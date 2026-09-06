@@ -7,7 +7,7 @@ mod layout;
 pub use display_list::*;
 pub use layout::*;
 
-use ooxml_drawingml::chart::PlotRect;
+use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use pptx_parse::ChartSpace;
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -292,7 +292,10 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
             h: (text.font.size_px * 1.25) as f32,
             anchor: TextAnchor::Top,
             paragraphs: vec![TextParagraph {
-                align: Some(TextAlign::Left),
+                align: Some(match text.align {
+                    PlotTextAlign::Center => TextAlign::Center,
+                    PlotTextAlign::Start => TextAlign::Left,
+                }),
                 level: 0,
                 runs: vec![TextRun {
                     text: text.text.to_owned(),
@@ -384,6 +387,7 @@ impl From<ComposedStroke> for Stroke {
             color: stroke.color_hex,
             width: stroke.width_px,
             dashed: stroke.dash,
+            paint: None,
             head_end: None,
             tail_end: None,
         }

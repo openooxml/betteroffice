@@ -106,6 +106,94 @@ describe('PPTX canvas replay', () => {
     expect(calls).toContain('text:Hello');
   });
 
+  test('strokes a gradient outline with a gradient sized to the shape box', async () => {
+    const gradients: Array<{ args: number[]; stops: Array<[number, string]> }> = [];
+    let strokeStyle: unknown;
+    let fillStyle: unknown;
+    const objects: unknown[] = [];
+    const ctx = new Proxy(
+      {
+        createLinearGradient: (...args: number[]) => {
+          const entry = { args, stops: [] as Array<[number, string]> };
+          gradients.push(entry);
+          const gradient = {
+            addColorStop: (position: number, color: string) => entry.stops.push([position, color]),
+          };
+          objects.push(gradient);
+          return gradient;
+        },
+      } as Record<string, unknown>,
+      {
+        get(target, property) {
+          if (property in target) return target[property as string];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          if (property === 'strokeStyle') strokeStyle = value;
+          if (property === 'fillStyle') fillStyle = value;
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    const list: SlideDisplayList = {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'shape',
+          objectId: 1,
+          name: 'Spoke',
+          x: 20,
+          y: 40,
+          w: 200,
+          h: 0,
+          geometry: 'line',
+          path: [
+            { type: 'move', x: 0, y: 0 },
+            { type: 'line', x: 1, y: 0 },
+          ],
+          stroke: {
+            color: '#c00000',
+            width: 3,
+            paint: {
+              kind: 'gradient',
+              gradientType: 'linear',
+              angleDeg: 0,
+              stops: [
+                { position: 0, color: '#c00000' },
+                { position: 1, color: '#c2c2c2' },
+              ],
+            },
+          },
+        },
+      ],
+    };
+
+    await paintSlide(ctx, list, 1);
+    expect(gradients).toHaveLength(1);
+    expect(gradients[0]?.args).toEqual([20, 40, 220, 40]);
+    expect(gradients[0]?.stops).toEqual([
+      [0, '#c00000'],
+      [1, '#c2c2c2'],
+    ]);
+    expect(strokeStyle).toBe(objects[0]);
+    const shape = list.primitives[0];
+    if (shape?.kind !== 'shape' || !shape.stroke) throw new Error('shape');
+    shape.stroke.tailEnd = { kind: 'triangle', width: 9, length: 9 };
+    await paintSlide(ctx, list, 1);
+    expect(fillStyle).toBe(objects[2]);
+    expect(strokeStyle).toBe(objects[2]);
+    list.primitives = [{
+      kind: 'image', objectId: 2, name: 'Outline', x: 20, y: 40, w: 200, h: 0,
+      stroke: shape.stroke,
+    }];
+    await paintSlide(ctx, list, 1);
+    expect(strokeStyle).toBe(objects[3]);
+    expect(gradients[3]?.args).toEqual([20, 40, 220, 40]);
+  });
+
   test('paints chart parts clipped to the chart rectangle', async () => {
     const calls: string[] = [];
     const ctx = new Proxy(

@@ -624,6 +624,7 @@ fn parse_shape_style(
                 .any(|child| is_fill_element(child) && !allowed.contains(&child.local_name()))
         })
     };
+    let line = properties.and_then(|value| value.child("ln"));
     let style = ShapeStyle {
         font_color: element
             .and_then(|value| value.child("fontRef"))
@@ -634,10 +635,10 @@ fn parse_shape_style(
             properties,
             &["solidFill", "gradFill", "blipFill", "noFill", "grpFill"],
         ),
-        line_disabled: unsupported(
-            properties.and_then(|value| value.child("ln")),
-            &["solidFill"],
-        ),
+        line_disabled: unsupported(line, &["solidFill", "gradFill"])
+            || line.is_some_and(|line| {
+                line.child("gradFill").is_some() && parse_outline_gradient(line).is_none()
+            }),
     };
     (!style.is_empty()).then_some(style)
 }
@@ -787,6 +788,7 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
     Some(ShapeOutline {
         width: line.attribute("w").and_then(|value| value.parse().ok()),
         color: line.child("solidFill").and_then(parse_color_container),
+        gradient: parse_outline_gradient(line),
         style: line
             .child("prstDash")
             .and_then(|value| value.attribute("val"))
@@ -799,6 +801,12 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
         head_end: line.child("headEnd").map(parse_line_end),
         tail_end: line.child("tailEnd").map(parse_line_end),
     })
+}
+
+fn parse_outline_gradient(line: &XmlElement) -> Option<GradientFill> {
+    line.child("gradFill")
+        .and_then(|fill| parse_gradient_fill(fill).gradient)
+        .filter(|gradient| !gradient.stops.is_empty())
 }
 
 fn parse_line_end(element: &XmlElement) -> LineEnd {
@@ -1511,6 +1519,45 @@ mod tests {
                 .properties
                 .font_size_pt,
             Some(24.0)
+        );
+    }
+
+    #[test]
+    fn reads_a_gradient_fill_on_an_outline() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Spoke"/></p:nvSpPr><p:spPr><a:prstGeom prst="line"><a:avLst/></a:prstGeom><a:ln w="19050"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="C00000"/></a:gs><a:gs pos="100000"><a:srgbClr val="C2C2C2"/></a:gs></a:gsLst><a:lin ang="5400000" scaled="1"/></a:gradFill></a:ln></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let outline = shape.outline.as_ref().unwrap();
+
+        assert_eq!(outline.width, Some(19_050.0));
+        assert!(outline.color.is_none());
+        let gradient = outline.gradient.as_ref().unwrap();
+        assert_eq!(gradient.gradient_type, "linear");
+        assert_eq!(gradient.angle, Some(90.0));
+        assert_eq!(gradient.stops.len(), 2);
+        assert_eq!(gradient.stops[0].color.rgb.as_deref(), Some("C00000"));
+        assert_eq!(gradient.stops[1].position, 100_000.0);
+        assert!(
+            shape
+                .style
+                .as_ref()
+                .is_none_or(|style| !style.line_disabled)
         );
     }
 

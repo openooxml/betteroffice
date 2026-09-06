@@ -102,7 +102,7 @@ fn v9_baselines_recover_with_source_and_preserve_edits() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(13.0)))
+            Some(Out::Any(Any::Number(14.0)))
         );
         assert!(meta.get(&txn, "baselinesPendingSource").is_none());
         let reopened = DeckSession::open_from_update(&current, 33103).unwrap();

@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::{
-    ColorValue, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
+    ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
 };
 
 use crate::PptxError;
@@ -1497,46 +1497,48 @@ fn fill_element(
                 .gradient
                 .as_ref()
                 .ok_or_else(|| write_error(part, "gradient fill without stops"))?;
-            let mut stops = XmlElement::new(prefixes.drawing("gsLst"));
-            for stop in &gradient.stops {
-                let color = color_element(&stop.color, prefixes)
-                    .ok_or_else(|| write_error(part, "gradient stop without a color"))?;
-                stops = stops.with_child(
-                    XmlElement::new(prefixes.drawing("gs"))
-                        .with_attribute("pos", format_fixed(stop.position))
-                        .with_child(color),
-                );
-            }
-            let mut element = XmlElement::new(prefixes.drawing("gradFill")).with_child(stops);
-            match gradient.gradient_type.as_str() {
-                "linear" => {
-                    element = element.with_child(
-                        XmlElement::new(prefixes.drawing("lin"))
-                            .with_attribute(
-                                "ang",
-                                format_fixed(gradient.angle.unwrap_or_default() * 60_000.0),
-                            )
-                            .with_attribute("scaled", "1"),
-                    );
-                }
-                kind => {
-                    let path = match kind {
-                        "radial" => "circle",
-                        "rectangular" => "rect",
-                        _ => "shape",
-                    };
-                    element = element.with_child(
-                        XmlElement::new(prefixes.drawing("path")).with_attribute("path", path),
-                    );
-                }
-            }
-            Ok(element)
+            gradient_element(gradient, prefixes)
+                .ok_or_else(|| write_error(part, "gradient stop without a color"))
         }
         other => Err(write_error(
             part,
             format!("unsupported fill type {other:?}"),
         )),
     }
+}
+
+fn gradient_element(gradient: &GradientFill, prefixes: &Prefixes) -> Option<XmlElement> {
+    let mut stops = XmlElement::new(prefixes.drawing("gsLst"));
+    for stop in &gradient.stops {
+        stops = stops.with_child(
+            XmlElement::new(prefixes.drawing("gs"))
+                .with_attribute("pos", format_fixed(stop.position))
+                .with_child(color_element(&stop.color, prefixes)?),
+        );
+    }
+    let mut element = XmlElement::new(prefixes.drawing("gradFill")).with_child(stops);
+    match gradient.gradient_type.as_str() {
+        "linear" => {
+            element = element.with_child(
+                XmlElement::new(prefixes.drawing("lin"))
+                    .with_attribute(
+                        "ang",
+                        format_fixed(gradient.angle.unwrap_or_default() * 60_000.0),
+                    )
+                    .with_attribute("scaled", "1"),
+            );
+        }
+        kind => {
+            let path = match kind {
+                "radial" => "circle",
+                "rectangular" => "rect",
+                _ => "shape",
+            };
+            element = element
+                .with_child(XmlElement::new(prefixes.drawing("path")).with_attribute("path", path));
+        }
+    }
+    Some(element)
 }
 
 fn color_element(color: &ColorValue, prefixes: &Prefixes) -> Option<XmlElement> {
@@ -1593,6 +1595,19 @@ fn format_fixed(value: f64) -> String {
 }
 
 fn set_outline(properties: &mut XmlElement, outline: &ShapeOutline, prefixes: &Prefixes) {
+    if let Some(line) = properties.child_mut("ln")
+        && let Some(mut original) = crate::drawing::parse_outline_element(line)
+    {
+        original.width = outline.width;
+        if original == *outline {
+            if let Some(width) = outline.width {
+                line.set_attribute("w", format_fixed(width));
+            } else {
+                line.attributes.remove("w");
+            }
+            return;
+        }
+    }
     let element = outline_element(outline, prefixes);
     let existing = properties.children.iter().position(
         |child| matches!(child, XmlNode::Element(element) if element.local_name() == "ln"),
@@ -1636,6 +1651,12 @@ fn outline_element(outline: &ShapeOutline, prefixes: &Prefixes) -> XmlElement {
     {
         element =
             element.with_child(XmlElement::new(prefixes.drawing("solidFill")).with_child(color));
+    } else if let Some(gradient) = outline
+        .gradient
+        .as_ref()
+        .and_then(|gradient| gradient_element(gradient, prefixes))
+    {
+        element = element.with_child(gradient);
     }
     if let Some(style) = &outline.style {
         element = element.with_child(
@@ -2471,6 +2492,29 @@ mod tests {
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
+
+    #[test]
+    fn a_new_gradient_outline_writes_its_stops_and_angle() {
+        let package =
+            crate::parse_pptx(include_bytes!("../tests/fixtures/gradient-outline.pptx")).unwrap();
+        let crate::ShapeNode::Shape(shape) = &package.slides[0].shapes[0] else {
+            panic!("shape")
+        };
+        let outline = shape.outline.as_ref().unwrap();
+        let mut properties = XmlElement::new("p:spPr");
+        let prefixes = Prefixes::from_root(&mut properties);
+        set_outline(&mut properties, outline, &prefixes);
+        let line = properties.child("ln").unwrap();
+        assert_eq!(line.attribute("w"), Some("76200"));
+        let gradient = line.child("gradFill").unwrap();
+        assert_eq!(gradient.child("gsLst").unwrap().child_elements().count(), 3);
+        assert_eq!(gradient.child("lin").unwrap().attribute("ang"), Some("0"));
+        assert!(line.child("solidFill").is_none());
+        assert_eq!(
+            crate::drawing::parse_outline_element(line).as_ref(),
+            Some(outline)
+        );
+    }
 
     fn run_properties(xml: &[u8]) -> (XmlElement, Prefixes, RunProperties) {
         let limits = ParseLimits::default();
