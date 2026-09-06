@@ -49,6 +49,7 @@ fn matrix_stroke(color: &str) -> Stroke {
         color: color.to_owned(),
         width: 3.0,
         dashed: true,
+        paint: None,
         head_end: Some(StrokeEnd {
             kind: "triangle".to_owned(),
             width: 15.0,
@@ -117,6 +118,7 @@ fn theme_matrix_renders_reference_colours_indices_and_explicit_line_defaults() {
                 color: "#474747".to_owned(),
                 width: 4.0,
                 dashed: false,
+                paint: None,
                 head_end: None,
                 tail_end: None,
             },
@@ -137,6 +139,7 @@ fn placeholder_properties_outrank_shape_and_layout_style_references() {
             color: "#667788".to_owned(),
             width: 8.0,
             dashed: true,
+            paint: None,
             head_end: Some(StrokeEnd {
                 kind: "triangle".to_owned(),
                 width: 40.0,
@@ -184,6 +187,7 @@ fn master_shapes_render_theme_fills() {
             color: "#030E13".to_owned(),
             width: 2.0,
             dashed: false,
+            paint: None,
             head_end: None,
             tail_end: None,
         })
@@ -213,6 +217,7 @@ fn edited_outlines_override_the_resolved_style() {
             color: "#000000".to_owned(),
             width: 2.0,
             dashed: false,
+            paint: None,
             head_end: None,
             tail_end: None,
         })
@@ -235,6 +240,7 @@ fn edited_outlines_override_the_resolved_style() {
             color: "#FEDCBA".to_owned(),
             width: 2.0,
             dashed: false,
+            paint: None,
             head_end: None,
             tail_end: None,
         })

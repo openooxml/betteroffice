@@ -47,7 +47,7 @@ fn explicit_data_labels_preserve_axes_bars_and_overrides() {
             })
             .collect();
         let mut expected = vec![
-            "Revenue", "0", "6", "13", "19", "25", "Q1", "Q2", "Q3", "Quarter", "Millions",
+            "Revenue", "0", "5", "10", "15", "20", "25", "Q1", "Q2", "Q3", "Quarter", "Millions",
             "North", "South",
         ];
         expected.extend_from_slice(labels);

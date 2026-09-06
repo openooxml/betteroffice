@@ -7,11 +7,11 @@ pub use pptx_edit::{
 };
 pub use pptx_parse::{
     BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,
-    MediaPart, ParagraphProperties, ParseLimits, Picture, PictureCrop, Placeholder, PptxError,
-    PptxPackage, Presentation as PresentationModel, Relationship, RunProperties, Shape, ShapeBase,
-    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, SlideReference, TargetMode,
-    TextAutofit, TextBody, TextParagraph as ModelTextParagraph, TextRun as ModelTextRun,
-    TextStyleSet, ThemePart,
+    LineSpacing, MediaPart, ParagraphProperties, ParseLimits, Picture, PictureCrop, Placeholder,
+    PptxError, PptxPackage, Presentation as PresentationModel, Relationship, RunProperties, Shape,
+    ShapeBase, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, SlideReference,
+    TargetMode, TextAutofit, TextBody, TextParagraph as ModelTextParagraph,
+    TextRun as ModelTextRun, TextStyleSet, ThemePart,
 };
 pub use pptx_render::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, ImageCrop, ImageEffect,

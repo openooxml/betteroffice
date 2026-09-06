@@ -2,7 +2,8 @@ use std::fmt;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotOp, PlotRect, PlotSink, chart_aria_label, plot_chart_into,
+    ChartSpace, PlotChart, PlotOp, PlotRect, PlotSink, PlotTextAlign, chart_aria_label,
+    plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
 use xlsx_model::workbook::Sheet;
@@ -813,6 +814,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             width,
             font,
             color,
+            align,
         } => {
             let x = finite_f32(x)?;
             let y = finite_f32(baseline_y)?;
@@ -820,6 +822,10 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             let font_size_px = positive_f32(font.size_px)?;
             let font_size = positive_f32(font.size_px * 72.0 / 96.0)?;
             let text_clip = text_clip(x, y, width, font_size_px, chart_clip)?;
+            let (x, align) = match align {
+                PlotTextAlign::Center => (x + width / 2.0, Align::Center),
+                PlotTextAlign::Start => (x, Align::Left),
+            };
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
                 y,
@@ -827,7 +833,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
                 font_size,
                 color,
                 clip,
-                align: Align::Left,
+                align,
                 bold: font.weight >= 600,
                 italic: false,
                 underline: false,

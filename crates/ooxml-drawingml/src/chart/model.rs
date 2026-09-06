@@ -21,6 +21,44 @@ pub struct ChartSpace {
     /// `c:txPr` on `c:title`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title_text: Option<ChartTextProperties>,
+    /// `c:chartSpace/c:spPr`: the chart's own background paint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ChartFill>,
+}
+
+/// The fill of a `c:spPr`. Absent means the host paints its own default.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ChartFill {
+    /// `a:noFill`: nothing is painted, so whatever sits behind shows through.
+    None,
+    Solid {
+        color: String,
+    },
+    /// `a:pattFill`, kept as its two colours: no host paints a hatch yet.
+    Pattern {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        foreground: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        background: Option<String>,
+    },
+}
+
+/// The `a:ln` of a `c:spPr`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartLine {
+    /// `a:ln/a:noFill`: the outline is declared and switched off.
+    pub none: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// `a:ln/@w`, in EMU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width_emu: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -251,4 +289,7 @@ pub struct ChartAxis {
     pub minor_gridlines: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
+    /// `c:spPr/a:ln` of this axis: the rule drawn along the plot's edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<ChartLine>,
 }
