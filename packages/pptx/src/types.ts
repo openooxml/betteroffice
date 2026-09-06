@@ -276,6 +276,8 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
+  clip?: GeometryPathCommand[];
+  evenOdd?: boolean;
   adjustValues?: Record<string, number>;
   fill?: Paint;
   stroke?: Stroke;

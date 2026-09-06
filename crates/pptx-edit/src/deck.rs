@@ -21,9 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 12.0;
+const SCHEMA_VERSION: f64 = 13.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 12] = [
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 13] = [
     1.0,
     2.0,
     3.0,
@@ -35,6 +35,7 @@ const MIGRATABLE_SCHEMA_VERSIONS: [f64; 12] = [
     9.0,
     10.0,
     11.0,
+    12.0,
     SCHEMA_VERSION,
 ];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
@@ -825,6 +826,19 @@ fn merge_source_text_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
                 changed |= merge_source_text_shapes(&mut target.children, &source.children);
             }
             (ShapeNode::GraphicFrame(target), ShapeNode::GraphicFrame(source)) => {
+                if matches!(
+                    target.data,
+                    pptx_parse::GraphicFrameData::Unknown { picture: None, .. }
+                ) && matches!(
+                    source.data,
+                    pptx_parse::GraphicFrameData::Unknown {
+                        picture: Some(_),
+                        ..
+                    }
+                ) {
+                    target.data.clone_from(&source.data);
+                    changed = true;
+                }
                 if let (
                     pptx_parse::GraphicFrameData::Table { rows: target },
                     pptx_parse::GraphicFrameData::Table { rows: source },
@@ -931,6 +945,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 12.0 {
         migrate_doc_to_v12(doc)?;
+    }
+    if version < 13.0 {
+        migrate_doc_to_v13(doc)?;
     }
     Ok(())
 }
@@ -1105,6 +1122,100 @@ fn migrate_doc_to_v12(doc: &Doc) -> EditResult<()> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "schemaVersion", 12.0);
+    Ok(())
+}
+
+fn migrate_doc_to_v13(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let needs_source = package
+        .slides
+        .iter()
+        .any(|part| needs_ole_source(&part.shapes))
+        || package
+            .layouts
+            .iter()
+            .any(|part| needs_ole_source(&part.shapes))
+        || package
+            .masters
+            .iter()
+            .any(|part| needs_ole_source(&part.shapes));
+    if needs_source {
+        meta.insert(&mut txn, "olePicturesPendingSource", true);
+    }
+    meta.insert(&mut txn, "schemaVersion", 13.0);
+    Ok(())
+}
+
+fn needs_ole_source(nodes: &[ShapeNode]) -> bool {
+    nodes.iter().any(|node| match node {
+        ShapeNode::GraphicFrame(frame) => matches!(&frame.data,
+            pptx_parse::GraphicFrameData::Unknown { uri: Some(uri), picture: None }
+                if uri == "http://schemas.openxmlformats.org/presentationml/2006/ole"),
+        ShapeNode::Group(group) => needs_ole_source(&group.children),
+        _ => false,
+    })
+}
+
+pub(crate) fn import_source_ole_pictures(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    if map_bool(&meta, &txn, "olePicturesPendingSource") != Some(true) {
+        return Ok(());
+    }
+    let shapes = required_map(&txn, SHAPES)?;
+    for (index, (slide, reference)) in source
+        .slides
+        .iter()
+        .zip(&source.presentation.slides)
+        .enumerate()
+    {
+        let slide_id = seeded_slide_id(index, reference.id);
+        for (index, node) in slide.shapes.iter().enumerate() {
+            backfill_ole_picture(&mut txn, &shapes, &slide_id, &index.to_string(), node)?;
+        }
+    }
+    meta.remove(&mut txn, "olePicturesPendingSource");
+    Ok(())
+}
+
+fn backfill_ole_picture(
+    txn: &mut TransactionMut<'_>,
+    shapes: &MapRef,
+    slide_id: &str,
+    path: &str,
+    node: &ShapeNode,
+) -> EditResult<()> {
+    if let ShapeNode::GraphicFrame(frame) = node
+        && matches!(
+            frame.data,
+            pptx_parse::GraphicFrameData::Unknown {
+                picture: Some(_),
+                ..
+            }
+        )
+        && let Some(shape) = shapes
+            .get(txn, &seeded_shape_id(slide_id, path))
+            .and_then(|value| value.cast::<MapRef>().ok())
+        && matches!(
+            optional_json::<pptx_parse::GraphicFrameData, _>(&shape, txn, "graphicJson")?,
+            Some(pptx_parse::GraphicFrameData::Unknown { picture: None, .. })
+        )
+    {
+        insert_json(&shape, txn, "graphicJson", Some(&frame.data))?;
+    }
+    if let ShapeNode::Group(group) = node {
+        for (index, child) in group.children.iter().enumerate() {
+            backfill_ole_picture(
+                txn,
+                shapes,
+                slide_id,
+                &seeded_child_path(path, index),
+                child,
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -1650,6 +1761,51 @@ mod tests {
     }
 
     #[test]
+    fn v12_ole_pictures_recover_from_source_and_survive_update_only_loading() {
+        const UPDATE: &[u8] = include_bytes!("../tests/fixtures/metafile-pictures-v12.update.bin");
+        const SOURCE: &[u8] =
+            include_bytes!("../../pptx-render/tests/fixtures/metafile-pictures.pptx");
+        let session = DeckSession::open_from_update(UPDATE, 31801).unwrap();
+        {
+            let txn = session.doc.transact();
+            let meta = required_map(&txn, META).unwrap();
+            assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(13.0));
+            assert_eq!(
+                map_bool(&meta, &txn, "olePicturesPendingSource"),
+                Some(true)
+            );
+        }
+        let session = DeckSession::open_from_update_with_source(UPDATE, SOURCE, 31802).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let graphic = snapshot.slides[0].shapes[2].graphic.as_ref().unwrap();
+        assert!(matches!(
+            graphic,
+            pptx_parse::GraphicFrameData::Unknown {
+                picture: Some(_),
+                ..
+            }
+        ));
+        let restored =
+            DeckSession::open_from_update(&session.encode_state_as_update_v1(), 31803).unwrap();
+        assert_eq!(restored.snapshot().unwrap(), snapshot);
+        assert_eq!(
+            serde_json::to_value(restored.package()).unwrap(),
+            serde_json::to_value(session.package()).unwrap()
+        );
+        assert_eq!(
+            map_bool(
+                &required_map(&session.doc.transact(), META).unwrap(),
+                &session.doc.transact(),
+                "olePicturesPendingSource"
+            ),
+            None
+        );
+        let bytes = session.encode_state_as_update_v1();
+        migrate_doc(&session.doc).unwrap();
+        assert_eq!(session.encode_state_as_update_v1(), bytes);
+    }
+
+    #[test]
     fn migration_leaves_a_current_document_untouched() {
         let session = DeckSession::open(FIXTURE, 102).unwrap();
         let before = session.encode_state_as_update_v1();
@@ -1676,13 +1832,26 @@ mod tests {
             (
                 V9,
                 9.0,
-                vec![(10.0, Some(true)), (11.0, Some(true)), (12.0, Some(true))],
+                vec![
+                    (10.0, Some(true)),
+                    (11.0, Some(true)),
+                    (12.0, Some(true)),
+                    (13.0, Some(true)),
+                ],
             ),
-            (V10_BASELINE, 10.0, vec![(11.0, None), (12.0, None)]),
-            (V10_NUMBERING, 10.0, vec![(11.0, None), (12.0, None)]),
-            (V11_BASELINE, 11.0, vec![(12.0, None)]),
-            (V11_NUMBERING, 11.0, vec![(12.0, None)]),
-            (V11_SPACING, 11.0, vec![(12.0, None)]),
+            (
+                V10_BASELINE,
+                10.0,
+                vec![(11.0, None), (12.0, None), (13.0, None)],
+            ),
+            (
+                V10_NUMBERING,
+                10.0,
+                vec![(11.0, None), (12.0, None), (13.0, None)],
+            ),
+            (V11_BASELINE, 11.0, vec![(12.0, None), (13.0, None)]),
+            (V11_NUMBERING, 11.0, vec![(12.0, None), (13.0, None)]),
+            (V11_SPACING, 11.0, vec![(12.0, None), (13.0, None)]),
         ] {
             let doc = crate::doc_with_client_id(30020);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1713,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_each_version_through_v12() {
+    fn legacy_migrations_commit_each_version_through_v13() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1725,13 +1894,16 @@ mod tests {
         for (update, expected_versions) in [
             (
                 V1,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
             (
                 V2,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
+            (
+                V3,
+                vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
+            ),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1804,19 +1976,19 @@ mod tests {
             (
                 V2,
                 V4_LEGACY,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 1,
             ),
             (
                 V4_STYLES,
                 V4_STYLES,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 1,
             ),
             (
                 V4_NUMBERED,
                 V4_NUMBERED,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 10,
             ),
         ] {
@@ -1882,10 +2054,10 @@ mod tests {
         for (update, versions) in [
             (
                 V2,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
-            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
-            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
+            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]),
+            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -2128,7 +2300,8 @@ mod tests {
                 (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (11.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (12.0, before, Some("legacy".to_owned()), Some(true))
+                (12.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (13.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

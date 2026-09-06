@@ -125,6 +125,10 @@ pub enum Primitive {
         h: f32,
         geometry: String,
         path: Vec<GeometryPathCommand>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Vec<GeometryPathCommand>>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        even_odd: bool,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         adjust_values: BTreeMap<String, f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

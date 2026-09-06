@@ -10,6 +10,7 @@ pub use font::GlyphCache;
 
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_text::{FontId, FontStore};
@@ -185,6 +186,7 @@ pub fn render_slide_cached(
         resources,
         glyphs,
         images: ImageCache::default(),
+        shape_clip_cache: None,
         skipped_images: 0,
     };
     for primitive in &dl.primitives {
@@ -229,7 +231,15 @@ struct Painter<'a, 'b> {
     resources: &'a RenderResources<'b>,
     glyphs: &'a mut GlyphCache,
     images: ImageCache,
+    shape_clip_cache: Option<ShapeClipCache>,
     skipped_images: usize,
+}
+
+struct ShapeClipCache {
+    commands: Vec<GeometryPathCommand>,
+    frame: [f32; 4],
+    transform: Transform,
+    mask: Arc<Mask>,
 }
 
 impl Painter<'_, '_> {
@@ -249,6 +259,8 @@ impl Painter<'_, '_> {
                 path,
                 fill,
                 stroke,
+                clip: shape_clip,
+                even_odd,
                 ..
             } => self.paint_shape(
                 *x,
@@ -260,6 +272,8 @@ impl Painter<'_, '_> {
                 stroke.as_ref(),
                 transform,
                 clip,
+                shape_clip.as_deref(),
+                *even_odd,
             ),
             Primitive::Image {
                 x,
@@ -385,14 +399,51 @@ impl Painter<'_, '_> {
         stroke: Option<&SlideStroke>,
         transform: Transform,
         clip: Option<&Mask>,
+        shape_clip: Option<&[GeometryPathCommand]>,
+        even_odd: bool,
     ) -> Result<(), String> {
         let Some(path) = geometry_path(commands, x, y, w, h) else {
             return Ok(());
         };
+        let mask = if let Some(commands) = shape_clip {
+            let frame = [x, y, w, h];
+            if clip.is_none()
+                && let Some(cached) = &self.shape_clip_cache
+                && cached.commands == commands
+                && cached.frame == frame
+                && cached.transform == transform
+            {
+                Some(cached.mask.clone())
+            } else {
+                let Some(path) = geometry_path(commands, x, y, w, h) else {
+                    return Ok(());
+                };
+                let Some(mask) = self.clipped_path(clip, path, transform)? else {
+                    return Ok(());
+                };
+                let mask = Arc::new(mask);
+                if clip.is_none() {
+                    self.shape_clip_cache = Some(ShapeClipCache {
+                        commands: commands.to_vec(),
+                        frame,
+                        transform,
+                        mask: mask.clone(),
+                    });
+                }
+                Some(mask)
+            }
+        } else {
+            None
+        };
+        let clip = mask.as_deref().or(clip);
+        let rule = if even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::Winding
+        };
         if let Some(fill) = fill {
             let paint = shader_paint(fill, x, y, w, h)?;
-            self.pixmap
-                .fill_path(&path, &paint, FillRule::Winding, transform, clip);
+            self.pixmap.fill_path(&path, &paint, rule, transform, clip);
         }
         if let Some(stroke) = stroke {
             self.stroke_path(&path, stroke, transform, clip)?;
@@ -918,6 +969,60 @@ mod tests {
     }
 
     #[test]
+    fn metafile_clips_and_even_odd_holes_follow_picture_rotation() {
+        let fonts = FontStore::new();
+        let images = AssetMap::default();
+        let rect = |left, top, right, bottom| {
+            vec![
+                GeometryPathCommand::Move { x: left, y: top },
+                GeometryPathCommand::Line { x: right, y: top },
+                GeometryPathCommand::Line {
+                    x: right,
+                    y: bottom,
+                },
+                GeometryPathCommand::Line { x: left, y: bottom },
+                GeometryPathCommand::Close,
+            ]
+        };
+        for rotated in [false, true] {
+            let mut path = rect(-1.0, -1.0, 2.0, 2.0);
+            path.extend(rect(0.25, 0.25, 0.75, 0.75));
+            let mut list = empty_list(80.0, 80.0);
+            list.primitives.push(Primitive::Shape {
+                object_id: 1,
+                shape_id: None,
+                name: "metafile".into(),
+                x: 20.0,
+                y: 20.0,
+                w: 40.0,
+                h: 20.0,
+                geometry: "custom".into(),
+                path,
+                clip: Some(rect(0.0, 0.0, 1.0, 1.0)),
+                even_odd: true,
+                adjust_values: Default::default(),
+                fill: Some(SlidePaint::Solid {
+                    color: "#ff0000".into(),
+                }),
+                stroke: None,
+                transform: SlideTransform {
+                    rotation_deg: if rotated { 90.0 } else { 0.0 },
+                    ..Default::default()
+                },
+            });
+            let png = render_png(&list, &resources(&fonts, &images)).unwrap();
+            let pixels = Pixmap::decode_png(&png).unwrap();
+            let at = |x, y| {
+                let (x, y) = if rotated { (70 - y, x - 10) } else { (x, y) };
+                pixels.pixel(x, y).unwrap().demultiply()
+            };
+            assert_eq!(at(25, 23), ColorU8::from_rgba(255, 0, 0, 255));
+            assert_eq!(at(40, 30), ColorU8::from_rgba(255, 255, 255, 255));
+            assert_eq!(at(15, 23), ColorU8::from_rgba(255, 255, 255, 255));
+        }
+    }
+
+    #[test]
     fn png_dimensions_follow_the_scale() {
         let fonts = FontStore::new();
         let images = AssetMap::default();
@@ -1107,6 +1212,8 @@ mod tests {
             h: 100.0,
             label: "offscreen".into(),
             primitives: vec![Primitive::Shape {
+                clip: None,
+                even_odd: false,
                 object_id: 2,
                 shape_id: None,
                 name: "bar".into(),

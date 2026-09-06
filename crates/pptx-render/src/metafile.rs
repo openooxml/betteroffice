@@ -1,37 +1,21 @@
-//! Replays EMF and WMF picture parts into display-list paths.
-//!
-//! Neither `image` nor a browser `CanvasImageSource` decodes a metafile, so a
-//! picture whose media is EMF or WMF paints nothing at all. The records are
-//! vector drawing operations, so the layout pass replays them into the
-//! `Primitive::Shape` paths both backends already draw rather than handing
-//! bytes to a raster decoder that will reject them.
-//!
-//! Coordinates come out as fractions of the metafile's frame rectangle, which
-//! is what a `Primitive::Shape` path is measured in.
+//! Replays vector EMF and WMF records.
 
 use ooxml_drawingml::GeometryPathCommand;
 
-/// Records read from one part. A metafile that keeps drawing past this is
-/// treated as undecodable rather than allowed to spend the render budget.
 const MAX_RECORDS: usize = 200_000;
-/// Fill/stroke operations one metafile may contribute to a slide.
 const MAX_OPS: usize = 4_096;
-/// Path commands across the whole drawing.
 const MAX_COMMANDS: usize = 400_000;
-/// Points one record may carry, so a corrupt count cannot allocate.
 const MAX_POINTS_PER_RECORD: usize = 65_536;
-/// Line segments an arc is flattened to over a full turn.
 const ARC_SEGMENTS: usize = 64;
 
-/// One fill or stroke, with its path in fractions of the frame rectangle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetafileOp {
     pub path: Vec<GeometryPathCommand>,
     pub fill: Option<String>,
     pub stroke: Option<MetafileStroke>,
+    pub even_odd: bool,
 }
 
-/// A pen, with its width as a fraction of the frame rectangle's width.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MetafileStroke {
     pub color: String,
@@ -43,20 +27,24 @@ pub struct MetafileDrawing {
     pub ops: Vec<MetafileOp>,
 }
 
-/// Decodes EMF or WMF bytes, or `None` when the bytes are neither, are
-/// malformed, or draw nothing this module understands.
 pub fn decode(bytes: &[u8]) -> Option<MetafileDrawing> {
     let drawing = decode_emf(bytes).or_else(|| decode_wmf(bytes))?;
     (!drawing.ops.is_empty()).then_some(drawing)
 }
 
+pub fn is_metafile(bytes: &[u8]) -> bool {
+    (u32_at(bytes, 0) == Some(1) && u32_at(bytes, 40) == Some(EMF_SIGNATURE))
+        || u32_at(bytes, 0) == Some(WMF_PLACEABLE_KEY)
+        || (matches!(u16_at(bytes, 0), Some(1 | 2)) && u16_at(bytes, 2) == Some(9))
+}
+
 fn u16_at(bytes: &[u8], offset: usize) -> Option<u16> {
-    let slice = bytes.get(offset..offset + 2)?;
+    let slice = bytes.get(offset..offset.checked_add(2)?)?;
     Some(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
 fn u32_at(bytes: &[u8], offset: usize) -> Option<u32> {
-    let slice = bytes.get(offset..offset + 4)?;
+    let slice = bytes.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
 
@@ -72,7 +60,6 @@ fn f32_at(bytes: &[u8], offset: usize) -> Option<f32> {
     u32_at(bytes, offset).map(f32::from_bits)
 }
 
-/// A GDI `COLORREF` is `0x00bbggrr`.
 fn colorref_hex(value: u32) -> String {
     format!(
         "#{:02x}{:02x}{:02x}",
@@ -85,7 +72,6 @@ fn colorref_hex(value: u32) -> String {
 #[derive(Clone, Copy, PartialEq)]
 struct Pen {
     color: u32,
-    /// Logical units; zero means one device unit.
     width: f64,
     visible: bool,
 }
@@ -102,7 +88,6 @@ enum GdiObject {
     Brush(Brush),
 }
 
-/// Row-major 2x3 affine: `[m11, m12, m21, m22, dx, dy]`.
 type Xform = [f64; 6];
 
 const IDENTITY: Xform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
@@ -124,10 +109,12 @@ struct Dc {
     window_ext: (f64, f64),
     viewport_org: (f64, f64),
     viewport_ext: (f64, f64),
-    /// Both extents seen. A file that sets only a window extent is still
-    /// mapping logical units 1:1 — `project17/image18.emf` sets one after it has
-    /// finished drawing, and honouring it would shrink the pie to nothing.
     scaled: bool,
+    window_ext_set: bool,
+    viewport_ext_set: bool,
+    map_mode: i32,
+    even_odd: bool,
+    clockwise: bool,
     xform: Xform,
     pen: Option<Pen>,
     brush: Option<Brush>,
@@ -141,6 +128,11 @@ impl Default for Dc {
             viewport_org: (0.0, 0.0),
             viewport_ext: (1.0, 1.0),
             scaled: false,
+            window_ext_set: false,
+            viewport_ext_set: false,
+            map_mode: 1,
+            even_odd: true,
+            clockwise: false,
             xform: IDENTITY,
             pen: Some(Pen {
                 color: 0,
@@ -155,21 +147,17 @@ impl Default for Dc {
     }
 }
 
-/// Maps logical coordinates onto the frame rectangle and collects the ops.
 struct Player {
     dc: Dc,
     saved: Vec<Dc>,
     objects: Vec<Option<GdiObject>>,
-    /// Frame rectangle in device units: origin and size.
     frame: (f64, f64, f64, f64),
     path: Vec<GeometryPathCommand>,
+    selected_path: Vec<GeometryPathCommand>,
+    figure_start: (f64, f64),
     current: (f64, f64),
-    /// True between `BEGINPATH` and the `FILLPATH`/`STROKEPATH` that ends it.
     bracketed: bool,
-    /// True when unbracketed line records have queued a stroke not yet emitted.
     pending_stroke: bool,
-    window_ext_set: bool,
-    viewport_ext_set: bool,
     commands: usize,
     ops: Vec<MetafileOp>,
     overflowed: bool,
@@ -183,18 +171,17 @@ impl Player {
             objects: vec![None; handles.min(4096)],
             frame,
             path: Vec::new(),
+            selected_path: Vec::new(),
+            figure_start: (0.0, 0.0),
             current: (0.0, 0.0),
             bracketed: false,
             pending_stroke: false,
-            window_ext_set: false,
-            viewport_ext_set: false,
             commands: 0,
             ops: Vec::new(),
             overflowed: false,
         }
     }
 
-    /// Logical point to a fraction of the frame rectangle.
     fn point(&self, x: f64, y: f64) -> (f64, f64) {
         let m = self.dc.xform;
         let wx = x * m[0] + y * m[2] + m[4];
@@ -215,16 +202,13 @@ impl Player {
         )
     }
 
-    /// Pen width as a fraction of the frame's width. A zero-width pen comes
-    /// back as zero: GDI draws it one pixel wide on the output device, which
-    /// only the caller knows the size of.
     fn pen_width(&self, width: f64) -> f64 {
         let scale = if self.dc.scaled {
             (self.dc.viewport_ext.0 / self.dc.window_ext.0).abs()
         } else {
             1.0
         };
-        (width * scale * self.dc.xform[0].abs() / self.frame.2).abs()
+        (width * scale * self.dc.xform[0].hypot(self.dc.xform[1]) / self.frame.2).abs()
     }
 
     fn push(&mut self, command: GeometryPathCommand) {
@@ -238,17 +222,20 @@ impl Player {
 
     fn move_to(&mut self, x: f64, y: f64) {
         self.current = (x, y);
+        self.figure_start = (x, y);
         let (px, py) = self.point(x, y);
         self.push(GeometryPathCommand::Move { x: px, y: py });
     }
 
     fn line_to(&mut self, x: f64, y: f64) {
+        self.resume_figure();
         self.current = (x, y);
         let (px, py) = self.point(x, y);
         self.push(GeometryPathCommand::Line { x: px, y: py });
     }
 
     fn cubic_to(&mut self, points: [(f64, f64); 3]) {
+        self.resume_figure();
         self.current = points[2];
         let a = self.point(points[0].0, points[0].1);
         let b = self.point(points[1].0, points[1].1);
@@ -261,6 +248,31 @@ impl Player {
             x: c.0,
             y: c.1,
         });
+    }
+
+    fn resume_figure(&mut self) {
+        if self.path.is_empty() || matches!(self.path.last(), Some(GeometryPathCommand::Close)) {
+            self.move_to(self.current.0, self.current.1);
+        }
+    }
+
+    fn close_figure(&mut self) {
+        self.push(GeometryPathCommand::Close);
+        self.current = self.figure_start;
+    }
+
+    fn restore(&mut self, depth: i32) -> Option<()> {
+        self.flush_pending();
+        let index = if depth < 0 {
+            self.saved
+                .len()
+                .checked_sub(depth.unsigned_abs() as usize)?
+        } else {
+            (depth as usize).checked_sub(1)?
+        };
+        self.dc = *self.saved.get(index)?;
+        self.saved.truncate(index);
+        Some(())
     }
 
     fn brush_fill(&self) -> Option<String> {
@@ -290,11 +302,18 @@ impl Player {
             self.overflowed = true;
             return;
         }
-        self.ops.push(MetafileOp { path, fill, stroke });
+        self.ops.push(MetafileOp {
+            path,
+            fill,
+            stroke,
+            even_odd: self.dc.even_odd,
+        });
     }
 
-    /// Draws the polyline that unbracketed `LINETO`-style records built up.
     fn flush_pending(&mut self) {
+        if self.bracketed {
+            return;
+        }
         if !self.pending_stroke {
             self.path.clear();
             return;
@@ -313,10 +332,14 @@ impl Player {
         let angle = |p: (f64, f64)| ((p.1 - cy) / ry).atan2((p.0 - cx) / rx);
         let from = angle(start);
         let mut sweep = angle(end) - from;
-        // GDI sweeps counter-clockwise, which is decreasing angle once the
-        // y-down logical axis has been folded into `atan2`.
-        while sweep >= 0.0 {
-            sweep -= std::f64::consts::TAU;
+        if self.dc.clockwise {
+            while sweep <= 0.0 {
+                sweep += std::f64::consts::TAU;
+            }
+        } else {
+            while sweep >= 0.0 {
+                sweep -= std::f64::consts::TAU;
+            }
         }
         let steps = ((sweep.abs() / std::f64::consts::TAU) * ARC_SEGMENTS as f64).ceil() as usize;
         let steps = steps.clamp(2, ARC_SEGMENTS);
@@ -378,7 +401,6 @@ impl Player {
     }
 }
 
-/// The GDI stock objects a metafile may select without creating them.
 fn stock_object(index: u32) -> Option<GdiObject> {
     let brush = |color| {
         Some(GdiObject::Brush(Brush {
@@ -414,34 +436,29 @@ fn stock_object(index: u32) -> Option<GdiObject> {
     }
 }
 
-/// `BS_NULL` brushes and `PS_NULL` pens paint nothing; hatches and patterns are
-/// approximated by their colour rather than dropped.
-fn brush_from_style(style: u32, color: u32) -> Brush {
-    Brush {
+fn brush_from_style(style: u32, color: u32) -> Option<Brush> {
+    if !matches!(style, 0 | 1) {
+        return None;
+    }
+    Some(Brush {
         color,
         visible: style != 1,
-    }
+    })
 }
 
-fn pen_from_style(style: u32, width: f64, color: u32) -> Pen {
-    Pen {
+fn pen_from_style(style: u32, width: f64, color: u32) -> Option<Pen> {
+    if !matches!(style & 0x0f, 0 | 5) {
+        return None;
+    }
+    Some(Pen {
         color,
         width,
         visible: style & 0x0f != 5,
-    }
+    })
 }
 
-// ---------------------------------------------------------------------------
-// EMF
-// ---------------------------------------------------------------------------
+const EMF_SIGNATURE: u32 = 0x464D_4520;
 
-const EMF_SIGNATURE: u32 = 0x464D_4520; // " EMF"
-
-/// The frame rectangle in device units. `rclFrame` is in hundredths of a
-/// millimetre; scaling it by the recorded device resolution gives the rectangle
-/// PowerPoint stretches onto the picture's box. Falling back to `rclBounds`
-/// would zoom the ink to the box edges — visible on the MSGraph pies, whose
-/// frame is a fifth wider than their ink.
 fn emf_frame(bytes: &[u8]) -> Option<(f64, f64, f64, f64)> {
     let bounds = (
         i32_at(bytes, 8)? as f64,
@@ -483,38 +500,36 @@ fn emf_frame(bytes: &[u8]) -> Option<(f64, f64, f64, f64)> {
 }
 
 fn decode_emf(bytes: &[u8]) -> Option<MetafileDrawing> {
-    if u32_at(bytes, 0)? != 1 || u32_at(bytes, 40)? != EMF_SIGNATURE {
+    if u32_at(bytes, 0)? != 1 || u32_at(bytes, 40)? != EMF_SIGNATURE || u32_at(bytes, 4)? < 88 {
         return None;
     }
     let handles = u16_at(bytes, 56)? as usize;
     let mut player = Player::new(emf_frame(bytes)?, handles + 1);
     let mut offset = 0usize;
-    let mut records = 0usize;
-    while offset + 8 <= bytes.len() {
+    for _ in 0..MAX_RECORDS {
         let kind = u32_at(bytes, offset)?;
         let size = u32_at(bytes, offset + 4)? as usize;
-        if size < 8 || !size.is_multiple_of(4) || offset + size > bytes.len() {
-            break;
-        }
-        records += 1;
-        if records > MAX_RECORDS {
+        if size < 8 || !size.is_multiple_of(4) {
             return None;
         }
+        let end = offset.checked_add(size)?;
+        let record = bytes.get(offset..end)?;
         if kind == 14 {
-            break;
+            if size < 20 {
+                return None;
+            }
+            player.flush_pending();
+            return player.finish();
         }
-        let body = offset + 8;
-        emf_record(&mut player, bytes, kind, body);
+        emf_record(&mut player, record, kind, 8)?;
         if player.overflowed {
             return None;
         }
-        offset += size;
+        offset = end;
     }
-    player.flush_pending();
-    player.finish()
+    None
 }
 
-/// Reads `count` points, 16- or 32-bit, starting at `offset`.
 fn read_points(bytes: &[u8], offset: usize, count: usize, small: bool) -> Option<Vec<(f64, f64)>> {
     if count > MAX_POINTS_PER_RECORD {
         return None;
@@ -533,9 +548,7 @@ fn read_points(bytes: &[u8], offset: usize, count: usize, small: bool) -> Option
     Some(points)
 }
 
-fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
-    // Poly records carry a bounds rectangle ahead of their count; Box records
-    // do not.
+fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Option<()> {
     let poly_points = |small: bool| -> Option<Vec<(f64, f64)>> {
         let count = u32_at(bytes, body + 16)? as usize;
         read_points(bytes, body + 20, count, small)
@@ -549,55 +562,69 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
         ))
     };
     match kind {
-        // SETWINDOWEXTEX / SETWINDOWORGEX / SETVIEWPORTEXTEX / SETVIEWPORTORGEX
         9..=12 => {
-            let Some((x, y)) = i32_at(bytes, body).zip(i32_at(bytes, body + 4)) else {
-                return;
-            };
+            let (x, y) = i32_at(bytes, body).zip(i32_at(bytes, body + 4))?;
             let value = (f64::from(x), f64::from(y));
+            if matches!(kind, 9 | 11) && (x == 0 || y == 0) {
+                return None;
+            }
             match kind {
                 9 => {
                     player.dc.window_ext = value;
-                    player.window_ext_set = true;
+                    player.dc.window_ext_set = true;
                 }
                 10 => player.dc.window_org = value,
                 11 => {
                     player.dc.viewport_ext = value;
-                    player.viewport_ext_set = true;
+                    player.dc.viewport_ext_set = true;
                 }
                 _ => player.dc.viewport_org = value,
             }
-            player.dc.scaled = player.window_ext_set
-                && player.viewport_ext_set
+            player.dc.scaled = player.dc.map_mode == 8
+                && player.dc.window_ext_set
+                && player.dc.viewport_ext_set
                 && player.dc.window_ext.0 != 0.0
                 && player.dc.window_ext.1 != 0.0;
         }
-        33 => player.saved.push(player.dc), // SAVEDC
-        34 => {
-            // RESTOREDC's argument is a relative depth: -1 is the top of stack.
-            let depth = i32_at(bytes, body).unwrap_or(-1);
-            let back = if depth < 0 {
-                (-depth) as usize
-            } else {
-                player.saved.len().saturating_sub(depth as usize)
-            };
-            let keep = player.saved.len().saturating_sub(back.max(1));
-            if let Some(dc) = player.saved.get(keep).copied() {
-                player.dc = dc;
-                player.saved.truncate(keep);
+        17 => {
+            let mode = i32_at(bytes, body)?;
+            if !matches!(mode, 1 | 8) {
+                return None;
             }
+            player.dc.map_mode = mode;
+            player.dc.scaled = mode == 8 && player.dc.window_ext_set && player.dc.viewport_ext_set;
         }
+        19 => {
+            player.dc.even_odd = match u32_at(bytes, body)? {
+                1 => true,
+                2 => false,
+                _ => return None,
+            };
+        }
+        57 => {
+            player.dc.clockwise = match u32_at(bytes, body)? {
+                1 => false,
+                2 => true,
+                _ => return None,
+            };
+        }
+        33 => {
+            if player.saved.len() >= 1024 {
+                return None;
+            }
+            player.saved.push(player.dc);
+        }
+        34 => player.restore(i32_at(bytes, body)?)?,
         35 | 36 => {
-            // SETWORLDTRANSFORM / MODIFYWORLDTRANSFORM
             let mut matrix = IDENTITY;
             for (index, slot) in matrix.iter_mut().enumerate() {
                 match f32_at(bytes, body + index * 4) {
-                    Some(value) => *slot = f64::from(value),
-                    None => return,
+                    Some(value) if value.is_finite() => *slot = f64::from(value),
+                    _ => return None,
                 }
             }
             let mode = if kind == 36 {
-                u32_at(bytes, body + 24).unwrap_or(4)
+                u32_at(bytes, body + 24)?
             } else {
                 4
             };
@@ -605,14 +632,12 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
                 1 => IDENTITY,
                 2 => concat(matrix, player.dc.xform),
                 3 => concat(player.dc.xform, matrix),
-                _ => matrix,
+                4 => matrix,
+                _ => return None,
             };
         }
         37 => {
-            // SELECTOBJECT
-            let Some(handle) = u32_at(bytes, body) else {
-                return;
-            };
+            let handle = u32_at(bytes, body)?;
             player.flush_pending();
             let object = if handle & 0x8000_0000 != 0 {
                 stock_object(handle & 0x7fff_ffff)
@@ -624,51 +649,47 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
             }
         }
         38 => {
-            // CREATEPEN
             let (Some(handle), Some(style), Some(width), Some(color)) = (
                 u32_at(bytes, body),
                 u32_at(bytes, body + 4),
                 i32_at(bytes, body + 8),
                 u32_at(bytes, body + 16),
             ) else {
-                return;
+                return None;
             };
             player.store(
                 handle as usize,
-                GdiObject::Pen(pen_from_style(style, f64::from(width), color)),
+                GdiObject::Pen(pen_from_style(style, f64::from(width), color)?),
             );
         }
         95 => {
-            // EXTCREATEPEN: the log pen follows the DIB offsets.
             let (Some(handle), Some(style), Some(width), Some(color)) = (
                 u32_at(bytes, body),
                 u32_at(bytes, body + 20),
                 u32_at(bytes, body + 24),
                 u32_at(bytes, body + 32),
             ) else {
-                return;
+                return None;
             };
             player.store(
                 handle as usize,
-                GdiObject::Pen(pen_from_style(style, f64::from(width), color)),
+                GdiObject::Pen(pen_from_style(style, f64::from(width), color)?),
             );
         }
         39 => {
-            // CREATEBRUSHINDIRECT
             let (Some(handle), Some(style), Some(color)) = (
                 u32_at(bytes, body),
                 u32_at(bytes, body + 4),
                 u32_at(bytes, body + 8),
             ) else {
-                return;
+                return None;
             };
             player.store(
                 handle as usize,
-                GdiObject::Brush(brush_from_style(style, color)),
+                GdiObject::Brush(brush_from_style(style, color)?),
             );
         }
         40 => {
-            // DELETEOBJECT
             if let Some(handle) = u32_at(bytes, body)
                 && let Some(slot) = player.objects.get_mut(handle as usize)
             {
@@ -676,48 +697,55 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
             }
         }
         59 => {
-            // BEGINPATH
             player.flush_pending();
+            player.path.clear();
+            player.selected_path.clear();
             player.bracketed = true;
         }
-        60 => player.bracketed = false,                // ENDPATH
-        61 => player.push(GeometryPathCommand::Close), // CLOSEFIGURE
+        60 => {
+            player.bracketed = false;
+            player.selected_path = std::mem::take(&mut player.path);
+        }
+        61 => player.close_figure(),
         62 => {
+            player.flush_pending();
+            player.path = std::mem::take(&mut player.selected_path);
             let fill = player.brush_fill();
             player.emit(fill, None);
         }
         63 => {
+            player.flush_pending();
+            player.path = std::mem::take(&mut player.selected_path);
             let (fill, stroke) = (player.brush_fill(), player.pen_stroke());
             player.emit(fill, stroke);
         }
         64 => {
+            player.flush_pending();
+            player.path = std::mem::take(&mut player.selected_path);
             let stroke = player.pen_stroke();
             player.emit(None, stroke);
         }
+        68 => {
+            player.path.clear();
+            player.selected_path.clear();
+            player.bracketed = false;
+            player.pending_stroke = false;
+        }
         27 => {
-            // MOVETOEX
-            let Some((x, y)) = i32_at(bytes, body).zip(i32_at(bytes, body + 4)) else {
-                return;
-            };
+            let (x, y) = i32_at(bytes, body).zip(i32_at(bytes, body + 4))?;
             if !player.bracketed {
                 player.flush_pending();
             }
             player.move_to(f64::from(x), f64::from(y));
         }
         54 => {
-            // LINETO
-            let Some((x, y)) = i32_at(bytes, body).zip(i32_at(bytes, body + 4)) else {
-                return;
-            };
+            let (x, y) = i32_at(bytes, body).zip(i32_at(bytes, body + 4))?;
             player.line_to(f64::from(x), f64::from(y));
             player.pending_stroke = !player.bracketed;
         }
-        // POLYBEZIERTO / POLYLINETO and their 16-bit forms.
         5 | 6 | 88 | 89 => {
             let small = kind >= 88;
-            let Some(points) = poly_points(small) else {
-                return;
-            };
+            let points = poly_points(small)?;
             if matches!(kind, 5 | 88) {
                 for chunk in points.as_chunks::<3>().0 {
                     player.cubic_to([chunk[0], chunk[1], chunk[2]]);
@@ -729,15 +757,10 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
             }
             player.pending_stroke = !player.bracketed;
         }
-        // POLYBEZIER / POLYGON / POLYLINE and their 16-bit forms.
         2 | 3 | 4 | 85 | 86 | 87 => {
             let small = kind >= 85;
-            let Some(points) = poly_points(small) else {
-                return;
-            };
-            let Some(first) = points.first().copied() else {
-                return;
-            };
+            let points = poly_points(small)?;
+            let first = points.first().copied()?;
             if !player.bracketed {
                 player.flush_pending();
             }
@@ -761,28 +784,30 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
                 player.emit(fill, stroke);
             }
         }
-        // POLYPOLYLINE / POLYPOLYGON and their 16-bit forms.
         7 | 8 | 90 | 91 => {
             let small = kind >= 90;
             let (Some(polygons), Some(total)) =
                 (u32_at(bytes, body + 16), u32_at(bytes, body + 20))
             else {
-                return;
+                return None;
             };
             let (polygons, total) = (polygons as usize, total as usize);
             if polygons > MAX_POINTS_PER_RECORD || total > MAX_POINTS_PER_RECORD {
-                return;
+                return None;
             }
             let mut counts = Vec::with_capacity(polygons);
             for index in 0..polygons {
-                match u32_at(bytes, body + 24 + index * 4) {
-                    Some(count) => counts.push(count as usize),
-                    None => return,
-                }
+                let count = u32_at(bytes, body + 24 + index * 4)?;
+                counts.push(count as usize);
             }
-            let Some(points) = read_points(bytes, body + 24 + polygons * 4, total, small) else {
-                return;
-            };
+            if counts
+                .iter()
+                .try_fold(0usize, |sum, count| sum.checked_add(*count))
+                != Some(total)
+            {
+                return None;
+            }
+            let points = read_points(bytes, body + 24 + polygons * 4, total, small)?;
             if !player.bracketed {
                 player.flush_pending();
             }
@@ -811,8 +836,7 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
             }
         }
         42 | 43 => {
-            // ELLIPSE / RECTANGLE
-            let Some(rect) = box_rect() else { return };
+            let rect = box_rect()?;
             if !player.bracketed {
                 player.flush_pending();
             }
@@ -827,7 +851,6 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
             }
         }
         47 => {
-            // PIE
             let (Some(rect), Some(sx), Some(sy), Some(ex), Some(ey)) = (
                 box_rect(),
                 i32_at(bytes, body + 16),
@@ -835,7 +858,7 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
                 i32_at(bytes, body + 24),
                 i32_at(bytes, body + 28),
             ) else {
-                return;
+                return None;
             };
             if !player.bracketed {
                 player.flush_pending();
@@ -853,18 +876,15 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) {
                 player.emit(fill, stroke);
             }
         }
-        _ => {}
+        20 if u32_at(bytes, body)? == 13 => {}
+        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 69 | 70 | 98 => {}
+        _ => return None,
     }
+    Some(())
 }
-
-// ---------------------------------------------------------------------------
-// WMF
-// ---------------------------------------------------------------------------
 
 const WMF_PLACEABLE_KEY: u32 = 0x9AC6_CDD7;
 
-/// WMF handles are slots in a table, and a create record takes the first free
-/// one rather than naming an index.
 fn wmf_store(player: &mut Player, object: GdiObject) {
     if let Some(slot) = player.objects.iter_mut().find(|slot| slot.is_none()) {
         *slot = Some(object);
@@ -901,32 +921,37 @@ fn decode_wmf(bytes: &[u8]) -> Option<MetafileDrawing> {
     );
     let mut offset = header + 18;
     let mut records = 0usize;
-    let mut deferred: Vec<(usize, usize)> = Vec::new();
+    let mut eof = false;
+    let mut deferred: Vec<(usize, usize, usize)> = Vec::new();
     while offset + 6 <= bytes.len() {
-        let size = u32_at(bytes, offset)? as usize * 2;
+        let size = (u32_at(bytes, offset)? as usize).checked_mul(2)?;
         let function = u16_at(bytes, offset + 4)?;
-        if size < 6 || offset + size > bytes.len() {
-            break;
+        let end = offset.checked_add(size)?;
+        if size < 6 || end > bytes.len() {
+            return None;
         }
         records += 1;
         if records > MAX_RECORDS {
             return None;
         }
         if function == 0 {
+            eof = true;
             break;
         }
-        deferred.push((function as usize, offset + 6));
-        offset += size;
+        deferred.push((function as usize, offset, end));
+        offset = end;
     }
-    // WMF has no world transform and no viewport, so the window the file
-    // declares *is* the frame the picture stretches onto; folding it in here
-    // keeps `Player::point` an identity map for WMF.
+    if !eof {
+        return None;
+    }
     let mut org = None;
     let mut ext = None;
-    for (function, body) in &deferred {
+    for (function, start, end) in &deferred {
+        let bytes = &bytes[*start..*end];
+        let body = 6;
         match function {
-            0x020B => org = i16_at(bytes, *body + 2).zip(i16_at(bytes, *body)),
-            0x020C => ext = i16_at(bytes, *body + 2).zip(i16_at(bytes, *body)),
+            0x020B => org = org.or(i16_at(bytes, body + 2).zip(i16_at(bytes, body))),
+            0x020C => ext = ext.or(i16_at(bytes, body + 2).zip(i16_at(bytes, body))),
             _ => {}
         }
     }
@@ -944,8 +969,14 @@ fn decode_wmf(bytes: &[u8]) -> Option<MetafileDrawing> {
     if player.frame.2.abs() < f64::EPSILON || player.frame.3.abs() < f64::EPSILON {
         return None;
     }
-    for (function, body) in deferred {
-        wmf_record(&mut player, bytes, function, body);
+    player.dc.window_org = (player.frame.0, player.frame.1);
+    player.dc.window_ext = (player.frame.2, player.frame.3);
+    player.dc.viewport_ext = player.dc.window_ext;
+    player.dc.scaled = true;
+    player.frame.0 = 0.0;
+    player.frame.1 = 0.0;
+    for (function, start, end) in deferred {
+        wmf_record(&mut player, &bytes[start..end], function, 6)?;
         if player.overflowed {
             return None;
         }
@@ -954,8 +985,7 @@ fn decode_wmf(bytes: &[u8]) -> Option<MetafileDrawing> {
     player.finish()
 }
 
-fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
-    // WMF point records store y before x.
+fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -> Option<()> {
     let point_at = |offset: usize| -> Option<(f64, f64)> {
         Some((
             f64::from(i16_at(bytes, offset + 2)?),
@@ -963,52 +993,68 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
         ))
     };
     match function {
+        0x020B => player.dc.window_org = point_at(body)?,
+        0x020C => {
+            let ext = point_at(body)?;
+            if ext.0 == 0.0 || ext.1 == 0.0 {
+                return None;
+            }
+            player.dc.window_ext = ext;
+        }
+        0x020D => player.dc.viewport_org = point_at(body)?,
+        0x020E => player.dc.viewport_ext = point_at(body)?,
+        0x0106 => {
+            player.dc.even_odd = match u16_at(bytes, body)? {
+                1 => true,
+                2 => false,
+                _ => return None,
+            }
+        }
+        0x001E => {
+            if player.saved.len() >= 1024 {
+                return None;
+            }
+            player.saved.push(player.dc);
+        }
+        0x0127 => player.restore(i32::from(i16_at(bytes, body)?))?,
         0x0214 => {
-            // MOVETO
             if let Some(point) = point_at(body) {
                 player.flush_pending();
                 player.move_to(point.0, point.1);
             }
         }
         0x0213 => {
-            // LINETO
             if let Some(point) = point_at(body) {
                 player.line_to(point.0, point.1);
                 player.pending_stroke = true;
             }
         }
         0x02FA => {
-            // CREATEPENINDIRECT
             let (Some(style), Some(width), Some(color)) = (
                 u16_at(bytes, body),
                 i16_at(bytes, body + 2),
                 u32_at(bytes, body + 6),
             ) else {
-                return;
+                return None;
             };
-            let pen = pen_from_style(u32::from(style), f64::from(width), color);
+            let pen = pen_from_style(u32::from(style), f64::from(width), color)?;
             wmf_store(player, GdiObject::Pen(pen));
         }
         0x02FC => {
-            // CREATEBRUSHINDIRECT
             let (Some(style), Some(color)) = (u16_at(bytes, body), u32_at(bytes, body + 2)) else {
-                return;
+                return None;
             };
-            let brush = brush_from_style(u32::from(style), color);
+            let brush = brush_from_style(u32::from(style), color)?;
             wmf_store(player, GdiObject::Brush(brush));
         }
         0x012D => {
-            // SELECTOBJECT
-            let Some(index) = u16_at(bytes, body) else {
-                return;
-            };
+            let index = u16_at(bytes, body)?;
             player.flush_pending();
             if let Some(object) = player.objects.get(index as usize).copied().flatten() {
                 player.select(object);
             }
         }
         0x01F0 => {
-            // DELETEOBJECT
             if let Some(index) = u16_at(bytes, body)
                 && let Some(slot) = player.objects.get_mut(index as usize)
             {
@@ -1016,16 +1062,9 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
             }
         }
         0x0324 | 0x0325 => {
-            // POLYGON / POLYLINE
-            let Some(count) = u16_at(bytes, body) else {
-                return;
-            };
-            let Some(points) = read_points(bytes, body + 2, count as usize, true) else {
-                return;
-            };
-            let Some(first) = points.first().copied() else {
-                return;
-            };
+            let count = u16_at(bytes, body)?;
+            let points = read_points(bytes, body + 2, count as usize, true)?;
+            let first = points.first().copied()?;
             player.flush_pending();
             player.move_to(first.0, first.1);
             for point in &points[1..] {
@@ -1040,28 +1079,19 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
             player.emit(fill, stroke);
         }
         0x0538 => {
-            // POLYPOLYGON
-            let Some(polygons) = u16_at(bytes, body) else {
-                return;
-            };
+            let polygons = u16_at(bytes, body)?;
             let polygons = polygons as usize;
             if polygons > MAX_POINTS_PER_RECORD {
-                return;
+                return None;
             }
             let mut counts = Vec::with_capacity(polygons);
             let mut total = 0usize;
             for index in 0..polygons {
-                match u16_at(bytes, body + 2 + index * 2) {
-                    Some(count) => {
-                        total += count as usize;
-                        counts.push(count as usize);
-                    }
-                    None => return,
-                }
+                let count = u16_at(bytes, body + 2 + index * 2)?;
+                total += count as usize;
+                counts.push(count as usize);
             }
-            let Some(points) = read_points(bytes, body + 2 + polygons * 2, total, true) else {
-                return;
-            };
+            let points = read_points(bytes, body + 2 + polygons * 2, total, true)?;
             player.flush_pending();
             let mut start = 0usize;
             for count in counts {
@@ -1082,14 +1112,13 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
             player.emit(fill, stroke);
         }
         0x041B | 0x0418 => {
-            // RECTANGLE / ELLIPSE: bottom, right, top, left.
             let (Some(bottom), Some(right), Some(top), Some(left)) = (
                 i16_at(bytes, body),
                 i16_at(bytes, body + 2),
                 i16_at(bytes, body + 4),
                 i16_at(bytes, body + 6),
             ) else {
-                return;
+                return None;
             };
             let rect = (
                 f64::from(left),
@@ -1106,15 +1135,17 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) {
             let (fill, stroke) = (player.brush_fill(), player.pen_stroke());
             player.emit(fill, stroke);
         }
-        _ => {}
+        0x0103 if u16_at(bytes, body)? == 8 => {}
+        0x0102 | 0x0107 | 0x0108 | 0x0201 | 0x0209 | 0x020A => {}
+        _ => return None,
     }
+    Some(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// An EMF header whose frame rectangle maps onto `device` pixels.
     fn emf_header(bounds: [i32; 4], frame_device: [i32; 2]) -> Vec<u8> {
         let mut header = vec![0u8; 88];
         let put = |header: &mut Vec<u8>, offset: usize, value: i32| {
@@ -1125,7 +1156,6 @@ mod tests {
         for (index, value) in bounds.iter().enumerate() {
             put(&mut header, 8 + index * 4, *value);
         }
-        // 100 device units per millimetre keeps `rclFrame` in whole hundredths.
         for (index, value) in [0, 0, frame_device[0] * 100, frame_device[1] * 100]
             .iter()
             .enumerate()
@@ -1133,9 +1163,7 @@ mod tests {
             put(&mut header, 24 + index * 4, *value);
         }
         put(&mut header, 40, EMF_SIGNATURE as i32);
-        put(&mut header, 56, 16); // handles, in the low half of the u32 slot
-        // One device unit per millimetre makes `rclFrame`, in hundredths of a
-        // millimetre, exactly a hundred times the device rectangle.
+        put(&mut header, 56, 16);
         put(&mut header, 72, frame_device[0]);
         put(&mut header, 76, frame_device[1]);
         put(&mut header, 80, frame_device[0]);
@@ -1159,7 +1187,6 @@ mod tests {
         values.iter().flat_map(|v| v.to_le_bytes()).collect()
     }
 
-    /// Bounds rectangle, point count, then 16-bit points.
     fn poly16(points: &[(i16, i16)]) -> Vec<u8> {
         let mut body = i32s(&[0, 0, 0, 0, points.len() as i32]);
         for (x, y) in points {
@@ -1221,8 +1248,6 @@ mod tests {
 
     #[test]
     fn coordinates_scale_by_the_frame_rectangle_not_the_ink_bounds() {
-        // The MSGraph pies declare a frame a fifth wider than their ink;
-        // normalising by `rclBounds` would zoom them to the picture's edges.
         let records = vec![
             solid_brush(1, 0x0000_0000),
             record(86, &poly16(&[(20, 20), (60, 20), (60, 60)])),
@@ -1237,8 +1262,6 @@ mod tests {
 
     #[test]
     fn a_window_extent_without_a_viewport_extent_does_not_scale() {
-        // `project17/image18.emf` sets a window extent of 9113 and no viewport
-        // at all; applying it as a ratio collapses the pie to a point.
         let records = vec![
             record(10, &i32s(&[0, 0])),
             record(9, &i32s(&[1000, 1000])),
@@ -1257,6 +1280,7 @@ mod tests {
     #[test]
     fn a_window_and_viewport_extent_pair_scales_logical_units() {
         let records = vec![
+            record(17, &i32s(&[8])),
             record(9, &i32s(&[200, 200])),
             record(11, &i32s(&[100, 100])),
             solid_brush(1, 0x0000_0000),
@@ -1273,10 +1297,6 @@ mod tests {
 
     #[test]
     fn a_pie_sweeps_counter_clockwise_from_its_start_ray() {
-        // GDI's default arc direction is counter-clockwise, so a wedge from
-        // twelve o'clock to three o'clock is the three-quarter one. Sweeping
-        // the short way instead paints every wedge of the MSGraph pies as its
-        // own complement.
         let records = vec![
             solid_brush(1, 0x0000_0000),
             record(47, &i32s(&[0, 0, 100, 100, 50, 0, 100, 50])),
@@ -1323,8 +1343,6 @@ mod tests {
 
     #[test]
     fn a_metafile_that_draws_nothing_is_not_decoded() {
-        // Several parts in the corpus are 188-byte header-and-EOF stubs. They
-        // stay `Image`s so the backend still counts them as skipped.
         let bytes = emf(Vec::new(), [0, 0, 99, 99], [100, 100]);
         assert!(decode(&bytes).is_none());
     }
@@ -1339,12 +1357,10 @@ mod tests {
             [0, 0, 99, 99],
             [100, 100],
         );
-        let full = decode(&bytes).expect("the whole file decodes");
+        assert!(decode(&bytes).is_some());
         bytes.truncate(bytes.len() - 12);
-        let truncated = decode(&bytes).expect("the leading records still decode");
-        assert_eq!(truncated.ops.len(), full.ops.len());
+        assert!(decode(&bytes).is_none());
 
-        // A point count that runs past the record must not be trusted.
         let mut lying = emf_header([0, 0, 99, 99], [100, 100]);
         lying.extend(record(86, &i32s(&[0, 0, 0, 0, 100_000])));
         assert!(decode(&lying).is_none());
@@ -1359,7 +1375,6 @@ mod tests {
         bytes.extend_from_slice(&1440u16.to_le_bytes());
         bytes.extend_from_slice(&0u32.to_le_bytes());
         bytes.extend_from_slice(&0u16.to_le_bytes());
-        // META_HEADER: type, header words, version, size, objects, max record, members
         bytes.extend_from_slice(&1u16.to_le_bytes());
         bytes.extend_from_slice(&9u16.to_le_bytes());
         bytes.extend_from_slice(&0x0300u16.to_le_bytes());
@@ -1375,7 +1390,6 @@ mod tests {
             out.extend_from_slice(body);
             out
         };
-        // META_SETWINDOWORG and META_SETWINDOWEXT store y before x.
         bytes.extend(wmf_record(0x020B, &i16s(&[0, 0])));
         bytes.extend(wmf_record(0x020C, &i16s(&[100, 100])));
         let mut brush = 0u16.to_le_bytes().to_vec();
@@ -1392,5 +1406,187 @@ mod tests {
         let op = only_op(&drawing);
         assert_eq!(op.fill.as_deref(), Some("#ff0000"));
         assert_eq!(op.path[1], GeometryPathCommand::Line { x: 0.5, y: 0.0 });
+    }
+    #[test]
+    fn records_cannot_read_points_from_their_successors() {
+        let bytes = emf(
+            vec![
+                record(86, &i32s(&[0, 0, 99, 99, 3])),
+                record(70, &i32s(&[12, 0, 0, 0])),
+            ],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        assert!(decode(&bytes).is_none());
+        let mut bytes = vec![0u8; 18];
+        bytes[0..2].copy_from_slice(&1u16.to_le_bytes());
+        bytes[2..4].copy_from_slice(&9u16.to_le_bytes());
+        bytes.extend(4u32.to_le_bytes());
+        bytes.extend(0x0324u16.to_le_bytes());
+        bytes.extend(3u16.to_le_bytes());
+        bytes.extend(9u32.to_le_bytes());
+        bytes.extend(0x0201u16.to_le_bytes());
+        bytes.extend([0u8; 12]);
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u16.to_le_bytes());
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn selecting_a_brush_preserves_open_and_closed_paths() {
+        for before_end in [false, true] {
+            let mut records = vec![
+                record(59, &[]),
+                record(27, &i32s(&[0, 0])),
+                record(89, &poly16(&[(100, 0), (0, 100)])),
+                record(61, &[]),
+            ];
+            if before_end {
+                records.push(solid_brush(1, 0x0000ff00));
+            }
+            records.push(record(60, &[]));
+            if !before_end {
+                records.push(solid_brush(1, 0x0000ff00));
+            }
+            records.push(record(62, &i32s(&[0, 0, 100, 100])));
+            let drawing = decode(&emf(records, [0, 0, 99, 99], [100, 100])).unwrap();
+            assert_eq!(only_op(&drawing).fill.as_deref(), Some("#00ff00"));
+            assert_eq!(only_op(&drawing).path.len(), 4);
+        }
+    }
+
+    #[test]
+    fn restore_dc_uses_absolute_levels_and_rejects_extreme_depths() {
+        let bytes = emf(
+            vec![
+                record(33, &[]),
+                record(10, &i32s(&[20, 20])),
+                record(33, &[]),
+                record(10, &i32s(&[40, 40])),
+                record(34, &i32s(&[1])),
+                record(86, &poly16(&[(0, 0), (50, 0), (50, 50)])),
+            ],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        let drawing = decode(&bytes).unwrap();
+        assert_eq!(
+            only_op(&drawing).path[0],
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 }
+        );
+        let bytes = emf(
+            vec![record(33, &[]), record(34, &i32s(&[i32::MIN]))],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        assert!(decode(&bytes).is_none());
+    }
+
+    #[test]
+    fn world_transforms_keep_rotated_pen_widths_and_reject_nonfinite_values() {
+        let matrix = |values: &[f32]| {
+            values
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect::<Vec<_>>()
+        };
+        let bytes = emf(
+            vec![
+                record(38, &i32s(&[1, 0, 10, 0, 0])),
+                record(37, &i32s(&[1])),
+                record(35, &matrix(&[0.0, 1.0, -1.0, 0.0, 100.0, 0.0])),
+                record(43, &i32s(&[0, 0, 100, 100])),
+            ],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        let drawing = decode(&bytes).unwrap();
+        assert_eq!(only_op(&drawing).stroke.as_ref().unwrap().width, 0.1);
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let bytes = emf(
+                vec![
+                    record(35, &matrix(&[invalid, 0.0, 0.0, 1.0, 0.0, 0.0])),
+                    record(43, &i32s(&[0, 0, 100, 100])),
+                ],
+                [0, 0, 99, 99],
+                [100, 100],
+            );
+            assert!(decode(&bytes).is_none());
+        }
+    }
+
+    #[test]
+    fn fill_mode_and_arc_direction_follow_the_device_context() {
+        for mode in [1, 2] {
+            let bytes = emf(
+                vec![
+                    record(19, &i32s(&[mode])),
+                    record(57, &i32s(&[2])),
+                    record(47, &i32s(&[0, 0, 100, 100, 50, 0, 100, 50])),
+                ],
+                [0, 0, 99, 99],
+                [100, 100],
+            );
+            let drawing = decode(&bytes).unwrap();
+            let op = only_op(&drawing);
+            assert_eq!(op.even_odd, mode == 1);
+            assert!(
+                op.path
+                    .iter()
+                    .all(|p| !matches!(p, GeometryPathCommand::Line { x, .. } if *x < 0.49))
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_drawing_records_do_not_produce_partial_artwork() {
+        for kind in [30, 76, 84, 118] {
+            let bytes = emf(
+                vec![
+                    record(43, &i32s(&[0, 0, 100, 100])),
+                    record(kind, &[0; 100]),
+                ],
+                [0, 0, 99, 99],
+                [100, 100],
+            );
+            assert!(decode(&bytes).is_none(), "record {kind}");
+        }
+        for mode in 1..=8u16 {
+            let mut bytes = vec![0u8; 18];
+            bytes[0..2].copy_from_slice(&1u16.to_le_bytes());
+            bytes[2..4].copy_from_slice(&9u16.to_le_bytes());
+            bytes.extend(4u32.to_le_bytes());
+            bytes.extend(0x0103u16.to_le_bytes());
+            bytes.extend(mode.to_le_bytes());
+            bytes.extend(7u32.to_le_bytes());
+            bytes.extend(0x041Bu16.to_le_bytes());
+            for value in [1u16, 1, 0, 0] {
+                bytes.extend(value.to_le_bytes());
+            }
+            bytes.extend(3u32.to_le_bytes());
+            bytes.extend(0u16.to_le_bytes());
+            assert_eq!(decode(&bytes).is_some(), mode == 8, "WMF mapping {mode}");
+        }
+    }
+
+    #[test]
+    fn replay_budgets_reject_excessive_records_operations_and_points() {
+        let bytes = emf(
+            vec![record(43, &i32s(&[0, 0, 100, 100])); 4097],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        assert!(decode(&bytes).is_none());
+        let points = vec![(0, 0); 65536];
+        let bytes = emf(
+            vec![record(86, &poly16(&points)); 7],
+            [0, 0, 99, 99],
+            [100, 100],
+        );
+        assert!(decode(&bytes).is_none());
+        let mut records = vec![record(18, &i32s(&[1])); 200000];
+        records.push(record(43, &i32s(&[0, 0, 100, 100])));
+        let bytes = emf(records, [0, 0, 99, 99], [100, 100]);
+        assert!(decode(&bytes).is_none());
     }
 }

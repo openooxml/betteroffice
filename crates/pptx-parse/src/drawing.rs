@@ -257,20 +257,24 @@ fn parse_graphic_frame(
             .map(|(_, value)| value.clone())
             .collect();
         GraphicFrameData::Diagram { relationship_ids }
-    } else if let Some(picture) =
-        data.and_then(|value| value.descendants_named("pic").first().copied())
-    {
-        // An OLE object's `mc:Fallback` holds the picture PowerPoint paints
-        // until the object is activated; without it the frame degrades to an
-        // empty dashed box.
-        GraphicFrameData::Ole {
-            picture: Box::new(parse_picture(picture, relationships, part, budget)?),
-        }
     } else {
+        let uri = data.and_then(|value| value.attribute("uri"));
+        let picture = data
+            .filter(|_| uri == Some("http://schemas.openxmlformats.org/presentationml/2006/ole"))
+            .and_then(|value| {
+                value
+                    .child("AlternateContent")
+                    .and_then(|alternate| alternate.child("Fallback"))
+                    .unwrap_or(value)
+                    .child("oleObj")
+            })
+            .and_then(|object| object.child("pic"))
+            .map(|picture| parse_picture(picture, relationships, part, budget))
+            .transpose()?
+            .map(Box::new);
         GraphicFrameData::Unknown {
-            uri: data
-                .and_then(|value| value.attribute("uri"))
-                .map(str::to_owned),
+            uri: uri.map(str::to_owned),
+            picture,
         }
     };
     Ok(GraphicFrame {
@@ -1769,11 +1773,25 @@ mod tests {
     }
 
     #[test]
+    fn unrelated_graphics_keep_their_original_json_without_an_ole_picture() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(br#"<p:graphicFrame><a:graphic><a:graphicData uri="custom:graphic"><p:oleObj><p:pic><p:blipFill><a:blip r:embed="rId1"/></p:blipFill></p:pic></p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"#, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let frame = parse_graphic_frame(&root, &[], "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let json = serde_json::to_string(&frame.data).unwrap();
+        assert_eq!(json, r#"{"type":"unknown","uri":"custom:graphic"}"#);
+        assert_eq!(
+            serde_json::from_str::<GraphicFrameData>(&json).unwrap(),
+            frame.data
+        );
+    }
+
+    #[test]
     fn an_ole_graphic_frame_keeps_its_fallback_picture() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="9" name="Object 8"/></p:nvGraphicFramePr><p:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="v"><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/></p:oleObj></mc:Choice><mc:Fallback><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id="9" name="Object 8"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId10"/></p:blipFill><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></a:xfrm></p:spPr></p:pic></p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld><p:spTree><p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="9" name="Object 8"/></p:nvGraphicFramePr><p:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole"><mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="v"><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/><p:pic><p:blipFill><a:blip r:embed="unsupportedChoice"/></p:blipFill></p:pic></p:oleObj></mc:Choice><mc:Fallback><p:oleObj r:id="rId9" progId="MSGraph.Chart.8"><p:embed/><p:pic><p:nvPicPr><p:cNvPr id="9" name="Object 8"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="rId10"/></p:blipFill><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="30" cy="40"/></a:xfrm></p:spPr></p:pic></p:oleObj></mc:Fallback></mc:AlternateContent></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -1798,7 +1816,11 @@ mod tests {
         let ShapeNode::GraphicFrame(frame) = &data.shapes[0] else {
             panic!("expected a graphic frame");
         };
-        let GraphicFrameData::Ole { picture } = &frame.data else {
+        let GraphicFrameData::Unknown {
+            picture: Some(picture),
+            ..
+        } = &frame.data
+        else {
             panic!("expected the OLE fallback picture, got {:?}", frame.data);
         };
         assert_eq!(

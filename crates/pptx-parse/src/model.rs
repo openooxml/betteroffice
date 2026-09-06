@@ -336,13 +336,10 @@ pub enum GraphicFrameData {
     Diagram {
         relationship_ids: Vec<String>,
     },
-    /// An embedded OLE object, carrying the `mc:Fallback` picture PowerPoint
-    /// paints while the object is not activated.
-    Ole {
-        picture: Box<Picture>,
-    },
     Unknown {
         uri: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        picture: Option<Box<Picture>>,
     },
 }
 

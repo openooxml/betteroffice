@@ -721,3 +721,27 @@ test('paints script glyphs and underlines at their shifted baselines', async () 
   expect(underlines).toHaveLength(3);
   [44.8, 55.8, 50.8].forEach((y, i) => expect(underlines[i]).toBeCloseTo(y));
 });
+
+test('clips metafile paths before filling their even-odd holes', async () => {
+  const calls: string[] = [];
+  const ctx = new Proxy({
+    clip: () => calls.push('clip'),
+    fill: (rule: string) => calls.push(`fill:${rule}`),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  await paintSlide(ctx, {
+    contractVersion: 1, width: 100, height: 100,
+    primitives: [{
+      kind: 'shape', objectId: 1, name: 'Metafile', geometry: 'custom',
+      x: 10, y: 10, w: 80, h: 80, path: [], clip: [], evenOdd: true,
+      fill: { kind: 'solid', color: '#ff0000' },
+    }, {
+      kind: 'shape', objectId: 2, name: 'Ordinary', geometry: 'rect',
+      x: 10, y: 10, w: 80, h: 80, path: [],
+      fill: { kind: 'solid', color: '#0000ff' },
+    }],
+  });
+  expect(calls).toEqual(['clip', 'fill:evenodd', 'fill:nonzero']);
+});

@@ -178,6 +178,8 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     f64::from(base.rect.w) / f64::from(base.rect.h),
                 );
                 primitives.push(Primitive::Shape {
+                    clip: None,
+                    even_odd: false,
                     object_id: base.id,
                     shape_id: None,
                     name: base.name,
