@@ -1537,6 +1537,8 @@ fn prepend_bullet(
         justify: false,
         level: paragraph.level,
         margin_left_px: 0.0,
+        line_spacing: None,
+        compat_line_spacing: false,
         indent_px: 0.0,
         bullet: None,
         bullet_style: None,
