@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::chart::PlotRect;
+use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, LineEnd, ShapeFill, ShapeOutline, ShapeStyle, Theme, ThemeFormatScheme,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
@@ -1433,7 +1433,17 @@ fn chart_text_primitive(
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    let x = safe_geometry(text.x as f32);
+    let advance: f32 = shaped.iter().map(|glyph| glyph.x_advance).sum();
+    let box_x = safe_geometry(text.x as f32);
+    let box_w = safe_geometry(text.width as f32);
+    let align = match text.align {
+        PlotTextAlign::Center => TextAlign::Center,
+        PlotTextAlign::Start => TextAlign::Left,
+    };
+    let x = match align {
+        TextAlign::Center => box_x + ((box_w - advance) / 2.0).max(0.0),
+        _ => box_x,
+    };
     let baseline = safe_geometry(text.baseline_y as f32);
     let mut glyphs = Vec::with_capacity(shaped.len());
     let mut cursor = 0.0_f32;
@@ -1469,13 +1479,13 @@ fn chart_text_primitive(
         object_id: text.object_id,
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
-        x,
+        x: box_x,
         y: baseline - line_box.ascent,
-        w: safe_geometry(text.width as f32).max(width),
+        w: box_w.max(x - box_x + width),
         h: line_box.height(),
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
-            align: Some(TextAlign::Left),
+            align: Some(align),
             level: 0,
             runs: vec![TextRun {
                 text: text.text.to_owned(),
@@ -4902,6 +4912,41 @@ mod tests {
                     if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty())
             )),
             "chart text is not shaped"
+        );
+    }
+
+    #[test]
+    fn a_chart_title_is_shaped_into_the_centre_of_its_box() {
+        let parts = chart_slide(0)
+            .into_iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Chart {
+                    primitives, name, ..
+                } if name == "Revenue chart" => Some(primitives),
+                _ => None,
+            })
+            .expect("the chart frame plots");
+        let (align, x, width) = parts
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    lines, paragraphs, ..
+                } if lines
+                    .iter()
+                    .flat_map(|line| &line.runs)
+                    .any(|run| run.text == "Revenue") =>
+                {
+                    let run = &lines[0].runs[0];
+                    Some((paragraphs[0].align, run.x, run.width))
+                }
+                _ => None,
+            })
+            .expect("the chart title is laid out");
+        assert_eq!(align, Some(TextAlign::Center));
+        let centre = x + width / 2.0;
+        assert!(
+            (centre - (96.0 + 576.0 / 2.0)).abs() < 2.0,
+            "the title is not centred on the frame: {centre}"
         );
     }
 
