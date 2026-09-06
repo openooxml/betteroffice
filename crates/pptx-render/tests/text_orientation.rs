@@ -147,6 +147,7 @@ fn vertical_autofit_and_anchoring_use_the_inset_text_area() {
         },
         pptx_parse::TextAutofit::Shape,
     ] {
+        let shape_autofit = matches!(autofit, pptx_parse::TextAutofit::Shape);
         let mut package = session.package().clone();
         let shape = package.slides[1]
             .shapes
@@ -169,16 +170,25 @@ fn vertical_autofit_and_anchoring_use_the_inset_text_area() {
         };
         assert_eq!(transform.rotation_deg, 90.0);
         assert_eq!(lines.len(), 2);
-        assert!(!overflow);
+        assert_eq!(*overflow, shape_autofit);
         let top = lines[0].y;
         let last = lines.last().unwrap();
         let bottom = last.y + last.height;
-        assert!(top >= 427.1);
-        assert!(bottom <= 472.9);
+        if shape_autofit {
+            assert!(top < 427.1);
+            assert!(bottom > 472.9);
+        } else {
+            assert!(top >= 427.1);
+            assert!(bottom <= 472.9);
+        }
         assert!(((top + bottom) / 2.0 - 450.0).abs() < 0.001);
         for line in lines {
             assert_eq!(line.x, 827.3);
-            assert!(line.runs[0].font_size_px < 20.0);
+            if shape_autofit {
+                assert_eq!(line.runs[0].font_size_px, 32.0);
+            } else {
+                assert!(line.runs[0].font_size_px < 20.0);
+            }
             assert!(line.width <= 330.4);
         }
     }

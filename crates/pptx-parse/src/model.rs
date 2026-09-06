@@ -382,6 +382,10 @@ pub struct TextBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,
     pub autofit: Option<TextAutofit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertical_overflow: Option<TextOverflow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizontal_overflow: Option<TextOverflow>,
     pub inset_left: Option<i64>,
     pub inset_top: Option<i64>,
     pub inset_right: Option<i64>,
@@ -392,6 +396,14 @@ pub struct TextBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_list_style: Option<Box<ParagraphProperties>>,
     pub paragraphs: Vec<TextParagraph>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextOverflow {
+    Overflow,
+    Clip,
+    Ellipsis,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
