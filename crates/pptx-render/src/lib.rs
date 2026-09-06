@@ -52,6 +52,10 @@ enum ComposedShape {
         #[serde(default)]
         image_part_path: Option<String>,
         #[serde(default)]
+        crop: ImageCrop,
+        #[serde(default)]
+        path: Option<Vec<ooxml_drawingml::GeometryPathCommand>>,
+        #[serde(default)]
         stroke: Option<ComposedStroke>,
     },
     TablePlaceholder {
@@ -195,6 +199,8 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             ComposedShape::Picture {
                 base,
                 image_part_path,
+                crop,
+                path,
                 stroke,
             } => {
                 let transform = transform(&base);
@@ -207,6 +213,8 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     w: base.rect.w,
                     h: base.rect.h,
                     asset_id: image_part_path,
+                    crop,
+                    path,
                     stroke: stroke.map(Into::into),
                     transform,
                 });
@@ -377,6 +385,8 @@ impl From<ComposedStroke> for Stroke {
             color: stroke.color_hex,
             width: stroke.width_px,
             dashed: stroke.dash,
+            head_end: None,
+            tail_end: None,
         }
     }
 }

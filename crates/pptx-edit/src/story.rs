@@ -47,6 +47,7 @@ pub(crate) fn validate_style_values(
     underline: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
+    baseline_pct: Option<f64>,
 ) -> EditResult<()> {
     if let Some(font_family) = font_family {
         validate_xml_text(font_family)?;
@@ -72,6 +73,14 @@ pub(crate) fn validate_style_values(
         return Err(EditError::InvalidText(format!(
             "font size {size}pt is outside the 1-4000pt range"
         )));
+    }
+    if let Some(baseline) = baseline_pct
+        && (!baseline.is_finite()
+            || !(f64::from(i32::MIN)..=f64::from(i32::MAX)).contains(&(baseline * 1000.0)))
+    {
+        return Err(EditError::InvalidText(
+            "baseline exceeds the signed percentage range".into(),
+        ));
     }
     Ok(())
 }
@@ -140,6 +149,70 @@ pub(crate) fn seed_plain_story(
     }
     append_pilcrow(&story, txn, paragraph_id, None, 0, None);
     story
+}
+
+pub(crate) fn import_source_numbering_restarts(
+    doc: &yrs::Doc,
+    package: &pptx_parse::PptxPackage,
+) -> EditResult<()> {
+    let source = crate::doc_with_client_id(crate::BOOTSTRAP_CLIENT_ID);
+    crate::deck::seed_doc(&source, package, "")?;
+    let source_txn = source.transact();
+    let source_stories = crate::deck::required_map(&source_txn, STORIES)?;
+    let mut restarts = std::collections::HashMap::new();
+    for (_, value) in source_stories.iter(&source_txn) {
+        let Out::YText(story) = value else { continue };
+        for diff in story.diff(&source_txn, YChange::identity) {
+            let Out::YMap(map) = diff.insert else {
+                continue;
+            };
+            let (Some(id), Some(json)) = (
+                map_string(&map, &source_txn, PARA_ID),
+                map_string(&map, &source_txn, "bulletJson"),
+            ) else {
+                continue;
+            };
+            let mut bullet: pptx_parse::Bullet =
+                serde_json::from_str(&json).map_err(|error| EditError::Json(error.to_string()))?;
+            if let pptx_parse::Bullet::AutoNumber {
+                restart: restart @ true,
+                ..
+            } = &mut bullet
+            {
+                *restart = false;
+                restarts.insert(id, (bullet, json));
+            }
+        }
+    }
+    if restarts.is_empty() {
+        return Ok(());
+    }
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
+    let stories = crate::deck::required_map(&txn, STORIES)?;
+    let mut updates = Vec::new();
+    for (_, value) in stories.iter(&txn) {
+        let Out::YText(story) = value else { continue };
+        for diff in story.diff(&txn, YChange::identity) {
+            let Out::YMap(map) = diff.insert else {
+                continue;
+            };
+            let Some(id) = map_string(&map, &txn, PARA_ID) else {
+                continue;
+            };
+            let Some((legacy, source)) = restarts.get(&id) else {
+                continue;
+            };
+            let current = map_string(&map, &txn, "bulletJson")
+                .and_then(|json| serde_json::from_str::<pptx_parse::Bullet>(&json).ok());
+            if current.as_ref() == Some(legacy) {
+                updates.push((map, source.clone()));
+            }
+        }
+    }
+    for (map, json) in updates {
+        map.insert(&mut txn, "bulletJson", json);
+    }
+    Ok(())
 }
 
 fn append_pilcrow(
@@ -217,6 +290,7 @@ impl DeckSession {
             style.underline.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
+            style.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -274,6 +348,7 @@ impl DeckSession {
             patch.underline.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
+            patch.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
         let story = story_ref(&txn, story_id)?;
@@ -584,7 +659,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 6] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 7] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -612,6 +687,10 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 6] {
                 .map(Any::from)
                 .unwrap_or(Any::Null),
         ),
+        (
+            "baseline",
+            style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
+        ),
     ]
 }
 
@@ -631,6 +710,7 @@ fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
         "underline",
         patch.underline.as_deref().map(Any::from),
     );
+    insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
     attrs
 }
 
@@ -648,6 +728,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        baseline_pct: properties.baseline_pct,
     }
 }
 
@@ -659,6 +740,7 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
+        baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
     }
 }
 
