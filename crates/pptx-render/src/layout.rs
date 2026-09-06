@@ -9,9 +9,9 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    ChartSpace, CustomGeometryPath, GraphicFrameData, ParagraphProperties, Picture, PictureCrop,
-    PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide,
-    SlideLayout, SlideMaster, TextAutofit, TextBody,
+    Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
+    ParagraphProperties, Picture, PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties,
+    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -957,6 +957,12 @@ impl BodyCascade<'_> {
             .into_iter()
             .flatten()
         {
+            if let Some(source) = &body.default_list_style {
+                merge_paragraph_properties(&mut properties, source);
+            }
+            if let Some(source) = body.list_style.get(level as usize) {
+                merge_paragraph_properties(&mut properties, source);
+            }
             if let Some(source) = body
                 .paragraphs
                 .get(index)
@@ -1067,6 +1073,9 @@ struct ResolvedParagraph {
     justify: bool,
     level: u32,
     margin_left_px: f32,
+    indent_px: f32,
+    bullet: Option<Bullet>,
+    bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
 }
 
@@ -1156,11 +1165,46 @@ fn resolve_content(
             justify: is_full_justification(alignment),
             level: paragraph.level,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
+            indent_px: emu_to_px(properties.indent.unwrap_or_default()),
+            bullet: properties.bullet.clone(),
+            bullet_style: matches!(properties.bullet, Some(Bullet::Character { .. }))
+                .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
+                .transpose()?,
             runs,
         });
         story_offset = story_offset.saturating_add(1);
     }
     Ok(ResolvedContent { paragraphs })
+}
+
+fn resolve_bullet_style(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    properties: &ParagraphProperties,
+    text: &ResolvedStyle,
+) -> Result<ResolvedStyle, RenderError> {
+    let mut style = text.clone();
+    if let Some(BulletFont::Typeface(family)) = &properties.bullet_font {
+        let family = if family.starts_with('+') {
+            resolve_theme_font_ref(Some(theme), family)
+        } else {
+            family.clone()
+        };
+        style.face = renderer.resolve_face(&family, style.bold, style.italic)?;
+        style.family = style.face.family.clone();
+    }
+    if let Some(BulletColor::Color(color)) = &properties.bullet_color
+        && let Some(color) = resolve_color_value_to_hex_with_theme(Some(color), Some(theme))
+    {
+        style.color = color;
+    }
+    style.font_size_pt = match properties.bullet_size {
+        Some(BulletSize::Percent(size)) => text.font_size_pt * size as f32,
+        Some(BulletSize::Points(size)) => size as f32,
+        _ => text.font_size_pt,
+    }
+    .clamp(1.0, 4_096.0);
+    Ok(style)
 }
 
 fn resolve_style(
@@ -1448,7 +1492,61 @@ fn layout_paragraph(
         });
         line_y += line_box.height();
     }
+    prepend_bullet(fonts, paragraph, x, &mut output, scale)?;
     Ok(output)
+}
+
+/// Prepends a marker outside the story's character space.
+fn prepend_bullet(
+    fonts: &FontStore,
+    paragraph: &ResolvedParagraph,
+    x: f32,
+    lines: &mut [PositionedTextLine],
+    scale: f32,
+) -> Result<(), RenderError> {
+    let Some(Bullet::Character { value }) = &paragraph.bullet else {
+        return Ok(());
+    };
+    let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
+        return Ok(());
+    };
+    if value.trim().is_empty() || first.runs.is_empty() {
+        return Ok(());
+    }
+    let bullet_x = (x + paragraph.indent_px).max(x - paragraph.margin_left_px.max(0.0));
+    let marker = ResolvedParagraph {
+        align: paragraph.align,
+        justify: false,
+        level: paragraph.level,
+        margin_left_px: 0.0,
+        indent_px: 0.0,
+        bullet: None,
+        bullet_style: None,
+        runs: vec![ResolvedRun {
+            text: value.clone(),
+            start: paragraph.runs[0].start,
+            style: style.clone(),
+        }],
+    };
+    let clusters = shape_paragraph(fonts, &marker, scale)?;
+    if clusters.is_empty() {
+        return Ok(());
+    }
+    let advances = clusters
+        .iter()
+        .map(|cluster| cluster.width)
+        .collect::<Vec<_>>();
+    let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
+    for run in &mut runs {
+        run.start = paragraph.runs[0].start;
+        run.end = run.start;
+        for glyph in &mut run.glyphs {
+            glyph.cluster = run.start;
+        }
+    }
+    runs.append(&mut first.runs);
+    first.runs = runs;
+    Ok(())
 }
 
 struct ShapedCluster {
@@ -1671,7 +1769,14 @@ fn positioned_runs(
             continue;
         }
         let append = output.last().is_some_and(|run| {
-            run.end == cluster.start && run.font_id == cluster.style.face.id.to_u32()
+            run.end == cluster.start
+                && run.font_id == cluster.style.face.id.to_u32()
+                && run.font_family == cluster.style.family
+                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
+                && run.bold == cluster.style.bold
+                && run.italic == cluster.style.italic
+                && run.underline == cluster.style.underline
+                && run.color == cluster.style.color
         });
         if !append {
             output.push(PositionedTextRun {
@@ -2092,6 +2197,15 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     if source.bullet.is_some() {
         target.bullet.clone_from(&source.bullet);
     }
+    if source.bullet_font.is_some() {
+        target.bullet_font.clone_from(&source.bullet_font);
+    }
+    if source.bullet_color.is_some() {
+        target.bullet_color.clone_from(&source.bullet_color);
+    }
+    if source.bullet_size.is_some() {
+        target.bullet_size.clone_from(&source.bullet_size);
+    }
     if let Some(source) = &source.default_run {
         let target = target
             .default_run
@@ -2192,7 +2306,7 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
             "path" => GradientType::Path,
             _ => GradientType::Linear,
         };
-        let stops = gradient
+        let mut stops = gradient
             .stops
             .iter()
             .filter_map(|stop| {
@@ -2202,6 +2316,11 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
                 })
             })
             .collect::<Vec<_>>();
+        stops.sort_by(|left, right| {
+            left.position
+                .partial_cmp(&right.position)
+                .unwrap_or_else(|| left.position.total_cmp(&right.position))
+        });
         if !stops.is_empty() {
             return Some(Paint::Gradient {
                 gradient_type,
@@ -2632,6 +2751,9 @@ mod tests {
             justify: is_full_justification(Some(alignment)),
             level: 0,
             margin_left_px: 0.0,
+            indent_px: 0.0,
+            bullet: None,
+            bullet_style: None,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -2776,6 +2898,196 @@ mod tests {
             assert_eq!(parse_align(Some(alignment)), TextAlign::Justify);
             assert!(!is_full_justification(Some(alignment)));
         }
+    }
+
+    #[test]
+    fn adjacent_runs_keep_their_own_paint_attributes() {
+        let renderer = renderer();
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            family: "Arial".to_owned(),
+            font_size_pt: 14.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            color: "#000000".to_owned(),
+        };
+        let mut variants = vec![style.clone(); 7];
+        variants[0].color = "#A99A72".to_owned();
+        variants[1].bold = true;
+        variants[2].italic = true;
+        variants[3].underline = true;
+        variants[4].font_size_pt = 28.0;
+        variants[5].family = "Fallback".to_owned();
+        variants[6].face = renderer.resolve_face("Arial", true, false).unwrap();
+        for changed in variants {
+            let paragraph = ResolvedParagraph {
+                align: TextAlign::Left,
+                justify: false,
+                level: 0,
+                margin_left_px: 0.0,
+                indent_px: 0.0,
+                bullet: None,
+                bullet_style: None,
+                runs: [style.clone(), changed.clone(), style.clone()]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, style)| ResolvedRun {
+                        text: "word ".to_owned(),
+                        start: index as u32 * 5,
+                        style,
+                    })
+                    .collect(),
+            };
+            for scale in [1.0, 0.5] {
+                let lines =
+                    layout_paragraph(&renderer.fonts, &paragraph, 10.0, 20.0, 10_000.0, scale)
+                        .unwrap();
+                assert_eq!(lines.len(), 1);
+                let runs = &lines[0].runs;
+                assert_eq!(runs.len(), 3);
+                for (index, (actual, expected)) in runs.iter().zip(&paragraph.runs).enumerate() {
+                    assert_eq!(actual.text, expected.text);
+                    assert_eq!(
+                        (actual.start, actual.end),
+                        (index as u32 * 5, index as u32 * 5 + 5)
+                    );
+                    assert_eq!(actual.color, expected.style.color);
+                    assert_eq!(actual.bold, expected.style.bold);
+                    assert_eq!(actual.italic, expected.style.italic);
+                    assert_eq!(actual.underline, expected.style.underline);
+                    assert_eq!(actual.font_id, expected.style.face.id.to_u32());
+                    assert_eq!(actual.font_family, expected.style.family);
+                    assert_eq!(
+                        actual.font_size_px,
+                        points_to_px(expected.style.font_size_pt * scale)
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn identical_adjacent_runs_keep_the_same_display_list() {
+        let renderer = renderer();
+        let style = ResolvedStyle {
+            face: renderer.resolve_face("Arial", false, false).unwrap(),
+            family: "Arial".to_owned(),
+            font_size_pt: 14.0,
+            bold: false,
+            italic: false,
+            underline: true,
+            color: "#A99A72".to_owned(),
+        };
+        let paragraph = |parts: &[&str]| {
+            let mut start = 0;
+            ResolvedParagraph {
+                align: TextAlign::Justify,
+                justify: true,
+                level: 0,
+                margin_left_px: 0.0,
+                indent_px: 0.0,
+                bullet: None,
+                bullet_style: None,
+                runs: parts
+                    .iter()
+                    .map(|text| {
+                        let run = ResolvedRun {
+                            text: (*text).to_owned(),
+                            start,
+                            style: style.clone(),
+                        };
+                        start += utf16_len(text);
+                        run
+                    })
+                    .collect(),
+            }
+        };
+        let split = paragraph(&["alpha ", "", "beta ", "gamma ", "delta"]);
+        let joined = paragraph(&["alpha beta gamma delta"]);
+        for width in [100.0, 10_000.0] {
+            let render = |paragraph| {
+                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0).unwrap()
+            };
+            assert_eq!(render(&split), render(&joined));
+        }
+    }
+
+    #[test]
+    fn gradient_stops_reach_the_display_list_in_position_order() {
+        use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
+
+        let stop = |position, rgb: &str, alpha| ModelStop {
+            position,
+            color: ColorValue {
+                rgb: Some(rgb.to_owned()),
+                alpha,
+                ..ColorValue::default()
+            },
+        };
+        let ordered = [
+            stop(0.0, "404040", None),
+            stop(50_000.0, "FF0000", Some(0.5)),
+            stop(50_000.0, "00FF00", None),
+            stop(100_000.0, "262626", None),
+        ];
+        for (kind, gradient_type) in [
+            ("linear", GradientType::Linear),
+            ("radial", GradientType::Radial),
+            ("rectangular", GradientType::Rectangular),
+            ("path", GradientType::Path),
+        ] {
+            for indices in [[0, 1, 2, 3], [3, 1, 0, 2]] {
+                let fill = ShapeFill {
+                    fill_type: "gradient".to_owned(),
+                    color: None,
+                    gradient: Some(GradientFill {
+                        gradient_type: kind.to_owned(),
+                        angle: Some(45.0),
+                        stops: indices.map(|index| ordered[index].clone()).to_vec(),
+                    }),
+                };
+                let source = serde_json::to_vec(&fill).unwrap();
+                assert_eq!(
+                    paint(&fill, &Theme::default()),
+                    Some(Paint::Gradient {
+                        gradient_type,
+                        angle_deg: Some(45.0),
+                        stops: [
+                            (0.0, "#404040"),
+                            (0.5, "#FF000080"),
+                            (0.5, "#00FF00"),
+                            (1.0, "#262626"),
+                        ]
+                        .map(|(position, color)| GradientStop {
+                            position,
+                            color: color.to_owned(),
+                        })
+                        .to_vec(),
+                    }),
+                    "{kind}: {indices:?}",
+                );
+                assert_eq!(serde_json::to_vec(&fill).unwrap(), source);
+            }
+        }
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/gradient-stop-order.pptx"),
+            306,
+        )
+        .unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 2)
+            .unwrap();
+        let Some(Paint::Gradient { stops, .. }) = rendered.display_list.background else {
+            panic!("expected a gradient");
+        };
+        assert_eq!(
+            stops
+                .iter()
+                .map(|stop| stop.color.as_str())
+                .collect::<Vec<_>>(),
+            ["#FF0000", "#FF00FF", "#00FF00", "#FFFF00", "#0000FF"]
+        );
     }
 
     #[test]
@@ -3856,6 +4168,7 @@ mod tests {
                 positioned.extend(lines.iter().flat_map(|line| {
                     line.runs
                         .iter()
+                        .filter(|run| run.start != run.end)
                         .map(|run| (run.text.as_str(), run.color.as_str()))
                 }));
             }

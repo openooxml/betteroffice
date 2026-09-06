@@ -1022,3 +1022,143 @@ def test_repr_is_python_shaped(deck):
     assert "after=None" in repr(cleared)
     assert "from_index=None" in repr(deck.insert_slide(0))
     assert repr(deck).startswith("Presentation(slides=")
+
+
+def test_a_new_deck_starts_neutral_on_legacy_comments(deck):
+    assert deck.comments() == []
+    assert deck.comment_flavor == "legacy"
+
+
+def test_add_comment_round_trips_through_a_save(deck, tmp_path):
+    edit = deck.add_comment(
+        1,
+        "Tighten this claim.",
+        author="Ada Lovelace",
+        initials="AL",
+        created="2026-09-01T10:00:00.000",
+        x=1_828_800,
+        y=914_400,
+    )
+    assert edit.comment_id
+    assert edit.parent_id is None
+    assert edit.resolved is False
+
+    out = tmp_path / "commented.pptx"
+    deck.save_path(out)
+    reopened = bo.Presentation.open_path(out)
+    comments = reopened.comments()
+    assert len(comments) == 1
+    assert comments[0].text == "Tighten this claim."
+    assert comments[0].author == "Ada Lovelace"
+    assert comments[0].initials == "AL"
+    assert comments[0].x == 1_828_800
+    assert comments[0].y == 914_400
+    assert comments[0].resolved is False
+    assert reopened.comment_flavor == "legacy"
+
+
+def test_comments_land_in_the_expected_parts(deck, tmp_path):
+    import zipfile
+
+    deck.add_comment(
+        0,
+        "Check this figure.",
+        author="Ada Lovelace",
+        initials="AL",
+        created="2026-09-01T10:00:00.000",
+    )
+    out = tmp_path / "commented.pptx"
+    deck.save_path(out)
+    with zipfile.ZipFile(out) as archive:
+        names = set(archive.namelist())
+        assert "ppt/commentAuthors.xml" in names
+        assert "ppt/comments/comment1.xml" in names
+        content_types = archive.read("[Content_Types].xml").decode()
+        assert "presentationml.comments+xml" in content_types
+        assert "presentationml.commentAuthors+xml" in content_types
+        slide_rels = archive.read("ppt/slides/_rels/slide1.xml.rels").decode()
+        assert "../comments/comment1.xml" in slide_rels
+
+
+def test_replies_and_status_need_modern_comments(deck):
+    edit = deck.add_comment(
+        0,
+        "Root.",
+        author="Ada",
+        initials="AL",
+        created="2026-09-01T10:00:00.000",
+    )
+    with pytest.raises(ValueError):
+        deck.reply_to_comment(
+            edit.comment_id, "Nope.", author="Grace", initials="GH", created="2026-09-01T10:01:00.000"
+        )
+    with pytest.raises(ValueError):
+        deck.set_comment_status(edit.comment_id, True)
+
+
+def test_modern_threads_resolve_and_reply(deck, tmp_path):
+    assert deck.set_comment_flavor("modern") == "modern"
+    root = deck.add_comment(
+        0,
+        "Root.",
+        author="Ada",
+        initials="AL",
+        created="2026-09-01T10:00:00.000",
+    )
+    reply = deck.reply_to_comment(
+        root.comment_id,
+        "Agreed.",
+        author="Grace",
+        initials="GH",
+        created="2026-09-01T10:01:00.000",
+    )
+    assert reply.parent_id == root.comment_id
+    assert deck.set_comment_status(root.comment_id, True).resolved is True
+
+    out = tmp_path / "threaded.pptx"
+    deck.save_path(out)
+    reopened = bo.Presentation.open_path(out)
+    assert reopened.comment_flavor == "modern"
+    comments = reopened.comments()
+    assert len(comments) == 2
+    roots = [comment for comment in comments if comment.parent_id is None]
+    replies = [comment for comment in comments if comment.parent_id is not None]
+    assert len(roots) == len(replies) == 1
+    assert roots[0].resolved is True
+    assert replies[0].text == "Agreed."
+
+
+def test_the_comment_flavour_is_fixed_once_a_deck_has_comments(deck):
+    deck.add_comment(
+        0, "Root.", author="Ada", initials="AL", created="2026-09-01T10:00:00.000"
+    )
+    with pytest.raises(ValueError):
+        deck.set_comment_flavor("modern")
+
+
+def test_unknown_comment_flavor_is_rejected(deck):
+    with pytest.raises(ValueError):
+        deck.set_comment_flavor("threaded")
+
+
+def test_remove_comment_drops_the_parts(deck, tmp_path):
+    import zipfile
+
+    edit = deck.add_comment(
+        0, "Root.", author="Ada", initials="AL", created="2026-09-01T10:00:00.000"
+    )
+    deck = bo.Presentation.open(deck.save())
+    edit = deck.comments()[0]
+    deck.remove_comment(edit.id)
+    assert deck.comments() == []
+    out = tmp_path / "empty.pptx"
+    deck.save_path(out)
+    with zipfile.ZipFile(out) as archive:
+        names = set(archive.namelist())
+        assert "ppt/comments/comment1.xml" not in names
+        assert "ppt/commentAuthors.xml" not in names
+
+
+def test_removing_an_unknown_comment_raises(deck):
+    with pytest.raises(KeyError):
+        deck.remove_comment("comment:0:0")

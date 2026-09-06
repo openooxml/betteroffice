@@ -6,6 +6,7 @@ use ooxml_drawingml::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::comments::{Comment, CommentAuthor, CommentFlavor};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
@@ -45,6 +46,12 @@ pub struct PptxPackage {
     #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_authors: Vec<CommentAuthor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<Comment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_flavor: Option<CommentFlavor>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
@@ -376,6 +383,11 @@ pub struct TextBody {
     pub inset_top: Option<i64>,
     pub inset_right: Option<i64>,
     pub inset_bottom: Option<i64>,
+    /// List properties by outline level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list_style: Vec<ParagraphProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_list_style: Option<Box<ParagraphProperties>>,
     pub paragraphs: Vec<TextParagraph>,
 }
 
@@ -410,7 +422,35 @@ pub struct ParagraphProperties {
     pub margin_left: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_font: Option<BulletFont>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_color: Option<BulletColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_size: Option<BulletSize>,
     pub default_run: Option<RunProperties>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletFont {
+    FollowText,
+    Typeface(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletColor {
+    FollowText,
+    Color(ColorValue),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletSize {
+    FollowText,
+    Percent(f64),
+    Points(f64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

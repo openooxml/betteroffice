@@ -9,6 +9,7 @@ use ooxml_drawingml::{
 };
 
 use crate::PptxError;
+use crate::comments::{CommentFlavor, CommentSlide, CommentsWrite, authors_xml, comments_xml};
 use crate::drawing::parse_run_properties;
 use crate::model::{Bullet, PptxPackage, RunProperties, ShapeElements, SlideReference};
 use crate::xml::{ParseBudget, ParseLimits, XmlElement, XmlNode, parse_xml, serialize_xml};
@@ -29,6 +30,7 @@ const MAX_SLIDE_ID: u32 = 2_147_483_647;
 /// The desired final deck, expressed against the parsed source package.
 pub struct DeckWrite {
     pub slides: Vec<SlideWrite>,
+    pub comments: Option<CommentsWrite>,
 }
 
 pub enum SlideWrite {
@@ -164,9 +166,12 @@ pub fn write_pptx_with_edits(
                 .part_bytes(part_path)
                 .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
             let mut root = parse_xml(bytes, part_path, &mut budget)?;
+            let original_root = root.clone();
             let theme = slide_theme(package, part_path);
             patch_slide(&mut root, shapes, theme, part_path, package.shape_elements)?;
-            replacements.insert(part_path.clone(), serialize_xml(&root));
+            if root != original_root {
+                replacements.insert(part_path.clone(), serialize_xml(&root));
+            }
         }
     }
 
@@ -176,7 +181,8 @@ pub fn write_pptx_with_edits(
     let mut next_relationship = next_relationship_number(package);
     let mut structural = false;
     let mut final_order: Vec<FinalSlide<'_>> = Vec::new();
-    for slide in &deck.slides {
+    let mut minted_by_slide: HashMap<usize, usize> = HashMap::new();
+    for (slide_index, slide) in deck.slides.iter().enumerate() {
         match slide {
             SlideWrite::Keep { part_path } | SlideWrite::Patch { part_path, .. } => {
                 let reference = package
@@ -239,6 +245,7 @@ pub fn write_pptx_with_edits(
                     relationship_id,
                     slide_id,
                 });
+                minted_by_slide.insert(slide_index, minted.len() - 1);
                 final_order.push(FinalSlide::Added(minted.len() - 1));
             }
         }
@@ -277,6 +284,20 @@ pub fn write_pptx_with_edits(
             &removed,
             &orphans,
             &mut replacements,
+            &mut budget,
+        )?;
+    }
+    if let Some(comments) = &deck.comments {
+        patch_comment_parts(
+            package,
+            comments,
+            &MintedSlides {
+                slides: &minted,
+                by_slide_index: &minted_by_slide,
+            },
+            &mut replacements,
+            &mut new_parts,
+            &mut removed_paths,
             &mut budget,
         )?;
     }
@@ -501,6 +522,406 @@ fn patch_structure(
         ));
     }
     replacements.insert(content_types_path.to_owned(), serialize_xml(&root));
+    Ok(())
+}
+
+const PACKAGE_RELATIONSHIPS_NS: &str =
+    "http://schemas.openxmlformats.org/package/2006/relationships";
+
+struct MintedSlides<'a> {
+    slides: &'a [MintedSlide],
+    by_slide_index: &'a HashMap<usize, usize>,
+}
+
+impl MintedSlides<'_> {
+    fn get(&self, slide_index: usize) -> Option<&MintedSlide> {
+        self.by_slide_index
+            .get(&slide_index)
+            .and_then(|at| self.slides.get(*at))
+    }
+}
+
+fn patch_comment_parts(
+    package: &PptxPackage,
+    write: &CommentsWrite,
+    minted: &MintedSlides<'_>,
+    replacements: &mut HashMap<String, Vec<u8>>,
+    new_parts: &mut Vec<(String, Vec<u8>)>,
+    removed_paths: &mut HashSet<String>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let mut taken: HashSet<String> = package
+        .parts
+        .iter()
+        .map(|part| part.path.clone())
+        .chain(
+            package
+                .relationships
+                .values()
+                .flatten()
+                .filter(|relationship| relationship.is_type(write.comments_relationship_type()))
+                .filter_map(|relationship| relationship.resolved_target.clone()),
+        )
+        .collect();
+
+    let mut sink = PartSink {
+        package,
+        replacements,
+        new_parts,
+    };
+    for (slide, comments) in &write.per_slide {
+        let (slide_part_path, slide_id) = match slide {
+            CommentSlide::Existing(part_path) => {
+                let reference = package
+                    .presentation
+                    .slides
+                    .iter()
+                    .find(|reference| &reference.part_path == part_path)
+                    .ok_or_else(|| write_error(part_path, "not a slide of this deck"))?;
+                (part_path.clone(), reference.id)
+            }
+            CommentSlide::Added(index) => {
+                let Some(slide) = minted.get(*index) else {
+                    continue;
+                };
+                (slide.part_path.clone(), slide.slide_id)
+            }
+        };
+        let relationships_path = slide_relationships_path(&slide_part_path);
+        let existing = existing_comment_part(package, &slide_part_path, write);
+
+        if comments.is_empty() {
+            if let Some(part_path) = existing {
+                removed_paths.insert(part_path.clone());
+                sink.forget(&part_path);
+                remove_content_type_override(&mut sink, &part_path, budget)?;
+                remove_relationship(
+                    &mut sink,
+                    &relationships_path,
+                    write.comments_relationship_type(),
+                    budget,
+                )?;
+            }
+            continue;
+        }
+
+        let is_existing = existing.is_some();
+        let part_path = match existing {
+            Some(part_path) => part_path,
+            None => mint_comment_part_path(write, &slide_part_path, &mut taken),
+        };
+        removed_paths.remove(&part_path);
+        let bytes = match sink.current(&part_path) {
+            Some(bytes) => crate::comment_patch::patch_comments_xml(
+                &bytes, &part_path, write, comments, slide_id, budget,
+            )?,
+            None => comments_xml(write, comments, slide_id),
+        };
+        sink.store(&part_path, bytes);
+        if !is_existing {
+            set_content_type_override(
+                &mut sink,
+                &part_path,
+                write.comments_content_type(),
+                budget,
+            )?;
+            set_relationship(
+                &mut sink,
+                &relationships_path,
+                write.comments_relationship_type(),
+                &relative_target(&slide_part_path, &part_path),
+                budget,
+            )?;
+        }
+    }
+
+    let presentation_relationships = slide_relationships_path(&package.presentation.part_path);
+    let authors_path = existing_authors_part(package, write)
+        .unwrap_or_else(|| write.authors_part_path().to_owned());
+    if write.authors.is_empty() {
+        removed_paths.insert(authors_path.clone());
+        sink.forget(&authors_path);
+        remove_content_type_override(&mut sink, &authors_path, budget)?;
+        remove_relationship(
+            &mut sink,
+            &presentation_relationships,
+            write.authors_relationship_type(),
+            budget,
+        )?;
+    } else {
+        removed_paths.remove(&authors_path);
+        let existing = sink.current(&authors_path);
+        let bytes = match &existing {
+            Some(bytes) => {
+                crate::comment_patch::patch_authors_xml(bytes, &authors_path, write, budget)?
+            }
+            None => authors_xml(write),
+        };
+        sink.store(&authors_path, bytes);
+        if existing.is_none() {
+            set_content_type_override(
+                &mut sink,
+                &authors_path,
+                write.authors_content_type(),
+                budget,
+            )?;
+            set_relationship(
+                &mut sink,
+                &presentation_relationships,
+                write.authors_relationship_type(),
+                &relative_target(&package.presentation.part_path, &authors_path),
+                budget,
+            )?;
+        }
+    }
+
+    if package.comment_flavor != Some(write.flavor) {
+        drop_other_flavor(package, write, &mut sink, removed_paths, budget)?;
+    }
+    Ok(())
+}
+
+fn mint_comment_part_path(
+    write: &CommentsWrite,
+    slide_part_path: &str,
+    taken: &mut HashSet<String>,
+) -> String {
+    let preferred = slide_number(slide_part_path);
+    let mut number = preferred;
+    loop {
+        let candidate = write.comments_part_path(number);
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
+fn drop_other_flavor(
+    package: &PptxPackage,
+    write: &CommentsWrite,
+    sink: &mut PartSink<'_>,
+    removed_paths: &mut HashSet<String>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let other = CommentsWrite {
+        flavor: match write.flavor {
+            CommentFlavor::Legacy => CommentFlavor::Modern,
+            CommentFlavor::Modern => CommentFlavor::Legacy,
+        },
+        authors: Vec::new(),
+        per_slide: Vec::new(),
+    };
+    for reference in &package.presentation.slides {
+        let Some(part_path) = existing_comment_part(package, &reference.part_path, &other) else {
+            continue;
+        };
+        removed_paths.insert(part_path.clone());
+        sink.forget(&part_path);
+        remove_content_type_override(sink, &part_path, budget)?;
+        remove_relationship(
+            sink,
+            &slide_relationships_path(&reference.part_path),
+            other.comments_relationship_type(),
+            budget,
+        )?;
+    }
+    let authors_path = existing_authors_part(package, &other)
+        .unwrap_or_else(|| other.authors_part_path().to_owned());
+    if package.part_bytes(&authors_path).is_some() {
+        removed_paths.insert(authors_path.clone());
+        sink.forget(&authors_path);
+        remove_content_type_override(sink, &authors_path, budget)?;
+        remove_relationship(
+            sink,
+            &slide_relationships_path(&package.presentation.part_path),
+            other.authors_relationship_type(),
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn existing_authors_part(package: &PptxPackage, write: &CommentsWrite) -> Option<String> {
+    package
+        .relationships
+        .get(&package.presentation.part_path)?
+        .iter()
+        .find(|relationship| relationship.is_type(write.authors_relationship_type()))
+        .and_then(|relationship| relationship.resolved_target.clone())
+}
+
+fn existing_comment_part(
+    package: &PptxPackage,
+    slide_part_path: &str,
+    write: &CommentsWrite,
+) -> Option<String> {
+    package
+        .relationships
+        .get(slide_part_path)?
+        .iter()
+        .find(|relationship| relationship.is_type(write.comments_relationship_type()))
+        .and_then(|relationship| relationship.resolved_target.clone())
+}
+
+fn slide_number(slide_part_path: &str) -> usize {
+    slide_part_path
+        .rsplit_once("/slide")
+        .and_then(|(_, tail)| tail.strip_suffix(".xml"))
+        .and_then(|digits| digits.parse().ok())
+        .unwrap_or(1)
+}
+
+struct PartSink<'a> {
+    package: &'a PptxPackage,
+    replacements: &'a mut HashMap<String, Vec<u8>>,
+    new_parts: &'a mut Vec<(String, Vec<u8>)>,
+}
+
+impl PartSink<'_> {
+    fn current(&self, path: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.replacements.get(path) {
+            return Some(bytes.clone());
+        }
+        if let Some((_, bytes)) = self.new_parts.iter().find(|(name, _)| name == path) {
+            return Some(bytes.clone());
+        }
+        self.package.part_bytes(path).map(<[u8]>::to_vec)
+    }
+
+    fn store(&mut self, path: &str, bytes: Vec<u8>) {
+        if self.package.part_bytes(path).is_some() {
+            self.replacements.insert(path.to_owned(), bytes);
+            return;
+        }
+        match self.new_parts.iter_mut().find(|(name, _)| name == path) {
+            Some((_, existing)) => *existing = bytes,
+            None => self.new_parts.push((path.to_owned(), bytes)),
+        }
+    }
+
+    fn forget(&mut self, path: &str) {
+        self.replacements.remove(path);
+        self.new_parts.retain(|(name, _)| name != path);
+    }
+}
+
+fn set_relationship(
+    sink: &mut PartSink<'_>,
+    relationships_path: &str,
+    relationship_type: &str,
+    target: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let mut root = match sink.current(relationships_path) {
+        Some(bytes) => parse_xml(&bytes, relationships_path, budget)?,
+        None => XmlElement::new("Relationships").with_attribute("xmlns", PACKAGE_RELATIONSHIPS_NS),
+    };
+    let existing = root.children.iter_mut().find_map(|child| match child {
+        XmlNode::Element(element)
+            if element.local_name() == "Relationship"
+                && element.attribute("Type") == Some(relationship_type) =>
+        {
+            Some(element)
+        }
+        _ => None,
+    });
+    match existing {
+        Some(element) => element.set_attribute("Target", target),
+        None => {
+            let id = format!("rId{}", max_relationship_id(&root) + 1);
+            root.children.push(XmlNode::Element(
+                XmlElement::new("Relationship")
+                    .with_attribute("Id", id)
+                    .with_attribute("Type", relationship_type)
+                    .with_attribute("Target", target),
+            ));
+        }
+    }
+    sink.store(relationships_path, serialize_xml(&root));
+    Ok(())
+}
+
+fn remove_relationship(
+    sink: &mut PartSink<'_>,
+    relationships_path: &str,
+    relationship_type: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let Some(bytes) = sink.current(relationships_path) else {
+        return Ok(());
+    };
+    let mut root = parse_xml(&bytes, relationships_path, budget)?;
+    root.children.retain(|child| match child {
+        XmlNode::Element(element) if element.local_name() == "Relationship" => {
+            element.attribute("Type") != Some(relationship_type)
+        }
+        _ => true,
+    });
+    sink.store(relationships_path, serialize_xml(&root));
+    Ok(())
+}
+
+fn max_relationship_id(root: &XmlElement) -> usize {
+    root.children_named("Relationship")
+        .filter_map(|element| element.attribute("Id"))
+        .filter_map(|id| id.strip_prefix("rId"))
+        .filter_map(|number| number.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
+fn set_content_type_override(
+    sink: &mut PartSink<'_>,
+    part_path: &str,
+    content_type: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let path = "[Content_Types].xml";
+    let bytes = sink
+        .current(path)
+        .ok_or_else(|| PptxError::MissingPart(path.to_owned()))?;
+    let mut root = parse_xml(&bytes, path, budget)?;
+    let name = format!("/{part_path}");
+    let existing = root.children.iter_mut().find_map(|child| match child {
+        XmlNode::Element(element)
+            if element.local_name() == "Override"
+                && element.attribute("PartName") == Some(name.as_str()) =>
+        {
+            Some(element)
+        }
+        _ => None,
+    });
+    match existing {
+        Some(element) => element.set_attribute("ContentType", content_type),
+        None => root.children.push(XmlNode::Element(
+            XmlElement::new("Override")
+                .with_attribute("PartName", name)
+                .with_attribute("ContentType", content_type),
+        )),
+    }
+    sink.store(path, serialize_xml(&root));
+    Ok(())
+}
+
+fn remove_content_type_override(
+    sink: &mut PartSink<'_>,
+    part_path: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let path = "[Content_Types].xml";
+    let Some(bytes) = sink.current(path) else {
+        return Ok(());
+    };
+    let mut root = parse_xml(&bytes, path, budget)?;
+    let name = format!("/{part_path}");
+    root.children.retain(|child| match child {
+        XmlNode::Element(element) if element.local_name() == "Override" => {
+            element.attribute("PartName") != Some(name.as_str())
+        }
+        _ => true,
+    });
+    sink.store(path, serialize_xml(&root));
     Ok(())
 }
 
@@ -1474,17 +1895,28 @@ fn build_paragraph(
     let template = (tail_start - front == 1 && source_runs[front].local_name() == "r")
         .then(|| source_runs[front].child("rPr").cloned())
         .flatten();
+    let rebuilt = gradient_segment_elements(
+        &segments[front..segments.len() - back],
+        &source_runs[front..tail_start],
+        theme,
+        prefixes,
+    );
     let mut runs: Vec<XmlNode> = Vec::with_capacity(segments.len());
     let mut source_runs = source_runs.into_iter();
     for element in source_runs.by_ref().take(front) {
         runs.push(XmlNode::Element(element));
     }
-    for segment in &segments[front..segments.len() - back] {
-        runs.push(XmlNode::Element(segment_element(
-            segment,
-            template.as_ref(),
-            prefixes,
-        )));
+    if let Some(rebuilt) = rebuilt {
+        runs.extend(rebuilt);
+    } else {
+        for segment in &segments[front..segments.len() - back] {
+            runs.push(XmlNode::Element(segment_element(
+                segment,
+                template.as_ref(),
+                theme,
+                prefixes,
+            )));
+        }
     }
     for element in source_runs.skip(tail_start - front) {
         runs.push(XmlNode::Element(element));
@@ -1500,31 +1932,155 @@ fn build_paragraph(
     paragraph
 }
 
+fn gradient_segment_elements(
+    segments: &[RunSegment<'_>],
+    source_runs: &[XmlElement],
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> Option<Vec<XmlNode>> {
+    if !source_runs
+        .iter()
+        .all(|run| matches!(run.local_name(), "r" | "br"))
+        || !source_runs.iter().any(|run| {
+            run.child("rPr")
+                .and_then(|properties| properties.child("gradFill"))
+                .is_some()
+        })
+    {
+        return None;
+    }
+    let mut source_text = String::new();
+    let mut source_ends = Vec::with_capacity(source_runs.len());
+    for run in source_runs {
+        if run.local_name() == "br" {
+            source_text.push('\n');
+        } else if let Some(text) = run.child("t") {
+            source_text.push_str(&text.text_content());
+        }
+        source_ends.push(source_text.len());
+    }
+    let target_text: String = segments
+        .iter()
+        .map(|segment| {
+            if segment.line_break {
+                "\n"
+            } else {
+                segment.text
+            }
+        })
+        .collect();
+    let prefix: usize = source_text
+        .chars()
+        .zip(target_text.chars())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let suffix: usize = source_text[prefix..]
+        .chars()
+        .rev()
+        .zip(target_text[prefix..].chars().rev())
+        .take_while(|(left, right)| left == right)
+        .map(|(value, _)| value.len_utf8())
+        .sum();
+    let source_end = source_text.len() - suffix;
+    let target_end = target_text.len() - suffix;
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    let mut push_range = |end: usize, index: usize| {
+        if let Some(last) = ranges.last_mut() {
+            if end <= last.0 {
+                return;
+            }
+            if last.1 == index {
+                last.0 = end;
+                return;
+            }
+        }
+        if end > 0 {
+            ranges.push((end, index));
+        }
+    };
+    for (index, &end) in source_ends.iter().enumerate() {
+        push_range(end.min(prefix), index);
+    }
+    if target_end > prefix {
+        let index = source_ends
+            .iter()
+            .position(|&end| end > prefix)
+            .unwrap_or(source_runs.len() - 1);
+        push_range(target_end, index);
+    }
+    for (index, &end) in source_ends.iter().enumerate() {
+        if end > source_end {
+            push_range(target_end + end - source_end, index);
+        }
+    }
+    let mut output = Vec::new();
+    let mut offset = 0;
+    let mut range_index = 0;
+    for segment in segments {
+        if segment.line_break {
+            while ranges[range_index].0 <= offset {
+                range_index += 1;
+            }
+            output.push(XmlNode::Element(segment_element(
+                segment,
+                source_runs[ranges[range_index].1].child("rPr"),
+                theme,
+                prefixes,
+            )));
+            offset += 1;
+            continue;
+        }
+        let mut remaining = segment.text;
+        while !remaining.is_empty() {
+            while ranges[range_index].0 <= offset {
+                range_index += 1;
+            }
+            let (end, source_index) = ranges[range_index];
+            let length = remaining.len().min(end - offset);
+            let piece = RunSegment {
+                text: &remaining[..length],
+                ..*segment
+            };
+            output.push(XmlNode::Element(segment_element(
+                &piece,
+                source_runs[source_index].child("rPr"),
+                theme,
+                prefixes,
+            )));
+            offset += length;
+            remaining = &remaining[length..];
+        }
+    }
+    Some(output)
+}
+
 fn segment_element(
     segment: &RunSegment<'_>,
     template: Option<&XmlElement>,
+    theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> XmlElement {
-    if segment.line_break {
-        let mut line_break = XmlElement::new(prefixes.drawing("br"));
-        if let Some(properties) = run_properties_element(segment.properties, prefixes) {
-            line_break = line_break.with_child(properties);
-        }
-        return line_break;
-    }
-    let properties = match template {
+    let properties = match template
+        .filter(|template| !segment.line_break || template.child("gradFill").is_some())
+    {
         Some(template) => {
             let mut base = template.clone();
-            apply_run_properties(&mut base, segment.properties, prefixes);
+            apply_run_properties(&mut base, segment.properties, theme, prefixes);
             Some(base)
         }
         None => run_properties_element(segment.properties, prefixes),
     };
-    let mut element = XmlElement::new(prefixes.drawing("r"));
+    let mut element =
+        XmlElement::new(prefixes.drawing(if segment.line_break { "br" } else { "r" }));
     if let Some(properties) = properties {
         element = element.with_child(properties);
     }
-    element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
+    if segment.line_break {
+        element
+    } else {
+        element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
+    }
 }
 
 const POST_LATIN_ELEMENTS: [&str; 7] = [
@@ -1539,7 +2095,12 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
 
 /// Overwrites the modeled styling on a cloned source `rPr`, leaving what the
 /// model does not carry (hyperlinks, strike, spacing, language) in place.
-fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefixes: &Prefixes) {
+fn apply_run_properties(
+    base: &mut XmlElement,
+    properties: &RunProperties,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) {
     match properties.font_size_pt {
         Some(size) => base.set_attribute("sz", format_fixed(size * 100.0)),
         None => {
@@ -1561,9 +2122,24 @@ fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefi
             base.attributes.remove("u");
         }
     }
+    let keeps_gradient = properties.color.as_ref().is_some_and(|color| {
+        base.child("gradFill")
+            .and_then(crate::drawing::run_gradient_color)
+            .is_some_and(|authored| {
+                &authored == color
+                    || resolve_color_value_to_hex_with_theme(Some(&authored), theme).is_some_and(
+                        |authored| {
+                            Some(authored)
+                                == resolve_color_value_to_hex_with_theme(Some(color), theme)
+                        },
+                    )
+            })
+    });
     // A colour write replaces the whole fill choice; clearing the colour only
     // drops an explicit solidFill so an unmodeled noFill/gradFill survives.
-    let removed_fills: &[&str] = if properties.color.is_some() {
+    let removed_fills: &[&str] = if keeps_gradient {
+        &[]
+    } else if properties.color.is_some() {
         &FILL_ELEMENTS
     } else {
         &["solidFill"]
@@ -1577,6 +2153,7 @@ fn apply_run_properties(base: &mut XmlElement, properties: &RunProperties, prefi
     if let Some(color) = properties
         .color
         .as_ref()
+        .filter(|_| !keeps_gradient)
         .and_then(|color| color_element(color, prefixes))
     {
         let position = base
@@ -1874,7 +2451,59 @@ fn slide_relationships_xml(part_path: &str, layout_part_path: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::ParseLimits;
+    use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
+    use crate::xml::{ParseBudget, parse_xml};
+
+    fn run_properties(xml: &[u8]) -> (XmlElement, Prefixes, RunProperties) {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let prefixes = Prefixes::from_root(&mut root);
+        let properties = parse_run_properties(Some(&root));
+        (root, prefixes, properties)
+    }
+
+    #[test]
+    fn an_unedited_gradient_fill_survives_a_rewrite() {
+        let (mut element, prefixes, properties) = run_properties(
+            br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs><a:gs pos="100000"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
+        );
+        assert!(
+            properties.color.is_some(),
+            "the gradient should flatten to a colour"
+        );
+        let gradient = element.child("gradFill").unwrap().clone();
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        assert_eq!(element.child("gradFill"), Some(&gradient));
+        let serialized = String::from_utf8(serialize_xml(&element)).unwrap();
+        assert!(
+            serialized.contains("gradFill"),
+            "the authored gradient must be left alone"
+        );
+        assert!(
+            !serialized.contains("solidFill"),
+            "it must not be rewritten as a solid fill"
+        );
+    }
+
+    #[test]
+    fn an_edited_colour_replaces_the_gradient() {
+        let (mut element, prefixes, mut properties) = run_properties(
+            br#"<a:rPr xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" lang="en"><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill></a:rPr>"#,
+        );
+        properties.color = Some(ColorValue {
+            rgb: Some("FF0000".to_owned()),
+            ..ColorValue::default()
+        });
+        apply_run_properties(&mut element, &properties, None, &prefixes);
+        let serialized = String::from_utf8(serialize_xml(&element)).unwrap();
+        assert!(!serialized.contains("gradFill"));
+        assert!(serialized.contains("solidFill"));
+        assert_eq!(parse_run_properties(Some(&element)).color, properties.color);
+    }
 
     #[test]
     fn the_writer_recognises_exactly_what_the_parser_reads() {

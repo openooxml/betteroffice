@@ -294,6 +294,7 @@ fn body_from_wire(wire: S9DocumentBodyWire) -> DocumentBody {
         content: wire.content,
         sections,
         final_section_properties: wire.final_section_properties,
+        custom_root_bindings: wire.custom_root_bindings,
         comments: wire.comments,
     }
 }
@@ -321,6 +322,7 @@ fn collect_paragraphs<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Parag
                 }
             }
             BlockContent::BlockSdt(sdt) => collect_paragraphs(&sdt.content, output),
+            BlockContent::RawXml(_) => {}
         }
     }
 }
@@ -338,6 +340,7 @@ fn collect_tables<'a>(blocks: &'a [BlockContent], output: &mut Vec<&'a Table>) {
                 }
             }
             BlockContent::BlockSdt(sdt) => collect_tables(&sdt.content, output),
+            BlockContent::RawXml(_) => {}
         }
     }
 }
@@ -366,6 +369,7 @@ fn find_paragraph_mut<'a>(
                     return Some(paragraph);
                 }
             }
+            BlockContent::RawXml(_) => {}
         }
     }
     None

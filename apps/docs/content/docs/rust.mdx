@@ -63,6 +63,31 @@ let saved = presentation.save()?;
 for one you supply, which is what a host ingesting untrusted uploads wants. A
 file past any cap is refused, never truncated.
 
+PPTX comments read and write in both PowerPoint formats. `comment_flavor`
+reports which system a deck uses — `CommentFlavor::Legacy` reads everywhere,
+`CommentFlavor::Modern` carries replies and a resolved state but only shows in
+PowerPoint 365. A file commits to one at its first comment and never carries
+both, so `set_comment_flavor` only works while the deck has no comments, and
+`reply_to_comment` and `set_comment_status` return `EditError::InvalidComment`
+on a legacy deck.
+
+```rust
+let context = EditCtx::local("reviewer");
+presentation.add_comment(
+    &context,
+    &deck.slides[0].id,
+    "Ada Lovelace",
+    "AL",
+    "Tighten this claim.",
+    "2026-09-01T10:00:00.000",
+    1_828_800, // EMU, like every other coordinate
+    914_400,
+)?;
+```
+
+The timestamp is caller-supplied rather than read from a clock, so the engine
+stays clock-free and the same edits replay to the same bytes on every peer.
+
 ## Rendering
 
 XLSX rasterizes by default: `render_sheet` returns a PNG, and the raster backend
