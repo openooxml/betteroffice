@@ -21,9 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 11.0;
+const SCHEMA_VERSION: f64 = 12.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 11] = [
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 12] = [
     1.0,
     2.0,
     3.0,
@@ -34,6 +34,7 @@ const MIGRATABLE_SCHEMA_VERSIONS: [f64; 11] = [
     8.0,
     9.0,
     10.0,
+    11.0,
     SCHEMA_VERSION,
 ];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
@@ -735,7 +736,7 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
+pub(crate) fn import_source_text_properties(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
     let mut package = package_from_doc(doc)?;
     let sources = source
         .slides
@@ -773,7 +774,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
         )
     {
         if let Some(source) = sources.get(path) {
-            changed |= merge_source_list_shapes(shapes, source);
+            changed |= merge_source_text_shapes(shapes, source);
         }
     }
     for master in &mut package.masters {
@@ -791,7 +792,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
                 .chain(target.body.iter_mut().zip(&source.body))
                 .chain(target.other.iter_mut().zip(&source.other))
             {
-                changed |= merge_source_bullet_properties(target, source);
+                changed |= merge_source_paragraph_properties(target, source);
             }
         }
     }
@@ -805,7 +806,7 @@ pub(crate) fn import_source_list_styles(doc: &Doc, source: &PptxPackage) -> Edit
     Ok(())
 }
 
-fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
+fn merge_source_text_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> bool {
     let mut changed = false;
     for source in source {
         let Some(target) = target
@@ -817,11 +818,11 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
         match (target, source) {
             (ShapeNode::Shape(target), ShapeNode::Shape(source)) => {
                 if let (Some(target), Some(source)) = (&mut target.text, &source.text) {
-                    changed |= merge_source_list_body(target, source);
+                    changed |= merge_source_text_body(target, source);
                 }
             }
             (ShapeNode::Group(target), ShapeNode::Group(source)) => {
-                changed |= merge_source_list_shapes(&mut target.children, &source.children);
+                changed |= merge_source_text_shapes(&mut target.children, &source.children);
             }
             (ShapeNode::GraphicFrame(target), ShapeNode::GraphicFrame(source)) => {
                 if let (
@@ -831,7 +832,7 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
                 {
                     for (target, source) in target.iter_mut().zip(source) {
                         for (target, source) in target.iter_mut().zip(source) {
-                            changed |= merge_source_list_body(target, source);
+                            changed |= merge_source_text_body(target, source);
                         }
                     }
                 }
@@ -842,29 +843,33 @@ fn merge_source_list_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) -> b
     changed
 }
 
-fn merge_source_list_body(
+fn merge_source_text_body(
     target: &mut pptx_parse::TextBody,
     source: &pptx_parse::TextBody,
 ) -> bool {
     let mut changed = target.list_style != source.list_style
-        || target.default_list_style != source.default_list_style;
+        || target.default_list_style != source.default_list_style
+        || target.compat_line_spacing != source.compat_line_spacing;
+    target.compat_line_spacing = source.compat_line_spacing;
     target.list_style.clone_from(&source.list_style);
     target
         .default_list_style
         .clone_from(&source.default_list_style);
     for (target, source) in target.paragraphs.iter_mut().zip(&source.paragraphs) {
-        changed |= merge_source_bullet_properties(&mut target.properties, &source.properties);
+        changed |= merge_source_paragraph_properties(&mut target.properties, &source.properties);
     }
     changed
 }
 
-fn merge_source_bullet_properties(
+fn merge_source_paragraph_properties(
     target: &mut pptx_parse::ParagraphProperties,
     source: &pptx_parse::ParagraphProperties,
 ) -> bool {
     let mut changed = target.bullet_font != source.bullet_font
         || target.bullet_color != source.bullet_color
-        || target.bullet_size != source.bullet_size;
+        || target.bullet_size != source.bullet_size
+        || target.line_spacing != source.line_spacing;
+    target.line_spacing = source.line_spacing;
     if let (
         Some(pptx_parse::Bullet::AutoNumber {
             restart: target, ..
@@ -923,6 +928,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 11.0 {
         migrate_doc_to_v11(doc)?;
+    }
+    if version < 12.0 {
+        migrate_doc_to_v12(doc)?;
     }
     Ok(())
 }
@@ -1081,6 +1089,22 @@ fn migrate_doc_to_v11(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(&mut txn, "schemaVersion", 11.0);
+    Ok(())
+}
+
+/// Persists line spacing in schema 12.
+fn migrate_doc_to_v12(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", 12.0);
     Ok(())
 }
 
@@ -1634,7 +1658,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_migration_precedes_numbering_and_preserves_current_main_state() {
+    fn baseline_then_numbering_then_spacing_preserve_main_state() {
         use std::sync::Mutex;
 
         const V9: &[u8] = include_bytes!("../tests/fixtures/run-baseline-main-v9.update.bin");
@@ -1642,10 +1666,23 @@ mod tests {
             include_bytes!("../tests/fixtures/deck-schema-v10-baseline.update.bin");
         const V10_NUMBERING: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v10-autonumber.update.bin");
+        const V11_BASELINE: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-baseline.update.bin");
+        const V11_NUMBERING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-autonumber.update.bin");
+        const V11_SPACING: &[u8] =
+            include_bytes!("../tests/fixtures/deck-schema-v11-line-spacing.update.bin");
         for (update, version, expected) in [
-            (V9, 9.0, vec![(10.0, Some(true)), (11.0, Some(true))]),
-            (V10_BASELINE, 10.0, vec![(11.0, None)]),
-            (V10_NUMBERING, 10.0, vec![(11.0, None)]),
+            (
+                V9,
+                9.0,
+                vec![(10.0, Some(true)), (11.0, Some(true)), (12.0, Some(true))],
+            ),
+            (V10_BASELINE, 10.0, vec![(11.0, None), (12.0, None)]),
+            (V10_NUMBERING, 10.0, vec![(11.0, None), (12.0, None)]),
+            (V11_BASELINE, 11.0, vec![(12.0, None)]),
+            (V11_NUMBERING, 11.0, vec![(12.0, None)]),
+            (V11_SPACING, 11.0, vec![(12.0, None)]),
         ] {
             let doc = crate::doc_with_client_id(30020);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1676,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_each_version_through_v11() {
+    fn legacy_migrations_commit_each_version_through_v12() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1686,9 +1723,15 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+            (
+                V1,
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            ),
+            (
+                V2,
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            ),
+            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1761,19 +1804,19 @@ mod tests {
             (
                 V2,
                 V4_LEGACY,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
                 1,
             ),
             (
                 V4_STYLES,
                 V4_STYLES,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
                 1,
             ),
             (
                 V4_NUMBERED,
                 V4_NUMBERED,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
                 10,
             ),
         ] {
@@ -1837,9 +1880,12 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
-            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
-            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0]),
+            (
+                V2,
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+            ),
+            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
+            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -2081,7 +2127,8 @@ mod tests {
                 (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (11.0, before, Some("legacy".to_owned()), Some(true))
+                (11.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (12.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

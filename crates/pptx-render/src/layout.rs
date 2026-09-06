@@ -10,8 +10,9 @@ use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, sin
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
-    ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    LineSpacing, ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage,
+    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
+    TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -31,6 +32,8 @@ const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 /// Size a super/subscript run shapes at, relative to its own `sz`.
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
+/// Compatibility line pitch in ems.
+const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
 const MAX_RENDER_SHAPES: usize = 20_000;
@@ -991,6 +994,13 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
     }
 
+    fn compat_line_spacing(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| {
+            body.compat_line_spacing
+        })
+        .unwrap_or(false)
+    }
+
     fn inset_left(&self) -> Option<i64> {
         cascade_value(self.primary, self.layout, self.master, |body| {
             body.inset_left
@@ -1165,6 +1175,8 @@ struct ResolvedParagraph {
     justify: bool,
     level: u32,
     margin_left_px: f32,
+    line_spacing: Option<LineSpacing>,
+    compat_line_spacing: bool,
     indent_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
@@ -1221,6 +1233,7 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
+    let compat_line_spacing = cascade.compat_line_spacing();
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
     let mut counters = [0_u32; 9];
@@ -1269,6 +1282,8 @@ fn resolve_content(
             justify: is_full_justification(alignment),
             level: paragraph.level,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
+            line_spacing: properties.line_spacing,
+            compat_line_spacing,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
             bullet_style: marker
                 .is_some()
@@ -1519,7 +1534,12 @@ fn layout_paragraph(
     let clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
         let style = &paragraph.runs[0].style;
-        let line_box = style_line_box(fonts, style, scale)?;
+        let line_box = spaced_line_box(
+            style_line_box(fonts, style, scale)?,
+            paragraph,
+            points_to_px(style.font_size_pt * scale),
+            scale,
+        );
         return Ok(vec![PositionedTextLine {
             x,
             y,
@@ -1578,7 +1598,12 @@ fn layout_paragraph(
             TextAlign::Right => x + (width - natural_width).max(0.0),
             TextAlign::Left | TextAlign::Justify => x,
         };
-        let line_box = clusters_line_box(fonts, slice, scale)?;
+        let line_box = spaced_line_box(
+            clusters_line_box(fonts, slice, scale)?,
+            paragraph,
+            line_font_size_px(slice, scale),
+            scale,
+        );
         let mut caret_stops = vec![CaretStop {
             position: slice[0].start,
             x: line_x,
@@ -1638,6 +1663,8 @@ fn prepend_bullet(
         justify: false,
         level: paragraph.level,
         margin_left_px: 0.0,
+        line_spacing: None,
+        compat_line_spacing: false,
         indent_px: 0.0,
         marker: None,
         bullet_style: None,
@@ -2039,6 +2066,58 @@ fn style_line_box(
     ))
 }
 
+/// Largest font size on this line.
+fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
+    clusters
+        .iter()
+        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .fold(0.0_f32, f32::max)
+}
+
+/// Apply paragraph spacing to a measured line box.
+fn spaced_line_box(
+    content: ooxml_text::LineBox,
+    paragraph: &ResolvedParagraph,
+    size_px: f32,
+    scale: f32,
+) -> ooxml_text::LineBox {
+    let Some(spacing) = paragraph.line_spacing else {
+        return content;
+    };
+    if content.height() <= 0.0 {
+        return content;
+    }
+    let target = match spacing {
+        LineSpacing::Percent { value } => {
+            let single = if paragraph.compat_line_spacing {
+                SINGLE_LINE_PITCH_EM * size_px
+            } else {
+                content.height()
+            };
+            value as f32 * single
+        }
+        LineSpacing::Points { value } => points_to_px(value as f32 * scale),
+    };
+    if !target.is_finite() || target < 0.0 {
+        return content;
+    }
+    if target >= content.height() {
+        return ooxml_text::LineBox {
+            leading: target - content.ascent - content.descent,
+            ..content
+        };
+    }
+    scale_line_box(content, target / content.height())
+}
+
+fn scale_line_box(line: ooxml_text::LineBox, factor: f32) -> ooxml_text::LineBox {
+    ooxml_text::LineBox {
+        ascent: line.ascent * factor,
+        descent: line.descent * factor,
+        leading: line.leading * factor,
+    }
+}
+
 fn shift_line(line: &mut PositionedTextLine, x: f32, y: f32) {
     line.x += x;
     line.y += y;
@@ -2332,6 +2411,9 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     }
     if source.bullet.is_some() {
         target.bullet.clone_from(&source.bullet);
+    }
+    if source.line_spacing.is_some() {
+        target.line_spacing = source.line_spacing;
     }
     if source.bullet_font.is_some() {
         target.bullet_font.clone_from(&source.bullet_font);
@@ -3056,6 +3138,8 @@ mod tests {
             justify: is_full_justification(Some(alignment)),
             level: 0,
             margin_left_px: 0.0,
+            line_spacing: None,
+            compat_line_spacing: false,
             indent_px: 0.0,
             marker: None,
             bullet_style: None,
@@ -3233,6 +3317,8 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
                 marker: None,
                 bullet_style: None,
@@ -3294,6 +3380,8 @@ mod tests {
                 justify: true,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
                 marker: None,
                 bullet_style: None,
@@ -4127,6 +4215,7 @@ mod tests {
                 text: Some(TextBody {
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
+                    compat_line_spacing: None,
                     autofit: None,
                     inset_left: None,
                     inset_top: None,
@@ -4457,6 +4546,135 @@ mod tests {
                 ..
             }) if hit_story == story_id
         ));
+    }
+
+    /// Wrap the demo text with inherited spacing.
+    fn wrapped_text_box(
+        seed: u64,
+        spacing: Option<LineSpacing>,
+        paragraph_spacing: Option<LineSpacing>,
+        height_emu: i64,
+        compat: bool,
+    ) -> (Vec<PositionedTextLine>, f32) {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, seed).unwrap();
+        let initial = session.snapshot().unwrap();
+        let slide_id = initial.slides[0].id.clone();
+        let shape = initial.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| !shape.text_stories.is_empty())
+            .unwrap();
+        let shape_id = shape.id.clone();
+        let source_id = shape.source_id;
+        let story_id = shape.text_stories[0].id.clone();
+        let index = shape.text_stories[0].length - 1;
+        for master in &mut package.masters {
+            for level in [
+                &mut master.text_styles.title,
+                &mut master.text_styles.body,
+                &mut master.text_styles.other,
+            ] {
+                *level = vec![ParagraphProperties {
+                    line_spacing: spacing,
+                    ..ParagraphProperties::default()
+                }];
+            }
+        }
+        let parsed = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap();
+        let ShapeNode::Shape(parsed) = parsed else {
+            panic!("expected text shape");
+        };
+        let body = parsed.text.as_mut().unwrap();
+        body.compat_line_spacing = compat.then_some(true);
+        for paragraph in &mut body.paragraphs {
+            paragraph.properties.line_spacing = paragraph_spacing;
+        }
+        session
+            .resize_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &shape_id,
+                1_200_000,
+                height_emu,
+            )
+            .unwrap();
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story_id,
+                index,
+                " with enough text to wrap across several shaped lines",
+                &TextStyle::default(),
+            )
+            .unwrap();
+        renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    shape_id: Some(id),
+                    lines,
+                    paragraphs,
+                    ..
+                } if id == &shape_id => Some((lines.clone(), paragraphs[0].runs[0].font_size_pt)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn master_line_spacing_sets_the_line_pitch() {
+        let percent = |value| Some(LineSpacing::Percent { value });
+        let (single, size_pt) = wrapped_text_box(8_010, None, None, 1_524_000, true);
+        let (tight, _) = wrapped_text_box(8_011, percent(0.8), None, 1_524_000, true);
+        let (loose, _) = wrapped_text_box(
+            8_012,
+            Some(LineSpacing::Points { value: 40.0 }),
+            None,
+            1_524_000,
+            true,
+        );
+        let (font_based, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let pitch = |lines: &[PositionedTextLine]| {
+            assert!(lines.len() > 1, "expected the text to wrap");
+            lines[1].y - lines[0].y
+        };
+        let size_px = points_to_px(size_pt);
+
+        assert!((pitch(&single) - single[0].height).abs() < 0.01);
+        assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
+        assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
+        assert!(pitch(&tight) < pitch(&single));
+        assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
+
+        let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
+        let font_share = (single[0].baseline - single[0].y) / single[0].height;
+        assert!((share - font_share).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_slide_paragraph_overrides_the_master_line_spacing() {
+        let (lines, size_pt) = wrapped_text_box(
+            8_015,
+            Some(LineSpacing::Percent { value: 0.8 }),
+            Some(LineSpacing::Percent { value: 1.5 }),
+            1_524_000,
+            true,
+        );
+        assert!(lines.len() > 1, "expected the text to wrap");
+        let pitch = lines[1].y - lines[0].y;
+        assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
+
+        let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
+        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
     }
 
     #[test]
