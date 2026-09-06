@@ -4,6 +4,7 @@ import {
   paintSlide,
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
+  slideToPng,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
@@ -217,6 +218,12 @@ interface RecentCanvasClick {
 
 const PPTX_MIME =
   'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+// the png download name derived from the deck name: swap .pptx for the slide.
+function pngName(fileName: string | undefined, slideIndex: number): string {
+  const stem = (fileName ?? 'presentation.pptx').replace(/\.pptx$/i, '');
+  return `${stem}-slide-${slideIndex + 1}.png`;
+}
 
 // trigger a browser download of a byte blob under the given name and mime type.
 function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
@@ -1636,6 +1643,32 @@ function PptxEditorContent({
 
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
+
+  // Export the current slide through the same canvas painter the editor draws
+  // with, so the png matches what is on screen.
+  const exportPng = () => {
+    const frame = model?.frame;
+    const handle = handleRef.current;
+    if (!frame || !handle) return;
+    // Painting is async, so the deck can be replaced or disposed mid-export.
+    // Pin the handle the frame came from, behind its own decode cache, rather
+    // than reading whichever deck `handleRef` holds by the time an asset
+    // resolves.
+    const pinned = { current: handle };
+    const cache = { current: new Map<string, Promise<CanvasImageSource | null>>() };
+    void slideToPng(frame, {
+      scale: window.devicePixelRatio || 1,
+      resolveImage: (assetId) => resolveImage(assetId, pinned, cache, decodeImageError),
+    })
+      .then(async (blob) => {
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (handleRef.current !== handle) return;
+        downloadBytes(bytes, pngName(fileName, currentSlide), 'image/png');
+      })
+      .catch((value: unknown) => {
+        if (handleRef.current === handle) reportError(value);
+      });
+  };
   const shapeDragDelta =
     dragPreview && dragPreview.shapeId === shapeSelection?.shapeId ? dragPreview.delta : null;
   const resizingHandle = resizeRef.current?.handle;
@@ -1673,6 +1706,7 @@ function PptxEditorContent({
           slideLayouts={slideLayouts}
           currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
           onSave={save}
+          onExportPng={exportPng}
           onUndo={() => history('undo')}
           onRedo={() => history('redo')}
           canUndo={historyState.canUndo}
