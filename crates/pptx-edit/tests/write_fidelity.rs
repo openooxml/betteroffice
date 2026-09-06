@@ -51,6 +51,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="4" name="Halfway"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
 <p:spPr><a:xfrm rot="1200000"><a:off x="123456" y="654321"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Halfway</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="6" name="Script"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>1</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>st</a:t></a:r><a:r><a:rPr sz="1200"/><a:t> place, H</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>2</a:t></a:r><a:r><a:rPr sz="1200"/><a:t>O</a:t></a:r></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -539,6 +542,77 @@ fn an_edit_before_a_hyperlink_keeps_links_fields_and_theme_colours() {
     let reopened = DeckSession::open(&saved, 12).unwrap();
     let text = reopened.story(&story_id).unwrap().plain_text();
     assert_eq!(text, "Hi Hello link\n1Accent");
+}
+
+fn script_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Script")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn run_baselines(session: &DeckSession, story_id: &str) -> Vec<(String, Option<f64>)> {
+    session.story(story_id).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.baseline_pct))
+        .collect()
+}
+
+#[test]
+fn an_edit_inside_a_raised_run_keeps_its_baseline() {
+    let session = open();
+    let story_id = script_story(&session);
+    session
+        .insert_text(&context(), &story_id, 2, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("X".to_owned(), None),
+            ("t".to_owned(), Some(30.0)),
+            (" place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
+}
+
+#[test]
+fn an_edit_spanning_two_runs_keeps_both_baselines() {
+    let session = open();
+    let story_id = script_story(&session);
+    session.delete_text(&context(), &story_id, 2, 4).unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"baseline="-25000""#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
 }
 
 #[test]
