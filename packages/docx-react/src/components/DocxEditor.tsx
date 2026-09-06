@@ -1317,21 +1317,18 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     () => getInitialSectionProperties(history.state),
     [history.state]
   );
-  const finalSectionProperties = history.state?.package.document?.finalSectionProperties;
-
   const {
     headerContent,
     footerContent,
     firstPageHeaderContent,
     firstPageFooterContent,
+    finalSectionProperties,
     handleHeaderFooterDoubleClick,
     handleBodyClick,
     handleRemoveHeaderFooter,
   } = useHeaderFooterEditing({
     document: history.state,
     pushDocument,
-    initialSectionProperties,
-    finalSectionProperties,
     partEditTarget,
     setPartEditTarget,
   });
