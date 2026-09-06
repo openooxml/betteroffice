@@ -41,3 +41,8 @@ The kept source rectangle is `(102.4, 204.8, 614.4, 716.8)` pixels. Rendering sh
 `outer-shadow.pptx` is hand-authored. Slide 1 places two 320x200 CSS-pixel round rectangles on a white ground, both carrying `outerShdw blurRad="76200" dist="38100" dir="2700000"` in 40% black: the left one is filled `#4472C4`, the right one has `a:noFill` and a red outline. The shadow resolves to 8px of blur 2.83px down and right, on both cards, using the painted fill and outline alpha. The hollow card stays white at its center. The adjacent before/after PNGs show the complete 1280x720 surface rendered with main (`069e4d66`) and this branch.
 
 `text-baseline-script.pptx` derives from the same deck. Only slide 1's subtitle changes: one paragraph whose `a:pPr/a:defRPr` carries `baseline="0"` and whose runs alternate between no shift, `baseline="30000"` and `baseline="-25000"` at `sz="1700"`. The zero must stay a no-op; the other two must shrink and shift their runs.
+
+`outer-shadow-scale.pptx` derives from `outer-shadow.pptx`. The filled card uses
+`sx="200000" sy="50000" algn="tr"`; the outlined card uses
+`sx="-150000" sy="200000" algn="ctr"`. It covers unequal axes, a flipped shadow,
+and source reattachment and edited-save round trips from schema 17 to 18.

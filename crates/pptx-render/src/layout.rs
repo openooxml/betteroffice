@@ -625,7 +625,8 @@ impl<'a> LayoutBuilder<'a> {
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
-                let fill = resolved_fill.as_ref()
+                let fill = resolved_fill
+                    .as_ref()
                     .and_then(|fill| paint(fill, self.theme));
                 let outline = self
                     .resolved_outline(&[Some(shape)])
@@ -2471,7 +2472,7 @@ fn node_outline(node: &ShapeNode) -> Option<&ShapeOutline> {
 fn node_effects(node: &ShapeNode) -> Option<&ShapeEffects> {
     match node {
         ShapeNode::Shape(shape) => shape.effects.as_ref(),
-        ShapeNode::Picture(shape) => shape.effects.as_ref(),
+        ShapeNode::Picture(shape) => shape.shape_effects.as_ref(),
         ShapeNode::GraphicFrame(_) | ShapeNode::Group(_) => None,
     }
 }
@@ -2719,25 +2720,24 @@ fn shadow(
     }
     // Scaling happens about the surface origin, so the anchor `algn` names travels in the
     // offset: a point scaled about A lands at s * p + A * (1 - s).
-    let scale_x = outer.scale_x as f32;
-    let scale_y = outer.scale_y as f32;
+    let scale_x = safe_scale(outer.scale_x as f32);
+    let scale_y = safe_scale(outer.scale_y as f32);
+    if scale_x == 0.0 || scale_y == 0.0 {
+        return None;
+    }
     let (anchor_x, anchor_y) = shadow_anchor(&outer.alignment, rect);
     Some(Shadow {
         color,
         blur: safe_geometry(outer.blur_radius as f32 * (space.scale_x + space.scale_y) / 2.0),
         dx: safe_geometry(dx + anchor_x * (1.0 - scale_x)),
         dy: safe_geometry(dy + anchor_y * (1.0 - scale_y)),
-        scale_x: safe_scale(scale_x),
-        scale_y: safe_scale(scale_y),
+        scale_x,
+        scale_y,
     })
 }
 
 fn safe_scale(value: f32) -> f32 {
-    if value.is_finite() && value > 0.0 {
-        value
-    } else {
-        1.0
-    }
+    if value.is_finite() { value } else { 1.0 }
 }
 
 /// The point of `rect` that `a:algn` keeps fixed when the shadow is scaled.
@@ -3214,7 +3214,7 @@ mod tests {
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
-            effects: None,
+            shape_effects: None,
             style: None,
         };
         let rect = PxRect {
@@ -4280,6 +4280,51 @@ mod tests {
         )
         .expect("a painted shadow");
         assert_eq!((plain.scale_x, plain.dx, plain.dy), (1.0, 0.0, 0.0));
+
+        for (alignment, x, y) in [
+            ("tl", 100.0, 200.0),
+            ("t", 120.0, 200.0),
+            ("tr", 140.0, 200.0),
+            ("l", 100.0, 240.0),
+            ("ctr", 120.0, 240.0),
+            ("r", 140.0, 240.0),
+            ("bl", 100.0, 280.0),
+            ("b", 120.0, 280.0),
+            ("br", 140.0, 280.0),
+        ] {
+            let mut effects = scaled(alignment, -1.5);
+            effects.outer_shadow.as_mut().unwrap().scale_y = 0.5;
+            let result = shadow(&effects, &theme, Space::root(), box_, 0.0, false, false).unwrap();
+            assert_eq!((result.scale_x, result.scale_y), (-1.5, 0.5));
+            assert_eq!(result.dx, x * 2.5, "{alignment}");
+            assert_eq!(result.dy, y * 0.5, "{alignment}");
+        }
+        assert!(
+            shadow(
+                &scaled("ctr", 0.0),
+                &theme,
+                Space::root(),
+                box_,
+                0.0,
+                false,
+                false
+            )
+            .is_none()
+        );
+        let invalid = shadow(
+            &scaled("ctr", f64::INFINITY),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (invalid.scale_x, invalid.scale_y, invalid.dx, invalid.dy),
+            (1.0, 1.0, 0.0, 0.0)
+        );
     }
 
     #[test]
@@ -4794,6 +4839,7 @@ mod tests {
         package.masters[0]
             .shapes
             .push(ShapeNode::Shape(pptx_parse::Shape {
+                effects: None,
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),

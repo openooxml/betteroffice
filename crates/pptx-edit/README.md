@@ -18,11 +18,12 @@ untouched comment parts byte for byte. Deleting a thread removes its known
 replies; a reply added concurrently becomes a root when its parent is absent,
 so both clients and saved files retain it.
 
-The current schema is v17. Older v1–v16 updates can be opened, and attaching the
+The current schema is v18. Older v1–v17 updates can be opened, and attaching the
 original package with `open_from_update_with_source` imports source comments,
 list styles, explicit numbering restarts, paragraph line spacing, picture
 fills, unedited gradient outlines, chart-space fills and axis lines, explicit
-text overflow settings, and bitmap effects missing from older snapshots.
+text overflow settings, bitmap effects, and shape shadows with their scale and
+alignment missing from older snapshots.
 Source attachment also restores run baseline formatting on surviving text while
 retaining edits and explicit zero overrides. Imported properties persist in
 subsequent updates, and reattaching the source is idempotent.
@@ -34,7 +35,7 @@ followed by the schema-10 baseline migration, schema-11 numbering migration,
 schema-12 line-spacing migration, schema-13 picture-fill migration, and
 schema-14 gradient-outline migration, followed by the chart migration in
 schema 15, the text-overflow migration in schema 16, and the bitmap-effect
-migration in schema 17.
+migration in schema 17, then the outer-shadow migration in schema 18.
 Default text overflow settings and starting slide numbers remain omitted from
 package JSON.
 

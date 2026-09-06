@@ -571,7 +571,9 @@ impl Painter<'_, '_> {
             return Ok(());
         };
         let margin = blur::spread(radius) as f32 + 1.0;
-        let outline = stroke.map_or(0.0, |stroke| stroke.width * self.scale * 2.0);
+        let outline = stroke.map_or(0.0, |stroke| {
+            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
+        });
         let bounds = placed_path.bounds();
         let surface_width = self.pixmap.width() as f32;
         let surface_height = self.pixmap.height() as f32;
@@ -601,7 +603,7 @@ impl Painter<'_, '_> {
             scratch.fill_path(path, &paint, FillRule::Winding, local, None);
         }
         if let Some(stroke) = stroke
-            && let Some((paint, stroke)) = stroke_paint(stroke)?
+            && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
         {
             scratch.stroke_path(path, &paint, &stroke, local, None);
         }
@@ -1012,6 +1014,7 @@ mod tests {
                 }
             } else {
                 Primitive::Shape {
+                    shadow: None,
                     object_id: 1,
                     shape_id: None,
                     name: kind.into(),
@@ -1385,6 +1388,7 @@ mod tests {
     #[test]
     fn outline_shadows_keep_the_center_hollow() {
         let stroke = SlideStroke {
+            paint: None,
             color: "#C00000".into(),
             width: 2.0,
             dashed: false,
@@ -1394,6 +1398,106 @@ mod tests {
         let image = render_probe(&shadow_probe(40.0, None, Some(stroke), 0.0, 8.0), 1.0);
         assert_eq!(image.pixel(60, 60).unwrap().red(), 255);
         assert_eq!(image.pixel(87, 60).unwrap().red(), 153);
+    }
+
+    #[test]
+    fn scaled_shadows_apply_both_axes_and_keep_enlarged_outline_edges() {
+        let mut list = shadow_probe(40.0, Some("#FF0000"), None, 0.0, 40.0);
+        if let Primitive::Shape {
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        {
+            shadow.scale_x = 2.0;
+            shadow.scale_y = 0.5;
+            shadow.dy = 60.0;
+        }
+        for scale in [1.0, 2.0] {
+            let image = render_probe(&list, scale);
+            assert_eq!(
+                image
+                    .pixel((135.0 * scale) as u32, (90.0 * scale) as u32)
+                    .unwrap()
+                    .red(),
+                153
+            );
+            assert_eq!(
+                image
+                    .pixel((110.0 * scale) as u32, (90.0 * scale) as u32)
+                    .unwrap()
+                    .red(),
+                255
+            );
+        }
+        let mut list = shadow_probe(
+            40.0,
+            None,
+            Some(SlideStroke {
+                color: "#FF0000".into(),
+                width: 8.0,
+                paint: None,
+                dashed: false,
+                head_end: None,
+                tail_end: None,
+            }),
+            0.0,
+            -170.0,
+        );
+        if let Primitive::Shape {
+            w,
+            h,
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        {
+            *w = 4.0;
+            *h = 4.0;
+            shadow.scale_x = 6.0;
+            shadow.scale_y = 6.0;
+            shadow.dy = -170.0;
+        }
+        for scale in [1.0, 2.0] {
+            let image = render_probe(&list, scale);
+            assert_eq!(
+                image
+                    .pixel((50.0 * scale) as u32, (90.0 * scale) as u32)
+                    .unwrap()
+                    .red(),
+                153
+            );
+        }
+    }
+
+    #[test]
+    fn the_shadow_budget_is_exact_and_resets_for_each_cached_slide() {
+        let fonts = FontStore::new();
+        let images = AssetMap::default();
+        let resources = resources(&fonts, &images);
+        let mut glyphs = GlyphCache::default();
+        let list = shadow_probe(40.0, Some("#FF0000"), None, 0.0, 0.0);
+        let options = RenderOptions {
+            max_shadow_pixels: 42 * 42,
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            render_slide_cached(&list, &resources, &options, &mut glyphs).unwrap();
+        }
+        let options = RenderOptions {
+            max_shadow_pixels: 42 * 42 - 1,
+            ..options
+        };
+        assert!(
+            render_slide_cached(&list, &resources, &options, &mut glyphs)
+                .unwrap_err()
+                .contains("shadows cover")
+        );
+        let mut many = list.clone();
+        many.primitives = vec![list.primitives[0].clone(); 10_000];
+        assert!(
+            render_slide(&many, &resources, &options)
+                .unwrap_err()
+                .contains("shadows cover")
+        );
     }
 
     #[test]

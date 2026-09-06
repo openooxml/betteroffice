@@ -20,7 +20,14 @@ export type CanvasImageResolver = (
 
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
+  maxShadowPixels?: number;
 }
+
+interface ShadowBudget {
+  remaining: number;
+}
+
+const MAX_SHADOW_PIXELS = 134_217_728;
 
 export interface SlideCanvasLike {
   width: number;
@@ -47,6 +54,9 @@ export async function paintSlide(
   scale = 1,
   options: PaintSlideOptions = {}
 ): Promise<void> {
+  const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
+  if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
+    throw new Error('invalid shadow pixel budget');
   ctx.save();
   try {
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
@@ -56,7 +66,7 @@ export async function paintSlide(
       ctx.fillRect(0, 0, list.width, list.height);
     }
     for (const primitive of list.primitives)
-      await paintPrimitive(ctx, primitive, options, dpr * scale);
+      await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
   } finally {
     ctx.restore();
   }
@@ -66,14 +76,15 @@ async function paintPrimitive(
   ctx: CanvasRenderingContext2D,
   primitive: SlidePrimitive,
   options: PaintSlideOptions,
-  deviceScale: number
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
   ctx.save();
   try {
     applyTransform(ctx, primitive);
     switch (primitive.kind) {
       case 'shape':
-        paintShape(ctx, primitive, deviceScale);
+        paintShape(ctx, primitive, deviceScale, shadowBudget);
         break;
       case 'image':
         await paintImage(ctx, primitive, options.resolveImage);
@@ -85,7 +96,7 @@ async function paintPrimitive(
         paintPlaceholder(ctx, primitive);
         break;
       case 'chart':
-        await paintChart(ctx, primitive, options, deviceScale);
+        await paintChart(ctx, primitive, options, deviceScale, shadowBudget);
         break;
     }
   } finally {
@@ -97,13 +108,14 @@ async function paintChart(
   ctx: CanvasRenderingContext2D,
   chart: ChartPrimitive,
   options: PaintSlideOptions,
-  deviceScale: number
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
   ctx.beginPath();
   ctx.rect(chart.x, chart.y, chart.w, chart.h);
   ctx.clip();
   for (const primitive of chart.primitives)
-    await paintPrimitive(ctx, primitive, options, deviceScale);
+    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget);
 }
 
 function applyTransform(
@@ -123,10 +135,11 @@ function applyTransform(
 function paintShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapePrimitive,
-  deviceScale: number
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): void {
   if (shape.shadow && (shape.fill || shape.stroke)) {
-    paintShadowedShape(ctx, shape, deviceScale);
+    paintShadowedShape(ctx, shape, deviceScale, shadowBudget);
   }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
   if (shape.fill) {
@@ -142,7 +155,8 @@ function paintShape(
 function paintShadowedShape(
   ctx: CanvasRenderingContext2D,
   shape: ShapePrimitive,
-  deviceScale: number
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): void {
   const shadowScaleX = shape.shadow?.scaleX ?? 1;
   const shadowScaleY = shape.shadow?.scaleY ?? 1;
@@ -167,7 +181,8 @@ function paintShadowedShape(
   const shadow = shape.shadow!;
   const sigma = Math.min(Math.max(shadow.blur ?? 0, 0) * deviceScale / 2, 128);
   const spread = sigma * 3 + 1;
-  const outline = (shape.stroke?.width ?? 0) * deviceScale * 2;
+  const outline = (shape.stroke?.width ?? 0) * deviceScale
+    * Math.max(Math.abs(shadowScaleX), Math.abs(shadowScaleY)) * 2;
   const dx = (shadow.dx ?? 0) * deviceScale;
   const dy = (shadow.dy ?? 0) * deviceScale;
   const left = Math.floor(Math.max(minX - outline, -spread - dx));
@@ -175,13 +190,17 @@ function paintShadowedShape(
   const right = Math.ceil(Math.min(maxX + outline, ctx.canvas.width + spread - dx));
   const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
   if (right <= left || bottom <= top) return;
+  const pixels = (right - left) * (bottom - top);
+  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining)
+    throw new Error('shadows exceed the pixel budget on one slide');
+  shadowBudget.remaining -= pixels;
   const layer = typeof OffscreenCanvas !== 'undefined'
     ? new OffscreenCanvas(right - left, bottom - top)
     : Object.assign(document.createElement('canvas'), { width: right - left, height: bottom - top });
   const scratch = layer.getContext('2d') as CanvasRenderingContext2D | null;
   if (!scratch) return;
   scratch.setTransform(transform.a, transform.b, transform.c, transform.d, transform.e - left, transform.f - top);
-  paintShape(scratch, { ...shape, shadow: undefined }, deviceScale);
+  paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget);
   ctx.save();
   try {
     ctx.setTransform(1, 0, 0, 1, 0, 0);

@@ -72,7 +72,7 @@ fn merge_shapes(targets: &mut [ShapeNode], sources: &[ShapeNode]) -> bool {
                 (&mut target.effects, &source.effects)
             }
             (ShapeNode::Picture(target), ShapeNode::Picture(source)) => {
-                (&mut target.effects, &source.effects)
+                (&mut target.shape_effects, &source.shape_effects)
             }
             (ShapeNode::Group(target), ShapeNode::Group(source)) => {
                 changed |= merge_shapes(&mut target.children, &source.children);

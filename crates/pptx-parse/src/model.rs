@@ -316,7 +316,7 @@ pub struct Picture {
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effects: Option<ShapeEffects>,
+    pub shape_effects: Option<ShapeEffects>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<Box<ShapeStyle>>,
 }

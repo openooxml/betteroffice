@@ -217,7 +217,7 @@ fn parse_picture(
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
-        effects: properties.and_then(parse_effects),
+        shape_effects: properties.and_then(parse_effects),
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
     })
 }
@@ -870,9 +870,8 @@ const RECT_ALIGNMENTS: [&str; 9] = ["tl", "t", "tr", "l", "ctr", "r", "bl", "b",
 fn shadow_scale(shadow: &XmlElement, name: &str) -> f64 {
     shadow
         .attribute(name)
-        .and_then(|value| value.parse::<f64>().ok())
-        .map(|value| value / 100_000.0)
-        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 100.0)
+        .and_then(|value| value.parse::<i32>().ok())
+        .map(|value| f64::from(value) / 100_000.0)
         .unwrap_or(1.0)
 }
 
@@ -2238,8 +2237,20 @@ mod tests {
         )
         .unwrap();
         let shadow = parse_effects(&root).unwrap().outer_shadow.unwrap();
-        assert_eq!((shadow.scale_x, shadow.scale_y), (1.0, 1.0));
+        assert_eq!((shadow.scale_x, shadow.scale_y), (0.0, 1.0));
         assert_eq!(shadow.alignment, "b");
+
+        for (value, expected) in [
+            ("-150000", -1.5),
+            ("2147483647", 21474.83647),
+            ("NaN", 1.0),
+            ("inf", 1.0),
+        ] {
+            let xml = format!("<a:outerShdw sx=\"{value}\" sy=\"{value}\"/>");
+            let root = parse_xml(xml.as_bytes(), "slide.xml", &mut budget).unwrap();
+            assert_eq!(shadow_scale(&root, "sx"), expected);
+            assert_eq!(shadow_scale(&root, "sy"), expected);
+        }
     }
 
     #[test]
