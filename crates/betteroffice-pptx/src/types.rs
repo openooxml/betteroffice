@@ -6,16 +6,16 @@ pub use pptx_edit::{
     TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
 };
 pub use pptx_parse::{
-    Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape, MediaPart,
-    ParagraphProperties, ParseLimits, Picture, PictureCrop, Placeholder, PptxError, PptxPackage,
-    Presentation as PresentationModel, Relationship, RunProperties, Shape, ShapeBase, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, SlideReference, TargetMode, TextAutofit,
-    TextBody, TextParagraph as ModelTextParagraph, TextRun as ModelTextRun, TextStyleSet,
-    ThemePart,
+    BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,
+    MediaPart, ParagraphProperties, ParseLimits, Picture, PictureCrop, Placeholder, PptxError,
+    PptxPackage, Presentation as PresentationModel, Relationship, RunProperties, Shape, ShapeBase,
+    ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, SlideReference, TargetMode,
+    TextAutofit, TextBody, TextParagraph as ModelTextParagraph, TextRun as ModelTextRun,
+    TextStyleSet, ThemePart,
 };
 pub use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, ImageCrop, Paint,
-    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, RenderError, RenderedSlide,
-    Stroke, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph as DisplayTextParagraph,
-    TextRun as DisplayTextRun, Transform,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, HitTestResult, ImageCrop, ImageEffect,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, RenderError,
+    RenderedSlide, Stroke, SurfaceDisplayList, TextAlign, TextAnchor,
+    TextParagraph as DisplayTextParagraph, TextRun as DisplayTextRun, Transform,
 };

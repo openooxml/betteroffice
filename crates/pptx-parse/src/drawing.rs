@@ -211,8 +211,7 @@ fn parse_picture(
     })
 }
 
-/// The `a:blip` colour transforms, in document order. Unrecognised children —
-/// `a:extLst`, `a:alphaModFix`, `a:lum` — are dropped rather than guessed at.
+/// Reads supported bitmap effects in document order.
 fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
     let Some(blip) = blip else {
         return Vec::new();
@@ -233,6 +232,7 @@ fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
             "clrChange" => Some(BlipEffect::ColorChange {
                 from: child.child("clrFrom").and_then(parse_color_container),
                 to: child.child("clrTo").and_then(parse_color_container),
+                use_alpha: child.attribute("useA").map(parse_bool).unwrap_or(true),
             }),
             _ => None,
         })
@@ -1430,7 +1430,14 @@ mod tests {
             &mut budget,
         )
         .unwrap();
-        let data = common_slide_data(&root, &[], "ppt/slides/slide1.xml", &mut budget, ShapeElements::WithConnectors).unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
         let ShapeNode::Picture(picture) = &data.shapes[0] else {
             panic!("expected picture");
         };
@@ -1439,6 +1446,7 @@ mod tests {
             picture.effects,
             vec![
                 BlipEffect::ColorChange {
+                    use_alpha: true,
                     from: Some(ColorValue {
                         rgb: Some("FFFFFF".to_owned()),
                         ..ColorValue::default()

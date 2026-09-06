@@ -693,8 +693,6 @@ describe('PPTX picture cropping', () => {
 });
 
 describe('blip colour effects', () => {
-  // #03A7DF is the elastica mark from the cisco deck: 48.7% under Rec. 601 and
-  // 53.4% under Rec. 709, so the two luma formulas disagree at this threshold.
   test('biLevel thresholds on Rec. 601 luma and leaves alpha alone', () => {
     const data = new Uint8ClampedArray([0x03, 0xa7, 0xdf, 0x80]);
     applyImageEffects(data, [{ kind: 'biLevel', threshold: 0.5 }]);
@@ -711,8 +709,6 @@ describe('blip colour effects', () => {
     expect([...data]).toEqual([0x73, 0x73, 0x73, 0xff, 255, 255, 255, 0xff]);
   });
 
-  // clrFrom="FFFFFF" -> clrTo with alpha="0" has to run before the duotone that
-  // follows it, or the whole bitmap is recoloured opaque.
   test('effects apply in list order', () => {
     const ordered: ImageEffect[] = [
       { kind: 'colorChange', from: '#ffffffff', to: '#ffffff00' },
@@ -726,4 +722,69 @@ describe('blip colour effects', () => {
     applyImageEffects(reversed, [...ordered].reverse());
     expect(reversed[3]).toBe(0xff);
   });
+});
+
+test('colour changes respect useA and preserve transparent and antialiased pixels', () => {
+  for (const useAlpha of [undefined, true, false]) {
+    const data = new Uint8ClampedArray([
+      255, 255, 255, 255, 255, 255, 255, 128, 255, 255, 255, 0, 255, 254, 255, 255,
+    ]);
+    applyImageEffects(data, [{ kind: 'colorChange', from: '#ffffffff', to: '#ff000000', useAlpha }]);
+    expect([...data]).toEqual(useAlpha === false
+      ? [255, 0, 0, 255, 255, 0, 0, 128, 255, 0, 0, 0, 255, 254, 255, 255]
+      : [255, 0, 0, 0, 255, 255, 255, 128, 255, 255, 255, 0, 255, 254, 255, 255]);
+  }
+  const data = new Uint8ClampedArray([3, 167, 223, 128]);
+  applyImageEffects(data, [{ kind: 'grayscale' }]);
+  expect([...data]).toEqual([124, 124, 124, 128]);
+});
+
+test('picture effects reach canvas before cropping without changing the shared source', async () => {
+  const original = globalThis.OffscreenCanvas;
+  const source = { width: 4, height: 1, pixels: new Uint8ClampedArray([3, 167, 223, 128]) };
+  try {
+    for (const failure of [null, 'read', 'context'] as const) {
+      class Surface {
+        pixels = new Uint8ClampedArray();
+        constructor(public width: number, public height: number) {}
+        getContext() {
+          if (failure === 'context') throw new Error('context unavailable');
+          return {
+            drawImage: () => { this.pixels = source.pixels.slice(); },
+            getImageData: () => {
+              if (failure === 'read') throw new Error('tainted');
+              return { data: this.pixels };
+            },
+            putImageData: () => {},
+          };
+        }
+      }
+      globalThis.OffscreenCanvas = Surface as unknown as typeof OffscreenCanvas;
+      const draws: unknown[][] = [];
+      const ctx = new Proxy({} as CanvasRenderingContext2D, {
+        get: (_, key) => key === 'drawImage' ? (...args: unknown[]) => draws.push(args) : () => {},
+        set: () => true,
+      });
+      await paintSlide(ctx, {
+        contractVersion: 1,
+        width: 100,
+        height: 100,
+        primitives: [
+          { kind: 'image', objectId: 1, name: 'Effect', x: 10, y: 20, w: 40, h: 10,
+            assetId: 'image', crop: { left: 0.25 }, effects: [{ kind: 'biLevel', threshold: 0.25 }] },
+          { kind: 'image', objectId: 2, name: 'Control', x: 10, y: 40, w: 40, h: 10, assetId: 'image' },
+        ],
+      }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+      expect(draws).toHaveLength(2);
+      expect(draws[0].slice(1)).toEqual([1, 0, 3, 1, 10, 20, 40, 10]);
+      expect([...(draws[0][0] as typeof source).pixels]).toEqual(
+        failure ? [3, 167, 223, 128] : [255, 255, 255, 128]
+      );
+      expect(draws[1][0]).toBe(source);
+      expect([...source.pixels]).toEqual([3, 167, 223, 128]);
+    }
+  } finally {
+    if (original === undefined) Reflect.deleteProperty(globalThis, 'OffscreenCanvas');
+    else globalThis.OffscreenCanvas = original;
+  }
 });

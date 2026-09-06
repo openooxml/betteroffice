@@ -284,8 +284,7 @@ pub struct Picture {
     pub relationship_id: Option<String>,
     pub media_part_path: Option<String>,
     pub crop: PictureCrop,
-    /// `a:blip` colour transforms, in document order: `clrChange` then
-    /// `duotone` is not `duotone` then `clrChange`.
+    /// Bitmap effects in document order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<BlipEffect>,
     /// Preset mask; defaults to the frame rectangle.
@@ -307,8 +306,7 @@ fn is_rect(geometry: &str) -> bool {
     geometry == "rect"
 }
 
-/// A colour transform an `a:blip` applies to its bitmap before it is drawn.
-/// Colours stay unresolved because the parser has no theme.
+/// Bitmap effects with unresolved colours.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum BlipEffect {
@@ -321,12 +319,25 @@ pub enum BlipEffect {
         shadow: Option<ColorValue>,
         highlight: Option<ColorValue>,
     },
-    /// `a:clrChange`: pixels equal to `from` are replaced by `to`, whose alpha
-    /// is what makes `clrFrom="FFFFFF"` -> `alpha="0"` knock out a background.
+    /// Exact colour replacement.
     ColorChange {
         from: Option<ColorValue>,
         to: Option<ColorValue>,
+        #[serde(
+            default = "default_use_alpha",
+            skip_serializing_if = "use_alpha_is_default",
+            rename = "useAlpha"
+        )]
+        use_alpha: bool,
     },
+}
+
+fn default_use_alpha() -> bool {
+    true
+}
+
+fn use_alpha_is_default(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

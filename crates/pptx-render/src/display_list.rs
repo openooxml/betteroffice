@@ -49,8 +49,7 @@ pub struct GradientStop {
     pub color: String,
 }
 
-/// An `a:blip` colour transform with its colours resolved to `#rrggbbaa`,
-/// applied to the decoded bitmap in the order the list gives.
+/// Bitmap effects with resolved colours.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -58,10 +57,31 @@ pub struct GradientStop {
     rename_all_fields = "camelCase"
 )]
 pub enum ImageEffect {
-    BiLevel { threshold: f32 },
+    BiLevel {
+        threshold: f32,
+    },
     Grayscale,
-    Duotone { shadow: String, highlight: String },
-    ColorChange { from: String, to: String },
+    Duotone {
+        shadow: String,
+        highlight: String,
+    },
+    ColorChange {
+        from: String,
+        to: String,
+        #[serde(
+            default = "default_use_alpha",
+            skip_serializing_if = "use_alpha_is_default"
+        )]
+        use_alpha: bool,
+    },
+}
+
+fn default_use_alpha() -> bool {
+    true
+}
+
+fn use_alpha_is_default(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,6 +387,7 @@ mod tests {
             w: 0.5,
             h: 0.25,
             asset_id: Some("ppt/media/betteroffice-mark.png".into()),
+            effects: Vec::new(),
             crop: ImageCrop::default(),
             path: None,
             stroke: None,

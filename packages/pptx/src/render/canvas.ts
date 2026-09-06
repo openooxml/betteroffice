@@ -397,27 +397,22 @@ function offscreen(width: number, height: number): HTMLCanvasElement | Offscreen
   return canvas;
 }
 
-/**
- * `a:blip` colour transforms, per pixel: `ctx.filter` can approximate `biLevel`
- * but cannot express `duotone` or `clrChange` at all. Returns the source
- * untouched when there is no offscreen surface, or when reading it back would
- * throw on a cross-origin bitmap.
- */
+/** Recolours readable bitmaps on a private surface. */
 function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): CanvasImageSource {
   const size = imageSourceSize(source);
   if (!size) return source;
-  const canvas = offscreen(size.width, size.height);
-  const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
-  if (!canvas || !ctx) return source;
   try {
+    const canvas = offscreen(size.width, size.height);
+    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!canvas || !ctx) return source;
     ctx.drawImage(source, 0, 0);
     const data = ctx.getImageData(0, 0, size.width, size.height);
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
+    return canvas as CanvasImageSource;
   } catch {
     return source;
   }
-  return canvas as CanvasImageSource;
 }
 
 /** Rec. 601 luma, the weighting `biLevel` and `duotone` are defined against. */
@@ -481,13 +476,13 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
         const to = rgba(effect.to);
         if (!from || !to) break;
         for (let index = 0; index < data.length; index += 4) {
-          if (data[index] !== from[0] || data[index + 1] !== from[1] || data[index + 2] !== from[2]) {
+          if (data[index] !== from[0] || data[index + 1] !== from[1] || data[index + 2] !== from[2] || (effect.useAlpha !== false && data[index + 3] !== from[3])) {
             continue;
           }
           data[index] = to[0];
           data[index + 1] = to[1];
           data[index + 2] = to[2];
-          data[index + 3] = to[3];
+          if (effect.useAlpha !== false) data[index + 3] = to[3];
         }
         break;
       }

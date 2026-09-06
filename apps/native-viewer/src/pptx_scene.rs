@@ -248,12 +248,18 @@ impl PptxImages {
         Self { assets }
     }
 
-    fn get(&self, asset_id: &str) -> Result<&ImageData, String> {
-        match self.assets.get(asset_id) {
-            Some(PptxImage::Decoded(image)) => Ok(image),
-            Some(PptxImage::Failed(reason)) => Err(reason.clone()),
-            None => Err(format!("image asset {asset_id} is missing")),
+    fn get(&self, asset_id: &str, effects: &[pptx_render::ImageEffect]) -> Result<ImageData, String> {
+        let mut image = match self.assets.get(asset_id) {
+            Some(PptxImage::Decoded(image)) => image.clone(),
+            Some(PptxImage::Failed(reason)) => return Err(reason.clone()),
+            None => return Err(format!("image asset {asset_id} is missing")),
+        };
+        if !effects.is_empty() {
+            let mut pixels = image.data.data().to_vec();
+            pptx_render::apply_image_effects(&mut pixels, effects);
+            image.data = Blob::from(pixels);
         }
+        Ok(image)
     }
 }
 
@@ -371,6 +377,7 @@ impl Translator<'_> {
                 w,
                 h,
                 asset_id,
+                effects,
                 crop,
                 path,
                 stroke,
@@ -381,6 +388,7 @@ impl Translator<'_> {
                     frame,
                     PictureSource {
                         asset_id: asset_id.as_deref(),
+                        effects,
                         crop: *crop,
                         path: path.as_deref(),
                     },
@@ -497,7 +505,7 @@ impl Translator<'_> {
         let asset_id = source
             .asset_id
             .ok_or_else(|| "image has no asset id".to_owned())?;
-        let image = self.images.get(asset_id)?;
+        let image = self.images.get(asset_id, source.effects)?;
         if image.width == 0 || image.height == 0 {
             return Err(format!("image asset {asset_id} has no pixels"));
         }
@@ -705,6 +713,7 @@ impl Translator<'_> {
 
 struct PictureSource<'a> {
     asset_id: Option<&'a str>,
+    effects: &'a [pptx_render::ImageEffect],
     crop: ImageCrop,
     path: Option<&'a [GeometryPathCommand]>,
 }
@@ -1117,6 +1126,19 @@ mod tests {
     }
 
     #[test]
+    fn picture_effects_do_not_recolour_the_shared_source() {
+        let source = vec![3, 167, 223, 128];
+        let images = PptxImages { assets: HashMap::from([("image".into(), PptxImage::Decoded(ImageData {
+            data: Blob::from(source.clone()), format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::Alpha, width: 1, height: 1,
+        }))]) };
+        let recoloured = images.get("image", &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }]).unwrap();
+        assert_eq!(recoloured.data.data(), &[255, 255, 255, 128]);
+        let plain = images.get("image", &[]).unwrap();
+        assert_eq!(plain.data.data(), source);
+    }
+
+    #[test]
     fn a_cropped_masked_picture_translates_through_its_mask() {
         let crop = ImageCrop {
             left: 0.1,
@@ -1138,6 +1160,7 @@ mod tests {
                 w: 200.0,
                 h: 100.0,
                 asset_id: Some("ppt/media/image1.png".to_owned()),
+                effects: Vec::new(),
                 crop,
                 path: Some(ELLIPSE.to_vec()),
                 stroke: Some(DisplayStroke {

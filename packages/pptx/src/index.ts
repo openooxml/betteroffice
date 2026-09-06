@@ -36,6 +36,7 @@ export type {
   WasmInitInput,
 } from './wasm/loader';
 export type {
+  BlipEffect,
   CaretStop,
   ColorValue,
   CommentFlavor,

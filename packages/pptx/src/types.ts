@@ -63,6 +63,12 @@ export interface ShapeOutline {
   join?: string;
 }
 
+export type BlipEffect =
+  | { type: 'biLevel'; threshold: number }
+  | { type: 'grayscale' }
+  | { type: 'duotone'; shadow: ColorValue | null; highlight: ColorValue | null }
+  | { type: 'colorChange'; from: ColorValue | null; to: ColorValue | null; useAlpha?: boolean };
+
 export interface ShapeSnapshot {
   id: string;
   sourceId: number;
@@ -85,6 +91,7 @@ export interface ShapeSnapshot {
   outline: ShapeOutline | null;
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
+  blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
@@ -284,7 +291,7 @@ export type ImageEffect =
   | { kind: 'biLevel'; threshold: number }
   | { kind: 'grayscale' }
   | { kind: 'duotone'; shadow: string; highlight: string }
-  | { kind: 'colorChange'; from: string; to: string };
+  | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };
 export interface ImageCrop {
   left?: number;
   top?: number;

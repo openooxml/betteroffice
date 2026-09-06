@@ -9,18 +9,19 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
-    ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
+    GraphicFrameData, ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage,
+    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
+    TextBody,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint, PositionedGlyph,
-    PositionedTextLine, PositionedTextRun, Primitive, Stroke, StrokeEnd, SurfaceDisplayList,
-    TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
+    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Stroke, StrokeEnd,
+    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
@@ -2279,9 +2280,7 @@ fn resolved_transform_value(
     }
 }
 
-/// `a:blip` colour transforms with their colours resolved against the theme.
-/// An effect whose colours will not resolve is dropped rather than painted with
-/// a black stand-in, which would erase the artwork it recolours.
+/// Resolves bitmap effect colours against the theme.
 fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
     let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
     effects
@@ -2295,9 +2294,14 @@ fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
                 shadow: rgba(shadow.as_ref())?,
                 highlight: rgba(highlight.as_ref())?,
             }),
-            BlipEffect::ColorChange { from, to } => Some(ImageEffect::ColorChange {
+            BlipEffect::ColorChange {
+                from,
+                to,
+                use_alpha,
+            } => Some(ImageEffect::ColorChange {
                 from: rgba(from.as_ref())?,
                 to: rgba(to.as_ref())?,
+                use_alpha: *use_alpha,
             }),
         })
         .collect()
@@ -2583,6 +2587,7 @@ mod tests {
             },
             relationship_id: None,
             media_part_path: None,
+            effects: Vec::new(),
             crop: PictureCrop::default(),
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -2844,9 +2849,6 @@ mod tests {
         }
     }
 
-    /// The cisco deck's Google Drive glyph: `bg2` with `shade="45000"` against a
-    /// white `lt2` is the shadow, `prstClr val="white"` the highlight. Resolving
-    /// it in the parser, which has no theme, would have produced black.
     #[test]
     fn duotone_colours_resolve_against_the_theme() {
         let theme = Theme {
@@ -2886,8 +2888,6 @@ mod tests {
         );
     }
 
-    /// A duotone missing one of its two colours is dropped, not painted with a
-    /// black stand-in that would erase the artwork it recolours.
     #[test]
     fn an_unresolvable_duotone_is_dropped() {
         let effects = image_effects(
