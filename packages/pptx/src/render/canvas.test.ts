@@ -691,3 +691,33 @@ describe('PPTX picture cropping', () => {
     expect(calls.some((call) => call.startsWith('draw:'))).toBe(false);
   });
 });
+
+test('paints script glyphs and underlines at their shifted baselines', async () => {
+  const text: [string, number][] = [];
+  const underlines: number[] = [];
+  const ctx = new Proxy({
+    fillText: (value: string, _x: number, y: number) => text.push([value, y]),
+    fillRect: (_x: number, y: number) => underlines.push(y),
+  } as Record<string, unknown>, {
+    get: (target, key) => target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  const list: SlideDisplayList = {
+    contractVersion: 1, width: 200, height: 100,
+    primitives: [{
+      kind: 'textBox', objectId: 1, x: 0, y: 0, w: 200, h: 100,
+      anchor: 'top', paragraphs: [], lines: [{
+        x: 10, y: 20, width: 60, height: 50, baseline: 50, start: 0, end: 3,
+        caretStops: [], runs: [6, -5, undefined].map((offset, i) => ({
+          text: ['up', 'down', 'base'][i], start: i, end: i + 1, x: 10 + i * 20, width: 20,
+          fontId: 1, fontFamily: 'Arial', fontSizePx: 10, bold: false, italic: false,
+          underline: true, color: '#475467', baselineOffsetPx: offset, glyphs: [],
+        })),
+      }],
+    }],
+  };
+  await paintSlide(ctx, list, 1);
+  expect(text).toEqual([['up', 44], ['down', 55], ['base', 50]]);
+  expect(underlines).toHaveLength(3);
+  [44.8, 55.8, 50.8].forEach((y, i) => expect(underlines[i]).toBeCloseTo(y));
+});
