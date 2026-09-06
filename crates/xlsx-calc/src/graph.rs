@@ -301,7 +301,8 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
             | Expr::Bool(_)
             | Expr::Error(_)
             | Expr::Ref { .. }
-            | Expr::Range { .. } => {}
+            | Expr::Range { .. }
+            | Expr::ColumnRange { .. } => {}
         }
     }
     pending.extend(uses.into_iter().rev());
@@ -330,7 +331,8 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
             | Expr::Bool(_)
             | Expr::Error(_)
             | Expr::Ref { .. }
-            | Expr::Range { .. } => {}
+            | Expr::Range { .. }
+            | Expr::ColumnRange { .. } => {}
         }
     }
     pending.extend(uses.into_iter().rev());
@@ -400,6 +402,20 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn whole_column_dependencies_cover_future_rows() {
+        let mut wb = wb2();
+        wb.sheets[0].set_cell(a1("A1"), formula_cell("VLOOKUP(2,Data!$S:$V,4,FALSE)"));
+        let graph = DepGraph::build(&wb);
+        for cell in ["S1", "T999999", "V1048576"] {
+            assert_eq!(deps_a1(&graph, "Data", cell, &wb), vec!["Sheet1!A1"]);
+        }
+        assert!(deps_a1(&graph, "Data", "W1", &wb).is_empty());
+        assert!(deps_a1(&graph, "Sheet1", "S1", &wb).is_empty());
+        assert_eq!(graph.by_sheet[&SheetId(1)].len(), 1);
+        assert_eq!(wb.sheets[1].iter_cells().count(), 0);
     }
 
     #[test]

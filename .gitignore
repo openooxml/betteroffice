@@ -25,3 +25,4 @@ packages/docx/src/wasm/generated/**/*.js
 apps/redact-worker/src/wasm/generated/*.wasm
 apps/redact-worker/src/wasm/generated/*.js
 screenshots/
+~$*

@@ -14,6 +14,7 @@ use yrs::{
     Update, WriteTxn,
 };
 
+mod comments;
 mod deck;
 mod model;
 mod save;
@@ -31,6 +32,7 @@ pub(crate) const SLIDE_ORDER: &str = "pptx:slide-order";
 pub(crate) const SLIDES: &str = "pptx:slides";
 pub(crate) const SHAPES: &str = "pptx:shapes";
 pub(crate) const STORIES: &str = "pptx:stories";
+pub(crate) const COMMENTS: &str = "pptx:comments";
 pub(crate) const REMOTE_ORIGIN: &str = "pptx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "pptx:hydrate";
 pub(crate) const MIGRATE_ORIGIN: &str = "pptx:migrate";
@@ -155,6 +157,8 @@ impl DeckSession {
             pptx_parse::parse_pptx_without_connectors(source)
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
+        comments::import_source_comments(&session, &package)?;
+        deck::import_source_list_styles(&session.doc, &package)?;
         Ok(Self {
             package: Arc::new(package),
             ..session
@@ -291,7 +295,7 @@ fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
     // An empty container carries no items, so an update cannot carry it either.
     // Every peer registers the roots the same way, which stays convergent.
     txn.get_or_insert_array(SLIDE_ORDER);
-    for root in [SLIDES, SHAPES, STORIES] {
+    for root in [META, SLIDES, SHAPES, STORIES, COMMENTS] {
         txn.get_or_insert_map(root);
     }
     Ok(())

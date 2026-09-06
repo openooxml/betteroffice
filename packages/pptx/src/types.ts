@@ -75,6 +75,8 @@ export interface ShapeSnapshot {
   rotationDeg: number;
   flipH: boolean;
   flipV: boolean;
+  /** Hides this shape and its descendants; omitted when false. */
+  hidden?: boolean;
   geometry: string;
   adjustValues: Record<string, number>;
   placeholder: unknown | null;
@@ -100,6 +102,32 @@ export interface DeckSnapshot {
   widthEmu: number;
   heightEmu: number;
   slides: SlideSnapshot[];
+  commentFlavor?: CommentFlavor;
+  comments?: CommentSnapshot[];
+}
+
+/** Legacy comments or modern threads. */
+export type CommentFlavor = 'legacy' | 'modern';
+
+export interface CommentSnapshot {
+  id: string;
+  slideId: string;
+  author: string;
+  initials: string;
+  text: string;
+  created: string | null;
+  xEmu: number;
+  yEmu: number;
+  /** Set on a reply; names the thread root. Modern decks only. */
+  parentId: string | null;
+  resolved: boolean;
+}
+
+export interface CommentReceipt {
+  commentId: string;
+  slideId: string;
+  parentId: string | null;
+  resolved: boolean;
 }
 
 export interface SlideReceipt {

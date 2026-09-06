@@ -17,6 +17,7 @@ pub struct ParseLimits {
     pub max_shapes: usize,
     pub max_paragraphs: usize,
     pub max_runs: usize,
+    pub max_comments: usize,
 }
 
 impl Default for ParseLimits {
@@ -32,6 +33,7 @@ impl Default for ParseLimits {
             max_shapes: 100_000,
             max_paragraphs: 500_000,
             max_runs: 2_000_000,
+            max_comments: 100_000,
         }
     }
 }
@@ -46,6 +48,7 @@ pub(crate) struct ParseBudget<'a> {
     shapes: usize,
     paragraphs: usize,
     runs: usize,
+    comments: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -59,6 +62,7 @@ impl<'a> ParseBudget<'a> {
             shapes: 0,
             paragraphs: 0,
             runs: 0,
+            comments: 0,
         }
     }
 
@@ -93,6 +97,16 @@ impl<'a> ParseBudget<'a> {
 
     pub fn charge_run(&mut self, part: &str) -> Result<(), PptxError> {
         charge(&mut self.runs, 1, self.limits.max_runs, "runs", part)
+    }
+
+    pub fn charge_comment(&mut self, part: &str) -> Result<(), PptxError> {
+        charge(
+            &mut self.comments,
+            1,
+            self.limits.max_comments,
+            "comments",
+            part,
+        )
     }
 }
 
@@ -239,6 +253,12 @@ pub(crate) fn local_name(name: &str) -> &str {
 pub(crate) fn serialize_xml(root: &XmlElement) -> Vec<u8> {
     let mut output =
         String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n");
+    write_element(root, &mut output);
+    output.into_bytes()
+}
+
+pub(crate) fn serialize_xml_fragment(root: &XmlElement) -> Vec<u8> {
+    let mut output = String::new();
     write_element(root, &mut output);
     output.into_bytes()
 }

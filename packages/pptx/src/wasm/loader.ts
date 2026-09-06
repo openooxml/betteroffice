@@ -10,6 +10,9 @@ import type {
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 import type {
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
   HistoryResult,
   HitTestResult,
@@ -85,6 +88,29 @@ export interface PresentationHandle extends CollaborationReplica {
     adjustments: Record<string, number>
   ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
+  /** Adds a slide comment; coordinates are EMU. */
+  addComment(
+    slideId: string,
+    comment: {
+      author: string;
+      initials?: string;
+      text: string;
+      created: string;
+      xEmu?: number;
+      yEmu?: number;
+    }
+  ): CommentReceipt;
+  /** Modern decks only; legacy `p:cm` has no reply list. */
+  replyToComment(
+    commentId: string,
+    reply: { author: string; initials?: string; text: string; created: string }
+  ): CommentReceipt;
+  /** Resolves or reopens a modern comment. */
+  setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  removeComment(commentId: string): CommentReceipt;
+  /** Only legal while the deck has no comments. */
+  setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
+  comments(): CommentSnapshot[];
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
   setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
@@ -326,6 +352,53 @@ export function openPresentation(
         () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
         true
       );
+    },
+    addComment(slideId, comment): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.addCommentJson(
+            JSON.stringify({
+              slideId,
+              author: comment.author,
+              initials: comment.initials ?? '',
+              text: comment.text,
+              created: comment.created,
+              xEmu: comment.xEmu ?? 0,
+              yEmu: comment.yEmu ?? 0,
+            })
+          ),
+        true
+      );
+    },
+    replyToComment(commentId, reply): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.replyToCommentJson(
+            JSON.stringify({
+              commentId,
+              author: reply.author,
+              initials: reply.initials ?? '',
+              text: reply.text,
+              created: reply.created,
+            })
+          ),
+        true
+      );
+    },
+    setCommentStatus(commentId, resolved): CommentReceipt {
+      return jsonWasmCall(
+        () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
+        true
+      );
+    },
+    removeComment(commentId): CommentReceipt {
+      return jsonWasmCall(() => doc.removeCommentJson(JSON.stringify({ commentId })), true);
+    },
+    setCommentFlavor(flavor): CommentFlavor {
+      return jsonWasmCall(() => doc.setCommentFlavorJson(JSON.stringify({ flavor })), true);
+    },
+    comments(): CommentSnapshot[] {
+      return jsonWasmCall(() => doc.commentsJson());
     },
     addTextBox(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
