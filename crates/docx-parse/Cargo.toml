@@ -20,7 +20,7 @@ default = ["wasm"]
 wasm = ["dep:wasm-bindgen"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 ooxml-opc.workspace = true
 indexmap = { version = "2", features = ["serde"] }
 ooxml-drawingml = { workspace = true, features = ["chart"] }
