@@ -51,6 +51,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
             fonts.h_ansi_theme.as_deref(),
             fonts.east_asia_theme.as_deref(),
             fonts.cs_theme.as_deref(),
+            fonts.hint.as_deref(),
         ]
         .into_iter()
         .any(|value| nonempty(value).is_some());
@@ -68,6 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 fonts.east_asia_theme.as_deref(),
             );
             optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
     }
@@ -329,11 +331,24 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
-        RunContent::CommentReference { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::CommentReference { id } => {
+            writer.start_element("w:commentReference");
+            if let Some(id) = id {
+                writer.attribute("w:id", &js_number(*id));
+            }
+            writer.end_element();
+        }
+        RunContent::Chart { .. } | RunContent::OpaqueDrawing { .. } => {}
     }
     Ok(writer.finish())
+}
+
+/// The authored z-order when the anchor carried one; Word's default otherwise.
+fn relative_height_attr(position: Option<&crate::image::ImagePosition>) -> String {
+    position
+        .and_then(|position| position.relative_height)
+        .map(|value| int_attr(Some(value)))
+        .unwrap_or_else(|| "251658240".to_owned())
 }
 
 /// Serializes one image as WordprocessingDrawing XML.
@@ -344,9 +359,10 @@ pub fn serialize_drawing_content(
     let floating = image.wrap.wrap_type != "inline";
     let id = drawing_id(image.id.as_deref(), context);
     let name = image
-        .title
+        .name
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or_else(|| image.title.as_deref().filter(|value| !value.is_empty()))
         .or_else(|| image.filename.as_deref().filter(|value| !value.is_empty()))
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Picture {id}"));
@@ -361,7 +377,10 @@ pub fn serialize_drawing_content(
             .attribute("distL", &int_attr(image.wrap.dist_l))
             .attribute("distR", &int_attr(image.wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(image.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if image.wrap.wrap_type == "behind" {
@@ -501,6 +520,13 @@ pub fn serialize_shape_content(
                 &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
             )
             .attribute("vert", vertical_token(shape));
+        if let Some(wrap) = shape
+            .text_body_properties
+            .as_ref()
+            .and_then(|properties| nonempty(properties.wrap.as_deref()))
+        {
+            body_properties.attribute("wrap", wrap);
+        }
         if let Some(anchor) = nonempty(text_body.anchor.as_deref()).and_then(anchor_token) {
             body_properties.attribute("anchor", anchor);
         }
@@ -547,7 +573,10 @@ pub fn serialize_shape_content(
             .attribute("distL", &int_attr(wrap.dist_l))
             .attribute("distR", &int_attr(wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(shape.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if wrap.wrap_type == "behind" { "1" } else { "0" },
@@ -685,9 +714,6 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
         .start_element("pic:cNvPr")
         .attribute("id", id)
         .attribute("name", &name);
-    if let Some(alt) = nonempty(image.alt.as_deref()) {
-        writer.attribute("descr", alt);
-    }
     writer
         .end_element()
         .start_element("pic:cNvPicPr")

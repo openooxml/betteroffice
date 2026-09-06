@@ -8,6 +8,7 @@
 import type { ParagraphFormatting } from '../formatting';
 import type { ListRendering } from '../lists';
 import type { Run } from './run';
+import type { RawXml } from './rawXml';
 import type { Hyperlink, BookmarkStart, BookmarkEnd, SimpleField, ComplexField } from './link';
 import type { InlineSdt } from './sdt';
 import type { CommentRangeStart, CommentRangeEnd } from './comment';
@@ -51,7 +52,8 @@ export type ParagraphContent =
   | MoveFromRangeEnd
   | MoveToRangeStart
   | MoveToRangeEnd
-  | MathEquation;
+  | MathEquation
+  | RawXml;
 
 /**
  * Paragraph (`w:p`) — the primary block-level container in a Word document.

@@ -174,6 +174,14 @@ export interface NumberingInstance {
 export interface ListRendering {
   /** Computed marker text (e.g., "1.", "a)", "•") */
   marker: string;
+  /**
+   * Level indents the paragraph inherits when neither direct formatting nor
+   * the style chain sets its own; applied at layout time so the paragraph's
+   * authored properties stay authored.
+   */
+  indentLeft?: number;
+  indentFirstLine?: number;
+  hangingIndent?: boolean;
   /** List level (0-8) */
   level: number;
   /** Numbering ID */

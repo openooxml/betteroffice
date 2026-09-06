@@ -2,6 +2,7 @@
 //! every byte as attacker-controlled with depth and collection caps.
 
 mod chart;
+mod formula;
 mod package;
 mod read;
 mod reference;

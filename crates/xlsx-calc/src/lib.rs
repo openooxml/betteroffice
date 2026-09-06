@@ -20,9 +20,11 @@ pub mod graph;
 pub mod lexer;
 pub mod parser;
 pub mod printer;
+mod reference;
 
 pub use deps::references;
 pub use engine::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 pub use eval::{EvalContext, evaluate};
 pub use lexer::{ParseError, TokKind, Token, lex};
 pub use parser::{BinaryOp, Expr, MAX_DEPTH, UnaryOp, parse_formula};
+pub use reference::ColumnRange;
