@@ -1833,7 +1833,8 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
     }
     let source = parse_run_properties(element.child("rPr"));
     let target = segment.properties;
-    source.bold == target.bold
+    source.baseline_pct == target.baseline_pct
+        && source.bold == target.bold
         && source.italic == target.italic
         && source.font_size_pt == target.font_size_pt
         && source.underline == target.underline
@@ -2107,6 +2108,12 @@ fn apply_run_properties(
             base.attributes.remove("sz");
         }
     }
+    match properties.baseline_pct {
+        Some(baseline) => base.set_attribute("baseline", format_fixed(baseline * 1000.0)),
+        None => {
+            base.attributes.remove("baseline");
+        }
+    }
     let toggles = [("b", properties.bold), ("i", properties.italic)];
     for (name, value) in toggles {
         match value {
@@ -2234,10 +2241,14 @@ fn apply_paragraph_properties(
         Some(Bullet::Character { value }) => {
             Some(XmlElement::new(prefixes.drawing("buChar")).with_attribute("char", value.clone()))
         }
-        Some(Bullet::AutoNumber { scheme, start_at }) => {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
             let mut element = XmlElement::new(prefixes.drawing("buAutoNum"))
                 .with_attribute("type", scheme.clone());
-            if *start_at != 1 {
+            if *restart || *start_at != 1 {
                 element.set_attribute("startAt", start_at.to_string());
             }
             Some(element)
@@ -2272,6 +2283,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     }
     if let Some(size) = properties.font_size_pt {
         element.set_attribute("sz", format_fixed(size * 100.0));
+        present = true;
+    }
+    if let Some(baseline) = properties.baseline_pct {
+        element.set_attribute("baseline", format_fixed(baseline * 1000.0));
         present = true;
     }
     if let Some(bold) = properties.bold {

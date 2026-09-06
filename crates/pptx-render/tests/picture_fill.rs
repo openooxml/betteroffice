@@ -159,7 +159,7 @@ fn an_explicit_tiled_fill_blocks_a_placeholders_inherited_picture() {
 #[test]
 fn attaching_a_main_snapshot_persists_picture_fills_for_source_free_reopens() {
     let old =
-        include_bytes!("../../pptx-edit/tests/fixtures/deck-schema-v9-picture-fill.update.bin");
+        include_bytes!("../../pptx-edit/tests/fixtures/deck-schema-v12-picture-fill.update.bin");
     let attached = DeckSession::open_from_update_with_source(old, FIXTURE, 33611).unwrap();
     let update = attached.encode_state_as_update_v1();
     let reopened = DeckSession::open_from_update(&update, 33612).unwrap();

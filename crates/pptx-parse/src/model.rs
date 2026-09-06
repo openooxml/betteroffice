@@ -378,6 +378,9 @@ pub struct GroupShape {
 pub struct TextBody {
     pub anchor: Option<String>,
     pub vertical: Option<String>,
+    /// Use a 1.2 em percentage pitch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compat_line_spacing: Option<bool>,
     pub autofit: Option<TextAutofit>,
     pub inset_left: Option<i64>,
     pub inset_top: Option<i64>,
@@ -414,6 +417,18 @@ pub struct TextParagraph {
     pub end_properties: Option<RunProperties>,
 }
 
+/// Paragraph line pitch.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LineSpacing {
+    Percent { value: f64 },
+    Points { value: f64 },
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphProperties {
@@ -422,6 +437,8 @@ pub struct ParagraphProperties {
     pub margin_left: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_spacing: Option<LineSpacing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_font: Option<BulletFont>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -460,8 +477,15 @@ pub enum BulletSize {
     rename_all_fields = "camelCase"
 )]
 pub enum Bullet {
-    Character { value: String },
-    AutoNumber { scheme: String, start_at: u32 },
+    Character {
+        value: String,
+    },
+    AutoNumber {
+        scheme: String,
+        start_at: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restart: bool,
+    },
     None,
 }
 
@@ -479,6 +503,9 @@ pub struct TextRun {
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
     pub font_size_pt: Option<f64>,
+    /// Baseline shift as a percentage of the font size; negative is subscript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,

@@ -173,6 +173,7 @@ fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primit
                 italic: false,
                 underline,
                 color: "#1b2733".into(),
+                baseline_offset_px: 0.0,
                 glyphs,
             }],
             caret_stops: vec![CaretStop { position: 0, x }],
@@ -480,4 +481,32 @@ fn a_transparent_render_differs_from_the_opaque_one() {
     )
     .expect("clear");
     assert_ne!(opaque.bytes, clear.bytes);
+}
+
+#[test]
+fn shifted_underlines_follow_run_baselines() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    let rows = [0.0, 8.0, -8.0].map(|offset| {
+        let mut primitive = text_box(10.0, 20.0, "script", 20.0, true);
+        let Primitive::TextBox { lines, .. } = &mut primitive else {
+            unreachable!()
+        };
+        lines[0].runs[0].baseline_offset_px = offset;
+        lines[0].runs[0].glyphs.clear();
+        let rendered = render_slide(
+            &slide(vec![primitive]),
+            &resources,
+            &RenderOptions::default(),
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&rendered.bytes).unwrap().to_rgba8();
+        (0..pixels.height())
+            .filter(|y| (0..pixels.width()).any(|x| pixels.get_pixel(x, *y)[0] < 200))
+            .collect::<Vec<_>>()
+    });
+    assert!(!rows[0].is_empty());
+    assert_eq!(rows[1], rows[0].iter().map(|y| y - 8).collect::<Vec<_>>());
+    assert_eq!(rows[2], rows[0].iter().map(|y| y + 8).collect::<Vec<_>>());
 }
