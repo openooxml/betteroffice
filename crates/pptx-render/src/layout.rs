@@ -3861,6 +3861,8 @@ mod tests {
                 },
                 geometry: "rect".to_owned(),
                 adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                style: None,
                 fill: None,
                 outline: None,
                 text: Some(TextBody {
@@ -3871,6 +3873,8 @@ mod tests {
                     inset_top: None,
                     inset_right: None,
                     inset_bottom: None,
+                    default_list_style: None,
+                    list_style: Vec::new(),
                     paragraphs: vec![pptx_parse::TextParagraph {
                         properties: ParagraphProperties::default(),
                         runs: vec![pptx_parse::TextRun {
