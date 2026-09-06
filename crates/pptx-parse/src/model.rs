@@ -453,8 +453,15 @@ pub enum BulletSize {
     rename_all_fields = "camelCase"
 )]
 pub enum Bullet {
-    Character { value: String },
-    AutoNumber { scheme: String, start_at: u32 },
+    Character {
+        value: String,
+    },
+    AutoNumber {
+        scheme: String,
+        start_at: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restart: bool,
+    },
     None,
 }
 
@@ -472,6 +479,9 @@ pub struct TextRun {
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
     pub font_size_pt: Option<f64>,
+    /// Baseline shift as a percentage of the font size; negative is subscript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,

@@ -29,6 +29,8 @@ const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
 const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
+/// Size a super/subscript run shapes at, relative to its own `sz`.
+const SCRIPT_SIZE_RATIO: f32 = 0.58;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
 /// Compatibility line pitch in ems.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
@@ -38,6 +40,7 @@ const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
+const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -973,6 +976,18 @@ impl BodyCascade<'_> {
                 merge_paragraph_properties(&mut properties, source);
             }
         }
+        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
+            *restart = self
+                .primary
+                .and_then(|body| body.paragraphs.get(index))
+                .is_some_and(|paragraph| {
+                    matches!(
+                        paragraph.properties.bullet,
+                        Some(Bullet::AutoNumber { restart: true, .. })
+                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
+                    )
+                });
+        }
         properties
     }
 }
@@ -999,6 +1014,7 @@ struct TextContent {
 struct ContentParagraph {
     alignment: Option<String>,
     level: u32,
+    bullet: Option<Bullet>,
     runs: Vec<ContentRun>,
 }
 
@@ -1017,6 +1033,10 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
+                bullet: paragraph
+                    .bullet_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok()),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1052,6 +1072,7 @@ fn content_from_body(
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
+                bullet: paragraph.properties.bullet.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1077,7 +1098,7 @@ struct ResolvedParagraph {
     line_spacing: Option<LineSpacing>,
     compat_line_spacing: bool,
     indent_px: f32,
-    bullet: Option<Bullet>,
+    marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
 }
@@ -1093,6 +1114,7 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    baseline_shift_px: f32,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -1134,8 +1156,18 @@ fn resolve_content(
     let compat_line_spacing = cascade.compat_line_spacing();
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
+    let mut counters = [0_u32; 9];
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties = cascade.paragraph_properties(index, paragraph.level);
+        let mut properties = cascade.paragraph_properties(index, paragraph.level);
+        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
+            properties.bullet = paragraph.bullet.clone();
+            if let Some(Bullet::AutoNumber {
+                restart, start_at, ..
+            }) = &mut properties.bullet
+            {
+                *restart |= *start_at != 1;
+            }
+        }
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
@@ -1164,6 +1196,7 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -1172,10 +1205,11 @@ fn resolve_content(
             line_spacing: properties.line_spacing,
             compat_line_spacing,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
-            bullet: properties.bullet.clone(),
-            bullet_style: matches!(properties.bullet, Some(Bullet::Character { .. }))
+            bullet_style: marker
+                .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
                 .transpose()?,
+            marker,
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -1263,10 +1297,23 @@ fn resolve_style(
         .filter(|value| value.is_finite() && *value > 0.0)
         .unwrap_or(DEFAULT_FONT_SIZE_PT)
         .min(4_096.0);
+    let baseline_pct = direct
+        .baseline_pct
+        .or_else(|| fallback.and_then(|value| value.baseline_pct))
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    let baseline_shift_px = points_to_px(font_size_pt) * baseline_pct / 100.0;
+    let font_size_pt = if baseline_pct == 0.0 {
+        font_size_pt
+    } else {
+        font_size_pt * SCRIPT_SIZE_RATIO
+    };
     Ok(ResolvedStyle {
         family: face.family.clone(),
         face,
         font_size_pt,
+        baseline_shift_px,
         bold,
         italic,
         underline: direct
@@ -1325,6 +1372,7 @@ fn chart_text_primitive(
         italic: false,
         underline: false,
         color: text.color.to_owned(),
+        baseline_offset_px: 0.0,
         glyphs,
     };
     let width = run.width;
@@ -1520,7 +1568,7 @@ fn prepend_bullet(
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
-    let Some(Bullet::Character { value }) = &paragraph.bullet else {
+    let Some(value) = &paragraph.marker else {
         return Ok(());
     };
     let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
@@ -1538,7 +1586,7 @@ fn prepend_bullet(
         line_spacing: None,
         compat_line_spacing: false,
         indent_px: 0.0,
-        bullet: None,
+        marker: None,
         bullet_style: None,
         runs: vec![ResolvedRun {
             text: value.clone(),
@@ -1786,9 +1834,11 @@ fn positioned_runs(
         if cluster.text == "\n" {
             continue;
         }
+        let baseline_offset_px = cluster.style.baseline_shift_px * scale;
         let append = output.last().is_some_and(|run| {
             run.end == cluster.start
                 && run.font_id == cluster.style.face.id.to_u32()
+                && run.baseline_offset_px == baseline_offset_px
                 && run.font_family == cluster.style.family
                 && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
                 && run.bold == cluster.style.bold
@@ -1810,6 +1860,7 @@ fn positioned_runs(
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
                 color: cluster.style.color.clone(),
+                baseline_offset_px,
                 glyphs: Vec::new(),
             });
         }
@@ -1825,7 +1876,7 @@ fn positioned_runs(
                 x: cursor_x + glyph.x,
                 advance: glyph.advance,
                 x_offset: glyph.x_offset,
-                y_offset: baseline + glyph.y_offset,
+                y_offset: baseline - baseline_offset_px + glyph.y_offset,
             });
         }
         let advance = advances.get(index).copied().unwrap_or(cluster.width);
@@ -1908,8 +1959,9 @@ fn clusters_line_box(
             continue;
         }
         let line = style_line_box(fonts, &cluster.style, scale)?;
-        ascent = ascent.max(line.ascent);
-        descent = descent.max(line.descent);
+        let shift = cluster.style.baseline_shift_px * scale;
+        ascent = ascent.max((line.ascent + shift).max(0.0));
+        descent = descent.max((line.descent - shift).max(0.0));
         leading = leading.max(line.leading);
     }
     Ok(ooxml_text::LineBox {
@@ -2309,6 +2361,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.language.is_some() {
         target.language.clone_from(&source.language);
     }
+    if source.baseline_pct.is_some() {
+        target.baseline_pct = source.baseline_pct;
+    }
 }
 
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -2319,6 +2374,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme)),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        baseline_pct: properties.baseline_pct,
     }
 }
 
@@ -2533,6 +2589,98 @@ fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
 }
 
+/// Resolves a marker once per paragraph.
+fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
+    let level = (level as usize).min(counters.len() - 1);
+    counters[level + 1..].fill(0);
+    match bullet {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
+            counters[level] = match counters[level] {
+                0 => (*start_at).clamp(1, 32_767),
+                _ if *restart => (*start_at).clamp(1, 32_767),
+                current => current.saturating_add(1),
+            };
+            Some(format_autonum(counters[level], scheme))
+        }
+        _ => {
+            counters[level] = 0;
+            match bullet {
+                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
+                    Some(value.clone())
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Formats Latin, Roman and decimal markers.
+fn format_autonum(value: u32, scheme: &str) -> String {
+    let value = value.clamp(1, MAX_AUTONUM_VALUE);
+    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
+        .into_iter()
+        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
+        .unwrap_or((scheme, "Period"));
+    let body = match numeral {
+        "alphaLc" => format_alpha(value, false),
+        "alphaUc" => format_alpha(value, true),
+        "romanLc" => format_roman(value, false),
+        "romanUc" => format_roman(value, true),
+        "arabic" => value.to_string(),
+        _ => return format!("{value}."),
+    };
+    match suffix {
+        "ParenBoth" => format!("({body})"),
+        "ParenR" => format!("{body})"),
+        "Plain" => body,
+        _ => format!("{body}."),
+    }
+}
+
+fn format_alpha(value: u32, upper: bool) -> String {
+    let base = if upper { b'A' } else { b'a' };
+    let mut value = value.max(1);
+    let mut out = Vec::new();
+    while value > 0 {
+        let index = (value - 1) % 26;
+        out.push(base + index as u8);
+        value = (value - 1) / 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn format_roman(value: u32, upper: bool) -> String {
+    const NUMERALS: [(u32, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut value = value.max(1);
+    let mut out = String::new();
+    for (amount, numeral) in NUMERALS {
+        while value >= amount {
+            out.push_str(numeral);
+            value -= amount;
+        }
+    }
+    if upper { out.to_uppercase() } else { out }
+}
+
 fn normalize_family(value: &str) -> String {
     value.trim().to_lowercase()
 }
@@ -2724,6 +2872,153 @@ mod tests {
         assert_eq!(stroke.color, "#FF00FF");
     }
 
+    #[test]
+    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
+        let mut counters = [0_u32; 9];
+        let number = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 1,
+                    restart: false,
+                }),
+                level,
+                counters,
+            )
+        };
+        let dash = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "-".to_owned(),
+                }),
+                level,
+                counters,
+            )
+        };
+        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
+    }
+
+    #[test]
+    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
+        let mut counters = [0_u32; 9];
+        let number = |counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 7,
+                    restart: false,
+                }),
+                0,
+                counters,
+            )
+        };
+        assert_eq!(number(&mut counters).as_deref(), Some("7."));
+        assert_eq!(number(&mut counters).as_deref(), Some("8."));
+        let mut counters = [0; 9];
+        let last_start = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 32_767,
+            restart: false,
+        };
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32767.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32768.")
+        );
+    }
+
+    #[test]
+    fn autonumber_schemes_format_their_numeral_and_suffix() {
+        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
+        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
+        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
+        assert_eq!(format_autonum(4, "arabicPlain"), "4");
+        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
+        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
+        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
+        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
+        assert_eq!(format_autonum(3, "somethingElse"), "3.");
+        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
+        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
+    }
+
+    #[test]
+    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
+        let mut counters = [0; 9];
+        let number = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 1,
+            restart: false,
+        };
+        let restart = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 7,
+            restart: true,
+        };
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
+            Some("7.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("8.")
+        );
+        assert_eq!(resolve_marker(None, 0, &mut counters), None);
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "•".to_owned()
+                }),
+                0,
+                &mut counters
+            )
+            .as_deref(),
+            Some("•")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+    }
+
+    #[test]
+    fn autonumber_roman_markers_bound_untrusted_start_values() {
+        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
+        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
+        assert_eq!(
+            format_autonum(u32::MAX, "romanUcPeriod"),
+            format!("{}DCCLXVII.", "M".repeat(52))
+        );
+    }
+
     fn renderer() -> SlideRenderer {
         let mut renderer = SlideRenderer::new();
         for bold in [false, true] {
@@ -2753,7 +3048,7 @@ mod tests {
             line_spacing: None,
             compat_line_spacing: false,
             indent_px: 0.0,
-            bullet: None,
+            marker: None,
             bullet_style: None,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
@@ -2762,6 +3057,7 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
@@ -2908,6 +3204,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
@@ -2930,7 +3227,7 @@ mod tests {
                 line_spacing: None,
                 compat_line_spacing: false,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
@@ -2977,6 +3274,7 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
@@ -2992,7 +3290,7 @@ mod tests {
                 line_spacing: None,
                 compat_line_spacing: false,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: parts
                     .iter()
@@ -3709,6 +4007,125 @@ mod tests {
             })
             .unwrap();
         assert!(master_index < slide_index);
+    }
+
+    #[test]
+    fn a_baseline_shifted_run_is_raised_lowered_and_shrunk() {
+        let session = DeckSession::open(
+            include_bytes!("../tests/fixtures/text-baseline-script.pptx"),
+            289,
+        )
+        .unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Some(Primitive::TextBox { lines, .. }) =
+            rendered.display_list.primitives.iter().find(|primitive| {
+                matches!(primitive, Primitive::TextBox { lines, .. }
+                    if lines.iter().flat_map(|line| &line.runs).any(|run| run.text.starts_with("E = mc")))
+            })
+        else {
+            panic!("expected the script text box");
+        };
+        let line = lines
+            .iter()
+            .find(|line| line.runs.iter().any(|run| run.text == "E = mc"))
+            .unwrap();
+        let base = &line.runs[0];
+        let raised = &line.runs[1];
+        let plain = &line.runs[2];
+        let lowered = &line.runs[3];
+        assert_eq!(
+            [
+                base.text.as_str(),
+                raised.text.as_str(),
+                plain.text.as_str(),
+                lowered.text.as_str()
+            ],
+            ["E = mc", "2", " and H", "2"]
+        );
+        assert_eq!(base.baseline_offset_px, 0.0);
+        assert_eq!(plain.baseline_offset_px, 0.0);
+        assert_eq!(base.font_size_px, plain.font_size_px);
+
+        let em = points_to_px(17.0);
+        assert!((raised.baseline_offset_px - em * 0.30).abs() < 0.01);
+        assert!((lowered.baseline_offset_px + em * 0.25).abs() < 0.01);
+        assert!((raised.font_size_px - 13.146666).abs() < 0.01);
+        assert!((lowered.font_size_px - 13.146666).abs() < 0.01);
+        assert!(
+            (raised.glyphs[0].y_offset - (base.glyphs[0].y_offset - raised.baseline_offset_px))
+                .abs()
+                < 0.01
+        );
+        assert!(lowered.glyphs[0].y_offset > base.glyphs[0].y_offset);
+        assert!(line.baseline - raised.baseline_offset_px - raised.font_size_px >= line.y);
+    }
+
+    #[test]
+    fn baseline_cascade_keeps_zero_overrides_and_expands_line_metrics() {
+        let mut package = pptx_parse::parse_pptx(include_bytes!(
+            "../tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[3] else {
+            panic!("shape")
+        };
+        let body = shape.text.as_mut().unwrap();
+        body.list_style = vec![pptx_parse::ParagraphProperties {
+            default_run: Some(RunProperties {
+                baseline_pct: Some(150.0),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }];
+        body.paragraphs[0]
+            .properties
+            .default_run
+            .as_mut()
+            .unwrap()
+            .baseline_pct = None;
+        body.paragraphs[0].runs = [None, Some(-150.0), Some(0.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, baseline)| pptx_parse::TextRun {
+                text: ["A", "B", "C"][i].into(),
+                properties: RunProperties {
+                    font_size_pt: Some(17.0),
+                    baseline_pct: baseline,
+                    ..Default::default()
+                },
+                field_id: None,
+                field_type: None,
+                line_break: false,
+            })
+            .collect();
+        let session = DeckSession::from_package(package, 331).unwrap();
+        let rendered = renderer()
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap();
+        let Primitive::TextBox { lines, .. } = rendered
+            .display_list
+            .primitives
+            .iter()
+            .find(|p| matches!(p, Primitive::TextBox { object_id: 5, .. }))
+            .unwrap()
+        else {
+            panic!("text")
+        };
+        let line = &lines[0];
+        assert_eq!(line.runs.len(), 3);
+        for (run, shift, size) in [
+            (&line.runs[0], 34.0, 13.146666),
+            (&line.runs[1], -34.0, 13.146666),
+            (&line.runs[2], 0.0, 22.666666),
+        ] {
+            assert!((run.baseline_offset_px - shift).abs() < 0.001);
+            assert!((run.font_size_px - size).abs() < 0.001);
+            assert!((run.glyphs[0].y_offset - (line.baseline - shift)).abs() < 0.001);
+        }
+        assert!(line.baseline - line.y > 34.0);
+        assert!(line.y + line.height - line.baseline > 34.0);
     }
 
     #[test]

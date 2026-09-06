@@ -282,6 +282,9 @@ pub struct PositionedTextRun {
     pub italic: bool,
     pub underline: bool,
     pub color: String,
+    /// Pixels this run's baseline sits above the line's; negative is subscript.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub baseline_offset_px: f32,
     pub glyphs: Vec<PositionedGlyph>,
 }
 

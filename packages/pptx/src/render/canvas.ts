@@ -397,11 +397,17 @@ function paintTextRun(
   const weight = run.bold ? 'bold ' : '';
   ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(run.fontFamily)}`;
   ctx.fillStyle = run.color;
+  const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
   for (const chunk of positionedTextChunks(run)) {
-    ctx.fillText(chunk.text, chunk.x, baseline);
+    ctx.fillText(chunk.text, chunk.x, runBaseline);
   }
   if (run.underline) {
-    ctx.fillRect(run.x, baseline + run.fontSizePx * 0.08, run.width, Math.max(1, run.fontSizePx * 0.05));
+    ctx.fillRect(
+      run.x,
+      runBaseline + run.fontSizePx * 0.08,
+      run.width,
+      Math.max(1, run.fontSizePx * 0.05)
+    );
   }
 }
 

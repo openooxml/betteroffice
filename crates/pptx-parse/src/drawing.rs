@@ -994,6 +994,7 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
                 .attribute("startAt")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1),
+            restart: value.attribute("startAt").is_some(),
         })
     };
     ParagraphProperties {
@@ -1086,6 +1087,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite())
             .map(|value| value / 100.0),
+        baseline_pct: element
+            .attribute("baseline")
+            .and_then(|value| value.parse::<i32>().ok())
+            .map(|value| f64::from(value) / 1000.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
@@ -1466,6 +1471,63 @@ mod tests {
             None
         );
         assert_eq!(spacing(""), None);
+    }
+
+    #[test]
+    fn a_run_baseline_reads_as_a_signed_percentage() {
+        for (value, expected) in [
+            ("150000", Some(150.0)),
+            ("-150000", Some(-150.0)),
+            ("2147483647", Some(2147483.647)),
+            ("-2147483648", Some(-2147483.648)),
+            ("2147483648", None),
+            ("-2147483649", None),
+            ("NaN", None),
+            ("inf", None),
+            ("1.5", None),
+        ] {
+            let element = XmlElement::new("a:rPr").with_attribute("baseline", value);
+            assert_eq!(
+                parse_run_properties(Some(&element)).baseline_pct,
+                expected,
+                "{value}"
+            );
+        }
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr baseline="0"/></a:pPr><a:r><a:rPr sz="1200"/><a:t>base</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>up</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>down</a:t></a:r><a:r><a:rPr sz="1200" baseline="nonsense"/><a:t>junk</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let text = shape.text.as_ref().unwrap();
+        let baselines: Vec<Option<f64>> = text.paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| run.properties.baseline_pct)
+            .collect();
+        assert_eq!(baselines, [None, Some(30.0), Some(-25.0), None]);
+        assert_eq!(
+            text.paragraphs[0]
+                .properties
+                .default_run
+                .as_ref()
+                .unwrap()
+                .baseline_pct,
+            Some(0.0)
+        );
     }
 
     #[test]
@@ -1877,5 +1939,36 @@ mod tests {
         let actual = values.get(name).unwrap();
         assert_eq!(actual.value, expected);
         assert_eq!(actual.extent_power, expected_power);
+    }
+
+    #[test]
+    fn autonumber_start_presence_survives_parsing_and_default_serialization() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        for (attribute, start_at, restart) in [
+            ("", 1, false),
+            (" startAt=\"1\"", 1, true),
+            (" startAt=\"7\"", 7, true),
+        ] {
+            let xml = format!("<a:pPr><a:buAutoNum type=\"arabicPeriod\"{attribute}/></a:pPr>");
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            let bullet = parse_paragraph_properties(Some(&root)).bullet.unwrap();
+            assert_eq!(
+                bullet,
+                Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at,
+                    restart
+                }
+            );
+            let json = serde_json::to_string(&bullet).unwrap();
+            assert_eq!(serde_json::from_str::<Bullet>(&json).unwrap(), bullet);
+            if !restart {
+                assert_eq!(
+                    json,
+                    r#"{"type":"autoNumber","scheme":"arabicPeriod","startAt":1}"#
+                );
+            }
+        }
     }
 }
