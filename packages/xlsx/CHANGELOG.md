@@ -1,5 +1,14 @@
 # @betteroffice/xlsx
 
+## 0.1.1
+
+### Patch Changes
+
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+- 5798031: Load Excel shared formulas with correct absolute and relative references for
+  recalculation and round-trip saves.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(...,S:V,...)`.
+
 ## 0.1.0
 
 ### Minor Changes

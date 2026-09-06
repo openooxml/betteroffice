@@ -1,5 +1,91 @@
 # @betteroffice/rust-crates
 
+## 0.2.0
+
+### Minor Changes
+
+- 1d0f41d: Round-trip DOCX packages as a byte-stable fixed point that keeps the authored section properties, simple fields, drawing names, foreign markup, unknown attributes and custom root bindings (new public model fields and enum variants).
+- 8b9f363: The `betteroffice-opc` `wasm` feature is opt-in instead of default, so native dependants no longer pull wasm-bindgen and js-sys; wasm consumers enable it explicitly.
+- d6e6e91: Read, add, reply to, resolve and remove PowerPoint comments in both the legacy and modern formats, saved by patching the existing comment XML in place (deck schema v8; older clients reject new updates until upgraded).
+- bf84789: Set paragraph alignment from the presentation toolbar.
+- 387f239: Add PPTX-to-PNG export for Rust, Python, and browsers, plus an Export PNG button
+  in the React editor.
+
+  Rust: enable the `raster` feature; exhaustive `Error` matches must handle the new
+  `Raster` variant.
+
+- 187cebc: Intern styles through hash indexes instead of linear scans. `Stylesheet` gains private interning caches, which prevent exhaustive struct-literal construction downstream; the caches are internal state only and excluded from serialization and equality.
+
+### Patch Changes
+
+- 45798dd: Compare layout blocks structurally instead of fingerprinting serialized JSON.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- cf9a2f5: Share glyph caches across pages and stop re-parsing fonts per run.
+- 6f0e36d: Hide suppressed list-number placeholders while preserving literal labels.
+- 8ea2659: Preserve paragraph measurement values across the typed layout path.
+- 1fca3b6: Measure paragraphs through a typed path instead of serializing to JSON per call.
+- 010865c: Measure block arrow heads from the shortest side while preserving shaft widths across aspect ratios.
+- 2877aba: Render automatic list numbers with bullet formatting, preserve explicit restarts when editing and saving, and migrate collaboration snapshots to schema 11 after the schema-10 baseline migration.
+- 1f30ea0: Apply picture duotone, biLevel, grayscale and colour-change effects in Canvas, PNG exports and the native viewer, preserving alpha and migrating older collaboration snapshots.
+- 899aac5: Round an automatic value axis to whole `{1, 2, 5} x 10^k` steps and widen its unpinned ends to the next step, so a stacked bar no longer ends on the plot edge.
+- c4985a8: Respect explicit chart data label settings that disable every field.
+- bfc3231: Reserve space for top and bottom chart legends, wrap their entries to fit, and center PowerPoint chart titles.
+- d2aaf9c: Paint a chart's own `c:chartSpace` fill instead of a white ground, and stroke each axis line with its own `a:ln` colour and width, or not at all under `a:noFill`.
+
+  Migrate collaboration snapshots to schema 15 after the existing schema-14 gradient-outline migration, importing chart-space fills and axis lines from a reattached source.
+
+- bc34dfc: Parse connector shapes and preserve legacy collaboration updates when editing and saving.
+- 0c9b52e: Render numeric custom geometry paths, including elliptical arcs and separate path fills and strokes. Preserve custom geometry in schema 7 collaboration snapshots and migrate versions 1–6 after the existing hidden-shape migration.
+- 69167fe: Paint justified lines at their caret positions and keep editor gestures consistent.
+- 413499c: Preserve weight and slant when substituting missing presentation fonts, and choose
+  the nearest fallback style consistently regardless of face registration order.
+- 2044df7: Render gradient outlines across browser, raster, and native backends while preserving their paint through theme inheritance, width edits, and legacy snapshot migration.
+- 8b48e8d: Render unordered gradient stops correctly in slide display lists and raster output while preserving equal-position stop order and source XML.
+- 54fdaa0: Skip hidden slide shapes and hidden groups' descendants when painting and hit-testing.
+
+  Deck schema 6 migrates existing version 1–5 documents by recovering hidden flags from stored package data after the schema-5 theme-formatting migration. Older clients reject the new schema.
+
+  `ShapeSnapshot.hidden` is optional and omitted when false, preserving unchanged snapshot JSON. Only hidden shapes store a Yrs key; the schema stamp changes for all decks.
+
+- cca2618: Transpose horizontal bar chart axes, preserve category direction, and reserve space for category labels, axis titles, and secondary value ticks.
+- 2b639b9: Render triangle, open arrow, stealth, diamond, and oval line ends on the PPTX
+  canvas, preserving their independent width and length settings.
+- 2c90c17: Apply inherited list styles and render character bullets with their own formatting while preserving caret positions and migrating collaboration snapshots to schema 9.
+- 3d95068: Apply inherited paragraph line spacing, preserve baselines for expanded point spacing, and migrate collaboration snapshots to schema 12 after baseline and numbering migrations.
+- 70e7394: Crop pictures to their `srcRect` and clip and outline their preset masks in Canvas, PNG exports, and the native viewer. Preserve JSON for uncropped rectangular pictures.
+- 0824bff: Scale chevron and homePlate adjustments from the shortest side, allow their points to span the full width, and normalize DOCX preset guide values consistently.
+- 069e4d6: Render superscript and subscript runs at their shifted baselines and preserve their formatting through edits and saved decks.
+- 1e86217: Render gradient-filled text using its lowest valid stop and preserve authored gradients across text edits until their color changes.
+- 89f8f7b: Preserve each text run's colour, weight, italic, underline, and size while keeping identically styled adjacent runs grouped.
+- 9274a2b: Render stretched picture fills through shape geometry and retain their source data across collaboration snapshots.
+
+  Migrate collaboration snapshots to schema 13 after the existing schema-12 line-spacing migration, preserving source imports and edited text.
+
+- 25d4ee4: Use shape font-reference colours above master text defaults while preserving run, paragraph, and placeholder colours.
+- 7fdc0ee: Evaluate slide-number fields on masters and layouts, counting from the presentation's first slide number.
+
+  Collaboration snapshots use deck schema v4. Older snapshots migrate through the
+  existing v3 connector migration before the v4 slide-number migration; missing
+  starting numbers default to one. Readers supporting only v3 reject v4 snapshots.
+
+- 07d72ce: Keep shape text unmirrored and honor vertical text direction, insets, and caret positions without changing ordinary horizontal rotations.
+- 1af946f: Render overflowing text at its intended size and anchor across backends, preserve explicit clipping, and keep transformed text clickable while migrating collaboration snapshots to schema 16.
+- a3b2acd: Resolve DrawingML font references to the theme's major or minor script face, using its Latin face when the requested script slot is empty.
+- 2710a41: Resolve PPTX theme fill and line references, including background fills and placeholder colour transforms. Preserve explicit shape and placeholder formatting. Preserve font reference colours from the existing text-style resolver.
+
+  Migrate v1–v4 deck snapshots to schema 5 after the existing connector and slide-number migrations, preserving edits, numbering and source ordinals.
+
+- 7202c79: Scrub unrecognized binary parts during redaction. A part is kept only when it is recognized media or XML; every other part is emptied, and it is removed outright — together with its owned relationship part, that part's exclusive targets and its content-type declaration — when no surviving relationship points at it. The XML rewriter and the scrubber now share one reading of relationship markup, so they cannot disagree about which targets leave the package, and a part is only removed when every surviving relationship resolves to a stored entry.
+- 188540f: Redact relationship targets that carry a URI scheme, are protocol-relative or name a UNC share even when TargetMode is missing or oddly spelled, and declare the mode on the rewritten relationship.
+- 2d1b9d0: Media placeholders are now a fixed 64x64 blank image instead of matching the source dimensions, and WMF/EMF parts become blank metafile stubs instead of failing the whole redaction.
+- b59ba43: Resolve each font slot's fallback chain once per run during measurement.
+- aacdacc: Cache tokenized number formats across renders.
+- 79db755: Reuse formula parses and shift cell maps in place during structural edits.
+- 5798031: Load Excel shared formulas with correct absolute and relative references for
+  recalculation and round-trip saves.
+- b07afd7: Write sheetData in one pass instead of rescanning cells per row.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(...,S:V,...)`.
+
 ## 0.1.0
 
 ### Minor Changes

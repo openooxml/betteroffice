@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/xlsx-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Excel-faithful React XLSX spreadsheet editor and viewer — full OOXML fidelity, real-time human + AI agent collaboration.",
   "keywords": [
     "xlsx",
