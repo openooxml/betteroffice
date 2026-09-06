@@ -2283,18 +2283,29 @@ fn compute_list_marker(values: &BTreeMap<String, Any>, state: &mut ListState) ->
     }
 
     let level = map_number(num_pr, "ilvl").unwrap_or(0.0).max(0.0) as usize;
-    let formats = list_level_formats(values);
+    let mut formats = list_level_formats(values);
     let level_format = formats
         .get(level)
         .cloned()
         .or_else(|| value_string(values.get("listNumFmt")));
-    if level_format.as_deref() == Some("none") {
-        return marker.filter(|value| !value.is_empty());
-    }
-
     let counter_key = value_number(values.get("listAbstractNumId"))
         .unwrap_or(num_id)
         .to_string();
+    if level_format.as_deref() == Some("none") {
+        if level < 9 && formats.len() <= level {
+            formats.resize(level + 1, "decimal".to_owned());
+            formats[level] = "none".to_owned();
+        }
+        let counters = state
+            .counters
+            .get(&counter_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        return marker
+            .map(|template| resolve_list_template(&template, counters, &formats))
+            .filter(|value| !value.is_empty());
+    }
+
     let counters = state
         .counters
         .entry(counter_key)
@@ -3304,6 +3315,47 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn none_format_without_level_formats_suppresses_an_existing_counter() {
+        let mut state = ListState::default();
+        state.counters.insert("41".to_owned(), vec![3]);
+        let values = BTreeMap::from([
+            (
+                "numPr".to_owned(),
+                any_map([("numId", Any::Number(41.0)), ("ilvl", Any::Number(0.0))]),
+            ),
+            ("listNumFmt".to_owned(), Any::String("none".into())),
+            ("listMarker".to_owned(), Any::String("%1".into())),
+        ]);
+        assert_eq!(compute_list_marker(&values, &mut state), None);
+        assert_eq!(state.counters["41"], [3]);
+    }
+
+    #[test]
+    fn none_format_preserves_references_to_numbered_ancestors() {
+        let mut state = ListState::default();
+        state.counters.insert("41".to_owned(), vec![3, 0]);
+        let values = BTreeMap::from([
+            (
+                "numPr".to_owned(),
+                any_map([("numId", Any::Number(42.0)), ("ilvl", Any::Number(1.0))]),
+            ),
+            ("listAbstractNumId".to_owned(), Any::Number(41.0)),
+            (
+                "listLevelNumFmts".to_owned(),
+                Any::from_json(r#"["decimal", "none"]"#).unwrap(),
+            ),
+            (
+                "listMarker".to_owned(),
+                Any::String("Parent %1 child %2".into()),
+            ),
+        ]);
+        assert_eq!(
+            compute_list_marker(&values, &mut state).as_deref(),
+            Some("Parent 3 child ")
+        );
     }
 
     fn format_range(doc: &EditingDoc, start: u32, end: u32, attrs: Vec<(&'static str, Any)>) {

@@ -41,6 +41,7 @@ pub enum BlockContent {
     Paragraph(Paragraph),
     Table(Table),
     BlockSdt(BlockSdt),
+    RawXml(crate::inline::RawInlineXml),
 }
 
 impl BlockContent {
@@ -48,6 +49,7 @@ impl BlockContent {
         match self {
             Self::Paragraph(paragraph) => &paragraph.node_type,
             Self::Table(table) => &table.node_type,
+            Self::RawXml(_) => "rawXml",
             Self::BlockSdt(sdt) => &sdt.node_type,
         }
     }
@@ -113,6 +115,11 @@ impl StoryParser<'_, '_> {
                 "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
             );
             if !recognized {
+                if let Some(crate::inline::InlineNode::RawXml(raw)) =
+                    crate::inline::raw_foreign_inline(child)
+                {
+                    content.push(BlockContent::RawXml(*raw));
+                }
                 continue;
             }
             let events = scan_field_block_events(child);
@@ -359,6 +366,7 @@ impl StoryParser<'_, '_> {
         }
         let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
         shape.id = text_box.id;
+        shape.name = text_box.name;
         shape.position = text_box.position;
         shape.wrap = text_box.wrap;
         shape.fill = text_box.fill;
@@ -577,6 +585,7 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -607,6 +616,7 @@ fn empty_paragraph() -> Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,

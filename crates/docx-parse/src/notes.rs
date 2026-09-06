@@ -13,6 +13,9 @@ pub struct Note {
     pub id: f64,
     pub note_type: String,
     pub content: Vec<BlockContent>,
+    /// Inherited root bindings required by foreign note content.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbatim_xml: Option<String>,
 }
@@ -42,7 +45,21 @@ pub fn parse_notes(
         parser.budget.charge_note(parser.part)?;
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         let content = parser.parse_blocks(element, 0, false)?;
-        let verbatim_xml = has_unmodeled_direct_block(element).then(|| element.to_raw_inline_xml());
+        let custom_root_bindings = if has_foreign_content(element) {
+            crate::document::custom_root_bindings(root)
+        } else {
+            Vec::new()
+        };
+        let verbatim_xml = has_unmodeled_direct_block(element).then(|| {
+            let mut bound = element.clone();
+            for attribute in &custom_root_bindings {
+                bound
+                    .attributes
+                    .entry(attribute.name.clone())
+                    .or_insert_with(|| attribute.value.clone());
+            }
+            bound.to_raw_inline_xml()
+        });
         notes.push(Note {
             story_type: note_name.to_owned(),
             id: element
@@ -50,10 +67,16 @@ pub fn parse_notes(
                 .unwrap_or(0.0),
             note_type: note_type.to_owned(),
             content,
+            custom_root_bindings,
             verbatim_xml,
         });
     }
     Ok(notes)
+}
+
+fn has_foreign_content(element: &XmlElement) -> bool {
+    crate::inline::raw_foreign_inline(element).is_some()
+        || element.child_elements().any(has_foreign_content)
 }
 
 pub fn parse_note_type(value: Option<&str>) -> &'static str {
@@ -299,7 +322,13 @@ mod tests {
             false,
             &ParseLimits::default(),
         );
-        assert!(notes[0].verbatim_xml.as_deref().unwrap().contains("a&b"));
+        assert!(
+            notes[0]
+                .verbatim_xml
+                .as_deref()
+                .unwrap()
+                .contains("a&amp;b")
+        );
         assert!(notes[1].verbatim_xml.is_none());
     }
 
