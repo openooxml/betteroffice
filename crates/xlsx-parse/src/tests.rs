@@ -101,6 +101,123 @@ fn parses_shared_string_number_formula_bool_error() {
 }
 
 #[test]
+fn parses_absolute_and_relative_concatenation() {
+    for formula in [
+        r#"$B$6&"A"&$B$4&"B"&$D$2"#,
+        r#"B6&"A"&B4&"B"&D2"#,
+        r#"$B6&"A"&B$4&"B"&D2"#,
+    ] {
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="str"><f>{}</f><v/></c></row></sheetData>"#,
+            formula.replace('&', "&amp;")
+        );
+        let wb = parse_workbook(&package(&body, &[], false)).unwrap();
+        assert_eq!(cell_at(&wb, "A1").formula.as_deref(), Some(formula));
+    }
+}
+
+#[test]
+fn expands_shared_formulas_and_preserves_source_until_edited() {
+    let mut parts = package("", &[], false);
+    let source = include_bytes!("../tests/fixtures/shared-formulas.xml");
+    parts[2].1 = source.to_vec();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&parsed.workbook, address).formula.as_deref(),
+            Some(r#"$B$6&"A"&$B$4&"B"&$D$2"#)
+        );
+    }
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&unchanged, "xl/worksheets/sheet1.xml"), source);
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let reopened = parse_workbook(&saved).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&reopened, address).formula,
+            cell_at(&edited, address).formula
+        );
+    }
+}
+
+#[test]
+fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
+    let body = r#"<sheetData>
+        <row r="1"><c r="A1"><f t="shared" si="7">999</f><v>10</v></c></row>
+        <row r="2"><c r="A2"><f>99</f><v>99</v></c><c r="B2"><f t="shared" si="7" ref="A1:C3">A1+$A1+A$1+$A$1</f><v>20</v></c></row>
+        <row r="3"><c r="A3"><v>55</v></c><c r="C3"><f t="shared" si="7"/><v>30</v></c></row>
+    </sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(
+        cell_at(&wb, "A1").formula.as_deref(),
+        Some("#REF!+#REF!+#REF!+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "A1").value, CellValue::Number { value: 10.0 });
+    assert_eq!(
+        cell_at(&wb, "C3").formula.as_deref(),
+        Some("B2+$A2+B$1+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "C3").value, CellValue::Number { value: 30.0 });
+    assert_eq!(cell_at(&wb, "A2").formula.as_deref(), Some("99"));
+    assert_eq!(cell_at(&wb, "A3").formula, None);
+    assert_eq!(wb.sheets[0].iter_cells().count(), 5);
+}
+
+#[test]
+fn shared_formula_indices_are_scoped_to_each_worksheet() {
+    let first = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:B1">C1</f></c><c r="B1"><f t="shared" si="0"/></c></row></sheetData>"#;
+    let second = first.replace(">C1</f>", ">$C$9</f>");
+    let wb = parse_workbook(&two_sheet_package(first, &second)).unwrap();
+    let address = CellRef::parse_a1("B1").unwrap();
+    assert_eq!(
+        wb.sheets[0].cell(address).unwrap().formula.as_deref(),
+        Some("D1")
+    );
+    assert_eq!(
+        wb.sheets[1].cell(address).unwrap().formula.as_deref(),
+        Some("$C$9")
+    );
+}
+
+#[test]
+fn shared_formula_ranges_do_not_allocate_implicit_cells() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:XFD1048576">1</f></c></row></sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(wb.sheets[0].iter_cells().count(), 1);
+}
+
+#[test]
+fn malformed_shared_groups_fail_instead_of_losing_formulas() {
+    for cells in [
+        r#"<c r="A1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="-1" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="4294967296" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="B1:B2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2">1</f></c><c r="B1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:B1">1</f></c><c r="B1"><f t="shared" si="0" ref="A1:B1">2</f></c>"#,
+    ] {
+        let body = format!("<sheetData><row r=\"1\">{cells}</row></sheetData>");
+        assert!(
+            matches!(
+                parse_workbook(&package(&body, &[], false)),
+                Err(ParseError::Malformed(_))
+            ),
+            "{cells}"
+        );
+    }
+}
+
+#[test]
 fn parses_inline_string() {
     let body = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>inline &lt;here&gt;</t></is></c></row></sheetData>"#;
     let wb = parse_workbook(&package(body, &[], false)).unwrap();

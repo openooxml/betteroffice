@@ -227,7 +227,15 @@ pub fn parse_section_properties(element: Option<&XmlElement>) -> SectionProperti
         distance: numeric(line, "distance"),
         restart: enum_attribute(line, "restart", &["continuous", "newPage", "newSection"]),
     });
-    value.page_numbering = None;
+    value.page_numbering =
+        element
+            .child("w", "pgNumType")
+            .map(|numbering| PageNumberingProperties {
+                start: numeric(numbering, "start"),
+                format: numbering.attribute(Some("w"), "fmt").map(str::to_owned),
+                chapter_style: numeric(numbering, "chapStyle"),
+                chapter_separator: numbering.attribute(Some("w"), "chapSep").map(str::to_owned),
+            });
     value.page_borders = parse_page_borders(element.child("w", "pgBorders"));
     value.background = parse_background(element.child("w", "background"));
     if let Some(properties) = element.child("w", "footnotePr") {
@@ -446,6 +454,45 @@ mod tests {
         assert!(
             crate::serializer::serialize_section_properties(Some(&properties))
                 .contains(r#"<w:type w:val="nextColumn"/>"#)
+        );
+    }
+
+    #[test]
+    fn a_count_less_cols_with_authored_space_round_trips() {
+        let limits = ParseLimits::default();
+        let document = parse_xml(
+            br#"<w:sectPr><w:cols w:space="708"/></w:sectPr>"#,
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let properties = parse_section_properties(document.root());
+        assert_eq!(properties.column_space, Some(708.0));
+        assert!(
+            crate::serializer::serialize_section_properties(Some(&properties))
+                .contains(r#"<w:cols w:space="708">"#)
+        );
+    }
+
+    #[test]
+    fn page_numbering_parses_and_round_trips() {
+        let limits = ParseLimits::default();
+        let document = parse_xml(
+            br#"<w:sectPr><w:pgNumType w:fmt="lowerRoman" w:start="1" w:chapStyle="1" w:chapSep="hyphen"/></w:sectPr>"#,
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let properties = parse_section_properties(document.root());
+        let numbering = properties.page_numbering.as_ref().unwrap();
+        assert_eq!(numbering.start, Some(1.0));
+        assert_eq!(numbering.format.as_deref(), Some("lowerRoman"));
+        assert_eq!(numbering.chapter_style, Some(1.0));
+        assert_eq!(numbering.chapter_separator.as_deref(), Some("hyphen"));
+        assert!(
+            crate::serializer::serialize_section_properties(Some(&properties)).contains(
+                r#"<w:pgNumType w:fmt="lowerRoman" w:start="1" w:chapStyle="1" w:chapSep="hyphen"/>"#
+            )
         );
     }
 }
