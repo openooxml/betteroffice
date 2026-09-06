@@ -276,9 +276,7 @@ dependencies = [
 name = "betteroffice-opc"
 version = "0.1.0"
 dependencies = [
- "js-sys",
  "quick-xml",
- "wasm-bindgen",
  "zip",
 ]
 
