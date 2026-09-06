@@ -117,3 +117,23 @@ properties, preserves edits, and persists them for source-free reopening.
 Released v1 and historical v2–v11 fixtures traverse every remaining migration
 in order; v12 seeds undergo only the picture-fill migration. Reopening is
 idempotent, and versions newer than 13 are rejected.
+
+`gradient-outline-main-v10.update.bin` was exported by `DeckSession::open` at
+main `069e4d66bf749869ad581114dd3e4e4c721ed07f` (schema 10) from
+`crates/pptx-parse/tests/fixtures/gradient-outline.pptx`, with client ID 322.
+It remains the historical oracle that traverses the numbering, line-spacing,
+picture-fill, and gradient-outline migrations in order.
+
+`gradient-outline-main-v13.update.bin` is the same deck seeded by current main
+`9274a2ba042b4fcc05ecfad909ea0719ed8b13b1` (schema 13), using its locked
+dependencies and client ID 322. Copy `generate_gradient_schema_snapshots.rs`
+into that main checkout's `crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_gradient_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts schema 13 and that main reopens the seed unchanged. Both
+fixtures test the schema-14 gradient-outline migration, deferred source
+recovery, part-preserving saves, and retention of explicit outline edits; the
+v13 seed undergoes only that migration, and versions newer than 14 are rejected.
