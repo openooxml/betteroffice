@@ -18,6 +18,7 @@ mod baseline;
 mod comments;
 mod deck;
 mod model;
+mod outline_gradients;
 mod save;
 mod story;
 mod undo;
@@ -161,6 +162,7 @@ impl DeckSession {
         comments::import_source_comments(&session, &package)?;
         deck::import_source_list_styles(&session.doc, &package)?;
         baseline::import_source(&session, &package)?;
+        outline_gradients::import_source(&session, &package)?;
         Ok(Self {
             package: Arc::new(package),
             ..session

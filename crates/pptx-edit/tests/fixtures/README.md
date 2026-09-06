@@ -73,3 +73,9 @@ were generated on main `2c90c17f` from
 `../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+`gradient-outline-main-v10.update.bin` was exported by `DeckSession::open` at
+main `069e4d66bf749869ad581114dd3e4e4c721ed07f` from
+`crates/pptx-parse/tests/fixtures/gradient-outline.pptx`, with client ID 322.
+It tests v10 to v11 migration, deferred source recovery, part-preserving saves,
+and retention of explicit outline edits.

@@ -248,7 +248,7 @@ export interface StrokeEnd {
 }
 
 export interface Stroke {
-  /** Flat colour for consumers that predate `paint`; the gradient's first stop when `paint` is one. */
+  /** Solid colour or first gradient stop. */
   color: string;
   width: number;
   dashed?: boolean;

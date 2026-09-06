@@ -109,14 +109,18 @@ describe('PPTX canvas replay', () => {
   test('strokes a gradient outline with a gradient sized to the shape box', async () => {
     const gradients: Array<{ args: number[]; stops: Array<[number, string]> }> = [];
     let strokeStyle: unknown;
+    let fillStyle: unknown;
+    const objects: unknown[] = [];
     const ctx = new Proxy(
       {
         createLinearGradient: (...args: number[]) => {
           const entry = { args, stops: [] as Array<[number, string]> };
           gradients.push(entry);
-          return {
+          const gradient = {
             addColorStop: (position: number, color: string) => entry.stops.push([position, color]),
           };
+          objects.push(gradient);
+          return gradient;
         },
       } as Record<string, unknown>,
       {
@@ -126,6 +130,7 @@ describe('PPTX canvas replay', () => {
         },
         set(target, property, value) {
           if (property === 'strokeStyle') strokeStyle = value;
+          if (property === 'fillStyle') fillStyle = value;
           target[property as string] = value;
           return true;
         },
@@ -168,14 +173,25 @@ describe('PPTX canvas replay', () => {
 
     await paintSlide(ctx, list, 1);
     expect(gradients).toHaveLength(1);
-    // centred on the shape box, spanning its diagonal, as the raster backend does
     expect(gradients[0]?.args).toEqual([20, 40, 220, 40]);
     expect(gradients[0]?.stops).toEqual([
       [0, '#c00000'],
       [1, '#c2c2c2'],
     ]);
-    // the gradient object reaches strokeStyle, not the flat fallback colour
-    expect(typeof strokeStyle).toBe('object');
+    expect(strokeStyle).toBe(objects[0]);
+    const shape = list.primitives[0];
+    if (shape?.kind !== 'shape' || !shape.stroke) throw new Error('shape');
+    shape.stroke.tailEnd = { kind: 'triangle', width: 9, length: 9 };
+    await paintSlide(ctx, list, 1);
+    expect(fillStyle).toBe(objects[2]);
+    expect(strokeStyle).toBe(objects[2]);
+    list.primitives = [{
+      kind: 'image', objectId: 2, name: 'Outline', x: 20, y: 40, w: 200, h: 0,
+      stroke: shape.stroke,
+    }];
+    await paintSlide(ctx, list, 1);
+    expect(strokeStyle).toBe(objects[3]);
+    expect(gradients[3]?.args).toEqual([20, 40, 220, 40]);
   });
 
   test('paints chart parts clipped to the chart rectangle', async () => {

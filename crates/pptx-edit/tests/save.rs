@@ -306,7 +306,8 @@ fn a_width_only_stroke_edit_keeps_a_gradient_outline() {
     let outline = restyled.outline.as_ref().unwrap();
 
     assert_eq!(outline.width, Some(38_100.0));
-    assert_eq!(outline.gradient.as_ref().unwrap().stops.len(), 3);
+    assert_eq!(outline.gradient, shape.outline.as_ref().unwrap().gradient);
+    assert!(outline.color.is_none());
 }
 
 #[test]
@@ -340,6 +341,15 @@ fn a_colour_stroke_edit_replaces_a_gradient_outline() {
             },
         )
         .unwrap();
+
+    assert!(
+        session.snapshot().unwrap().slides[0].shapes[0]
+            .outline
+            .as_ref()
+            .unwrap()
+            .gradient
+            .is_none()
+    );
 
     let reopened = reopen(&session);
     let restyled = reopened
@@ -866,4 +876,53 @@ fn a_comment_on_a_newly_inserted_slide_survives_the_save() {
     );
     assert_eq!(snapshot.comments[0].text, "Fresh slide, fresh comment.");
     assert_eq!(snapshot.comments[0].slide_id, snapshot.slides[1].id);
+}
+
+#[test]
+fn width_edits_preserve_authored_gradient_geometry() {
+    let mut parts = ooxml_opc::unzip_parts(GRADIENT_OUTLINE_FIXTURE).unwrap();
+    let (_, slide) = parts
+        .iter_mut()
+        .find(|(path, _)| path == "ppt/slides/slide1.xml")
+        .unwrap();
+    *slide = String::from_utf8(slide.clone())
+        .unwrap()
+        .replace(
+            "<a:gradFill>",
+            "<a:gradFill flip=\"xy\" rotWithShape=\"0\">",
+        )
+        .replace("scaled=\"1\"", "scaled=\"0\"")
+        .replace(
+            "</a:gradFill>",
+            "<a:tileRect l=\"10000\" t=\"20000\" r=\"30000\" b=\"40000\"/></a:gradFill>",
+        )
+        .into_bytes();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let session = DeckSession::open(&source, 32208).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    session
+        .set_shape_stroke(
+            &EditCtx::local("test"),
+            &snapshot.slides[0].id,
+            &snapshot.slides[0].shapes[0].id,
+            &ShapeStroke {
+                color: None,
+                width_pt: Some(3.0),
+            },
+        )
+        .unwrap();
+    let saved = ooxml_opc::unzip_parts(&session.save().unwrap()).unwrap();
+    let xml = String::from_utf8(
+        saved
+            .iter()
+            .find(|(path, _)| path == "ppt/slides/slide1.xml")
+            .unwrap()
+            .1
+            .clone(),
+    )
+    .unwrap();
+    assert_eq!(xml.matches("flip=\"xy\"").count(), 2);
+    assert_eq!(xml.matches("scaled=\"0\"").count(), 2);
+    assert_eq!(xml.matches("<a:tileRect").count(), 2);
+    assert_eq!(xml.matches("rotWithShape=\"0\"").count(), 2);
 }

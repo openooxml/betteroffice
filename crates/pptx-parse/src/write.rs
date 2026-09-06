@@ -1595,6 +1595,19 @@ fn format_fixed(value: f64) -> String {
 }
 
 fn set_outline(properties: &mut XmlElement, outline: &ShapeOutline, prefixes: &Prefixes) {
+    if let Some(line) = properties.child_mut("ln")
+        && let Some(mut original) = crate::drawing::parse_outline_element(line)
+    {
+        original.width = outline.width;
+        if original == *outline {
+            if let Some(width) = outline.width {
+                line.set_attribute("w", format_fixed(width));
+            } else {
+                line.attributes.remove("w");
+            }
+            return;
+        }
+    }
     let element = outline_element(outline, prefixes);
     let existing = properties.children.iter().position(
         |child| matches!(child, XmlNode::Element(element) if element.local_name() == "ln"),
@@ -2475,6 +2488,29 @@ mod tests {
     use crate::drawing::parse_run_properties;
     use crate::model::ShapeElements;
     use crate::xml::{ParseBudget, parse_xml};
+
+    #[test]
+    fn a_new_gradient_outline_writes_its_stops_and_angle() {
+        let package =
+            crate::parse_pptx(include_bytes!("../tests/fixtures/gradient-outline.pptx")).unwrap();
+        let crate::ShapeNode::Shape(shape) = &package.slides[0].shapes[0] else {
+            panic!("shape")
+        };
+        let outline = shape.outline.as_ref().unwrap();
+        let mut properties = XmlElement::new("p:spPr");
+        let prefixes = Prefixes::from_root(&mut properties);
+        set_outline(&mut properties, outline, &prefixes);
+        let line = properties.child("ln").unwrap();
+        assert_eq!(line.attribute("w"), Some("76200"));
+        let gradient = line.child("gradFill").unwrap();
+        assert_eq!(gradient.child("gsLst").unwrap().child_elements().count(), 3);
+        assert_eq!(gradient.child("lin").unwrap().attribute("ang"), Some("0"));
+        assert!(line.child("solidFill").is_none());
+        assert_eq!(
+            crate::drawing::parse_outline_element(line).as_ref(),
+            Some(outline)
+        );
+    }
 
     fn run_properties(xml: &[u8]) -> (XmlElement, Prefixes, RunProperties) {
         let limits = ParseLimits::default();

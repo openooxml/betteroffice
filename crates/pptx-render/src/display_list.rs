@@ -321,6 +321,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn solid_stroke_keeps_legacy_json_and_reads_missing_paint() {
+        let json = r##"{"color":"#123456","width":2.0,"dashed":true}"##;
+        let stroke: Stroke = serde_json::from_str(json).unwrap();
+        assert!(stroke.paint.is_none());
+        assert_eq!(serde_json::to_string(&stroke).unwrap(), json);
+    }
+
+    #[test]
     fn identity_transform_is_omitted_from_json() {
         let list = SurfaceDisplayList {
             contract_version: CONTRACT_VERSION,

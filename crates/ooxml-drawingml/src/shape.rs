@@ -45,7 +45,7 @@ pub struct ShapeOutline {
     pub width: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorValue>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradient: Option<GradientFill>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style: Option<String>,

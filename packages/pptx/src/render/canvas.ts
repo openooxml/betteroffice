@@ -157,8 +157,11 @@ function paintLineEnds(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): vo
   ];
   ctx.save();
   ctx.setLineDash([]);
-  ctx.fillStyle = stroke.color;
-  ctx.strokeStyle = stroke.color;
+  const style = stroke.paint
+    ? paintStyle(ctx, stroke.paint, shape.x, shape.y, shape.w, shape.h)
+    : stroke.color;
+  ctx.fillStyle = style;
+  ctx.strokeStyle = style;
   ctx.lineWidth = stroke.width;
   ctx.lineJoin = 'miter';
   for (const [end, from, tip] of ends) {

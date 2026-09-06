@@ -615,6 +615,7 @@ fn parse_shape_style(
                 .any(|child| is_fill_element(child) && !allowed.contains(&child.local_name()))
         })
     };
+    let line = properties.and_then(|value| value.child("ln"));
     let style = ShapeStyle {
         font_color: element
             .and_then(|value| value.child("fontRef"))
@@ -625,10 +626,10 @@ fn parse_shape_style(
             properties,
             &["solidFill", "gradFill", "blipFill", "noFill", "grpFill"],
         ),
-        line_disabled: unsupported(
-            properties.and_then(|value| value.child("ln")),
-            &["solidFill"],
-        ),
+        line_disabled: unsupported(line, &["solidFill", "gradFill"])
+            || line.is_some_and(|line| {
+                line.child("gradFill").is_some() && parse_outline_gradient(line).is_none()
+            }),
     };
     (!style.is_empty()).then_some(style)
 }
@@ -752,9 +753,7 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
     Some(ShapeOutline {
         width: line.attribute("w").and_then(|value| value.parse().ok()),
         color: line.child("solidFill").and_then(parse_color_container),
-        gradient: line
-            .child("gradFill")
-            .and_then(|fill| parse_gradient_fill(fill).gradient),
+        gradient: parse_outline_gradient(line),
         style: line
             .child("prstDash")
             .and_then(|value| value.attribute("val"))
@@ -767,6 +766,12 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
         head_end: line.child("headEnd").map(parse_line_end),
         tail_end: line.child("tailEnd").map(parse_line_end),
     })
+}
+
+fn parse_outline_gradient(line: &XmlElement) -> Option<GradientFill> {
+    line.child("gradFill")
+        .and_then(|fill| parse_gradient_fill(fill).gradient)
+        .filter(|gradient| !gradient.stops.is_empty())
 }
 
 fn parse_line_end(element: &XmlElement) -> LineEnd {
@@ -1431,6 +1436,12 @@ mod tests {
         assert_eq!(gradient.stops.len(), 2);
         assert_eq!(gradient.stops[0].color.rgb.as_deref(), Some("C00000"));
         assert_eq!(gradient.stops[1].position, 100_000.0);
+        assert!(
+            shape
+                .style
+                .as_ref()
+                .is_none_or(|style| !style.line_disabled)
+        );
     }
 
     #[test]
