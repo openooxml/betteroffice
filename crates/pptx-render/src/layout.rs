@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::chart::PlotRect;
+use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
-    ColorValue, LineEnd, ShapeEffects, ShapeFill, ShapeOutline, ShapeStyle, Theme,
+    ColorValue, GradientFill, LineEnd, ShapeEffects, ShapeFill, ShapeOutline, ShapeStyle, Theme,
     ThemeFormatScheme, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
@@ -10,8 +10,9 @@ use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, sin
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
-    ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill, Placeholder, PptxPackage,
+    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
+    TextBody, TextOverflow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -24,6 +25,7 @@ use crate::{
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
 const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
@@ -32,12 +34,15 @@ const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 /// Size a super/subscript run shapes at, relative to its own `sz`.
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
+/// Compatibility line pitch in ems.
+const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
 const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
+const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -319,22 +324,26 @@ impl RenderedSlide {
             return None;
         }
         for region in self.hit_regions.iter().rev() {
-            let (x, y) = region.local_point(x, y);
-            if !region.rect.contains(x, y) {
+            let (shape_x, shape_y) = region.local_point(x, y);
+            let inside_shape = region.rect.contains(shape_x, shape_y);
+            if let Some(text) = &region.text {
+                let (text_x, text_y) = text.local_point(x, y);
+                if !inside_shape && !(text.overflow && region.hit_rect.contains(text_x, text_y)) {
+                    continue;
+                }
+                if let Some(line) = nearest_line(&text.lines, text_y)
+                    && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
+                        (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
+                    })
+                {
+                    return Some(HitTestResult::Text {
+                        shape_id: region.shape_id.clone(),
+                        story_id: text.story_id.clone(),
+                        position: caret.position,
+                    });
+                }
+            } else if !inside_shape {
                 continue;
-            }
-            if let Some(text) = &region.text
-                && let Some(line) = nearest_line(&text.lines, y)
-                && let Some(caret) = line
-                    .caret_stops
-                    .iter()
-                    .min_by(|left, right| (left.x - x).abs().total_cmp(&(right.x - x).abs()))
-            {
-                return Some(HitTestResult::Text {
-                    shape_id: region.shape_id.clone(),
-                    story_id: text.story_id.clone(),
-                    position: caret.position,
-                });
             }
             return Some(HitTestResult::Shape {
                 shape_id: region.shape_id.clone(),
@@ -451,11 +460,11 @@ impl<'a> LayoutBuilder<'a> {
         let inherited = [original, layout_node, master_node];
         let inherited_fill = self.resolved_fill(&inherited);
         let inherited_outline = self.resolved_outline(&inherited);
-        let fill = shape
-            .fill
-            .as_ref()
-            .or(inherited_fill.as_ref())
-            .and_then(|fill| paint(fill, self.theme));
+        let effective_fill = shape.fill.as_ref().or(inherited_fill.as_ref());
+        let picture = effective_fill
+            .filter(|fill| fill.fill_type == PICTURE_FILL)
+            .and_then(|_| picture_fill(&inherited));
+        let fill = effective_fill.and_then(|fill| paint(fill, self.theme));
         let outline = if shape.outline.as_ref() == original.and_then(node_outline) {
             inherited_outline
         } else {
@@ -522,6 +531,7 @@ impl<'a> LayoutBuilder<'a> {
                         transform,
                     },
                     custom_paths(original),
+                    picture,
                 )?;
             }
             ShapeKind::Picture => {
@@ -579,6 +589,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id,
             rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -612,9 +623,9 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape {
             ShapeNode::Shape(value) => {
-                let fill = self
-                    .resolved_fill(&[Some(shape)])
-                    .and_then(|fill| paint(&fill, self.theme));
+                let resolved_fill = self.resolved_fill(&[Some(shape)]);
+                let fill = resolved_fill.as_ref()
+                    .and_then(|fill| paint(fill, self.theme));
                 let outline = self
                     .resolved_outline(&[Some(shape)])
                     .and_then(|outline| stroke(&outline, self.theme));
@@ -659,6 +670,10 @@ impl<'a> LayoutBuilder<'a> {
                         transform,
                     },
                     &value.paths,
+                    resolved_fill
+                        .as_ref()
+                        .filter(|fill| fill.fill_type == PICTURE_FILL)
+                        .and(value.picture_fill.as_deref()),
                 )?;
             }
             ShapeNode::Picture(value) => {
@@ -714,6 +729,7 @@ impl<'a> LayoutBuilder<'a> {
         self.hit_regions.push(HitRegion {
             shape_id: stable_id.to_owned(),
             rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -724,11 +740,12 @@ impl<'a> LayoutBuilder<'a> {
         &mut self,
         primitive: Primitive,
         paths: &[CustomGeometryPath],
+        picture: Option<&PictureFill>,
     ) -> Result<(), RenderError> {
         if paths.is_empty()
             || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
         {
-            self.primitives.push(primitive);
+            self.primitives.push(picture_filled(primitive, picture));
             return Ok(());
         }
         for (index, custom) in paths.iter().enumerate() {
@@ -755,7 +772,8 @@ impl<'a> LayoutBuilder<'a> {
                     *shadow = None;
                 }
             }
-            self.primitives.push(primitive);
+            let picture = picture.filter(|_| !custom.no_fill);
+            self.primitives.push(picture_filled(primitive, picture));
         }
         Ok(())
     }
@@ -836,17 +854,21 @@ impl<'a> LayoutBuilder<'a> {
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
         let resolved = resolve_content(self.renderer, self.theme, &content, cascade)?;
+        let flow = TextFlow::from_body_vert(cascade.vertical());
+        let text_transform = text_transform(transform, flow);
+        let text_rect = flow.layout_rect(rect);
         let left = cascade.inset_left().unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let right = cascade
             .inset_right()
             .unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let top = cascade.inset_top().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let bottom = cascade.inset_bottom().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
+        let [left, top, right, bottom] = flow.layout_insets([left, top, right, bottom]);
         let content_rect = PxRect {
-            x: rect.x + emu_to_px(left),
-            y: rect.y + emu_to_px(top),
-            w: (rect.w - emu_to_px(left + right)).max(1.0),
-            h: (rect.h - emu_to_px(top + bottom)).max(1.0),
+            x: text_rect.x + emu_to_px(left),
+            y: text_rect.y + emu_to_px(top),
+            w: (text_rect.w - emu_to_px(left + right)).max(1.0),
+            h: (text_rect.h - emu_to_px(top + bottom)).max(1.0),
         };
         let autofit = cascade.autofit();
         let mut scale = match autofit {
@@ -856,10 +878,7 @@ impl<'a> LayoutBuilder<'a> {
             _ => 1.0,
         };
         let mut laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
-        if matches!(
-            autofit,
-            Some(TextAutofit::Normal { .. } | TextAutofit::Shape)
-        ) {
+        if matches!(autofit, Some(TextAutofit::Normal { .. })) {
             while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
                 scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
                 laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
@@ -879,10 +898,16 @@ impl<'a> LayoutBuilder<'a> {
             Some("b") => TextAnchor::Bottom,
             _ => TextAnchor::Top,
         };
+        let spare_height = content_rect.h - laid_out.total_height;
+        let spare_height = if cascade.clips_overflow() {
+            spare_height.max(0.0)
+        } else {
+            spare_height
+        };
         let vertical_shift = match anchor {
             TextAnchor::Top => 0.0,
-            TextAnchor::Center => ((content_rect.h - laid_out.total_height) / 2.0).max(0.0),
-            TextAnchor::Bottom => (content_rect.h - laid_out.total_height).max(0.0),
+            TextAnchor::Center => spare_height / 2.0,
+            TextAnchor::Bottom => spare_height,
         };
         for line in &mut laid_out.lines {
             shift_line(line, 0.0, vertical_shift);
@@ -908,24 +933,93 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h;
+        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
         let story_id = content.story_id;
         let lines = laid_out.lines;
         self.primitives.push(Primitive::TextBox {
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
+            x: text_rect.x,
+            y: text_rect.y,
+            w: text_rect.w,
+            h: text_rect.h,
             anchor,
             paragraphs: display_paragraphs,
             lines: lines.clone(),
             overflow,
-            transform,
+            transform: text_transform,
         });
-        Ok(TextHit { story_id, lines })
+        Ok(TextHit {
+            overflow,
+            story_id,
+            rect: text_rect,
+            transform: text_transform,
+            lines,
+        })
+    }
+}
+
+/// Text flow relative to the shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TextFlow {
+    Horizontal,
+    Vert,
+    Vert270,
+}
+
+impl TextFlow {
+    fn from_body_vert(vertical: Option<&str>) -> Self {
+        match vertical {
+            Some("vert") => Self::Vert,
+            Some("vert270") => Self::Vert270,
+            _ => Self::Horizontal,
+        }
+    }
+
+    fn rotation_deg(self) -> f32 {
+        match self {
+            Self::Horizontal => 0.0,
+            Self::Vert => 90.0,
+            Self::Vert270 => -90.0,
+        }
+    }
+
+    fn layout_rect(self, rect: PxRect) -> PxRect {
+        match self {
+            Self::Horizontal => rect,
+            Self::Vert | Self::Vert270 => PxRect {
+                x: rect.x + (rect.w - rect.h) / 2.0,
+                y: rect.y + (rect.h - rect.w) / 2.0,
+                w: rect.h,
+                h: rect.w,
+            },
+        }
+    }
+
+    fn layout_insets(self, [left, top, right, bottom]: [i64; 4]) -> [i64; 4] {
+        match self {
+            Self::Horizontal => [left, top, right, bottom],
+            Self::Vert => [top, right, bottom, left],
+            Self::Vert270 => [bottom, left, top, right],
+        }
+    }
+}
+
+/// Removes glyph reflections and applies vertical flow.
+fn text_transform(shape: Transform, flow: TextFlow) -> Transform {
+    if flow == TextFlow::Horizontal && !shape.flip_v {
+        return Transform {
+            flip_h: false,
+            ..shape
+        };
+    }
+    let rotation_deg =
+        shape.rotation_deg + if shape.flip_v { 180.0 } else { 0.0 } + flow.rotation_deg();
+    Transform {
+        rotation_deg: rotation_deg.rem_euclid(360.0),
+        flip_h: false,
+        flip_v: false,
     }
 }
 
@@ -940,6 +1034,19 @@ struct BodyCascade<'a> {
 }
 
 impl BodyCascade<'_> {
+    fn clips_overflow(&self) -> bool {
+        let vertical = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.vertical_overflow
+        });
+        let horizontal = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.horizontal_overflow
+        });
+        [vertical, horizontal]
+            .into_iter()
+            .flatten()
+            .any(|value| value != TextOverflow::Overflow)
+    }
+
     fn anchor(&self) -> Option<&str> {
         self.primary
             .and_then(|body| body.anchor.as_deref())
@@ -947,11 +1054,25 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.anchor.as_deref()))
     }
 
+    fn vertical(&self) -> Option<&str> {
+        self.primary
+            .and_then(|body| body.vertical.as_deref())
+            .or_else(|| self.layout.and_then(|body| body.vertical.as_deref()))
+            .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
+    }
+
     fn autofit(&self) -> Option<&TextAutofit> {
         self.primary
             .and_then(|body| body.autofit.as_ref())
             .or_else(|| self.layout.and_then(|body| body.autofit.as_ref()))
             .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
+    }
+
+    fn compat_line_spacing(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| {
+            body.compat_line_spacing
+        })
+        .unwrap_or(false)
     }
 
     fn inset_left(&self) -> Option<i64> {
@@ -1009,6 +1130,18 @@ impl BodyCascade<'_> {
                 merge_paragraph_properties(&mut properties, source);
             }
         }
+        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
+            *restart = self
+                .primary
+                .and_then(|body| body.paragraphs.get(index))
+                .is_some_and(|paragraph| {
+                    matches!(
+                        paragraph.properties.bullet,
+                        Some(Bullet::AutoNumber { restart: true, .. })
+                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
+                    )
+                });
+        }
         properties
     }
 }
@@ -1035,6 +1168,7 @@ struct TextContent {
 struct ContentParagraph {
     alignment: Option<String>,
     level: u32,
+    bullet: Option<Bullet>,
     runs: Vec<ContentRun>,
 }
 
@@ -1053,6 +1187,10 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
+                bullet: paragraph
+                    .bullet_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok()),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1088,6 +1226,7 @@ fn content_from_body(
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
+                bullet: paragraph.properties.bullet.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1110,8 +1249,10 @@ struct ResolvedParagraph {
     justify: bool,
     level: u32,
     margin_left_px: f32,
+    line_spacing: Option<LineSpacing>,
+    compat_line_spacing: bool,
     indent_px: f32,
-    bullet: Option<Bullet>,
+    marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
 }
@@ -1166,10 +1307,21 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
+    let compat_line_spacing = cascade.compat_line_spacing();
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
+    let mut counters = [0_u32; 9];
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties = cascade.paragraph_properties(index, paragraph.level);
+        let mut properties = cascade.paragraph_properties(index, paragraph.level);
+        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
+            properties.bullet = paragraph.bullet.clone();
+            if let Some(Bullet::AutoNumber {
+                restart, start_at, ..
+            }) = &mut properties.bullet
+            {
+                *restart |= *start_at != 1;
+            }
+        }
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
@@ -1198,16 +1350,20 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
             level: paragraph.level,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
+            line_spacing: properties.line_spacing,
+            compat_line_spacing,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
-            bullet: properties.bullet.clone(),
-            bullet_style: matches!(properties.bullet, Some(Bullet::Character { .. }))
+            bullet_style: marker
+                .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
                 .transpose()?,
+            marker,
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -1342,7 +1498,17 @@ fn chart_text_primitive(
         .metrics(face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     let line_box = single_line_box(metrics, size_px, &CompatFlags::default());
-    let x = safe_geometry(text.x as f32);
+    let advance: f32 = shaped.iter().map(|glyph| glyph.x_advance).sum();
+    let box_x = safe_geometry(text.x as f32);
+    let box_w = safe_geometry(text.width as f32);
+    let align = match text.align {
+        PlotTextAlign::Center => TextAlign::Center,
+        PlotTextAlign::Start => TextAlign::Left,
+    };
+    let x = match align {
+        TextAlign::Center => box_x + ((box_w - advance) / 2.0).max(0.0),
+        _ => box_x,
+    };
     let baseline = safe_geometry(text.baseline_y as f32);
     let mut glyphs = Vec::with_capacity(shaped.len());
     let mut cursor = 0.0_f32;
@@ -1378,13 +1544,13 @@ fn chart_text_primitive(
         object_id: text.object_id,
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
-        x,
+        x: box_x,
         y: baseline - line_box.ascent,
-        w: safe_geometry(text.width as f32).max(width),
+        w: box_w.max(x - box_x + width),
         h: line_box.height(),
         anchor: TextAnchor::Top,
         paragraphs: vec![TextParagraph {
-            align: Some(TextAlign::Left),
+            align: Some(align),
             level: 0,
             runs: vec![TextRun {
                 text: text.text.to_owned(),
@@ -1452,7 +1618,12 @@ fn layout_paragraph(
     let clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
         let style = &paragraph.runs[0].style;
-        let line_box = style_line_box(fonts, style, scale)?;
+        let line_box = spaced_line_box(
+            style_line_box(fonts, style, scale)?,
+            paragraph,
+            points_to_px(style.font_size_pt * scale),
+            scale,
+        );
         return Ok(vec![PositionedTextLine {
             x,
             y,
@@ -1511,7 +1682,12 @@ fn layout_paragraph(
             TextAlign::Right => x + (width - natural_width).max(0.0),
             TextAlign::Left | TextAlign::Justify => x,
         };
-        let line_box = clusters_line_box(fonts, slice, scale)?;
+        let line_box = spaced_line_box(
+            clusters_line_box(fonts, slice, scale)?,
+            paragraph,
+            line_font_size_px(slice, scale),
+            scale,
+        );
         let mut caret_stops = vec![CaretStop {
             position: slice[0].start,
             x: line_x,
@@ -1556,7 +1732,7 @@ fn prepend_bullet(
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
-    let Some(Bullet::Character { value }) = &paragraph.bullet else {
+    let Some(value) = &paragraph.marker else {
         return Ok(());
     };
     let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
@@ -1571,8 +1747,10 @@ fn prepend_bullet(
         justify: false,
         level: paragraph.level,
         margin_left_px: 0.0,
+        line_spacing: None,
+        compat_line_spacing: false,
         indent_px: 0.0,
-        bullet: None,
+        marker: None,
         bullet_style: None,
         runs: vec![ResolvedRun {
             text: value.clone(),
@@ -1972,6 +2150,58 @@ fn style_line_box(
     ))
 }
 
+/// Largest font size on this line.
+fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
+    clusters
+        .iter()
+        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .fold(0.0_f32, f32::max)
+}
+
+/// Apply paragraph spacing to a measured line box.
+fn spaced_line_box(
+    content: ooxml_text::LineBox,
+    paragraph: &ResolvedParagraph,
+    size_px: f32,
+    scale: f32,
+) -> ooxml_text::LineBox {
+    let Some(spacing) = paragraph.line_spacing else {
+        return content;
+    };
+    if content.height() <= 0.0 {
+        return content;
+    }
+    let target = match spacing {
+        LineSpacing::Percent { value } => {
+            let single = if paragraph.compat_line_spacing {
+                SINGLE_LINE_PITCH_EM * size_px
+            } else {
+                content.height()
+            };
+            value as f32 * single
+        }
+        LineSpacing::Points { value } => points_to_px(value as f32 * scale),
+    };
+    if !target.is_finite() || target < 0.0 {
+        return content;
+    }
+    if target >= content.height() {
+        return ooxml_text::LineBox {
+            leading: target - content.ascent - content.descent,
+            ..content
+        };
+    }
+    scale_line_box(content, target / content.height())
+}
+
+fn scale_line_box(line: ooxml_text::LineBox, factor: f32) -> ooxml_text::LineBox {
+    ooxml_text::LineBox {
+        ascent: line.ascent * factor,
+        descent: line.descent * factor,
+        leading: line.leading * factor,
+    }
+}
+
 fn shift_line(line: &mut PositionedTextLine, x: f32, y: f32) {
     line.x += x;
     line.y += y;
@@ -1988,7 +2218,7 @@ fn shift_line(line: &mut PositionedTextLine, x: f32, y: f32) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct PxRect {
     x: f32,
     y: f32,
@@ -2051,37 +2281,52 @@ impl Space {
 struct HitRegion {
     shape_id: String,
     rect: PxRect,
+    hit_rect: PxRect,
     transform: Transform,
     text: Option<TextHit>,
 }
 
 impl HitRegion {
-    /// Undoes the rotate-then-flip the shape paints with, so `rect` and the text
-    /// lines can both be read in their unrotated frame.
+    /// Maps slide coordinates into the shape frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
-        if self.transform.is_identity() {
-            return (x, y);
-        }
-        let center_x = self.rect.x + self.rect.w / 2.0;
-        let center_y = self.rect.y + self.rect.h / 2.0;
-        let (sin, cos) = self.transform.rotation_deg.to_radians().sin_cos();
-        let dx = x - center_x;
-        let dy = y - center_y;
-        let mut local_x = dx * cos + dy * sin;
-        let mut local_y = dy * cos - dx * sin;
-        if self.transform.flip_h {
-            local_x = -local_x;
-        }
-        if self.transform.flip_v {
-            local_y = -local_y;
-        }
-        (center_x + local_x, center_y + local_y)
+        local_point(self.rect, self.transform, x, y)
     }
 }
 
 struct TextHit {
+    overflow: bool,
     story_id: String,
+    rect: PxRect,
+    transform: Transform,
     lines: Vec<PositionedTextLine>,
+}
+
+impl TextHit {
+    /// Maps slide coordinates into the text frame.
+    fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
+        local_point(self.rect, self.transform, x, y)
+    }
+}
+
+/// Maps a slide point back into the unrotated frame `rect` was laid out in.
+fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32) {
+    if transform.is_identity() {
+        return (x, y);
+    }
+    let center_x = rect.x + rect.w / 2.0;
+    let center_y = rect.y + rect.h / 2.0;
+    let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+    let dx = x - center_x;
+    let dy = y - center_y;
+    let mut local_x = dx * cos + dy * sin;
+    let mut local_y = dy * cos - dx * sin;
+    if transform.flip_h {
+        local_x = -local_x;
+    }
+    if transform.flip_v {
+        local_y = -local_y;
+    }
+    (center_x + local_x, center_y + local_y)
 }
 
 fn nearest_line(lines: &[PositionedTextLine], y: f32) -> Option<&PositionedTextLine> {
@@ -2185,7 +2430,20 @@ fn merge_outline(direct: &ShapeOutline, fallback: Option<&ShapeOutline>) -> Shap
     };
     ShapeOutline {
         width: direct.width.or(fallback.width),
-        color: direct.color.clone().or_else(|| fallback.color.clone()),
+        color: direct.color.clone().or_else(|| {
+            direct
+                .gradient
+                .is_none()
+                .then(|| fallback.color.clone())
+                .flatten()
+        }),
+        gradient: direct.gradient.clone().or_else(|| {
+            direct
+                .color
+                .is_none()
+                .then(|| fallback.gradient.clone())
+                .flatten()
+        }),
         style: direct.style.clone().or_else(|| fallback.style.clone()),
         cap: direct.cap.clone().or_else(|| fallback.cap.clone()),
         join: direct.join.clone().or_else(|| fallback.join.clone()),
@@ -2260,6 +2518,9 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     }
     if source.bullet.is_some() {
         target.bullet.clone_from(&source.bullet);
+    }
+    if source.line_spacing.is_some() {
+        target.line_spacing = source.line_spacing;
     }
     if source.bullet_font.is_some() {
         target.bullet_font.clone_from(&source.bullet_font);
@@ -2367,35 +2628,12 @@ fn paint(fill: &ShapeFill, theme: &Theme) -> Option<Paint> {
     if fill.fill_type == "none" {
         return None;
     }
-    if let Some(gradient) = &fill.gradient {
-        let gradient_type = match gradient.gradient_type.as_str() {
-            "radial" => GradientType::Radial,
-            "rectangular" => GradientType::Rectangular,
-            "path" => GradientType::Path,
-            _ => GradientType::Linear,
-        };
-        let mut stops = gradient
-            .stops
-            .iter()
-            .filter_map(|stop| {
-                Some(GradientStop {
-                    position: (stop.position as f32 / 100_000.0).clamp(0.0, 1.0),
-                    color: resolve_paint_color(Some(&stop.color), theme)?,
-                })
-            })
-            .collect::<Vec<_>>();
-        stops.sort_by(|left, right| {
-            left.position
-                .partial_cmp(&right.position)
-                .unwrap_or_else(|| left.position.total_cmp(&right.position))
-        });
-        if !stops.is_empty() {
-            return Some(Paint::Gradient {
-                gradient_type,
-                angle_deg: gradient.angle.map(|value| value as f32),
-                stops,
-            });
-        }
+    if let Some(paint) = fill
+        .gradient
+        .as_ref()
+        .and_then(|gradient| gradient_paint(gradient, theme))
+    {
+        return Some(paint);
     }
     resolve_paint_color(fill.color.as_ref(), theme).map(|color| Paint::Solid { color })
 }
@@ -2488,8 +2726,53 @@ fn shadow_anchor(alignment: &str, rect: PxRect) -> (f32, f32) {
     (x, y)
 }
 
+fn gradient_paint(gradient: &GradientFill, theme: &Theme) -> Option<Paint> {
+    let gradient_type = match gradient.gradient_type.as_str() {
+        "radial" => GradientType::Radial,
+        "rectangular" => GradientType::Rectangular,
+        "path" => GradientType::Path,
+        _ => GradientType::Linear,
+    };
+    let mut stops = gradient
+        .stops
+        .iter()
+        .filter_map(|stop| {
+            Some(GradientStop {
+                position: (stop.position as f32 / 100_000.0).clamp(0.0, 1.0),
+                color: resolve_paint_color(Some(&stop.color), theme)?,
+            })
+        })
+        .collect::<Vec<_>>();
+    stops.sort_by(|left, right| {
+        left.position
+            .partial_cmp(&right.position)
+            .unwrap_or_else(|| left.position.total_cmp(&right.position))
+    });
+    if stops.is_empty() {
+        return None;
+    }
+    Some(Paint::Gradient {
+        gradient_type,
+        angle_deg: gradient.angle.map(|value| value as f32),
+        stops,
+    })
+}
+
 fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
-    let color = resolve_paint_color(outline.color.as_ref(), theme)?;
+    let solid = resolve_paint_color(outline.color.as_ref(), theme);
+    let paint = match &solid {
+        Some(_) => None,
+        None => outline
+            .gradient
+            .as_ref()
+            .and_then(|gradient| gradient_paint(gradient, theme)),
+    };
+    let color = match (&solid, &paint) {
+        (Some(color), _) => color.clone(),
+        (None, Some(Paint::Gradient { stops, .. })) => stops.first()?.color.clone(),
+        (None, Some(Paint::Solid { color })) => color.clone(),
+        (None, None) => return None,
+    };
     let width = outline
         .width
         .filter(|width| width.is_finite() && *width >= 0.0)
@@ -2502,6 +2785,7 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
             .style
             .as_deref()
             .is_some_and(|style| style != "solid"),
+        paint,
         head_end: line_end(outline.head_end.as_ref(), width),
         tail_end: line_end(outline.tail_end.as_ref(), width),
     })
@@ -2555,6 +2839,84 @@ fn custom_paths(shape: Option<&ShapeNode>) -> &[CustomGeometryPath] {
     }
 }
 
+/// Looks up the blip behind a snapshot shape's picture fill.
+fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> {
+    match nodes
+        .iter()
+        .flatten()
+        .find(|node| node_fill(node).is_some())?
+    {
+        ShapeNode::Shape(shape) => shape.picture_fill.as_deref(),
+        _ => None,
+    }
+}
+
+/// Redraws a picture-filled shape as an image masked by the shape's own outline.
+fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primitive {
+    let Some(picture) = picture else {
+        return primitive;
+    };
+    match primitive {
+        Primitive::Shape {
+            object_id,
+            shape_id,
+            name,
+            x,
+            y,
+            w,
+            h,
+            geometry,
+            path,
+            stroke,
+            transform,
+            ..
+        } => Primitive::Image {
+            object_id,
+            shape_id,
+            name,
+            x,
+            y,
+            w,
+            h,
+            asset_id: picture.media_part_path.clone(),
+            crop: picture_fill_crop(picture),
+            path: (geometry != "rect").then_some(path),
+            stroke,
+            transform,
+        },
+        other => other,
+    }
+}
+
+/// Folds `a:srcRect` and the `a:stretch/a:fillRect` band into source fractions.
+/// Insets that letterbox the image rather than crop it stretch to the box instead.
+fn picture_fill_crop(picture: &PictureFill) -> ImageCrop {
+    let source = image_crop(&picture.crop);
+    let (kept_x, kept_y) = source.kept();
+    let band = |near: i32, far: i32| {
+        let (near, far) = (near as f32 / 100_000.0, far as f32 / 100_000.0);
+        let span = 1.0 - near - far;
+        if span <= 0.0 {
+            return (0.0, 0.0);
+        }
+        ((-near).max(0.0) / span, (-far).max(0.0) / span)
+    };
+    let (left, right) = band(picture.fill_rect.left, picture.fill_rect.right);
+    let (top, bottom) = band(picture.fill_rect.top, picture.fill_rect.bottom);
+    let cropped = ImageCrop {
+        left: source.left + left * kept_x,
+        top: source.top + top * kept_y,
+        right: source.right + right * kept_x,
+        bottom: source.bottom + bottom * kept_y,
+    };
+    let (kept_x, kept_y) = cropped.kept();
+    if kept_x <= 0.0 || kept_y <= 0.0 {
+        source
+    } else {
+        cropped
+    }
+}
+
 fn geometry_path(
     geometry: &str,
     adjustments: &BTreeMap<String, f64>,
@@ -2589,6 +2951,123 @@ fn parse_align(value: Option<&str>) -> TextAlign {
 
 fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
+}
+
+fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
+    let Some(text) = text.filter(|text| text.overflow) else {
+        return rect;
+    };
+    let rect = text.rect;
+    let (mut left, mut right) = (rect.x, rect.x + rect.w);
+    let (mut top, mut bottom) = (rect.y, rect.y + rect.h);
+    for line in &text.lines {
+        left = left.min(line.x);
+        right = right.max(line.x + line.width);
+        top = top.min(line.y);
+        bottom = bottom.max(line.y + line.height);
+        for run in &line.runs {
+            left = left.min(run.x);
+            right = right.max(run.x + run.width);
+        }
+    }
+    PxRect {
+        x: left,
+        y: top,
+        w: (right - left).max(rect.w),
+        h: (bottom - top).max(rect.h),
+    }
+}
+
+/// Resolves a marker once per paragraph.
+fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
+    let level = (level as usize).min(counters.len() - 1);
+    counters[level + 1..].fill(0);
+    match bullet {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
+            counters[level] = match counters[level] {
+                0 => (*start_at).clamp(1, 32_767),
+                _ if *restart => (*start_at).clamp(1, 32_767),
+                current => current.saturating_add(1),
+            };
+            Some(format_autonum(counters[level], scheme))
+        }
+        _ => {
+            counters[level] = 0;
+            match bullet {
+                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
+                    Some(value.clone())
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Formats Latin, Roman and decimal markers.
+fn format_autonum(value: u32, scheme: &str) -> String {
+    let value = value.clamp(1, MAX_AUTONUM_VALUE);
+    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
+        .into_iter()
+        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
+        .unwrap_or((scheme, "Period"));
+    let body = match numeral {
+        "alphaLc" => format_alpha(value, false),
+        "alphaUc" => format_alpha(value, true),
+        "romanLc" => format_roman(value, false),
+        "romanUc" => format_roman(value, true),
+        "arabic" => value.to_string(),
+        _ => return format!("{value}."),
+    };
+    match suffix {
+        "ParenBoth" => format!("({body})"),
+        "ParenR" => format!("{body})"),
+        "Plain" => body,
+        _ => format!("{body}."),
+    }
+}
+
+fn format_alpha(value: u32, upper: bool) -> String {
+    let base = if upper { b'A' } else { b'a' };
+    let mut value = value.max(1);
+    let mut out = Vec::new();
+    while value > 0 {
+        let index = (value - 1) % 26;
+        out.push(base + index as u8);
+        value = (value - 1) / 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn format_roman(value: u32, upper: bool) -> String {
+    const NUMERALS: [(u32, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut value = value.max(1);
+    let mut out = String::new();
+    for (amount, numeral) in NUMERALS {
+        while value >= amount {
+            out.push_str(numeral);
+            value -= amount;
+        }
+    }
+    if upper { out.to_uppercase() } else { out }
 }
 
 fn normalize_family(value: &str) -> String {
@@ -2631,6 +3110,8 @@ mod tests {
 
     const FIXTURE: &[u8] = include_bytes!("../../../apps/demo/public/betteroffice-demo.pptx");
     const CHART_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/chart-deck.pptx");
+    const GRADIENT_OUTLINE_FIXTURE: &[u8] =
+        include_bytes!("../../pptx-parse/tests/fixtures/gradient-outline.pptx");
     const NUMBERED_FIXTURE: &[u8] =
         include_bytes!("../../pptx-parse/tests/fixtures/slide-number-fields.pptx");
     const STYLE_FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/shape-style.pptx");
@@ -2783,6 +3264,202 @@ mod tests {
         assert_eq!(stroke.color, "#FF00FF");
     }
 
+    #[test]
+    fn overflowing_text_grows_the_hit_region_so_a_visible_glyph_stays_clickable() {
+        let rect = PxRect {
+            x: 10.0,
+            y: 100.0,
+            w: 200.0,
+            h: 20.0,
+        };
+        let line = |y: f32, height: f32| PositionedTextLine {
+            x: 10.0,
+            y,
+            width: 200.0,
+            height,
+            baseline: y + height,
+            start: 0,
+            end: 0,
+            runs: Vec::new(),
+            caret_stops: Vec::new(),
+        };
+        let text = TextHit {
+            rect,
+            transform: Transform::default(),
+            overflow: true,
+            story_id: "story".to_owned(),
+            lines: vec![line(80.0, 40.0), line(120.0, 40.0)],
+        };
+        let grown = rect_covering_text(rect, Some(&text));
+        assert_eq!(grown.y, 80.0);
+        assert_eq!(grown.y + grown.h, 160.0);
+        assert_eq!(grown.x, rect.x);
+        assert_eq!(grown.w, rect.w);
+        let fitting = TextHit {
+            rect,
+            transform: Transform::default(),
+            overflow: false,
+            story_id: "story".to_owned(),
+            lines: vec![line(104.0, 12.0)],
+        };
+        let same = rect_covering_text(rect, Some(&fitting));
+        assert_eq!((same.y, same.h), (rect.y, rect.h));
+        assert_eq!(
+            (
+                rect_covering_text(rect, None).y,
+                rect_covering_text(rect, None).h
+            ),
+            (rect.y, rect.h)
+        );
+    }
+
+    #[test]
+    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
+        let mut counters = [0_u32; 9];
+        let number = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 1,
+                    restart: false,
+                }),
+                level,
+                counters,
+            )
+        };
+        let dash = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "-".to_owned(),
+                }),
+                level,
+                counters,
+            )
+        };
+        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
+    }
+
+    #[test]
+    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
+        let mut counters = [0_u32; 9];
+        let number = |counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 7,
+                    restart: false,
+                }),
+                0,
+                counters,
+            )
+        };
+        assert_eq!(number(&mut counters).as_deref(), Some("7."));
+        assert_eq!(number(&mut counters).as_deref(), Some("8."));
+        let mut counters = [0; 9];
+        let last_start = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 32_767,
+            restart: false,
+        };
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32767.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32768.")
+        );
+    }
+
+    #[test]
+    fn autonumber_schemes_format_their_numeral_and_suffix() {
+        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
+        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
+        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
+        assert_eq!(format_autonum(4, "arabicPlain"), "4");
+        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
+        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
+        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
+        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
+        assert_eq!(format_autonum(3, "somethingElse"), "3.");
+        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
+        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
+    }
+
+    #[test]
+    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
+        let mut counters = [0; 9];
+        let number = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 1,
+            restart: false,
+        };
+        let restart = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 7,
+            restart: true,
+        };
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
+            Some("7.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("8.")
+        );
+        assert_eq!(resolve_marker(None, 0, &mut counters), None);
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "•".to_owned()
+                }),
+                0,
+                &mut counters
+            )
+            .as_deref(),
+            Some("•")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+    }
+
+    #[test]
+    fn autonumber_roman_markers_bound_untrusted_start_values() {
+        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
+        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
+        assert_eq!(
+            format_autonum(u32::MAX, "romanUcPeriod"),
+            format!("{}DCCLXVII.", "M".repeat(52))
+        );
+    }
+
     fn renderer() -> SlideRenderer {
         let mut renderer = SlideRenderer::new();
         for bold in [false, true] {
@@ -2809,8 +3486,10 @@ mod tests {
             justify: is_full_justification(Some(alignment)),
             level: 0,
             margin_left_px: 0.0,
+            line_spacing: None,
+            compat_line_spacing: false,
             indent_px: 0.0,
-            bullet: None,
+            marker: None,
             bullet_style: None,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
@@ -2986,8 +3665,10 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
@@ -3047,8 +3728,10 @@ mod tests {
                 justify: true,
                 level: 0,
                 margin_left_px: 0.0,
+                line_spacing: None,
+                compat_line_spacing: false,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: parts
                     .iter()
@@ -3776,6 +4459,12 @@ mod tests {
                     w: 100.0,
                     h: 100.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 transform,
                 text: None,
             }],
@@ -3803,9 +4492,7 @@ mod tests {
     }
 
     #[test]
-    fn hit_testing_flipped_text_reads_the_mirrored_caret() {
-        // membership cannot catch a flip — the rect maps onto itself — so pin it
-        // on the caret, where the sign of the local point decides the answer
+    fn hit_testing_flipped_text_keeps_the_upright_caret() {
         let slide = |flip_h| RenderedSlide {
             display_list: SurfaceDisplayList {
                 contract_version: CONTRACT_VERSION,
@@ -3822,13 +4509,34 @@ mod tests {
                     w: 120.0,
                     h: 40.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
                 transform: Transform {
                     rotation_deg: 0.0,
                     flip_h,
                     flip_v: false,
                 },
                 text: Some(TextHit {
+                    overflow: false,
                     story_id: "story".to_owned(),
+                    rect: PxRect {
+                        x: 100.0,
+                        y: 100.0,
+                        w: 120.0,
+                        h: 40.0,
+                    },
+                    transform: text_transform(
+                        Transform {
+                            rotation_deg: 0.0,
+                            flip_h,
+                            flip_v: false,
+                        },
+                        TextFlow::Horizontal,
+                    ),
                     lines: vec![PositionedTextLine {
                         x: 110.0,
                         y: 110.0,
@@ -3858,7 +4566,269 @@ mod tests {
         };
 
         assert_eq!(position(false), 0);
-        assert_eq!(position(true), 5);
+        assert_eq!(position(true), 0);
+    }
+
+    #[test]
+    fn hit_testing_vertical_text_reads_the_caret_in_the_turned_frame() {
+        let shape = Transform {
+            rotation_deg: 0.0,
+            flip_h: false,
+            flip_v: false,
+        };
+        let rect = PxRect {
+            x: 100.0,
+            y: 100.0,
+            w: 40.0,
+            h: 120.0,
+        };
+        let slide = RenderedSlide {
+            display_list: SurfaceDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 400.0,
+                height: 400.0,
+                background: None,
+                primitives: Vec::new(),
+            },
+            hit_regions: vec![HitRegion {
+                shape_id: "sideways".to_owned(),
+                hit_rect: rect,
+                rect,
+                transform: shape,
+                text: Some(TextHit {
+                    overflow: false,
+                    story_id: "story".to_owned(),
+                    rect: TextFlow::Vert270.layout_rect(rect),
+                    transform: text_transform(shape, TextFlow::Vert270),
+                    lines: vec![PositionedTextLine {
+                        x: 60.0,
+                        y: 150.0,
+                        width: 100.0,
+                        height: 20.0,
+                        baseline: 165.0,
+                        start: 0,
+                        end: 5,
+                        runs: Vec::new(),
+                        caret_stops: vec![
+                            CaretStop {
+                                position: 0,
+                                x: 60.0,
+                            },
+                            CaretStop {
+                                position: 5,
+                                x: 160.0,
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        };
+        let position = |y| match slide.hit_test(120.0, y) {
+            Some(HitTestResult::Text { position, .. }) => position,
+            other => panic!("expected a text hit, got {other:?}"),
+        };
+
+        assert_eq!(position(205.0), 0);
+        assert_eq!(position(115.0), 5);
+    }
+
+    #[test]
+    fn text_follows_the_shape_rotation_but_is_never_mirrored() {
+        let turned = |rotation_deg, flip_h, flip_v| {
+            text_transform(
+                Transform {
+                    rotation_deg,
+                    flip_h,
+                    flip_v,
+                },
+                TextFlow::Horizontal,
+            )
+        };
+        let upright = |rotation_deg: f32| Transform {
+            rotation_deg,
+            flip_h: false,
+            flip_v: false,
+        };
+
+        assert_eq!(turned(180.0, false, true), upright(0.0));
+        assert_eq!(turned(0.0, true, false), upright(0.0));
+        assert_eq!(turned(90.0, true, false), upright(90.0));
+        assert_eq!(turned(0.0, true, true), upright(180.0));
+        assert_eq!(turned(45.0, false, false), upright(45.0));
+    }
+
+    #[test]
+    fn body_vert_turns_the_text_and_lays_it_out_in_the_swapped_box() {
+        assert_eq!(TextFlow::from_body_vert(Some("vert")), TextFlow::Vert);
+        assert_eq!(TextFlow::from_body_vert(Some("vert270")), TextFlow::Vert270);
+        assert_eq!(TextFlow::from_body_vert(Some("horz")), TextFlow::Horizontal);
+        assert_eq!(TextFlow::from_body_vert(None), TextFlow::Horizontal);
+
+        let shape = |rotation_deg| Transform {
+            rotation_deg,
+            flip_h: false,
+            flip_v: false,
+        };
+        assert_eq!(
+            text_transform(shape(90.0), TextFlow::Vert270).rotation_deg,
+            0.0
+        );
+        assert_eq!(
+            text_transform(shape(270.0), TextFlow::Vert).rotation_deg,
+            0.0
+        );
+
+        let rect = PxRect {
+            x: 100.0,
+            y: 0.0,
+            w: 40.0,
+            h: 240.0,
+        };
+        assert_eq!(
+            TextFlow::Vert.layout_rect(rect),
+            PxRect {
+                x: 0.0,
+                y: 100.0,
+                w: 240.0,
+                h: 40.0,
+            }
+        );
+        assert_eq!(TextFlow::Horizontal.layout_rect(rect), rect);
+    }
+
+    /// Renders a synthetic master text box.
+    fn text_box_on_master(
+        transform: ShapeTransform,
+        vertical: Option<&str>,
+        text: &str,
+    ) -> Primitive {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_010).unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                base: pptx_parse::ShapeBase {
+                    id: 9_001,
+                    name: "turned".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform,
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                style: None,
+                fill: None,
+                picture_fill: None,
+                outline: None,
+                text: Some(TextBody {
+                    vertical_overflow: None,
+                    horizontal_overflow: None,
+                    anchor: Some("ctr".to_owned()),
+                    vertical: vertical.map(str::to_owned),
+                    compat_line_spacing: None,
+                    autofit: None,
+                    inset_left: None,
+                    inset_top: None,
+                    inset_right: None,
+                    inset_bottom: None,
+                    default_list_style: None,
+                    list_style: Vec::new(),
+                    paragraphs: vec![pptx_parse::TextParagraph {
+                        properties: ParagraphProperties::default(),
+                        runs: vec![pptx_parse::TextRun {
+                            text: text.to_owned(),
+                            properties: RunProperties {
+                                font_size_pt: Some(12.0),
+                                font_family: Some("Arial".to_owned()),
+                                ..RunProperties::default()
+                            },
+                            field_id: None,
+                            field_type: None,
+                            line_break: false,
+                        }],
+                        end_properties: None,
+                    }],
+                }),
+            }));
+        renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .primitives
+            .into_iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::TextBox {
+                        object_id: 9_001,
+                        ..
+                    }
+                )
+            })
+            .expect("the master text box was laid out")
+    }
+
+    #[test]
+    fn a_flipped_shape_lays_its_text_out_unmirrored() {
+        let primitive = text_box_on_master(
+            ShapeTransform {
+                x: 1_000_000,
+                y: 1_000_000,
+                width: 4_000_000,
+                height: 1_000_000,
+                rotation_deg: 180.0,
+                flip_v: true,
+                ..ShapeTransform::default()
+            },
+            None,
+            "Audit",
+        );
+        let Primitive::TextBox { transform, .. } = &primitive else {
+            unreachable!()
+        };
+        assert_eq!(
+            *transform,
+            Transform {
+                rotation_deg: 0.0,
+                flip_h: false,
+                flip_v: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_vert270_label_bar_lays_its_sentence_out_on_one_line() {
+        let turned = ShapeTransform {
+            x: 4_601_452,
+            y: -2_333_065,
+            width: 639_990,
+            height: 7_718_032,
+            rotation_deg: 90.0,
+            ..ShapeTransform::default()
+        };
+        let sentence = "Take the Shadow IT and Data Risk Assessments";
+        let primitive = text_box_on_master(turned.clone(), Some("vert270"), sentence);
+        let Primitive::TextBox {
+            w,
+            h,
+            lines,
+            transform,
+            ..
+        } = &primitive
+        else {
+            unreachable!()
+        };
+        assert!(w > h, "the layout box is the shape box on its side");
+        assert_eq!(transform.rotation_deg, 0.0);
+        assert_eq!(lines.len(), 1);
+
+        let upright = text_box_on_master(turned, None, sentence);
+        let Primitive::TextBox { lines, .. } = &upright else {
+            unreachable!()
+        };
+        assert!(lines.len() > 1);
     }
 
     #[test]
@@ -4090,6 +5060,136 @@ mod tests {
         ));
     }
 
+    /// Wrap the demo text with inherited spacing.
+    fn wrapped_text_box(
+        seed: u64,
+        spacing: Option<LineSpacing>,
+        paragraph_spacing: Option<LineSpacing>,
+        height_emu: i64,
+        compat: bool,
+    ) -> (Vec<PositionedTextLine>, f32) {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, seed).unwrap();
+        let initial = session.snapshot().unwrap();
+        let slide_id = initial.slides[0].id.clone();
+        let shape = initial.slides[0]
+            .shapes
+            .iter()
+            .find(|shape| !shape.text_stories.is_empty())
+            .unwrap();
+        let shape_id = shape.id.clone();
+        let source_id = shape.source_id;
+        let story_id = shape.text_stories[0].id.clone();
+        let index = shape.text_stories[0].length - 1;
+        for master in &mut package.masters {
+            for level in [
+                &mut master.text_styles.title,
+                &mut master.text_styles.body,
+                &mut master.text_styles.other,
+            ] {
+                *level = vec![ParagraphProperties {
+                    line_spacing: spacing,
+                    ..ParagraphProperties::default()
+                }];
+            }
+        }
+        let parsed = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap();
+        let ShapeNode::Shape(parsed) = parsed else {
+            panic!("expected text shape");
+        };
+        let body = parsed.text.as_mut().unwrap();
+        body.compat_line_spacing = compat.then_some(true);
+        body.anchor = Some("t".to_owned());
+        for paragraph in &mut body.paragraphs {
+            paragraph.properties.line_spacing = paragraph_spacing;
+        }
+        session
+            .resize_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &shape_id,
+                1_200_000,
+                height_emu,
+            )
+            .unwrap();
+        session
+            .insert_text(
+                &EditCtx::local("test"),
+                &story_id,
+                index,
+                " with enough text to wrap across several shaped lines",
+                &TextStyle::default(),
+            )
+            .unwrap();
+        renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    shape_id: Some(id),
+                    lines,
+                    paragraphs,
+                    ..
+                } if id == &shape_id => Some((lines.clone(), paragraphs[0].runs[0].font_size_pt)),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn master_line_spacing_sets_the_line_pitch() {
+        let percent = |value| Some(LineSpacing::Percent { value });
+        let (single, size_pt) = wrapped_text_box(8_010, None, None, 1_524_000, true);
+        let (tight, _) = wrapped_text_box(8_011, percent(0.8), None, 1_524_000, true);
+        let (loose, _) = wrapped_text_box(
+            8_012,
+            Some(LineSpacing::Points { value: 40.0 }),
+            None,
+            1_524_000,
+            true,
+        );
+        let (font_based, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let pitch = |lines: &[PositionedTextLine]| {
+            assert!(lines.len() > 1, "expected the text to wrap");
+            lines[1].y - lines[0].y
+        };
+        let size_px = points_to_px(size_pt);
+
+        assert!((pitch(&single) - single[0].height).abs() < 0.01);
+        assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
+        assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
+        assert!(pitch(&tight) < pitch(&single));
+        assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
+
+        let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
+        let font_share = (single[0].baseline - single[0].y) / single[0].height;
+        assert!((share - font_share).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_slide_paragraph_overrides_the_master_line_spacing() {
+        let (lines, size_pt) = wrapped_text_box(
+            8_015,
+            Some(LineSpacing::Percent { value: 0.8 }),
+            Some(LineSpacing::Percent { value: 1.5 }),
+            1_524_000,
+            true,
+        );
+        assert!(lines.len() > 1, "expected the text to wrap");
+        let pitch = lines[1].y - lines[0].y;
+        assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
+
+        let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
+        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
+    }
+
     #[test]
     fn normal_autofit_scales_text_until_the_shape_height_is_respected() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
@@ -4135,23 +5235,155 @@ mod tests {
                 &TextStyle::default(),
             )
             .unwrap();
-        let rendered = renderer()
+        let snapshot = session.snapshot().unwrap();
+        let font_size = |package: &PptxPackage| {
+            renderer()
+                .layout_slide(package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        shape_id: Some(id),
+                        paragraphs,
+                        ..
+                    } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let scaled = font_size(&package);
+        let ShapeNode::Shape(parsed) = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap()
+        else {
+            panic!("expected text shape");
+        };
+        parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::None);
+        assert!(scaled < font_size(&package));
+    }
+
+    #[test]
+    fn a_gradient_outline_strokes_with_its_gradient_and_keeps_a_flat_fallback() {
+        let package = pptx_parse::parse_pptx(GRADIENT_OUTLINE_FIXTURE).unwrap();
+        let session = DeckSession::open(GRADIENT_OUTLINE_FIXTURE, 8_010).unwrap();
+        let primitives = renderer()
             .layout_slide(&package, &session.snapshot().unwrap(), 0)
-            .unwrap();
-        let font_size = rendered
+            .unwrap()
             .display_list
-            .primitives
+            .primitives;
+        let strokes = primitives
             .iter()
-            .find_map(|primitive| match primitive {
-                Primitive::TextBox {
-                    shape_id: Some(id),
-                    paragraphs,
-                    ..
-                } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
+            .filter_map(|primitive| match primitive {
+                Primitive::Shape { name, stroke, .. } => Some((name.clone(), stroke.clone()?)),
                 _ => None,
             })
-            .unwrap();
-        assert!(font_size < 40.0);
+            .collect::<Vec<_>>();
+
+        let (_, gradient) = strokes
+            .iter()
+            .find(|(name, _)| name == "Gradient outline rectangle")
+            .expect("the gradient-stroked rectangle must reach the display list");
+        assert_eq!(
+            gradient.paint,
+            Some(Paint::Gradient {
+                gradient_type: GradientType::Linear,
+                angle_deg: Some(0.0),
+                stops: vec![
+                    GradientStop {
+                        position: 0.0,
+                        color: "#C00000".to_owned(),
+                    },
+                    GradientStop {
+                        position: 0.5,
+                        color: "#FFC000".to_owned(),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: "#1F7A3D".to_owned(),
+                    },
+                ],
+            })
+        );
+        assert_eq!(gradient.color, "#C00000");
+        assert_eq!(gradient.width, 8.0);
+
+        assert!(
+            strokes
+                .iter()
+                .any(|(name, stroke)| name == "Gradient outline line" && stroke.paint.is_some())
+        );
+
+        let (_, solid) = strokes
+            .iter()
+            .find(|(name, _)| name == "Solid outline rectangle")
+            .expect("the solid-stroked rectangle must reach the display list");
+        assert_eq!(solid.paint, None);
+        assert_eq!(solid.color, "#C00000");
+    }
+
+    #[test]
+    fn gradient_outline_keeps_sorted_alpha_paint_through_theme_fallback() {
+        let gradient: ShapeOutline = serde_json::from_value(serde_json::json!({
+            "gradient": {
+                "type": "linear", "angle": 0.0,
+                "stops": [
+                    {"position": 100000.0, "color": {"rgb": "0000FF"}},
+                    {"position": 50000.0, "color": {"rgb": "00FF00"}},
+                    {"position": 0.0, "color": {"rgb": "FF0000", "alpha": 0.5}},
+                    {"position": 50000.0, "color": {"rgb": "FFFF00"}}
+                ]
+            }
+        }))
+        .unwrap();
+        let solid = ShapeOutline {
+            color: Some(ColorValue {
+                rgb: Some("123456".into()),
+                ..Default::default()
+            }),
+            width: Some(76_200.0),
+            head_end: Some(LineEnd {
+                end_type: "triangle".into(),
+                width: None,
+                length: None,
+            }),
+            ..Default::default()
+        };
+        let merged = merge_outline(&gradient, Some(&solid));
+        let stroke = stroke(&merged, &Theme::default()).unwrap();
+        assert_eq!(stroke.width, 8.0);
+        assert_eq!(stroke.color, "#FF000080");
+        assert!(stroke.head_end.is_some());
+        let Some(Paint::Gradient { stops, .. }) = stroke.paint else {
+            panic!("gradient")
+        };
+        assert_eq!(
+            stops
+                .iter()
+                .map(|stop| (stop.position, stop.color.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (0.0, "#FF000080"),
+                (0.5, "#00FF00"),
+                (0.5, "#FFFF00"),
+                (1.0, "#0000FF")
+            ]
+        );
+        assert!(merge_outline(&solid, Some(&gradient)).gradient.is_none());
+        assert_eq!(
+            merge_outline(
+                &ShapeOutline {
+                    width: Some(12_700.0),
+                    ..Default::default()
+                },
+                Some(&gradient)
+            )
+            .gradient,
+            gradient.gradient
+        );
     }
 
     fn chart_slide(index: usize) -> Vec<Primitive> {
@@ -4227,6 +5459,41 @@ mod tests {
                     if lines.iter().flat_map(|line| &line.runs).any(|run| !run.glyphs.is_empty())
             )),
             "chart text is not shaped"
+        );
+    }
+
+    #[test]
+    fn a_chart_title_is_shaped_into_the_centre_of_its_box() {
+        let parts = chart_slide(0)
+            .into_iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Chart {
+                    primitives, name, ..
+                } if name == "Revenue chart" => Some(primitives),
+                _ => None,
+            })
+            .expect("the chart frame plots");
+        let (align, x, width) = parts
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::TextBox {
+                    lines, paragraphs, ..
+                } if lines
+                    .iter()
+                    .flat_map(|line| &line.runs)
+                    .any(|run| run.text == "Revenue") =>
+                {
+                    let run = &lines[0].runs[0];
+                    Some((paragraphs[0].align, run.x, run.width))
+                }
+                _ => None,
+            })
+            .expect("the chart title is laid out");
+        assert_eq!(align, Some(TextAlign::Center));
+        let centre = x + width / 2.0;
+        assert!(
+            (centre - (96.0 + 576.0 / 2.0)).abs() < 2.0,
+            "the title is not centred on the frame: {centre}"
         );
     }
 
@@ -4415,6 +5682,7 @@ mod tests {
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
             fill: None,
+            picture_fill: None,
             outline: None,
             effects: None,
             text: None,

@@ -1,8 +1,8 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
 use super::model::{
-    ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
-    ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartMarker,
+    ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
 };
 
 pub const DEFAULT_SERIES_COLORS: [&str; 8] = [
@@ -135,6 +135,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
             parse_text_properties(child(title, "txPr"))
                 .or_else(|| parse_text_properties(first_deep(title, "rich", 0)))
         }),
+        fill: parse_fill(child(chart_space, "spPr")),
     })
 }
 
@@ -560,7 +561,35 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         major_gridlines: child(axis, "majorGridlines").is_some(),
         minor_gridlines: child(axis, "minorGridlines").is_some(),
         text: parse_text_properties(child(axis, "txPr")),
+        line: parse_line(child(axis, "spPr")),
     }
+}
+
+/// The fill declared directly on a `c:spPr`, ignoring the one its `a:ln` carries.
+fn parse_fill<E: ChartXml>(properties: Option<&E>) -> Option<ChartFill> {
+    let properties = properties?;
+    if child(properties, "noFill").is_some() {
+        return Some(ChartFill::None);
+    }
+    if let Some(solid) = child(properties, "solidFill") {
+        return solid
+            .solid_fill_hex()
+            .map(|color| ChartFill::Solid { color });
+    }
+    let pattern = child(properties, "pattFill")?;
+    Some(ChartFill::Pattern {
+        foreground: child(pattern, "fgClr").and_then(E::solid_fill_hex),
+        background: child(pattern, "bgClr").and_then(E::solid_fill_hex),
+    })
+}
+
+fn parse_line<E: ChartXml>(properties: Option<&E>) -> Option<ChartLine> {
+    let line = child(properties?, "ln")?;
+    Some(ChartLine {
+        none: child(line, "noFill").is_some(),
+        color: child(line, "solidFill").and_then(E::solid_fill_hex),
+        width_emu: parse_number(line.attribute(None, "w")),
+    })
 }
 
 fn parse_axes<E: ChartXml>(plot_area: &E, first_series: Option<&ChartSeries>) -> Option<ChartAxes> {

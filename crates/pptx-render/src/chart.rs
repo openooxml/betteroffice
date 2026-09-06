@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, chart_aria_label,
-    plot_chart_into,
+    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, PlotTextAlign,
+    chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -26,6 +26,7 @@ pub(crate) struct ChartText<'a> {
     pub width: f64,
     pub font: PlotFont,
     pub color: &'a str,
+    pub align: PlotTextAlign,
 }
 
 /// The chart primitive for `space`, with at most `budget` parts.
@@ -97,6 +98,29 @@ impl PlotSink for ChartSink<'_> {
         self.remaining > 0 && self.error.is_none()
     }
 
+    fn measure_text(&mut self, text: &str, font: &PlotFont) -> Option<f64> {
+        if !self.accepts_more() {
+            return None;
+        }
+        match (self.text)(ChartText {
+            object_id: self.object_id,
+            text,
+            x: 0.0,
+            baseline_y: 0.0,
+            width: 1.0,
+            font: font.clone(),
+            color: "#000000",
+            align: PlotTextAlign::Start,
+        }) {
+            Ok(Primitive::TextBox { lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+            Ok(_) => None,
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        }
+    }
+
     fn push_op(&mut self, op: PlotOp) -> bool {
         if self.remaining == 0 || self.error.is_some() {
             return false;
@@ -144,6 +168,7 @@ impl PlotSink for ChartSink<'_> {
                         color,
                         width: width as f32,
                         dashed: false,
+                        paint: None,
                         head_end: None,
                         tail_end: None,
                     }),
@@ -172,6 +197,7 @@ impl PlotSink for ChartSink<'_> {
                     color: stroke.color,
                     width: stroke.width as f32,
                     dashed: false,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -183,6 +209,7 @@ impl PlotSink for ChartSink<'_> {
                 width,
                 font,
                 color,
+                align,
             } => {
                 let request = ChartText {
                     object_id: self.object_id,
@@ -192,6 +219,7 @@ impl PlotSink for ChartSink<'_> {
                     width,
                     font,
                     color: &color,
+                    align,
                 };
                 match (self.text)(request) {
                     Ok(primitive) => primitive,

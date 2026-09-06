@@ -8,7 +8,7 @@ use std::sync::LazyLock;
 use ooxml_text::{FontId, FontStore};
 use pptx_raster::{AssetMap, Background, RenderOptions, RenderResources, render_slide};
 use pptx_render::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, Paint, PositionedGlyph,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
     PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAnchor,
     TextParagraph, Transform,
 };
@@ -201,6 +201,7 @@ fn golden_shapes() {
                     color: "#1e3a8a".into(),
                     width: 2.0,
                     dashed: false,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -215,6 +216,7 @@ fn golden_shapes() {
                     color: "#ef4444".into(),
                     width: 3.0,
                     dashed: true,
+                    paint: None,
                     head_end: None,
                     tail_end: None,
                 }),
@@ -304,9 +306,48 @@ fn golden_image() {
                 color: "#111827".into(),
                 width: 2.0,
                 dashed: false,
+                paint: None,
                 head_end: None,
                 tail_end: None,
             }),
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_picture_fill() {
+    use ooxml_drawingml::GeometryPathCommand as Cmd;
+    check(
+        "picture-fill",
+        &slide(vec![Primitive::Image {
+            object_id: 4,
+            shape_id: Some("shape-2".into()),
+            name: "ring".into(),
+            x: 20.0,
+            y: 15.0,
+            w: 200.0,
+            h: 105.0,
+            asset_id: Some("ppt/media/image1.png".into()),
+            crop: ImageCrop {
+                left: 0.25,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            path: Some(vec![
+                Cmd::Move { x: 0.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 1.0 },
+                Cmd::Line { x: 0.0, y: 1.0 },
+                Cmd::Close,
+                Cmd::Move { x: 0.25, y: 0.25 },
+                Cmd::Line { x: 0.25, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.25 },
+                Cmd::Close,
+            ]),
+            stroke: None,
             transform: Transform::default(),
         }]),
     );
@@ -444,6 +485,65 @@ fn a_transparent_render_differs_from_the_opaque_one() {
     )
     .expect("clear");
     assert_ne!(opaque.bytes, clear.bytes);
+}
+
+#[test]
+fn overflowing_text_escapes_its_box_but_respects_the_parent_clip() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    for overflow in [false, true] {
+        for parent_clip in [false, true] {
+            let mut text = text_box(20.0, 20.0, "Overflowing text", 32.0, false);
+            if let Primitive::TextBox {
+                h, overflow: flag, ..
+            } = &mut text
+            {
+                *h = 8.0;
+                *flag = overflow;
+            }
+            let primitive = if parent_clip {
+                Primitive::Chart {
+                    object_id: 3,
+                    shape_id: None,
+                    name: "Clip".into(),
+                    x: 35.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 60.0,
+                    label: "".into(),
+                    primitives: vec![text],
+                    transform: Transform::default(),
+                }
+            } else {
+                text
+            };
+            let png = render_slide(
+                &slide(vec![primitive]),
+                &resources,
+                &RenderOptions::default(),
+            )
+            .unwrap();
+            let pixels = image::load_from_memory(&png.bytes).unwrap().to_rgba8();
+            let mut outside_text = 0;
+            for (x, y, pixel) in pixels.enumerate_pixels() {
+                if pixel.0 == [253, 253, 253, 255] {
+                    continue;
+                }
+                if parent_clip {
+                    assert!((35..85).contains(&x) && (10..70).contains(&y));
+                }
+                if y >= 28 {
+                    outside_text += 1;
+                }
+            }
+            if overflow {
+                assert!(outside_text > 100, "parent clip: {parent_clip}");
+            } else {
+                assert_eq!(outside_text, 0);
+            }
+        }
+    }
 }
 
 #[test]

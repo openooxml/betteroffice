@@ -52,10 +52,13 @@ pub struct GradientStop {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stroke {
+    /// Solid colour or first gradient stop.
     pub color: String,
     pub width: f32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub dashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint: Option<Paint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_end: Option<StrokeEnd>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -345,6 +348,14 @@ fn is_zero(value: &f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn solid_stroke_keeps_legacy_json_and_reads_missing_paint() {
+        let json = r##"{"color":"#123456","width":2.0,"dashed":true}"##;
+        let stroke: Stroke = serde_json::from_str(json).unwrap();
+        assert!(stroke.paint.is_none());
+        assert_eq!(serde_json::to_string(&stroke).unwrap(), json);
+    }
 
     #[test]
     fn identity_transform_is_omitted_from_json() {
