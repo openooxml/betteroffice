@@ -157,21 +157,25 @@ pub fn preset_geometry_to_path(
             "right",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "leftArrow" => arrow(
             "left",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "upArrow" => arrow(
             "up",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "downArrow" => arrow(
             "down",
             adjustments.get("adj1").copied(),
             adjustments.get("adj2").copied(),
+            aspect_ratio,
         ),
         "leftRightArrow" => polygon(&[
             (0.0, 0.5),
@@ -245,6 +249,10 @@ pub fn preset_geometry_to_path(
 fn shortest_side_adjustment(adjustment: Option<f64>, fallback: f64, aspect_ratio: f64) -> f64 {
     let width = width_in_shortest_sides(aspect_ratio);
     pin(adjustment, fallback, width) / width
+}
+
+fn height_in_shortest_sides(aspect_ratio: f64) -> f64 {
+    width_in_shortest_sides(1.0 / aspect_ratio)
 }
 
 fn width_in_shortest_sides(aspect_ratio: f64) -> f64 {
@@ -366,10 +374,23 @@ fn arrow(
     direction: &str,
     shaft_adjustment: Option<f64>,
     head_adjustment: Option<f64>,
+    aspect_ratio: f64,
 ) -> Vec<GeometryPathCommand> {
-    let shaft = clamp_fraction(shaft_adjustment, 0.5);
+    // `adj1` and `adj2` are both measured off the shortest side, so each has to be restated
+    // against the axis it spans before it means anything in the unit box.
+    let (along, across) = match direction {
+        "up" | "down" => (
+            height_in_shortest_sides(aspect_ratio),
+            width_in_shortest_sides(aspect_ratio),
+        ),
+        _ => (
+            width_in_shortest_sides(aspect_ratio),
+            height_in_shortest_sides(aspect_ratio),
+        ),
+    };
+    let shaft = clamp_fraction(shaft_adjustment, 0.5) / across;
     let edge = (1.0 - shaft) / 2.0;
-    let head = clamp_fraction(head_adjustment, 0.5);
+    let head = pin(head_adjustment, 0.5, along) / along;
     polygon(&[
         (0.0, edge),
         (1.0 - head, edge),
@@ -472,6 +493,38 @@ mod tests {
             panic!("round rectangle must curve its first corner");
         };
         (rx, ry)
+    }
+
+    /// An up arrow's shaft half-width and head height, as fractions of the box.
+    fn up_arrow(adj1: f64, adj2: f64, aspect_ratio: f64) -> (f64, f64) {
+        let adjustments = HashMap::from([("adj1".to_owned(), adj1), ("adj2".to_owned(), adj2)]);
+        let path = preset_geometry_to_path("upArrow", &adjustments, aspect_ratio).unwrap();
+        let GeometryPathCommand::Line { x, y } = path[1] else {
+            panic!("expected the shaft edge after the opening move");
+        };
+        (x, y)
+    }
+
+    #[test]
+    fn an_arrow_measures_both_adjustments_off_the_shortest_side() {
+        // A 468000 x 1078605 EMU upArrow with adj1 55713 and adj2 80407: PowerPoint puts the
+        // shaft at 55.7% of the width and the head at 34.9% of the height, both off ss = width.
+        let (edge, head) = up_arrow(0.557_13, 0.804_07, 468_000.0 / 1_078_605.0);
+        assert_close(1.0 - 2.0 * edge, 0.557_13);
+        assert_close(head, 0.804_07 / (1_078_605.0 / 468_000.0));
+    }
+
+    #[test]
+    fn a_square_arrow_reads_its_adjustments_unchanged() {
+        let (edge, head) = up_arrow(0.5, 0.5, 1.0);
+        assert_close(1.0 - 2.0 * edge, 0.5);
+        assert_close(head, 0.5);
+    }
+
+    #[test]
+    fn an_arrow_head_pins_at_the_side_it_spans() {
+        let (_, head) = up_arrow(0.5, 9.0, 468_000.0 / 1_078_605.0);
+        assert_close(head, 1.0);
     }
 
     /// Where the leading edge stops before the point begins.
