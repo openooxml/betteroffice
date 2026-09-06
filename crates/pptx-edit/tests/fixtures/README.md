@@ -73,3 +73,24 @@ were generated on main `2c90c17f` from
 `../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+`deck-schema-v9-autonumber.update.bin` was generated on main `2c90c17f`
+from `../../pptx-render/tests/fixtures/autonumber-bullets.pptx`. It remains
+the historical oracle for numbering before baseline and restart support.
+
+`deck-schema-v10-autonumber.update.bin` and `deck-schema-v10-baseline.update.bin`
+are fresh seeds produced by current main
+`069e4d66bf749869ad581114dd3e4e4c721ed07f`, using its schema-10 reader and writer
+and client ID 30001. Their sources are `autonumber-bullets.pptx` and
+`text-baseline-script.pptx` in the renderer fixtures. Copy
+`generate_autonumber_schema_snapshots.rs` into that main checkout's
+`crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_autonumber_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts schema 10 and verifies that main reopens its seeds without
+changes. Tests retain separate transactions for main's baseline migration to 10
+and the numbering migration to 11, recover legacy baseline and restart data on
+source attachment, preserve current-main baselines, and verify idempotence.
