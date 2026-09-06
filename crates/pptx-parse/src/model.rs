@@ -479,6 +479,8 @@ pub struct TextRun {
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
     pub font_size_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
     /// Baseline shift as a percentage of the font size; negative is subscript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,

@@ -14,11 +14,11 @@ use yrs::{
     Update, WriteTxn,
 };
 
-mod baseline;
 mod comments;
 mod deck;
 mod model;
 mod save;
+mod source_run_properties;
 mod story;
 mod undo;
 
@@ -160,7 +160,12 @@ impl DeckSession {
         .map_err(|error| EditError::Parse(error.to_string()))?;
         comments::import_source_comments(&session, &package)?;
         deck::import_source_text_properties(&session.doc, &package)?;
-        baseline::import_source(&session, &package)?;
+        for property in [
+            source_run_properties::SourceProperty::Baseline,
+            source_run_properties::SourceProperty::Spacing,
+        ] {
+            source_run_properties::import_source(&session, &package, property)?;
+        }
         story::import_source_numbering_restarts(&session.doc, &package)?;
         Ok(Self {
             package: Arc::new(package),

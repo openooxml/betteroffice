@@ -1813,10 +1813,7 @@ fn run_segments(runs: &[RunWrite]) -> Vec<RunSegment<'_>> {
     segments
 }
 
-/// Whether a source run element already carries the segment: same text and
-/// the same modeled styling once colours are resolved against the theme.
-/// Reused elements keep everything the model does not carry — hyperlinks,
-/// field bindings, spacing, strikethrough.
+/// Matches text and modeled styling against a source run.
 fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option<&Theme>) -> bool {
     if element.local_name() == "br" {
         return segment.line_break;
@@ -1837,6 +1834,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.bold == target.bold
         && source.italic == target.italic
         && source.font_size_pt == target.font_size_pt
+        && source.spacing_pt == target.spacing_pt
         && source.underline == target.underline
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
@@ -2094,8 +2092,7 @@ const POST_LATIN_ELEMENTS: [&str; 7] = [
     "extLst",
 ];
 
-/// Overwrites the modeled styling on a cloned source `rPr`, leaving what the
-/// model does not carry (hyperlinks, strike, spacing, language) in place.
+/// Updates modeled styling while preserving unmodeled XML.
 fn apply_run_properties(
     base: &mut XmlElement,
     properties: &RunProperties,
@@ -2106,6 +2103,12 @@ fn apply_run_properties(
         Some(size) => base.set_attribute("sz", format_fixed(size * 100.0)),
         None => {
             base.attributes.remove("sz");
+        }
+    }
+    match properties.spacing_pt {
+        Some(spacing) => base.set_attribute("spc", format_fixed(spacing * 100.0)),
+        None => {
+            base.attributes.remove("spc");
         }
     }
     match properties.baseline_pct {
@@ -2283,6 +2286,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     }
     if let Some(size) = properties.font_size_pt {
         element.set_attribute("sz", format_fixed(size * 100.0));
+        present = true;
+    }
+    if let Some(spacing) = properties.spacing_pt {
+        element.set_attribute("spc", format_fixed(spacing * 100.0));
         present = true;
     }
     if let Some(baseline) = properties.baseline_pct {

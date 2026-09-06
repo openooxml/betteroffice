@@ -104,3 +104,15 @@ without changes. Tests observe separate baseline (10), numbering (11), and
 spacing (12) transactions; retain legacy baseline, restart, and spacing recovery
 from source; preserve existing edits; and verify idempotence. Released v1 and
 historical v2–v9 fixtures also traverse every remaining migration in order.
+
+## Run character spacing
+
+`run-spacing-main-v10.update.bin` was generated on main `069e4d66` from
+`crates/pptx-render/tests/fixtures/run-spacing.pptx` with client ID 32500.
+It exercises schema v13 source recovery, deferred attachment, and explicit zero overrides.
+
+`run-spacing-main-v11.update.bin` was generated from the same deck on main
+`cca2618c` with client ID 32500. Both main snapshots exercise migration to v13.
+
+`run-spacing-main-v12.update.bin` is the same source opened on main `3d95068f`
+with client ID 32500. All three native main snapshots recover tracking in v13.

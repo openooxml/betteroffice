@@ -21,9 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 12.0;
+const SCHEMA_VERSION: f64 = 13.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 12] = [
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 13] = [
     1.0,
     2.0,
     3.0,
@@ -35,6 +35,7 @@ const MIGRATABLE_SCHEMA_VERSIONS: [f64; 12] = [
     9.0,
     10.0,
     11.0,
+    12.0,
     SCHEMA_VERSION,
 ];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
@@ -396,6 +397,7 @@ impl DeckSession {
             draft.style.underline.as_deref(),
             draft.style.color.as_deref(),
             draft.style.font_size_pt,
+            draft.style.spacing_pt,
             draft.style.baseline_pct,
         )?;
         let shape_id = self.next_id("shape");
@@ -932,6 +934,9 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     if version < 12.0 {
         migrate_doc_to_v12(doc)?;
     }
+    if version < 13.0 {
+        migrate_doc_to_v13(doc)?;
+    }
     Ok(())
 }
 
@@ -1105,6 +1110,14 @@ fn migrate_doc_to_v12(doc: &Doc) -> EditResult<()> {
         Any::Buffer(Arc::from(package_json)),
     );
     meta.insert(&mut txn, "schemaVersion", 12.0);
+    Ok(())
+}
+
+fn migrate_doc_to_v13(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    meta.insert(&mut txn, "spacingPendingSource", true);
+    meta.insert(&mut txn, "schemaVersion", 13.0);
     Ok(())
 }
 
@@ -1676,13 +1689,26 @@ mod tests {
             (
                 V9,
                 9.0,
-                vec![(10.0, Some(true)), (11.0, Some(true)), (12.0, Some(true))],
+                vec![
+                    (10.0, Some(true)),
+                    (11.0, Some(true)),
+                    (12.0, Some(true)),
+                    (13.0, Some(true)),
+                ],
             ),
-            (V10_BASELINE, 10.0, vec![(11.0, None), (12.0, None)]),
-            (V10_NUMBERING, 10.0, vec![(11.0, None), (12.0, None)]),
-            (V11_BASELINE, 11.0, vec![(12.0, None)]),
-            (V11_NUMBERING, 11.0, vec![(12.0, None)]),
-            (V11_SPACING, 11.0, vec![(12.0, None)]),
+            (
+                V10_BASELINE,
+                10.0,
+                vec![(11.0, None), (12.0, None), (13.0, None)],
+            ),
+            (
+                V10_NUMBERING,
+                10.0,
+                vec![(11.0, None), (12.0, None), (13.0, None)],
+            ),
+            (V11_BASELINE, 11.0, vec![(12.0, None), (13.0, None)]),
+            (V11_NUMBERING, 11.0, vec![(12.0, None), (13.0, None)]),
+            (V11_SPACING, 11.0, vec![(12.0, None), (13.0, None)]),
         ] {
             let doc = crate::doc_with_client_id(30020);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1713,7 +1739,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_each_version_through_v12() {
+    fn legacy_migrations_commit_each_version_through_v13() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1725,13 +1751,16 @@ mod tests {
         for (update, expected_versions) in [
             (
                 V1,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
             (
                 V2,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
+            (
+                V3,
+                vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
+            ),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1804,19 +1833,19 @@ mod tests {
             (
                 V2,
                 V4_LEGACY,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 1,
             ),
             (
                 V4_STYLES,
                 V4_STYLES,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 1,
             ),
             (
                 V4_NUMBERED,
                 V4_NUMBERED,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                 10,
             ),
         ] {
@@ -1882,10 +1911,10 @@ mod tests {
         for (update, versions) in [
             (
                 V2,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
             ),
-            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
-            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]),
+            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]),
+            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -2128,7 +2157,8 @@ mod tests {
                 (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (11.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (12.0, before, Some("legacy".to_owned()), Some(true))
+                (12.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (13.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

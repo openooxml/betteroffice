@@ -43,6 +43,8 @@ pub struct TextStyle {
     pub font_family: Option<String>,
     pub underline: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
 }
 
@@ -55,6 +57,8 @@ pub struct TextStylePatch {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
 }

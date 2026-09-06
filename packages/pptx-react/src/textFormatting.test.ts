@@ -177,6 +177,7 @@ function style(overrides: Partial<TextStyleSnapshot>): TextStyleSnapshot {
     color: '#111827',
     fontFamily: null,
     underline: null,
+    spacingPt: null,
     ...overrides,
   };
 }

@@ -47,6 +47,7 @@ pub(crate) fn validate_style_values(
     underline: Option<&str>,
     color: Option<&str>,
     font_size_pt: Option<f64>,
+    spacing_pt: Option<f64>,
     baseline_pct: Option<f64>,
 ) -> EditResult<()> {
     if let Some(font_family) = font_family {
@@ -72,6 +73,13 @@ pub(crate) fn validate_style_values(
     {
         return Err(EditError::InvalidText(format!(
             "font size {size}pt is outside the 1-4000pt range"
+        )));
+    }
+    if let Some(spacing) = spacing_pt
+        && (!spacing.is_finite() || !(-4_000.0..=4_000.0).contains(&spacing))
+    {
+        return Err(EditError::InvalidText(format!(
+            "letter spacing {spacing}pt is outside the -4000-4000pt range"
         )));
     }
     if let Some(baseline) = baseline_pct
@@ -290,6 +298,7 @@ impl DeckSession {
             style.underline.as_deref(),
             style.color.as_deref(),
             style.font_size_pt,
+            style.spacing_pt,
             style.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
@@ -348,6 +357,7 @@ impl DeckSession {
             patch.underline.as_deref(),
             patch.color.as_deref(),
             patch.font_size_pt,
+            patch.spacing_pt,
             patch.baseline_pct,
         )?;
         let mut txn = self.transact_for(context);
@@ -659,7 +669,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 7] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 8] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -688,6 +698,10 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 7] {
                 .unwrap_or(Any::Null),
         ),
         (
+            "spacing",
+            style.spacing_pt.map(Any::Number).unwrap_or(Any::Null),
+        ),
+        (
             "baseline",
             style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
         ),
@@ -710,6 +724,7 @@ fn attrs_from_patch(patch: &TextStylePatch) -> Attrs {
         "underline",
         patch.underline.as_deref().map(Any::from),
     );
+    insert_option(&mut attrs, "spacing", patch.spacing_pt.map(Any::Number));
     insert_option(&mut attrs, "baseline", patch.baseline_pct.map(Any::Number));
     attrs
 }
@@ -728,6 +743,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), theme),
         font_family: properties.font_family.clone(),
         underline: properties.underline.clone(),
+        spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
     }
 }
@@ -740,6 +756,7 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         color: attrs.and_then(|attrs| any_string(attrs.get("color"))),
         font_family: attrs.and_then(|attrs| any_string(attrs.get("fontFamily"))),
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
+        spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
     }
 }

@@ -54,6 +54,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="6" name="Script"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>1</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>st</a:t></a:r><a:r><a:rPr sz="1200"/><a:t> place, H</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>2</a:t></a:r><a:r><a:rPr sz="1200"/><a:t>O</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="7" name="Tracked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr spc="300"/><a:t>Wide</a:t></a:r><a:r><a:rPr spc="300" b="1"/><a:t>Caps</a:t></a:r></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -482,6 +485,73 @@ fn junk_style_values_are_rejected_at_the_edit() {
         assert!(matches!(error, EditError::InvalidText(_)));
     }
     assert_eq!(parts(&session.save().unwrap()), parts(&fixture(256)));
+}
+
+fn tracked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+#[test]
+fn an_edit_inside_a_tracked_run_keeps_its_letter_spacing() {
+    let session = open();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 2, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>Wi</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr spc="300"/><a:t>de</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr b="1" spc="300"/><a:t>Caps</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let story = reopened.story(&tracked_story(&reopened)).unwrap();
+    let spacing = story.paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.spacing_pt))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spacing,
+        vec![
+            ("Wi".to_owned(), Some(3.0)),
+            ("X".to_owned(), None),
+            ("de".to_owned(), Some(3.0)),
+            ("Caps".to_owned(), Some(3.0)),
+        ]
+    );
+}
+
+#[test]
+fn an_edit_across_two_tracked_runs_rebuilds_their_letter_spacing() {
+    let session = open();
+    let story_id = tracked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 5).unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>Wid</a:t>"));
+    assert!(slide.contains("<a:t>aps</a:t>"));
+    assert_eq!(slide.matches(r#"spc="300""#).count(), 2);
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let story = reopened.story(&tracked_story(&reopened)).unwrap();
+    assert_eq!(story.plain_text(), "Widaps");
+    assert!(
+        story.paragraphs[0]
+            .runs
+            .iter()
+            .all(|run| run.style.spacing_pt == Some(3.0))
+    );
 }
 
 #[test]

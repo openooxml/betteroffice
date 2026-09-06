@@ -9,19 +9,45 @@ use crate::{
     DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot, StorySnapshot,
 };
 
-pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> EditResult<()> {
+#[derive(Clone, Copy)]
+pub(crate) enum SourceProperty {
+    Baseline,
+    Spacing,
+}
+
+impl SourceProperty {
+    fn keys(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Self::Baseline => ("baselinesPendingSource", "baselinePct", "baseline"),
+            Self::Spacing => ("spacingPendingSource", "spacingPt", "spacing"),
+        }
+    }
+
+    fn value(self, style: &crate::TextStyle) -> Option<f64> {
+        match self {
+            Self::Baseline => style.baseline_pct,
+            Self::Spacing => style.spacing_pt,
+        }
+    }
+}
+
+pub(crate) fn import_source(
+    session: &DeckSession,
+    source: &PptxPackage,
+    property: SourceProperty,
+) -> EditResult<()> {
+    let (pending_key, json_key, attribute) = property.keys();
     let pending = {
         let txn = session.doc.transact();
-        txn.get_map(META).is_some_and(|meta| {
-            meta.get(&txn, "baselinesPendingSource") == Some(Out::Any(Any::Bool(true)))
-        })
+        txn.get_map(META)
+            .is_some_and(|meta| meta.get(&txn, pending_key) == Some(Out::Any(Any::Bool(true))))
     };
     if !pending {
         return Ok(());
     }
     let source_json =
         serde_json::to_value(source).map_err(|error| EditError::Json(error.to_string()))?;
-    if !has_baselines(&source_json) {
+    if !has_property(&source_json, json_key) {
         return Ok(());
     }
     let fresh = DeckSession::from_package(source.clone(), 33100)?;
@@ -40,11 +66,11 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
         let Some(source) = sources.get(id) else {
             continue;
         };
-        let source_tokens = tokens(source);
+        let source_tokens = tokens(source, property);
         if !source_tokens.iter().any(|(_, baseline)| baseline.is_some()) {
             continue;
         }
-        let target_tokens = tokens(target);
+        let target_tokens = tokens(target, property);
         let pairs = unchanged_pairs(&source_tokens, &target_tokens)?;
         let mut offset = 0u32;
         let positions: Vec<_> = target_tokens
@@ -66,7 +92,7 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
     }
     let mut package = serde_json::to_value(crate::deck::package_from_doc(&session.doc)?)
         .map_err(|error| EditError::Json(error.to_string()))?;
-    merge_baselines(&mut package, &source_json);
+    merge_property(&mut package, &source_json, json_key);
     let package: PptxPackage =
         serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
     let bytes = serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
@@ -83,14 +109,14 @@ pub(crate) fn import_source(session: &DeckSession, source: &PptxPackage) -> Edit
             &mut txn,
             start,
             end - start,
-            Attrs::from([("baseline".into(), Any::Number(baseline))]),
+            Attrs::from([(attribute.into(), Any::Number(baseline))]),
         );
     }
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
     meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
-    meta.remove(&mut txn, "baselinesPendingSource");
+    meta.remove(&mut txn, pending_key);
     Ok(())
 }
 
@@ -106,11 +132,15 @@ fn collect_stories<'a>(
     }
 }
 
-fn tokens(story: &StorySnapshot) -> Vec<(char, Option<f64>)> {
+fn tokens(story: &StorySnapshot, property: SourceProperty) -> Vec<(char, Option<f64>)> {
     let mut tokens = Vec::new();
     for paragraph in &story.paragraphs {
         for run in &paragraph.runs {
-            tokens.extend(run.text.chars().map(|unit| (unit, run.style.baseline_pct)));
+            tokens.extend(
+                run.text
+                    .chars()
+                    .map(|unit| (unit, property.value(&run.style))),
+            );
         }
         tokens.push(('\0', None));
     }
@@ -137,7 +167,7 @@ fn unchanged_pairs(
         .checked_mul(cols)
         .filter(|cells| *cells <= 4_000_000)
         .ok_or_else(|| {
-            EditError::InvalidState("source baseline recovery exceeds text diff limit".into())
+            EditError::InvalidState("source run property recovery exceeds text diff limit".into())
         })?;
     let mut lengths = vec![0u32; cells];
     for i in (0..rows - 1).rev() {
@@ -166,33 +196,33 @@ fn unchanged_pairs(
     Ok(pairs)
 }
 
-fn merge_baselines(target: &mut Value, source: &Value) {
+fn merge_property(target: &mut Value, source: &Value, key: &str) {
     match (target, source) {
         (Value::Object(target), Value::Object(source)) => {
-            if let Some(baseline) = source.get("baselinePct") {
-                target.insert("baselinePct".into(), baseline.clone());
+            if let Some(baseline) = source.get(key) {
+                target.insert(key.into(), baseline.clone());
             }
-            for (key, target) in target {
-                if let Some(source) = source.get(key) {
-                    merge_baselines(target, source);
+            for (child_key, target) in target {
+                if let Some(source) = source.get(child_key) {
+                    merge_property(target, source, key);
                 }
             }
         }
         (Value::Array(target), Value::Array(source)) => {
             for (target, source) in target.iter_mut().zip(source) {
-                merge_baselines(target, source);
+                merge_property(target, source, key);
             }
         }
         _ => {}
     }
 }
 
-fn has_baselines(value: &Value) -> bool {
+fn has_property(value: &Value, key: &str) -> bool {
     match value {
         Value::Object(object) => {
-            object.contains_key("baselinePct") || object.values().any(has_baselines)
+            object.contains_key(key) || object.values().any(|value| has_property(value, key))
         }
-        Value::Array(array) => array.iter().any(has_baselines),
+        Value::Array(array) => array.iter().any(|value| has_property(value, key)),
         _ => false,
     }
 }
