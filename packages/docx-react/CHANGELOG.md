@@ -1,5 +1,16 @@
 # @betteroffice/docx-react
 
+## 0.2.0
+
+### Patch Changes
+
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- Updated dependencies [43fad65]
+- Updated dependencies [6f0e36d]
+- Updated dependencies [1d0f41d]
+  - @betteroffice/docx@0.2.0
+  - @betteroffice/docx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

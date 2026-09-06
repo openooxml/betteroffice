@@ -1,5 +1,16 @@
 # @betteroffice/docx
 
+## 0.2.0
+
+### Minor Changes
+
+- 1d0f41d: Round-trip DOCX packages as a byte-stable fixed point that keeps the authored section properties, simple fields, drawing names, foreign markup, unknown attributes and custom root bindings (new public model fields and enum variants).
+
+### Patch Changes
+
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 6f0e36d: Hide suppressed list-number placeholders while preserving literal labels.
+
 ## 0.1.0
 
 ### Minor Changes
