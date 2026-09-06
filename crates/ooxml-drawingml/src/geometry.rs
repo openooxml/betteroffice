@@ -376,19 +376,11 @@ fn arrow(
     head_adjustment: Option<f64>,
     aspect_ratio: f64,
 ) -> Vec<GeometryPathCommand> {
-    // `adj1` and `adj2` are both measured off the shortest side, so each has to be restated
-    // against the axis it spans before it means anything in the unit box.
-    let (along, across) = match direction {
-        "up" | "down" => (
-            height_in_shortest_sides(aspect_ratio),
-            width_in_shortest_sides(aspect_ratio),
-        ),
-        _ => (
-            width_in_shortest_sides(aspect_ratio),
-            height_in_shortest_sides(aspect_ratio),
-        ),
+    let along = match direction {
+        "up" | "down" => height_in_shortest_sides(aspect_ratio),
+        _ => width_in_shortest_sides(aspect_ratio),
     };
-    let shaft = clamp_fraction(shaft_adjustment, 0.5) / across;
+    let shaft = clamp_fraction(shaft_adjustment, 0.5);
     let edge = (1.0 - shaft) / 2.0;
     let head = pin(head_adjustment, 0.5, along) / along;
     polygon(&[
@@ -495,7 +487,6 @@ mod tests {
         (rx, ry)
     }
 
-    /// An up arrow's shaft half-width and head height, as fractions of the box.
     fn up_arrow(adj1: f64, adj2: f64, aspect_ratio: f64) -> (f64, f64) {
         let adjustments = HashMap::from([("adj1".to_owned(), adj1), ("adj2".to_owned(), adj2)]);
         let path = preset_geometry_to_path("upArrow", &adjustments, aspect_ratio).unwrap();
@@ -506,9 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arrow_measures_both_adjustments_off_the_shortest_side() {
-        // A 468000 x 1078605 EMU upArrow with adj1 55713 and adj2 80407: PowerPoint puts the
-        // shaft at 55.7% of the width and the head at 34.9% of the height, both off ss = width.
+    fn an_arrow_head_uses_the_shortest_side() {
         let (edge, head) = up_arrow(0.557_13, 0.804_07, 468_000.0 / 1_078_605.0);
         assert_close(1.0 - 2.0 * edge, 0.557_13);
         assert_close(head, 0.804_07 / (1_078_605.0 / 468_000.0));
@@ -516,15 +505,55 @@ mod tests {
 
     #[test]
     fn a_square_arrow_reads_its_adjustments_unchanged() {
-        let (edge, head) = up_arrow(0.5, 0.5, 1.0);
-        assert_close(1.0 - 2.0 * edge, 0.5);
-        assert_close(head, 0.5);
+        let (edge, head) = up_arrow(0.4, 0.7, 1.0);
+        assert_close(1.0 - 2.0 * edge, 0.4);
+        assert_close(head, 0.7);
+        let defaults = preset_geometry_to_path("upArrow", &HashMap::new(), 1.0).unwrap();
+        assert_eq!(defaults[0], GeometryPathCommand::Move { x: 0.25, y: 1.0 });
+        assert_eq!(defaults[1], GeometryPathCommand::Line { x: 0.25, y: 0.5 });
     }
 
     #[test]
     fn an_arrow_head_pins_at_the_side_it_spans() {
-        let (_, head) = up_arrow(0.5, 9.0, 468_000.0 / 1_078_605.0);
-        assert_close(head, 1.0);
+        for (adjustment, expected) in [(-0.5, 0.0), (1.5, 0.375), (9.0, 1.0)] {
+            let (_, head) = up_arrow(0.5, adjustment, 0.25);
+            assert_close(head, expected);
+        }
+    }
+
+    #[test]
+    fn arrow_shafts_use_the_full_cross_axis() {
+        let adjustments = HashMap::from([("adj1".to_owned(), 0.4)]);
+        for (shape, aspect, x, y) in [
+            ("upArrow", 4.0, 0.3, 1.0),
+            ("downArrow", 4.0, 0.3, 0.0),
+            ("leftArrow", 0.25, 1.0, 0.3),
+            ("rightArrow", 0.25, 0.0, 0.3),
+        ] {
+            let path = preset_geometry_to_path(shape, &adjustments, aspect).unwrap();
+            assert_eq!(path[0], GeometryPathCommand::Move { x, y }, "{shape}");
+        }
+    }
+
+    #[test]
+    fn arrow_heads_follow_the_pointing_axis() {
+        for (shape, aspect, shoulder, tip) in [
+            ("upArrow", 0.25, (0.25, 0.125), (0.5, 0.0)),
+            ("downArrow", 0.25, (0.25, 0.875), (0.5, 1.0)),
+            ("leftArrow", 4.0, (0.125, 0.25), (0.0, 0.5)),
+            ("rightArrow", 4.0, (0.875, 0.25), (1.0, 0.5)),
+        ] {
+            let path = preset_geometry_to_path(shape, &HashMap::new(), aspect).unwrap();
+            assert_eq!(
+                path[1],
+                GeometryPathCommand::Line {
+                    x: shoulder.0,
+                    y: shoulder.1,
+                },
+                "{shape}"
+            );
+            assert_eq!(path[3], GeometryPathCommand::Line { x: tip.0, y: tip.1 });
+        }
     }
 
     /// Where the leading edge stops before the point begins.
