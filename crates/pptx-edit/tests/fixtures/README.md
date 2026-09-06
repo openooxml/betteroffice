@@ -80,7 +80,7 @@ the historical oracle for numbering before baseline and restart support.
 
 `deck-schema-v11-line-spacing.update.bin`, `deck-schema-v11-autonumber.update.bin`,
 and `deck-schema-v11-baseline.update.bin` are fresh seeds from main
-`2877abaaffeba33db90012303fb48e4ee3fb9a6d` (schema 11), using its locked
+`07d72ce1ad5cb490d4013db245d78380ffcade3b` (schema 11), using its locked
 dependencies and client ID 31401. Their sources are `line-spacing.pptx`,
 `autonumber-bullets.pptx`, and `text-baseline-script.pptx` in the renderer
 fixtures. The spacing seed inserts `Edited ` at the start of the first story.
