@@ -261,6 +261,8 @@ export interface Shadow {
   blur?: number;
   dx?: number;
   dy?: number;
+  scaleX?: number;
+  scaleY?: number;
 }
 
 export interface PrimitiveTransform {

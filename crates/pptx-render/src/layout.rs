@@ -483,6 +483,7 @@ impl<'a> LayoutBuilder<'a> {
                     effects,
                     self.theme,
                     space,
+                    rect,
                     shape.rotation_deg as f32,
                     shape.flip_h,
                     shape.flip_v,
@@ -626,6 +627,7 @@ impl<'a> LayoutBuilder<'a> {
                             effects,
                             self.theme,
                             space,
+                            rect,
                             transform.rotation_deg,
                             transform.flip_h,
                             transform.flip_v,
@@ -2428,6 +2430,7 @@ fn shadow(
     effects: &ShapeEffects,
     theme: &Theme,
     space: Space,
+    rect: PxRect,
     rotation_deg: f32,
     flip_h: bool,
     flip_v: bool,
@@ -2447,12 +2450,42 @@ fn shadow(
         let (sin, cos) = rotation_deg.to_radians().sin_cos();
         (dx, dy) = (cos * dx - sin * dy, sin * dx + cos * dy);
     }
+    // Scaling happens about the surface origin, so the anchor `algn` names travels in the
+    // offset: a point scaled about A lands at s * p + A * (1 - s).
+    let scale_x = outer.scale_x as f32;
+    let scale_y = outer.scale_y as f32;
+    let (anchor_x, anchor_y) = shadow_anchor(&outer.alignment, rect);
     Some(Shadow {
         color,
         blur: safe_geometry(outer.blur_radius as f32 * (space.scale_x + space.scale_y) / 2.0),
-        dx: safe_geometry(dx),
-        dy: safe_geometry(dy),
+        dx: safe_geometry(dx + anchor_x * (1.0 - scale_x)),
+        dy: safe_geometry(dy + anchor_y * (1.0 - scale_y)),
+        scale_x: safe_scale(scale_x),
+        scale_y: safe_scale(scale_y),
     })
+}
+
+fn safe_scale(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        1.0
+    }
+}
+
+/// The point of `rect` that `a:algn` keeps fixed when the shadow is scaled.
+fn shadow_anchor(alignment: &str, rect: PxRect) -> (f32, f32) {
+    let x = match alignment {
+        "tl" | "l" | "bl" => rect.x,
+        "tr" | "r" | "br" => rect.x + rect.w,
+        _ => rect.x + rect.w / 2.0,
+    };
+    let y = match alignment {
+        "tl" | "t" | "tr" => rect.y,
+        "l" | "ctr" | "r" => rect.y + rect.h / 2.0,
+        _ => rect.y + rect.h,
+    };
+    (x, y)
 }
 
 fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
@@ -3349,25 +3382,56 @@ mod tests {
                 ..Default::default()
             }),
         };
-        let resolved = shadow(&effects(0.4), &theme, Space::root(), 0.0, false, false)
-            .expect("a painted shadow");
+        let box_ = PxRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        let resolved = shadow(
+            &effects(0.4),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
         assert_eq!(resolved.color, "#00000066");
         assert!((resolved.blur - 8.0).abs() < 0.01);
         assert!((resolved.dx - 2.828).abs() < 0.01);
         assert!((resolved.dy - 2.828).abs() < 0.01);
 
-        let rotated = shadow(&effects(0.4), &theme, Space::root(), 90.0, true, false).unwrap();
+        let rotated = shadow(
+            &effects(0.4),
+            &theme,
+            Space::root(),
+            box_,
+            90.0,
+            true,
+            false,
+        )
+        .unwrap();
         assert!((rotated.dx + 2.828).abs() < 0.01);
         assert!((rotated.dy + 2.828).abs() < 0.01);
         let mut fixed = effects(0.4);
         fixed.outer_shadow.as_mut().unwrap().rotate_with_shape = false;
         assert_eq!(
-            shadow(&fixed, &theme, Space::root(), 90.0, true, false).unwrap(),
+            shadow(&fixed, &theme, Space::root(), box_, 90.0, true, false).unwrap(),
             resolved
         );
 
         assert_eq!(
-            shadow(&effects(0.0), &theme, Space::root(), 0.0, false, false),
+            shadow(
+                &effects(0.0),
+                &theme,
+                Space::root(),
+                box_,
+                0.0,
+                false,
+                false
+            ),
             None
         );
         assert_eq!(
@@ -3375,12 +3439,77 @@ mod tests {
                 &ShapeEffects::default(),
                 &theme,
                 Space::root(),
+                box_,
                 0.0,
                 false,
                 false
             ),
             None
         );
+    }
+
+    #[test]
+    fn a_scaled_shadow_keeps_the_point_its_alignment_names() {
+        let theme = Theme::default();
+        let scaled = |alignment: &str, sx: f64| ShapeEffects {
+            outer_shadow: Some(ooxml_drawingml::OuterShadow {
+                color: Some(ColorValue {
+                    rgb: Some("000000".to_owned()),
+                    alpha: Some(0.4),
+                    ..ColorValue::default()
+                }),
+                scale_x: sx,
+                scale_y: sx,
+                alignment: alignment.to_owned(),
+                ..Default::default()
+            }),
+        };
+        let box_ = PxRect {
+            x: 100.0,
+            y: 200.0,
+            w: 40.0,
+            h: 80.0,
+        };
+        let centre = shadow(
+            &scaled("ctr", 1.02),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert!((centre.scale_x - 1.02).abs() < 1e-6);
+        // 102% about the box centre (120, 240) leaves it where it was.
+        assert!((120.0 * centre.scale_x + centre.dx - 120.0).abs() < 0.01);
+        assert!((240.0 * centre.scale_y + centre.dy - 240.0).abs() < 0.01);
+
+        // The default anchor is the bottom edge, so only that edge stays put.
+        let bottom = shadow(
+            &scaled("b", 1.02),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert!((280.0 * bottom.scale_y + bottom.dy - 280.0).abs() < 0.01);
+        assert!(200.0 * bottom.scale_y + bottom.dy < 200.0);
+
+        let plain = shadow(
+            &scaled("ctr", 1.0),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert_eq!((plain.scale_x, plain.dx, plain.dy), (1.0, 0.0, 0.0));
     }
 
     #[test]

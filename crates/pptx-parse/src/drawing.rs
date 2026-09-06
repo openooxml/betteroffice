@@ -786,8 +786,28 @@ fn parse_effects(element: &XmlElement) -> Option<ShapeEffects> {
             rotate_with_shape: shadow
                 .attribute("rotWithShape")
                 .is_none_or(|value| value != "0" && value != "false"),
+            scale_x: shadow_scale(shadow, "sx"),
+            scale_y: shadow_scale(shadow, "sy"),
+            alignment: shadow
+                .attribute("algn")
+                .filter(|value| RECT_ALIGNMENTS.contains(value))
+                .unwrap_or("b")
+                .to_owned(),
         }),
     })
+}
+
+/// `ST_RectAlignment`, the anchor a scaled shadow keeps.
+const RECT_ALIGNMENTS: [&str; 9] = ["tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br"];
+
+/// `sx`/`sy`, which are thousandths of a percent and may legitimately exceed 100%.
+fn shadow_scale(shadow: &XmlElement, name: &str) -> f64 {
+    shadow
+        .attribute(name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value / 100_000.0)
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 100.0)
+        .unwrap_or(1.0)
 }
 
 fn parse_line_end(element: &XmlElement) -> LineEnd {
@@ -1887,6 +1907,32 @@ mod tests {
         let actual = values.get(name).unwrap();
         assert_eq!(actual.value, expected);
         assert_eq!(actual.extent_power, expected_power);
+    }
+
+    #[test]
+    fn a_shadow_reads_its_scale_and_alignment() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:spPr><a:effectLst><a:outerShdw blurRad="63500" sx="102000" sy="98000" algn="ctr"><a:prstClr val="black"><a:alpha val="40000"/></a:prstClr></a:outerShdw></a:effectLst></p:spPr>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let shadow = parse_effects(&root).unwrap().outer_shadow.unwrap();
+        assert!((shadow.scale_x - 1.02).abs() < 1e-9);
+        assert!((shadow.scale_y - 0.98).abs() < 1e-9);
+        assert_eq!(shadow.alignment, "ctr");
+
+        let root = parse_xml(
+            br#"<p:spPr><a:effectLst><a:outerShdw blurRad="1" sx="0" algn="bogus"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst></p:spPr>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let shadow = parse_effects(&root).unwrap().outer_shadow.unwrap();
+        assert_eq!((shadow.scale_x, shadow.scale_y), (1.0, 1.0));
+        assert_eq!(shadow.alignment, "b");
     }
 
     #[test]

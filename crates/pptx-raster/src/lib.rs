@@ -540,6 +540,7 @@ impl Painter<'_, '_> {
             return Ok(());
         }
         let placed = Transform::from_translate(shadow.dx * self.scale, shadow.dy * self.scale)
+            .pre_concat(Transform::from_scale(shadow.scale_x, shadow.scale_y))
             .pre_concat(transform);
         let radius = blur::box_radius(shadow.blur * self.scale / 2.0);
         let Some(placed_path) = path.clone().transform(placed) else {
@@ -1074,6 +1075,8 @@ mod tests {
             blur: 8.0,
             dx: 6.0,
             dy: 6.0,
+            scale_x: 1.0,
+            scale_y: 1.0,
         })));
 
         assert_eq!(ink(&plain, 84, 84), 0);
@@ -1123,6 +1126,8 @@ mod tests {
                 blur,
                 dx,
                 dy: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
             }),
             transform: SlideTransform::default(),
         });

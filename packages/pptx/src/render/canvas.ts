@@ -143,7 +143,15 @@ function paintShadowedShape(
   shape: ShapePrimitive,
   deviceScale: number
 ): void {
-  const transform = ctx.getTransform();
+  const shadowScaleX = shape.shadow?.scaleX ?? 1;
+  const shadowScaleY = shape.shadow?.scaleY ?? 1;
+  // The anchor is already in dx/dy, so the shadow scales about the surface origin.
+  const base = ctx.getTransform();
+  const transform = {
+    a: base.a * shadowScaleX, b: base.b * shadowScaleY,
+    c: base.c * shadowScaleX, d: base.d * shadowScaleY,
+    e: base.e * shadowScaleX, f: base.f * shadowScaleY,
+  };
   const points = pathPoints(shape);
   if (!points.length) return;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
