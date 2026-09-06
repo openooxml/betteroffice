@@ -903,6 +903,7 @@ mod tests {
                     w: 200.0,
                     h,
                     asset_id: None,
+                    effects: Vec::new(),
                     crop: ImageCrop::default(),
                     path: None,
                     stroke: Some(stroke),
