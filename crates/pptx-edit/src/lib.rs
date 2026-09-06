@@ -166,6 +166,7 @@ impl DeckSession {
         ] {
             source_run_properties::import_source(&session, &package, property)?;
         }
+        story::import_source_numbering_restarts(&session.doc, &package)?;
         Ok(Self {
             package: Arc::new(package),
             ..session

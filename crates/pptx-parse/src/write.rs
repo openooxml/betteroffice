@@ -2244,10 +2244,14 @@ fn apply_paragraph_properties(
         Some(Bullet::Character { value }) => {
             Some(XmlElement::new(prefixes.drawing("buChar")).with_attribute("char", value.clone()))
         }
-        Some(Bullet::AutoNumber { scheme, start_at }) => {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
             let mut element = XmlElement::new(prefixes.drawing("buAutoNum"))
                 .with_attribute("type", scheme.clone());
-            if *start_at != 1 {
+            if *restart || *start_at != 1 {
                 element.set_attribute("startAt", start_at.to_string());
             }
             Some(element)

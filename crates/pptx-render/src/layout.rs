@@ -39,6 +39,7 @@ const MAX_RENDER_SHAPES: usize = 20_000;
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TEXT_LINES: usize = 100_000;
 const MAX_TEXT_PARAGRAPHS: usize = 20_000;
+const MAX_AUTONUM_VALUE: u32 = 32_767 + MAX_TEXT_PARAGRAPHS as u32;
 const MAX_TEXT_RUNS: usize = 100_000;
 /// Chart parts one slide may draw, shared across its charts.
 pub(crate) const MAX_CHART_PRIMITIVES: usize = 100_000;
@@ -320,22 +321,23 @@ impl RenderedSlide {
             return None;
         }
         for region in self.hit_regions.iter().rev() {
-            let (x, y) = region.local_point(x, y);
-            if !region.rect.contains(x, y) {
+            let (shape_x, shape_y) = region.local_point(x, y);
+            if !region.rect.contains(shape_x, shape_y) {
                 continue;
             }
-            if let Some(text) = &region.text
-                && let Some(line) = nearest_line(&text.lines, y)
-                && let Some(caret) = line
-                    .caret_stops
-                    .iter()
-                    .min_by(|left, right| (left.x - x).abs().total_cmp(&(right.x - x).abs()))
-            {
-                return Some(HitTestResult::Text {
-                    shape_id: region.shape_id.clone(),
-                    story_id: text.story_id.clone(),
-                    position: caret.position,
-                });
+            if let Some(text) = &region.text {
+                let (text_x, text_y) = text.local_point(x, y);
+                if let Some(line) = nearest_line(&text.lines, text_y)
+                    && let Some(caret) = line.caret_stops.iter().min_by(|left, right| {
+                        (left.x - text_x).abs().total_cmp(&(right.x - text_x).abs())
+                    })
+                {
+                    return Some(HitTestResult::Text {
+                        shape_id: region.shape_id.clone(),
+                        story_id: text.story_id.clone(),
+                        position: caret.position,
+                    });
+                }
             }
             return Some(HitTestResult::Shape {
                 shape_id: region.shape_id.clone(),
@@ -794,17 +796,21 @@ impl<'a> LayoutBuilder<'a> {
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
         let resolved = resolve_content(self.renderer, self.theme, &content, cascade)?;
+        let flow = TextFlow::from_body_vert(cascade.vertical());
+        let text_transform = text_transform(transform, flow);
+        let text_rect = flow.layout_rect(rect);
         let left = cascade.inset_left().unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let right = cascade
             .inset_right()
             .unwrap_or(DEFAULT_INSET_HORIZONTAL_EMU);
         let top = cascade.inset_top().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let bottom = cascade.inset_bottom().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
+        let [left, top, right, bottom] = flow.layout_insets([left, top, right, bottom]);
         let content_rect = PxRect {
-            x: rect.x + emu_to_px(left),
-            y: rect.y + emu_to_px(top),
-            w: (rect.w - emu_to_px(left + right)).max(1.0),
-            h: (rect.h - emu_to_px(top + bottom)).max(1.0),
+            x: text_rect.x + emu_to_px(left),
+            y: text_rect.y + emu_to_px(top),
+            w: (text_rect.w - emu_to_px(left + right)).max(1.0),
+            h: (text_rect.h - emu_to_px(top + bottom)).max(1.0),
         };
         let autofit = cascade.autofit();
         let mut scale = match autofit {
@@ -814,7 +820,14 @@ impl<'a> LayoutBuilder<'a> {
             _ => 1.0,
         };
         let mut laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
-        if matches!(autofit, Some(TextAutofit::Normal { .. })) {
+        let tracked = resolved
+            .paragraphs
+            .iter()
+            .flat_map(|paragraph| &paragraph.runs)
+            .any(|run| run.style.spacing_pt != 0.0);
+        if matches!(autofit, Some(TextAutofit::Normal { .. }))
+            || matches!(autofit, Some(TextAutofit::Shape)) && !tracked
+        {
             while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
                 scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
                 laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
@@ -870,17 +883,85 @@ impl<'a> LayoutBuilder<'a> {
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
+            x: text_rect.x,
+            y: text_rect.y,
+            w: text_rect.w,
+            h: text_rect.h,
             anchor,
             paragraphs: display_paragraphs,
             lines: lines.clone(),
             overflow,
-            transform,
+            transform: text_transform,
         });
-        Ok(TextHit { story_id, lines })
+        Ok(TextHit {
+            story_id,
+            rect: text_rect,
+            transform: text_transform,
+            lines,
+        })
+    }
+}
+
+/// Text flow relative to the shape.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TextFlow {
+    Horizontal,
+    Vert,
+    Vert270,
+}
+
+impl TextFlow {
+    fn from_body_vert(vertical: Option<&str>) -> Self {
+        match vertical {
+            Some("vert") => Self::Vert,
+            Some("vert270") => Self::Vert270,
+            _ => Self::Horizontal,
+        }
+    }
+
+    fn rotation_deg(self) -> f32 {
+        match self {
+            Self::Horizontal => 0.0,
+            Self::Vert => 90.0,
+            Self::Vert270 => -90.0,
+        }
+    }
+
+    fn layout_rect(self, rect: PxRect) -> PxRect {
+        match self {
+            Self::Horizontal => rect,
+            Self::Vert | Self::Vert270 => PxRect {
+                x: rect.x + (rect.w - rect.h) / 2.0,
+                y: rect.y + (rect.h - rect.w) / 2.0,
+                w: rect.h,
+                h: rect.w,
+            },
+        }
+    }
+
+    fn layout_insets(self, [left, top, right, bottom]: [i64; 4]) -> [i64; 4] {
+        match self {
+            Self::Horizontal => [left, top, right, bottom],
+            Self::Vert => [top, right, bottom, left],
+            Self::Vert270 => [bottom, left, top, right],
+        }
+    }
+}
+
+/// Removes glyph reflections and applies vertical flow.
+fn text_transform(shape: Transform, flow: TextFlow) -> Transform {
+    if flow == TextFlow::Horizontal && !shape.flip_v {
+        return Transform {
+            flip_h: false,
+            ..shape
+        };
+    }
+    let rotation_deg =
+        shape.rotation_deg + if shape.flip_v { 180.0 } else { 0.0 } + flow.rotation_deg();
+    Transform {
+        rotation_deg: rotation_deg.rem_euclid(360.0),
+        flip_h: false,
+        flip_v: false,
     }
 }
 
@@ -900,6 +981,13 @@ impl BodyCascade<'_> {
             .and_then(|body| body.anchor.as_deref())
             .or_else(|| self.layout.and_then(|body| body.anchor.as_deref()))
             .or_else(|| self.master.and_then(|body| body.anchor.as_deref()))
+    }
+
+    fn vertical(&self) -> Option<&str> {
+        self.primary
+            .and_then(|body| body.vertical.as_deref())
+            .or_else(|| self.layout.and_then(|body| body.vertical.as_deref()))
+            .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
     }
 
     fn autofit(&self) -> Option<&TextAutofit> {
@@ -964,6 +1052,18 @@ impl BodyCascade<'_> {
                 merge_paragraph_properties(&mut properties, source);
             }
         }
+        if let Some(Bullet::AutoNumber { restart, .. }) = &mut properties.bullet {
+            *restart = self
+                .primary
+                .and_then(|body| body.paragraphs.get(index))
+                .is_some_and(|paragraph| {
+                    matches!(
+                        paragraph.properties.bullet,
+                        Some(Bullet::AutoNumber { restart: true, .. })
+                            | Some(Bullet::AutoNumber { start_at: 2.., .. })
+                    )
+                });
+        }
         properties
     }
 }
@@ -990,6 +1090,7 @@ struct TextContent {
 struct ContentParagraph {
     alignment: Option<String>,
     level: u32,
+    bullet: Option<Bullet>,
     runs: Vec<ContentRun>,
 }
 
@@ -1008,6 +1109,10 @@ fn content_from_story(story: &StorySnapshot) -> TextContent {
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.alignment.clone(),
                 level: paragraph.level,
+                bullet: paragraph
+                    .bullet_json
+                    .as_deref()
+                    .and_then(|json| serde_json::from_str(json).ok()),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1043,6 +1148,7 @@ fn content_from_body(
             .map(|paragraph| ContentParagraph {
                 alignment: paragraph.properties.alignment.clone(),
                 level: paragraph.properties.level,
+                bullet: paragraph.properties.bullet.clone(),
                 runs: paragraph
                     .runs
                     .iter()
@@ -1066,7 +1172,7 @@ struct ResolvedParagraph {
     level: u32,
     margin_left_px: f32,
     indent_px: f32,
-    bullet: Option<Bullet>,
+    marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
 }
@@ -1125,8 +1231,18 @@ fn resolve_content(
     }
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
+    let mut counters = [0_u32; 9];
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
-        let properties = cascade.paragraph_properties(index, paragraph.level);
+        let mut properties = cascade.paragraph_properties(index, paragraph.level);
+        if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
+            properties.bullet = paragraph.bullet.clone();
+            if let Some(Bullet::AutoNumber {
+                restart, start_at, ..
+            }) = &mut properties.bullet
+            {
+                *restart |= *start_at != 1;
+            }
+        }
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
@@ -1155,16 +1271,18 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
             level: paragraph.level,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
-            bullet: properties.bullet.clone(),
-            bullet_style: matches!(properties.bullet, Some(Bullet::Character { .. }))
+            bullet_style: marker
+                .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
                 .transpose()?,
+            marker,
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -1522,7 +1640,7 @@ fn prepend_bullet(
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
-    let Some(Bullet::Character { value }) = &paragraph.bullet else {
+    let Some(value) = &paragraph.marker else {
         return Ok(());
     };
     let (Some(first), Some(style)) = (lines.first_mut(), paragraph.bullet_style.as_ref()) else {
@@ -1538,7 +1656,7 @@ fn prepend_bullet(
         level: paragraph.level,
         margin_left_px: 0.0,
         indent_px: 0.0,
-        bullet: None,
+        marker: None,
         bullet_style: None,
         runs: vec![ResolvedRun {
             text: value.clone(),
@@ -2011,7 +2129,7 @@ fn shift_line(line: &mut PositionedTextLine, x: f32, y: f32) {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct PxRect {
     x: f32,
     y: f32,
@@ -2079,32 +2197,45 @@ struct HitRegion {
 }
 
 impl HitRegion {
-    /// Undoes the rotate-then-flip the shape paints with, so `rect` and the text
-    /// lines can both be read in their unrotated frame.
+    /// Maps slide coordinates into the shape frame.
     fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
-        if self.transform.is_identity() {
-            return (x, y);
-        }
-        let center_x = self.rect.x + self.rect.w / 2.0;
-        let center_y = self.rect.y + self.rect.h / 2.0;
-        let (sin, cos) = self.transform.rotation_deg.to_radians().sin_cos();
-        let dx = x - center_x;
-        let dy = y - center_y;
-        let mut local_x = dx * cos + dy * sin;
-        let mut local_y = dy * cos - dx * sin;
-        if self.transform.flip_h {
-            local_x = -local_x;
-        }
-        if self.transform.flip_v {
-            local_y = -local_y;
-        }
-        (center_x + local_x, center_y + local_y)
+        local_point(self.rect, self.transform, x, y)
     }
 }
 
 struct TextHit {
     story_id: String,
+    rect: PxRect,
+    transform: Transform,
     lines: Vec<PositionedTextLine>,
+}
+
+impl TextHit {
+    /// Maps slide coordinates into the text frame.
+    fn local_point(&self, x: f32, y: f32) -> (f32, f32) {
+        local_point(self.rect, self.transform, x, y)
+    }
+}
+
+/// Maps a slide point back into the unrotated frame `rect` was laid out in.
+fn local_point(rect: PxRect, transform: Transform, x: f32, y: f32) -> (f32, f32) {
+    if transform.is_identity() {
+        return (x, y);
+    }
+    let center_x = rect.x + rect.w / 2.0;
+    let center_y = rect.y + rect.h / 2.0;
+    let (sin, cos) = transform.rotation_deg.to_radians().sin_cos();
+    let dx = x - center_x;
+    let dy = y - center_y;
+    let mut local_x = dx * cos + dy * sin;
+    let mut local_y = dy * cos - dx * sin;
+    if transform.flip_h {
+        local_x = -local_x;
+    }
+    if transform.flip_v {
+        local_y = -local_y;
+    }
+    (center_x + local_x, center_y + local_y)
 }
 
 fn nearest_line(lines: &[PositionedTextLine], y: f32) -> Option<&PositionedTextLine> {
@@ -2547,6 +2678,98 @@ fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
 }
 
+/// Resolves a marker once per paragraph.
+fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
+    let level = (level as usize).min(counters.len() - 1);
+    counters[level + 1..].fill(0);
+    match bullet {
+        Some(Bullet::AutoNumber {
+            scheme,
+            start_at,
+            restart,
+        }) => {
+            counters[level] = match counters[level] {
+                0 => (*start_at).clamp(1, 32_767),
+                _ if *restart => (*start_at).clamp(1, 32_767),
+                current => current.saturating_add(1),
+            };
+            Some(format_autonum(counters[level], scheme))
+        }
+        _ => {
+            counters[level] = 0;
+            match bullet {
+                Some(Bullet::Character { value }) if !value.trim().is_empty() => {
+                    Some(value.clone())
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Formats Latin, Roman and decimal markers.
+fn format_autonum(value: u32, scheme: &str) -> String {
+    let value = value.clamp(1, MAX_AUTONUM_VALUE);
+    let (numeral, suffix) = ["ParenBoth", "ParenR", "Period", "Plain"]
+        .into_iter()
+        .find_map(|suffix| Some((scheme.strip_suffix(suffix)?, suffix)))
+        .unwrap_or((scheme, "Period"));
+    let body = match numeral {
+        "alphaLc" => format_alpha(value, false),
+        "alphaUc" => format_alpha(value, true),
+        "romanLc" => format_roman(value, false),
+        "romanUc" => format_roman(value, true),
+        "arabic" => value.to_string(),
+        _ => return format!("{value}."),
+    };
+    match suffix {
+        "ParenBoth" => format!("({body})"),
+        "ParenR" => format!("{body})"),
+        "Plain" => body,
+        _ => format!("{body}."),
+    }
+}
+
+fn format_alpha(value: u32, upper: bool) -> String {
+    let base = if upper { b'A' } else { b'a' };
+    let mut value = value.max(1);
+    let mut out = Vec::new();
+    while value > 0 {
+        let index = (value - 1) % 26;
+        out.push(base + index as u8);
+        value = (value - 1) / 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn format_roman(value: u32, upper: bool) -> String {
+    const NUMERALS: [(u32, &str); 13] = [
+        (1000, "m"),
+        (900, "cm"),
+        (500, "d"),
+        (400, "cd"),
+        (100, "c"),
+        (90, "xc"),
+        (50, "l"),
+        (40, "xl"),
+        (10, "x"),
+        (9, "ix"),
+        (5, "v"),
+        (4, "iv"),
+        (1, "i"),
+    ];
+    let mut value = value.max(1);
+    let mut out = String::new();
+    for (amount, numeral) in NUMERALS {
+        while value >= amount {
+            out.push_str(numeral);
+            value -= amount;
+        }
+    }
+    if upper { out.to_uppercase() } else { out }
+}
+
 fn normalize_family(value: &str) -> String {
     value.trim().to_lowercase()
 }
@@ -2738,6 +2961,153 @@ mod tests {
         assert_eq!(stroke.color, "#FF00FF");
     }
 
+    #[test]
+    fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
+        let mut counters = [0_u32; 9];
+        let number = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 1,
+                    restart: false,
+                }),
+                level,
+                counters,
+            )
+        };
+        let dash = |level, counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "-".to_owned(),
+                }),
+                level,
+                counters,
+            )
+        };
+        assert_eq!(number(0, &mut counters).as_deref(), Some("1."));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(dash(1, &mut counters).as_deref(), Some("-"));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("3."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("2."));
+        assert_eq!(number(0, &mut counters).as_deref(), Some("4."));
+        assert_eq!(number(1, &mut counters).as_deref(), Some("1."));
+        assert_eq!(resolve_marker(Some(&Bullet::None), 0, &mut counters), None);
+    }
+
+    #[test]
+    fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
+        let mut counters = [0_u32; 9];
+        let number = |counters: &mut [u32; 9]| {
+            resolve_marker(
+                Some(&Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at: 7,
+                    restart: false,
+                }),
+                0,
+                counters,
+            )
+        };
+        assert_eq!(number(&mut counters).as_deref(), Some("7."));
+        assert_eq!(number(&mut counters).as_deref(), Some("8."));
+        let mut counters = [0; 9];
+        let last_start = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 32_767,
+            restart: false,
+        };
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32767.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&last_start), 0, &mut counters).as_deref(),
+            Some("32768.")
+        );
+    }
+
+    #[test]
+    fn autonumber_schemes_format_their_numeral_and_suffix() {
+        assert_eq!(format_autonum(4, "arabicPeriod"), "4.");
+        assert_eq!(format_autonum(4, "arabicParenR"), "4)");
+        assert_eq!(format_autonum(4, "arabicParenBoth"), "(4)");
+        assert_eq!(format_autonum(4, "arabicPlain"), "4");
+        assert_eq!(format_autonum(1, "alphaLcParenR"), "a)");
+        assert_eq!(format_autonum(27, "alphaUcPeriod"), "AA.");
+        assert_eq!(format_autonum(9, "romanLcPeriod"), "ix.");
+        assert_eq!(format_autonum(2024, "romanUcPeriod"), "MMXXIV.");
+        assert_eq!(format_autonum(3, "somethingElse"), "3.");
+        assert_eq!(format_autonum(3, "somethingElsePlain"), "3.");
+        assert_eq!(format_autonum(3, "somethingElseParenBoth"), "3.");
+    }
+
+    #[test]
+    fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
+        let mut counters = [0; 9];
+        let number = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 1,
+            restart: false,
+        };
+        let restart = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 7,
+            restart: true,
+        };
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&restart), 0, &mut counters).as_deref(),
+            Some("7.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("8.")
+        );
+        assert_eq!(resolve_marker(None, 0, &mut counters), None);
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(
+                Some(&Bullet::Character {
+                    value: "•".to_owned()
+                }),
+                0,
+                &mut counters
+            )
+            .as_deref(),
+            Some("•")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 1, &mut counters).as_deref(),
+            Some("1.")
+        );
+        assert_eq!(
+            resolve_marker(Some(&number), 0, &mut counters).as_deref(),
+            Some("1.")
+        );
+    }
+
+    #[test]
+    fn autonumber_roman_markers_bound_untrusted_start_values() {
+        assert_eq!(format_autonum(0, "arabicPeriod"), "1.");
+        assert_eq!(format_autonum(u32::MAX, "romanUcPeriod").len(), 61);
+        assert_eq!(
+            format_autonum(u32::MAX, "romanUcPeriod"),
+            format!("{}DCCLXVII.", "M".repeat(52))
+        );
+    }
+
     fn renderer() -> SlideRenderer {
         let mut renderer = SlideRenderer::new();
         for bold in [false, true] {
@@ -2765,7 +3135,7 @@ mod tests {
             level: 0,
             margin_left_px: 0.0,
             indent_px: 0.0,
-            bullet: None,
+            marker: None,
             bullet_style: None,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
@@ -2944,7 +3314,7 @@ mod tests {
                 level: 0,
                 margin_left_px: 0.0,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
@@ -3006,7 +3376,7 @@ mod tests {
                 level: 0,
                 margin_left_px: 0.0,
                 indent_px: 0.0,
-                bullet: None,
+                marker: None,
                 bullet_style: None,
                 runs: parts
                     .iter()
@@ -3615,9 +3985,7 @@ mod tests {
     }
 
     #[test]
-    fn hit_testing_flipped_text_reads_the_mirrored_caret() {
-        // membership cannot catch a flip — the rect maps onto itself — so pin it
-        // on the caret, where the sign of the local point decides the answer
+    fn hit_testing_flipped_text_keeps_the_upright_caret() {
         let slide = |flip_h| RenderedSlide {
             display_list: SurfaceDisplayList {
                 contract_version: CONTRACT_VERSION,
@@ -3641,6 +4009,20 @@ mod tests {
                 },
                 text: Some(TextHit {
                     story_id: "story".to_owned(),
+                    rect: PxRect {
+                        x: 100.0,
+                        y: 100.0,
+                        w: 120.0,
+                        h: 40.0,
+                    },
+                    transform: text_transform(
+                        Transform {
+                            rotation_deg: 0.0,
+                            flip_h,
+                            flip_v: false,
+                        },
+                        TextFlow::Horizontal,
+                    ),
                     lines: vec![PositionedTextLine {
                         x: 110.0,
                         y: 110.0,
@@ -3670,7 +4052,263 @@ mod tests {
         };
 
         assert_eq!(position(false), 0);
-        assert_eq!(position(true), 5);
+        assert_eq!(position(true), 0);
+    }
+
+    #[test]
+    fn hit_testing_vertical_text_reads_the_caret_in_the_turned_frame() {
+        let shape = Transform {
+            rotation_deg: 0.0,
+            flip_h: false,
+            flip_v: false,
+        };
+        let rect = PxRect {
+            x: 100.0,
+            y: 100.0,
+            w: 40.0,
+            h: 120.0,
+        };
+        let slide = RenderedSlide {
+            display_list: SurfaceDisplayList {
+                contract_version: CONTRACT_VERSION,
+                width: 400.0,
+                height: 400.0,
+                background: None,
+                primitives: Vec::new(),
+            },
+            hit_regions: vec![HitRegion {
+                shape_id: "sideways".to_owned(),
+                rect,
+                transform: shape,
+                text: Some(TextHit {
+                    story_id: "story".to_owned(),
+                    rect: TextFlow::Vert270.layout_rect(rect),
+                    transform: text_transform(shape, TextFlow::Vert270),
+                    lines: vec![PositionedTextLine {
+                        x: 60.0,
+                        y: 150.0,
+                        width: 100.0,
+                        height: 20.0,
+                        baseline: 165.0,
+                        start: 0,
+                        end: 5,
+                        runs: Vec::new(),
+                        caret_stops: vec![
+                            CaretStop {
+                                position: 0,
+                                x: 60.0,
+                            },
+                            CaretStop {
+                                position: 5,
+                                x: 160.0,
+                            },
+                        ],
+                    }],
+                }),
+            }],
+        };
+        let position = |y| match slide.hit_test(120.0, y) {
+            Some(HitTestResult::Text { position, .. }) => position,
+            other => panic!("expected a text hit, got {other:?}"),
+        };
+
+        assert_eq!(position(205.0), 0);
+        assert_eq!(position(115.0), 5);
+    }
+
+    #[test]
+    fn text_follows_the_shape_rotation_but_is_never_mirrored() {
+        let turned = |rotation_deg, flip_h, flip_v| {
+            text_transform(
+                Transform {
+                    rotation_deg,
+                    flip_h,
+                    flip_v,
+                },
+                TextFlow::Horizontal,
+            )
+        };
+        let upright = |rotation_deg: f32| Transform {
+            rotation_deg,
+            flip_h: false,
+            flip_v: false,
+        };
+
+        assert_eq!(turned(180.0, false, true), upright(0.0));
+        assert_eq!(turned(0.0, true, false), upright(0.0));
+        assert_eq!(turned(90.0, true, false), upright(90.0));
+        assert_eq!(turned(0.0, true, true), upright(180.0));
+        assert_eq!(turned(45.0, false, false), upright(45.0));
+    }
+
+    #[test]
+    fn body_vert_turns_the_text_and_lays_it_out_in_the_swapped_box() {
+        assert_eq!(TextFlow::from_body_vert(Some("vert")), TextFlow::Vert);
+        assert_eq!(TextFlow::from_body_vert(Some("vert270")), TextFlow::Vert270);
+        assert_eq!(TextFlow::from_body_vert(Some("horz")), TextFlow::Horizontal);
+        assert_eq!(TextFlow::from_body_vert(None), TextFlow::Horizontal);
+
+        let shape = |rotation_deg| Transform {
+            rotation_deg,
+            flip_h: false,
+            flip_v: false,
+        };
+        assert_eq!(
+            text_transform(shape(90.0), TextFlow::Vert270).rotation_deg,
+            0.0
+        );
+        assert_eq!(
+            text_transform(shape(270.0), TextFlow::Vert).rotation_deg,
+            0.0
+        );
+
+        let rect = PxRect {
+            x: 100.0,
+            y: 0.0,
+            w: 40.0,
+            h: 240.0,
+        };
+        assert_eq!(
+            TextFlow::Vert.layout_rect(rect),
+            PxRect {
+                x: 0.0,
+                y: 100.0,
+                w: 240.0,
+                h: 40.0,
+            }
+        );
+        assert_eq!(TextFlow::Horizontal.layout_rect(rect), rect);
+    }
+
+    /// Renders a synthetic master text box.
+    fn text_box_on_master(
+        transform: ShapeTransform,
+        vertical: Option<&str>,
+        text: &str,
+    ) -> Primitive {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_010).unwrap();
+        package.masters[0]
+            .shapes
+            .push(ShapeNode::Shape(pptx_parse::Shape {
+                base: pptx_parse::ShapeBase {
+                    id: 9_001,
+                    name: "turned".to_owned(),
+                    description: None,
+                    hidden: false,
+                    placeholder: None,
+                    transform,
+                },
+                geometry: "rect".to_owned(),
+                adjust_values: BTreeMap::new(),
+                paths: Vec::new(),
+                style: None,
+                fill: None,
+                outline: None,
+                text: Some(TextBody {
+                    anchor: Some("ctr".to_owned()),
+                    vertical: vertical.map(str::to_owned),
+                    autofit: None,
+                    inset_left: None,
+                    inset_top: None,
+                    inset_right: None,
+                    inset_bottom: None,
+                    default_list_style: None,
+                    list_style: Vec::new(),
+                    paragraphs: vec![pptx_parse::TextParagraph {
+                        properties: ParagraphProperties::default(),
+                        runs: vec![pptx_parse::TextRun {
+                            text: text.to_owned(),
+                            properties: RunProperties {
+                                font_size_pt: Some(12.0),
+                                font_family: Some("Arial".to_owned()),
+                                ..RunProperties::default()
+                            },
+                            field_id: None,
+                            field_type: None,
+                            line_break: false,
+                        }],
+                        end_properties: None,
+                    }],
+                }),
+            }));
+        renderer()
+            .layout_slide(&package, &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list
+            .primitives
+            .into_iter()
+            .find(|primitive| {
+                matches!(
+                    primitive,
+                    Primitive::TextBox {
+                        object_id: 9_001,
+                        ..
+                    }
+                )
+            })
+            .expect("the master text box was laid out")
+    }
+
+    #[test]
+    fn a_flipped_shape_lays_its_text_out_unmirrored() {
+        let primitive = text_box_on_master(
+            ShapeTransform {
+                x: 1_000_000,
+                y: 1_000_000,
+                width: 4_000_000,
+                height: 1_000_000,
+                rotation_deg: 180.0,
+                flip_v: true,
+                ..ShapeTransform::default()
+            },
+            None,
+            "Audit",
+        );
+        let Primitive::TextBox { transform, .. } = &primitive else {
+            unreachable!()
+        };
+        assert_eq!(
+            *transform,
+            Transform {
+                rotation_deg: 0.0,
+                flip_h: false,
+                flip_v: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_vert270_label_bar_lays_its_sentence_out_on_one_line() {
+        let turned = ShapeTransform {
+            x: 4_601_452,
+            y: -2_333_065,
+            width: 639_990,
+            height: 7_718_032,
+            rotation_deg: 90.0,
+            ..ShapeTransform::default()
+        };
+        let sentence = "Take the Shadow IT and Data Risk Assessments";
+        let primitive = text_box_on_master(turned.clone(), Some("vert270"), sentence);
+        let Primitive::TextBox {
+            w,
+            h,
+            lines,
+            transform,
+            ..
+        } = &primitive
+        else {
+            unreachable!()
+        };
+        assert!(w > h, "the layout box is the shape box on its side");
+        assert_eq!(transform.rotation_deg, 0.0);
+        assert_eq!(lines.len(), 1);
+
+        let upright = text_box_on_master(turned, None, sentence);
+        let Primitive::TextBox { lines, .. } = &upright else {
+            unreachable!()
+        };
+        assert!(lines.len() > 1);
     }
 
     #[test]

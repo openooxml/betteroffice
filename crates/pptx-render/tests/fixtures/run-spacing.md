@@ -11,7 +11,7 @@ Compared with main `069e4d66` using the same Liberation Sans font files:
 | Shape autofit body | Shrunk to 21.33333 px | Keeps 42.66667 px and 4 px tracking |
 | Inherited tracking | 461.47916 px | 529.4792 px with 4 px tracking |
 
-The title stays centered at x=640 and retains `#008044`. The inherited text retains `#802020`, the mixed runs retain `#112233`, and the body retains `#224466`. Shape autofit no longer shrinks text; growing its stored box remains a separate autofit feature.
+The title stays centered at x=640 and retains `#008044`. The inherited text retains `#802020`, the mixed runs retain `#112233`, and the body retains `#224466`. Shape autofit no longer shrinks tracked text; growing its stored box remains a separate autofit feature.
 
 `run-spacing.before.png` and `run-spacing.after.png` were rendered with the Rust raster backend. Tests cover parsing, tracking, wrapping, hard breaks, ligatures, mixed runs, autofit, editing, and source recovery from the committed main v10 update.
 

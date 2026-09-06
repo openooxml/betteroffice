@@ -74,8 +74,32 @@ were generated on main `2c90c17f` from
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
 
+`deck-schema-v9-autonumber.update.bin` was generated on main `2c90c17f`
+from `../../pptx-render/tests/fixtures/autonumber-bullets.pptx`. It remains
+the historical oracle for numbering before baseline and restart support.
+
+`deck-schema-v10-autonumber.update.bin` and `deck-schema-v10-baseline.update.bin`
+are fresh seeds produced by current main
+`069e4d66bf749869ad581114dd3e4e4c721ed07f`, using its schema-10 reader and writer
+and client ID 30001. Their sources are `autonumber-bullets.pptx` and
+`text-baseline-script.pptx` in the renderer fixtures. Copy
+`generate_autonumber_schema_snapshots.rs` into that main checkout's
+`crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_autonumber_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts schema 10 and verifies that main reopens its seeds without
+changes. Tests retain separate transactions for main's baseline migration to 10
+and the numbering migration to 11, recover legacy baseline and restart data on
+source attachment, preserve current-main baselines, and verify idempotence.
+
 ## Run character spacing
 
 `run-spacing-main-v10.update.bin` was generated on main `069e4d66` from
 `crates/pptx-render/tests/fixtures/run-spacing.pptx` with client ID 32500.
-It exercises schema v11 source recovery, deferred attachment, and explicit zero overrides.
+It exercises schema v12 source recovery, deferred attachment, and explicit zero overrides.
+
+`run-spacing-main-v11.update.bin` was generated from the same deck on main
+`cca2618c` with client ID 32500. Both main snapshots exercise migration to v12.

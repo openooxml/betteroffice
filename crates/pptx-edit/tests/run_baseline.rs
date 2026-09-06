@@ -7,6 +7,25 @@ const EDITED_V9: &[u8] = include_bytes!("fixtures/run-baseline-edited-main-v9.up
 const STORY: &str = "story:slide:0:256:shape:3:0";
 
 #[test]
+fn current_main_v10_baselines_survive_numbering_migration() {
+    let update = include_bytes!("fixtures/deck-schema-v10-baseline.update.bin");
+    let migrated = DeckSession::open_from_update(update, 33110).unwrap();
+    let fresh = DeckSession::open(DECK, 33111).unwrap();
+    assert_eq!(migrated.snapshot().unwrap(), fresh.snapshot().unwrap());
+    assert_eq!(
+        serde_json::to_value(migrated.package()).unwrap(),
+        serde_json::to_value(fresh.package()).unwrap()
+    );
+    let current = migrated.encode_state_as_update_v1();
+    let reattached = DeckSession::open_from_update_with_source(&current, DECK, 33112).unwrap();
+    assert_eq!(reattached.encode_state_as_update_v1(), current);
+    assert_eq!(
+        ooxml_opc::unzip_parts(&reattached.save().unwrap()).unwrap(),
+        ooxml_opc::unzip_parts(DECK).unwrap()
+    );
+}
+
+#[test]
 fn v9_baselines_recover_with_source_and_preserve_edits() {
     for (update, prefix) in [(V9, ""), (EDITED_V9, "😀 ")] {
         let session = DeckSession::open_from_update_with_source(update, DECK, 33101).unwrap();
@@ -79,7 +98,7 @@ fn v9_baselines_recover_with_source_and_preserve_edits() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(11.0)))
+            Some(Out::Any(Any::Number(12.0)))
         );
         assert!(meta.get(&txn, "baselinesPendingSource").is_none());
         let reopened = DeckSession::open_from_update(&current, 33103).unwrap();
