@@ -492,7 +492,8 @@ fn a_direct_character_first_line_indent_outranks_a_numbering_hanging_indent() {
 
     let xml = saved_document(&package);
 
-    assert!(xml.contains(r#"<w:ind w:left="720" w:firstLineChars="200"/>"#));
+    // Level indents ride list rendering; w:ind saves back as authored.
+    assert!(xml.contains(r#"<w:ind w:firstLineChars="200"/>"#));
     assert!(!xml.contains("hangingChars"));
     assert!(!xml.contains("w:hanging="));
 

@@ -313,6 +313,7 @@ pub(crate) fn parse_comment_part(
         root,
         find_part(parts, "word/commentsExtensible.xml").map(|(_, bytes)| bytes),
         find_part(parts, "word/commentsExtended.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/commentsIds.xml").map(|(_, bytes)| bytes),
         &mut parser,
     )
 }

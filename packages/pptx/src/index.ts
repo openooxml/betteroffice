@@ -38,6 +38,9 @@ export type {
 export type {
   CaretStop,
   ColorValue,
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
   GeometryPathCommand,
   HistoryResult,

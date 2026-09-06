@@ -691,6 +691,7 @@ fn visit_new_images(
             }
             // New images inside block SDTs remain on the selective-patch path.
             BlockContent::BlockSdt(_) => {}
+            BlockContent::RawXml(_) => {}
         }
     }
     Ok(())
@@ -1086,6 +1087,7 @@ fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyp
                 }
             }
             BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut sdt.content, visit),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

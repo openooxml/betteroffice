@@ -584,7 +584,7 @@ impl Translator<'_> {
             font,
             font_size_px,
             x,
-            baseline: line.baseline,
+            baseline: line.baseline - finite(run.baseline_offset_px, "text baseline offset")?,
             width,
             glyphs,
             color: color(&run.color, 1.0)?,
@@ -1264,6 +1264,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path.bounding_box(), Rect::new(10.0, 20.0, 40.0, 60.0));
+    }
+
+    #[test]
+    fn script_underlines_use_the_glyph_baseline() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let rendered = presentation.render_slide(0).unwrap();
+        let mut translator = Translator {
+            scene: Scene::new(),
+            fonts: &resources.fonts,
+            images: &resources.images,
+            skipped: SkipStats::default(),
+            summary: PptxSlideSummary::default(),
+        };
+        let mut shifted = 0;
+        for primitive in &rendered.display_list.primitives {
+            if let Primitive::TextBox { lines, .. } = primitive {
+                for line in lines {
+                    for run in &line.runs {
+                        if run.baseline_offset_px != 0.0 {
+                            let prepared = translator.prepare_text_run(line, run).unwrap();
+                            assert!((prepared.baseline - prepared.glyphs[0].y).abs() < 0.001);
+                            shifted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(shifted, 3);
     }
 
     #[test]

@@ -2,10 +2,11 @@ use std::collections::BTreeMap;
 
 use ooxml_drawingml::{
     ColorValue, GradientFill, GradientStop, LineEnd, OuterShadow, ShapeEffects, ShapeFill,
-    ShapeOutline,
+    ShapeOutline, ShapeStyle, StyleReference,
 };
 
 use crate::PptxError;
+use crate::custom_geometry::parse_custom_geometry;
 use crate::model::*;
 use crate::relationships::Relationship;
 use crate::xml::{ParseBudget, XmlElement};
@@ -143,13 +144,6 @@ fn parse_shape_children(
     Ok(shapes)
 }
 
-fn parse_shape_style(element: Option<&XmlElement>) -> Option<ShapeStyle> {
-    let font_color = element?.child("fontRef").and_then(parse_color_container);
-    font_color.map(|color| ShapeStyle {
-        font_color: Some(color),
-    })
-}
-
 fn parse_shape(
     element: &XmlElement,
     part: &str,
@@ -159,7 +153,11 @@ fn parse_shape(
     let properties = element.child("spPr");
     let transform = properties.and_then(|value| value.child("xfrm"));
     Ok(Shape {
-        style: parse_shape_style(element.child("style")).map(Box::new),
+        paths: properties
+            .filter(|value| value.child("prstGeom").is_none())
+            .and_then(|value| value.child("custGeom"))
+            .and_then(|custom| parse_custom_geometry(custom, parse_shape_extent(transform)))
+            .unwrap_or_default(),
         base: parse_base(
             element
                 .child("nvSpPr")
@@ -171,6 +169,7 @@ fn parse_shape(
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
         effects: properties.and_then(parse_effects),
+        style: parse_shape_style(element.child("style"), properties).map(Box::new),
         text: element
             .child("txBody")
             .map(|body| parse_text_body(body, part, budget))
@@ -209,6 +208,7 @@ fn parse_picture(
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
         effects: properties.and_then(parse_effects),
+        style: parse_shape_style(element.child("style"), properties).map(Box::new),
     })
 }
 
@@ -594,27 +594,72 @@ fn parse_background(element: &XmlElement) -> Option<ShapeFill> {
     })
 }
 
+/// Parses theme references and explicit fill barriers.
+fn parse_shape_style(
+    element: Option<&XmlElement>,
+    properties: Option<&XmlElement>,
+) -> Option<ShapeStyle> {
+    let reference = |name| {
+        element
+            .and_then(|element| element.child(name))
+            .map(|reference| StyleReference {
+                index: reference
+                    .attribute("idx")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_default(),
+                color: parse_color_container(reference),
+            })
+    };
+    let unsupported = |element: Option<&XmlElement>, allowed: &[&str]| {
+        element.is_some_and(|element| {
+            element
+                .child_elements()
+                .any(|child| is_fill_element(child) && !allowed.contains(&child.local_name()))
+        })
+    };
+    let style = ShapeStyle {
+        font_color: element
+            .and_then(|value| value.child("fontRef"))
+            .and_then(parse_color_container),
+        fill: reference("fillRef"),
+        line: reference("lnRef"),
+        fill_disabled: unsupported(
+            properties,
+            &["solidFill", "gradFill", "blipFill", "noFill", "grpFill"],
+        ),
+        line_disabled: unsupported(
+            properties.and_then(|value| value.child("ln")),
+            &["solidFill"],
+        ),
+    };
+    (!style.is_empty()).then_some(style)
+}
+
+fn is_fill_element(element: &XmlElement) -> bool {
+    matches!(
+        element.local_name(),
+        "noFill" | "solidFill" | "gradFill" | "blipFill" | "pattFill" | "grpFill"
+    )
+}
+
 fn parse_fill(element: &XmlElement) -> Option<ShapeFill> {
-    if element.child("noFill").is_some() {
-        return Some(ShapeFill::named("none"));
-    }
-    if let Some(fill) = element.child("solidFill") {
-        return Some(ShapeFill {
+    element.child_elements().find_map(parse_fill_element)
+}
+
+/// Parses a shape or theme fill.
+pub(crate) fn parse_fill_element(element: &XmlElement) -> Option<ShapeFill> {
+    match element.local_name() {
+        "noFill" => Some(ShapeFill::named("none")),
+        "solidFill" => Some(ShapeFill {
             fill_type: "solid".to_owned(),
-            color: parse_color_container(fill),
+            color: parse_color_container(element),
             gradient: None,
-        });
+        }),
+        "gradFill" => Some(parse_gradient_fill(element)),
+        "blipFill" => Some(ShapeFill::named("picture")),
+        "grpFill" => Some(ShapeFill::named(GROUP_FILL)),
+        _ => None,
     }
-    if let Some(fill) = element.child("gradFill") {
-        return Some(parse_gradient_fill(fill));
-    }
-    if element.child("blipFill").is_some() {
-        return Some(ShapeFill::named("picture"));
-    }
-    if element.child("grpFill").is_some() {
-        return Some(ShapeFill::named(GROUP_FILL));
-    }
-    None
 }
 
 /// Marker left by `<a:grpFill/>`, standing until an ancestor group resolves it or the tree
@@ -644,6 +689,12 @@ fn resolve_group_fill(children: &mut [ShapeNode], fill: Option<&ShapeFill>) {
             resolve_group_fill(&mut group.children, fill);
         }
     }
+}
+
+pub(crate) fn run_gradient_color(element: &XmlElement) -> Option<ColorValue> {
+    let mut stops = parse_gradient_fill(element).gradient?.stops;
+    stops.sort_by(|left, right| left.position.total_cmp(&right.position));
+    stops.into_iter().next().map(|stop| stop.color)
 }
 
 fn parse_gradient_fill(element: &XmlElement) -> ShapeFill {
@@ -689,6 +740,16 @@ fn parse_outline(element: &XmlElement) -> Option<ShapeOutline> {
     let line = element.child("ln")?;
     if line.child("noFill").is_some() {
         return None;
+    }
+    parse_outline_element(line)
+}
+
+pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
+    if line.local_name() != "ln" {
+        return None;
+    }
+    if line.child("noFill").is_some() {
+        return Some(ShapeOutline::default());
     }
     Some(ShapeOutline {
         width: line.attribute("w").and_then(|value| value.parse().ok()),
@@ -866,6 +927,11 @@ pub(crate) fn parse_text_body(
         inset_top: numeric_attribute(body_properties, "tIns"),
         inset_right: numeric_attribute(body_properties, "rIns"),
         inset_bottom: numeric_attribute(body_properties, "bIns"),
+        list_style: parse_style_levels(element.child("lstStyle")),
+        default_list_style: element
+            .child("lstStyle")
+            .and_then(|style| style.child("defPPr"))
+            .map(|properties| Box::new(parse_paragraph_properties(Some(properties)))),
         paragraphs,
     })
 }
@@ -956,6 +1022,33 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
         margin_left: numeric_attribute(Some(element), "marL"),
         indent: numeric_attribute(Some(element), "indent"),
         bullet,
+        bullet_font: if element.child("buFontTx").is_some() {
+            Some(BulletFont::FollowText)
+        } else {
+            element
+                .child("buFont")
+                .and_then(|font| font.attribute("typeface"))
+                .map(|font| BulletFont::Typeface(font.to_owned()))
+        },
+        bullet_color: if element.child("buClrTx").is_some() {
+            Some(BulletColor::FollowText)
+        } else {
+            element
+                .child("buClr")
+                .and_then(parse_color_container)
+                .map(BulletColor::Color)
+        },
+        bullet_size: if element.child("buSzTx").is_some() {
+            Some(BulletSize::FollowText)
+        } else if let Some(size) = element.child("buSzPct") {
+            percentage_attribute(size, "val")
+                .filter(|size| (0.25..=4.0).contains(size))
+                .map(BulletSize::Percent)
+        } else {
+            numeric_attribute(element.child("buSzPts"), "val")
+                .filter(|size| (100..=400_000).contains(size))
+                .map(|size| BulletSize::Points(size as f64 / 100.0))
+        },
         default_run: element
             .child("defRPr")
             .map(|value| parse_run_properties(Some(value))),
@@ -989,6 +1082,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .and_then(|value| value.parse::<f64>().ok())
             .filter(|value| value.is_finite())
             .map(|value| value / 100.0),
+        baseline_pct: element
+            .attribute("baseline")
+            .and_then(|value| value.parse::<i32>().ok())
+            .map(|value| f64::from(value) / 1000.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
@@ -996,7 +1093,10 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .child("latin")
             .and_then(|value| value.attribute("typeface"))
             .map(str::to_owned),
-        color: element.child("solidFill").and_then(parse_color_container),
+        color: element
+            .child("solidFill")
+            .and_then(parse_color_container)
+            .or_else(|| run_gradient_color(element.child("gradFill")?)),
         language: element.attribute("lang").map(str::to_owned),
         hyperlink_relationship_id: element
             .child("hlinkClick")
@@ -1034,6 +1134,56 @@ mod tests {
     use super::*;
     use crate::ParseLimits;
     use crate::xml::parse_xml;
+    use ooxml_drawingml::GeometryPathCommand;
+
+    #[test]
+    fn a_custom_geometry_becomes_a_path_normalised_to_the_shape() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Freeform"/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="200" h="100"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="200" y="50"/></a:lnTo><a:cubicBezTo><a:pt x="150" y="100"/><a:pt x="50" y="100"/><a:pt x="0" y="50"/></a:cubicBezTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Guided"/><p:nvPr/></p:nvSpPr><p:spPr><a:custGeom><a:gdLst><a:gd name="x1" fmla="*/ w 1 2"/></a:gdLst><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="x1" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+
+        let ShapeNode::Shape(freeform) = &data.shapes[0] else {
+            panic!("expected a shape");
+        };
+        assert_eq!(freeform.geometry, "custom");
+        let path = &freeform.paths[0].commands;
+        assert_eq!(
+            path[0],
+            GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+            "coordinates are fractions of the path box, not raw units"
+        );
+        assert_eq!(path[1], GeometryPathCommand::Line { x: 1.0, y: 0.5 });
+        assert_eq!(
+            path[2],
+            GeometryPathCommand::Cubic {
+                cp1x: 0.75,
+                cp1y: 1.0,
+                cp2x: 0.25,
+                cp2y: 1.0,
+                x: 0.0,
+                y: 0.5
+            }
+        );
+        assert_eq!(path[3], GeometryPathCommand::Close);
+
+        let ShapeNode::Shape(guided) = &data.shapes[1] else {
+            panic!("expected a shape");
+        };
+        assert!(guided.paths.is_empty());
+    }
 
     #[test]
     fn a_shape_style_supplies_the_default_text_colour() {
@@ -1071,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn a_font_ref_without_a_colour_leaves_the_shape_unstyled() {
+    fn a_font_ref_without_a_colour_leaves_the_text_colour_unset() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
@@ -1092,7 +1242,10 @@ mod tests {
         let ShapeNode::Shape(shape) = &data.shapes[0] else {
             panic!("expected a shape");
         };
-        assert!(shape.style.is_none());
+        let style = shape.style.as_ref().unwrap();
+        assert!(style.font_color.is_none());
+        assert_eq!(style.fill.as_ref().unwrap().index, 1);
+        assert_eq!(style.line.as_ref().unwrap().index, 2);
     }
 
     #[test]
@@ -1262,6 +1415,208 @@ mod tests {
                 .font_size_pt,
             Some(24.0)
         );
+    }
+
+    #[test]
+    fn a_run_baseline_reads_as_a_signed_percentage() {
+        for (value, expected) in [
+            ("150000", Some(150.0)),
+            ("-150000", Some(-150.0)),
+            ("2147483647", Some(2147483.647)),
+            ("-2147483648", Some(-2147483.648)),
+            ("2147483648", None),
+            ("-2147483649", None),
+            ("NaN", None),
+            ("inf", None),
+            ("1.5", None),
+        ] {
+            let element = XmlElement::new("a:rPr").with_attribute("baseline", value);
+            assert_eq!(
+                parse_run_properties(Some(&element)).baseline_pct,
+                expected,
+                "{value}"
+            );
+        }
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr baseline="0"/></a:pPr><a:r><a:rPr sz="1200"/><a:t>base</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>up</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>down</a:t></a:r><a:r><a:rPr sz="1200" baseline="nonsense"/><a:t>junk</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let text = shape.text.as_ref().unwrap();
+        let baselines: Vec<Option<f64>> = text.paragraphs[0]
+            .runs
+            .iter()
+            .map(|run| run.properties.baseline_pct)
+            .collect();
+        assert_eq!(baselines, [None, Some(30.0), Some(-25.0), None]);
+        assert_eq!(
+            text.paragraphs[0]
+                .properties
+                .default_run
+                .as_ref()
+                .unwrap()
+                .baseline_pct,
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn reads_a_shape_list_style_into_its_text_body() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Body"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle><a:lvl1pPr marL="342900" indent="-342900"><a:buChar char="&#8226;"/><a:defRPr sz="6600" b="1"/></a:lvl1pPr><a:lvl3pPr><a:buChar char="&#8211;"/></a:lvl3pPr></a:lstStyle><a:p><a:r><a:rPr lang="en"/><a:t>Item</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let body = shape.text.as_ref().expect("text body");
+        assert_eq!(body.list_style.len(), 9);
+        let level1 = &body.list_style[0];
+        assert_eq!(level1.margin_left, Some(342_900));
+        assert_eq!(level1.indent, Some(-342_900));
+        assert_eq!(
+            level1.bullet,
+            Some(Bullet::Character {
+                value: "\u{2022}".to_owned()
+            })
+        );
+        assert_eq!(
+            level1.default_run.as_ref().and_then(|run| run.font_size_pt),
+            Some(66.0)
+        );
+        assert_eq!(body.list_style[1].bullet, None);
+        assert_eq!(
+            body.list_style[2].bullet,
+            Some(Bullet::Character {
+                value: "\u{2013}".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn a_body_without_a_list_style_carries_none() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="3" name="Plain"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en"/><a:t>Hi</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Shape(shape) = &data.shapes[0] else {
+            panic!("expected shape");
+        };
+        let body = shape.text.as_ref().unwrap();
+        assert!(body.list_style.is_empty());
+        let json = serde_json::to_value(body).unwrap();
+        assert!(json.get("listStyle").is_none());
+        assert!(json.get("defaultListStyle").is_none());
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), *body);
+    }
+
+    #[test]
+    fn reads_default_list_properties_and_bullet_overrides() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:lstStyle><a:defPPr><a:buFont typeface="Arial"/><a:buClr><a:srgbClr val="D02020"/></a:buClr><a:buSzPct val="50000"/><a:defRPr sz="2400"/></a:defPPr><a:lvl1pPr><a:buSzPts val="1200"/></a:lvl1pPr><a:lvl2pPr><a:buFontTx/><a:buClrTx/><a:buSzTx/></a:lvl2pPr></a:lstStyle><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        ).unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        let defaults = body.default_list_style.as_ref().unwrap();
+        assert_eq!(
+            defaults.default_run.as_ref().unwrap().font_size_pt,
+            Some(24.0)
+        );
+        assert_eq!(
+            defaults.bullet_font,
+            Some(BulletFont::Typeface("Arial".to_owned()))
+        );
+        let Some(BulletColor::Color(color)) = &defaults.bullet_color else {
+            panic!("bullet color")
+        };
+        assert_eq!(color.rgb.as_deref(), Some("D02020"));
+        assert_eq!(defaults.bullet_size, Some(BulletSize::Percent(0.5)));
+        assert_eq!(
+            body.list_style[0].bullet_size,
+            Some(BulletSize::Points(12.0))
+        );
+        assert_eq!(body.list_style[1].bullet_size, Some(BulletSize::FollowText));
+        assert_eq!(body.list_style[1].bullet_font, Some(BulletFont::FollowText));
+        assert_eq!(
+            body.list_style[1].bullet_color,
+            Some(BulletColor::FollowText)
+        );
+        let json = serde_json::to_string(&body).unwrap();
+        assert_eq!(serde_json::from_str::<TextBody>(&json).unwrap(), body);
+    }
+
+    #[test]
+    fn a_run_gradient_fill_resolves_to_a_colour() {
+        for (fill, expected) in [
+            (
+                r#"<a:gradFill><a:gsLst><a:gs pos="100000"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("FFFFFF"),
+            ),
+            (
+                r#"<a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FFFFFF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("112233"),
+            ),
+            (
+                r#"<a:gradFill><a:gsLst><a:gs pos="-1"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="NaN"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="100001"><a:srgbClr val="FF0000"/></a:gs><a:gs pos="50000"><a:srgbClr val="ABCDEF"/></a:gs></a:gsLst></a:gradFill>"#,
+                Some("ABCDEF"),
+            ),
+            ("<a:gradFill><a:gsLst/></a:gradFill>", None),
+            ("", None),
+        ] {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!("<a:rPr>{fill}</a:rPr>");
+            let root = parse_xml(xml.as_bytes(), "ppt/slides/slide1.xml", &mut budget).unwrap();
+            assert_eq!(
+                parse_run_properties(Some(&root)).color,
+                expected.map(|rgb| ColorValue {
+                    rgb: Some(rgb.to_owned()),
+                    ..ColorValue::default()
+                }),
+                "{fill}",
+            );
+        }
     }
 
     #[test]

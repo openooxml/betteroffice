@@ -161,6 +161,7 @@ fn project_s6_blocks(blocks: &mut [BlockContent], depth: usize) {
             }
             BlockContent::Table(table) => *table = crate::table::Table::empty(),
             BlockContent::BlockSdt(sdt) => project_s6_blocks(&mut sdt.content, depth + 1),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{CommentFlavor, DeckSession, EditCtx, EditError, TextStyle};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -51,6 +51,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="4" name="Halfway"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
 <p:spPr><a:xfrm rot="1200000"><a:off x="123456" y="654321"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Halfway</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="6" name="Script"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1200"/><a:t>1</a:t></a:r><a:r><a:rPr sz="1200" baseline="30000"/><a:t>st</a:t></a:r><a:r><a:rPr sz="1200"/><a:t> place, H</a:t></a:r><a:r><a:rPr sz="1200" baseline="-25000"/><a:t>2</a:t></a:r><a:r><a:rPr sz="1200"/><a:t>O</a:t></a:r></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -138,8 +141,113 @@ fn presentation_xml(first_slide_id: u32) -> String {
     )
 }
 
+const LEGACY_AUTHORS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:cmAuthorLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cmAuthor id="0" name="Mary Smith" initials="mas" lastIdx="1" clrIdx="0"/>
+</p:cmAuthorLst>"#;
+
+const LEGACY_COMMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:cmLst xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+<p:cm authorId="0" dt="2005-11-13T17:00:22.071" idx="1"><p:pos x="576" y="288"/><p:text>Needs a source.</p:text></p:cm>
+</p:cmLst>"#;
+
+const MODERN_AUTHORS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p188:authorLst xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">
+<p188:author id="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" name="Mary Smith" initials="mas" userId="" providerId=""/>
+</p188:authorLst>"#;
+
+const MODERN_COMMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p188:cmLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pc="http://schemas.microsoft.com/office/powerpoint/2013/main/command" xmlns:p188="http://schemas.microsoft.com/office/powerpoint/2018/8/main">
+<p188:cm id="{62A8A96D-E5A8-4BFC-B993-A6EAE3907CAD}" authorId="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" created="2024-12-30T20:26:06.503">
+<pc:sldMkLst><pc:docMk/><pc:sldMk cId="0" sldId="256"/></pc:sldMkLst>
+<p188:pos x="576" y="288"/>
+<p188:replyLst><p188:reply id="{9F5B1E2C-4A7D-4E93-9B1A-2C3D4E5F6A7B}" authorId="{CD37207E-7903-4ED4-8AE8-017538D2DF7E}" created="2024-12-30T20:31:12.117"><p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Added one.</a:t></a:r></a:p></p188:txBody></p188:reply></p188:replyLst>
+<p188:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Needs a source.</a:t></a:r></a:p></p188:txBody>
+</p188:cm>
+</p188:cmLst>"#;
+
+const LEGACY_COMMENTS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments" Target="../comments/comment1.xml"/>"#;
+const LEGACY_AUTHORS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/commentAuthors" Target="commentAuthors.xml"/>"#;
+const MODERN_COMMENTS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2018/10/relationships/comments" Target="../comments/modernComment1.xml"/>"#;
+const MODERN_AUTHORS_REL: &str = r#"<Relationship Id="rId9" Type="http://schemas.microsoft.com/office/2018/10/relationships/authors" Target="authors.xml"/>"#;
+
+fn commented_fixture(flavor: CommentFlavor) -> Vec<u8> {
+    let (
+        authors_part,
+        comments_part,
+        authors,
+        comments,
+        authors_rel,
+        comments_rel,
+        authors_type,
+        comments_type,
+    ) = match flavor {
+        CommentFlavor::Legacy => (
+            "ppt/commentAuthors.xml",
+            "ppt/comments/comment1.xml",
+            LEGACY_AUTHORS,
+            LEGACY_COMMENTS,
+            LEGACY_AUTHORS_REL,
+            LEGACY_COMMENTS_REL,
+            "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml",
+            "application/vnd.openxmlformats-officedocument.presentationml.comments+xml",
+        ),
+        CommentFlavor::Modern => (
+            "ppt/authors.xml",
+            "ppt/comments/modernComment1.xml",
+            MODERN_AUTHORS,
+            MODERN_COMMENTS,
+            MODERN_AUTHORS_REL,
+            MODERN_COMMENTS_REL,
+            "application/vnd.ms-powerpoint.authors+xml",
+            "application/vnd.ms-powerpoint.comments+xml",
+        ),
+    };
+    let mut parts = fixture_parts(256);
+    for (path, body) in parts.iter_mut() {
+        match path.as_str() {
+            "[Content_Types].xml" => {
+                *body = body.replace(
+                    "</Types>",
+                    &format!(
+                        r#"<Override PartName="/{authors_part}" ContentType="{authors_type}"/><Override PartName="/{comments_part}" ContentType="{comments_type}"/></Types>"#
+                    ),
+                );
+            }
+            "ppt/_rels/presentation.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{authors_rel}</Relationships>"),
+                );
+            }
+            "ppt/slides/_rels/slide1.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{comments_rel}</Relationships>"),
+                );
+            }
+            _ => {}
+        }
+    }
+    parts.push((authors_part.to_owned(), authors.to_owned()));
+    parts.push((comments_part.to_owned(), comments.to_owned()));
+    zip(parts)
+}
+
+fn zip(parts: Vec<(String, String)>) -> Vec<u8> {
+    let parts: Vec<(String, Vec<u8>)> = parts
+        .into_iter()
+        .map(|(path, body)| (path, body.into_bytes()))
+        .collect();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
 fn fixture(first_slide_id: u32) -> Vec<u8> {
-    let parts: Vec<(String, Vec<u8>)> = [
+    zip(fixture_parts(first_slide_id))
+}
+
+fn fixture_parts(first_slide_id: u32) -> Vec<(String, String)> {
+    [
         ("[Content_Types].xml", CONTENT_TYPES.to_owned()),
         ("_rels/.rels", ROOT_RELS.to_owned()),
         ("ppt/presentation.xml", presentation_xml(first_slide_id)),
@@ -169,9 +277,8 @@ fn fixture(first_slide_id: u32) -> Vec<u8> {
         ("ppt/theme/theme1.xml", THEME.to_owned()),
     ]
     .into_iter()
-    .map(|(path, body)| (path.to_owned(), body.into_bytes()))
-    .collect();
-    ooxml_opc::rezip_parts(&parts).unwrap()
+    .map(|(path, body)| (path.to_owned(), body))
+    .collect()
 }
 
 fn open() -> DeckSession {
@@ -437,6 +544,77 @@ fn an_edit_before_a_hyperlink_keeps_links_fields_and_theme_colours() {
     assert_eq!(text, "Hi Hello link\n1Accent");
 }
 
+fn script_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Script")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn run_baselines(session: &DeckSession, story_id: &str) -> Vec<(String, Option<f64>)> {
+    session.story(story_id).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.clone(), run.style.baseline_pct))
+        .collect()
+}
+
+#[test]
+fn an_edit_inside_a_raised_run_keeps_its_baseline() {
+    let session = open();
+    let story_id = script_story(&session);
+    session
+        .insert_text(&context(), &story_id, 2, "X", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"<a:rPr/><a:t>X</a:t>"#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("X".to_owned(), None),
+            ("t".to_owned(), Some(30.0)),
+            (" place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
+}
+
+#[test]
+fn an_edit_spanning_two_runs_keeps_both_baselines() {
+    let session = open();
+    let story_id = script_story(&session);
+    session.delete_text(&context(), &story_id, 2, 4).unwrap();
+
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains(r#"<a:rPr baseline="30000" sz="1200"/><a:t>s</a:t>"#));
+    assert!(slide.contains(r#"baseline="-25000""#));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        run_baselines(&reopened, &script_story(&reopened)),
+        vec![
+            ("1".to_owned(), None),
+            ("s".to_owned(), Some(30.0)),
+            ("place, H".to_owned(), None),
+            ("2".to_owned(), Some(-25.0)),
+            ("O".to_owned(), None),
+        ]
+    );
+}
+
 #[test]
 fn deleting_a_slide_prunes_its_notes_and_custom_show_entry() {
     let session = open();
@@ -679,4 +857,319 @@ fn a_session_opened_from_an_update_alone_refuses_to_save() {
 
     let mismatched = DeckSession::open_from_update_with_source(&update, b"garbage", 14);
     assert!(mismatched.is_err());
+}
+
+#[test]
+fn a_deck_reads_the_comments_it_was_opened_with() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 21).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Legacy);
+    assert_eq!(snapshot.comments.len(), 1);
+    let comment = &snapshot.comments[0];
+    assert_eq!(comment.text, "Needs a source.");
+    assert_eq!(comment.author, "Mary Smith");
+    assert_eq!(comment.initials, "mas");
+    assert_eq!(comment.slide_id, snapshot.slides[0].id);
+    assert_eq!(comment.x_emu, 914_400);
+    assert_eq!(comment.y_emu, 457_200);
+}
+
+#[test]
+fn a_modern_deck_reads_its_threads_and_flavour() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Modern), 22).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Modern);
+    assert_eq!(snapshot.comments.len(), 2);
+    let root = snapshot
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_none())
+        .unwrap();
+    let reply = snapshot
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_some())
+        .unwrap();
+    assert_eq!(root.text, "Needs a source.");
+    assert_eq!(reply.text, "Added one.");
+    assert_eq!(reply.parent_id.as_deref(), Some(root.id.as_str()));
+}
+
+#[test]
+fn an_unrelated_edit_leaves_existing_comment_parts_byte_for_byte() {
+    let source = commented_fixture(CommentFlavor::Legacy);
+    let session = DeckSession::open(&source, 23).unwrap();
+    let story = session.snapshot().unwrap().slides[1].shapes[0].text_stories[0]
+        .id
+        .clone();
+    session
+        .insert_text(&context(), &story, 0, "x", &TextStyle::default())
+        .unwrap();
+
+    let before = parts(&source);
+    let after = parts(&session.save().unwrap());
+    for path in ["ppt/commentAuthors.xml", "ppt/comments/comment1.xml"] {
+        assert_eq!(before[path], after[path], "{path} was rewritten");
+    }
+    assert_relationships_resolve(&after);
+}
+
+#[test]
+fn deleting_a_commented_slide_prunes_its_comment_part() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 24).unwrap();
+    let first = session.snapshot().unwrap().slides[0].id.clone();
+    session.delete_slide(&context(), &first).unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(!content_types.contains("comments/comment1.xml"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn adding_a_comment_mints_the_part_relationship_and_override() {
+    let session = open();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada Lovelace",
+            "AL",
+            "Check this figure.",
+            "2026-09-01T10:00:00.000",
+            914_400,
+            457_200,
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    let comments = part_text(&saved, "ppt/comments/comment1.xml");
+    assert!(comments.contains("<p:text>Check this figure.</p:text>"));
+    assert!(comments.contains(r#"<p:pos x="576" y="288"/>"#));
+    assert!(comments.contains(r#"authorId="0""#));
+    assert!(comments.contains(r#"idx="1""#));
+
+    let authors = part_text(&saved, "ppt/commentAuthors.xml");
+    assert!(authors.contains(r#"name="Ada Lovelace""#));
+    assert!(authors.contains(r#"initials="AL""#));
+    assert!(authors.contains(r#"lastIdx="1""#));
+
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(content_types.contains(
+        "application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"
+    ));
+    assert!(
+        content_types
+            .contains("application/vnd.openxmlformats-officedocument.presentationml.comments+xml")
+    );
+    let slide_rels = part_text(&saved, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(slide_rels.contains("Target=\"../comments/comment1.xml\""));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn removing_the_last_comment_drops_the_part_and_its_bookkeeping() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 25).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    session.remove_comment(&context(), &comment).unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    assert!(!saved.contains_key("ppt/commentAuthors.xml"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(!content_types.contains("commentAuthors.xml"));
+    assert!(!content_types.contains("comments/comment1.xml"));
+    assert!(!part_text(&saved, "ppt/slides/_rels/slide1.xml.rels").contains("comments"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn a_modern_thread_round_trips_through_a_save() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Modern), 26).unwrap();
+    let root = session
+        .snapshot()
+        .unwrap()
+        .comments
+        .iter()
+        .find(|comment| comment.parent_id.is_none())
+        .unwrap()
+        .id
+        .clone();
+    session.set_comment_status(&context(), &root, true).unwrap();
+
+    let saved = session.save().unwrap();
+    let text = part_text(&parts(&saved), "ppt/comments/modernComment1.xml");
+    assert!(text.contains(r#"status="resolved""#));
+    assert!(text.contains("<p188:replyLst>"));
+    assert!(text.contains("<a:t>Added one.</a:t>"));
+    assert!(text.contains(r#"sldId="256""#));
+
+    let reopened = DeckSession::open(&saved, 27).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.comment_flavor, CommentFlavor::Modern);
+    assert_eq!(snapshot.comments.len(), 2);
+    assert!(
+        snapshot
+            .comments
+            .iter()
+            .any(|comment| comment.resolved && comment.parent_id.is_none())
+    );
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn replies_and_status_are_rejected_on_a_legacy_deck() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 28).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    assert!(matches!(
+        session.reply_to_comment(
+            &context(),
+            &comment,
+            "Ada",
+            "AL",
+            "no",
+            "2026-09-01T10:00:00"
+        ),
+        Err(EditError::InvalidComment(_))
+    ));
+    assert!(matches!(
+        session.set_comment_status(&context(), &comment, true),
+        Err(EditError::InvalidComment(_))
+    ));
+}
+
+#[test]
+fn the_comment_flavour_is_fixed_once_a_deck_has_comments() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 29).unwrap();
+    assert!(matches!(
+        session.set_comment_flavor(&context(), CommentFlavor::Modern),
+        Err(EditError::InvalidComment(_))
+    ));
+}
+
+#[test]
+fn switching_an_emptied_deck_to_modern_drops_the_legacy_parts() {
+    let session = DeckSession::open(&commented_fixture(CommentFlavor::Legacy), 30).unwrap();
+    let comment = session.snapshot().unwrap().comments[0].id.clone();
+    session.remove_comment(&context(), &comment).unwrap();
+    session
+        .set_comment_flavor(&context(), CommentFlavor::Modern)
+        .unwrap();
+    let slide = session.snapshot().unwrap().slides[0].id.clone();
+    let root = session
+        .add_comment(
+            &context(),
+            &slide,
+            "Ada Lovelace",
+            "AL",
+            "Threaded now.",
+            "2026-09-01T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+    session
+        .reply_to_comment(
+            &context(),
+            &root.comment_id,
+            "Grace Hopper",
+            "GH",
+            "Agreed.",
+            "2026-09-01T10:05:00.000",
+        )
+        .unwrap();
+
+    let saved = parts(&session.save().unwrap());
+    assert!(!saved.contains_key("ppt/comments/comment1.xml"));
+    assert!(!saved.contains_key("ppt/commentAuthors.xml"));
+    let modern = part_text(&saved, "ppt/comments/modernComment1.xml");
+    assert!(modern.contains("<a:t>Threaded now.</a:t>"));
+    assert!(modern.contains("<a:t>Agreed.</a:t>"));
+    let content_types = part_text(&saved, "[Content_Types].xml");
+    assert!(content_types.contains("application/vnd.ms-powerpoint.comments+xml"));
+    assert!(content_types.contains("application/vnd.ms-powerpoint.authors+xml"));
+    assert!(!content_types.contains("presentationml.comments+xml"));
+    assert!(!content_types.contains("presentationml.commentAuthors+xml"));
+    assert_relationships_resolve(&saved);
+}
+
+#[test]
+fn a_minted_comment_part_never_overwrites_another_slides() {
+    let mut sources = fixture_parts(256);
+    for (path, body) in sources.iter_mut() {
+        match path.as_str() {
+            "[Content_Types].xml" => {
+                *body = body.replace(
+                    "</Types>",
+                    r#"<Override PartName="/ppt/commentAuthors.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.commentAuthors+xml"/><Override PartName="/ppt/comments/comment1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.comments+xml"/></Types>"#,
+                );
+            }
+            "ppt/_rels/presentation.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{LEGACY_AUTHORS_REL}</Relationships>"),
+                );
+            }
+            "ppt/slides/_rels/slide2.xml.rels" => {
+                *body = body.replace(
+                    "</Relationships>",
+                    &format!("{LEGACY_COMMENTS_REL}</Relationships>"),
+                );
+            }
+            _ => {}
+        }
+    }
+    sources.push((
+        "ppt/commentAuthors.xml".to_owned(),
+        LEGACY_AUTHORS.to_owned(),
+    ));
+    sources.push((
+        "ppt/comments/comment1.xml".to_owned(),
+        LEGACY_COMMENTS.to_owned(),
+    ));
+
+    let session = DeckSession::open(&zip(sources), 31).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(
+        snapshot.comments.len(),
+        1,
+        "slide 2 starts with the comment"
+    );
+    assert_eq!(snapshot.comments[0].slide_id, snapshot.slides[1].id);
+
+    let first = snapshot.slides[0].id.clone();
+    session
+        .add_comment(
+            &context(),
+            &first,
+            "Ada Lovelace",
+            "AL",
+            "First slide, new comment.",
+            "2026-09-02T10:00:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let back = DeckSession::open(&saved, 32).unwrap();
+    let comments = back.snapshot().unwrap();
+    assert_eq!(
+        comments.comments.len(),
+        2,
+        "both slides keep their own comment"
+    );
+    let texts: Vec<&str> = comments
+        .comments
+        .iter()
+        .map(|comment| comment.text.as_str())
+        .collect();
+    assert!(
+        texts.contains(&"Needs a source."),
+        "slide 2's comment was lost: {texts:?}"
+    );
+    assert!(texts.contains(&"First slide, new comment."));
+    assert_relationships_resolve(&parts(&saved));
 }

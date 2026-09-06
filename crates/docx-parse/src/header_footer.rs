@@ -22,6 +22,9 @@ pub struct HeaderFooter {
     pub story_type: String,
     pub hdr_ftr_type: String,
     pub content: Vec<BlockContent>,
+    /// Root namespace bindings and attributes retained outside the standard boilerplate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub watermark: Option<Watermark>,
 }
@@ -50,6 +53,7 @@ pub fn parse_header_footer(
         story_type: if is_header { "header" } else { "footer" }.to_owned(),
         hdr_ftr_type: normalize_header_footer_type(Some(hdr_ftr_type)).to_owned(),
         content,
+        custom_root_bindings: crate::document::custom_root_bindings(root),
         watermark,
     })
 }
@@ -246,6 +250,7 @@ mod tests {
                     hdr_ftr_type: kind.to_owned(),
                     content: Vec::new(),
                     watermark: None,
+                    custom_root_bindings: Vec::new(),
                 },
             );
         }

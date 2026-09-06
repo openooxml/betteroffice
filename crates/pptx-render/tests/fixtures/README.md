@@ -39,3 +39,5 @@ The 1024×1024 bitmap has RGB `(floor(x / 4), floor(y / 4), 40)`. The picture us
 The kept source rectangle is `(102.4, 204.8, 614.4, 716.8)` pixels. Rendering should crop that rectangle, clip it to the ellipse, and stroke the ellipse. The adjacent before/after PNGs show the isolated picture on a 400×200 surface.
 
 `outer-shadow.pptx` is hand-authored. Slide 1 places two 320x200 CSS-pixel round rectangles on a white ground, both carrying `outerShdw blurRad="76200" dist="38100" dir="2700000"` in 40% black: the left one is filled `#4472C4`, the right one has `a:noFill` and a red outline. The shadow resolves to 8px of blur 2.83px down and right, and only the filled card casts it. The adjacent before/after PNGs crop the filled card on the 1280x720 surface.
+
+`text-baseline-script.pptx` derives from the same deck. Only slide 1's subtitle changes: one paragraph whose `a:pPr/a:defRPr` carries `baseline="0"` and whose runs alternate between no shift, `baseline="30000"` and `baseline="-25000"` at `sz="1700"`. The zero must stay a no-op; the other two must shrink and shift their runs.

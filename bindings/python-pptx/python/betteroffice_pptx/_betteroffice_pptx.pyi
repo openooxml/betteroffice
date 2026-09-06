@@ -245,6 +245,41 @@ class AdjustEdit:
     def after(self) -> dict[str, float]: ...
 
 @final
+class Comment:
+    @property
+    def id(self) -> str: ...
+    @property
+    def slide_id(self) -> str: ...
+    @property
+    def author(self) -> str: ...
+    @property
+    def initials(self) -> str: ...
+    @property
+    def text(self) -> str: ...
+    @property
+    def created(self) -> str | None: ...
+    @property
+    def x(self) -> int: ...
+    @property
+    def y(self) -> int: ...
+    @property
+    def parent_id(self) -> str | None:
+        """Set on a reply; names the thread root. Modern decks only."""
+    @property
+    def resolved(self) -> bool: ...
+
+@final
+class CommentEdit:
+    @property
+    def comment_id(self) -> str: ...
+    @property
+    def slide_id(self) -> str: ...
+    @property
+    def parent_id(self) -> str | None: ...
+    @property
+    def resolved(self) -> bool: ...
+
+@final
 class TextEdit:
     @property
     def story_id(self) -> str: ...
@@ -384,6 +419,37 @@ class Presentation:
         underline: str | None = ...,
     ) -> TextEdit: ...
     def insert_paragraph_break(self, story_id: str, index: int) -> TextEdit: ...
+    def add_comment(
+        self,
+        slide: int | str,
+        text: str,
+        *,
+        author: str,
+        initials: str = ...,
+        created: str,
+        x: int = ...,
+        y: int = ...,
+    ) -> CommentEdit:
+        """Anchor a comment to a slide; `created` is an ISO-8601 timestamp."""
+    def reply_to_comment(
+        self,
+        comment_id: str,
+        text: str,
+        *,
+        author: str,
+        initials: str = ...,
+        created: str,
+    ) -> CommentEdit:
+        """Modern comments only; legacy comments carry no replies."""
+    def set_comment_status(self, comment_id: str, resolved: bool = ...) -> CommentEdit:
+        """Resolve or reopen a modern comment."""
+    def remove_comment(self, comment_id: str) -> CommentEdit: ...
+    def comments(self) -> list[Comment]: ...
+    @property
+    def comment_flavor(self) -> str:
+        """Either `legacy` or `modern`; a deck never carries both."""
+    def set_comment_flavor(self, flavor: str) -> str:
+        """Only legal while the deck has no comments."""
     def register_font(
         self, family: str, data: bytes, *, bold: bool = ..., italic: bool = ...
     ) -> int: ...

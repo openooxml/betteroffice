@@ -96,3 +96,31 @@ until `register_font` has supplied at least one face — no font is compiled int
 that wheel. `render_png` rasterizes a slide to PNG bytes from that same layout,
 resolving pictures out of the package, so only fonts need registering. A `Presentation` is also pinned to the thread that opened it, and
 must be released there.
+
+Comments read and write in both PowerPoint formats. `comments()` returns every
+comment on the deck and `comment_flavor` reports which system it uses: `legacy`
+reads in every version of PowerPoint plus LibreOffice and Google Slides, while
+`modern` carries replies and a resolved state but only shows in PowerPoint 365.
+A file commits to one at its first comment and never carries both, so
+`set_comment_flavor` only works while the deck has no comments, and
+`reply_to_comment` and `set_comment_status` raise on a legacy deck.
+
+```python
+from betteroffice_pptx import Presentation
+
+deck = Presentation.open_path("deck.pptx")
+deck.add_comment(
+    0,
+    "Tighten this claim.",
+    author="Ada Lovelace",
+    initials="AL",
+    created="2026-09-01T10:00:00.000",
+    x=1_828_800,
+    y=914_400,
+)
+deck.save_path("reviewed.pptx")
+```
+
+Positions are EMU, like every other coordinate in the API. `created` is
+caller-supplied rather than read from a clock, so the same edits replay to the
+same bytes.

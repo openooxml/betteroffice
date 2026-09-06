@@ -1,8 +1,12 @@
 use std::collections::BTreeMap;
 
-use ooxml_drawingml::{ColorValue, ShapeEffects, ShapeFill, ShapeOutline, Theme};
+pub use ooxml_drawingml::ShapeStyle;
+use ooxml_drawingml::{
+    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, Theme, ThemeFormatScheme,
+};
 use serde::{Deserialize, Serialize};
 
+use crate::comments::{Comment, CommentAuthor, CommentFlavor};
 use crate::relationships::Relationship;
 
 pub use ooxml_drawingml::chart::{
@@ -42,6 +46,12 @@ pub struct PptxPackage {
     #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comment_authors: Vec<CommentAuthor>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<Comment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_flavor: Option<CommentFlavor>,
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
@@ -89,8 +99,22 @@ pub struct Presentation {
     pub part_path: String,
     pub width_emu: i64,
     pub height_emu: i64,
+    /// `p:presentation/@firstSlideNum`.
+    #[serde(
+        default = "default_first_slide_num",
+        skip_serializing_if = "is_default_first_slide_num"
+    )]
+    pub first_slide_num: i32,
     pub slides: Vec<SlideReference>,
     pub master_part_paths: Vec<String>,
+}
+
+fn default_first_slide_num() -> i32 {
+    1
+}
+
+fn is_default_first_slide_num(value: &i32) -> bool {
+    *value == default_first_slide_num()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -141,6 +165,9 @@ pub struct SlideMaster {
 pub struct ThemePart {
     pub part_path: String,
     pub theme: Theme,
+    /// Absent from packages serialized before `a:fmtScheme` was parsed.
+    #[serde(default, skip_serializing_if = "ThemeFormatScheme::is_empty")]
+    pub format_scheme: ThemeFormatScheme,
 }
 
 /// A chart part resolved against one referenced presentation theme.
@@ -226,7 +253,10 @@ pub struct Shape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub geometry: String,
-    /// `p:style` text defaults.
+    /// Custom paths in shape-relative coordinates.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<CustomGeometryPath>,
+    /// Theme formatting and text defaults.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub style: Option<Box<ShapeStyle>>,
     #[serde(default)]
@@ -238,13 +268,14 @@ pub struct Shape {
     pub text: Option<TextBody>,
 }
 
-/// Shape text defaults.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ShapeStyle {
-    /// `a:fontRef` colour.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub font_color: Option<ColorValue>,
+pub struct CustomGeometryPath {
+    pub commands: Vec<GeometryPathCommand>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_fill: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_stroke: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -264,6 +295,8 @@ pub struct Picture {
     pub outline: Option<ShapeOutline>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effects: Option<ShapeEffects>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<Box<ShapeStyle>>,
 }
 
 fn rect_geometry() -> String {
@@ -330,6 +363,11 @@ pub struct TextBody {
     pub inset_top: Option<i64>,
     pub inset_right: Option<i64>,
     pub inset_bottom: Option<i64>,
+    /// List properties by outline level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub list_style: Vec<ParagraphProperties>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_list_style: Option<Box<ParagraphProperties>>,
     pub paragraphs: Vec<TextParagraph>,
 }
 
@@ -364,7 +402,35 @@ pub struct ParagraphProperties {
     pub margin_left: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_font: Option<BulletFont>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_color: Option<BulletColor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bullet_size: Option<BulletSize>,
     pub default_run: Option<RunProperties>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletFont {
+    FollowText,
+    Typeface(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletColor {
+    FollowText,
+    Color(ColorValue),
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum BulletSize {
+    FollowText,
+    Percent(f64),
+    Points(f64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -393,6 +459,9 @@ pub struct TextRun {
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
     pub font_size_pt: Option<f64>,
+    /// Baseline shift as a percentage of the font size; negative is subscript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
