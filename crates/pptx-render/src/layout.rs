@@ -1483,11 +1483,14 @@ fn add_shaped_segment(
             glyph_x += glyph.x_advance;
         }
         let global_end = global_run_byte + run_byte_start + end_byte;
+        // Tightening can never pull a cluster past zero width, and `width - tracking` has to
+        // stay the bare advance, so wrapping and alignment clamp with the same number.
+        let tracking = tracking.max(-glyph_x);
         output.push(ShapedCluster {
             text: text[start_byte..end_byte].to_owned(),
             start: source_start,
             end: source_end,
-            width: (glyph_x + tracking).max(0.0),
+            width: glyph_x + tracking,
             tracking,
             run_index,
             style: run.style.clone(),
@@ -2714,6 +2717,24 @@ mod tests {
             plain.len()
         );
         assert!(tracked[0].end < plain[0].end);
+    }
+
+    #[test]
+    fn tightening_past_a_glyph_advance_never_widens_the_line() {
+        let wide = 5_000_000;
+        let plain = tracked_text_box(9_005, None, None, wide);
+        let tight = tracked_text_box(9_006, Some(-4_000.0), None, wide);
+
+        // Clamping the width but not the tracking turned `width - tracking` into a large
+        // positive number, which wrapped one cluster per line and mismeasured every line.
+        assert_eq!(tight.len(), plain.len());
+        assert!(
+            tight[0].width <= plain[0].width,
+            "{} vs {}",
+            tight[0].width,
+            plain[0].width
+        );
+        assert!(tight[0].width >= 0.0, "{}", tight[0].width);
     }
 
     /// The demo deck's first text shape, narrowed until its text wraps, with `spacing`
