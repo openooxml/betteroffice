@@ -43,6 +43,9 @@ pub const MAX_SLIDE_IMAGE_PIXELS: u64 = 67_108_864;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
 /// The same, summed across every image one slide decodes.
 pub const MAX_SLIDE_IMAGE_BYTES: u64 = 536_870_912;
+/// Scratch pixels every shadow on one slide may blur between them, eight full surfaces.
+/// A slide may carry 100_000 shapes and each shadow blurs its own buffer six times over.
+pub const MAX_SHADOW_PIXELS: u64 = 134_217_728;
 
 const PLACEHOLDER_STROKE: &str = "#8a94a6";
 const PLACEHOLDER_LABEL: &str = "#5d6675";
@@ -91,6 +94,8 @@ pub struct RenderOptions {
     /// only the pixmap and its transform grow.
     pub scale: f32,
     pub background: Background,
+    /// Scratch pixels every shadow on the slide may blur between them.
+    pub max_shadow_pixels: u64,
 }
 
 impl Default for RenderOptions {
@@ -98,6 +103,7 @@ impl Default for RenderOptions {
         Self {
             scale: 1.0,
             background: Background::default(),
+            max_shadow_pixels: MAX_SHADOW_PIXELS,
         }
     }
 }
@@ -188,6 +194,8 @@ pub fn render_slide_cached(
         glyphs,
         images: ImageCache::default(),
         skipped_images: 0,
+        shadow_pixels: 0,
+        max_shadow_pixels: options.max_shadow_pixels,
     };
     for primitive in &dl.primitives {
         painter.paint(primitive, base, None)?;
@@ -229,6 +237,8 @@ fn encode_png(pixmap: Pixmap, width: u32, height: u32) -> Result<Vec<u8>, String
 struct Painter<'a, 'b> {
     pixmap: &'a mut Pixmap,
     scale: f32,
+    shadow_pixels: u64,
+    max_shadow_pixels: u64,
     resources: &'a RenderResources<'b>,
     glyphs: &'a mut GlyphCache,
     images: ImageCache,
@@ -562,7 +572,13 @@ impl Painter<'_, '_> {
         if right <= left || bottom <= top {
             return Ok(());
         }
-        let Some(mut scratch) = Pixmap::new((right - left) as u32, (bottom - top) as u32) else {
+        let (scratch_w, scratch_h) = ((right - left) as u32, (bottom - top) as u32);
+        self.shadow_pixels += u64::from(scratch_w) * u64::from(scratch_h);
+        if self.shadow_pixels > self.max_shadow_pixels {
+            let limit = self.max_shadow_pixels;
+            return Err(format!("shadows cover more than {limit}px on one slide"));
+        }
+        let Some(mut scratch) = Pixmap::new(scratch_w, scratch_h) else {
             return Ok(());
         };
         let local = Transform::from_translate(-left, -top).pre_concat(placed);
@@ -1020,6 +1036,61 @@ mod tests {
             rendered.bytes[..8],
             [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]
         );
+    }
+
+    #[test]
+    fn many_shadows_stop_at_the_slide_budget_instead_of_blurring_forever() {
+        let fonts = FontStore::new();
+        let images = AssetMap::default();
+        let mut list = empty_list(256.0, 256.0);
+        for object_id in 0..8 {
+            list.primitives.push(Primitive::Shape {
+                object_id,
+                shape_id: None,
+                name: "card".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 256.0,
+                h: 256.0,
+                geometry: "rect".into(),
+                path: vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                    GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                    GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+                    GeometryPathCommand::Close,
+                ],
+                adjust_values: Default::default(),
+                fill: Some(SlidePaint::Solid {
+                    color: "#4472C4".into(),
+                }),
+                stroke: None,
+                shadow: Some(SlideShadow {
+                    color: "#00000066".into(),
+                    blur: 8.0,
+                    dx: 1.0,
+                    dy: 1.0,
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                }),
+                transform: SlideTransform::default(),
+            });
+        }
+        let options = RenderOptions {
+            max_shadow_pixels: 4 * 256 * 256,
+            ..RenderOptions::default()
+        };
+        let error = render_slide(&list, &resources(&fonts, &images), &options)
+            .expect_err("eight full-surface shadows must exceed a four-surface budget");
+        assert!(error.contains("shadows cover"), "{error}");
+
+        // The same slide is fine once the budget covers it.
+        render_slide(
+            &list,
+            &resources(&fonts, &images),
+            &RenderOptions::default(),
+        )
+        .expect("the default budget is generous enough for eight small shadows");
     }
 
     #[test]
