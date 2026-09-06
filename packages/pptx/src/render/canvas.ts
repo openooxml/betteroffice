@@ -381,12 +381,45 @@ async function paintImage(
   }
 }
 
+/** Matches `MAX_IMAGE_PIXELS` in pptx-raster, so both backends refuse the same bitmaps. */
+const MAX_EFFECT_PIXELS = 33_554_432;
+
 function imageSourceSize(source: CanvasImageSource): { width: number; height: number } | null {
-  const candidate = source as { naturalWidth?: number; naturalHeight?: number; width?: unknown; height?: unknown };
-  const width = candidate.naturalWidth ?? (typeof candidate.width === 'number' ? candidate.width : 0);
-  const height = candidate.naturalHeight ?? (typeof candidate.height === 'number' ? candidate.height : 0);
+  const candidate = source as {
+    naturalWidth?: number;
+    naturalHeight?: number;
+    videoWidth?: number;
+    videoHeight?: number;
+    displayWidth?: number;
+    displayHeight?: number;
+    width?: unknown;
+    height?: unknown;
+  };
+  const width =
+    candidate.naturalWidth ??
+    candidate.videoWidth ??
+    candidate.displayWidth ??
+    (typeof candidate.width === 'number' ? candidate.width : 0);
+  const height =
+    candidate.naturalHeight ??
+    candidate.videoHeight ??
+    candidate.displayHeight ??
+    (typeof candidate.height === 'number' ? candidate.height : 0);
   return width > 0 && height > 0 ? { width, height } : null;
 }
+
+/** The largest surface at or below the pixel cap that keeps the source's proportions. */
+function boundedSize(size: { width: number; height: number }): { width: number; height: number } {
+  const pixels = size.width * size.height;
+  if (pixels <= MAX_EFFECT_PIXELS) return size;
+  const factor = Math.sqrt(MAX_EFFECT_PIXELS / pixels);
+  return {
+    width: Math.max(1, Math.floor(size.width * factor)),
+    height: Math.max(1, Math.floor(size.height * factor)),
+  };
+}
+
+const recoloured = new WeakMap<object, Map<string, CanvasImageSource>>();
 
 function offscreen(width: number, height: number): HTMLCanvasElement | OffscreenCanvas | null {
   if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
@@ -397,19 +430,32 @@ function offscreen(width: number, height: number): HTMLCanvasElement | Offscreen
   return canvas;
 }
 
-/** Recolours readable bitmaps on a private surface. */
+/** Recolours readable bitmaps on a private surface, once per source and effect list. */
 function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): CanvasImageSource {
   const size = imageSourceSize(source);
   if (!size) return source;
+  const key = JSON.stringify(effects);
+  const cached = recoloured.get(source as object)?.get(key);
+  if (cached) return cached;
+  // A slide's bitmap is whatever the file carried, and every effect walks all of it, so
+  // an oversized source is recoloured at the cap and drawn back up to size.
+  const bounds = boundedSize(size);
   try {
-    const canvas = offscreen(size.width, size.height);
+    const canvas = offscreen(bounds.width, bounds.height);
     const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
     if (!canvas || !ctx) return source;
-    ctx.drawImage(source, 0, 0);
-    const data = ctx.getImageData(0, 0, size.width, size.height);
+    ctx.drawImage(source, 0, 0, bounds.width, bounds.height);
+    const data = ctx.getImageData(0, 0, bounds.width, bounds.height);
     applyImageEffects(data.data, effects);
     ctx.putImageData(data, 0, 0);
-    return canvas as CanvasImageSource;
+    const result = canvas as CanvasImageSource;
+    let entries = recoloured.get(source as object);
+    if (!entries) {
+      entries = new Map();
+      recoloured.set(source as object, entries);
+    }
+    entries.set(key, result);
+    return result;
   } catch {
     return source;
   }
@@ -468,6 +514,10 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
               shadow[channel] * (1 - ratio) + highlight[channel] * ratio
             );
           }
+          // An endpoint may be translucent. It modulates the source's own alpha rather
+          // than replacing it, or a transparent pixel would turn opaque.
+          const endpoint = shadow[3] * (1 - ratio) + highlight[3] * ratio;
+          data[index + 3] = Math.round((data[index + 3] * endpoint) / 255);
         }
         break;
       }

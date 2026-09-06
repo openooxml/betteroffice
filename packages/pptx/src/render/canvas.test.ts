@@ -739,11 +739,24 @@ test('colour changes respect useA and preserve transparent and antialiased pixel
   expect([...data]).toEqual([124, 124, 124, 128]);
 });
 
+test('a duotone endpoint modulates alpha instead of replacing it', () => {
+  const data = new Uint8ClampedArray([255, 255, 255, 200, 0, 0, 0, 0]);
+  applyImageEffects(data, [{ kind: 'duotone', shadow: '#000000ff', highlight: '#ffffff80' }]);
+  // The white pixel takes half the highlight's alpha; the transparent one stays transparent.
+  expect([...data]).toEqual([255, 255, 255, 100, 0, 0, 0, 0]);
+
+  const opaque = new Uint8ClampedArray([255, 255, 255, 200]);
+  applyImageEffects(opaque, [{ kind: 'duotone', shadow: '#000000', highlight: '#ffffff' }]);
+  expect([...opaque]).toEqual([255, 255, 255, 200]);
+});
+
 test('picture effects reach canvas before cropping without changing the shared source', async () => {
   const original = globalThis.OffscreenCanvas;
-  const source = { width: 4, height: 1, pixels: new Uint8ClampedArray([3, 167, 223, 128]) };
   try {
     for (const failure of [null, 'read', 'context'] as const) {
+      // A source of its own per case: a recoloured bitmap is cached against the source it
+      // came from, so sharing one here would answer the later cases from the first.
+      const source = { width: 4, height: 1, pixels: new Uint8ClampedArray([3, 167, 223, 128]) };
       class Surface {
         pixels = new Uint8ClampedArray();
         constructor(public width: number, public height: number) {}
