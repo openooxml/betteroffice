@@ -354,6 +354,7 @@ describe('PPTX canvas replay', () => {
                   italic: false,
                   underline: false,
                   color: '#ffffff',
+                  letterSpacingPx: 0,
                   glyphs,
                 },
               ],
