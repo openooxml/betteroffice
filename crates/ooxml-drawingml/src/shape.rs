@@ -59,6 +59,79 @@ pub struct ShapeOutline {
     pub tail_end: Option<LineEnd>,
 }
 
+/// Shape effects.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeEffects {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outer_shadow: Option<OuterShadow>,
+}
+
+/// Outer shadow in EMUs and 60000ths of a degree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OuterShadow {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<ColorValue>,
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
+    pub blur_radius: i64,
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
+    pub distance: i64,
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
+    pub direction: i64,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub rotate_with_shape: bool,
+    /// `sx`/`sy`: the shadow's own size, as a fraction of the shape's.
+    #[serde(default = "default_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_x: f64,
+    #[serde(default = "default_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_y: f64,
+    /// `algn`: the point of the shape's box a scaled shadow keeps.
+    #[serde(
+        default = "default_alignment",
+        skip_serializing_if = "is_default_alignment"
+    )]
+    pub alignment: String,
+}
+
+impl Default for OuterShadow {
+    fn default() -> Self {
+        Self {
+            color: None,
+            blur_radius: 0,
+            distance: 0,
+            direction: 0,
+            rotate_with_shape: true,
+            scale_x: 1.0,
+            scale_y: 1.0,
+            alignment: default_alignment(),
+        }
+    }
+}
+
+fn default_scale() -> f64 {
+    1.0
+}
+fn is_unit_scale(value: &f64) -> bool {
+    *value == 1.0
+}
+fn default_alignment() -> String {
+    "b".to_owned()
+}
+fn is_default_alignment(value: &str) -> bool {
+    value == "b"
+}
+
+fn is_zero_emu(value: &i64) -> bool {
+    *value == 0
+}
+fn default_true() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LineEnd {
     #[serde(rename = "type")]

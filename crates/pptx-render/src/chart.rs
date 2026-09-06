@@ -261,6 +261,7 @@ impl ChartSink<'_> {
             adjust_values: Default::default(),
             fill,
             stroke,
+            shadow: None,
             transform: Transform::default(),
         }
     }

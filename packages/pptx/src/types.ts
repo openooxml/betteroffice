@@ -264,6 +264,16 @@ export interface Stroke {
   tailEnd?: StrokeEnd;
 }
 
+/** An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted. */
+export interface Shadow {
+  color: string;
+  blur?: number;
+  dx?: number;
+  dy?: number;
+  scaleX?: number;
+  scaleY?: number;
+}
+
 export interface PrimitiveTransform {
   rotationDeg?: number;
   flipH?: boolean;
@@ -288,6 +298,7 @@ export interface ShapePrimitive extends PrimitiveBase {
   adjustValues?: Record<string, number>;
   fill?: Paint;
   stroke?: Stroke;
+  shadow?: Shadow;
 }
 
 /** An `a:blip` colour transform, colours already resolved to `#rrggbbaa`. */

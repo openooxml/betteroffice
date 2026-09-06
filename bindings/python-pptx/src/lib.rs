@@ -1847,6 +1847,7 @@ impl PyPresentation {
         let options = RenderOptions {
             scale,
             background: parse_background(background)?,
+            ..RenderOptions::default()
         };
         let deck = DetachedDeck(&self.presentation);
         py.detach(move || {

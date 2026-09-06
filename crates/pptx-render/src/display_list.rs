@@ -109,6 +109,33 @@ pub struct StrokeEnd {
     pub length: f32,
 }
 
+/// An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shadow {
+    pub color: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blur: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dx: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dy: f32,
+    /// `sx`/`sy`. The anchor `algn` names is already folded into `dx`/`dy`, so a backend
+    /// scales about the surface origin and then translates.
+    #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_x: f32,
+    #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_y: f32,
+}
+
+fn unit_scale() -> f32 {
+    1.0
+}
+
+fn is_unit_scale(value: &f32) -> bool {
+    *value == 1.0
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Transform {
@@ -169,6 +196,8 @@ pub enum Primitive {
         fill: Option<Paint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<Shadow>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },

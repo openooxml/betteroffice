@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
-    ColorValue, GradientFill, LineEnd, ShapeFill, ShapeOutline, ShapeStyle, Theme,
+    ColorValue, GradientFill, LineEnd, ShapeEffects, ShapeFill, ShapeOutline, ShapeStyle, Theme,
     ThemeFormatScheme, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
@@ -20,13 +20,14 @@ use thiserror::Error;
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
-    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Stroke, StrokeEnd,
+    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, StrokeEnd,
     SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
 const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
+const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
 const DEFAULT_INSET_HORIZONTAL_EMU: i64 = 91_440;
 const DEFAULT_INSET_VERTICAL_EMU: i64 = 45_720;
 const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
@@ -480,6 +481,23 @@ impl<'a> LayoutBuilder<'a> {
                 .or(inherited_outline)
         }
         .and_then(|outline| stroke(&outline, self.theme));
+        let node_effects = original
+            .and_then(node_effects)
+            .or_else(|| layout_node.and_then(node_effects))
+            .or_else(|| master_node.and_then(node_effects));
+        let shadow = node_effects
+            .filter(|_| shape.kind == ShapeKind::Shape && (fill.is_some() || outline.is_some()))
+            .and_then(|effects| {
+                shadow(
+                    effects,
+                    self.theme,
+                    space,
+                    rect,
+                    shape.rotation_deg as f32,
+                    shape.flip_h,
+                    shape.flip_v,
+                )
+            });
         let transform = Transform {
             rotation_deg: shape.rotation_deg as f32,
             flip_h: shape.flip_h,
@@ -509,6 +527,7 @@ impl<'a> LayoutBuilder<'a> {
                             .collect(),
                         fill,
                         stroke: outline,
+                        shadow,
                         transform,
                     },
                     custom_paths(original),
@@ -606,6 +625,27 @@ impl<'a> LayoutBuilder<'a> {
         match shape {
             ShapeNode::Shape(value) => {
                 let resolved_fill = self.resolved_fill(&[Some(shape)]);
+                let fill = resolved_fill
+                    .as_ref()
+                    .and_then(|fill| paint(fill, self.theme));
+                let outline = self
+                    .resolved_outline(&[Some(shape)])
+                    .and_then(|outline| stroke(&outline, self.theme));
+                let shadow = value
+                    .effects
+                    .as_ref()
+                    .filter(|_| fill.is_some() || outline.is_some())
+                    .and_then(|effects| {
+                        shadow(
+                            effects,
+                            self.theme,
+                            space,
+                            rect,
+                            transform.rotation_deg,
+                            transform.flip_h,
+                            transform.flip_v,
+                        )
+                    });
                 self.push_shape(
                     Primitive::Shape {
                         object_id: base.id,
@@ -626,12 +666,9 @@ impl<'a> LayoutBuilder<'a> {
                             .iter()
                             .map(|(name, value)| (name.clone(), *value as f32))
                             .collect(),
-                        fill: resolved_fill
-                            .as_ref()
-                            .and_then(|fill| paint(fill, self.theme)),
-                        stroke: self
-                            .resolved_outline(&[Some(shape)])
-                            .and_then(|outline| stroke(&outline, self.theme)),
+                        fill,
+                        stroke: outline,
+                        shadow,
                         transform,
                     },
                     &value.paths,
@@ -720,7 +757,11 @@ impl<'a> LayoutBuilder<'a> {
             }
             let mut primitive = primitive.clone();
             if let Primitive::Shape {
-                path, fill, stroke, ..
+                path,
+                fill,
+                stroke,
+                shadow,
+                ..
             } = &mut primitive
             {
                 *path = custom.commands.clone();
@@ -729,6 +770,9 @@ impl<'a> LayoutBuilder<'a> {
                 }
                 if custom.no_stroke {
                     *stroke = None;
+                }
+                if fill.is_none() && stroke.is_none() {
+                    *shadow = None;
                 }
             }
             let picture = picture.filter(|_| !custom.no_fill);
@@ -2425,6 +2469,14 @@ fn node_outline(node: &ShapeNode) -> Option<&ShapeOutline> {
     }
 }
 
+fn node_effects(node: &ShapeNode) -> Option<&ShapeEffects> {
+    match node {
+        ShapeNode::Shape(shape) => shape.effects.as_ref(),
+        ShapeNode::Picture(shape) => shape.shape_effects.as_ref(),
+        ShapeNode::GraphicFrame(_) | ShapeNode::Group(_) => None,
+    }
+}
+
 fn node_text(node: &ShapeNode) -> Option<&TextBody> {
     match node {
         ShapeNode::Shape(shape) => shape.text.as_ref(),
@@ -2639,6 +2691,68 @@ fn line_end_scale(size: Option<&str>) -> f32 {
         Some("lg") => 5.0,
         _ => 3.0,
     }
+}
+
+/// `a:outerShdw` in surface pixels, or `None` when it would paint nothing.
+fn shadow(
+    effects: &ShapeEffects,
+    theme: &Theme,
+    space: Space,
+    rect: PxRect,
+    rotation_deg: f32,
+    flip_h: bool,
+    flip_v: bool,
+) -> Option<Shadow> {
+    let outer = effects.outer_shadow.as_ref()?;
+    let color = resolve_paint_color(outer.color.as_ref(), theme)?;
+    if color.len() == 9 && color.ends_with("00") {
+        return None;
+    }
+    let direction = (outer.direction as f64 / ANGLE_UNITS_PER_DEGREE).to_radians();
+    let distance = outer.distance as f64;
+    let mut dx = (distance * direction.cos()) as f32 * space.scale_x;
+    let mut dy = (distance * direction.sin()) as f32 * space.scale_y;
+    if outer.rotate_with_shape {
+        dx *= if flip_h { -1.0 } else { 1.0 };
+        dy *= if flip_v { -1.0 } else { 1.0 };
+        let (sin, cos) = rotation_deg.to_radians().sin_cos();
+        (dx, dy) = (cos * dx - sin * dy, sin * dx + cos * dy);
+    }
+    // Scaling happens about the surface origin, so the anchor `algn` names travels in the
+    // offset: a point scaled about A lands at s * p + A * (1 - s).
+    let scale_x = safe_scale(outer.scale_x as f32);
+    let scale_y = safe_scale(outer.scale_y as f32);
+    if scale_x == 0.0 || scale_y == 0.0 {
+        return None;
+    }
+    let (anchor_x, anchor_y) = shadow_anchor(&outer.alignment, rect);
+    Some(Shadow {
+        color,
+        blur: safe_geometry(outer.blur_radius as f32 * (space.scale_x + space.scale_y) / 2.0),
+        dx: safe_geometry(dx + anchor_x * (1.0 - scale_x)),
+        dy: safe_geometry(dy + anchor_y * (1.0 - scale_y)),
+        scale_x,
+        scale_y,
+    })
+}
+
+fn safe_scale(value: f32) -> f32 {
+    if value.is_finite() { value } else { 1.0 }
+}
+
+/// The point of `rect` that `a:algn` keeps fixed when the shadow is scaled.
+fn shadow_anchor(alignment: &str, rect: PxRect) -> (f32, f32) {
+    let x = match alignment {
+        "tl" | "l" | "bl" => rect.x,
+        "tr" | "r" | "br" => rect.x + rect.w,
+        _ => rect.x + rect.w / 2.0,
+    };
+    let y = match alignment {
+        "tl" | "t" | "tr" => rect.y,
+        "l" | "ctr" | "r" => rect.y + rect.h / 2.0,
+        _ => rect.y + rect.h,
+    };
+    (x, y)
 }
 
 fn gradient_paint(gradient: &GradientFill, theme: &Theme) -> Option<Paint> {
@@ -3100,6 +3214,7 @@ mod tests {
             adjust_values: BTreeMap::new(),
             fill: None,
             outline: None,
+            shape_effects: None,
             style: None,
         };
         let rect = PxRect {
@@ -4022,6 +4137,197 @@ mod tests {
     }
 
     #[test]
+    fn an_outer_shadow_resolves_to_translucent_pixels_offset_along_its_direction() {
+        let theme = Theme::default();
+        let effects = |alpha| ShapeEffects {
+            outer_shadow: Some(ooxml_drawingml::OuterShadow {
+                color: Some(ColorValue {
+                    rgb: Some("000000".to_owned()),
+                    alpha: Some(alpha),
+                    ..ColorValue::default()
+                }),
+                blur_radius: 76_200,
+                distance: 38_100,
+                direction: 2_700_000,
+                ..Default::default()
+            }),
+        };
+        let box_ = PxRect {
+            x: 10.0,
+            y: 20.0,
+            w: 100.0,
+            h: 50.0,
+        };
+        let resolved = shadow(
+            &effects(0.4),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert_eq!(resolved.color, "#00000066");
+        assert!((resolved.blur - 8.0).abs() < 0.01);
+        assert!((resolved.dx - 2.828).abs() < 0.01);
+        assert!((resolved.dy - 2.828).abs() < 0.01);
+
+        let rotated = shadow(
+            &effects(0.4),
+            &theme,
+            Space::root(),
+            box_,
+            90.0,
+            true,
+            false,
+        )
+        .unwrap();
+        assert!((rotated.dx + 2.828).abs() < 0.01);
+        assert!((rotated.dy + 2.828).abs() < 0.01);
+        let mut fixed = effects(0.4);
+        fixed.outer_shadow.as_mut().unwrap().rotate_with_shape = false;
+        assert_eq!(
+            shadow(&fixed, &theme, Space::root(), box_, 90.0, true, false).unwrap(),
+            resolved
+        );
+
+        assert_eq!(
+            shadow(
+                &effects(0.0),
+                &theme,
+                Space::root(),
+                box_,
+                0.0,
+                false,
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            shadow(
+                &ShapeEffects::default(),
+                &theme,
+                Space::root(),
+                box_,
+                0.0,
+                false,
+                false
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_scaled_shadow_keeps_the_point_its_alignment_names() {
+        let theme = Theme::default();
+        let scaled = |alignment: &str, sx: f64| ShapeEffects {
+            outer_shadow: Some(ooxml_drawingml::OuterShadow {
+                color: Some(ColorValue {
+                    rgb: Some("000000".to_owned()),
+                    alpha: Some(0.4),
+                    ..ColorValue::default()
+                }),
+                scale_x: sx,
+                scale_y: sx,
+                alignment: alignment.to_owned(),
+                ..Default::default()
+            }),
+        };
+        let box_ = PxRect {
+            x: 100.0,
+            y: 200.0,
+            w: 40.0,
+            h: 80.0,
+        };
+        let centre = shadow(
+            &scaled("ctr", 1.02),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert!((centre.scale_x - 1.02).abs() < 1e-6);
+        // 102% about the box centre (120, 240) leaves it where it was.
+        assert!((120.0 * centre.scale_x + centre.dx - 120.0).abs() < 0.01);
+        assert!((240.0 * centre.scale_y + centre.dy - 240.0).abs() < 0.01);
+
+        // The default anchor is the bottom edge, so only that edge stays put.
+        let bottom = shadow(
+            &scaled("b", 1.02),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert!((280.0 * bottom.scale_y + bottom.dy - 280.0).abs() < 0.01);
+        assert!(200.0 * bottom.scale_y + bottom.dy < 200.0);
+
+        let plain = shadow(
+            &scaled("ctr", 1.0),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .expect("a painted shadow");
+        assert_eq!((plain.scale_x, plain.dx, plain.dy), (1.0, 0.0, 0.0));
+
+        for (alignment, x, y) in [
+            ("tl", 100.0, 200.0),
+            ("t", 120.0, 200.0),
+            ("tr", 140.0, 200.0),
+            ("l", 100.0, 240.0),
+            ("ctr", 120.0, 240.0),
+            ("r", 140.0, 240.0),
+            ("bl", 100.0, 280.0),
+            ("b", 120.0, 280.0),
+            ("br", 140.0, 280.0),
+        ] {
+            let mut effects = scaled(alignment, -1.5);
+            effects.outer_shadow.as_mut().unwrap().scale_y = 0.5;
+            let result = shadow(&effects, &theme, Space::root(), box_, 0.0, false, false).unwrap();
+            assert_eq!((result.scale_x, result.scale_y), (-1.5, 0.5));
+            assert_eq!(result.dx, x * 2.5, "{alignment}");
+            assert_eq!(result.dy, y * 0.5, "{alignment}");
+        }
+        assert!(
+            shadow(
+                &scaled("ctr", 0.0),
+                &theme,
+                Space::root(),
+                box_,
+                0.0,
+                false,
+                false
+            )
+            .is_none()
+        );
+        let invalid = shadow(
+            &scaled("ctr", f64::INFINITY),
+            &theme,
+            Space::root(),
+            box_,
+            0.0,
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            (invalid.scale_x, invalid.scale_y, invalid.dx, invalid.dy),
+            (1.0, 1.0, 0.0, 0.0)
+        );
+    }
+
+    #[test]
     fn a_slide_number_field_resolves_to_the_slide_it_is_drawn_on() {
         let run = |field_type: Option<&str>, text: &str| pptx_parse::TextRun {
             text: text.to_owned(),
@@ -4533,6 +4839,7 @@ mod tests {
         package.masters[0]
             .shapes
             .push(ShapeNode::Shape(pptx_parse::Shape {
+                effects: None,
                 base: pptx_parse::ShapeBase {
                     id: 9_001,
                     name: "turned".to_owned(),
@@ -5511,6 +5818,7 @@ mod tests {
             fill: None,
             picture_fill: None,
             outline: None,
+            effects: None,
             text: None,
         });
         let resolved = resolved_transform_value(&snapshot, None, Some(&layout_shape), None);

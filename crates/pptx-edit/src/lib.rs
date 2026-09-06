@@ -17,6 +17,7 @@ use yrs::{
 mod baseline;
 mod comments;
 mod deck;
+mod effects;
 mod model;
 mod outline_gradients;
 mod save;
@@ -162,6 +163,7 @@ impl DeckSession {
         comments::import_source_comments(&session, &package)?;
         deck::import_source_render_data(&session.doc, &package)?;
         baseline::import_source(&session, &package)?;
+        effects::import_source(&session.doc, &package)?;
         story::import_source_numbering_restarts(&session.doc, &package)?;
         outline_gradients::import_source(&session, &package)?;
         Ok(Self {

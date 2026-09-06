@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use ooxml_drawingml::{
-    ColorValue, GradientFill, GradientStop, LineEnd, ShapeFill, ShapeOutline, ShapeStyle,
-    StyleReference,
+    ColorValue, GradientFill, GradientStop, LineEnd, OuterShadow, ShapeEffects, ShapeFill,
+    ShapeOutline, ShapeStyle, StyleReference,
 };
 
 use crate::PptxError;
@@ -177,6 +177,7 @@ fn parse_shape(
             .and_then(|value| parse_picture_fill(value, relationships))
             .map(Box::new),
         outline: properties.and_then(parse_outline),
+        effects: properties.and_then(parse_effects),
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
         text: element
             .child("txBody")
@@ -216,6 +217,7 @@ fn parse_picture(
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
+        shape_effects: properties.and_then(parse_effects),
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
     })
 }
@@ -830,6 +832,47 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
         head_end: line.child("headEnd").map(parse_line_end),
         tail_end: line.child("tailEnd").map(parse_line_end),
     })
+}
+
+fn parse_effects(element: &XmlElement) -> Option<ShapeEffects> {
+    let list = element.child("effectLst")?;
+    let Some(shadow) = list.child("outerShdw") else {
+        return Some(ShapeEffects::default());
+    };
+    Some(ShapeEffects {
+        outer_shadow: Some(OuterShadow {
+            color: parse_color_container(shadow),
+            blur_radius: numeric_attribute(Some(shadow), "blurRad")
+                .unwrap_or_default()
+                .max(0),
+            distance: numeric_attribute(Some(shadow), "dist")
+                .unwrap_or_default()
+                .max(0),
+            direction: numeric_attribute(Some(shadow), "dir").unwrap_or_default(),
+            rotate_with_shape: shadow
+                .attribute("rotWithShape")
+                .is_none_or(|value| value != "0" && value != "false"),
+            scale_x: shadow_scale(shadow, "sx"),
+            scale_y: shadow_scale(shadow, "sy"),
+            alignment: shadow
+                .attribute("algn")
+                .filter(|value| RECT_ALIGNMENTS.contains(value))
+                .unwrap_or("b")
+                .to_owned(),
+        }),
+    })
+}
+
+/// `ST_RectAlignment`, the anchor a scaled shadow keeps.
+const RECT_ALIGNMENTS: [&str; 9] = ["tl", "t", "tr", "l", "ctr", "r", "bl", "b", "br"];
+
+/// `sx`/`sy`, which are thousandths of a percent and may legitimately exceed 100%.
+fn shadow_scale(shadow: &XmlElement, name: &str) -> f64 {
+    shadow
+        .attribute(name)
+        .and_then(|value| value.parse::<i32>().ok())
+        .map(|value| f64::from(value) / 100_000.0)
+        .unwrap_or(1.0)
 }
 
 fn parse_outline_gradient(line: &XmlElement) -> Option<GradientFill> {
@@ -2170,6 +2213,109 @@ mod tests {
         let actual = values.get(name).unwrap();
         assert_eq!(actual.value, expected);
         assert_eq!(actual.extent_power, expected_power);
+    }
+
+    #[test]
+    fn a_shadow_reads_its_scale_and_alignment() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:spPr><a:effectLst><a:outerShdw blurRad="63500" sx="102000" sy="98000" algn="ctr"><a:prstClr val="black"><a:alpha val="40000"/></a:prstClr></a:outerShdw></a:effectLst></p:spPr>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let shadow = parse_effects(&root).unwrap().outer_shadow.unwrap();
+        assert!((shadow.scale_x - 1.02).abs() < 1e-9);
+        assert!((shadow.scale_y - 0.98).abs() < 1e-9);
+        assert_eq!(shadow.alignment, "ctr");
+
+        let root = parse_xml(
+            br#"<p:spPr><a:effectLst><a:outerShdw blurRad="1" sx="0" algn="bogus"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst></p:spPr>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let shadow = parse_effects(&root).unwrap().outer_shadow.unwrap();
+        assert_eq!((shadow.scale_x, shadow.scale_y), (0.0, 1.0));
+        assert_eq!(shadow.alignment, "b");
+
+        for (value, expected) in [
+            ("-150000", -1.5),
+            ("2147483647", 21474.83647),
+            ("NaN", 1.0),
+            ("inf", 1.0),
+        ] {
+            let xml = format!("<a:outerShdw sx=\"{value}\" sy=\"{value}\"/>");
+            let root = parse_xml(xml.as_bytes(), "slide.xml", &mut budget).unwrap();
+            assert_eq!(shadow_scale(&root, "sx"), expected);
+            assert_eq!(shadow_scale(&root, "sy"), expected);
+        }
+    }
+
+    #[test]
+    fn an_outer_shadow_reaches_the_model_with_its_colour_and_geometry() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="Shadowed"/><p:nvPr/></p:nvSpPr><p:spPr><a:effectLst><a:outerShdw blurRad="25400" dist="38100" dir="2700000" rotWithShape="0"><a:schemeClr val="bg1"><a:lumMod val="50000"/><a:alpha val="40000"/></a:schemeClr></a:outerShdw></a:effectLst></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Plain"/><p:nvPr/></p:nvSpPr><p:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp><p:sp><p:nvSpPr><p:cNvPr id="4" name="Hidden effects only"/><p:nvPr/></p:nvSpPr><p:spPr><a:extLst><a:ext uri="{909E8E84-426E-40DD-AFC4-6F175D3DCCD1}"><a14:hiddenEffects xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"><a:effectLst><a:outerShdw blurRad="12700"><a:srgbClr val="000000"/></a:outerShdw></a:effectLst></a14:hiddenEffects></a:ext></a:extLst></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let effects_of = |node: &ShapeNode| match node {
+            ShapeNode::Shape(shape) => shape.effects.clone(),
+            _ => panic!("expected a shape"),
+        };
+
+        let shadow = effects_of(&data.shapes[0])
+            .expect("the shape should have effects")
+            .outer_shadow
+            .expect("the effects should carry an outer shadow");
+        assert_eq!(
+            (shadow.blur_radius, shadow.distance, shadow.direction),
+            (25_400, 38_100, 2_700_000)
+        );
+        assert!(!shadow.rotate_with_shape);
+        let color = shadow.color.expect("the shadow should have a colour");
+        assert_eq!(color.theme_color.as_deref(), Some("background1"));
+        assert_eq!(color.luminance_modulation, Some(0.5));
+        assert_eq!(color.alpha, Some(0.4));
+
+        assert_eq!(effects_of(&data.shapes[1]), None);
+        assert_eq!(effects_of(&data.shapes[2]), None);
+    }
+    #[test]
+    fn empty_effect_lists_override_inherited_effects_and_defaults_stay_omitted() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let properties = parse_xml(
+            br#"<a:spPr><a:effectLst/></a:spPr>"#,
+            "slide.xml",
+            &mut budget,
+        )
+        .unwrap();
+        assert_eq!(parse_effects(&properties), Some(ShapeEffects::default()));
+        let properties = parse_xml(br#"<a:spPr><a:effectLst><a:outerShdw><a:srgbClr val="FF0000"/></a:outerShdw></a:effectLst></a:spPr>"#, "slide.xml", &mut budget).unwrap();
+        let shadow = parse_effects(&properties).unwrap().outer_shadow.unwrap();
+        assert!(shadow.rotate_with_shape);
+        assert_eq!(
+            (shadow.blur_radius, shadow.distance, shadow.direction),
+            (0, 0, 0)
+        );
+        let json = serde_json::to_value(&shadow).unwrap();
+        for key in ["blurRadius", "distance", "direction", "rotateWithShape"] {
+            assert!(json.get(key).is_none(), "{key}");
+        }
+        assert_eq!(serde_json::from_value::<OuterShadow>(json).unwrap(), shadow);
     }
 
     #[test]

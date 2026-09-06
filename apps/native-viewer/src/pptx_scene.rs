@@ -1409,6 +1409,7 @@ mod tests {
                     }],
                 }),
                 stroke: None,
+                shadow: None,
                 transform: Transform::default(),
             }],
         };

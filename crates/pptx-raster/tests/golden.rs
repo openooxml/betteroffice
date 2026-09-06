@@ -114,6 +114,7 @@ fn shape(x: f32, y: f32, w: f32, h: f32, fill: Option<Paint>, stroke: Option<Str
         adjust_values: BTreeMap::new(),
         fill,
         stroke,
+        shadow: None,
         transform: Transform::default(),
     }
 }
