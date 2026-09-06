@@ -1694,6 +1694,8 @@ fn category_label(series: &[SeriesView<'_>], index: usize) -> String {
 struct ValueScale {
     min: f64,
     max: f64,
+    /// `c:majorUnit`, or the rounded step the auto bounds were widened to.
+    unit: f64,
     log_base: Option<f64>,
     reversed: bool,
     percent: bool,
@@ -1825,13 +1827,74 @@ fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
     (min, max)
 }
 
+/// The smallest `{1, 2, 5} x 10^k` at or above `rough`.
+fn nice_unit(rough: f64) -> f64 {
+    if rough <= 0.0 || !rough.is_finite() {
+        return 1.0;
+    }
+    let decade = 10.0_f64.powf(rough.log10().floor());
+    // 0.5 / 0.1 is 5.000000000000001.
+    let scaled = rough / decade * (1.0 - 1e-9);
+    let nice = if scaled <= 1.0 {
+        1.0
+    } else if scaled <= 2.0 {
+        2.0
+    } else if scaled <= 5.0 {
+        5.0
+    } else {
+        10.0
+    };
+    let unit = nice * decade;
+    if unit > 0.0 && unit.is_finite() {
+        unit
+    } else {
+        1.0
+    }
+}
+
+/// Major intervals to aim for along `extent` px: one label per 20px, clamped to `2..=12`.
+fn target_intervals(extent: f64) -> f64 {
+    const LABEL_PITCH_PX: f64 = 20.0;
+    let target = extent / LABEL_PITCH_PX;
+    if target.is_finite() {
+        target.clamp(2.0, 12.0)
+    } else {
+        4.0
+    }
+}
+
+/// `value` moved outward to a multiple of `unit`.
+fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
+    let steps = value / unit;
+    if !steps.is_finite() {
+        return value;
+    }
+    let rounded = if up {
+        (steps - 1e-9).ceil()
+    } else {
+        (steps + 1e-9).floor()
+    } * unit;
+    if !rounded.is_finite() {
+        return value;
+    }
+    // `(-1e-9).ceil() * unit` is -0.0, which formats as "-0".
+    if rounded == 0.0 { 0.0 } else { rounded }
+}
+
 #[cfg(test)]
 fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
-    let scale = value_scale(family);
+    let plot = PlotArea {
+        x: 0.0,
+        y: 0.0,
+        w: 200.0,
+        h: 156.0,
+        gutter: AXIS_GUTTER,
+    };
+    let scale = value_scale(family, plot);
     (scale.min, scale.max)
 }
 
-fn value_scale(family: PlotFamily<'_>) -> ValueScale {
+fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     let stacking = family.stacking();
     let (mut min, mut max) = match stacking {
         Stacking::Percent => percent_range(family),
@@ -1843,10 +1906,12 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
         .map(|axis| axis.range)
         .or(family.value_axis)
         .unwrap_or_default();
-    if let Some(value) = bounds.min.filter(|value| value.is_finite()) {
+    let pinned_min = bounds.min.filter(|value| value.is_finite());
+    let pinned_max = bounds.max.filter(|value| value.is_finite());
+    if let Some(value) = pinned_min {
         min = value;
     }
-    if let Some(value) = bounds.max.filter(|value| value.is_finite()) {
+    if let Some(value) = pinned_max {
         max = value;
     }
     if max <= min {
@@ -1855,20 +1920,36 @@ fn value_scale(family: PlotFamily<'_>) -> ValueScale {
     if !(max - min).is_finite() || max <= min {
         (min, max) = (0.0, 1.0);
     }
+    let log_base = family
+        .axis
+        .and_then(|axis| axis.log_base)
+        .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    let transposed = family.transposed();
+    let extent = if transposed { plot.w } else { plot.h };
+    let unit = family
+        .axis
+        .and_then(|axis| axis.major_unit)
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| nice_unit((max - min) / target_intervals(extent)));
+    if log_base.is_none() {
+        if pinned_min.is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if pinned_max.is_none() {
+            max = round_to_unit(max, unit, true);
+        }
+    }
     ValueScale {
         min,
         max,
-        log_base: family
-            .axis
-            .and_then(|axis| axis.log_base)
-            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        unit,
+        log_base,
         reversed: family.axis.is_some_and(|axis| axis.reversed),
         percent: stacking == Stacking::Percent,
     }
 }
 
-/// The major tick values of `scale`: powers of the base on a log axis, at
-/// `c:majorUnit` when it names one, and at five even steps otherwise.
+/// Tick values: powers of the base on a log axis, else a walk in `unit` or the scale's own.
 fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     let span = scale.max - scale.min;
     if let Some(base) = scale.log_base {
@@ -1884,10 +1965,13 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
             }
         }
     }
-    if let Some(unit) = unit.filter(|unit| unit.is_finite() && *unit > 0.0) {
+    let unit = unit
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or(scale.unit);
+    if unit.is_finite() && unit > 0.0 {
         let steps = (span / unit).floor();
         if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
-            let first = (scale.min / unit).ceil() * unit;
+            let first = round_to_unit(scale.min, unit, true);
             let mut ticks = Vec::new();
             let mut index = 0;
             while ticks.len() < MAX_PLOT_AXIS_TICKS {
@@ -1927,7 +2011,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
     plot: PlotArea,
 ) {
     let transposed = family.transposed();
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
     let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
@@ -2341,7 +2425,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
     }
     let horizontal = family.transposed();
     emit_axes(ops, family, plot);
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
     let category_style = &family.category_text();
     let spans = &mut Vec::with_capacity(family.series.len());
@@ -2467,7 +2551,7 @@ fn emit_line<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let stacking = family.stacking();
     emit_category_labels(ops, family, plot, cat_count);
     let spans = &mut Vec::with_capacity(family.series.len());
@@ -2527,7 +2611,7 @@ fn emit_area<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let stacking = family.stacking();
     emit_category_labels(ops, family, plot, cat_count);
     let vertices = cat_count.min(MAX_PLOT_POLYGON_POINTS);
@@ -2594,7 +2678,7 @@ fn emit_area<S: PlotSink + ?Sized>(
 }
 
 /// The x scale of a scatter or bubble family.
-fn scatter_x_scale(family: PlotFamily<'_>) -> ValueScale {
+fn scatter_x_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
     let mut seen = false;
     let mut remaining = MAX_PLOT_DATA_SCAN;
@@ -2629,12 +2713,26 @@ fn scatter_x_scale(family: PlotFamily<'_>) -> ValueScale {
     if !(max - min).is_finite() || max <= min {
         (min, max) = (min.min(0.0), min.min(0.0) + 1.0);
     }
+    let log_base = axis
+        .and_then(|axis| axis.log_base)
+        .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
+    let unit = axis
+        .and_then(|axis| axis.major_unit)
+        .filter(|unit| unit.is_finite() && *unit > 0.0)
+        .unwrap_or_else(|| nice_unit((max - min) / target_intervals(plot.w)));
+    if log_base.is_none() {
+        if axis.and_then(|axis| axis.range.min).is_none() {
+            min = round_to_unit(min, unit, false);
+        }
+        if axis.and_then(|axis| axis.range.max).is_none() {
+            max = round_to_unit(max, unit, true);
+        }
+    }
     ValueScale {
         min,
         max,
-        log_base: axis
-            .and_then(|axis| axis.log_base)
-            .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0),
+        unit,
+        log_base,
         reversed: axis.is_some_and(|axis| axis.reversed),
         percent: false,
     }
@@ -2689,8 +2787,8 @@ fn emit_scatter<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family);
+    let y_scale = value_scale(family, plot);
+    let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
     for (ser_idx, series) in family.series.iter().enumerate() {
@@ -2745,8 +2843,8 @@ fn emit_bubble<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let y_scale = value_scale(family);
-    let x_scale = scatter_x_scale(family);
+    let y_scale = value_scale(family, plot);
+    let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let group = family.group;
     let scale_percent = group
@@ -2821,7 +2919,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
     if cat_count == 0 || family.series.is_empty() {
         return;
     }
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let spokes = cat_count.min(MAX_PLOT_POLYGON_POINTS);
     let radius = (width.min(height) * 0.34).max(6.0);
     let (cx, cy) = (x + width * 0.38, y + height * 0.5);
@@ -2954,7 +3052,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let bands = bar_bands(family, cat_count, plot.w);
     let hi_lo = family.group.is_none_or(|group| group.hi_low_lines) || open.is_none();
     let up_down = open.is_some() && family.group.is_none_or(|group| group.up_down_bars);
@@ -3085,7 +3183,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
         CHART_AXIS_COLOR,
         1.0,
     );
-    let scale = value_scale(family);
+    let scale = value_scale(family, plot);
     let columns = cat_count.min(MAX_PLOT_SURFACE_CELLS / rows.max(1));
     let cell_w = plot.w / columns.max(1) as f64;
     let cell_h = plot.h / rows as f64;
@@ -5165,6 +5263,153 @@ mod tests {
     }
 
     #[test]
+    fn nice_unit_rounds_up_to_one_two_or_five_times_a_power_of_ten() {
+        let close = |got: f64, want: f64| (got - want).abs() <= want.abs() * 1e-9;
+        for (rough, want) in [
+            (1.0, 1.0),
+            (1.01, 2.0),
+            (2.0, 2.0),
+            (2.1, 5.0),
+            (5.0, 5.0),
+            (5.1, 10.0),
+            (10.0, 10.0),
+            (1.757, 2.0),
+            (3.205, 5.0),
+            (6.25, 10.0),
+            (1234.0, 2000.0),
+            (0.5, 0.5),
+            (0.51, 1.0),
+            (0.128, 0.2),
+            (0.05, 0.05),
+        ] {
+            let got = nice_unit(rough);
+            assert!(close(got, want), "nice_unit({rough}) is {got}, want {want}");
+        }
+        for rough in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(nice_unit(rough), 1.0, "nice_unit({rough}) falls back to 1");
+        }
+    }
+
+    #[test]
+    fn an_auto_value_axis_counts_in_round_steps_and_leaves_headroom() {
+        // The `stacked-bar` deck: four categories totalling 8.7, 8.9, 8.3 and
+        // 12.3, with no c:min, no c:max and no c:majorUnit anywhere.
+        let column = |values: &[f64]| Source {
+            categories: ["Alpha", "Beta", "Gamma", "Delta"]
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
+            values: values.to_vec(),
+        };
+        let (north, south, east) = (
+            column(&[2.9, 3.0, 2.8, 4.1]),
+            column(&[2.9, 3.0, 2.8, 4.1]),
+            column(&[2.9, 2.9, 2.7, 4.1]),
+        );
+        let mut stacked = group(
+            "bar",
+            vec![
+                series("North", &north),
+                series("South", &south),
+                series("East", &east),
+            ],
+        );
+        stacked.grouping = Some("stacked");
+        let wide = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1124.0,
+            h: 482.0,
+        };
+        let ops = plot_chart(&grouped("bar", stacked), wide);
+
+        let mut ticks: Vec<f64> = tick_labels(&ops)
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(
+            ticks,
+            vec![0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0],
+            "an auto axis over 0..12.3 counts in twos to 14"
+        );
+        for (text, ..) in tick_labels(&ops) {
+            assert!(!text.contains('.'), "{text} is not a round step");
+        }
+
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x1, x2, color, .. }
+                    if color == CHART_GRID_COLOR && (x1 - x2).abs() < 0.01 =>
+                {
+                    Some(*x1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 8);
+        let far = bars(&ops)
+            .iter()
+            .map(|(x, _, w, _)| x + w)
+            .fold(f64::MIN, f64::max);
+        assert!(
+            grid[6] < far && far < grid[7],
+            "the 12.3 stack stops between the 12 and 14 gridlines rather than \
+             against the plot edge: {far} in {grid:?}"
+        );
+    }
+
+    #[test]
+    fn a_pinned_axis_keeps_its_bounds_and_still_counts_in_round_steps() {
+        let data = source(&[10.0, 20.0]);
+        let mut group = group("column", vec![series("North", &data)]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![value_axis("1", 0.0, 25.0)],
+            ..PlotChart::default()
+        };
+        let mut ticks: Vec<f64> = tick_labels(&plot_chart(&chart, rect()))
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(ticks, vec![0.0, 5.0, 10.0, 15.0, 20.0, 25.0]);
+    }
+
+    #[test]
+    fn an_explicit_major_unit_beats_the_computed_one() {
+        let north = source(&[8.0, 12.3]);
+        let mut group = group("column", vec![series("North", &north)]);
+        group.axis_ids = vec!["1"];
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![group],
+            axes: vec![PlotAxis {
+                id: Some("1"),
+                kind: PlotAxisKind::Value,
+                major_gridlines: true,
+                major_unit: Some(3.0),
+                ..PlotAxis::default()
+            }],
+            ..PlotChart::default()
+        };
+        let mut ticks: Vec<f64> = tick_labels(&plot_chart(&chart, rect()))
+            .iter()
+            .map(|(text, ..)| text.parse::<f64>().expect("numeric"))
+            .collect();
+        ticks.sort_by(f64::total_cmp);
+        assert_eq!(
+            ticks,
+            vec![0.0, 3.0, 6.0, 9.0, 12.0, 15.0],
+            "the author's unit picks the ticks and the auto max rounds to it"
+        );
+    }
+
+    #[test]
     fn gridlines_follow_the_axis_that_declares_them() {
         let data = source(&[1.0, 2.0]);
         let grid = |on: bool| {
@@ -5482,7 +5727,9 @@ mod tests {
             axes: vec![axis],
             ..PlotChart::default()
         };
-        assert!(texts(&plot_chart(&chart, rect())).contains(&"75%".to_owned()));
+        let labels = texts(&plot_chart(&chart, rect()));
+        assert!(labels.contains(&"80%".to_owned()), "{labels:?}");
+        assert!(labels.contains(&"100%".to_owned()), "{labels:?}");
     }
 
     #[test]
