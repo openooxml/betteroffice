@@ -46,9 +46,39 @@ and registered with the Rust shaper through `openPresentation`.
 Beyond rendering, `PresentationHandle` covers editing: text
 (`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
-(`addTextBox` / `moveShape` / `resizeShape`), `hitTest`, undo/redo, and
-`save()`, which serializes the deck back to `.pptx` bytes with edits applied —
-untouched slides keep their exact source part bytes.
+(`addTextBox` / `moveShape` / `resizeShape` / `setShapeRect`), comments
+(`addComment` / `replyToComment` / `setCommentStatus` / `removeComment`),
+`hitTest`, undo/redo, and `save()`, which serializes the deck back to `.pptx`
+bytes with edits applied — untouched slides keep their exact source part bytes.
+
+## Comments
+
+PowerPoint has two comment systems and a file only ever uses one: `legacy`
+reads in every version of PowerPoint plus LibreOffice and Google Slides, while
+`modern` carries replies and a resolved state but only shows in PowerPoint 365.
+A deck commits to one at its first comment, so `setCommentFlavor` only works
+while `comments()` is empty, and `replyToComment` / `setCommentStatus` throw on
+a legacy deck.
+
+Saving patches existing comment XML, preserving identities, formatting, task
+metadata, anchors and unknown fields. Unedited parts remain byte-identical.
+Removing a thread removes its known replies; a concurrent reply survives as a
+new root if its parent was deleted.
+
+```ts
+deck.addComment(deck.snapshot().slides[0].id, {
+  author: 'Ada Lovelace',
+  initials: 'AL',
+  text: 'Tighten this claim.',
+  created: new Date().toISOString(),
+  xEmu: 1_828_800,
+  yEmu: 914_400,
+});
+```
+
+Positions are EMU, like every other coordinate. `created` is supplied by the
+caller rather than read from a clock, so peers replaying the same edits
+converge.
 
 ## Collaboration
 

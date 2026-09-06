@@ -182,6 +182,7 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "wasm-bindgen",
+ "zmij",
 ]
 
 [[package]]
@@ -287,6 +288,7 @@ version = "0.1.0"
 dependencies = [
  "betteroffice-pptx-edit",
  "betteroffice-pptx-parse",
+ "betteroffice-pptx-raster",
  "betteroffice-pptx-render",
 ]
 
@@ -312,6 +314,18 @@ dependencies = [
  "quick-xml",
  "serde",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "betteroffice-pptx-raster"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-pptx-render",
+ "image",
+ "png",
+ "tiny-skia 0.12.0",
 ]
 
 [[package]]

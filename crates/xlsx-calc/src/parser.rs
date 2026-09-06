@@ -3,6 +3,7 @@
 
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
+use crate::ColumnRange;
 use crate::lexer::{ParseError, TokKind, Token, lex};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
@@ -25,6 +26,10 @@ pub enum Expr {
     Range {
         sheet: Option<String>,
         range: CellRange,
+    },
+    ColumnRange {
+        sheet: Option<String>,
+        range: ColumnRange,
     },
     Name {
         scope: Option<String>,
@@ -215,6 +220,9 @@ impl Parser<'_> {
             TokKind::ErrLit(e) => Ok(ParsedExpr::leaf(Expr::Error(e))),
             TokKind::Ref { sheet, cell } => Ok(ParsedExpr::leaf(Expr::Ref { sheet, cell })),
             TokKind::Range { sheet, range } => Ok(ParsedExpr::leaf(Expr::Range { sheet, range })),
+            TokKind::ColumnRange { sheet, range } => {
+                Ok(ParsedExpr::leaf(Expr::ColumnRange { sheet, range }))
+            }
             TokKind::LParen => {
                 let inner = self.expr_bp(0, depth + 1)?;
                 self.expect(&TokKind::RParen, "')'")?;

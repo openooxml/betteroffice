@@ -392,6 +392,13 @@ export class EditSession {
      */
     layout_document_with_regions_json(input: string): string;
     /**
+     * Same full region pass as [`Self::layout_document_with_regions_json`],
+     * but the reply carries only `{ layout, headersFooters?, notesConverged }`
+     * — the measured arena stays retained wasm-side and is fetched on demand
+     * via [`Self::retained_kernel_inputs_json`].
+     */
+    layout_document_with_regions_retained_json(input: string): string;
+    /**
      * Region-layout input JSON in, the font families and sizes that input
      * needs as JSON out, so the host can register fonts before laying out.
      */
@@ -561,6 +568,11 @@ export class EditSession {
      * or the position no longer resolves in `story`.
      */
     resolve_sticky_position(story: string, position: Uint8Array): string;
+    /**
+     * Retained `{ measured, options }` for the main-thread display-list
+     * fallback after a retained-only region layout.
+     */
+    retained_kernel_inputs_json(): string;
     /**
      * [`EditSession::open_docx`] with seeding always on.
      */
@@ -1083,6 +1095,7 @@ export interface InitOutput {
     readonly editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_list_revisions: (a: number) => [number, number, number, number];
     readonly editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -1105,6 +1118,7 @@ export interface InitOutput {
     readonly editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
     readonly editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_selection: (a: number) => [number, number, number, number];
     readonly editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];

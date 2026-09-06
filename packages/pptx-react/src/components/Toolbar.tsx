@@ -90,6 +90,7 @@ export interface ToolbarProps {
   slideLayouts?: readonly SlideLayoutOption[];
   currentLayoutPartPath?: string | null;
   onSave?: () => void;
+  onExportPng?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -179,6 +180,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
     slideLayouts = [],
     currentLayoutPartPath,
     onSave,
+    onExportPng,
     onUndo,
     onRedo,
     canUndo = false,
@@ -242,7 +244,7 @@ export function Toolbar(explicitProps: ToolbarProps) {
   const sections: ToolbarSection[] = [
     {
       key: 'file',
-      width: 40,
+      width: 72,
       node: (
         <ToolbarGroup label={t('toolbar.groups.file')}>
           <ToolbarButton
@@ -252,6 +254,14 @@ export function Toolbar(explicitProps: ToolbarProps) {
             testId="pptx-save"
           >
             <ToolbarIcon name="save" size={18} />
+          </ToolbarButton>
+          <ToolbarButton
+            title={t('toolbar.exportPng')}
+            disabled={disabled || !onExportPng}
+            onClick={onExportPng}
+            testId="pptx-export-png"
+          >
+            <ToolbarIcon name="image" size={18} />
           </ToolbarButton>
         </ToolbarGroup>
       ),

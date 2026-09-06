@@ -58,7 +58,15 @@ export function useScrollPageInfo({
       }
       currentPage = Math.min(currentPage, totalPages);
 
-      setScrollPageInfo({ currentPage, totalPages, visible: true });
+      // bail out on unchanged values: this fires per scroll event, and a new
+      // object every time re-renders the whole editor tree every frame
+      setScrollPageInfo((previous) =>
+        previous.currentPage === currentPage &&
+        previous.totalPages === totalPages &&
+        previous.visible
+          ? previous
+          : { currentPage, totalPages, visible: true }
+      );
 
       if (scrollFadeTimerRef.current) {
         clearTimeout(scrollFadeTimerRef.current);

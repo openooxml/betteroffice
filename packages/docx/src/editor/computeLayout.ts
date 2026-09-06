@@ -1,21 +1,19 @@
 import type { ResidentMeasurementConfig } from '../layout/measure';
-import type {
-  BlockExtent,
-  Layout,
-  LayoutBlock,
-  LayoutOptions,
-  MeasuredBlock,
-} from '../layout/pagination';
+import type { Layout, LayoutOptions, MeasuredBlock } from '../layout/pagination';
 import type { DisplayListHeadersFooters } from '../layout/render/rustDisplayList';
 import type { Document, NoteKind, SectionProperties } from '../types/document';
 import type { YrsRenderEnv, YrsSession } from '../yrs';
+import { resolvedFinalSectionProperties } from './finalSection';
 
-interface ResidentRegionLayoutOutput {
-  measured: MeasuredBlock[];
-  options: LayoutOptions;
+interface ResidentRegionLayoutRetainedOutput {
   layout: Layout;
   headersFooters?: DisplayListHeadersFooters;
   notesConverged: boolean;
+}
+
+interface RetainedKernelInputs {
+  measured: MeasuredBlock[];
+  options: LayoutOptions;
 }
 
 export interface ResidentRegionLayoutRequest {
@@ -43,14 +41,17 @@ export interface ResidentRegionLayoutRequest {
 export interface ComputeLayoutInputs {
   document: Document | null;
   pageGap: number;
-  session: Pick<YrsSession, 'layoutDocumentWithRegionsJson'>;
+  session: Pick<
+    YrsSession,
+    | 'layoutDocumentWithRegionsRetainedJson'
+    | 'residentWorkerProbe'
+    | 'retainedKernelInputsJson'
+  >;
   renderEnv: YrsRenderEnv;
   measurement: ResidentMeasurementConfig;
 }
 
 export interface LayoutComputation {
-  blocks: LayoutBlock[];
-  measures: BlockExtent[];
   layout: Layout;
   notesConverged: boolean;
 }
@@ -72,8 +73,8 @@ function orderedSections(document: Document | null): ResidentRegionLayoutRequest
     properties: section.properties,
   }));
   sections.push({
-    sectionId: body.finalSectionProperties?.sectionId,
-    properties: body.finalSectionProperties ?? {},
+    sectionId: sections.at(-1)?.sectionId ?? body.finalSectionProperties?.sectionId,
+    properties: resolvedFinalSectionProperties(body) ?? {},
   });
   return sections;
 }
@@ -101,7 +102,7 @@ export function buildResidentRegionLayoutRequest(
     regions: {
       sections: orderedSections(document),
       settings: document?.package.settings,
-      watermark: document?.package.document.finalSectionProperties?.watermark,
+      watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
     },
     notes: { contents },
     renderEnv,
@@ -125,17 +126,26 @@ export function computeLayout(inputs: ComputeLayoutInputs): LayoutComputation {
     inputs.renderEnv
   );
   request.measurement = inputs.measurement;
+  const session = inputs.session;
   const output = JSON.parse(
-    inputs.session.layoutDocumentWithRegionsJson(JSON.stringify(request))
-  ) as ResidentRegionLayoutOutput;
+    session.layoutDocumentWithRegionsRetainedJson(JSON.stringify(request))
+  ) as ResidentRegionLayoutRetainedOutput;
+  const layoutRevision = session.residentWorkerProbe()!.layoutRevision;
+  let kernel: RetainedKernelInputs | null = null;
+  const fetchKernel = (): RetainedKernelInputs =>
+    (kernel ??= JSON.parse(
+      session.retainedKernelInputsJson(layoutRevision)
+    ) as RetainedKernelInputs);
   kernelInputsByLayout.set(output.layout, {
-    measured: output.measured,
-    options: output.options,
+    get measured() {
+      return fetchKernel().measured;
+    },
+    get options() {
+      return fetchKernel().options;
+    },
     ...(output.headersFooters ? { headersFooters: output.headersFooters } : {}),
   });
   return {
-    blocks: output.measured.map((item) => item.block),
-    measures: output.measured.map((item) => item.measure),
     layout: output.layout,
     notesConverged: output.notesConverged,
   };

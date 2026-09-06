@@ -42,7 +42,11 @@
  */
 
 import type { DisplayList, DisplayPrimitive } from './displayList';
-import { displayPageRevision } from './frameDelta';
+import {
+  displayPageRevision,
+  displayPageShiftsSince,
+  type FramePositionShiftRun,
+} from './frameDelta';
 import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
@@ -297,10 +301,10 @@ const handleFinalizers: HandleFinalizationRegistry | null = (() => {
  */
 interface FacadeDeltaSeed {
   list: DisplayList;
-  /** Per-page in-place mutation revisions captured at facade creation. The
-   * owned frame-delta path patches positions through the SAME page objects,
-   * so identity alone cannot prove a page still matches the parsed store. */
-  pageRevisions: number[];
+  /** Per-page mutation revisions as parsed into the Rust store (null before
+   * a handle opened or adopted). Owned frame deltas patch through the same
+   * page objects, so identity alone cannot prove a page matches the store. */
+  storeRevisions(): readonly number[] | null;
   engine(): RustDisplayListQueryEngine | null;
   /** Relinquish the live handle (the donor's queries fall back to JSON-arg). */
   takeHandle(): number | null;
@@ -346,33 +350,62 @@ function isWasmTrap(error: unknown): boolean {
   return error.name === 'RuntimeError';
 }
 
+type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
+
 /**
  * Page-delta between two display lists, exploiting the retained-frame
  * invariant that unchanged pages keep object identity across builds. A page
- * is reusable only when both its identity and its in-place mutation revision
- * are unchanged since the donor parsed it. Returns null when nothing is
- * reusable (a full open costs the same).
+ * whose identity and in-place mutation revision are unchanged since the store
+ * parsed it is reused outright; a page that only accumulated recorded
+ * position shifts ships those shifts as compact ops the store replays,
+ * instead of re-serializing the page. Returns null when nothing is reusable
+ * (a full open costs the same).
  */
 function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): string | null {
+  const storeRevisions = seed.storeRevisions();
+  if (!storeRevisions) return null;
   const previousIndex = new Map<unknown, number>();
   seed.list.pages.forEach((page, index) => previousIndex.set(page, index));
   const reuse: Array<[number, number]> = [];
   const replace: Array<[number, unknown]> = [];
+  const shift: Array<[number, number, StoreShiftRun[][]]> = [];
   next.pages.forEach((page, index) => {
     const from = previousIndex.get(page);
-    if (from !== undefined && displayPageRevision(page) === seed.pageRevisions[from]) {
-      reuse.push([index, from]);
-      previousIndex.delete(page);
-    } else {
+    if (from === undefined) {
       replace.push([index, page]);
+      return;
+    }
+    previousIndex.delete(page);
+    const storeRevision = storeRevisions[from];
+    if (storeRevision === undefined) {
+      replace.push([index, page]);
+      return;
+    }
+    const runLists =
+      displayPageRevision(page) === storeRevision
+        ? []
+        : displayPageShiftsSince(page, storeRevision);
+    if (runLists === null) {
+      replace.push([index, page]);
+    } else if (runLists.length === 0) {
+      reuse.push([index, from]);
+    } else {
+      shift.push([
+        index,
+        from,
+        runLists.map((runs: readonly FramePositionShiftRun[]) =>
+          runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
+        ),
+      ]);
     }
   });
-  if (reuse.length === 0) return null;
+  if (reuse.length === 0 && shift.length === 0) return null;
   return JSON.stringify({
     total: next.pages.length,
     ...(next.contractVersion !== undefined ? { contractVersion: next.contractVersion } : {}),
     reuse,
     replace,
+    ...(shift.length > 0 ? { shift } : {}),
   });
 }
 
@@ -393,7 +426,17 @@ export function createDisplayListQueries(
   previous?: DisplayListQueries | null
 ): DisplayListQueries {
   let json: string | null = null;
-  const getJson = (): string => (json ??= JSON.stringify(list));
+  let jsonRevisions: readonly number[] | null = null;
+  const getJson = (): string => {
+    if (json === null) {
+      jsonRevisions = list.pages.map(displayPageRevision);
+      json = JSON.stringify(list);
+    }
+    return json;
+  };
+  // Revisions of the pages as parsed into the Rust store; null until a handle
+  // is opened or adopted. Kept exact so shift replay can never double-apply.
+  let storeRevisions: readonly number[] | null = null;
 
   const resident: ResidentDisplayListQueryEngine | null = isResidentQueryEngine(engine)
     ? engine
@@ -492,6 +535,7 @@ export function createDisplayListQueries(
     if (!donor || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
     const seed = facadeDeltaSeeds.get(donor);
     if (!seed || seed.engine() !== eng) return false;
+    const revisionsAtBuild = list.pages.map(displayPageRevision);
     const update = buildDisplayListUpdateJson(seed, list);
     if (!update) return false;
     const adopted = seed.takeHandle();
@@ -499,6 +543,7 @@ export function createDisplayListQueries(
     try {
       eng.updateDisplayList(adopted, update);
       handle = adopted;
+      storeRevisions = revisionsAtBuild;
       return true;
     } catch (error) {
       // the Rust side closes the handle on a failed update; close defensively
@@ -523,6 +568,7 @@ export function createDisplayListQueries(
     if (adoptHandle()) return;
     try {
       handle = eng.openDisplayList(getJson());
+      storeRevisions = jsonRevisions;
     } catch (error) {
       handle = null;
       if (isWasmTrap(error)) {
@@ -1076,7 +1122,7 @@ export function createDisplayListQueries(
 
   facadeDeltaSeeds.set(queries, {
     list,
-    pageRevisions: list.pages.map(displayPageRevision),
+    storeRevisions: () => storeRevisions,
     engine: () => eng,
     hasHandle: () => handle !== null,
     donor: () => donorFacade,

@@ -873,6 +873,59 @@ impl EngineSession {
         )
     }
 
+    /// Full region pass whose reply omits the measured arena — tens of MB of
+    /// shaping data a worker-rendered host never reads. Fetch the retained
+    /// inputs on demand via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input_json: &str,
+    ) -> Result<String, String> {
+        let notes_converged = self.layout_document_with_regions_value(input_json)?;
+        let pagination = self.pagination.borrow();
+        let regions_state = self.regions.borrow();
+        let state = regions_state
+            .as_ref()
+            .expect("region state retained after successful region layout");
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedRegionLayoutOutput<'a> {
+            layout: &'a Layout,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            headers_footers: Option<&'a serde_json::Value>,
+            notes_converged: bool,
+        }
+        serde_json::to_string(&RetainedRegionLayoutOutput {
+            layout: pagination
+                .layout
+                .as_ref()
+                .expect("layout retained after successful pagination"),
+            headers_footers: state.headers_footers.as_ref(),
+            notes_converged,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// The retained measured arena and layout options, for a host taking the
+    /// main-thread display-list fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedKernelInputs<'a> {
+            measured: &'a [MeasuredBlock],
+            options: &'a docx_layout::types::LayoutOptions,
+        }
+        serde_json::to_string(&RetainedKernelInputs {
+            measured: &input.measured,
+            options: &input.options,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
     /// The full region pass minus the JSON envelope: pagination, note
     /// stabilization, and header/footer measurement all land in retained
     /// state. `apply_input`'s fallback consumes this directly so a keystroke

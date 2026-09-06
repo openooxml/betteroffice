@@ -974,6 +974,7 @@ fn thin_header_footer(
                         story_type: part.story_type.clone(),
                         hdr_ftr_type: part.hdr_ftr_type.clone(),
                         content: Vec::new(),
+                        custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
                     },
                 )
@@ -988,6 +989,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
             .iter()
             .map(|note| docx_parse::Note {
                 story_type: note.story_type.clone(),
+                custom_root_bindings: note.custom_root_bindings.clone(),
                 id: note.id,
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
@@ -1018,6 +1020,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                     content: Vec::new(),
                     sections,
                     final_section_properties: package.document.final_section_properties.clone(),
+                    custom_root_bindings: package.document.custom_root_bindings.clone(),
                     comments: package.document.comments.clone(),
                 },
                 styles: package.styles.clone(),
@@ -1233,6 +1236,27 @@ impl EditSession {
     pub fn layout_document_with_regions_json(&self, input: &str) -> Result<String, JsValue> {
         self.engine
             .layout_document_with_regions_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Same full region pass as [`Self::layout_document_with_regions_json`],
+    /// but the reply carries only `{ layout, headersFooters?, notesConverged }`
+    /// — the measured arena stays retained wasm-side and is fetched on demand
+    /// via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input: &str,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Retained `{ measured, options }` for the main-thread display-list
+    /// fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_kernel_inputs_json()
             .map_err(|error| JsValue::from_str(&error))
     }
 

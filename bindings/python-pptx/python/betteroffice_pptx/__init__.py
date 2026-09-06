@@ -8,6 +8,8 @@ from typing import Iterator, Mapping, Union
 from ._betteroffice_pptx import (
     AdjustEdit,
     CollaborativeStateError,
+    Comment,
+    CommentEdit,
     Deck,
     DisplayList,
     FillEdit,
@@ -17,6 +19,7 @@ from ._betteroffice_pptx import (
     NotCollaborativeError,
     Paragraph,
     ParseError,
+    Png,
     RangeError,
     Rect,
     RenderError,
@@ -37,6 +40,8 @@ from ._betteroffice_pptx import PptxError, __version__
 __all__ = [
     "AdjustEdit",
     "CollaborativeStateError",
+    "Comment",
+    "CommentEdit",
     "Deck",
     "DisplayList",
     "EMU_PER_CENTIMETER",
@@ -49,6 +54,7 @@ __all__ = [
     "NotCollaborativeError",
     "Paragraph",
     "ParseError",
+    "Png",
     "PptxError",
     "Presentation",
     "RangeError",
@@ -297,6 +303,17 @@ class Presentation:
     ) -> TransformEdit:
         return self._inner.resize_shape(slide, shape_id, width, height)
 
+    def set_shape_rect(
+        self,
+        slide: SlideKey,
+        shape_id: str,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+    ) -> TransformEdit:
+        return self._inner.set_shape_rect(slide, shape_id, x, y, width, height)
+
     def insert_text(
         self,
         story_id: str,
@@ -356,6 +373,57 @@ class Presentation:
     def insert_paragraph_break(self, story_id: str, index: int) -> TextEdit:
         return self._inner.insert_paragraph_break(story_id, index)
 
+    def add_comment(
+        self,
+        slide: SlideKey,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+        x: int = 0,
+        y: int = 0,
+    ) -> CommentEdit:
+        """Add a slide comment at an EMU position."""
+        return self._inner.add_comment(
+            slide, text, author=author, initials=initials, created=created, x=x, y=y
+        )
+
+    def reply_to_comment(
+        self,
+        comment_id: str,
+        text: str,
+        *,
+        author: str,
+        initials: str = "",
+        created: str,
+    ) -> CommentEdit:
+        """Reply to a thread. Modern comments only: legacy has no reply list."""
+        return self._inner.reply_to_comment(
+            comment_id, text, author=author, initials=initials, created=created
+        )
+
+    def set_comment_status(self, comment_id: str, resolved: bool = True) -> CommentEdit:
+        """Mark a thread resolved. Modern comments only; legacy has no status."""
+        return self._inner.set_comment_status(comment_id, resolved)
+
+    def remove_comment(self, comment_id: str) -> CommentEdit:
+        """Remove a comment; a thread root takes its replies with it."""
+        return self._inner.remove_comment(comment_id)
+
+    def comments(self) -> "list[Comment]":
+        """Every comment on the deck, replies included."""
+        return self._inner.comments()
+
+    @property
+    def comment_flavor(self) -> str:
+        """Either ``legacy`` or ``modern``; a deck never carries both."""
+        return self._inner.comment_flavor
+
+    def set_comment_flavor(self, flavor: str) -> str:
+        """Switch comment systems. Only legal while the deck has no comments."""
+        return self._inner.set_comment_flavor(flavor)
+
     def register_font(
         self,
         family: str,
@@ -372,6 +440,16 @@ class Presentation:
     def render_slide(self, slide: SlideKey) -> DisplayList:
         """Lay a slide out into the renderer's display list."""
         return self._inner.render_slide(slide)
+
+    def render_png(
+        self,
+        slide: SlideKey,
+        *,
+        scale: float = 1.0,
+        background: str = "slide",
+    ) -> Png:
+        """Rasterize a slide to PNG bytes. Register a font first."""
+        return self._inner.render_png(slide, scale=scale, background=background)
 
     def save(self) -> bytes:
         """Serialize back to PPTX bytes, edits included."""

@@ -63,6 +63,31 @@ let saved = presentation.save()?;
 for one you supply, which is what a host ingesting untrusted uploads wants. A
 file past any cap is refused, never truncated.
 
+PPTX comments read and write in both PowerPoint formats. `comment_flavor`
+reports which system a deck uses — `CommentFlavor::Legacy` reads everywhere,
+`CommentFlavor::Modern` carries replies and a resolved state but only shows in
+PowerPoint 365. A file commits to one at its first comment and never carries
+both, so `set_comment_flavor` only works while the deck has no comments, and
+`reply_to_comment` and `set_comment_status` return `EditError::InvalidComment`
+on a legacy deck.
+
+```rust
+let context = EditCtx::local("reviewer");
+presentation.add_comment(
+    &context,
+    &deck.slides[0].id,
+    "Ada Lovelace",
+    "AL",
+    "Tighten this claim.",
+    "2026-09-01T10:00:00.000",
+    1_828_800, // EMU, like every other coordinate
+    914_400,
+)?;
+```
+
+The timestamp is caller-supplied rather than read from a clock, so the engine
+stays clock-free and the same edits replay to the same bytes on every peer.
+
 ## Rendering
 
 XLSX rasterizes by default: `render_sheet` returns a PNG, and the raster backend
@@ -74,11 +99,19 @@ behind a feature, because the default build still targets
 cargo add betteroffice-docx --features raster
 ```
 
-PPTX has no rasterizer. `render_slide` returns the display list the browser
-editor paints — vector geometry, images, shaped text, caret data — alongside
-hit-test metadata, and it fails until at least one font face has been registered.
-Yrs edits reach that display list but are not projected back into
-PresentationML, so `save` re-zips the parts it retained rather than your edits.
+PPTX keeps its rasterizer behind a feature, for the same reason DOCX does:
+
+```bash
+cargo add betteroffice-pptx --features raster
+```
+
+`render_slide` returns the display list the browser editor paints — vector
+geometry, images, shaped text, caret data — alongside hit-test metadata, and it
+fails until at least one font face has been registered. With the feature on,
+`render_png` rasterizes a slide straight from the deck, resolving pictures out of
+the package, so only fonts need registering. Yrs edits reach that display list
+but are not projected back into PresentationML, so `save` re-zips the parts it
+retained rather than your edits.
 
 ## The facades
 
@@ -108,6 +141,7 @@ PresentationML, so `save` re-zips the parts it retained rather than your edits.
 | `betteroffice-pptx-parse` | Bounded PresentationML parsing and part-preserving package writes. |
 | `betteroffice-pptx-edit` | The Yrs deck model for PPTX. |
 | `betteroffice-pptx-render` | Slide layout and the PPTX display-list compiler. |
+| `betteroffice-pptx-raster` | The tiny-skia backend that paints a PPTX display list to PNG. Never part of the wasm build. |
 
 Every crate publishes to crates.io from one release train, so they always share a
 version.

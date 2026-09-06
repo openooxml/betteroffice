@@ -13,9 +13,10 @@ use pyo3::types::{PyBool, PyBytes, PyDict, PyInt};
 use python_common::{generated_client_id, map_io_error};
 
 use betteroffice_pptx::{
-    DeckSnapshot, EditCtx, EditError, EditOrigin, Error as CoreError, MAX_COLLABORATION_BYTES,
-    MAX_COLLABORATION_CLIENT_ID, ParagraphSnapshot, ParseLimits, Presentation as CorePresentation,
-    PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt,
+    Background, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
+    EditOrigin, Error as CoreError, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    ParagraphSnapshot, ParseLimits, Presentation as CorePresentation, PresetShapeDraft,
+    RenderOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt,
     ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideSnapshot,
     StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch, TransformReceipt,
 };
@@ -72,10 +73,12 @@ fn map_edit_error(error: EditError, message: String) -> PyErr {
         EditError::InvalidClientId(_)
         | EditError::InvalidGeometry(_)
         | EditError::InvalidAdjustment(_)
-        | EditError::InvalidText(_) => PyValueError::new_err(message),
-        EditError::SlideNotFound(_) | EditError::ShapeNotFound(_) | EditError::StoryNotFound(_) => {
-            PyKeyError::new_err(message)
-        }
+        | EditError::InvalidText(_)
+        | EditError::InvalidComment(_) => PyValueError::new_err(message),
+        EditError::SlideNotFound(_)
+        | EditError::ShapeNotFound(_)
+        | EditError::StoryNotFound(_)
+        | EditError::CommentNotFound(_) => PyKeyError::new_err(message),
         EditError::OutOfBounds { .. } | EditError::ParagraphBoundary { .. } => {
             RangeError::new_err(message)
         }
@@ -90,6 +93,17 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::Render(_) => RenderError::new_err(message),
         CoreError::Edit(edit) => map_edit_error(edit, message),
         _ => PptxError::new_err(message),
+    }
+}
+
+fn parse_background(value: &str) -> PyResult<Background> {
+    match value {
+        "slide" => Ok(Background::Slide),
+        "transparent" => Ok(Background::Transparent),
+        color if color.starts_with('#') => Ok(Background::Color(color.to_owned())),
+        other => Err(PyValueError::new_err(format!(
+            "background must be \"slide\", \"transparent\", or a #rrggbb color, not {other:?}"
+        ))),
     }
 }
 
@@ -114,6 +128,7 @@ fn parse_limits(limits: Option<&Bound<'_, PyDict>>) -> PyResult<ParseLimits> {
             "max_shapes" => parsed.max_shapes = value,
             "max_paragraphs" => parsed.max_paragraphs = value,
             "max_runs" => parsed.max_runs = value,
+            "max_comments" => parsed.max_comments = value,
             other => {
                 return Err(PyValueError::new_err(format!(
                     "unknown parse limit {other:?}"
@@ -636,8 +651,48 @@ impl PyMedia {
     }
 }
 
-/// A laid-out slide as the renderer's display list. There is no PPTX
-/// rasterizer yet, so this is the drawing contract rather than pixels.
+/// One rasterized slide.
+#[pyclass(module = "betteroffice_pptx", name = "Png", frozen)]
+pub struct PyPng {
+    data: Vec<u8>,
+    #[pyo3(get)]
+    width: u32,
+    #[pyo3(get)]
+    height: u32,
+    /// Pictures the backend could not draw: bytes missing from the package,
+    /// undecodable, or past its budget.
+    #[pyo3(get)]
+    skipped_images: usize,
+}
+
+#[pymethods]
+impl PyPng {
+    #[getter]
+    fn bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.data)
+    }
+
+    fn write(&self, py: Python<'_>, path: PathBuf) -> PyResult<()> {
+        py.detach(|| fs::write(&path, &self.data))
+            .map_err(|error| map_io_error(&error, &path))
+    }
+
+    fn __len__(&self) -> usize {
+        self.data.len()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Png(width={}, height={}, bytes={})",
+            self.width,
+            self.height,
+            self.data.len()
+        )
+    }
+}
+
+/// A laid-out slide as the renderer's display list, for hosts that paint it
+/// themselves; [`PyPresentation::render_png`] rasterizes it here instead.
 #[pyclass(module = "betteroffice_pptx", name = "DisplayList", frozen)]
 pub struct PyDisplayList {
     payload: String,
@@ -883,6 +938,87 @@ impl PyAdjustEdit {
             "AdjustEdit(shape_id={:?}, after={:?})",
             self.shape_id, self.after
         )
+    }
+}
+
+#[pyclass(module = "betteroffice_pptx", name = "Comment", frozen)]
+pub struct PyComment {
+    #[pyo3(get)]
+    id: String,
+    #[pyo3(get)]
+    slide_id: String,
+    #[pyo3(get)]
+    author: String,
+    #[pyo3(get)]
+    initials: String,
+    #[pyo3(get)]
+    text: String,
+    #[pyo3(get)]
+    created: Option<String>,
+    #[pyo3(get)]
+    x: i64,
+    #[pyo3(get)]
+    y: i64,
+    #[pyo3(get)]
+    parent_id: Option<String>,
+    #[pyo3(get)]
+    resolved: bool,
+}
+
+impl PyComment {
+    fn from_core(snapshot: CommentSnapshot) -> Self {
+        Self {
+            id: snapshot.id,
+            slide_id: snapshot.slide_id,
+            author: snapshot.author,
+            initials: snapshot.initials,
+            text: snapshot.text,
+            created: snapshot.created,
+            x: snapshot.x_emu,
+            y: snapshot.y_emu,
+            parent_id: snapshot.parent_id,
+            resolved: snapshot.resolved,
+        }
+    }
+}
+
+#[pymethods]
+impl PyComment {
+    fn __repr__(&self) -> String {
+        format!(
+            "Comment(id={:?}, author={:?}, resolved={})",
+            self.id, self.author, self.resolved
+        )
+    }
+}
+
+#[pyclass(module = "betteroffice_pptx", name = "CommentEdit", frozen)]
+pub struct PyCommentEdit {
+    #[pyo3(get)]
+    comment_id: String,
+    #[pyo3(get)]
+    slide_id: String,
+    #[pyo3(get)]
+    parent_id: Option<String>,
+    #[pyo3(get)]
+    resolved: bool,
+}
+
+impl PyCommentEdit {
+    fn from_core(receipt: CommentReceipt) -> Self {
+        Self {
+            comment_id: receipt.comment_id,
+            slide_id: receipt.slide_id,
+            parent_id: receipt.parent_id,
+            resolved: receipt.resolved,
+        }
+    }
+}
+
+#[pymethods]
+impl PyCommentEdit {
+    fn __repr__(&self) -> String {
+        format!("CommentEdit(comment_id={:?})", self.comment_id)
     }
 }
 
@@ -1440,6 +1576,25 @@ impl PyPresentation {
         Ok(PyTransformEdit::from_core(receipt))
     }
 
+    fn set_shape_rect(
+        &self,
+        slide: &Bound<'_, PyAny>,
+        shape_id: &str,
+        x: i64,
+        y: i64,
+        width: i64,
+        height: i64,
+    ) -> PyResult<PyTransformEdit> {
+        let slide_id = self.resolve_slide_id(slide)?;
+        let receipt = self.committed(self.presentation.set_shape_rect(
+            &self.edit_ctx(),
+            &slide_id,
+            shape_id,
+            rect(x, y, width, height),
+        ))?;
+        Ok(PyTransformEdit::from_core(receipt))
+    }
+
     /// `index` is a UTF-16 offset into the story.
     #[pyo3(signature = (
         story_id, index, text, *,
@@ -1515,6 +1670,107 @@ impl PyPresentation {
         Ok(PyTextEdit::from_core(receipt))
     }
 
+    #[pyo3(signature = (slide, text, *, author, initials = "", created, x = 0, y = 0))]
+    #[allow(clippy::too_many_arguments)]
+    fn add_comment(
+        &self,
+        slide: &Bound<'_, PyAny>,
+        text: &str,
+        author: &str,
+        initials: &str,
+        created: &str,
+        x: i64,
+        y: i64,
+    ) -> PyResult<PyCommentEdit> {
+        let slide_id = self.resolve_slide_id(slide)?;
+        let receipt = self.committed(self.presentation.add_comment(
+            &self.edit_ctx(),
+            &slide_id,
+            author,
+            initials,
+            text,
+            created,
+            x,
+            y,
+        ))?;
+        Ok(PyCommentEdit::from_core(receipt))
+    }
+
+    #[pyo3(signature = (comment_id, text, *, author, initials = "", created))]
+    fn reply_to_comment(
+        &self,
+        comment_id: &str,
+        text: &str,
+        author: &str,
+        initials: &str,
+        created: &str,
+    ) -> PyResult<PyCommentEdit> {
+        let receipt = self.committed(self.presentation.reply_to_comment(
+            &self.edit_ctx(),
+            comment_id,
+            author,
+            initials,
+            text,
+            created,
+        ))?;
+        Ok(PyCommentEdit::from_core(receipt))
+    }
+
+    #[pyo3(signature = (comment_id, resolved = true))]
+    fn set_comment_status(&self, comment_id: &str, resolved: bool) -> PyResult<PyCommentEdit> {
+        let receipt = self.committed(self.presentation.set_comment_status(
+            &self.edit_ctx(),
+            comment_id,
+            resolved,
+        ))?;
+        Ok(PyCommentEdit::from_core(receipt))
+    }
+
+    fn remove_comment(&self, comment_id: &str) -> PyResult<PyCommentEdit> {
+        let receipt = self.committed(
+            self.presentation
+                .remove_comment(&self.edit_ctx(), comment_id),
+        )?;
+        Ok(PyCommentEdit::from_core(receipt))
+    }
+
+    fn comments(&self) -> PyResult<Vec<PyComment>> {
+        Ok(self
+            .presentation
+            .comments()
+            .map_err(map_error)?
+            .into_iter()
+            .map(PyComment::from_core)
+            .collect())
+    }
+
+    #[getter]
+    fn comment_flavor(&self) -> PyResult<String> {
+        Ok(
+            match self.presentation.comment_flavor().map_err(map_error)? {
+                CommentFlavor::Legacy => "legacy".to_owned(),
+                CommentFlavor::Modern => "modern".to_owned(),
+            },
+        )
+    }
+
+    fn set_comment_flavor(&self, flavor: &str) -> PyResult<String> {
+        let flavor = match flavor {
+            "legacy" => CommentFlavor::Legacy,
+            "modern" => CommentFlavor::Modern,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown comment flavor {other:?}; expected \"legacy\" or \"modern\""
+                )));
+            }
+        };
+        self.committed(
+            self.presentation
+                .set_comment_flavor(&self.edit_ctx(), flavor),
+        )?;
+        self.comment_flavor()
+    }
+
     fn insert_paragraph_break(&self, story_id: &str, index: u32) -> PyResult<PyTextEdit> {
         let receipt = self.committed(self.presentation.insert_paragraph_break(
             &self.edit_ctx(),
@@ -1572,6 +1828,36 @@ impl PyPresentation {
             Failure::Engine(error) => map_error(error),
             Failure::Json(error) => RenderError::new_err(error.to_string()),
         })
+    }
+
+    /// Rasterize one slide to deterministic PNG bytes. Media resolves from the
+    /// package, so only fonts need registering; `background` is `"slide"`,
+    /// `"transparent"`, or a `#rrggbb` color painted under the slide's own.
+    #[pyo3(signature = (slide, *, scale = 1.0, background = "slide"))]
+    fn render_png(
+        &self,
+        py: Python<'_>,
+        slide: &Bound<'_, PyAny>,
+        scale: f32,
+        background: &str,
+    ) -> PyResult<PyPng> {
+        let index = self.resolve_slide_index(slide)?;
+        let options = RenderOptions {
+            scale,
+            background: parse_background(background)?,
+        };
+        let deck = DetachedDeck(&self.presentation);
+        py.detach(move || {
+            let deck = deck;
+            deck.0.render_png(index, &options)
+        })
+        .map(|rendered| PyPng {
+            data: rendered.bytes,
+            width: rendered.width,
+            height: rendered.height,
+            skipped_images: rendered.skipped_images,
+        })
+        .map_err(map_error)
     }
 
     fn save<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyBytes>> {
@@ -1685,6 +1971,7 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyStroke>()?;
     module.add_class::<PyMedia>()?;
     module.add_class::<PyDisplayList>()?;
+    module.add_class::<PyPng>()?;
     module.add_class::<PySlideEdit>()?;
     module.add_class::<PyShapeEdit>()?;
     module.add_class::<PyTransformEdit>()?;
@@ -1692,6 +1979,8 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyStrokeEdit>()?;
     module.add_class::<PyAdjustEdit>()?;
     module.add_class::<PyTextEdit>()?;
+    module.add_class::<PyComment>()?;
+    module.add_class::<PyCommentEdit>()?;
     module.add("PptxError", py.get_type::<PptxError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;
