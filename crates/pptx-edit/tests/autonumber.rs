@@ -5,6 +5,7 @@ use yrs::{Any, Doc, Map, Out, ReadTxn, Transact, Update};
 
 const DECK: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/autonumber-bullets.pptx");
 const V9: &[u8] = include_bytes!("fixtures/deck-schema-v9-autonumber.update.bin");
+const V10: &[u8] = include_bytes!("fixtures/deck-schema-v10-autonumber.update.bin");
 
 fn restart_bullets(session: &DeckSession) -> Vec<Bullet> {
     let shape = session.package().slides[0]
@@ -90,8 +91,24 @@ fn explicit_numbering_restarts_survive_text_edits_and_save() {
 }
 
 #[test]
-fn v9_numbering_migrates_once_and_recovers_explicit_restarts_from_source() {
-    let migrated = DeckSession::open_from_update(V9, 30012).unwrap();
+fn v9_and_v10_numbering_migrate_once_and_recover_explicit_restarts_from_source() {
+    for (legacy, version) in [(V9, 9.0), (V10, 10.0)] {
+        let doc = Doc::new();
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(legacy).unwrap())
+            .unwrap();
+        let txn = doc.transact();
+        assert_eq!(
+            txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
+            Some(Out::Any(Any::Number(version)))
+        );
+        assert!(!String::from_utf8_lossy(legacy).contains("\"restart\""));
+        assert_migrated_restarts(legacy);
+    }
+}
+
+fn assert_migrated_restarts(legacy: &[u8]) {
+    let migrated = DeckSession::open_from_update(legacy, 30012).unwrap();
     let update = migrated.encode_state_as_update_v1();
     let doc = Doc::new();
     doc.transact_mut()
@@ -100,7 +117,7 @@ fn v9_numbering_migrates_once_and_recovers_explicit_restarts_from_source() {
     let txn = doc.transact();
     assert_eq!(
         txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion"),
-        Some(Out::Any(Any::Number(10.0)))
+        Some(Out::Any(Any::Number(11.0)))
     );
     let reopened = DeckSession::open_from_update(&update, 30013).unwrap();
     assert_eq!(reopened.encode_state_as_update_v1(), update);
