@@ -56,6 +56,19 @@ pub struct Stroke {
     pub width: f32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub dashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_end: Option<StrokeEnd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_end: Option<StrokeEnd>,
+}
+
+/// End dimensions in CSS pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokeEnd {
+    pub kind: String,
+    pub width: f32,
+    pub length: f32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -67,6 +80,31 @@ pub struct Transform {
     pub flip_h: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub flip_v: bool,
+}
+
+/// Source fractions discarded by `a:srcRect`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCrop {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub left: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub top: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub right: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bottom: f32,
+}
+
+impl ImageCrop {
+    pub fn is_whole(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The fraction of the source that survives on each axis.
+    pub fn kept(&self) -> (f32, f32) {
+        (1.0 - self.left - self.right, 1.0 - self.top - self.bottom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -107,6 +145,10 @@ pub enum Primitive {
         h: f32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asset_id: Option<String>,
+        #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
+        crop: ImageCrop,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<Vec<GeometryPathCommand>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
@@ -295,5 +337,43 @@ mod tests {
         let json = serde_json::to_string(&list).expect("serialize display list");
         assert!(!json.contains("transform"));
         assert!(json.contains("contractVersion"));
+    }
+
+    #[test]
+    fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
+        let mut image = Primitive::Image {
+            object_id: 90,
+            shape_id: Some("slide:0:256:shape:9".into()),
+            name: "Media fixture".into(),
+            x: 1280.0,
+            y: 720.0,
+            w: 0.5,
+            h: 0.25,
+            asset_id: Some("ppt/media/betteroffice-mark.png".into()),
+            crop: ImageCrop::default(),
+            path: None,
+            stroke: None,
+            transform: Transform::default(),
+        };
+        let before = r#"{"kind":"image","objectId":90,"shapeId":"slide:0:256:shape:9","name":"Media fixture","x":1280.0,"y":720.0,"w":0.5,"h":0.25,"assetId":"ppt/media/betteroffice-mark.png"}"#;
+        assert_eq!(serde_json::to_string(&image).unwrap(), before);
+        assert_eq!(serde_json::from_str::<Primitive>(before).unwrap(), image);
+
+        let Primitive::Image { crop, path, .. } = &mut image else {
+            unreachable!()
+        };
+        *crop = ImageCrop {
+            top: 0.1,
+            bottom: 0.2,
+            ..ImageCrop::default()
+        };
+        *path = Some(vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.5 },
+            GeometryPathCommand::Close,
+        ]);
+        let json = serde_json::to_string(&image).unwrap();
+        assert!(json.contains(r#""crop":{"top":0.1,"bottom":0.2}"#));
+        assert!(json.contains(r#""path":[{"type":"move","x":0.0,"y":0.5},{"type":"close"}]"#));
+        assert_eq!(serde_json::from_str::<Primitive>(&json).unwrap(), image);
     }
 }

@@ -6,6 +6,8 @@ pub enum Error {
     Parse(pptx_parse::PptxError),
     Edit(pptx_edit::EditError),
     Render(pptx_render::RenderError),
+    /// The raster backend refused a surface or could not paint a primitive.
+    Raster(String),
 }
 
 impl fmt::Display for Error {
@@ -14,6 +16,7 @@ impl fmt::Display for Error {
             Self::Parse(error) => error.fmt(formatter),
             Self::Edit(error) => error.fmt(formatter),
             Self::Render(error) => error.fmt(formatter),
+            Self::Raster(message) => formatter.write_str(message),
         }
     }
 }
@@ -24,6 +27,7 @@ impl std::error::Error for Error {
             Self::Parse(error) => Some(error),
             Self::Edit(error) => Some(error),
             Self::Render(error) => Some(error),
+            Self::Raster(_) => None,
         }
     }
 }

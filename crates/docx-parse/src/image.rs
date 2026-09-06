@@ -111,6 +111,8 @@ pub struct Image {
     pub image_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     #[serde(rename = "rId")]
     pub relationship_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -304,6 +306,7 @@ fn image_base(relationship_id: String, size: ImageSize, wrap: ImageWrap) -> Imag
     Image {
         image_type: "image".into(),
         id: None,
+        name: None,
         relationship_id,
         src: None,
         mime_type: None,
@@ -351,6 +354,7 @@ fn apply_common_image_fields(
     relationships: Option<&RelationshipMap>,
 ) {
     image.id = properties.id;
+    image.name = properties.name;
     image.alt = properties.alt;
     image.title = properties.title;
     image.decorative = properties.decorative.then_some(true);
@@ -390,6 +394,7 @@ fn apply_common_image_fields(
 #[derive(Default)]
 struct DocProperties {
     id: Option<String>,
+    name: Option<String>,
     alt: Option<String>,
     title: Option<String>,
     decorative: bool,
@@ -408,6 +413,10 @@ fn parse_doc_properties(element: Option<&XmlElement>) -> DocProperties {
     DocProperties {
         id: element
             .attribute(None, "id")
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        name: element
+            .attribute(None, "name")
             .filter(|value| !value.is_empty())
             .map(str::to_owned),
         alt: element

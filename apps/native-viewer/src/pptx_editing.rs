@@ -313,6 +313,16 @@ impl PptxEditor {
         Ok(self.presentation.story(story_id)?)
     }
 
+    /// The CPU reference render of one slide, for the GPU-versus-raster diff.
+    pub fn render_reference_png(
+        &self,
+        slide_index: usize,
+    ) -> Result<betteroffice_pptx::RenderedPng> {
+        self.presentation
+            .render_png(slide_index, &betteroffice_pptx::RenderOptions::default())
+            .map_err(anyhow::Error::from)
+    }
+
     #[cfg(test)]
     pub fn rendered_slide(&self, slide_index: usize) -> Option<&RenderedSlide> {
         self.rendered.get(slide_index)
