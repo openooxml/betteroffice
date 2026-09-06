@@ -248,7 +248,11 @@ impl PptxImages {
         Self { assets }
     }
 
-    fn get(&self, asset_id: &str, effects: &[pptx_render::ImageEffect]) -> Result<ImageData, String> {
+    fn get(
+        &self,
+        asset_id: &str,
+        effects: &[pptx_render::ImageEffect],
+    ) -> Result<ImageData, String> {
         let mut image = match self.assets.get(asset_id) {
             Some(PptxImage::Decoded(image)) => image.clone(),
             Some(PptxImage::Failed(reason)) => return Err(reason.clone()),
@@ -592,7 +596,7 @@ impl Translator<'_> {
             font,
             font_size_px,
             x,
-            baseline: line.baseline,
+            baseline: line.baseline - finite(run.baseline_offset_px, "text baseline offset")?,
             width,
             glyphs,
             color: color(&run.color, 1.0)?,
@@ -1128,11 +1132,24 @@ mod tests {
     #[test]
     fn picture_effects_do_not_recolour_the_shared_source() {
         let source = vec![3, 167, 223, 128];
-        let images = PptxImages { assets: HashMap::from([("image".into(), PptxImage::Decoded(ImageData {
-            data: Blob::from(source.clone()), format: ImageFormat::Rgba8,
-            alpha_type: ImageAlphaType::Alpha, width: 1, height: 1,
-        }))]) };
-        let recoloured = images.get("image", &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }]).unwrap();
+        let images = PptxImages {
+            assets: HashMap::from([(
+                "image".into(),
+                PptxImage::Decoded(ImageData {
+                    data: Blob::from(source.clone()),
+                    format: ImageFormat::Rgba8,
+                    alpha_type: ImageAlphaType::Alpha,
+                    width: 1,
+                    height: 1,
+                }),
+            )]),
+        };
+        let recoloured = images
+            .get(
+                "image",
+                &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+            )
+            .unwrap();
         assert_eq!(recoloured.data.data(), &[255, 255, 255, 128]);
         let plain = images.get("image", &[]).unwrap();
         assert_eq!(plain.data.data(), source);
@@ -1287,6 +1304,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(path.bounding_box(), Rect::new(10.0, 20.0, 40.0, 60.0));
+    }
+
+    #[test]
+    fn script_underlines_use_the_glyph_baseline() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-baseline-script.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let rendered = presentation.render_slide(0).unwrap();
+        let mut translator = Translator {
+            scene: Scene::new(),
+            fonts: &resources.fonts,
+            images: &resources.images,
+            skipped: SkipStats::default(),
+            summary: PptxSlideSummary::default(),
+        };
+        let mut shifted = 0;
+        for primitive in &rendered.display_list.primitives {
+            if let Primitive::TextBox { lines, .. } = primitive {
+                for line in lines {
+                    for run in &line.runs {
+                        if run.baseline_offset_px != 0.0 {
+                            let prepared = translator.prepare_text_run(line, run).unwrap();
+                            assert!((prepared.baseline - prepared.glyphs[0].y).abs() < 0.001);
+                            shifted += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(shifted, 3);
     }
 
     #[test]

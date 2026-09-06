@@ -637,6 +637,7 @@ fn run_write(run: &TextRunSnapshot) -> RunWrite {
         text: run.text.clone(),
         properties: RunProperties {
             font_size_pt: run.style.font_size_pt,
+            baseline_pct: run.style.baseline_pct,
             bold: run.style.bold,
             italic: run.style.italic,
             underline: run.style.underline.clone(),
