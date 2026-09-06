@@ -11,7 +11,7 @@ use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle
 use pptx_parse::{
     Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
     ParagraphProperties, Picture, PictureCrop, Placeholder, PptxPackage, RunProperties, ShapeNode,
-    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody,
+    ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit, TextBody, TextOverflow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -317,7 +317,7 @@ impl RenderedSlide {
         }
         for region in self.hit_regions.iter().rev() {
             let (x, y) = region.local_point(x, y);
-            if !region.rect.contains(x, y) {
+            if !region.hit_rect.contains(x, y) {
                 continue;
             }
             if let Some(text) = &region.text
@@ -557,7 +557,8 @@ impl<'a> LayoutBuilder<'a> {
         };
         self.hit_regions.push(HitRegion {
             shape_id: stable_id,
-            rect: rect_covering_text(rect, text_hit.as_ref()),
+            rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -674,7 +675,8 @@ impl<'a> LayoutBuilder<'a> {
         };
         self.hit_regions.push(HitRegion {
             shape_id: stable_id.to_owned(),
-            rect: rect_covering_text(rect, text_hit.as_ref()),
+            rect,
+            hit_rect: rect_covering_text(rect, text_hit.as_ref()),
             transform,
             text: text_hit,
         });
@@ -810,8 +812,6 @@ impl<'a> LayoutBuilder<'a> {
             _ => 1.0,
         };
         let mut laid_out = layout_content(&self.renderer.fonts, &resolved, content_rect, scale)?;
-        // Only normAutofit shrinks text. spAutoFit resizes the *shape* to its text and never
-        // touches the font size, so text under it overflows the stored box at full size.
         if matches!(autofit, Some(TextAutofit::Normal { .. })) {
             while laid_out.total_height > content_rect.h && scale > MIN_AUTOFIT_SCALE {
                 scale = (scale * 0.9).max(MIN_AUTOFIT_SCALE);
@@ -832,12 +832,16 @@ impl<'a> LayoutBuilder<'a> {
             Some("b") => TextAnchor::Bottom,
             _ => TextAnchor::Top,
         };
-        // A negative shift is text taller than its box: centred text then spills equally above
-        // and below rather than starting at the top edge, and bottom-anchored text spills above.
+        let spare_height = content_rect.h - laid_out.total_height;
+        let spare_height = if cascade.clips_overflow() {
+            spare_height.max(0.0)
+        } else {
+            spare_height
+        };
         let vertical_shift = match anchor {
             TextAnchor::Top => 0.0,
-            TextAnchor::Center => (content_rect.h - laid_out.total_height) / 2.0,
-            TextAnchor::Bottom => content_rect.h - laid_out.total_height,
+            TextAnchor::Center => spare_height / 2.0,
+            TextAnchor::Bottom => spare_height,
         };
         for line in &mut laid_out.lines {
             shift_line(line, 0.0, vertical_shift);
@@ -863,7 +867,7 @@ impl<'a> LayoutBuilder<'a> {
                     .collect(),
             })
             .collect();
-        let overflow = laid_out.total_height > content_rect.h;
+        let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
         let story_id = content.story_id;
         let lines = laid_out.lines;
         self.primitives.push(Primitive::TextBox {
@@ -880,7 +884,11 @@ impl<'a> LayoutBuilder<'a> {
             overflow,
             transform,
         });
-        Ok(TextHit { story_id, lines })
+        Ok(TextHit {
+            story_id,
+            lines,
+            overflow,
+        })
     }
 }
 
@@ -895,6 +903,19 @@ struct BodyCascade<'a> {
 }
 
 impl BodyCascade<'_> {
+    fn clips_overflow(&self) -> bool {
+        let vertical = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.vertical_overflow
+        });
+        let horizontal = cascade_value(self.primary, self.layout, self.master, |body| {
+            body.horizontal_overflow
+        });
+        [vertical, horizontal]
+            .into_iter()
+            .flatten()
+            .any(|value| value != TextOverflow::Overflow)
+    }
+
     fn anchor(&self) -> Option<&str> {
         self.primary
             .and_then(|body| body.anchor.as_deref())
@@ -1987,6 +2008,7 @@ impl Space {
 struct HitRegion {
     shape_id: String,
     rect: PxRect,
+    hit_rect: PxRect,
     transform: Transform,
     text: Option<TextHit>,
 }
@@ -2016,6 +2038,7 @@ impl HitRegion {
 }
 
 struct TextHit {
+    overflow: bool,
     story_id: String,
     lines: Vec<PositionedTextLine>,
 }
@@ -2452,21 +2475,26 @@ fn is_full_justification(value: Option<&str>) -> bool {
     value == Some("just")
 }
 
-/// The shape's box grown to whatever its text actually painted. Text that overflows is drawn
-/// outside the box, and a caret has to be reachable wherever a glyph is visible.
 fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
-    let Some(text) = text else {
+    let Some(text) = text.filter(|text| text.overflow) else {
         return rect;
     };
+    let (mut left, mut right) = (rect.x, rect.x + rect.w);
     let (mut top, mut bottom) = (rect.y, rect.y + rect.h);
     for line in &text.lines {
+        left = left.min(line.x);
+        right = right.max(line.x + line.width);
         top = top.min(line.y);
         bottom = bottom.max(line.y + line.height);
+        for run in &line.runs {
+            left = left.min(run.x);
+            right = right.max(run.x + run.width);
+        }
     }
     PxRect {
-        x: rect.x,
+        x: left,
         y: top,
-        w: rect.w,
+        w: (right - left).max(rect.w),
         h: (bottom - top).max(rect.h),
     }
 }
@@ -2681,8 +2709,8 @@ mod tests {
             runs: Vec::new(),
             caret_stops: Vec::new(),
         };
-        // Text centred in a box shorter than itself spills equally above and below.
         let text = TextHit {
+            overflow: true,
             story_id: "story".to_owned(),
             lines: vec![line(80.0, 40.0), line(120.0, 40.0)],
         };
@@ -2691,8 +2719,8 @@ mod tests {
         assert_eq!(grown.y + grown.h, 160.0);
         assert_eq!(grown.x, rect.x);
         assert_eq!(grown.w, rect.w);
-        // Text that fits leaves the box alone.
         let fitting = TextHit {
+            overflow: false,
             story_id: "story".to_owned(),
             lines: vec![line(104.0, 12.0)],
         };
@@ -3551,6 +3579,12 @@ mod tests {
                     w: 100.0,
                     h: 100.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 100.0,
+                    h: 100.0,
+                },
                 transform,
                 text: None,
             }],
@@ -3597,12 +3631,19 @@ mod tests {
                     w: 120.0,
                     h: 40.0,
                 },
+                hit_rect: PxRect {
+                    x: 100.0,
+                    y: 100.0,
+                    w: 120.0,
+                    h: 40.0,
+                },
                 transform: Transform {
                     rotation_deg: 0.0,
                     flip_h,
                     flip_v: false,
                 },
                 text: Some(TextHit {
+                    overflow: false,
                     story_id: "story".to_owned(),
                     lines: vec![PositionedTextLine {
                         x: 110.0,
@@ -3791,23 +3832,35 @@ mod tests {
                 &TextStyle::default(),
             )
             .unwrap();
-        let rendered = renderer()
-            .layout_slide(&package, &session.snapshot().unwrap(), 0)
-            .unwrap();
-        let font_size = rendered
-            .display_list
-            .primitives
-            .iter()
-            .find_map(|primitive| match primitive {
-                Primitive::TextBox {
-                    shape_id: Some(id),
-                    paragraphs,
-                    ..
-                } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
-                _ => None,
-            })
-            .unwrap();
-        assert!(font_size < 40.0);
+        let snapshot = session.snapshot().unwrap();
+        let font_size = |package: &PptxPackage| {
+            renderer()
+                .layout_slide(package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    Primitive::TextBox {
+                        shape_id: Some(id),
+                        paragraphs,
+                        ..
+                    } if id == &shape_id => Some(paragraphs[0].runs[0].font_size_pt),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let scaled = font_size(&package);
+        let ShapeNode::Shape(parsed) = package.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.id() == source_id)
+            .unwrap()
+        else {
+            panic!("expected text shape");
+        };
+        parsed.text.as_mut().unwrap().autofit = Some(TextAutofit::None);
+        assert!(scaled < font_size(&package));
     }
 
     fn chart_slide(index: usize) -> Vec<Primitive> {

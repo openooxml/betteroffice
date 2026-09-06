@@ -396,6 +396,7 @@ impl Translator<'_> {
                 h,
                 paragraphs,
                 lines,
+                overflow,
                 transform,
                 ..
             } => Frame::new(*x, *y, *w, *h).and_then(|frame| {
@@ -406,6 +407,7 @@ impl Translator<'_> {
                         .flat_map(|paragraph| &paragraph.runs)
                         .any(|run| !run.text.is_empty()),
                     lines,
+                    *overflow,
                     *transform,
                     parent,
                 )
@@ -522,6 +524,7 @@ impl Translator<'_> {
         frame: Frame,
         has_text: bool,
         lines: &[PositionedTextLine],
+        overflow: bool,
         transform: Transform,
         parent: Affine,
     ) -> Result<(), String> {
@@ -536,8 +539,10 @@ impl Translator<'_> {
                 prepared.push(self.prepare_text_run(line, run)?);
             }
         }
-        self.scene
-            .push_clip_layer(Fill::NonZero, affine, &frame.rect);
+        if !overflow {
+            self.scene
+                .push_clip_layer(Fill::NonZero, affine, &frame.rect);
+        }
         for run in prepared {
             self.scene
                 .draw_glyphs(&run.font)
@@ -558,7 +563,9 @@ impl Translator<'_> {
                     .fill(Fill::NonZero, affine, run.color, None, &underline);
             }
         }
-        self.scene.pop_layer();
+        if !overflow {
+            self.scene.pop_layer();
+        }
         Ok(())
     }
 
@@ -1070,6 +1077,57 @@ mod tests {
     fn maps(affine: Affine, from: (f64, f64), to: (f64, f64)) -> bool {
         let point = affine * Point::new(from.0, from.1);
         (point.x - to.0).abs() < 1e-3 && (point.y - to.1).abs() < 1e-3
+    }
+
+    #[test]
+    fn overflowing_text_keeps_only_the_enclosing_chart_clip() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-overflow.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let source = presentation.render_slide(0).unwrap().display_list;
+        let text = source
+            .primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::TextBox { object_id: 2, .. }))
+            .unwrap()
+            .clone();
+        for overflow in [false, true] {
+            for parent_clip in [false, true] {
+                let mut text = text.clone();
+                if let Primitive::TextBox { overflow: flag, .. } = &mut text {
+                    *flag = overflow;
+                }
+                let primitive = if parent_clip {
+                    Primitive::Chart {
+                        object_id: 100,
+                        shape_id: None,
+                        name: "Clip".to_owned(),
+                        x: 20.0,
+                        y: 20.0,
+                        w: 500.0,
+                        h: 200.0,
+                        label: String::new(),
+                        primitives: vec![text],
+                        transform: Transform::default(),
+                    }
+                } else {
+                    text
+                };
+                let list = SurfaceDisplayList {
+                    primitives: vec![primitive],
+                    ..source.clone()
+                };
+                let (page, summary) = resources.translate(&list, 8192).unwrap();
+                assert_eq!(summary.structured(&page.skipped)["totals"]["skipped"], 0);
+                assert_eq!(page.scene.encoding().n_open_clips, 0);
+                assert_eq!(
+                    page.scene.encoding().n_clips,
+                    2 * (u32::from(parent_clip) + u32::from(!overflow))
+                );
+            }
+        }
     }
 
     #[test]
