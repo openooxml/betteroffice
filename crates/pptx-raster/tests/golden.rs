@@ -299,6 +299,7 @@ fn golden_image() {
             w: 100.0,
             h: 80.0,
             asset_id: Some("ppt/media/image1.png".into()),
+            effects: Vec::new(),
             crop: Default::default(),
             path: None,
             stroke: Some(Stroke {
@@ -328,6 +329,7 @@ fn golden_picture_fill() {
             w: 200.0,
             h: 105.0,
             asset_id: Some("ppt/media/image1.png".into()),
+            effects: Vec::new(),
             crop: ImageCrop {
                 left: 0.25,
                 top: 0.0,

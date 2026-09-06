@@ -211,12 +211,41 @@ fn parse_picture(
         relationship_id,
         media_part_path,
         crop: parse_crop(blip_fill.and_then(|value| value.child("srcRect"))),
+        effects: parse_blip_effects(blip_fill.and_then(|value| value.child("blip"))),
         geometry: parse_geometry(properties),
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         outline: properties.and_then(parse_outline),
         style: parse_shape_style(element.child("style"), properties).map(Box::new),
     })
+}
+
+/// Reads supported bitmap effects in document order.
+fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
+    let Some(blip) = blip else {
+        return Vec::new();
+    };
+    blip.child_elements()
+        .filter_map(|child| match child.local_name() {
+            "biLevel" => Some(BlipEffect::BiLevel {
+                threshold: percentage_attribute(child, "thresh").unwrap_or(0.5),
+            }),
+            "grayscl" => Some(BlipEffect::Grayscale),
+            "duotone" => {
+                let mut colors = child.child_elements().filter_map(parse_color_element);
+                Some(BlipEffect::Duotone {
+                    shadow: colors.next(),
+                    highlight: colors.next(),
+                })
+            }
+            "clrChange" => Some(BlipEffect::ColorChange {
+                from: child.child("clrFrom").and_then(parse_color_container),
+                to: child.child("clrTo").and_then(parse_color_container),
+                use_alpha: child.attribute("useA").map(parse_bool).unwrap_or(true),
+            }),
+            _ => None,
+        })
+        .collect()
 }
 
 fn parse_graphic_frame(
@@ -818,12 +847,10 @@ fn parse_line_end(element: &XmlElement) -> LineEnd {
 }
 
 pub(crate) fn parse_color_container(element: &XmlElement) -> Option<ColorValue> {
-    let color = element.child_elements().find(|value| {
-        matches!(
-            value.local_name(),
-            "srgbClr" | "schemeClr" | "sysClr" | "prstClr"
-        )
-    })?;
+    element.child_elements().find_map(parse_color_element)
+}
+
+fn parse_color_element(color: &XmlElement) -> Option<ColorValue> {
     let mut parsed = match color.local_name() {
         "srgbClr" => ColorValue {
             rgb: color.attribute("val").map(str::to_owned),
@@ -1530,6 +1557,59 @@ mod tests {
                 .properties
                 .font_size_pt,
             Some(24.0)
+        );
+    }
+
+    #[test]
+    fn keeps_blip_colour_effects_in_document_order() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange><a:duotone><a:schemeClr val="bg2"><a:shade val="45000"/></a:schemeClr><a:prstClr val="white"/></a:duotone><a:biLevel thresh="25000"/><a:extLst/></a:blip><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &[],
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::Picture(picture) = &data.shapes[0] else {
+            panic!("expected picture");
+        };
+
+        assert_eq!(
+            picture.effects,
+            vec![
+                BlipEffect::ColorChange {
+                    use_alpha: true,
+                    from: Some(ColorValue {
+                        rgb: Some("FFFFFF".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    to: Some(ColorValue {
+                        rgb: Some("FFFFFF".to_owned()),
+                        alpha: Some(0.0),
+                        ..ColorValue::default()
+                    }),
+                },
+                BlipEffect::Duotone {
+                    shadow: Some(ColorValue {
+                        theme_color: Some("background2".to_owned()),
+                        theme_shade: Some("73".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    highlight: Some(ColorValue {
+                        rgb: Some("FFFFFF".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                },
+                BlipEffect::BiLevel { threshold: 0.25 },
+            ]
         );
     }
 

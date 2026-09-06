@@ -49,6 +49,41 @@ pub struct GradientStop {
     pub color: String,
 }
 
+/// Bitmap effects with resolved colours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ImageEffect {
+    BiLevel {
+        threshold: f32,
+    },
+    Grayscale,
+    Duotone {
+        shadow: String,
+        highlight: String,
+    },
+    ColorChange {
+        from: String,
+        to: String,
+        #[serde(
+            default = "default_use_alpha",
+            skip_serializing_if = "use_alpha_is_default"
+        )]
+        use_alpha: bool,
+    },
+}
+
+fn default_use_alpha() -> bool {
+    true
+}
+
+fn use_alpha_is_default(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stroke {
@@ -148,6 +183,8 @@ pub enum Primitive {
         h: f32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asset_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        effects: Vec<ImageEffect>,
         #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
         crop: ImageCrop,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -364,6 +401,7 @@ mod tests {
             w: 0.5,
             h: 0.25,
             asset_id: Some("ppt/media/betteroffice-mark.png".into()),
+            effects: Vec::new(),
             crop: ImageCrop::default(),
             path: None,
             stroke: None,

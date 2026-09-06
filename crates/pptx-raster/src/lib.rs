@@ -267,6 +267,7 @@ impl Painter<'_, '_> {
                 w,
                 h,
                 asset_id,
+                effects,
                 crop,
                 path,
                 stroke,
@@ -277,6 +278,7 @@ impl Painter<'_, '_> {
                 *w,
                 *h,
                 asset_id.as_deref(),
+                effects,
                 *crop,
                 path.as_deref(),
                 stroke.as_ref(),
@@ -419,6 +421,7 @@ impl Painter<'_, '_> {
         w: f32,
         h: f32,
         asset_id: Option<&str>,
+        effects: &[pptx_render::ImageEffect],
         crop: ImageCrop,
         commands: Option<&[GeometryPathCommand]>,
         stroke: Option<&SlideStroke>,
@@ -445,7 +448,7 @@ impl Painter<'_, '_> {
             } else {
                 None
             };
-            match asset_id.and_then(|asset_id| self.decode(asset_id)) {
+            match asset_id.and_then(|asset_id| self.decode(asset_id, effects)) {
                 Some(source) => {
                     let fit = Transform::from_row(
                         frame.width() / (source.width() as f32 * kept_x),
@@ -540,9 +543,9 @@ impl Painter<'_, '_> {
         Ok(())
     }
 
-    fn decode(&mut self, asset_id: &str) -> Option<Pixmap> {
+    fn decode(&mut self, asset_id: &str, effects: &[pptx_render::ImageEffect]) -> Option<Pixmap> {
         let bytes = self.resources.images.get(asset_id)?;
-        self.images.decode(bytes)
+        self.images.decode(bytes, effects)
     }
 }
 
@@ -788,7 +791,7 @@ impl ImageCache {
     /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the slide
     /// has no budget left for. Declared pixels are charged before the decoder
     /// allocates, so a stream that fails late still costs what it claimed.
-    fn decode(&mut self, bytes: &[u8]) -> Option<Pixmap> {
+    fn decode(&mut self, bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> Option<Pixmap> {
         use image::ImageDecoder as _;
 
         let mut decoder = image::ImageReader::new(Cursor::new(bytes))
@@ -814,6 +817,7 @@ impl ImageCache {
         decoded.apply_orientation(orientation);
         let size = IntSize::from_wh(decoded.width(), decoded.height())?;
         let mut data = decoded.into_rgba8().into_raw();
+        pptx_render::apply_image_effects(&mut data, effects);
         let (pixels, _) = data.as_chunks_mut::<4>();
         for pixel in pixels {
             let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
@@ -899,6 +903,7 @@ mod tests {
                     w: 200.0,
                     h,
                     asset_id: None,
+                    effects: Vec::new(),
                     crop: ImageCrop::default(),
                     path: None,
                     stroke: Some(stroke),
@@ -944,6 +949,37 @@ mod tests {
 
     fn resources<'a>(fonts: &'a FontStore, images: &'a AssetMap<'a>) -> RenderResources<'a> {
         RenderResources::new(fonts, images)
+    }
+
+    #[test]
+    fn blip_effects_run_before_premultiplication() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[3, 167, 223, 128, 255, 255, 255, 0])
+                .unwrap();
+        }
+        let image = ImageCache::default()
+            .decode(
+                &bytes,
+                &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+            )
+            .unwrap();
+        assert_eq!(
+            image.pixel(0, 0).unwrap(),
+            ColorU8::from_rgba(255, 255, 255, 128).premultiply()
+        );
+        assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
+        let source = ImageCache::default().decode(&bytes, &[]).unwrap();
+        assert_eq!(
+            source.pixel(0, 0).unwrap(),
+            ColorU8::from_rgba(3, 167, 223, 128).premultiply()
+        );
     }
 
     #[test]
@@ -1062,6 +1098,7 @@ mod tests {
                     w: 200.0,
                     h: 100.0,
                     asset_id: Some("photo".into()),
+                    effects: Vec::new(),
                     crop: ImageCrop {
                         left: 0.1,
                         top: 0.2,
@@ -1150,6 +1187,7 @@ mod tests {
                 w: 50.0,
                 h: 50.0,
                 asset_id: asset_id.map(str::to_owned),
+                effects: Vec::new(),
                 crop: ImageCrop::default(),
                 path: None,
                 stroke: None,

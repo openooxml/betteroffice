@@ -36,6 +36,7 @@ export type {
   WasmInitInput,
 } from './wasm/loader';
 export type {
+  BlipEffect,
   CaretStop,
   ColorValue,
   CommentFlavor,
@@ -45,6 +46,7 @@ export type {
   GeometryPathCommand,
   HistoryResult,
   HitTestResult,
+  ImageEffect,
   ImageCrop,
   ImagePrimitive,
   Paint,

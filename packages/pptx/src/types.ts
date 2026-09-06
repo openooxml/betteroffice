@@ -65,6 +65,12 @@ export interface ShapeOutline {
   join?: string;
 }
 
+export type BlipEffect =
+  | { type: 'biLevel'; threshold: number }
+  | { type: 'grayscale' }
+  | { type: 'duotone'; shadow: ColorValue | null; highlight: ColorValue | null }
+  | { type: 'colorChange'; from: ColorValue | null; to: ColorValue | null; useAlpha?: boolean };
+
 export interface ShapeSnapshot {
   id: string;
   sourceId: number;
@@ -87,6 +93,7 @@ export interface ShapeSnapshot {
   outline: ShapeOutline | null;
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
+  blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];
   children: ShapeSnapshot[];
@@ -283,6 +290,12 @@ export interface ShapePrimitive extends PrimitiveBase {
   stroke?: Stroke;
 }
 
+/** An `a:blip` colour transform, colours already resolved to `#rrggbbaa`. */
+export type ImageEffect =
+  | { kind: 'biLevel'; threshold: number }
+  | { kind: 'grayscale' }
+  | { kind: 'duotone'; shadow: string; highlight: string }
+  | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };
 export interface ImageCrop {
   left?: number;
   top?: number;
@@ -294,6 +307,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   kind: 'image';
   name: string;
   assetId?: string;
+  /** Applied to the bitmap in order before it is drawn. */
+  effects?: ImageEffect[];
   /** Fraction of the source discarded per edge, from `a:srcRect`. */
   crop?: ImageCrop;
   /** Outline the picture is masked to, when its `spPr` gives it one. */

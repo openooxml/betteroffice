@@ -185,3 +185,22 @@ and byte-identical reopening. Tests require separate transactions for schema
 retain edits, and reopen or reattach without another migration. Historical v9
 and v10 overflow fixtures and the sibling PRs' historical v11 fixtures remain
 independent migration oracles.
+
+`blip-effects-main-v9.update.bin` and `blip-effects-main-v10.update.bin` are
+historical seeds of `../../pptx-render/tests/fixtures/blip-effects.pptx` from
+main `2c90c17f` (schema 9) and `069e4d66` (schema 10) with client ID 312.
+`blip-effects-main-v16.update.bin` is fresh output from main `49ecafba` with
+PR #295 (`dsaad68/pr/pptx-text-overflow` at `394052a4`, schema 16), using its
+locked dependencies and the same client ID. Copy
+`generate_blip_schema_snapshots.rs` into that checkout's
+`crates/pptx-edit/examples/` and run:
+
+```sh
+cargo run --locked -p betteroffice-pptx-edit --example generate_blip_schema_snapshots -- /absolute/path/to/this/branch
+```
+
+The generator asserts schema 16, that the seed carries neither picture effects
+nor `blipEffectsJson` keys, and that the base reopens it unchanged. The tests
+migrate all three seeds to schema 17 without touching the package JSON, recover
+the effects once the source is attached, keep edits, save the source parts byte
+for byte, and reopen or reattach without another migration.

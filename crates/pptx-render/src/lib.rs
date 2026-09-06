@@ -2,9 +2,11 @@
 
 mod chart;
 mod display_list;
+mod image_effects;
 mod layout;
 
 pub use display_list::*;
+pub use image_effects::apply_image_effects;
 pub use layout::*;
 
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
@@ -50,6 +52,8 @@ enum ComposedShape {
         base: ShapeBase,
         #[serde(default)]
         image_part_path: Option<String>,
+        #[serde(default)]
+        effects: Vec<ImageEffect>,
         #[serde(default)]
         crop: ImageCrop,
         #[serde(default)]
@@ -198,6 +202,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             ComposedShape::Picture {
                 base,
                 image_part_path,
+                effects,
                 crop,
                 path,
                 stroke,
@@ -212,6 +217,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     w: base.rect.w,
                     h: base.rect.h,
                     asset_id: image_part_path,
+                    effects,
                     crop,
                     path,
                     stroke: stroke.map(Into::into),
@@ -397,6 +403,15 @@ impl From<ComposedStroke> for Stroke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composed_pictures_keep_their_effects() {
+        let json = r#"{"widthPx":100,"heightPx":100,"shapes":[{"kind":"picture","id":7,"name":"Logo","rect":{"x":0,"y":0,"w":10,"h":10},"rotationDeg":0,"imagePartPath":"logo.png","effects":[{"kind":"biLevel","threshold":0.5}]}]}"#;
+        let list: SurfaceDisplayList = serde_json::from_str(&compile_json(json).unwrap()).unwrap();
+        assert!(
+            matches!(&list.primitives[0], Primitive::Image { effects, .. } if effects == &[ImageEffect::BiLevel { threshold: 0.5 }])
+        );
+    }
 
     #[test]
     fn compiles_shape_and_text_in_paint_order() {

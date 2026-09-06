@@ -9,19 +9,19 @@ use ooxml_drawingml::{
 use ooxml_text::{CompatFlags, FontId, FontStore, break_opportunities, shape, single_line_box};
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
-    Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath, GraphicFrameData,
-    LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill, Placeholder, PptxPackage,
-    RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout, SlideMaster, TextAutofit,
-    TextBody, TextOverflow,
+    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
+    GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
+    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
+    SlideMaster, TextAutofit, TextBody, TextOverflow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
-    PositionedTextLine, PositionedTextRun, Primitive, Stroke, StrokeEnd, SurfaceDisplayList,
-    TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
+    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Stroke, StrokeEnd,
+    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
@@ -526,6 +526,7 @@ impl<'a> LayoutBuilder<'a> {
                     w: rect.w,
                     h: rect.h,
                     asset_id: shape.media_part_path.clone(),
+                    effects: image_effects(&shape.blip_effects, self.theme),
                     crop: source
                         .map(|value| image_crop(&value.crop))
                         .unwrap_or_default(),
@@ -650,6 +651,7 @@ impl<'a> LayoutBuilder<'a> {
                     w: rect.w,
                     h: rect.h,
                     asset_id: value.media_part_path.clone(),
+                    effects: image_effects(&value.effects, self.theme),
                     crop: image_crop(&value.crop),
                     path: picture_mask(value, rect),
                     stroke: self
@@ -2564,6 +2566,33 @@ fn resolved_transform_value(
     }
 }
 
+/// Resolves bitmap effect colours against the theme.
+fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
+    let rgba = |color: Option<&ColorValue>| resolve_color_value_to_rgba_hex(color, Some(theme));
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            BlipEffect::BiLevel { threshold } => Some(ImageEffect::BiLevel {
+                threshold: (*threshold as f32).clamp(0.0, 1.0),
+            }),
+            BlipEffect::Grayscale => Some(ImageEffect::Grayscale),
+            BlipEffect::Duotone { shadow, highlight } => Some(ImageEffect::Duotone {
+                shadow: rgba(shadow.as_ref())?,
+                highlight: rgba(highlight.as_ref())?,
+            }),
+            BlipEffect::ColorChange {
+                from,
+                to,
+                use_alpha,
+            } => Some(ImageEffect::ColorChange {
+                from: rgba(from.as_ref())?,
+                to: rgba(to.as_ref())?,
+                use_alpha: *use_alpha,
+            }),
+        })
+        .collect()
+}
+
 /// A fill or stroke colour, widened to `#RRGGBBAA` only when it is actually translucent.
 fn resolve_paint_color(color: Option<&ColorValue>, theme: &Theme) -> Option<String> {
     let rgba = resolve_color_value_to_rgba_hex(color, Some(theme))?;
@@ -2765,6 +2794,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             w,
             h,
             asset_id: picture.media_part_path.clone(),
+            effects: Vec::new(),
             crop: picture_fill_crop(picture),
             path: (geometry != "rect").then_some(path),
             stroke,
@@ -2987,6 +3017,7 @@ fn utf16_len(value: &str) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use ooxml_drawingml::ThemeColorScheme;
     use std::collections::BTreeSet;
 
     use pptx_edit::{DeckSession, EditCtx};
@@ -3063,6 +3094,7 @@ mod tests {
             },
             relationship_id: None,
             media_part_path: None,
+            effects: Vec::new(),
             crop: PictureCrop::default(),
             geometry: "rect".to_owned(),
             adjust_values: BTreeMap::new(),
@@ -3521,6 +3553,61 @@ mod tests {
             assert_eq!(parse_align(Some(alignment)), TextAlign::Justify);
             assert!(!is_full_justification(Some(alignment)));
         }
+    }
+
+    #[test]
+    fn duotone_colours_resolve_against_the_theme() {
+        let theme = Theme {
+            color_scheme: ThemeColorScheme {
+                lt2: "FFFFFF".to_owned(),
+                ..ThemeColorScheme::default()
+            },
+            ..Theme::default()
+        };
+        let effects = image_effects(
+            &[
+                BlipEffect::Duotone {
+                    shadow: Some(ColorValue {
+                        theme_color: Some("background2".to_owned()),
+                        theme_shade: Some("73".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                    highlight: Some(ColorValue {
+                        rgb: Some("FFFFFF".to_owned()),
+                        ..ColorValue::default()
+                    }),
+                },
+                BlipEffect::BiLevel { threshold: 0.25 },
+            ],
+            &theme,
+        );
+
+        assert_eq!(
+            effects,
+            vec![
+                ImageEffect::Duotone {
+                    shadow: "#737373FF".to_owned(),
+                    highlight: "#FFFFFFFF".to_owned(),
+                },
+                ImageEffect::BiLevel { threshold: 0.25 },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_duotone_is_dropped() {
+        let effects = image_effects(
+            &[BlipEffect::Duotone {
+                shadow: Some(ColorValue::default()),
+                highlight: Some(ColorValue {
+                    rgb: Some("FFFFFF".to_owned()),
+                    ..ColorValue::default()
+                }),
+            }],
+            &Theme::default(),
+        );
+
+        assert!(effects.is_empty());
     }
 
     #[test]
@@ -5397,6 +5484,7 @@ mod tests {
             outline: None,
             resolved_outline_color: None,
             media_part_path: None,
+            blip_effects: Vec::new(),
             graphic: None,
             text_stories: Vec::new(),
             children: Vec::new(),

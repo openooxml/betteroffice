@@ -141,3 +141,62 @@ fn dumps_slides_when_asked() {
         std::fs::write(format!("{directory}/slide-{index}.png"), &rendered.bytes).unwrap();
     }
 }
+
+#[test]
+fn blip_effects_render_on_slides_layouts_and_masters() {
+    use betteroffice_pptx::{ImageEffect, Primitive};
+    let source = include_bytes!("../../pptx-render/tests/fixtures/blip-effects.pptx");
+    let deck = Presentation::open(source).unwrap();
+    let list = deck.render_slide(0).unwrap().display_list;
+    let effects: Vec<_> = list
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Image { name, effects, .. } => Some((name.as_str(), effects.as_slice())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(effects.len(), 8);
+    let duo = ImageEffect::Duotone {
+        shadow: "#737373FF".into(),
+        highlight: "#FFFFFFFF".into(),
+    };
+    let bilevel = ImageEffect::BiLevel { threshold: 0.5 };
+    assert_eq!(effects[0], ("Master duotone", std::slice::from_ref(&duo)));
+    assert_eq!(
+        effects[1],
+        ("Layout biLevel", std::slice::from_ref(&bilevel))
+    );
+    assert_eq!(effects[2], ("Control", [].as_slice()));
+    assert_eq!(effects[3], ("BiLevel", std::slice::from_ref(&bilevel)));
+    assert_eq!(effects[4], ("Duotone", std::slice::from_ref(&duo)));
+    assert!(matches!(
+        effects[6].1,
+        [ImageEffect::ColorChange {
+            use_alpha: false,
+            ..
+        }]
+    ));
+    let png = deck.render_png(0, &RenderOptions::default()).unwrap();
+    let mut reader = png::Decoder::new(Cursor::new(&png.bytes))
+        .read_info()
+        .unwrap();
+    let mut pixels = vec![0; reader.output_buffer_size().unwrap()];
+    let info = reader.next_frame(&mut pixels).unwrap();
+    assert_eq!(info.color_type, png::ColorType::Rgba);
+    let pixel =
+        |x, y| &pixels[(y * info.width as usize + x) * 4..(y * info.width as usize + x) * 4 + 4];
+    for (x, y, expected) in [
+        (40, 40, [3, 167, 223, 255]),
+        (40, 100, [0, 0, 0, 255]),
+        (40, 160, [183, 183, 183, 255]),
+        (136, 220, [208, 208, 208, 255]),
+        (136, 280, [255, 0, 0, 255]),
+        (232, 280, [232, 104, 104, 255]),
+        (40, 340, [124, 124, 124, 255]),
+        (360, 100, [0, 0, 0, 255]),
+        (360, 160, [183, 183, 183, 255]),
+    ] {
+        assert_eq!(pixel(x, y), expected, "pixel ({x}, {y})");
+    }
+}
