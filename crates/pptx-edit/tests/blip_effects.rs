@@ -1,14 +1,28 @@
 use pptx_edit::{DeckSession, EditCtx};
-use yrs::{Any, Map, Out, ReadTxn, Transact};
+use yrs::updates::decoder::Decode;
+use yrs::{Any, Doc, Map, Out, ReadTxn, Transact, Update};
 
 const SOURCE: &[u8] = include_bytes!("../../pptx-render/tests/fixtures/blip-effects.pptx");
 const MAIN_V9: &[u8] = include_bytes!("fixtures/blip-effects-main-v9.update.bin");
-
 const MAIN_V10: &[u8] = include_bytes!("fixtures/blip-effects-main-v10.update.bin");
+const MAIN_V16: &[u8] = include_bytes!("fixtures/blip-effects-main-v16.update.bin");
+
+fn stamped_version(update: &[u8]) -> Option<Out> {
+    let doc = Doc::new();
+    doc.transact_mut()
+        .apply_update(Update::decode_v1(update).unwrap())
+        .unwrap();
+    let txn = doc.transact();
+    txn.get_map("pptx:meta").unwrap().get(&txn, "schemaVersion")
+}
 
 #[test]
 fn main_snapshots_import_blip_effects_without_losing_edits_or_source_parts() {
-    for update in [MAIN_V9, MAIN_V10] {
+    for (update, version) in [(MAIN_V9, 9.0), (MAIN_V10, 10.0), (MAIN_V16, 16.0)] {
+        assert_eq!(
+            stamped_version(update),
+            Some(Out::Any(Any::Number(version)))
+        );
         let migrated = DeckSession::open_from_update(update, 31201).unwrap();
         let txn = migrated.yrs_doc().transact();
         let meta = txn.get_map("pptx:meta").unwrap();
