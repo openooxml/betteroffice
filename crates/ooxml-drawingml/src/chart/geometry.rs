@@ -1581,8 +1581,7 @@ fn category_label(series: &[SeriesView<'_>], index: usize) -> String {
 struct ValueScale {
     min: f64,
     max: f64,
-    /// The spacing between major ticks: `c:majorUnit` when the file names one,
-    /// otherwise a rounded step the bounds were widened to fit.
+    /// `c:majorUnit`, or the rounded step the auto bounds were widened to.
     unit: f64,
     log_base: Option<f64>,
     reversed: bool,
@@ -1715,17 +1714,13 @@ fn plain_range(family: PlotFamily<'_>) -> (f64, f64) {
     (min, max)
 }
 
-/// The smallest `{1, 2, 5} x 10^k` at or above `rough`: the steps a reader
-/// expects an axis to count in. Rounding up rather than to the nearest is what
-/// keeps the promise `rough` carries — no more than one label per
-/// `LABEL_PITCH_PX` — since the nice values sit up to 2.5x apart and rounding
-/// down would nearly double the tick count.
+/// The smallest `{1, 2, 5} x 10^k` at or above `rough`.
 fn nice_unit(rough: f64) -> f64 {
     if rough <= 0.0 || !rough.is_finite() {
         return 1.0;
     }
     let decade = 10.0_f64.powf(rough.log10().floor());
-    // 0.5 / 0.1 is 5.000000000000001, which would otherwise step to 1.0.
+    // 0.5 / 0.1 is 5.000000000000001.
     let scaled = rough / decade * (1.0 - 1e-9);
     let nice = if scaled <= 1.0 {
         1.0
@@ -1744,12 +1739,7 @@ fn nice_unit(rough: f64) -> f64 {
     }
 }
 
-/// How many major intervals to aim for along `extent` px of axis: one label
-/// per `LABEL_PITCH_PX`, never fewer than two and never more than twelve. The
-/// upper bound is what stops a wide axis from asking for a hairline grid, and
-/// the lower one is what stops a 24px plot from asking for none. A transposed
-/// family passes its plot width here and an upright one its height, so the
-/// same chart on its side picks a different unit.
+/// Major intervals to aim for along `extent` px: one label per 20px, clamped to `2..=12`.
 fn target_intervals(extent: f64) -> f64 {
     const LABEL_PITCH_PX: f64 = 20.0;
     let target = extent / LABEL_PITCH_PX;
@@ -1760,9 +1750,7 @@ fn target_intervals(extent: f64) -> f64 {
     }
 }
 
-/// `value` moved outward to a multiple of `unit`. The epsilon keeps a bound
-/// that already sits on a tick — 1.0 against a 0.2 unit — from gaining a whole
-/// extra interval to floating-point noise.
+/// `value` moved outward to a multiple of `unit`.
 fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
     let steps = value / unit;
     if !steps.is_finite() {
@@ -1776,7 +1764,7 @@ fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
     if !rounded.is_finite() {
         return value;
     }
-    // `(-1e-9).ceil() * unit` is negative zero, which formats as "-0".
+    // `(-1e-9).ceil() * unit` is -0.0, which formats as "-0".
     if rounded == 0.0 { 0.0 } else { rounded }
 }
 
@@ -1830,8 +1818,6 @@ fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
         .and_then(|axis| axis.major_unit)
         .filter(|unit| unit.is_finite() && *unit > 0.0)
         .unwrap_or_else(|| nice_unit((max - min) / target_intervals(extent)));
-    // A log axis ticks in powers of its base, so a linear unit must not touch
-    // its bounds. Author-declared bounds are the author's numbers and stay.
     if log_base.is_none() {
         if pinned_min.is_none() {
             min = round_to_unit(min, unit, false);
@@ -1850,9 +1836,7 @@ fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
     }
 }
 
-/// The tick values of `scale`: powers of the base on a log axis, otherwise a
-/// walk in `unit` — the caller's minor unit when it passes one, and the
-/// scale's own major unit when it does not.
+/// Tick values: powers of the base on a log axis, else a walk in `unit` or the scale's own.
 fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     let span = scale.max - scale.min;
     if let Some(base) = scale.log_base {
