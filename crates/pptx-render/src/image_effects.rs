@@ -29,6 +29,11 @@ pub fn apply_image_effects(data: &mut [u8], effects: &[ImageEffect]) {
                             + f64::from(highlight[channel]) * ratio)
                             .round() as u8;
                     }
+                    // An endpoint may be translucent. It modulates the source's own alpha
+                    // rather than replacing it, or a transparent pixel would turn opaque.
+                    let endpoint =
+                        f64::from(shadow[3]) * (1.0 - ratio) + f64::from(highlight[3]) * ratio;
+                    pixel[3] = (f64::from(pixel[3]) * endpoint / 255.0).round() as u8;
                 }
             }
             ImageEffect::ColorChange {
@@ -79,6 +84,29 @@ fn rgba(value: &str) -> Option<[u8; 4]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_duotone_endpoint_modulates_alpha_instead_of_replacing_it() {
+        let mut data = [255, 255, 255, 200, 0, 0, 0, 0];
+        apply_image_effects(
+            &mut data,
+            &[ImageEffect::Duotone {
+                shadow: "#000000ff".to_owned(),
+                highlight: "#ffffff80".to_owned(),
+            }],
+        );
+        assert_eq!(data, [255, 255, 255, 100, 0, 0, 0, 0]);
+
+        let mut opaque = [255, 255, 255, 200];
+        apply_image_effects(
+            &mut opaque,
+            &[ImageEffect::Duotone {
+                shadow: "#000000".to_owned(),
+                highlight: "#ffffff".to_owned(),
+            }],
+        );
+        assert_eq!(opaque, [255, 255, 255, 200]);
+    }
 
     #[test]
     fn effects_preserve_order_luma_and_alpha_semantics() {
