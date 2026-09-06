@@ -991,6 +991,7 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
                 .attribute("startAt")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(1),
+            restart: value.attribute("startAt").is_some(),
         })
     };
     ParagraphProperties {
@@ -1863,5 +1864,36 @@ mod tests {
         let actual = values.get(name).unwrap();
         assert_eq!(actual.value, expected);
         assert_eq!(actual.extent_power, expected_power);
+    }
+
+    #[test]
+    fn autonumber_start_presence_survives_parsing_and_default_serialization() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        for (attribute, start_at, restart) in [
+            ("", 1, false),
+            (" startAt=\"1\"", 1, true),
+            (" startAt=\"7\"", 7, true),
+        ] {
+            let xml = format!("<a:pPr><a:buAutoNum type=\"arabicPeriod\"{attribute}/></a:pPr>");
+            let root = parse_xml(xml.as_bytes(), "text.xml", &mut budget).unwrap();
+            let bullet = parse_paragraph_properties(Some(&root)).bullet.unwrap();
+            assert_eq!(
+                bullet,
+                Bullet::AutoNumber {
+                    scheme: "arabicPeriod".to_owned(),
+                    start_at,
+                    restart
+                }
+            );
+            let json = serde_json::to_string(&bullet).unwrap();
+            assert_eq!(serde_json::from_str::<Bullet>(&json).unwrap(), bullet);
+            if !restart {
+                assert_eq!(
+                    json,
+                    r#"{"type":"autoNumber","scheme":"arabicPeriod","startAt":1}"#
+                );
+            }
+        }
     }
 }

@@ -436,8 +436,15 @@ pub enum BulletSize {
     rename_all_fields = "camelCase"
 )]
 pub enum Bullet {
-    Character { value: String },
-    AutoNumber { scheme: String, start_at: u32 },
+    Character {
+        value: String,
+    },
+    AutoNumber {
+        scheme: String,
+        start_at: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        restart: bool,
+    },
     None,
 }
 
