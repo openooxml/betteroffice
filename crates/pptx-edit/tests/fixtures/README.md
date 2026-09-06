@@ -73,3 +73,8 @@ were generated on main `2c90c17f` from
 `../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
 The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
 They test v9 to v10 migration, source baseline recovery, and preservation of edits.
+
+`outer-shadow-main-v10.update.bin` was generated on main `069e4d66` by opening
+`crates/pptx-render/tests/fixtures/outer-shadow.pptx` with client 33400 and calling
+`DeckSession::encode_state_as_update_v1`. It exercises v10 to v11 migration and
+persistence of effects restored from the source package.

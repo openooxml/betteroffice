@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, Theme, ThemeFormatScheme,
+    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, Theme,
+    ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 

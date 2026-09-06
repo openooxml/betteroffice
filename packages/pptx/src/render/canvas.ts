@@ -5,7 +5,6 @@ import type {
   Paint,
   PlaceholderPrimitive,
   PositionedTextRun,
-  Shadow,
   ShapePrimitive,
   SlideDisplayList,
   SlidePrimitive,
@@ -125,16 +124,66 @@ function paintShape(
   shape: ShapePrimitive,
   deviceScale: number
 ): void {
+  if (shape.shadow && (shape.fill || shape.stroke)) {
+    paintShadowedShape(ctx, shape, deviceScale);
+  }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
   if (shape.fill) {
-    if (shape.shadow) applyShadow(ctx, shape.shadow, deviceScale);
     ctx.fillStyle = paintStyle(ctx, shape.fill, shape.x, shape.y, shape.w, shape.h);
     ctx.fill();
-    if (shape.shadow) clearShadow(ctx);
   }
   if (shape.stroke) {
     strokeCurrentPath(ctx, shape.stroke);
     paintLineEnds(ctx, shape);
+  }
+}
+
+function paintShadowedShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapePrimitive,
+  deviceScale: number
+): void {
+  const transform = ctx.getTransform();
+  const points = pathPoints(shape);
+  if (!points.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    const px = transform.a * x + transform.c * y + transform.e;
+    const py = transform.b * x + transform.d * y + transform.f;
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  }
+  const shadow = shape.shadow!;
+  const sigma = Math.min(Math.max(shadow.blur ?? 0, 0) * deviceScale / 2, 128);
+  const spread = sigma * 3 + 1;
+  const outline = (shape.stroke?.width ?? 0) * deviceScale * 2;
+  const dx = (shadow.dx ?? 0) * deviceScale;
+  const dy = (shadow.dy ?? 0) * deviceScale;
+  const left = Math.floor(Math.max(minX - outline, -spread - dx));
+  const top = Math.floor(Math.max(minY - outline, -spread - dy));
+  const right = Math.ceil(Math.min(maxX + outline, ctx.canvas.width + spread - dx));
+  const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
+  if (right <= left || bottom <= top) return;
+  const layer = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(right - left, bottom - top)
+    : Object.assign(document.createElement('canvas'), { width: right - left, height: bottom - top });
+  const scratch = layer.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!scratch) return;
+  scratch.setTransform(transform.a, transform.b, transform.c, transform.d, transform.e - left, transform.f - top);
+  paintShape(scratch, { ...shape, shadow: undefined }, deviceScale);
+  scratch.setTransform(1, 0, 0, 1, 0, 0);
+  scratch.globalCompositeOperation = 'source-in';
+  scratch.fillStyle = shadow.color;
+  scratch.fillRect(0, 0, layer.width, layer.height);
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = `blur(${sigma}px)`;
+    ctx.drawImage(layer, left + dx, top + dy);
+  } finally {
+    ctx.restore();
   }
 }
 
@@ -233,19 +282,9 @@ function paintLineEnd(
 }
 
 /** Canvas shadow offsets and blur ignore the current transform, so they carry the device scale. */
-function applyShadow(ctx: CanvasRenderingContext2D, shadow: Shadow, deviceScale: number): void {
-  ctx.shadowColor = shadow.color;
-  ctx.shadowBlur = (shadow.blur ?? 0) * deviceScale;
-  ctx.shadowOffsetX = (shadow.dx ?? 0) * deviceScale;
-  ctx.shadowOffsetY = (shadow.dy ?? 0) * deviceScale;
-}
 
-function clearShadow(ctx: CanvasRenderingContext2D): void {
-  ctx.shadowColor = 'transparent';
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-}
+
+
 
 /** Draws the cropped source through the picture's outline. */
 function drawCropped(

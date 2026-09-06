@@ -43,11 +43,11 @@ fn a_filled_shape_carries_its_shadow_into_the_display_list() {
 }
 
 #[test]
-fn an_unfilled_shape_casts_no_shadow() {
+fn an_unfilled_shape_casts_its_outline_shadow() {
     let shadows = shadows();
     let (_, shadow) = shadows
         .iter()
         .find(|(object_id, _)| *object_id == 3)
         .expect("the unfilled card is drawn");
-    assert_eq!(*shadow, None);
+    assert_eq!(shadow.as_ref().unwrap().color, "#00000066");
 }

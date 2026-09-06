@@ -57,7 +57,7 @@ pub struct ShapeOutline {
     pub tail_end: Option<LineEnd>,
 }
 
-/// `a:effectLst`, limited to the effects a renderer can paint today.
+/// Shape effects.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeEffects {
@@ -65,18 +65,42 @@ pub struct ShapeEffects {
     pub outer_shadow: Option<OuterShadow>,
 }
 
-/// `a:outerShdw`, in OOXML units: EMU lengths, 60000ths of a degree.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+/// Outer shadow in EMUs and 60000ths of a degree.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OuterShadow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<ColorValue>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
     pub blur_radius: i64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
     pub distance: i64,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_zero_emu")]
     pub direction: i64,
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub rotate_with_shape: bool,
+}
+
+impl Default for OuterShadow {
+    fn default() -> Self {
+        Self {
+            color: None,
+            blur_radius: 0,
+            distance: 0,
+            direction: 0,
+            rotate_with_shape: true,
+        }
+    }
+}
+
+fn is_zero_emu(value: &i64) -> bool {
+    *value == 0
+}
+fn default_true() -> bool {
+    true
+}
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

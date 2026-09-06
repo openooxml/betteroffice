@@ -21,10 +21,21 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 10.0;
+const SCHEMA_VERSION: f64 = 11.0;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 10] =
-    [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 11] = [
+    1.0,
+    2.0,
+    3.0,
+    4.0,
+    5.0,
+    6.0,
+    7.0,
+    8.0,
+    9.0,
+    10.0,
+    SCHEMA_VERSION,
+];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -201,7 +212,7 @@ fn seeded_child_path(path: &str, child_index: usize) -> String {
     format!("{path}.{child_index}")
 }
 
-fn shape_base(shape: &ShapeNode) -> &ShapeBase {
+pub(crate) fn shape_base(shape: &ShapeNode) -> &ShapeBase {
     match shape {
         ShapeNode::Shape(shape) => &shape.base,
         ShapeNode::Picture(shape) => &shape.base,
@@ -897,6 +908,10 @@ pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     }
     if version < 10.0 {
         migrate_doc_to_v10(doc)?;
+    }
+    if version < 11.0 {
+        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+        required_map(&txn, META)?.insert(&mut txn, "schemaVersion", 11.0);
     }
     Ok(())
 }
@@ -1600,7 +1615,8 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9_then_v10() {
+    fn legacy_migrations_commit_v3_then_v4_then_v5_then_v6_then_v7_then_v8_then_v9_then_v10_then_v11()
+     {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
@@ -1610,9 +1626,9 @@ mod tests {
         const V3: &[u8] =
             include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
         for (update, expected_versions) in [
-            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
-            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
+            (V1, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+            (V3, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
         ] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
@@ -1685,14 +1701,19 @@ mod tests {
             (
                 V2,
                 V4_LEGACY,
-                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
                 1,
             ),
-            (V4_STYLES, V4_STYLES, vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0], 1),
+            (
+                V4_STYLES,
+                V4_STYLES,
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
+                1,
+            ),
             (
                 V4_NUMBERED,
                 V4_NUMBERED,
-                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+                vec![5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
                 10,
             ),
         ] {
@@ -1756,9 +1777,9 @@ mod tests {
         const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
         const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
         for (update, versions) in [
-            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]),
-            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0]),
-            (V6, vec![7.0, 8.0, 9.0, 10.0]),
+            (V2, vec![3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+            (V5, vec![6.0, 7.0, 8.0, 9.0, 10.0, 11.0]),
+            (V6, vec![7.0, 8.0, 9.0, 10.0, 11.0]),
         ] {
             let doc = crate::doc_with_client_id(9430);
             doc.transact_mut()
@@ -1999,7 +2020,8 @@ mod tests {
             [
                 (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
                 (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (10.0, before, Some("legacy".to_owned()), Some(true))
+                (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
+                (11.0, before, Some("legacy".to_owned()), Some(true))
             ]
         );
     }

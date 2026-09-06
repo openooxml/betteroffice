@@ -17,6 +17,7 @@ use yrs::{
 mod baseline;
 mod comments;
 mod deck;
+mod effects;
 mod model;
 mod save;
 mod story;
@@ -161,6 +162,7 @@ impl DeckSession {
         comments::import_source_comments(&session, &package)?;
         deck::import_source_list_styles(&session.doc, &package)?;
         baseline::import_source(&session, &package)?;
+        effects::import_source(&session.doc, &package)?;
         Ok(Self {
             package: Arc::new(package),
             ..session

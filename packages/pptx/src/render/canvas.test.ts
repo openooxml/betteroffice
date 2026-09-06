@@ -695,63 +695,79 @@ describe('PPTX picture cropping', () => {
 describe('PPTX shape shadows', () => {
   function harness() {
     const calls: string[] = [];
-    const state: Record<string, unknown> = {
-      fill: () => calls.push(`fill:${state.shadowColor},${state.shadowBlur},${state.shadowOffsetX},${state.shadowOffsetY}`),
-      stroke: () =>
-        calls.push(`stroke:${state.shadowColor},${state.shadowBlur},${state.shadowOffsetX},${state.shadowOffsetY}`),
+    const makeContext = (name: string) => {
+      const state: Record<string, unknown> = {
+        canvas: { width: 480, height: 480 }, filter: 'none',
+        getTransform: () => ({ a: 3, b: 0, c: 0, d: 3, e: 0, f: 0 }),
+        fill: () => calls.push(`${name}:fill`),
+        stroke: () => calls.push(`${name}:stroke`),
+        fillRect: () => calls.push(`${name}:tint:${state.globalCompositeOperation}:${state.fillStyle}`),
+        drawImage: (_image: unknown, x: number, y: number) => calls.push(`${name}:shadow:${state.filter}:${x},${y}`),
+      };
+      const filters: unknown[] = [];
+      state.save = () => filters.push(state.filter);
+      state.restore = () => { state.filter = filters.pop(); };
+      return new Proxy(state, {
+        get: (target, key) => target[key as string] ?? (() => undefined),
+        set: (target, key, value) => { target[key as string] = value; return true; },
+      }) as unknown as CanvasRenderingContext2D;
     };
-    const ctx = new Proxy(state, {
-      get(target, property) {
-        if (property in target) return target[property as string];
-        return () => undefined;
-      },
-      set(target, property, value) {
-        target[property as string] = value;
-        return true;
-      },
-    }) as unknown as CanvasRenderingContext2D;
-    return { calls, ctx };
+    const previous = globalThis.OffscreenCanvas;
+    Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, writable: true, value: class {
+      constructor(public width: number, public height: number) {}
+      getContext() { return makeContext('mask'); }
+    } });
+    return { calls, ctx: makeContext('main'), restore: () => {
+      Object.defineProperty(globalThis, 'OffscreenCanvas', { configurable: true, writable: true, value: previous });
+    } };
   }
 
-  function list(shadow: Record<string, number | string> | undefined): SlideDisplayList {
+  function list(shadow: ShapePrimitive['shadow']): SlideDisplayList {
     return {
-      contractVersion: 1,
-      width: 160,
-      height: 160,
-      primitives: [
-        {
-          kind: 'shape',
-          objectId: 1,
-          name: 'card',
-          x: 40,
-          y: 40,
-          w: 40,
-          h: 40,
-          geometry: 'rect',
-          path: [
-            { type: 'move', x: 0, y: 0 },
-            { type: 'line', x: 1, y: 0 },
-            { type: 'line', x: 1, y: 1 },
-            { type: 'close' },
-          ],
-          fill: { kind: 'solid', color: '#4472c4' },
-          stroke: { color: '#10235b', width: 2 },
-          ...(shadow ? { shadow } : {}),
-        },
-      ],
-    } as SlideDisplayList;
+      contractVersion: 1, width: 160, height: 160,
+      primitives: [{
+        kind: 'shape', objectId: 1, name: 'card', x: 40, y: 40, w: 40, h: 40,
+        geometry: 'rect', path: [
+          { type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 0 },
+          { type: 'line', x: 1, y: 1 }, { type: 'line', x: 0, y: 1 }, { type: 'close' },
+        ],
+        fill: { kind: 'solid', color: '#4472c480' },
+        stroke: { color: '#10235b', width: 2 }, shadow,
+      }],
+    };
   }
 
-  test('a shadowed shape fills under a shadow scaled to the device and strokes without one', async () => {
-    const { calls, ctx } = harness();
-    await paintSlide(ctx, list({ color: '#00000066', blur: 8, dx: 6, dy: 6 }), 2, 1.5);
-    expect(calls).toEqual(['fill:#00000066,24,18,18', 'stroke:transparent,0,0,0']);
+  test('a shadow combines fill and outline alpha and scales blur and offset to the device', async () => {
+    const { calls, ctx, restore } = harness();
+    try {
+      await paintSlide(ctx, list({ color: '#00000066', blur: 8, dx: 6, dy: 6 }), 2, 1.5);
+      expect(calls).toEqual([
+        'mask:fill', 'mask:stroke', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(12px):126,126', 'main:fill', 'main:stroke',
+      ]);
+      expect(ctx.filter).toBe('none');
+    } finally { restore(); }
   });
 
   test('an unshadowed shape leaves the shadow state alone', async () => {
-    const { calls, ctx } = harness();
-    await paintSlide(ctx, list(undefined), 1, 1);
-    expect(calls).toEqual(['fill:undefined,undefined,undefined,undefined', 'stroke:undefined,undefined,undefined,undefined']);
+    const { calls, ctx, restore } = harness();
+    try {
+      await paintSlide(ctx, list(undefined), 1, 1);
+      expect(calls).toEqual(['main:fill', 'main:stroke']);
+    } finally { restore(); }
+  });
+
+  test('an unfilled outline casts a shadow even at zero blur and offset', async () => {
+    const { calls, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      (display.primitives[0] as ShapePrimitive).fill = undefined;
+      await paintSlide(ctx, display, 2, 1.5);
+      expect(calls).toEqual([
+        'mask:stroke', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):108,108', 'main:stroke',
+      ]);
+    } finally { restore(); }
   });
 });
 
