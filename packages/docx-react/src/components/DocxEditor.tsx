@@ -121,6 +121,8 @@ export interface DocxEditorProps {
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Whether Save also downloads a copy. Defaults to true. */
+  downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
   collaboration?: DocxEditorCollaborationOptions;
   /**
@@ -553,6 +555,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    downloadOnSave = true,
     collaboration,
     onOpen,
     author = 'User',
@@ -884,6 +887,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     comments,
     documentName,
     onSave,
+    downloadOnSave,
     onOpen,
     onError,
     onPrint,

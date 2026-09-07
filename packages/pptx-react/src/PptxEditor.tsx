@@ -102,6 +102,7 @@ export interface PptxTextSelection {
 }
 
 export interface PptxEditorApi {
+  focus: () => void;
   handle: PresentationHandle;
   refresh: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
@@ -453,7 +454,12 @@ function PptxEditorContent({
           setLoading(false);
           setCollaborationReplica(handle);
           const opened = handle;
-          onReadyRef.current?.({ handle: opened, refresh, save: () => opened.save() });
+          onReadyRef.current?.({
+            handle: opened,
+            refresh,
+            save: () => opened.save(),
+            focus: () => stageRef.current?.focus(),
+          });
         } catch (value) {
           setLoading(false);
           reportError(value);

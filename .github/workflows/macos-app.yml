@@ -12,6 +12,11 @@ on:
   pull_request:
     paths:
       - 'apps/native-viewer/**'
+      - 'apps/desktop/**'
+      - 'packages/**'
+      - 'crates/**'
+      - 'scripts/*wasm*'
+      - 'bun.lock'
       - '.github/workflows/macos-app.yml'
 
 concurrency:
@@ -33,7 +38,32 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: wasm32-unknown-unknown
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.3.14'
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install Binaryen
+        run: brew install binaryen
+
+      - name: Build shared desktop editors
+        run: apps/native-viewer/macos/build-editor.sh
+
+      - name: Verify desktop shell
+        run: |
+          bun run --filter @betteroffice/desktop typecheck
+          bun run --filter @betteroffice/desktop test
+          apps/native-viewer/macos/test-desktop.sh
+
+      - name: Verify editor flows
+        run: |
+          bunx playwright install chromium
+          bun apps/desktop/tests/smoke.ts
 
       - name: Resolve version
         id: version
@@ -68,6 +98,7 @@ jobs:
         env:
           BUILD_VERSION: ${{ steps.version.outputs.build }}
           BUNDLE_VERSION: ${{ steps.version.outputs.bundle_version }}
+          BETTEROFFICE_DESKTOP_PREBUILT: 1
         run: |
           for format in docx xlsx pptx; do
             apps/native-viewer/macos/build-app.sh \

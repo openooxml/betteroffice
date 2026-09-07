@@ -20,7 +20,6 @@ case "$format" in
         icon_variant=doc
         type_name="Word document"
         content_type=org.openxmlformats.wordprocessingml.document
-        welcome=betteroffice-demo.docx
         ;;
     xlsx)
         app_name="BetterOffice Sheets"
@@ -29,7 +28,6 @@ case "$format" in
         icon_variant=sheet
         type_name="Excel workbook"
         content_type=org.openxmlformats.spreadsheetml.sheet
-        welcome=sample.xlsx
         ;;
     pptx)
         app_name="BetterOffice Slides"
@@ -38,7 +36,6 @@ case "$format" in
         icon_variant=deck
         type_name="PowerPoint presentation"
         content_type=org.openxmlformats.presentationml.presentation
-        welcome=betteroffice-demo.pptx
         ;;
     *)
         echo "FORMAT must be docx, xlsx, or pptx" >&2
@@ -49,8 +46,8 @@ esac
 script_dir=$(cd "$(dirname "$0")" && pwd)
 repo_root=$(cd "$script_dir/../../.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/apps/native-viewer/target"}
-deployment_target=${MACOSX_DEPLOYMENT_TARGET:-12.0}
-binary_name=betteroffice-native-viewer
+deployment_target=${MACOSX_DEPLOYMENT_TARGET:-13.3}
+launcher_name=betteroffice-desktop
 app_path="$output_dir/$app_name.app"
 
 if [[ ! $version =~ ^[0-9]+([.][0-9]+){0,2}$ ]]; then
@@ -63,30 +60,32 @@ if [[ ! $build_version =~ ^[0-9]+([.][0-9]+)*$ ]]; then
     exit 2
 fi
 
-mkdir -p "$output_dir"
+if [[ ${BETTEROFFICE_DESKTOP_PREBUILT:-0} != 1 ]]; then
+    "$script_dir/build-editor.sh"
+fi
+if [[ ! -f "$repo_root/apps/desktop/dist/index.html" ]]; then
+    echo "build the desktop editor with $script_dir/build-editor.sh first" >&2
+    exit 1
+fi
+
+mkdir -p "$output_dir" "$target_dir"
 rm -rf "$app_path"
 
-export CARGO_TARGET_DIR="$target_dir"
-export MACOSX_DEPLOYMENT_TARGET="$deployment_target"
-
-for target in aarch64-apple-darwin x86_64-apple-darwin; do
-    cargo build \
-        --locked \
-        --release \
-        --no-default-features \
-        --features "$format" \
-        --target "$target" \
-        --manifest-path "$repo_root/apps/native-viewer/Cargo.toml"
-done
-
 mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+for arch in arm64 x86_64; do
+    swiftc -O -parse-as-library \
+        -target "$arch-apple-macosx$deployment_target" \
+        "$script_dir/DesktopServer.swift" "$script_dir/Desktop.swift" \
+        -o "$target_dir/$launcher_name-$arch"
+done
 xcrun lipo -create \
-    "$target_dir/aarch64-apple-darwin/release/$binary_name" \
-    "$target_dir/x86_64-apple-darwin/release/$binary_name" \
-    -output "$app_path/Contents/MacOS/$binary_name"
-chmod 755 "$app_path/Contents/MacOS/$binary_name"
+    "$target_dir/$launcher_name-arm64" "$target_dir/$launcher_name-x86_64" \
+    -output "$app_path/Contents/MacOS/$launcher_name"
+cp -R "$repo_root/apps/desktop/dist" "$app_path/Contents/Resources/Editor"
 
 cp "$script_dir/Info.plist" "$app_path/Contents/Info.plist"
+plutil -replace CFBundleExecutable -string "$launcher_name" "$app_path/Contents/Info.plist"
+plutil -insert BetterOfficeFormat -string "$format" "$app_path/Contents/Info.plist"
 plutil -replace CFBundleDisplayName -string "$app_name" "$app_path/Contents/Info.plist"
 plutil -replace CFBundleName -string "$app_name" "$app_path/Contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$bundle_id" "$app_path/Contents/Info.plist"
@@ -122,7 +121,6 @@ done
 swift "$script_dir/package-icns.swift" \
     "$icon_set" "$app_path/Contents/Resources/AppIcon.icns"
 
-cp "$repo_root/apps/demo/public/$welcome" "$app_path/Contents/Resources/Welcome.$extension"
 plutil -lint "$app_path/Contents/Info.plist" >/dev/null
-xcrun lipo "$app_path/Contents/MacOS/$binary_name" -verify_arch arm64 x86_64
+xcrun lipo "$app_path/Contents/MacOS/$launcher_name" -verify_arch arm64 x86_64
 printf '%s\n' "$app_path"

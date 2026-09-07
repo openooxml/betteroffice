@@ -2,7 +2,16 @@
 
 `build-app.sh FORMAT OUTPUT_DIR VERSION BUILD_VERSION` builds one of `docx`,
 `xlsx`, or `pptx` for both architectures, merges it into a universal binary,
-and assembles the matching BetterOffice app with its icon and Welcome file.
+and assembles the matching BetterOffice app with its icon, native macOS shell,
+and bundled shared editors. Launching the app shows a minimal start screen with
+Open and recent files. The shell requires macOS 13.3 or later and uses the same
+DOCX, XLSX, and PPTX editor components as the web apps.
+
+The build requires Bun, wasm-pack 0.15.0, Binaryen, and the Rust
+`wasm32-unknown-unknown` target. Swift builds the shell for both Mac architectures. It builds
+editor assets automatically. To build assets once for all three bundles, run
+`build-editor.sh` first, then set `BETTEROFFICE_DESKTOP_PREBUILT=1` when calling
+`build-app.sh`. The Rust/Vello viewer remains available from `apps/native-viewer` through Cargo.
 `package-dmg.sh DOCS_APP SHEETS_APP SLIDES_APP DMG` packages the suite with an
 `/Applications` symlink.
 

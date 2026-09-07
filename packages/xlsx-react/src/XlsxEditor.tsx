@@ -76,6 +76,7 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
  * external caller (e.g. a demo agent) stages proposals on the same handle.
  */
 export interface XlsxEditorApi {
+  focus: () => void;
   handle: WorkbookHandle;
   refreshProposals: () => void;
 }
@@ -562,7 +563,11 @@ function XlsxEditorContent({
           setCollaborationReplica(handle);
           setError(null);
           refreshProposals();
-          const cleanup = onReadyRef.current?.({ handle, refreshProposals });
+          const cleanup = onReadyRef.current?.({
+            handle,
+            refreshProposals,
+            focus: () => scrollRef.current?.focus(),
+          });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
           runReadyCleanup();
