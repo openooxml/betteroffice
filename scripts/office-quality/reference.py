@@ -108,9 +108,16 @@ end run
             if document.page_count == 0:
                 raise ValueError('Office exported no pages')
             fonts = set()
+            page_bounds = []
             for index, page in enumerate(document):
-                page.get_pixmap(dpi=args.dpi, alpha=False).save(args.out / f'page_{index + 1:04d}.png')
+                pixmap = page.get_pixmap(dpi=args.dpi, alpha=False)
+                pixmap.save(args.out / f'page_{index + 1:04d}.png')
                 fonts.update(font[3] for font in page.get_fonts())
+                if extension == '.docx' and args.dpi == 150:
+                    page_bounds.append(dict(width_pt=page.rect.width, height_pt=page.rect.height,
+                                            width_px=pixmap.width, height_px=pixmap.height))
+            if page_bounds:
+                record['capture_profile'] = dict(kind='office-page-bounds', pages=page_bounds)
             record.update(status='ok', pages=len(document), fonts=sorted(fonts), pdf_metadata=document.metadata)
         shutil.copy2(pdf, args.out / 'reference.pdf')
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError, OSError, fitz.FileDataError) as error:

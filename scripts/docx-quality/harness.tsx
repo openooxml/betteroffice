@@ -4,6 +4,11 @@ import { DocxEditor } from '@betteroffice/docx-react';
 import { setGoogleFontsEnabled } from '@betteroffice/docx/utils';
 import '@betteroffice/docx-react/styles.css';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
+import {
+  capturePageExtent,
+  validatePageBounds,
+  type OfficePageBounds,
+} from '../office-quality/page-bounds';
 
 const provider = createFontProvider();
 setGoogleFontsEnabled(false);
@@ -43,7 +48,11 @@ let editor: React.RefObject<any>;
 let root: ReturnType<typeof createRoot>;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const api = window as any;
-api.oracleInit = async (input: number[], fonts: boolean) => {
+let captureProfile: OfficePageBounds | null = null;
+const pageExtents: ReturnType<typeof capturePageExtent>[] = [];
+api.oracleInit = async (input: number[], fonts: boolean, profile?: unknown) => {
+  captureProfile = validatePageBounds(profile);
+  pageExtents.length = 0;
   fontLoads.length = 0;
   const bytes = new Uint8Array(input).buffer;
   root?.unmount();
@@ -93,19 +102,27 @@ api.oraclePage = async (index: number) => {
       `canvas[data-page-index="${index}"]`
     );
     if (canvas?.width && canvas?.height) {
+      const extent = capturePageExtent(captureProfile, index, canvas.width, canvas.height);
       const output = document.createElement('canvas');
-      output.width = canvas.width;
-      output.height = canvas.height;
+      output.width = extent.output.width_px;
+      output.height = extent.output.height_px;
       const context = output.getContext('2d')!;
       context.fillStyle = '#ffffff';
       context.fillRect(0, 0, output.width, output.height);
       context.drawImage(canvas, 0, 0);
       const value = output.toDataURL('image/png');
       equal = value === previous ? equal + 1 : 0;
-      if (equal >= 2) return value;
+      if (equal >= 2) {
+        pageExtents[index] = extent;
+        return value;
+      }
       previous = value;
     }
     await sleep(200);
   }
 };
+api.oracleCaptureMetadata = () => ({
+  capture_profile: captureProfile,
+  page_extents: pageExtents,
+});
 api.oracleReady = true;

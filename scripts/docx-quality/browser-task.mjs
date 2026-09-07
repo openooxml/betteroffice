@@ -122,12 +122,14 @@ try {
       Buffer.from(png.split(',')[1], 'base64')
     );
   }
+  const captureMetadata = await page.evaluate(() => window.oracleCaptureMetadata?.() ?? {});
   if (networkViolations.length)
     throw new Error(`Unexpected external requests: ${JSON.stringify(networkViolations)}`);
   const record = {
     status: 'ok',
     ...metadata,
     ...result,
+    ...captureMetadata,
     logs,
     externalRequests,
     ms: performance.now() - start,

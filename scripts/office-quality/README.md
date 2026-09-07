@@ -1,6 +1,6 @@
 # Office visual quality harness
 
-Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and generated files stay in ignored `.source/office-quality/`; the benchmark downloads the three public demo references listed below.
+Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and generated files stay in ignored `.source/office-quality/`; references come from the public corpus.
 
 ## Local benchmark
 
@@ -19,7 +19,7 @@ QUALITY_OUTPUT=.source/office-quality/run \
 node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 ```
 
-The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. Set `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset; all three demos run by default.
+The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the three demos and 48 English Open XML SDK fixtures. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
 
 ## Manual CI and generated README
 
@@ -29,7 +29,7 @@ After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main
 gh workflow run visual-fidelity.yml --ref main -f branch=main
 ```
 
-Keep `--ref main`; set `branch` to the repository branch to measure. The action uses existing bot credentials to update the [README scores](../../README.md#visual-fidelity) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. CI retains score JSON and generated Markdown; documents and page images are excluded from uploaded artifacts.
+Keep `--ref main`; set `branch` to the repository branch to measure. The optional `collection` and `samples` inputs select the corpus as above. The action uses existing bot credentials to update the [README scores](../../README.md#visual-fidelity) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. CI retains score JSON and generated Markdown; documents and page images are excluded from uploaded artifacts.
 
 ## Office references
 
@@ -41,6 +41,8 @@ Requires macOS and desktop Word, PowerPoint, or Excel. Run exports serially into
 ```
 
 The extension selects the app. Output includes `reference.pdf`, numbered PNGs at 150 DPI, and `result.json` with source hashes, Office/macOS versions, font names, UTC timestamps, and export status. The timeout defaults to 120 seconds; override it with `--timeout`.
+
+DOCX references record each PDF page's physical and raster bounds. The capture profile permits a one-pixel canvas extent difference on each axis, adding white space or clipping at the right/bottom edge without moving or resampling rendered content. Larger differences fail; extra renderer pages retain their native bounds. Captures record the original and output dimensions for each page.
 
 For XLSX comparisons, add `--xlsx-profile /path/to/profile.json`. The profile specifies `scale_percent`, `margin_pt`, and `pages` with zero-based `sheet` indices and A1 `range` values. Each range must fit one page. The demo's nine-page profile is stored in its metadata under `reference.capture_profile`. This measures worksheet range rendering, not automatic print pagination; frozen panes are unsupported. Print settings apply only to the temporary workbook, leaving source bytes unchanged.
 
@@ -86,7 +88,7 @@ The `betteroffice-corpus` R2 bucket is served at **https://corpus.betteroffice.d
 | [betteroffice-slides](https://corpus.betteroffice.dev/betteroffice-slides/metadata.json) | PPTX | 3 |
 | [betteroffice-workbook](https://corpus.betteroffice.dev/betteroffice-workbook/metadata.json) | XLSX | 9 |
 
-Metadata links the source and PNGs and records capture provenance, hashes, and comparison results. Only the original project demos are public; private inputs and captures stay local. Publishing additional authorized samples requires authenticated Wrangler:
+Collection manifests live at `collections/<id>.json` with `schema_version: 1`, the collection `id`, and a `samples` array of folder names. Sample metadata links the source and PNGs and records capture provenance, hashes, comparisons, and licensing. The SDK fixtures retain their upstream MIT notice; private inputs and captures stay local. Publishing additional authorized samples requires authenticated Wrangler:
 
 ```sh
 bunx wrangler r2 object put betteroffice-corpus/<key> --file <local-file> --remote

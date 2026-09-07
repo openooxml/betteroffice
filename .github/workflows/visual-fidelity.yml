@@ -8,10 +8,15 @@ on:
         default: main
         required: true
         type: string
-      samples:
-        description: JSON array of public corpus sample folders
-        default: '["betteroffice-demo","betteroffice-slides","betteroffice-workbook"]'
+      collection:
+        description: Public corpus collection to benchmark
+        default: office-quality
         required: true
+        type: string
+      samples:
+        description: Optional JSON array of sample folders overriding the collection
+        default: ''
+        required: false
         type: string
 
 permissions:
@@ -84,11 +89,12 @@ jobs:
 
       - name: Check benchmark scripts
         run: |
-          bun test scripts/office-quality/readme.test.ts
+          bun test scripts/office-quality
           python -m unittest discover -s scripts/office-quality -p 'test_*.py'
 
       - name: Measure the latest release and source commit
         env:
+          QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_SAMPLES: ${{ inputs.samples }}
           QUALITY_OUTPUT: .source/office-quality/ci
         run: |

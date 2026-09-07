@@ -5,24 +5,11 @@ import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { FORMATS, renderSection } from './readme.mjs';
+import { CORPUS_ORIGIN as corpus, selectSamples } from './samples.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
-const corpus = 'https://corpus.betteroffice.dev';
 const python = process.env.QUALITY_PYTHON ?? 'python3';
-const ids = JSON.parse(
-  process.env.QUALITY_SAMPLES ??
-    '["betteroffice-demo","betteroffice-slides","betteroffice-workbook"]'
-);
-if (
-  !Array.isArray(ids) ||
-  !ids.length ||
-  ids.length > 20 ||
-  ids.some((id) => typeof id !== 'string' || !/^[a-z0-9-]+$/.test(id)) ||
-  new Set(ids).size !== ids.length
-) {
-  throw new Error('QUALITY_SAMPLES must contain 1–20 unique sample folder names');
-}
 if (
   (
     await command('git', [
@@ -39,6 +26,7 @@ if (
 if ((await readdir(output).catch(() => [])).length)
   throw new Error('QUALITY_OUTPUT must be empty');
 await mkdir(output, { recursive: true });
+const ids = await selectSamples(process.env, download);
 
 async function command(program, args, options = {}) {
   const result = await execute(program, args, {
