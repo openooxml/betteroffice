@@ -1,29 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-// The Python release train. Adding a distribution here enrols it in versioning,
-// CI, and wheel builds; see RELEASING.md for the PyPI side.
-// `publish: false` holds it out of the PyPI matrix until its project is ready.
-const REGISTRY = [
-  { path: 'bindings/python-docx', publish: true },
-  { path: 'bindings/python-pptx', publish: true },
-  { path: 'bindings/python-xlsx', publish: true }
-];
+import {
+  REGISTRY,
+  PYPI_DISTRIBUTIONS,
+  PYTHON_BINDINGS,
+  PYTHON_BINDING_NAMES,
+  PYTHON_PUBLISH_NAMES,
+  bindingName
+} from './python-binding-names.mjs';
 
-function bindingName(path) {
-  return path.replace('bindings/python-', '');
-}
-
-export const PYTHON_BINDINGS = REGISTRY.map((entry) => entry.path);
-
-export const PYTHON_BINDING_NAMES = PYTHON_BINDINGS.map(bindingName);
-
-export const PYTHON_PUBLISH_NAMES = REGISTRY.filter((entry) => entry.publish).map((entry) =>
-  bindingName(entry.path)
-);
-
-/** The PyPI projects that exist, so a `publish: false` binding is absent. */
-export const PYPI_DISTRIBUTIONS = PYTHON_PUBLISH_NAMES.map((name) => `betteroffice-${name}`);
+export { PYPI_DISTRIBUTIONS, PYTHON_BINDINGS, PYTHON_BINDING_NAMES, PYTHON_PUBLISH_NAMES };
 
 /** The crate version maturin stamps on the wheel; bindings version independently of the workspace. */
 export function bindingVersion(path) {
