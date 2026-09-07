@@ -77,9 +77,9 @@ bun run rust:check   # fmt + clippy + tests for the engines
 
 | Format | Latest published version | SSIM | Latest commit | SSIM | Samples (published / commit) |
 | --- | --- | ---: | --- | ---: | ---: |
-| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.7711 | [8f36b35f](https://github.com/openooxml/betteroffice/commit/8f36b35f9a3cecb3410955db3e79995a8c58258e) | 0.7711 | 1 / 1 |
-| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | — | [8f36b35f](https://github.com/openooxml/betteroffice/commit/8f36b35f9a3cecb3410955db3e79995a8c58258e) | — | 0 / 0 |
-| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | — | [8f36b35f](https://github.com/openooxml/betteroffice/commit/8f36b35f9a3cecb3410955db3e79995a8c58258e) | — | 0 / 0 |
+| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.7711 | [d84657d0](https://github.com/openooxml/betteroffice/commit/d84657d0c000158271ed1f65888998d8fea1091e) | 0.7711 | 1 / 1 |
+| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | — | [d84657d0](https://github.com/openooxml/betteroffice/commit/d84657d0c000158271ed1f65888998d8fea1091e) | — | 0 / 0 |
+| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | — | [d84657d0](https://github.com/openooxml/betteroffice/commit/d84657d0c000158271ed1f65888998d8fea1091e) | — | 0 / 0 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. DOCX uses the pinned CDN fonts. **— = not measured.** One demo does not establish corpus-wide quality or a leaderboard rank.
 
