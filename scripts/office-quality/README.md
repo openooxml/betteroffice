@@ -1,8 +1,46 @@
 # Local Office visual checks
 
-Small scripts for documents you choose. There is no bundled dataset, downloader, scheduled run, or upload service. Keep inputs, PDFs, captures, and reports under ignored `.source/office-quality/`.
+Small scripts for documents you choose. Keep inputs, PDFs, captures, and reports under ignored `.source/office-quality/`. The manual CI runner downloads explicitly selected public references; there is no scheduled run or upload service.
 
 One explicitly published, project-authored demo lives in the public `betteroffice-corpus` R2 bucket; see the [reference links and SSIM results](../../README.md#visual-fidelity). The reference consists of a DOCX, two Word PNG pages, and JSON metadata with UTC capture times, Office version, hashes, license, and scores. Everything else stays local. Public access permits downloads; writes use authenticated Wrangler. There is no anonymous upload endpoint.
+
+The canonical origin is **https://corpus.betteroffice.dev**, with one top-level folder per sample:
+
+```text
+betteroffice-demo/
+  source.docx
+  reference/page_0001.png
+  reference/page_0002.png
+  metadata.json
+```
+
+[Demo source](https://corpus.betteroffice.dev/betteroffice-demo/source.docx), [Word page 1](https://corpus.betteroffice.dev/betteroffice-demo/reference/page_0001.png), [Word page 2](https://corpus.betteroffice.dev/betteroffice-demo/reference/page_0002.png), and [metadata](https://corpus.betteroffice.dev/betteroffice-demo/metadata.json) are public. The metadata's `format`, `reference`, `reference_pages`, and asset hashes describe the sample independently of Git.
+
+## Manual CI and generated README
+
+After this workflow lands on `main`, run **Actions → Visual fidelity → Run workflow**. Keep the workflow ref on `main`; choose the repository branch to measure and update, including an open PR's branch. The sample input is a JSON array of folder names and defaults to `["betteroffice-demo"]`.
+
+```sh
+gh workflow run visual-fidelity.yml --ref main \
+  -f branch=main -f 'samples=["betteroffice-demo"]'
+```
+
+The action builds the branch's DOCX renderer, fetches the current npm release, verifies the source/Word image hashes from R2, captures both with pinned CDN fonts, and computes fresh SSIM. The saved Office references remain unchanged. The report always includes DOCX, PPTX, and XLSX and resolves each latest published version from npm; unmeasured formats show `—`. Automatic candidate capture currently supports DOCX. PowerPoint/Excel exports and manually supplied candidate PDF/PNG comparisons are available separately below.
+
+The generated block sits immediately above Contributing. Scores are pinned to the tested source revision; README-only commits are excluded from revision selection. A separate job uses the existing `OPENOOXML_BOT_APP_ID` / `OPENOOXML_BOT_PRIVATE_KEY` secrets to commit **only README.md** as `openooxml-bot[bot]`. It checks that the target branch still matches the measured head and uses a normal fast-forward push. A changed branch requires a rerun; unchanged generated text produces no commit. There is no push, PR, merge, or scheduled trigger.
+
+Only `report.json` and the generated Markdown are retained as CI artifacts. Documents, PDFs, and page images are not uploaded to Actions or committed. Benchmark jobs have read-only repository access and no bot or R2 credentials.
+
+To run the same measurements locally after the [DOCX build](../docx-quality/README.md):
+
+```sh
+QUALITY_PYTHON=.source/office-quality/venv/bin/python \
+QUALITY_OUTPUT=.source/office-quality/run \
+  node scripts/office-quality/run.mjs
+node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
+```
+
+Use a fresh output directory and commit source changes first; the runner refuses to label an uncommitted source tree with a commit SHA. Additional selected samples are supplied with `QUALITY_SAMPLES='["sample-folder"]'`; unsupported candidate formats fail explicitly. The generator never reuses a score for a different published version or source commit.
 
 ## Setup
 

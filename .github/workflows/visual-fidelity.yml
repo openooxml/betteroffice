@@ -1,0 +1,174 @@
+name: Visual fidelity
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Repository branch to benchmark and update
+        default: main
+        required: true
+        type: string
+      samples:
+        description: JSON array of public corpus sample folders (DOCX capture currently supported)
+        default: '["betteroffice-demo"]'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: visual-fidelity-${{ inputs.branch }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      source-sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Pin the target branch
+        id: source
+        env:
+          TARGET_BRANCH: ${{ inputs.branch }}
+        run: |
+          git check-ref-format --branch "$TARGET_BRANCH"
+          source_sha=$(git rev-parse HEAD)
+          remote_sha=$(git ls-remote --heads origin "refs/heads/$TARGET_BRANCH" | cut -f1)
+          test "$source_sha" = "$remote_sha"
+          echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
+
+      - uses: ./.github/actions/wasm-toolchain
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Build the renderer and install comparison tools
+        run: |
+          bun install --frozen-lockfile
+          bun run build:fonts
+          bun run build:docx
+          bunx playwright install --with-deps chromium
+          python -m pip install -r scripts/office-quality/requirements.txt
+
+      - name: Measure the latest release and source commit
+        env:
+          QUALITY_SAMPLES: ${{ inputs.samples }}
+          QUALITY_OUTPUT: .source/office-quality/ci
+        run: |
+          node scripts/office-quality/run.mjs
+          cat .source/office-quality/ci/section.md >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: visual-fidelity
+          path: |
+            .source/office-quality/ci/report.json
+            .source/office-quality/ci/section.md
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: measure
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ inputs.branch }}
+          persist-credentials: false
+
+      - name: Require the measured branch head
+        env:
+          SOURCE_SHA: ${{ needs.measure.outputs.source-sha }}
+        run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity
+          path: ${{ runner.temp }}/fidelity-report
+
+      - name: Replace the generated README section
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          section = (Path(os.environ['RUNNER_TEMP']) / 'fidelity-report/section.md').read_text()
+          begin = '<!-- BEGIN GENERATED VISUAL FIDELITY -->'
+          end = '<!-- END GENERATED VISUAL FIDELITY -->'
+          if not section.startswith(begin) or not section.endswith(end):
+              raise SystemExit('Invalid generated report')
+          path = Path('README.md')
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('README must be a regular file')
+          readme = path.read_text()
+          if readme.count(begin) != 1 or readme.count(end) != 1:
+              raise SystemExit('README must contain exactly one generated block')
+          before, tail = readme.split(begin)
+          _, after = tail.split(end)
+          path.write_text(before + section + after)
+          PY
+
+      - name: Detect a changed report
+        id: changed
+        run: |
+          if git diff --quiet -- README.md; then
+            echo "value=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Mint the bot token
+        if: steps.changed.outputs.value == 'true'
+        id: bot
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          app-id: ${{ secrets.OPENOOXML_BOT_APP_ID }}
+          private-key: ${{ secrets.OPENOOXML_BOT_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Commit only the generated README
+        if: steps.changed.outputs.value == 'true'
+        env:
+          GH_TOKEN: ${{ steps.bot.outputs.token }}
+          TARGET_BRANCH: ${{ inputs.branch }}
+        run: |
+          bot_id=$(gh api '/users/openooxml-bot[bot]' --jq .id)
+          git config user.name 'openooxml-bot[bot]'
+          git config user.email "$bot_id+openooxml-bot[bot]@users.noreply.github.com"
+          git config core.hooksPath /dev/null
+          gh auth setup-git
+          git add -- README.md
+          git commit -m 'docs(ci): refresh visual fidelity'
+          git push origin "HEAD:refs/heads/$TARGET_BRANCH"
