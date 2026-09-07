@@ -49,16 +49,6 @@ export function renderSection(report) {
     const current = score(samples, 'commit', report.commit);
     return `| ${format.toUpperCase()} | [${version}](https://www.npmjs.com/package/@betteroffice/${format}/v/${version}) | ${published.value} | [${report.commit.slice(0, 8)}](https://github.com/openooxml/betteroffice/commit/${report.commit}) | ${current.value} | ${published.count} / ${current.count} |`;
   });
-  const sources = report.samples.map((sample) => {
-    const url = new URL(sample.metadata_url);
-    if (
-      url.origin !== 'https://corpus.betteroffice.dev' ||
-      !/^[a-z0-9-]+$/.test(sample.id)
-    ) {
-      throw new Error('Invalid public sample metadata URL');
-    }
-    return `[${sample.id}](${url.href})`;
-  });
   return `${BEGIN}
 ## Visual fidelity
 
@@ -68,9 +58,7 @@ export function renderSection(report) {
 | --- | --- | ---: | --- | ---: | ---: |
 ${rows.join('\n')}
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. **— = not measured.** Demo samples do not establish corpus-wide quality or a leaderboard rank.
-
-The commit column pins the tested source revision; generated README-only commits are excluded. Office versions, UTC render times, source files, page PNGs, and hashes are recorded per sample: ${sources.join(', ') || 'no reference samples yet'}.
+SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Demo samples do not establish corpus-wide quality or a leaderboard rank.
 ${END}`;
 }
 

@@ -83,9 +83,7 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 | PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.9404 | [096aeccb](https://github.com/openooxml/betteroffice/commit/096aeccb8ad22874d62fa3ebaba1b0d28cca64f7) | 0.9397 | 1 / 1 |
 | XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7046 | [096aeccb](https://github.com/openooxml/betteroffice/commit/096aeccb8ad22874d62fa3ebaba1b0d28cca64f7) | 0.7043 | 1 / 1 |
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. **— = not measured.** Demo samples do not establish corpus-wide quality or a leaderboard rank.
-
-The commit column pins the tested source revision; generated README-only commits are excluded. Office versions, UTC render times, source files, page PNGs, and hashes are recorded per sample: [betteroffice-demo](https://corpus.betteroffice.dev/betteroffice-demo/metadata.json), [betteroffice-slides](https://corpus.betteroffice.dev/betteroffice-slides/metadata.json), [betteroffice-workbook](https://corpus.betteroffice.dev/betteroffice-workbook/metadata.json).
+SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Demo samples do not establish corpus-wide quality or a leaderboard rank.
 <!-- END GENERATED VISUAL FIDELITY -->
 
 ## Contributing

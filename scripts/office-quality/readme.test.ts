@@ -35,7 +35,7 @@ test('generates every format and never reuses scores for a different release or 
   expect(section).not.toContain('0.8000');
   expect(section).toContain('| PPTX | [0.0.4]');
   expect(section).toContain('| XLSX | [0.1.0]');
-  expect(section).toContain('— = not measured');
+  expect(section).toContain('| — |');
 });
 
 test('replaces and moves the generated block without touching other sections', () => {
