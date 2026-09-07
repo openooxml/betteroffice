@@ -42,8 +42,6 @@ Requires macOS and desktop Word, PowerPoint, or Excel. Run exports serially into
 
 The extension selects the app. Output includes `reference.pdf`, numbered PNGs at 150 DPI, and `result.json` with source hashes, Office/macOS versions, font names, UTC timestamps, and export status. The timeout defaults to 120 seconds; override it with `--timeout`.
 
-DOCX references record each PDF page's physical and raster bounds. The capture profile permits a one-pixel canvas extent difference on each axis, adding white space or clipping at the right/bottom edge without moving or resampling rendered content. Larger differences fail; extra renderer pages retain their native bounds. Captures record the original and output dimensions for each page.
-
 For XLSX comparisons, add `--xlsx-profile /path/to/profile.json`. The profile specifies `scale_percent`, `margin_pt`, and `pages` with zero-based `sheet` indices and A1 `range` values. Each range must fit one page. The demo's nine-page profile is stored in its metadata under `reference.capture_profile`. This measures worksheet range rendering, not automatic print pagination; frozen panes are unsupported. Print settings apply only to the temporary workbook, leaving source bytes unchanged.
 
 ## macOS permissions
@@ -58,7 +56,15 @@ The scripts use local PDF export. For manual Word exports, choose **Best for pri
 
 ## Compare local captures
 
-Capture BetterOffice using the [DOCX instructions](../docx-quality/README.md). For PPTX/XLSX, set `QUALITY_FORMAT=pptx` or `xlsx` on the shared server and use the matching `?format=` in the capture URL. Pass the XLSX profile through `QUALITY_CAPTURE_CONFIG`. Document bytes stay local; external browser requests are limited to pinned font files.
+Capture BetterOffice using the [DOCX instructions](../docx-quality/README.md). For PPTX/XLSX, set `QUALITY_FORMAT=pptx` or `xlsx` on the shared server and use the matching `?format=` in the capture URL. Document bytes stay local; external browser requests are limited to pinned font files.
+
+DOCX references record each PDF page's physical and raster bounds. The capture profile permits a one-pixel canvas extent difference on each axis, adding white space or clipping at the right/bottom edge without moving or resampling rendered content. Larger differences fail; extra renderer pages retain their native bounds. Captures record the original and output dimensions for each page.
+
+For DOCX and XLSX, load the reference profile before running the capture command. Collection runs do this automatically:
+
+```sh
+export QUALITY_CAPTURE_CONFIG="$(jq -c '.capture_profile // null' .source/office-quality/example/office/result.json)"
+```
 
 ```sh
 .source/office-quality/venv/bin/python scripts/office-quality/compare.py \
