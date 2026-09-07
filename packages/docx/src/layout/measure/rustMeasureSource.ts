@@ -30,9 +30,11 @@ export interface ResidentMeasurementConfig {
 export interface RustMeasureSource {
   setEmbeddedFaces(faces: EmbeddedFaceInput[]): void;
   setCompat(flags: CompatibilityFlags | undefined): void;
-  prepareFontRequirements(requirements: ResidentFontRequirement[]): Promise<boolean>;
+  prepareFontRequirements(
+    requirements: ResidentFontRequirement[],
+  ): Promise<boolean>;
   measurementConfigForRequirements(
-    requirements: ResidentFontRequirement[]
+    requirements: ResidentFontRequirement[],
   ): ResidentMeasurementConfig | undefined;
   clear(): void;
 }
@@ -57,7 +59,7 @@ export function createRustMeasureSource(options: {
 }): RustMeasureSource {
   const registry = new TextMeasureFontRegistry(
     { registerFont: (bytes) => options.engine.registerFont(bytes) },
-    { bundled: options.bundled ?? resolveDefaultFontProvider }
+    { bundled: options.bundled ?? resolveDefaultFontProvider },
   );
   let compat: CompatibilityFlags | undefined;
 
@@ -78,13 +80,14 @@ export function createRustMeasureSource(options: {
               const cached = registry.getCachedFontIdChain(
                 requirement.family,
                 requirement.bold,
-                requirement.italic
+                requirement.italic,
+                false,
               );
               if (cached !== undefined) return false;
               await registry.getFontIdChain(
                 requirement.family,
                 requirement.bold,
-                requirement.italic
+                requirement.italic,
               );
               return true;
             } catch {
@@ -93,28 +96,57 @@ export function createRustMeasureSource(options: {
           })(),
           ...Array.from(new Set(requirement.scripts ?? []), async (script) => {
             try {
-              if (registry.getCachedScriptFallbackIds([script]) !== undefined) return false;
+              if (
+                registry.getCachedScriptFallbackIds([script], false) !==
+                undefined
+              )
+                return false;
               await registry.getScriptFallbackIds([script]);
               return true;
             } catch {
               return false;
             }
           }),
-        ])
+        ]),
       );
       return settled.some(Boolean);
     },
 
-    measurementConfigForRequirements(requirements): ResidentMeasurementConfig | undefined {
+    measurementConfigForRequirements(
+      requirements,
+    ): ResidentMeasurementConfig | undefined {
+      const settled = requirements.map((requirement) => ({
+        requirement,
+        familyIds: registry.getCachedFontIdChain(
+          requirement.family,
+          requirement.bold,
+          requirement.italic,
+          false,
+        ),
+        scriptIds: registry.getCachedScriptFallbackIds(
+          requirement.scripts ?? [],
+          false,
+        ),
+      }));
+      if (
+        settled.some(
+          ({ familyIds, scriptIds }) =>
+            familyIds === undefined || scriptIds === undefined,
+        )
+      )
+        return undefined;
       const fontChains: Record<string, number[]> = {};
-      for (const requirement of requirements) {
+      for (const { requirement } of settled) {
         const familyIds = registry.getCachedFontIdChain(
           requirement.family,
           requirement.bold,
-          requirement.italic
+          requirement.italic,
         );
-        const scriptIds = registry.getCachedScriptFallbackIds(requirement.scripts ?? []);
-        if (familyIds === undefined || scriptIds === undefined) return undefined;
+        const scriptIds = registry.getCachedScriptFallbackIds(
+          requirement.scripts ?? [],
+        );
+        if (familyIds === undefined || scriptIds === undefined)
+          return undefined;
         const chain = Array.from(familyIds);
         for (const id of scriptIds) if (!chain.includes(id)) chain.push(id);
         if (chain.length > 0) fontChains[requirement.key] = chain;

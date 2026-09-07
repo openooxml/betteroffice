@@ -8,7 +8,10 @@ use crate::chart::ChartPartsMap;
 use crate::media::MediaMap;
 use crate::numbering::NumberingMap;
 use crate::paragraph::HexIdAllocator;
-use crate::relationships::{RelationshipMap, parse_relationships, relationship_types};
+use crate::relationships::{
+    RelationshipMap, RelationshipTarget, office_document_path, parse_relationships,
+    relationship_part_path, relationship_types, resolve_relationship_target,
+};
 use crate::smart_art::SmartArtContext;
 use crate::styles::{DocDefaults, StyleMap};
 use crate::theme::Theme;
@@ -89,30 +92,25 @@ pub fn parse_related_header_footers(
 > {
     let mut headers = IndexMap::new();
     let mut footers = IndexMap::new();
+    let document_path = office_document_path(parts, budget)?;
     for (relationship_id, relationship) in document_relationships {
         let is_header = relationship.relationship_type == relationship_types::HEADER;
         let is_footer = relationship.relationship_type == relationship_types::FOOTER;
         if !is_header && !is_footer {
             continue;
         }
-        let Some(filename) = relationship
-            .target
-            .rsplit(|character| character == '/' || character == '\\')
-            .next()
+        let RelationshipTarget::Internal(expected_path) =
+            resolve_relationship_target(&document_path, relationship)?
         else {
             continue;
         };
-        if filename.is_empty() {
-            continue;
-        }
-        let expected_path = format!("word/{filename}");
         let Some((part_path, xml)) = find_part_case_insensitive(parts, &expected_path) else {
             // External and missing targets stay inert; no resolver or fetch is
             // available anywhere in this crate.
             continue;
         };
-        let relationship_part_path = format!("word/_rels/{filename}.rels");
-        let part_relationships = find_part_case_insensitive(parts, &relationship_part_path)
+        let relationships_path = relationship_part_path(part_path);
+        let part_relationships = find_part_case_insensitive(parts, &relationships_path)
             .map(|(path, xml)| parse_relationships(xml, path, budget))
             .transpose()?;
         let relationships = part_relationships

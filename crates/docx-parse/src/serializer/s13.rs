@@ -18,7 +18,9 @@ use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
 use crate::paragraph::ParagraphContent;
-use crate::relationships::{Relationship, relationship_types};
+use crate::relationships::{
+    Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
+};
 use crate::vml::Watermark;
 use crate::xml::ParseError;
 
@@ -112,7 +114,10 @@ pub fn write_docx_s13(
 ) -> Result<Vec<u8>, ParseError> {
     request.determinism.validate()?;
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    let mut package = Package::new(original_parts);
+    let limits = crate::xml::ParseLimits::default();
+    let mut budget = crate::xml::ParseBudget::new(&limits);
+    let document_path = crate::relationships::office_document_path(&original_parts, &mut budget)?;
+    let mut package = Package::new(original_parts, document_path);
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
 
     if request.selective.is_some() {
@@ -120,7 +125,7 @@ pub fn write_docx_s13(
     } else {
         process_new_images(&mut request, &relationships, &mut package)?;
         process_new_watermark_images(&mut request, &relationships, &mut package)?;
-        process_new_hyperlinks(&mut request, &relationships, &mut package);
+        process_new_hyperlinks(&mut request, &relationships, &mut package)?;
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
@@ -145,7 +150,7 @@ pub fn write_docx_s13(
     )?;
 
     if request.selective.is_none() {
-        ensure_header_footer_parts(&relationships, &mut package);
+        ensure_header_footer_parts(&relationships, &mut package)?;
         ensure_numbering_part(request.numbering.as_ref(), &mut package);
     }
 
@@ -189,25 +194,42 @@ pub fn write_docx_s13(
 struct Package {
     parts: Vec<(String, Vec<u8>)>,
     positions: HashMap<String, usize>,
+    document_path: String,
+    document_relationships_path: String,
 }
 
 impl Package {
-    fn new(parts: Vec<(String, Vec<u8>)>) -> Self {
+    fn new(parts: Vec<(String, Vec<u8>)>, document_path: String) -> Self {
         let positions = parts
             .iter()
             .enumerate()
             .map(|(index, (path, _))| (path.clone(), index))
             .collect();
-        Self { parts, positions }
+        let document_relationships_path =
+            crate::relationships::relationship_part_path(&document_path);
+        Self {
+            parts,
+            positions,
+            document_path,
+            document_relationships_path,
+        }
+    }
+
+    fn resolve_path<'a>(&'a self, path: &'a str) -> &'a str {
+        match path {
+            "word/document.xml" => &self.document_path,
+            "word/_rels/document.xml.rels" => &self.document_relationships_path,
+            _ => path,
+        }
     }
 
     fn contains(&self, path: &str) -> bool {
-        self.positions.contains_key(path)
+        self.positions.contains_key(self.resolve_path(path))
     }
 
     fn bytes(&self, path: &str) -> Option<&[u8]> {
         self.positions
-            .get(path)
+            .get(self.resolve_path(path))
             .map(|index| self.parts[*index].1.as_slice())
     }
 
@@ -218,6 +240,7 @@ impl Package {
 
     fn set(&mut self, path: impl Into<String>, bytes: Vec<u8>) {
         let path = path.into();
+        let path = self.resolve_path(&path).to_owned();
         if let Some(index) = self.positions.get(&path).copied() {
             self.parts[index].1 = bytes;
         } else {
@@ -245,7 +268,10 @@ fn validate_selective_header_footer_parts(
         {
             continue;
         }
-        let path = header_footer_filename(&relationship.target);
+        if relationship.target_mode == Some(TargetMode::External) {
+            continue;
+        }
+        let path = resolve_relative_path(&package.document_path, &relationship.target)?;
         if !package.contains(&path) {
             return Err(save_error(format!(
                 "selective save cannot register new header/footer part {path}"
@@ -270,12 +296,14 @@ fn serialize_header_footer_parts(
             let Some(relationship) = relationships.get(relationship_id) else {
                 continue;
             };
-            if relationship.relationship_type != relationship_type || relationship.target.is_empty()
+            if relationship.relationship_type != relationship_type
+                || relationship.target.is_empty()
+                || relationship.target_mode == Some(TargetMode::External)
             {
                 continue;
             }
             package.set_text(
-                header_footer_filename(&relationship.target),
+                resolve_relative_path(&package.document_path, &relationship.target)?,
                 serialize_header_footer_part(story, context)?,
             );
         }
@@ -286,21 +314,19 @@ fn serialize_header_footer_parts(
 fn ensure_header_footer_parts(
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
-) {
+) -> Result<(), ParseError> {
     let parts: Vec<_> = relationships
         .iter()
         .filter_map(|(relationship_id, relationship)| {
+            if relationship.target_mode == Some(TargetMode::External) {
+                return None;
+            }
             let content_type = match relationship.relationship_type.as_str() {
                 relationship_types::HEADER => HEADER_CONTENT_TYPE,
                 relationship_types::FOOTER => FOOTER_CONTENT_TYPE,
                 _ => return None,
             };
-            let target = relationship
-                .target
-                .trim_start_matches('/')
-                .strip_prefix("word/")
-                .unwrap_or(relationship.target.trim_start_matches('/'))
-                .to_owned();
+            let target = relationship.target.clone();
             Some((
                 relationship_id.as_str(),
                 relationship.relationship_type.as_str(),
@@ -310,13 +336,16 @@ fn ensure_header_footer_parts(
         })
         .collect();
     if parts.is_empty() {
-        return;
+        return Ok(());
     }
 
     if let Some(mut content_types) = package.text("[Content_Types].xml") {
         let mut changed = false;
         for (_, _, target, content_type) in &parts {
-            let part_name = format!("/word/{target}");
+            let part_name = format!(
+                "/{}",
+                resolve_relative_path(&package.document_path, target)?
+            );
             if !content_types.contains(&format!("PartName=\"{part_name}\"")) {
                 let entry =
                     format!("<Override PartName=\"{part_name}\" ContentType=\"{content_type}\"/>");
@@ -349,6 +378,7 @@ fn ensure_header_footer_parts(
     if changed {
         package.set_text(path, relationships_xml);
     }
+    Ok(())
 }
 
 fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut Package) {
@@ -489,14 +519,6 @@ fn ensure_comment_parts(package: &mut Package) {
     }
 }
 
-fn header_footer_filename(target: &str) -> String {
-    if target.starts_with('/') {
-        target.trim_start_matches('/').to_owned()
-    } else {
-        format!("word/{target}")
-    }
-}
-
 fn read_rels_or_stub(package: &Package, path: &str) -> String {
     normalize_relationships_root(
         &package
@@ -599,12 +621,14 @@ fn process_new_images(
             let Some(relationship) = relationships.get(relationship_id) else {
                 continue;
             };
-            if relationship.relationship_type != relationship_type {
+            if relationship.relationship_type != relationship_type
+                || relationship.target_mode == Some(TargetMode::External)
+            {
                 continue;
             }
             process_image_part(
                 package,
-                &owner_relationships_path(&relationship.target),
+                &owner_relationships_path(package, &relationship.target)?,
                 std::iter::once(&mut story.content),
                 &mut image_number,
                 &mut extensions,
@@ -800,10 +824,9 @@ fn image_content_type(extension: &str) -> &'static str {
     }
 }
 
-fn owner_relationships_path(target: &str) -> String {
-    let path = header_footer_filename(target);
-    let filename = path.strip_prefix("word/").unwrap_or(&path).to_owned();
-    format!("word/_rels/{filename}.rels")
+fn owner_relationships_path(package: &Package, target: &str) -> Result<String, ParseError> {
+    let path = resolve_relative_path(&package.document_path, target)?;
+    Ok(relationship_part_path(&path))
 }
 
 fn process_new_watermark_images(
@@ -828,7 +851,11 @@ fn process_new_watermark_images(
         let Some(relationship) = relationships.get(relationship_id) else {
             continue;
         };
-        let relationships_path = owner_relationships_path(&relationship.target);
+        if relationship.target_mode == Some(TargetMode::External) {
+            continue;
+        }
+        let story_path = resolve_relative_path(&package.document_path, &relationship.target)?;
+        let relationships_path = relationship_part_path(&story_path);
         let relationships_xml = read_rels_or_stub(package, &relationships_path);
 
         if watermark_relationship_id
@@ -959,7 +986,7 @@ fn process_new_hyperlinks(
     request: &mut S13SaveRequest,
     relationships: &IndexMap<String, Relationship>,
     package: &mut Package,
-) {
+) -> Result<(), ParseError> {
     process_hyperlink_part(
         package,
         "word/_rels/document.xml.rels",
@@ -991,16 +1018,19 @@ fn process_new_hyperlinks(
             let Some(relationship) = relationships.get(relationship_id) else {
                 continue;
             };
-            if relationship.relationship_type != relationship_type {
+            if relationship.relationship_type != relationship_type
+                || relationship.target_mode == Some(TargetMode::External)
+            {
                 continue;
             }
             process_hyperlink_part(
                 package,
-                &owner_relationships_path(&relationship.target),
+                &owner_relationships_path(package, &relationship.target)?,
                 std::iter::once(&mut story.content),
             );
         }
     }
+    Ok(())
 }
 
 fn process_hyperlink_part<'a>(

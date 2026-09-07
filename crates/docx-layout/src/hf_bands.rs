@@ -42,8 +42,8 @@
 //! A header band sits at `distance + visualTop` and flows content from
 //! `distance`. A footer band is bottom-anchored: it sits at
 //! `pageHeight - distance - bandHeight`, flows content from
-//! `pageHeight - distance - max(visualBottom - visualTop, 24) - visualTop`, and
-//! anchors floating tables against `pageHeight - distance - height`. Content
+//! `pageHeight - distance - max(flowHeight, 24)`, and anchors floating
+//! tables against `pageHeight - distance - flowHeight`. Content
 //! starts at `margins.left` horizontally in both cases.
 //!
 //! # Stacking inside a band
@@ -54,15 +54,16 @@
 //! spacing. An inline table paints whole at the cursor and advances by its
 //! total height; a `w:tblpPr` floating table paints at its resolved anchor and
 //! does not advance. An image paints at the cursor and advances by its measured
-//! height. Every other block kind emits nothing and leaves the cursor alone.
+//! height. Anchored shapes paint at their page coordinates without advancing
+//! the cursor; inline shapes advance by their height.
 
 use serde::Deserialize;
 
 use crate::display_list::{
     BlockIn, BlockRef, FieldWidthEntry, FieldWidthMap, FloatingTablePositionIn, HfKind, HfRegion,
     MeasureIn, MeasuredBlockIn, PageIn, ParagraphFragmentIn, Primitive, RenderCtx, ShapeFonts,
-    TableFragmentIn, WatermarkIn, capped_alt_text, emit_paragraph_fragment, emit_table_fragment,
-    px, rotation_degrees, sanitized_href, table_total_width,
+    TableFragmentIn, WatermarkIn, capped_alt_text, emit_hf_shape, emit_paragraph_fragment,
+    emit_table_fragment, px, rotation_degrees, sanitized_href, table_total_width,
 };
 use crate::display_list::{Crop, ImagePrimitive};
 
@@ -116,8 +117,6 @@ struct HfVariantIn {
     flow_height: Option<f64>,
     #[serde(default)]
     visual_top: Option<f64>,
-    #[serde(default)]
-    visual_bottom: Option<f64>,
     /// Per-page resolved PAGE/NUMPAGES field widths.
     #[serde(default)]
     field_widths: Vec<FieldWidthsIn>,
@@ -229,7 +228,6 @@ mod tests {
             height: None,
             flow_height: None,
             visual_top: None,
-            visual_bottom: None,
             field_widths: Vec::new(),
         }
     }
@@ -429,7 +427,6 @@ fn compose_region(
     let content_width = page.size.w - page.margins.left - page.margins.right;
     let height = v.height.unwrap_or_else(|| stacked_height(&v.measured));
     let visual_top = v.visual_top.unwrap_or(0.0);
-    let visual_bottom = v.visual_bottom.unwrap_or(height);
     let flow_height = v.flow_height.unwrap_or(height);
     let interactive = (flow_height - visual_top.min(0.0)).max(MIN_BAND_HEIGHT_PX);
 
@@ -446,10 +443,10 @@ fn compose_region(
                 .footer_distance
                 .or(page.margins.footer)
                 .unwrap_or(DEFAULT_HF_DISTANCE_PX);
-            let actual = (visual_bottom - visual_top).max(MIN_BAND_HEIGHT_PX);
+            let actual = flow_height.max(MIN_BAND_HEIGHT_PX);
             let band_y = page.size.h - distance - interactive;
-            let origin_y = page.size.h - distance - actual - visual_top;
-            let flow_top = page.size.h - distance - height;
+            let origin_y = page.size.h - distance - actual;
+            let flow_top = page.size.h - distance - flow_height;
             (band_y, interactive, origin_y, flow_top)
         }
     };
@@ -536,6 +533,12 @@ fn compose_region(
                     attrs,
                 }));
                 cursor += measure.height;
+            }
+            (BlockIn::Shape(block), MeasureIn::Shape(measure)) => {
+                emit_hf_shape(&mut prims, block, measure, ctx, page, origin_y + cursor);
+                if block.position.is_none() {
+                    cursor += measure.height;
+                }
             }
             _ => {}
         }

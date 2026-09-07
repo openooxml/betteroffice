@@ -105,6 +105,7 @@ export function DocxEditorPagedArea({
   // Scroll page indicator
   onTotalPagesChange,
   onLayoutComputed,
+  onError,
   applyResidentInput,
   applyResidentDelete,
   displayListQueries,
@@ -190,6 +191,7 @@ export function DocxEditorPagedArea({
   setShowCommentsSidebar: React.Dispatch<React.SetStateAction<boolean>>;
   onTotalPagesChange: (totalPages: number) => void;
   /** Receives each computed layout. */
+  onError?: (error: Error) => void;
   onLayoutComputed?: (layout: Layout | null) => void;
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   applyResidentDelete?: (
@@ -453,6 +455,7 @@ export function DocxEditorPagedArea({
         onYrsTrackedChangesChange={onYrsTrackedChangesChange}
         onTotalPagesChange={onTotalPagesChange}
         onLayoutComputed={onLayoutComputed}
+        onError={onError}
         applyResidentInput={applyResidentInput}
         applyResidentDelete={applyResidentDelete}
         displayListQueries={displayListQueries}

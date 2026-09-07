@@ -55,7 +55,7 @@ Each Latin family ships four faces: Regular, Bold, Italic, BoldItalic — 20 TTF
 
 These faces exist so the Rust text engine (and the browser) has real glyphs for scripts the Latin faces cannot cover. **They are coverage fallbacks first, metric approximations second** — unlike Carlito/Calibri, the Noto CJK faces do NOT share advance widths with SimSun/MS Gothic/Malgun Gothic et al. (fullwidth ideographs are uniformly 1 em everywhere, but proportional Latin runs and line heights differ), so CJK pagination approximates Word rather than matching it.
 
-The CJK rows below are **resolvable only with `@betteroffice/fonts-cjk` installed**; their manifest entries live here (resolution policy belongs in one place) but the binaries do not. Without the add-on, a CJK request resolves to a loader that rejects, and the caller falls back — the RTL faces below ship in this package and always work.
+For the bundled entry, the CJK rows below require **`@betteroffice/fonts-cjk` installed**; their manifest entries live here (resolution policy belongs in one place) but the binaries do not. Without the add-on, a CJK request resolves to a loader that rejects, and the caller falls back — the RTL faces below ship in this package and always work.
 
 | Bundled family    | Substitutes for (Word families)                                                                                   | Script bucket | License | Version |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------- | ------------- | ------- | ------- |
@@ -89,7 +89,30 @@ Importing this package performs **no network activity and no font registration**
 
 ## Serving the faces from a CDN
 
-Same-origin is the default deliberately: a CDN default would leak document-font usage to a third party and break offline and strict-CSP deployments. Opt in explicitly, either through the engine:
+Use the separate CDN entry to keep font binaries and the CJK add-on out of your application bundle:
+
+```ts
+import { configureDefaultFonts } from '@betteroffice/docx/layout';
+
+configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
+```
+
+This entry fetches faces lazily from version-pinned jsDelivr URLs for `@betteroffice/fonts@0.1.0` and `@betteroffice/fonts-cjk@0.1.0`. Japanese documents can load the CJK faces without installing the CJK package. Each download has a 30-second deadline and omits cookies and referrers; failed or truncated downloads can be retried. The bundled entry retains its existing request behavior and remains available for offline applications.
+
+To use your own CDN, pass a provider to the editor:
+
+```ts
+import { createFontProvider } from '@betteroffice/fonts/cdn';
+
+const measurementFontProvider = createFontProvider({
+  baseUrl: 'https://cdn.example.com/fonts/latin/',
+  cjkBaseUrl: 'https://cdn.example.com/fonts/cjk/',
+});
+```
+
+Pass `measurementFontProvider` to `DocxEditor`. When only `baseUrl` is supplied, all faces use that directory. Serve the original package filenames and allow cross-origin requests. Your content security policy must permit the CDN in `connect-src`.
+
+The original entry also supports a custom origin, but its imports still reference package assets. It keeps same-origin loading as the default for offline and strict-CSP deployments. A CDN can observe which font assets are requested. Opt in explicitly, either through the engine:
 
 ```ts
 import { configureDefaultFonts } from '@betteroffice/docx/layout';

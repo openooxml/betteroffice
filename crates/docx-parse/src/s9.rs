@@ -188,6 +188,8 @@ pub fn parse_docx_s9_wire_with_limits(
 ) -> Result<S9WireEnvelope, ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
     let mut budget = ParseBudget::new(limits);
+    let document_path = crate::relationships::office_document_path(&parts, &mut budget)?;
+    let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
 
     let settings = parse_settings(
         find_part(&parts, "word/settings.xml").map(|(_, bytes)| bytes),
@@ -228,7 +230,7 @@ pub fn parse_docx_s9_wire_with_limits(
         "word/fontTable.xml",
         &mut budget,
     )?;
-    let relationships = match find_part(&parts, "word/_rels/document.xml.rels") {
+    let relationships = match find_part(&parts, &document_relationships_path) {
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
@@ -249,7 +251,7 @@ pub fn parse_docx_s9_wire_with_limits(
         .unwrap_or_else(|| format!("{:x}", Sha256::digest(data)));
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
-    let document_part = find_part(&parts, "word/document.xml");
+    let document_part = find_part(&parts, &document_path);
     let mut warnings = Vec::new();
     let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {

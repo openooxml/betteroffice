@@ -253,11 +253,12 @@ export class TextMeasureFontRegistry {
   getCachedFontIdChain(
     family: string,
     bold: boolean,
-    italic: boolean
+    italic: boolean,
+    consumeRetryable = true
   ): readonly number[] | undefined {
     const key = chainKey(family, bold, italic);
     const resolution = this.chainResults.get(key);
-    if (resolution?.retryable) {
+    if (consumeRetryable && resolution?.retryable) {
       const results = this.chainResults;
       queueMicrotask(() => {
         if (results.get(key) === resolution) results.delete(key);
@@ -279,7 +280,10 @@ export class TextMeasureFontRegistry {
   }
 
   /** Synchronous settled view; retryable results are evicted after one pass. */
-  getCachedScriptFallbackIds(scripts: FontScript[]): readonly number[] | undefined {
+  getCachedScriptFallbackIds(
+    scripts: FontScript[],
+    consumeRetryable = true
+  ): readonly number[] | undefined {
     const results = this.scriptResults;
     const resolutions: Array<[FontScript, ScriptResolution]> = [];
     for (const script of scripts) {
@@ -291,7 +295,7 @@ export class TextMeasureFontRegistry {
     for (const [script, resolution] of resolutions) {
       const { id } = resolution;
       if (id !== null && !out.includes(id)) out.push(id);
-      if (resolution.retryable) {
+      if (consumeRetryable && resolution.retryable) {
         queueMicrotask(() => {
           if (results.get(script) === resolution) results.delete(script);
         });

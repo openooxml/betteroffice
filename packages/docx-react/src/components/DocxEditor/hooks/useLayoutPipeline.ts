@@ -57,6 +57,7 @@ interface CurrentViewportAnchor {
 }
 
 export interface UseLayoutPipelineOptions {
+  onError?: (error: Error) => void;
   document: Document | null;
   session: YrsSession | null;
   renderEnv: YrsRenderEnv;
@@ -116,6 +117,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
     yrsLocToDisplayPosition,
     syncCoordinator,
     getScrollContainer,
+    onError,
     onTotalPagesChange,
     onLayoutComputed,
     onAnchorPositionsChange,
@@ -126,6 +128,8 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
   // Callback refs — parent may hand in a fresh closure every render. Mirroring
   // these in refs keeps `runLayoutPipeline`'s dep array stable; otherwise
   // every parent re-render would invalidate the rAF-coalesced scheduler.
+  const onErrorRef = useRef(onError);
+  onErrorRef.current = onError;
   const onTotalPagesChangeRef = useRef(onTotalPagesChange);
   const onLayoutComputedRef = useRef(onLayoutComputed);
   const onAnchorPositionsChangeRef = useRef(onAnchorPositionsChange);
@@ -252,6 +256,9 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         measurement = residentMeasurementConfig(requirements);
       } catch (error) {
         console.error('[PagedEditor] Resident font preflight error:', error);
+        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
+        syncCoordinator.onLayoutComplete(currentEpoch);
+        return;
       }
       if (!measurement) {
         pendingLayoutOriginRef.current = mergeLayoutUpdateOrigin(
@@ -324,6 +331,7 @@ export function useLayoutPipeline(opts: UseLayoutPipelineOptions): UseLayoutPipe
         applyComputation(computeLayout(computeInputs));
       } catch (error) {
         console.error('[PagedEditor] Layout pipeline error:', error);
+        onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
       }
       syncCoordinator.onLayoutComplete(currentEpoch);
     },

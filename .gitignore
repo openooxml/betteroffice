@@ -26,3 +26,7 @@ apps/redact-worker/src/wasm/generated/*.wasm
 apps/redact-worker/src/wasm/generated/*.js
 screenshots/
 ~$*
+crates/docx-edit/tests/fixtures/anchored-header.docx
+crates/docx-edit/tests/fixtures/anchored-header.*.png
+crates/docx-edit/tests/fixtures/alternate-main-part.docx
+crates/docx-edit/tests/fixtures/alternate-main-part.*.png

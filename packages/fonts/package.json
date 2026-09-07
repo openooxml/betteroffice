@@ -12,7 +12,11 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./cdn": {
+      "types": "./dist/cdn.d.ts",
+      "import": "./dist/cdn.js"
+    }
   },
   "files": [
     "dist",

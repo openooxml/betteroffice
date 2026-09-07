@@ -282,6 +282,7 @@ export interface PagedEditorProps {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
+  onError?: (error: Error) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
@@ -461,6 +462,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsTrackedChangesChange,
       onTotalPagesChange,
       onLayoutComputed,
+      onError,
       applyResidentInput,
       applyResidentDelete,
       hyperlinkPopupData,
@@ -622,6 +624,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       residentMeasurementConfig,
       runLayoutPipelineRef,
     } = useRustMeasurement({
+      onError,
       document,
       fontProvider: measurementFontProvider,
       fontChainsProviderRef: rustFontChainsProviderRef,
@@ -641,6 +644,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       scheduleLayout,
       cancelPendingScrollRestore,
     } = useLayoutPipeline({
+      onError,
       document,
       session: yrsCore.session,
       renderEnv: yrsRenderEnv,

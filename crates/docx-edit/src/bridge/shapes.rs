@@ -1,8 +1,8 @@
 use std::f64::consts::PI;
 
 use docx_layout::types::{
-    BlockId, LineBreakRun, ParagraphAttrs, ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun,
-    TextRun,
+    AxisPosition, BlockId, ImageRunPosition, LineBreakRun, ParagraphAttrs, ParagraphBlock, Run,
+    RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use serde_json::{Map, Value, json};
 
@@ -58,6 +58,7 @@ fn lower_shape(
         .map(|start| (Some(start as f64), Some((start + 1) as f64)))
         .unwrap_or((None, None));
     let inner_text = shape_inner_text(shape, &block_id);
+    let position = shape_position(shape);
 
     Some(ShapeBlock {
         sdt_groups: None,
@@ -81,18 +82,55 @@ fn lower_shape(
         scene: field(shape, "scene").cloned(),
         effects: array(shape, "effects").cloned(),
         text_body_properties: field(shape, "textBodyProperties").map(text_body_in_pixels),
-        position: None,
-        wrap_type: None,
-        wrap_text: None,
-        relative_height: None,
-        behind_doc: None,
-        decorative: None,
-        title: None,
-        description: None,
+        wrap_type: field(shape, "wrap").and_then(|wrap| string(wrap, "type")),
+        wrap_text: field(shape, "wrap").and_then(|wrap| string(wrap, "wrapText")),
+        relative_height: field(shape, "relativeHeight")
+            .and_then(Value::as_f64)
+            .map(|height| height.max(0.0) as u64)
+            .or_else(|| position.as_ref().and_then(|value| value.relative_height)),
+        behind_doc: position.as_ref().and_then(|value| value.behind_doc),
+        position,
+        decorative: field(shape, "decorative").and_then(Value::as_bool),
+        title: string(shape, "title"),
+        description: string(shape, "description"),
         doc_start,
         doc_end,
         pm_start: doc_start,
         pm_end: doc_end,
+    })
+}
+
+fn shape_position(shape: &Value) -> Option<ImageRunPosition> {
+    let position = field(shape, "position").filter(|value| value.is_object())?;
+    let axis = |name| {
+        let value = field(position, name)?;
+        Some(AxisPosition {
+            align: string(value, "alignment").or_else(|| string(value, "align")),
+            pos_offset: field(value, "posOffset")
+                .or_else(|| field(value, "offset"))
+                .and_then(Value::as_f64)
+                .map(emu_to_pixels),
+            relative_to: string(value, "relativeTo"),
+        })
+    };
+    let simple_pos = field(position, "simplePos").map(|point| {
+        let mut point = point.clone();
+        for axis in ["x", "y"] {
+            if let Some(value) = point.get(axis).and_then(Value::as_f64) {
+                point[axis] = json!(emu_to_pixels(value));
+            }
+        }
+        point
+    });
+    Some(ImageRunPosition {
+        horizontal: axis("horizontal"),
+        vertical: axis("vertical"),
+        use_simple_pos: field(position, "useSimplePos").and_then(Value::as_bool),
+        simple_pos,
+        relative_height: field(position, "relativeHeight")
+            .and_then(Value::as_f64)
+            .map(|height| height.max(0.0) as u64),
+        behind_doc: field(position, "behindDoc").and_then(Value::as_bool),
     })
 }
 
@@ -814,6 +852,30 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lowers_anchor_offsets_alignment_and_metadata() {
+        let shape = json!({
+            "type": "shape", "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "position": {
+                "useSimplePos": true, "simplePos": {"x": 952500, "y": -95250},
+                "horizontal": {"relativeTo": "margin", "alignment": "right"},
+                "vertical": {"relativeTo": "page", "posOffset": 190500},
+                "relativeHeight": 251658240.0, "behindDoc": true
+            },
+            "wrap": {"type": "none"}, "title": "Header", "description": "Decoration"
+        });
+        let block = lower_shape_json(&shape, 7, &RenderEnv::default()).unwrap();
+        let position = block.position.unwrap();
+        assert_eq!(position.simple_pos, Some(json!({"x": 100.0, "y": -10.0})));
+        assert_eq!(position.horizontal.unwrap().align.as_deref(), Some("right"));
+        assert_eq!(position.vertical.unwrap().pos_offset, Some(20.0));
+        assert_eq!(block.relative_height, Some(251658240));
+        assert_eq!(block.behind_doc, Some(true));
+        assert_eq!(block.wrap_type.as_deref(), Some("none"));
+        assert_eq!(block.title.as_deref(), Some("Header"));
+    }
 
     #[test]
     fn lowers_shape_paint_text_children_and_geometry_without_layout_json() {

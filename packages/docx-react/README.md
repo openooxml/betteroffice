@@ -79,10 +79,20 @@ revisions).
 - Real-time collaboration with people or agents; the document is a CRDT
 - Live collaborator cursors and selections, shown in each peer's color
 
-For Word-accurate metrics install `@betteroffice/fonts` and hand it to the
-engine once at module scope — `configureDefaultFonts({ fonts })`, re-exported
-here — or pass your own provider through the `measurementFontProvider` prop.
-Without either, measurement falls back to the browser.
+For font metrics closer to Word, configure `@betteroffice/fonts` once at
+module scope, or pass a provider through `measurementFontProvider`. The CDN
+entry loads Latin and Japanese coverage fonts without bundling font binaries:
+
+```ts
+import { configureDefaultFonts } from '@betteroffice/docx-react';
+
+configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
+```
+
+For offline assets, import `* as fonts` from `@betteroffice/fonts` and call
+`configureDefaultFonts({ fonts })`. Without a provider, pagination uses
+approximate fallback metrics. CJK coverage fonts are substitutes and can differ
+from Word's fonts; see [font configuration](../fonts/README.md).
 
 ## Collaboration
 

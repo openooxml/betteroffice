@@ -834,6 +834,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
+    reportLayoutError,
   } = useDocumentLoader({
     documentBuffer,
     initialDocument,
@@ -1842,6 +1843,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
           >
             <DocxEditorPagedArea
               yrsCore={yrsCore}
+              onError={reportLayoutError}
               collaboration={collaboration}
               pagedEditorRef={pagedEditorRef}
               scrollContainerRef={scrollContainerRef}

@@ -1018,8 +1018,39 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
-/// Places a DrawingML shape by consuming its measured bbox in normal flow.
+/// Places non-wrapping anchored shapes at page coordinates.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
+    if block.position.is_some()
+        && !matches!(
+            block.wrap_type.as_deref(),
+            Some("square" | "tight" | "through" | "topAndBottom")
+        )
+    {
+        let (x, y) = resolve_object_position(
+            block.position.as_ref(),
+            measure.width,
+            measure.height,
+            paginator,
+        );
+        paginator.push_fragment_direct(Fragment::Shape(ShapeFragment {
+            block_id: block.id.clone(),
+            x,
+            y,
+            width: measure.width,
+            height: measure.height,
+            pm_start: block.pm_start,
+            pm_end: block.pm_end,
+            doc_start: block.doc_start,
+            doc_end: block.doc_end,
+            is_anchored: Some(true),
+            z_index: Some(if block.behind_doc.unwrap_or(false) {
+                -1.0
+            } else {
+                block.relative_height.unwrap_or(1).clamp(1, 2_147_483_647) as f64
+            }),
+        }));
+        return;
+    }
     let state_idx = paginator.ensure_fits(measure.height);
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Shape(ShapeFragment {
@@ -1075,69 +1106,23 @@ fn resolve_object_position(
     let state = paginator.state(state_idx);
     let page = &paginator.pages[state.page_index];
     let column_x = paginator.get_column_x(state.column_index);
-    if let Some(position) = position
-        && position.use_simple_pos.unwrap_or(false)
-        && let Some(simple) = position
-            .simple_pos
-            .as_ref()
-            .and_then(|value| value.as_object())
-    {
-        let x = simple
-            .get("x")
-            .and_then(|value| value.as_f64())
-            .filter(|value| value.is_finite())
-            .unwrap_or(column_x);
-        let y = simple
-            .get("y")
-            .and_then(|value| value.as_f64())
-            .filter(|value| value.is_finite())
-            .unwrap_or(state.pen_y);
-        return (x, y);
-    }
-
-    let coordinate = |spec: Option<&crate::types::AxisPosition>, horizontal: bool| {
-        let relative_to = spec
-            .and_then(|axis| axis.relative_to.as_deref())
-            .unwrap_or(if horizontal { "column" } else { "paragraph" });
-        let odd = page.number % 2 == 1;
-        let (start, end) = if horizontal {
-            match relative_to {
-                "page" => (0.0, page.size.w),
-                "margin" => (page.margins.left, page.size.w - page.margins.right),
-                "leftMargin" => (0.0, page.margins.left),
-                "rightMargin" => (page.size.w - page.margins.right, page.size.w),
-                "insideMargin" if odd => (0.0, page.margins.left),
-                "insideMargin" => (page.size.w - page.margins.right, page.size.w),
-                "outsideMargin" if odd => (page.size.w - page.margins.right, page.size.w),
-                "outsideMargin" => (0.0, page.margins.left),
-                _ => (column_x, column_x + paginator.column_width()),
-            }
-        } else {
-            match relative_to {
-                "page" => (0.0, page.size.h),
-                "margin" => (page.margins.top, page.size.h - page.margins.bottom),
-                "topMargin" => (0.0, page.margins.top),
-                "bottomMargin" => (page.size.h - page.margins.bottom, page.size.h),
-                _ => (state.pen_y, state.content_limit),
-            }
-        };
-        let extent = if horizontal { width } else { height };
-        if let Some(offset) = spec
-            .and_then(|axis| axis.pos_offset)
-            .filter(|value| value.is_finite())
-        {
-            return start + offset;
-        }
-        match spec.and_then(|axis| axis.align.as_deref()) {
-            Some("center") => start + (end - start - extent) / 2.0,
-            Some("right" | "bottom" | "outside") => end - extent,
-            Some("inside") if !odd => end - extent,
-            _ => start,
-        }
-    };
-    (
-        coordinate(position.and_then(|value| value.horizontal.as_ref()), true),
-        coordinate(position.and_then(|value| value.vertical.as_ref()), false),
+    crate::anchor::resolve_position(
+        position,
+        width,
+        height,
+        &crate::anchor::AnchorFrame {
+            page_width: page.size.w,
+            page_height: page.size.h,
+            margin_left: page.margins.left,
+            margin_right: page.margins.right,
+            margin_top: page.margins.top,
+            margin_bottom: page.margins.bottom,
+            flow_x: column_x,
+            flow_y: state.pen_y,
+            flow_width: paginator.column_width(),
+            flow_height: state.content_limit - state.pen_y,
+            odd_page: page.number % 2 == 1,
+        },
     )
 }
 
@@ -1307,6 +1292,51 @@ mod pagination_rule_tests {
             },
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn anchored_shape_does_not_advance_body_flow() {
+        for (anchored, wrap, overlay) in [
+            (false, "none", false),
+            (true, "none", true),
+            (true, "square", false),
+            (true, "tight", false),
+            (true, "through", false),
+            (true, "topAndBottom", false),
+        ] {
+            let mut shape = json!({
+                "kind": "shape", "id": "shape", "shapeType": "rect",
+                "width": 50, "height": 40, "geometryPath": [], "children": [],
+                "wrapType": wrap
+            });
+            if anchored {
+                shape["position"] = json!({
+                    "horizontal": {"relativeTo": "page", "posOffset": 100},
+                    "vertical": {"relativeTo": "page", "posOffset": 10}
+                });
+            }
+            let mut input: Input = serde_json::from_value(json!({
+                "measured": [
+                    {"block": shape, "measure": {"kind": "shape", "width": 50, "height": 40}},
+                    {"block": {"kind": "image", "id": "body", "src": "", "width": 20, "height": 20},
+                     "measure": {"kind": "image", "width": 20, "height": 20}}
+                ],
+                "options": {"pageSize": {"w": 300, "h": 200}, "margins": {"left": 20, "right": 20, "top": 20, "bottom": 20}}
+            })).unwrap();
+            let layout = layout_document(&mut input).unwrap();
+            assert_eq!(layout.pages.len(), 1);
+            let Fragment::Shape(shape) = &layout.pages[0].fragments[0] else {
+                panic!("shape expected")
+            };
+            let Fragment::Image(body) = &layout.pages[0].fragments[1] else {
+                panic!("image expected")
+            };
+            assert_eq!(body.y, if overlay { 20.0 } else { 60.0 });
+            assert_eq!(
+                (shape.x, shape.y),
+                if overlay { (100.0, 10.0) } else { (20.0, 20.0) }
+            );
+        }
     }
 
     #[test]

@@ -57,6 +57,7 @@
 //! registry lives in this file. Everything below the wrappers is pure and
 //! native-testable.
 
+mod anchor;
 pub mod canonical;
 pub mod hooks;
 pub mod page_flow;

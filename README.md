@@ -52,6 +52,24 @@ What to install for which language, with a first example each:
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
+## Visual fidelity
+
+Our first public reference is one original BetterOffice demo document, rendered by Microsoft Word 16.112.3 on macOS 26.2 on 2026-09-07.
+
+| DOCX renderer | Word / renderer pages | Common-page SSIM | Page-penalized SSIM |
+| --- | --- | ---: | ---: |
+| Published 0.1.0 + CDN fonts | 2 / 2 | 0.7711 | 0.7711 |
+| This revision + CDN fonts | 2 / 2 | 0.7711 | 0.7711 |
+
+Measured at 150 DPI with grayscale SSIM and matching image dimensions; no resizing or alignment correction. This single demo shows no score change and does not establish corpus quality or a leaderboard rank. The renderer uses the pinned Carlito/Liberation CDN substitutes; Word uses its installed Calibri, Calibri Light, Arial, and Symbol fonts.
+
+The reference assets live in the public `betteroffice-corpus` R2 bucket:
+[source DOCX](https://pub-7c169e9c70e5477580d398e65f63d974.r2.dev/docx/betteroffice-demo/source.docx),
+[Word page 1](https://pub-7c169e9c70e5477580d398e65f63d974.r2.dev/docx/betteroffice-demo/word/page_0001.png),
+[Word page 2](https://pub-7c169e9c70e5477580d398e65f63d974.r2.dev/docx/betteroffice-demo/word/page_0002.png),
+[metadata and scores](https://pub-7c169e9c70e5477580d398e65f63d974.r2.dev/docx/betteroffice-demo/metadata.json).
+The metadata records UTC export times, Word/macOS versions, fonts, source/image hashes, and scoring settings. No corpus copies or rendered images are added to Git. Use the [local Office harness](scripts/office-quality/README.md) to reproduce or compare another document.
+
 ## Structure
 
 - `crates/` — the Rust engines
