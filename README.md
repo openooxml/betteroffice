@@ -70,6 +70,8 @@ bun run dev          # web app
 bun run rust:check   # fmt + clippy + tests for the engines
 ```
 
+Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
+
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Visual fidelity
 
