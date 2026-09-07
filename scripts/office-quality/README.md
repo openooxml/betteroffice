@@ -22,7 +22,7 @@ node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. Set `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset; all three demos run by default.
 
 XLSX capture uses `printDisplayList` when available, with font metrics measured
-at Mac Excel's 72-DPI layout scale and the source worksheet's explicit defaults.
+at 72 layout DPI for the frozen Mac Office capture and the worksheet's explicit defaults.
 Older packages use the screen-range capture. Both keep the recorded ranges,
 150-DPI output, page margins, and SSIM scoring. Per-capture metadata identifies
 the mode and metrics. Unspecified column defaults, locale-specific dates, and
