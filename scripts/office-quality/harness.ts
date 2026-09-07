@@ -4,6 +4,7 @@ import { createFontProvider } from '../../packages/fonts/src/cdn';
 const api = window as any;
 const format = new URLSearchParams(location.search).get('format');
 let capture: (index: number) => Promise<string>;
+let printCapture: any;
 
 async function fontsFor(bytes: Uint8Array) {
   const zip = await JSZip.loadAsync(bytes);
@@ -39,6 +40,59 @@ async function fontsFor(bytes: Uint8Array) {
     }
   }
   return faces;
+}
+
+async function xlsxPrintMetrics(bytes: Uint8Array) {
+  const zip = await JSZip.loadAsync(bytes);
+  const xml = async (path: string) =>
+    new DOMParser().parseFromString((await zip.file(path)?.async('string')) ?? '<root/>', 'text/xml');
+  const styles = await xml('xl/styles.xml');
+  const normal = styles.querySelector('cellStyleXfs > xf');
+  const font =
+    styles.querySelectorAll('fonts > font')[Number(normal?.getAttribute('fontId') ?? 0)];
+  const family = font?.querySelector('name')?.getAttribute('val') ?? 'Calibri';
+  const size = Number(font?.querySelector('sz')?.getAttribute('val') ?? 11);
+  const dpi = 72;
+  const context = document.createElement('canvas').getContext('2d')!;
+  context.font = `${(size * dpi) / 72}px "${family.replace(/"/g, '\\"')}"`;
+  const bounds = context.measureText('0123456789');
+  const maxDigitWidth = Math.max(
+    ...[...'0123456789'].map((digit) => Math.round(context.measureText(digit).width))
+  );
+  const workbook = await xml('xl/workbook.xml');
+  const relationships = await xml('xl/_rels/workbook.xml.rels');
+  return Promise.all(
+    [...workbook.querySelectorAll('sheet')].map(async (sheet) => {
+      const id = sheet.getAttribute('r:id');
+      const target = [...relationships.querySelectorAll('Relationship')]
+        .find((rel) => rel.getAttribute('Id') === id)
+        ?.getAttribute('Target');
+      if (!target) throw new Error('Missing worksheet relationship');
+      const path = new URL(
+        target,
+        'https://package.invalid/xl/workbook.xml'
+      ).pathname.slice(1);
+      const format = (await xml(path)).querySelector('sheetFormatPr');
+      return {
+        dpi,
+        maxDigitWidth,
+        fontSizePt: size,
+        fontFamily: family,
+        fontAscent: bounds.fontBoundingBoxAscent,
+        fontDescent: bounds.fontBoundingBoxDescent,
+        defaultRowHeightPt: Number(
+          format?.getAttribute('defaultRowHeight') ??
+            ((bounds.fontBoundingBoxAscent + bounds.fontBoundingBoxDescent + 1) * 72) /
+              dpi
+        ),
+        ...(format?.hasAttribute('defaultColWidth')
+          ? {
+              defaultColumnWidth: Number(format.getAttribute('defaultColWidth')),
+            }
+          : {}),
+      };
+    })
+  );
 }
 
 function cell(value: string) {
@@ -89,6 +143,12 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     );
     await initWasm();
     const handle = openWorkbook(bytes);
+    const printMetrics = await xlsxPrintMetrics(bytes);
+    printCapture = {
+      mode:
+        typeof handle.printDisplayList === 'function' ? 'print-range' : 'screen-range',
+      metrics: printMetrics,
+    };
     if (
       !profile?.pages?.length ||
       !Number.isFinite(profile.scale_percent) ||
@@ -109,7 +169,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         throw new Error('Invalid worksheet index');
       handle.setActiveSheet(page.sheet);
       const info = handle.sheetInfo();
-      if (info.frozenRows || info.frozenCols)
+      if ((info.frozenRows || info.frozenCols) && typeof handle.printDisplayList !== 'function')
         throw new Error('XLSX print capture does not support frozen panes');
       const parts = page.range.split(':');
       if (parts.length !== 2) throw new Error('A rectangular print range is required');
@@ -117,10 +177,19 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       const end = cell(parts[1]);
       if (end.row < start.row || end.col < start.col)
         throw new Error('Reversed print range');
+      const printable =
+        typeof handle.printDisplayList === 'function'
+          ? handle.printDisplayList(
+              page.sheet,
+              page.range,
+              printMetrics[page.sheet],
+              profile.gridlines !== false
+            )
+          : undefined;
       const from = handle.cellPosition(page.sheet, start.row, start.col);
       const to = handle.cellPosition(page.sheet, end.row + 1, end.col + 1);
-      const width = to.x - from.x;
-      const height = to.y - from.y;
+      const width = printable?.width ?? to.x - from.x;
+      const height = printable?.height ?? to.y - from.y;
       const scale = ((150 / 96) * profile.scale_percent) / 100;
       const margin = (profile.margin_pt * 150) / 72;
       if (
@@ -133,21 +202,30 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
         height * scale > page.height_px - margin * 2 + 1
       )
         throw new Error('Print range does not fit the recorded page');
-      const content = document.createElement('canvas');
-      content.width = Math.ceil(width * scale);
-      content.height = Math.ceil(height * scale);
-      paintDisplayList(
-        content.getContext('2d')!,
-        handle.displayList({ x: from.x, y: from.y, width, height }),
-        scale
-      );
       const canvas = document.createElement('canvas');
       canvas.width = page.width_px;
       canvas.height = page.height_px;
       const context = canvas.getContext('2d')!;
       context.fillStyle = '#fff';
       context.fillRect(0, 0, canvas.width, canvas.height);
-      context.drawImage(content, margin, margin);
+      if (printable) {
+        context.save();
+        context.beginPath();
+        context.rect(margin, margin, width * scale, height * scale);
+        context.clip();
+        paintDisplayList(context, printable, scale, { x: margin, y: margin });
+        context.restore();
+      } else {
+        const content = document.createElement('canvas');
+        content.width = Math.ceil(width * scale);
+        content.height = Math.ceil(height * scale);
+        paintDisplayList(
+          content.getContext('2d')!,
+          handle.displayList({ x: from.x, y: from.y, width, height }),
+          scale
+        );
+        context.drawImage(content, margin, margin);
+      }
       return canvas.toDataURL('image/png');
     };
   } else throw new Error('Unsupported capture format');
@@ -163,6 +241,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       ok: true,
     })),
     capture_profile: profile,
+    ...(printCapture ? { print_capture: printCapture } : {}),
   };
 };
 api.oraclePage = (index: number) => capture(index);

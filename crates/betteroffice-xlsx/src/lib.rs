@@ -30,7 +30,7 @@ pub use xlsx_ops::{
 };
 pub use xlsx_render::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridGeometry, GridMeta,
-    HyperlinkRegion, PathStroke, Rect, RenderError, Viewport, viewport_for_range,
+    HyperlinkRegion, PathStroke, PrintMetrics, Rect, RenderError, Viewport, viewport_for_range,
     viewport_for_used_range, viewport_for_used_range_within,
 };
 

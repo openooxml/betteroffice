@@ -27,6 +27,7 @@ export const xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [n
 export const xlsxdocument_open: (a: number, b: number) => [number, number, number];
 export const xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
 export const xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const xlsxdocument_redoJson: (a: number) => [number, number, number, number];

@@ -96,6 +96,7 @@ export interface TextCmd {
   x: number;
   y: number;
   text: string;
+  /** Font size in points. */
   fontSize: number;
   /** resolved font color (`#rrggbb`); a number-format color prefix wins upstream. */
   color: string;

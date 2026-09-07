@@ -29,7 +29,7 @@ pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
     PathStroke, Rect, scaled,
 };
-pub use geometry::GridGeometry;
+pub use geometry::{GridGeometry, PrintMetrics};
 pub use hit::chart_at_point;
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
@@ -283,7 +283,42 @@ pub fn build_display_list_with_charts_and_ghosts<F>(
     sheet: SheetId,
     viewport: &Viewport,
     ghosts: &[GhostEdit],
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
+    build_frame(wb, sheet, viewport, ghosts, resolver, None)
+}
+
+pub fn build_print_display_list_with_charts<F>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    metrics: &PrintMetrics,
+    gridlines: bool,
+    resolver: F,
+) -> Result<DisplayList, RenderError>
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
+    build_frame(
+        wb,
+        sheet,
+        viewport,
+        &[],
+        resolver,
+        Some((metrics, gridlines)),
+    )
+}
+
+fn build_frame<F>(
+    wb: &Workbook,
+    sheet: SheetId,
+    viewport: &Viewport,
+    ghosts: &[GhostEdit],
     mut resolver: F,
+    print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
 where
     F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
@@ -313,10 +348,17 @@ where
     let styles = &wb.styles;
     let theme = &styles.theme;
     let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
-    let geom = GridGeometry::new(sheet_ref);
-    let (frozen_rows, frozen_cols) = sheet_ref
-        .freeze_pane
-        .map_or((0, 0), |pane| (pane.rows, pane.cols));
+    let geom = print.map_or_else(
+        || GridGeometry::new(sheet_ref),
+        |(metrics, _)| GridGeometry::for_print(sheet_ref, metrics),
+    );
+    let (frozen_rows, frozen_cols) = if print.is_some() {
+        (0, 0)
+    } else {
+        sheet_ref
+            .freeze_pane
+            .map_or((0, 0), |pane| (pane.rows, pane.cols))
+    };
     let rows = AxisLayout::new(
         MAX_ROWS,
         frozen_rows,
@@ -359,12 +401,80 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
-    let anchors = visible_anchors(sheet_ref, &rows, &cols);
+    let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
+    if print.is_some() {
+        anchors.retain(|(at, _)| {
+            geom.row_y(at.row) < viewport.y + viewport.height
+                && geom.col_x(at.col) < viewport.x + viewport.width
+        });
+    }
     let changed_ghost_cells: std::collections::HashSet<(u32, u32)> = ghosts
         .iter()
         .filter(|g| g.old_text != g.new_text)
         .map(|g| (g.row, g.col))
         .collect();
+
+    let mut grid_commands = Vec::new();
+    let grid_offset = print.map_or(0.0, |(m, _)| 48.0 / m.dpi);
+    let row_offsets = rows.offsets();
+    let col_offsets = cols.offsets();
+    let top = row_offsets.first().copied().unwrap_or(0.0);
+    let bottom = row_offsets.last().copied().unwrap_or(0.0);
+    let left = col_offsets.first().copied().unwrap_or(0.0);
+    let right = col_offsets.last().copied().unwrap_or(0.0);
+    for &x in &col_offsets {
+        grid_commands.push(DrawCmd::Line {
+            x1: x + grid_offset,
+            y1: top + grid_offset,
+            x2: x + grid_offset,
+            y2: bottom + grid_offset,
+            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
+            color: if print.is_some() {
+                TEXT_COLOR
+            } else {
+                GRIDLINE_COLOR
+            }
+            .to_string(),
+            style: None,
+            clip: None,
+        });
+    }
+    for &y in &row_offsets {
+        grid_commands.push(DrawCmd::Line {
+            x1: left + grid_offset,
+            y1: y + grid_offset,
+            x2: right + grid_offset,
+            y2: y + grid_offset,
+            width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
+            color: if print.is_some() {
+                TEXT_COLOR
+            } else {
+                GRIDLINE_COLOR
+            }
+            .to_string(),
+            style: None,
+            clip: None,
+        });
+    }
+
+    if let Some((metrics, gridlines)) = print {
+        if gridlines {
+            commands.extend(grid_commands.iter().cloned());
+        }
+        for merge in &sheet_ref.merges {
+            if let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, merge.start) {
+                let inset = 96.0 / metrics.dpi / 2.0;
+                commands.push(DrawCmd::FillRect {
+                    x: cell_box.x + inset,
+                    y: cell_box.y + inset,
+                    w: (cell_box.w - 2.0 * inset).max(0.0),
+                    h: (cell_box.h - 2.0 * inset).max(0.0),
+                    color: BACKGROUND_COLOR.to_string(),
+                    clip: Some(cell_box.clip),
+                });
+            }
+        }
+    }
 
     for &(at, cell) in &anchors {
         let Some(style) = cell.style else { continue };
@@ -388,35 +498,39 @@ where
         });
     }
 
-    let row_offsets = rows.offsets();
-    let col_offsets = cols.offsets();
-    let top = row_offsets.first().copied().unwrap_or(0.0);
-    let bottom = row_offsets.last().copied().unwrap_or(0.0);
-    let left = col_offsets.first().copied().unwrap_or(0.0);
-    let right = col_offsets.last().copied().unwrap_or(0.0);
-    for &x in &col_offsets {
-        commands.push(DrawCmd::Line {
-            x1: x,
-            y1: top,
-            x2: x,
-            y2: bottom,
-            width: GRIDLINE_WIDTH,
-            color: GRIDLINE_COLOR.to_string(),
-            style: None,
-            clip: None,
-        });
+    if print.is_none() {
+        commands.extend(grid_commands);
     }
-    for &y in &row_offsets {
-        commands.push(DrawCmd::Line {
-            x1: left,
-            y1: y,
-            x2: right,
-            y2: y,
-            width: GRIDLINE_WIDTH,
-            color: GRIDLINE_COLOR.to_string(),
-            style: None,
-            clip: None,
-        });
+    if let Some((metrics, true)) = print {
+        let width = 96.0 / metrics.dpi;
+        let offset = width / 2.0;
+        for (x1, y1, x2, y2) in [
+            (offset, offset, viewport.width + offset, offset),
+            (offset, offset, offset, viewport.height + offset),
+            (
+                offset,
+                viewport.height + offset,
+                viewport.width + offset,
+                viewport.height + offset,
+            ),
+            (
+                viewport.width + offset,
+                offset,
+                viewport.width + offset,
+                viewport.height + offset,
+            ),
+        ] {
+            commands.push(DrawCmd::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                width,
+                color: TEXT_COLOR.to_string(),
+                style: None,
+                clip: None,
+            });
+        }
     }
 
     for &(at, cell) in &anchors {
@@ -464,7 +578,7 @@ where
         let size = font
             .and_then(|f| f.size_pt)
             .map(|p| p as f32)
-            .unwrap_or(FONT_SIZE_PT);
+            .unwrap_or_else(|| print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt));
         let align = resolve_align(styles, cell);
         let valign = cell
             .style
@@ -472,11 +586,27 @@ where
             .and_then(|a| a.v);
 
         let tx = match align {
-            Align::Left => cell_box.x + TEXT_PAD_PX,
-            Align::Right => cell_box.x + cell_box.w - TEXT_PAD_PX,
+            Align::Left => cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
+            Align::Right => {
+                cell_box.x + cell_box.w - print.map_or(TEXT_PAD_PX, |(m, _)| 2.0 * 96.0 / m.dpi)
+            }
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = baseline_y(cell_box.y, cell_box.h, size, valign);
+        let ty = print.map_or_else(
+            || baseline_y(cell_box.y, cell_box.h, size, valign),
+            |(m, _)| {
+                let ratio = size / m.font_size_pt * 96.0 / m.dpi;
+                let ascent = m.font_ascent * ratio;
+                let descent = m.font_descent * ratio;
+                match valign {
+                    Some(VAlign::Top) => cell_box.y + ascent,
+                    Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => {
+                        cell_box.y + (cell_box.h + ascent - descent) / 2.0
+                    }
+                    Some(VAlign::Bottom) | None => cell_box.y + cell_box.h - descent,
+                }
+            },
+        );
 
         commands.push(DrawCmd::Text {
             x: tx,
@@ -492,7 +622,9 @@ where
             strike: font.is_some_and(|f| f.strike),
             highlight: None,
             dashed_underline: false,
-            font_family: font.and_then(|f| f.name.clone()),
+            font_family: font
+                .and_then(|f| f.name.clone())
+                .or_else(|| print.map(|(m, _)| m.font_family.clone())),
             ghost: false,
             chart: false,
         });
@@ -706,12 +838,12 @@ fn emit_ghost(
         return;
     }
 
-    let line_ratio = ASCENT_RATIO + DESCENT_RATIO;
+    let line_ratio = (ASCENT_RATIO + DESCENT_RATIO) * geometry::PX_PER_PT as f32;
     let scale = (ch / (2.0 * full_size * line_ratio)).clamp(GHOST_MIN_SCALE, 1.0);
     let size = full_size * scale;
     let line_h = size * line_ratio;
     let top = cy0 + ((ch - 2.0 * line_h) / 2.0).max(0.0);
-    let first_baseline = top + size * ASCENT_RATIO;
+    let first_baseline = top + size * geometry::PX_PER_PT as f32 * ASCENT_RATIO;
     line(
         x,
         first_baseline,
@@ -737,7 +869,7 @@ fn emit_ghost(
 /// estimated advance width of `text` at `size`, deliberately generous so fit
 /// decisions err toward ellipsizing rather than overlap.
 fn ghost_text_width(text: &str, size: f32) -> f32 {
-    text.chars().count() as f32 * size * GHOST_CHAR_W_RATIO
+    text.chars().count() as f32 * size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO
 }
 
 /// `text` unchanged when its estimate fits `budget`, else a truncated prefix
@@ -746,7 +878,7 @@ fn ellipsize(text: &str, budget: f32, size: f32) -> String {
     if ghost_text_width(text, size) <= budget {
         return text.to_string();
     }
-    let char_w = size * GHOST_CHAR_W_RATIO;
+    let char_w = size * geometry::PX_PER_PT as f32 * GHOST_CHAR_W_RATIO;
     let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
@@ -888,13 +1020,15 @@ fn resolve_align_with_value(
     }
 }
 
-/// baseline y for a cell's text given its vertical alignment; unset (or center)
-/// keeps the centered baseline.
+/// Alphabetic baseline in pixels for a point-sized cell font.
 fn baseline_y(cy0: f32, ch: f32, size: f32, valign: Option<VAlign>) -> f32 {
+    let size_px = size * geometry::PX_PER_PT as f32;
     match valign {
-        Some(VAlign::Top) => cy0 + TEXT_PAD_PX + size * ASCENT_RATIO,
-        Some(VAlign::Bottom) => cy0 + ch - TEXT_PAD_PX - size * DESCENT_RATIO,
-        _ => cy0 + (ch + size * ASCENT_RATIO) / 2.0,
+        Some(VAlign::Top) => cy0 + TEXT_PAD_PX + size_px * ASCENT_RATIO,
+        Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => {
+            cy0 + (ch + size_px * (ASCENT_RATIO - DESCENT_RATIO)) / 2.0
+        }
+        Some(VAlign::Bottom) | None => cy0 + ch - TEXT_PAD_PX - size_px * DESCENT_RATIO,
     }
 }
 
@@ -1446,7 +1580,9 @@ mod tests {
             })
             .collect();
         assert!(lines[0].0 < lines[1].0);
-        assert_eq!((lines[0].1, lines[1].1), (FONT_SIZE_PT, FONT_SIZE_PT));
+        assert_eq!(lines[0].1, lines[1].1);
+        assert!(lines[0].1 < FONT_SIZE_PT);
+        assert!(lines[0].1 >= FONT_SIZE_PT * GHOST_MIN_SCALE);
     }
 
     #[test]

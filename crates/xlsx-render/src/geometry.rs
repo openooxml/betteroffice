@@ -38,6 +38,42 @@ pub fn emu_to_px(emu: i64) -> f64 {
     emu as f64 / EMU_PER_PT * PX_PER_PT
 }
 
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrintMetrics {
+    pub dpi: f32,
+    pub max_digit_width: f32,
+    pub default_row_height_pt: f32,
+    pub default_column_width: Option<f64>,
+    pub font_size_pt: f32,
+    pub font_family: String,
+    pub font_ascent: f32,
+    pub font_descent: f32,
+}
+
+impl PrintMetrics {
+    pub fn is_valid(&self) -> bool {
+        !self.font_family.is_empty()
+            && self.font_family.len() <= 1024
+            && (36.0..=600.0).contains(&self.dpi)
+            && (1.0..=256.0).contains(&self.max_digit_width)
+            && (1.0..=409.0).contains(&self.default_row_height_pt)
+            && self
+                .default_column_width
+                .is_none_or(|w| w.is_finite() && w > 0.0 && w <= 255.0)
+            && (1.0..=409.0).contains(&self.font_size_pt)
+            && (0.0..=4096.0).contains(&self.font_ascent)
+            && (0.0..=4096.0).contains(&self.font_descent)
+            && self.font_ascent + self.font_descent > 0.0
+    }
+
+    pub fn column_pixels(&self, width: f64) -> f32 {
+        let digit = self.max_digit_width as f64;
+        (((256.0 * width + (128.0 / digit).floor()) / 256.0 * digit).floor() * 96.0
+            / self.dpi as f64) as f32
+    }
+}
+
 /// cumulative left-edge x offsets for columns and top-edge y offsets for rows,
 /// both in pixels from the sheet origin.
 #[derive(Debug, Clone)]
@@ -54,9 +90,33 @@ pub struct GridGeometry {
 impl GridGeometry {
     /// build cumulative offset tables from a sheet's custom widths/heights.
     pub fn new(sheet: &Sheet) -> Self {
-        let default_col_px = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
-        let default_row_px = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
+        Self::with_sizes(
+            sheet,
+            col_chars_to_px(DEFAULT_COL_WIDTH_CHARS),
+            row_pt_to_px(DEFAULT_ROW_HEIGHT_PT),
+            col_chars_to_px,
+        )
+    }
 
+    pub fn for_print(sheet: &Sheet, metrics: &PrintMetrics) -> Self {
+        Self::with_sizes(
+            sheet,
+            metrics
+                .default_column_width
+                .map_or(col_chars_to_px(DEFAULT_COL_WIDTH_CHARS), |width| {
+                    metrics.column_pixels(width)
+                }),
+            row_pt_to_px(metrics.default_row_height_pt as f64),
+            |width| metrics.column_pixels(width),
+        )
+    }
+
+    fn with_sizes(
+        sheet: &Sheet,
+        default_col_px: f32,
+        default_row_px: f32,
+        column_pixels: impl Fn(f64) -> f32,
+    ) -> Self {
         let n_cols = sheet
             .col_widths
             .keys()
@@ -76,7 +136,7 @@ impl GridGeometry {
             let w = sheet
                 .col_widths
                 .get(&c)
-                .map(|&w| col_chars_to_px(w))
+                .map(|&w| column_pixels(w))
                 .unwrap_or(default_col_px);
             let start = col_x.last().copied().unwrap_or(0.0);
             col_x.push(start + w);

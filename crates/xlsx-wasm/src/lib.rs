@@ -173,6 +173,13 @@ impl XlsxDocument {
         Ok(encoded)
     }
 
+    #[wasm_bindgen(js_name = printDisplayListJson)]
+    pub fn print_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .print_display_list_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// serialized `DisplayList` for a serialized `Viewport`.
     #[wasm_bindgen(js_name = displayListJson)]
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {

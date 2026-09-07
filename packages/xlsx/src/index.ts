@@ -90,6 +90,7 @@ export type {
   WasmInitInput,
   OpenWorkbookOptions,
   Viewport,
+  PrintMetrics,
   SheetInfo,
   WorkbookHandle,
   WorkbookUpdateListener,

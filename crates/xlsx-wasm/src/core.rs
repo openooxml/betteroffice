@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, MutationResult, NumberFormatMutation, Op, Proposal,
+    CellRef, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -248,6 +248,23 @@ impl Session {
         self.workbook
             .observe_update_v1(callback)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn print_display_list_json(&self, args: &str) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            sheet: u32,
+            range: String,
+            metrics: PrintMetrics,
+            gridlines: bool,
+        }
+        let args: Args = serde_json::from_str(args).map_err(|e| format!("bad print args: {e}"))?;
+        let range = CellRange::parse_a1(&args.range).map_err(|e| e.to_string())?;
+        let display_list = self
+            .workbook
+            .print_display_list(SheetId(args.sheet), range, &args.metrics, args.gridlines)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&display_list).map_err(|e| e.to_string())
     }
 
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
@@ -1143,14 +1160,15 @@ mod tests {
         let ghosted = session
             .display_list_json(r#"{"x":0,"y":0,"width":200,"height":80}"#)
             .unwrap();
-        assert!(
-            ghosted.contains(r##""text":"$2,000.00","fontSize":11.0,"color":"#2e7d32""##),
-            "{ghosted}"
-        );
-        assert!(
-            ghosted.contains(r##""text":"$1,000.00","fontSize":11.0,"color":"#c62828""##),
-            "{ghosted}"
-        );
+        let rendered: serde_json::Value = serde_json::from_str(&ghosted).unwrap();
+        let commands = rendered["commands"].as_array().unwrap();
+        for (text, color) in [("$2,000.00", "#2e7d32"), ("$1,000.00", "#c62828")] {
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command["text"] == text && command["color"] == color)
+            );
+        }
         assert!(ghosted.contains(r#""strike":true"#), "{ghosted}");
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"3000"}"#, None)

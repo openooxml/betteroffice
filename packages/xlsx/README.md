@@ -48,6 +48,20 @@ handle itself covers styling (`patchRangeStyle`, `setNumberFormat`), undo/redo,
 and PNG export (`renderPng` / `renderRangePng`; guard with
 `isPngExportAvailable`).
 
+## Print a range
+
+`workbook.printDisplayList(sheet, range, metrics, gridlines)` renders a range
+without changing workbook data, the active sheet, or screen geometry. Pass
+`PrintMetrics` measured from the workbook's normal font: `dpi`, `maxDigitWidth`,
+`fontAscent`, and `fontDescent` use the layout device's pixels; `fontSizePt` and
+`defaultRowHeightPt` use points. `fontFamily` supplies the default face, and
+optional `defaultColumnWidth` uses the stored OOXML character width.
+
+The result uses 96-DPI logical coordinates. Paint it with `paintDisplayList(ctx,
+frame, scale, { x, y })`; the optional origin uses backing-store pixels, so page
+margins need no intermediate image. Cell ranges, paper size, and pagination are
+chosen by the caller. See the [Office comparison harness](../../scripts/office-quality).
+
 ## AI agents / human-in-the-loop
 
 An agent stages edits as a proposal instead of applying them; a human reviews

@@ -22,6 +22,17 @@ export interface Viewport {
   height: number;
 }
 
+export interface PrintMetrics {
+  dpi: number;
+  maxDigitWidth: number;
+  defaultRowHeightPt: number;
+  defaultColumnWidth?: number;
+  fontSizePt: number;
+  fontFamily: string;
+  fontAscent: number;
+  fontDescent: number;
+}
+
 /**
  * Chrome-facing sheet metadata: stable IDs, tab names, active index, and the
  * scrollable content extent of the active sheet. Mirrors the Rust `SheetInfo`.
@@ -281,6 +292,9 @@ export interface WorkbookHandle extends CollaborationReplica {
   sheetInfo(): SheetInfo;
   calculationStatus(): CalculationStatus;
   displayList(viewport: Viewport): DisplayList;
+  printDisplayList(
+    sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean
+  ): DisplayList;
   /**
    * the chart under a viewport-local point on the active sheet, or `null`,
    * resolved against the current model from the same anchor geometry the
@@ -587,6 +601,11 @@ export function openWorkbook(
     },
     displayList(viewport: Viewport): DisplayList {
       return parseJson(() => doc.displayListJson(JSON.stringify(viewport)));
+    },
+    printDisplayList(sheet: number, range: string, metrics: PrintMetrics, gridlines: boolean): DisplayList {
+      return parseJson(() =>
+        doc.printDisplayListJson(JSON.stringify({ sheet, range, metrics, gridlines }))
+      );
     },
     chartAtPoint(viewport: Viewport, x: number, y: number): ChartRegion | null {
       return parseJson(() => doc.chartAtPointJson(JSON.stringify({ viewport, x, y })));

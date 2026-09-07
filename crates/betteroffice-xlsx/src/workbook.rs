@@ -17,9 +17,9 @@ use xlsx_ops::{
     cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
-    ChartRegion, DisplayList, GhostEdit, GridGeometry, RenderError, Viewport,
-    build_display_list_with_charts_and_ghosts, chart_at_point, chart_regions, display_text,
-    moved_chart_anchor, resolve_chart_anchor,
+    ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
+    build_display_list_with_charts_and_ghosts, build_print_display_list_with_charts,
+    chart_at_point, chart_regions, display_text, moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -1424,6 +1424,61 @@ impl Workbook {
 
     pub fn reject_proposal(&mut self, id: &str) -> bool {
         self.proposals.remove(id)
+    }
+
+    /// Prints one range without changing workbook data or viewport state.
+    pub fn print_display_list(
+        &self,
+        sheet: SheetId,
+        range: CellRange,
+        metrics: &PrintMetrics,
+        gridlines: bool,
+    ) -> Result<DisplayList> {
+        validate_cell_ref(range.start)?;
+        validate_cell_ref(range.end)?;
+        if range.start.row > range.end.row || range.start.col > range.end.col || !metrics.is_valid()
+        {
+            return Err(Error::InvalidViewport);
+        }
+        let cells = (u64::from(range.end.row - range.start.row) + 2)
+            * (u64::from(range.end.col - range.start.col) + 2);
+        if cells > MAX_DISPLAY_CELLS {
+            return Err(Error::DisplayTooLarge {
+                cells,
+                max: MAX_DISPLAY_CELLS,
+            });
+        }
+        let sheet_ref = self.sheet(sheet)?;
+        let geometry = GridGeometry::for_print(sheet_ref, metrics);
+        let viewport = Viewport {
+            x: geometry.col_x(range.start.col),
+            y: geometry.row_y(range.start.row),
+            width: geometry.col_x(range.end.col + 1) - geometry.col_x(range.start.col),
+            height: geometry.row_y(range.end.row + 1) - geometry.row_y(range.start.row),
+        };
+        validate_viewport(&viewport)?;
+        let mut frame = build_print_display_list_with_charts(
+            &self.model,
+            sheet,
+            &viewport,
+            metrics,
+            gridlines,
+            |chart| {
+                resolve_chart_space(
+                    self.source_package.as_ref(),
+                    &self.model.styles.theme,
+                    &self.model,
+                    &sheet_ref.name,
+                    chart,
+                )
+            },
+        )
+        .map_err(Error::from)?;
+        if gridlines {
+            frame.width += 96.0 / metrics.dpi;
+            frame.height += 96.0 / metrics.dpi;
+        }
+        Ok(frame)
     }
 
     pub fn display_list(&self, viewport: &Viewport) -> Result<DisplayList> {
