@@ -2,9 +2,9 @@
 
 Small scripts for documents you choose. Keep inputs, PDFs, captures, and reports under ignored `.source/office-quality/`. The manual CI runner downloads explicitly selected public references; there is no scheduled run or upload service.
 
-Three explicitly published, project-authored demos live in the public `betteroffice-corpus` R2 bucket: DOCX, PPTX, and XLSX. See the [reference links and SSIM results](../../README.md#visual-fidelity). Each completed sample contains the original source, Office PNG pages, and JSON metadata with UTC capture times, Office version, hashes, and license. Everything else stays local. Public access permits downloads; writes use authenticated Wrangler. There is no anonymous upload endpoint.
+Three explicitly published, project-authored demos live in the public `betteroffice-corpus` R2 bucket: DOCX, PPTX, and XLSX. See the [reference links and SSIM results](../../README.md#visual-fidelity). Each sample contains the original source, Office PNG pages, and JSON metadata with UTC capture times, Office version, hashes, and license. Everything else stays local. Public access permits downloads; writes use authenticated Wrangler. There is no anonymous upload endpoint.
 
-The canonical origin is **https://corpus.betteroffice.dev**, with one top-level folder per sample. The source files for all three formats are public. DOCX references are complete; PPTX and the XLSX print-profile references are awaiting the local Office dialogs described below. Their intended layout is:
+The canonical origin is **https://corpus.betteroffice.dev**, with one top-level folder per sample. The source files and verified Office references for all three formats are public:
 
 ```text
 betteroffice-demo/
@@ -33,7 +33,7 @@ gh workflow run visual-fidelity.yml --ref main \
   -f branch=main -f 'samples=["betteroffice-demo","betteroffice-slides","betteroffice-workbook"]'
 ```
 
-The action builds all three branch renderers, fetches each current npm release, verifies source/Office image hashes from R2, captures both channels with pinned CDN fonts, and computes fresh SSIM. The saved Office references remain unchanged. DOCX captures document pages, PPTX captures complete slides through the core canvas renderer, and XLSX paints the recorded worksheet print ranges. Unmeasured formats show `—`; a selected sample with a missing, invalid, or failed reference stops the run. Until the pending references are published, select `["betteroffice-demo"]` to run the available measurements.
+The action builds all three branch renderers, fetches each current npm release, verifies source/Office image hashes from R2, captures both channels with pinned CDN fonts, and computes fresh SSIM. The saved Office references remain unchanged. DOCX captures document pages, PPTX captures complete slides through the core canvas renderer, and XLSX paints the recorded worksheet print ranges. Unmeasured formats show `—`; a selected sample with a missing, invalid, or failed reference stops the run. All three demo references are available by default.
 
 The generated block sits immediately above Contributing. Scores are pinned to the tested source revision; README-only commits are excluded from revision selection. A separate job uses the existing `OPENOOXML_BOT_APP_ID` / `OPENOOXML_BOT_PRIVATE_KEY` secrets to commit **only README.md** as `openooxml-bot[bot]`. It checks that the target branch still matches the measured head and uses a normal fast-forward push. A changed branch requires a rerun; unchanged generated text produces no commit. There is no push, PR, merge, or scheduled trigger.
 
@@ -59,7 +59,7 @@ python3 -m venv .source/office-quality/venv
 
 Reference exports require macOS and the corresponding installed desktop app: Microsoft Word, PowerPoint, or Excel. The comparison script also works on other platforms.
 
-Run exports serially. Word and Excel PDF exports were verified on macOS 26.2 with Office 16.112.3. PowerPoint can reject opening files (`-9074`) or creating presentations (`-2710`) while its first-run “Start Using PowerPoint” screen is present. Clear that screen once before running exports. On this Mac, UI control is not granted, so it requires a manual click. An Excel repair dialog from a discarded temporary print-setup rewrite also needs to be dismissed with **No** before the profile export can be verified; the current exporter keeps the source bytes unchanged.
+Run exports serially. Word, PowerPoint, and Excel PDF exports were verified on macOS 26.2 with Office 16.112.3. PowerPoint can reject opening files (`-9074`) or creating presentations (`-2710`) while its first-run “Start Using PowerPoint” screen is present. Clear that screen once before running exports. On this Mac, dismissing it allowed a three-slide export to complete in 1.85 seconds. The nine-range Excel profile export completed in 6.58 seconds without further prompts. Both adapters keep the source bytes unchanged.
 
 ## Export an Office reference
 
@@ -74,7 +74,7 @@ Use `.pptx` or `.xlsx` to select PowerPoint or Excel. Each invocation exports on
 
 Excel's default export follows the workbook's print settings. For automatic comparisons, pass `--xlsx-profile profile.json` to export recorded rectangular ranges individually: landscape pages, a fixed percentage scale, explicit margins, gridlines, and no row/column headings or headers/footers. Other worksheets are hidden only in the temporary open workbook so Excel exports one selected range at a time; the source bytes remain unchanged. Each range must fit one printed page, or the exporter fails. The profile records the actual Office paper dimensions and each constituent PDF's metadata.
 
-The demo profile uses 75% scale, 18-point margins, Dashboard `A1:N16` (including the chart), Formulas `A1:K14`, and all 301 Data rows in blocks of at most 45 rows, for nine pages. The profile will live in the completed sample metadata as `reference.capture_profile`, not in Git. Candidate capture passes all nine ranges; the Office profile export remains pending the dialog cleanup. Reuse it when retaking the reference:
+The demo profile uses 75% scale, 18-point margins, Dashboard `A1:N16` (including the chart), Formulas `A1:K14`, and all 301 Data rows in blocks of at most 45 rows, for nine pages. The verified profile lives in the [sample metadata](https://corpus.betteroffice.dev/betteroffice-workbook/metadata.json) as `reference.capture_profile`, not in Git. Both Office and candidate capture produce all nine pages. Reuse it when retaking the reference:
 
 ```sh
 .source/office-quality/venv/bin/python scripts/office-quality/reference.py \
