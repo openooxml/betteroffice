@@ -1,13 +1,13 @@
 import { chromium } from 'playwright';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
-import { basename, resolve } from 'node:path';
+import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
 if (!file || !out)
   throw new Error(
-    'usage: browser-task.mjs input.docx output-directory [cdn|none] [server-url]'
+    'usage: browser-task.mjs input.docx|pptx|xlsx output-directory [cdn|none] [server-url]'
   );
 if (!['cdn', 'none'].includes(fontMode)) throw new Error('font mode must be cdn or none');
 const server = new URL(base);
@@ -18,12 +18,17 @@ if (
   throw new Error('capture server must use local loopback HTTP');
 if ((await readdir(out).catch(() => [])).length) throw new Error('output must be empty');
 const source = await readFile(file);
+const format = extname(file).slice(1).toLowerCase();
+if (!['docx', 'pptx', 'xlsx'].includes(format)) throw new Error('Invalid source format');
+const profile = JSON.parse(process.env.QUALITY_CAPTURE_CONFIG ?? 'null');
 const sha256 = createHash('sha256').update(source).digest('hex');
 const metadata = {
   source: basename(file),
   sha256,
   dpi: 150,
-  engine: process.env.QUALITY_ENGINE_LABEL ?? 'BetterOffice DOCX working tree',
+  engine:
+    process.env.QUALITY_ENGINE_LABEL ??
+    `BetterOffice ${format.toUpperCase()} working tree`,
 };
 const timeout = Number(process.env.QUALITY_TIMEOUT_SECONDS ?? 600);
 if (!Number.isFinite(timeout) || timeout <= 0)
@@ -105,8 +110,8 @@ try {
   });
   console.error('editor');
   const result = await page.evaluate(
-    ([bytes, fonts]) => window.oracleInit(bytes, fonts),
-    [Array.from(source), fontMode === 'cdn']
+    ([bytes, fonts, config]) => window.oracleInit(bytes, fonts, config),
+    [Array.from(source), fontMode === 'cdn', profile]
   );
   console.error(`paint ${result.pages}`);
   await mkdir(out, { recursive: true });

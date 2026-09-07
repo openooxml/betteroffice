@@ -9,8 +9,8 @@ on:
         required: true
         type: string
       samples:
-        description: JSON array of public corpus sample folders (DOCX capture currently supported)
-        default: '["betteroffice-demo"]'
+        description: JSON array of public corpus sample folders
+        default: '["betteroffice-demo","betteroffice-slides","betteroffice-workbook"]'
         required: true
         type: string
 
@@ -77,8 +77,15 @@ jobs:
           bun install --frozen-lockfile
           bun run build:fonts
           bun run build:docx
+          bun run build:pptx
+          bun run build:xlsx
           bunx playwright install --with-deps chromium
           python -m pip install -r scripts/office-quality/requirements.txt
+
+      - name: Check benchmark scripts
+        run: |
+          bun test scripts/office-quality/readme.test.ts
+          python -m unittest discover -s scripts/office-quality -p 'test_*.py'
 
       - name: Measure the latest release and source commit
         env:

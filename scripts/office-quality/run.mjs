@@ -10,7 +10,10 @@ const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
 const corpus = 'https://corpus.betteroffice.dev';
 const python = process.env.QUALITY_PYTHON ?? 'python3';
-const ids = JSON.parse(process.env.QUALITY_SAMPLES ?? '["betteroffice-demo"]');
+const ids = JSON.parse(
+  process.env.QUALITY_SAMPLES ??
+    '["betteroffice-demo","betteroffice-slides","betteroffice-workbook"]'
+);
 if (
   !Array.isArray(ids) ||
   !ids.length ||
@@ -99,10 +102,6 @@ async function reference(id) {
   const metadata = JSON.parse(await download(metadataUrl, 2 * 1024 * 1024));
   if (!FORMATS.includes(metadata.format))
     throw new Error(`Unsupported sample format: ${id}`);
-  if (metadata.format !== 'docx')
-    throw new Error(
-      `Automatic candidate capture for ${metadata.format} is not implemented; supply no such samples yet`
-    );
   if (
     metadata.reference.status !== 'ok' ||
     metadata.reference.dpi !== 150 ||
@@ -133,6 +132,7 @@ async function reference(id) {
     metadata_url: metadataUrl,
     source,
     directory,
+    capture_profile: metadata.reference.capture_profile ?? null,
     comparisons: [],
   };
 }
@@ -219,56 +219,71 @@ const versions = Object.fromEntries(
 );
 const samples = [];
 for (const id of ids) samples.push(await reference(id));
-const reactVersion = (await registry('@betteroffice/docx-react')).version;
-const roots = {
-  QUALITY_PACKAGE_ROOT: await packageRoot('@betteroffice/docx', versions.docx),
-  QUALITY_REACT_ROOT: await packageRoot('@betteroffice/docx-react', reactVersion),
-};
-for (const channel of ['published', 'commit']) {
-  const server = await viewer(channel === 'published' ? roots : {});
-  try {
-    for (const sample of samples) {
-      const candidate = resolve(sample.directory, channel);
-      const difference = resolve(sample.directory, `${channel}-diff`);
-      await command(
-        process.execPath,
-        [
-          'scripts/docx-quality/browser-task.mjs',
-          sample.source,
-          candidate,
-          'cdn',
-          server.url,
-        ],
-        {
-          env: {
-            ...process.env,
-            QUALITY_ENGINE_LABEL:
-              channel === 'published'
-                ? `@betteroffice/docx@${versions.docx}; @betteroffice/docx-react@${reactVersion}`
-                : commit,
-          },
+for (const format of FORMATS.filter((format) =>
+  samples.some((sample) => sample.format === format)
+)) {
+  const reactVersion =
+    format === 'docx' ? (await registry('@betteroffice/docx-react')).version : null;
+  const roots = {
+    QUALITY_PACKAGE_ROOT: await packageRoot(`@betteroffice/${format}`, versions[format]),
+    ...(reactVersion
+      ? {
+          QUALITY_REACT_ROOT: await packageRoot('@betteroffice/docx-react', reactVersion),
         }
-      );
-      await command(python, [
-        'scripts/office-quality/compare.py',
-        resolve(sample.directory, 'reference'),
-        candidate,
-        '--out',
-        difference,
-      ]);
-      const comparison = JSON.parse(
-        await readFile(resolve(difference, 'score.json'), 'utf8')
-      );
-      sample.comparisons.push({
-        ...comparison,
-        channel,
-        version: channel === 'published' ? versions.docx : undefined,
-        renderer_source_commit: channel === 'commit' ? commit : undefined,
-      });
-      console.log(`${sample.id} ${channel}: ${comparison.penalized_ssim.toFixed(4)}`);
+      : {}),
+  };
+  for (const channel of ['published', 'commit']) {
+    const server = await viewer({
+      QUALITY_FORMAT: format,
+      ...(channel === 'published' ? roots : {}),
+    });
+    try {
+      for (const sample of samples.filter((sample) => sample.format === format)) {
+        const candidate = resolve(sample.directory, channel);
+        const difference = resolve(sample.directory, `${channel}-diff`);
+        await command(
+          process.execPath,
+          [
+            'scripts/docx-quality/browser-task.mjs',
+            sample.source,
+            candidate,
+            'cdn',
+            `${server.url}/?format=${format}`,
+          ],
+          {
+            env: {
+              ...process.env,
+              QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
+              QUALITY_ENGINE_LABEL:
+                channel === 'published'
+                  ? `@betteroffice/${format}@${versions[format]}${
+                      reactVersion ? `; @betteroffice/docx-react@${reactVersion}` : ''
+                    }`
+                  : commit,
+            },
+          }
+        );
+        await command(python, [
+          'scripts/office-quality/compare.py',
+          resolve(sample.directory, 'reference'),
+          candidate,
+          '--out',
+          difference,
+        ]);
+        const comparison = JSON.parse(
+          await readFile(resolve(difference, 'score.json'), 'utf8')
+        );
+        sample.comparisons.push({
+          ...comparison,
+          channel,
+          version: channel === 'published' ? versions[format] : undefined,
+          renderer_source_commit: channel === 'commit' ? commit : undefined,
+        });
+        console.log(`${sample.id} ${channel}: ${comparison.penalized_ssim.toFixed(4)}`);
+      }
+    } finally {
+      server.child.kill();
     }
-  } finally {
-    server.child.kill();
   }
 }
 const report = {

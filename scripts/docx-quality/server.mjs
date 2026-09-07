@@ -4,15 +4,17 @@ import { resolve } from 'node:path';
 
 const packageRoot = process.env.QUALITY_PACKAGE_ROOT;
 const reactRoot = process.env.QUALITY_REACT_ROOT;
+const format = process.env.QUALITY_FORMAT ?? 'docx';
+if (!['docx', 'pptx', 'xlsx'].includes(format)) throw new Error('Invalid format');
 const aliases = [];
 for (const [name, override] of [
-  ['docx', packageRoot],
+  [format, packageRoot],
   ['docx-react', reactRoot],
 ]) {
   if (!override) continue;
   const manifest = JSON.parse(readFileSync(resolve(override, 'package.json')));
   for (const [key, value] of Object.entries(manifest.exports)) {
-    const target = typeof value === 'string' ? value : (value.import ?? value.default);
+    const target = typeof value === 'string' ? value : value.import ?? value.default;
     if (typeof target !== 'string') continue;
     aliases.push({
       find: new RegExp(`^@betteroffice/${name}${key === '.' ? '' : key.slice(1)}$`),
@@ -25,7 +27,7 @@ const server = await createServer({
   cacheDir: resolve(
     `.source/docx-quality/vite-cache-${process.env.QUALITY_PORT ?? 4178}`
   ),
-  root: resolve('scripts/docx-quality'),
+  root: resolve(format === 'docx' ? 'scripts/docx-quality' : 'scripts/office-quality'),
   resolve: {
     alias: aliases,
     dedupe: [
@@ -54,6 +56,7 @@ const server = await createServer({
   optimizeDeps: {
     noDiscovery: true,
     include: [
+      ...(format === 'docx' ? [] : ['jszip']),
       'react',
       'react-dom',
       'react-dom/client',
@@ -63,7 +66,12 @@ const server = await createServer({
       'sonner',
       '@radix-ui/react-select',
     ],
-    exclude: ['@betteroffice/docx', '@betteroffice/docx-react'],
+    exclude: [
+      '@betteroffice/docx',
+      '@betteroffice/docx-react',
+      '@betteroffice/pptx',
+      '@betteroffice/xlsx',
+    ],
   },
   esbuild: { jsx: 'automatic' },
 });

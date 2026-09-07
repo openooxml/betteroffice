@@ -68,7 +68,7 @@ export function renderSection(report) {
 | --- | --- | ---: | --- | ---: | ---: |
 ${rows.join('\n')}
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. DOCX uses the pinned CDN fonts. **— = not measured.** One demo does not establish corpus-wide quality or a leaderboard rank.
+SSIM is the mean page-penalized grayscale score at 150 DPI, without resizing or alignment correction. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. **— = not measured.** Demo samples do not establish corpus-wide quality or a leaderboard rank.
 
 The commit column pins the tested source revision; generated README-only commits are excluded. Office versions, UTC render times, source files, page PNGs, and hashes are recorded per sample: ${sources.join(', ') || 'no reference samples yet'}.
 ${END}`;

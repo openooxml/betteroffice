@@ -55,3 +55,25 @@ test('refuses failed or mismatched render records', () => {
   input.samples[0].comparisons[0].actual.sha256 = 'wrong';
   expect(() => renderSection(input)).toThrow('mismatched');
 });
+
+test('keeps each format tied to its own published version and comparison', () => {
+  const input = report();
+  for (const [format, version, score] of [
+    ['pptx', '0.0.4', 0.91],
+    ['xlsx', '0.1.0', 0.87],
+  ] as const) {
+    input.samples.push({
+      id: format,
+      format,
+      metadata_url: `https://corpus.betteroffice.dev/${format}/metadata.json`,
+      comparisons: input.samples[0].comparisons.map((comparison) => ({
+        ...comparison,
+        version,
+        penalized_ssim: score,
+      })),
+    });
+  }
+  const section = renderSection(input);
+  expect(section).toMatch(/\| PPTX .*\| 0\.9100 .*\| 0\.9100 \| 1 \/ 1 \|/);
+  expect(section).toMatch(/\| XLSX .*\| 0\.8700 .*\| 0\.8700 \| 1 \/ 1 \|/);
+});

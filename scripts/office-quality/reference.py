@@ -12,6 +12,7 @@ import time
 import zipfile
 
 import fitz
+from xlsx_reference import export_profile
 
 OFFICE = {
     '.docx': ('Word', 'com.microsoft.Word', '''
@@ -55,12 +56,15 @@ def main():
     parser.add_argument('--out', type=Path, required=True)
     parser.add_argument('--dpi', type=int, default=150)
     parser.add_argument('--timeout', type=int, default=120)
+    parser.add_argument('--xlsx-profile', type=Path)
     args = parser.parse_args()
     if platform.system() != 'Darwin':
         parser.error('desktop Microsoft Office on macOS is required')
     extension = args.source.suffix.lower()
     if extension not in OFFICE or args.dpi <= 0 or args.timeout <= 0:
         parser.error('use .docx, .pptx, or .xlsx and positive DPI/timeout values')
+    if args.xlsx_profile and extension != '.xlsx':
+        parser.error('--xlsx-profile requires an XLSX document')
     if args.out.exists() and any(args.out.iterdir()):
         parser.error('output must be empty; use a fresh directory for each revision')
     data = args.source.read_bytes()
@@ -94,8 +98,12 @@ def main():
 end run
 '''
     try:
-        subprocess.run(['osascript', '-', str(source), str(pdf)], input=script,
-                       text=True, capture_output=True, check=True, timeout=args.timeout + 5)
+        if args.xlsx_profile:
+            profile = json.loads(args.xlsx_profile.read_text())
+            record['capture_profile'] = export_profile(source, pdf, profile, args.timeout, args.dpi)
+        else:
+            subprocess.run(['osascript', '-', str(source), str(pdf)], input=script,
+                           text=True, capture_output=True, check=True, timeout=args.timeout + 5)
         with fitz.open(pdf) as document:
             if document.page_count == 0:
                 raise ValueError('Office exported no pages')
