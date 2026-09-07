@@ -8783,7 +8783,6 @@ pub(crate) fn emit_table_fragment(
             cx,
             cy,
             p.cell_h,
-            p.is_first_row,
             is_first_col,
             clip_top_y,
             clip_bottom_y,
@@ -8920,9 +8919,7 @@ pub(crate) fn emit_table_fragment(
 /// Adjacent paragraphs collapse `spacing.after` against the next
 /// `spacing.before`, a nested table flows after the previous paragraph's
 /// after-spacing, and a trailing after-spacing acts as the content box's bottom
-/// padding. Drawn border widths and padding inset the box on the sides this
-/// cell actually paints, and the resulting box is what `w:vAlign` measures its
-/// slack against.
+/// padding. Authored border insets remain stable across fragment cuts.
 #[allow(clippy::too_many_arguments)]
 fn emit_cell_content(
     prims: &mut Vec<Primitive>,
@@ -8932,7 +8929,6 @@ fn emit_cell_content(
     cx: f64,
     cy: f64,
     cell_h: f64,
-    is_first_row: bool,
     is_first_col: bool,
     clip_top_y: f64,
     clip_bottom_y: f64,
@@ -8963,7 +8959,11 @@ fn emit_cell_content(
     let (border_left, border_top, border_bottom) = match &cell.borders {
         Some(b) => (
             if is_first_col { edge_w(&b.left) } else { 0.0 },
-            if is_first_row { edge_w(&b.top) } else { 0.0 },
+            if p.row_index == 0 {
+                edge_w(&b.top)
+            } else {
+                0.0
+            },
             edge_w(&b.bottom),
         ),
         None => (0.0, 0.0, 0.0),
