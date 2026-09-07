@@ -160,12 +160,13 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
                     add_unique(&mut offsets, off);
                 }
             }
-            for (top, bottom) in cell_unbreakable_ranges(
-                &source_cell.blocks,
-                &measured_cell.blocks,
-                pad_top + content_offset,
-            ) {
-                unbreakable_ranges.push((top - shift, bottom - shift));
+            for (top, bottom) in
+                cell_unbreakable_ranges(&source_cell.blocks, &measured_cell.blocks, pad_top)
+            {
+                unbreakable_ranges.push((
+                    top + content_offset - shift,
+                    bottom + content_offset - shift,
+                ));
             }
         }
         offsets.retain(|offset| {
@@ -446,5 +447,36 @@ mod tests {
         let info = build_table_row_break_info(&block, &measure);
         assert_eq!(info.break_offsets[0], vec![60.0]);
         assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
+    }
+
+    #[test]
+    fn preserves_aligned_line_boundaries_with_fractional_padding() {
+        let padding = 1.0 / 15.0;
+        let line_height = 17.89453125;
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [{
+                "id": 0,
+                "verticalAlign": "center",
+                "padding": { "top": padding, "bottom": padding, "left": 0, "right": 0 },
+                "blocks": [para()]
+            }] }],
+            "columnWidths": [100],
+        }))
+        .unwrap();
+        let mut paragraph = para_measure(2);
+        for line in paragraph["lines"].as_array_mut().unwrap() {
+            line["lineHeight"] = json!(line_height);
+        }
+        paragraph["totalHeight"] = json!(2.0 * line_height);
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 100, "cells": [{
+                "blocks": [paragraph], "width": 100, "height": 2.0 * (line_height + padding)
+            }] }],
+            "columnWidths": [100], "totalWidth": 100, "totalHeight": 100,
+        }))
+        .unwrap();
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 50.0), 50.0);
     }
 }

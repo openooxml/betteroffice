@@ -80,7 +80,8 @@ pub fn layout_cell_content(
             prev_after = spacing.and_then(|s| s.after).unwrap_or(0.0);
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
-            y += prev_after + total_height;
+            y += prev_after;
+            y += total_height;
             line_tops.push(Vec::new());
             flat_bottoms.push(y);
             prev_after = 0.0;
