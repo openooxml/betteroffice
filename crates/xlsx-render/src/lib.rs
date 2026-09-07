@@ -100,6 +100,7 @@ struct AxisLayout {
     divider: Option<f32>,
     frozen: u32,
     scroll: f32,
+    print_extent: Option<f32>,
 }
 
 #[derive(Clone, Copy)]
@@ -174,6 +175,7 @@ impl AxisLayout {
             divider: (frozen > 0 && frozen_extent < extent).then_some(frozen_extent),
             frozen,
             scroll,
+            print_extent: None,
         }
     }
 
@@ -206,12 +208,27 @@ impl AxisLayout {
     }
 
     fn intersects(&self, start: u32, end: u32) -> bool {
-        self.tracks
+        self.ranges
             .iter()
-            .any(|track| (start..=end).contains(&track.index))
+            .any(|range| range.start <= end && range.end > start)
     }
 
     fn span(&self, start: u32, end: u32, edge: impl Fn(u32) -> f32) -> Option<AxisSpan> {
+        if let Some(extent) = self.print_extent {
+            if !self.intersects(start, end) {
+                return None;
+            }
+            let raw_start = edge(start) - self.scroll;
+            let raw_end = edge(end.saturating_add(1)) - self.scroll;
+            let start = raw_start.max(0.0);
+            let end = raw_end.min(extent);
+            return (end > start).then_some(AxisSpan {
+                raw_start,
+                raw_end,
+                start,
+                end,
+            });
+        }
         let first = self
             .tracks
             .binary_search_by_key(&start, |track| track.index)
@@ -359,7 +376,7 @@ where
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols))
     };
-    let rows = AxisLayout::new(
+    let mut rows = AxisLayout::new(
         MAX_ROWS,
         frozen_rows,
         viewport.y,
@@ -367,7 +384,7 @@ where
         |row| geom.row_y(row),
         |y| geom.row_at_y(y),
     );
-    let cols = AxisLayout::new(
+    let mut cols = AxisLayout::new(
         MAX_COLS,
         frozen_cols,
         viewport.x,
@@ -375,6 +392,10 @@ where
         |col| geom.col_x(col),
         |x| geom.col_at_x(x),
     );
+    if print.is_some() {
+        rows.print_extent = Some(viewport.height);
+        cols.print_extent = Some(viewport.width);
+    }
 
     let grid = GridMeta {
         start_row: rows.start(),
@@ -403,6 +424,16 @@ where
         .collect();
     let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
     if print.is_some() {
+        for merge in &sheet_ref.merges {
+            if rows.intersects(merge.start.row, merge.end.row)
+                && cols.intersects(merge.start.col, merge.end.col)
+                && let Some(cell) = sheet_ref.cell(merge.start)
+            {
+                anchors.push((merge.start, cell));
+            }
+        }
+        anchors.sort_unstable_by_key(|(at, _)| (at.row, at.col));
+        anchors.dedup_by_key(|(at, _)| (at.row, at.col));
         anchors.retain(|(at, _)| {
             geom.row_y(at.row) < viewport.y + viewport.height
                 && geom.col_x(at.col) < viewport.x + viewport.width
@@ -592,21 +623,7 @@ where
             }
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
-        let ty = print.map_or_else(
-            || baseline_y(cell_box.y, cell_box.h, size, valign),
-            |(m, _)| {
-                let ratio = size / m.font_size_pt * 96.0 / m.dpi;
-                let ascent = m.font_ascent * ratio;
-                let descent = m.font_descent * ratio;
-                match valign {
-                    Some(VAlign::Top) => cell_box.y + ascent,
-                    Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => {
-                        cell_box.y + (cell_box.h + ascent - descent) / 2.0
-                    }
-                    Some(VAlign::Bottom) | None => cell_box.y + cell_box.h - descent,
-                }
-            },
-        );
+        let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
 
         commands.push(DrawCmd::Text {
             x: tx,
@@ -632,7 +649,9 @@ where
 
     for link in &sheet_ref.hyperlinks {
         let at = link.range.start;
-        if sheet_ref.cell(at).is_some() || !rows.contains(at.row) || !cols.contains(at.col) {
+        if sheet_ref.cell(at).is_some()
+            || (print.is_none() && (!rows.contains(at.row) || !cols.contains(at.col)))
+        {
             continue;
         }
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
@@ -641,11 +660,12 @@ where
         let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
             continue;
         };
+        let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
         commands.push(DrawCmd::Text {
-            x: cell_box.x + TEXT_PAD_PX,
-            y: baseline_y(cell_box.y, cell_box.h, FONT_SIZE_PT, None),
+            x: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
+            y: text_baseline(cell_box, size, None, print.map(|(m, _)| m)),
             text: text.clone(),
-            font_size: FONT_SIZE_PT,
+            font_size: size,
             color: hyperlink_color.to_string(),
             clip: cell_box.clip,
             align: Align::Left,
@@ -655,7 +675,7 @@ where
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: None,
+            font_family: print.map(|(m, _)| m.font_family.clone()),
             ghost: false,
             chart: false,
         });
@@ -1029,6 +1049,27 @@ fn baseline_y(cy0: f32, ch: f32, size: f32, valign: Option<VAlign>) -> f32 {
             cy0 + (ch + size_px * (ASCENT_RATIO - DESCENT_RATIO)) / 2.0
         }
         Some(VAlign::Bottom) | None => cy0 + ch - TEXT_PAD_PX - size_px * DESCENT_RATIO,
+    }
+}
+
+fn text_baseline(
+    cell: CellBox,
+    size: f32,
+    valign: Option<VAlign>,
+    print: Option<&PrintMetrics>,
+) -> f32 {
+    let Some(metrics) = print else {
+        return baseline_y(cell.y, cell.h, size, valign);
+    };
+    let ratio = size / metrics.font_size_pt * 96.0 / metrics.dpi;
+    let ascent = metrics.font_ascent * ratio;
+    let descent = metrics.font_descent * ratio;
+    match valign {
+        Some(VAlign::Top) => cell.y + ascent,
+        Some(VAlign::Center | VAlign::Justify | VAlign::Distributed) => {
+            cell.y + (cell.h + ascent - descent) / 2.0
+        }
+        Some(VAlign::Bottom) | None => cell.y + cell.h - descent,
     }
 }
 

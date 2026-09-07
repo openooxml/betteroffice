@@ -1,7 +1,8 @@
 use betteroffice_xlsx::{
-    Cell, CellRange, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, PrintMetrics,
-    Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    Cell, CellRange, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink,
+    PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
+use xlsx_model::styles::{Border, BorderEdge, BorderStyle, Color, Fill, Stylesheet, Xf};
 
 fn metrics() -> PrintMetrics {
     PrintMetrics {
@@ -129,4 +130,155 @@ fn print_gridlines_are_optional_and_invalid_metrics_are_rejected() {
         ),
         Err(Error::DisplayTooLarge { .. })
     ));
+}
+
+#[test]
+fn partial_merged_print_ranges_clip_without_moving_the_anchor() {
+    let mut sheet = Sheet::new("Merged");
+    sheet.merges.push(CellRange::parse_a1("A1:C3").unwrap());
+    for col in 0..3 {
+        sheet.col_widths.insert(col, 12.0);
+    }
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        Cell {
+            value: CellValue::Text {
+                value: "Merged content".into(),
+            },
+            style: Some(0),
+            ..Cell::default()
+        },
+    );
+    let edge = BorderEdge {
+        style: BorderStyle::Thin,
+        color: Some(Color::Rgb("#0000ff".into())),
+    };
+    let mut styles = Stylesheet::default();
+    styles.fills = vec![Fill::Solid(Color::Rgb("#ffd700".into()))];
+    styles.borders = vec![Border {
+        left: Some(edge.clone()),
+        right: Some(edge.clone()),
+        top: Some(edge.clone()),
+        bottom: Some(edge),
+    }];
+    styles.cell_xfs = vec![Xf {
+        fill: Some(0),
+        border: Some(0),
+        ..Xf::default()
+    }];
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        styles,
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let render = |range| {
+        workbook
+            .print_display_list(
+                SheetId(0),
+                CellRange::parse_a1(range).unwrap(),
+                &metrics(),
+                false,
+            )
+            .unwrap()
+    };
+    let full = render("A1:C3");
+    let partial = render("B2:C3");
+    let texts = |list: &betteroffice_xlsx::DisplayList| {
+        list.commands
+            .iter()
+            .filter_map(|cmd| {
+                if let DrawCmd::Text { x, y, clip, .. } = cmd {
+                    Some((*x, *y, *clip))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let full_text = texts(&full);
+    let partial_text = texts(&partial);
+    assert_eq!(full_text.len(), 1);
+    assert_eq!(partial_text.len(), 1);
+    assert!((partial_text[0].0 - (full_text[0].0 - 96.0)).abs() < 0.001);
+    assert!((partial_text[0].1 - (full_text[0].1 - 56.0 / 3.0)).abs() < 0.001);
+    assert_eq!(partial_text[0].2.x, 0.0);
+    assert_eq!(partial_text[0].2.y, 0.0);
+    assert_eq!(partial_text[0].2.w, partial.width);
+    assert_eq!(partial_text[0].2.h, partial.height);
+    assert!(partial.commands.iter().any(|cmd| matches!(cmd,
+        DrawCmd::FillRect { x, y, w, h, color, .. }
+        if *x == 0.0 && *y == 0.0 && *w == partial.width && *h == partial.height && color == "#ffd700"
+    )));
+    assert_eq!(
+        partial
+            .commands
+            .iter()
+            .filter(|cmd| matches!(cmd,
+                DrawCmd::Line { color, .. } if color == "#0000ff"
+            ))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn display_only_hyperlinks_use_the_same_print_font_and_position_as_cells() {
+    let mut sheet = Sheet::new("Links");
+    sheet.set_cell(CellRef::new(0, 0), Cell::default());
+    for col in 0..2 {
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::new(CellRef::new(0, col), CellRef::new(0, col)),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Link".into()),
+        });
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let mut metrics = metrics();
+    metrics.font_family = "Example Font".into();
+    metrics.font_size_pt = 16.0;
+    metrics.default_row_height_pt = 24.0;
+    metrics.font_ascent = 15.0;
+    metrics.font_descent = 4.0;
+    let printed = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:B1").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    let texts: Vec<_> = printed
+        .commands
+        .iter()
+        .filter_map(|cmd| {
+            if let DrawCmd::Text {
+                x,
+                y,
+                font_family,
+                font_size,
+                underline,
+                ..
+            } = cmd
+            {
+                assert_eq!(font_family.as_deref(), Some("Example Font"));
+                assert_eq!(*font_size, 16.0);
+                assert!(*underline);
+                Some((*x, *y))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(texts.len(), 2);
+    assert_eq!(texts[0].1, texts[1].1);
+    assert!((texts[1].0 - texts[0].0 - printed.grid.col_offsets[1]).abs() < 0.001);
+    assert_eq!(texts[0].0, 4.0);
+    assert!((texts[0].1 - 80.0 / 3.0).abs() < 0.001);
 }

@@ -1,5 +1,6 @@
 import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
+import { normalFontIndex } from './xlsx-styles';
 
 const api = window as any;
 const format = new URLSearchParams(location.search).get('format');
@@ -47,9 +48,15 @@ async function xlsxPrintMetrics(bytes: Uint8Array) {
   const xml = async (path: string) =>
     new DOMParser().parseFromString((await zip.file(path)?.async('string')) ?? '<root/>', 'text/xml');
   const styles = await xml('xl/styles.xml');
-  const normal = styles.querySelector('cellStyleXfs > xf');
-  const font =
-    styles.querySelectorAll('fonts > font')[Number(normal?.getAttribute('fontId') ?? 0)];
+  const fontIndex = normalFontIndex(
+    [...styles.querySelectorAll('cellStyles > cellStyle')].map((style) => ({
+      builtinId: style.hasAttribute('builtinId') ? Number(style.getAttribute('builtinId')) : undefined,
+      name: style.getAttribute('name') ?? undefined,
+      xfId: Number(style.getAttribute('xfId') ?? 0),
+    })),
+    [...styles.querySelectorAll('cellStyleXfs > xf')].map((xf) => Number(xf.getAttribute('fontId') ?? 0))
+  );
+  const font = styles.querySelectorAll('fonts > font')[fontIndex];
   const family = font?.querySelector('name')?.getAttribute('val') ?? 'Calibri';
   const size = Number(font?.querySelector('sz')?.getAttribute('val') ?? 11);
   const dpi = 72;
