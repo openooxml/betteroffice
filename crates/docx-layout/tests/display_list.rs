@@ -1061,15 +1061,13 @@ fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
     };
     let nf = |n: &serde_json::Number| n.as_f64().unwrap();
 
-    // cell content box origin: cx(50) + padLeft(7) = 57 x, cy(50) + padTop(1) = 51 y
-    // front float is flush-right: x = contentX + (contentWidth 186 - width 40) = 203
     let front = image("rIdFront");
     assert!(
         (nf(&front.x) - 203.0).abs() < 0.001,
         "front x {:?}",
         front.x
     );
-    assert!((nf(&front.y) - 51.0).abs() < 0.001, "front y {:?}", front.y);
+    assert!((nf(&front.y) - 50.0).abs() < 0.001, "front y {:?}", front.y);
     assert!((nf(&front.w) - 40.0).abs() < 0.001);
     assert!((nf(&front.h) - 30.0).abs() < 0.001);
     assert_eq!(front.alt_text.as_deref(), Some("front logo"));
@@ -1091,7 +1089,7 @@ fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
         behind.x
     );
     assert!(
-        (nf(&behind.y) - 51.0).abs() < 0.001,
+        (nf(&behind.y) - 50.0).abs() < 0.001,
         "behind y {:?}",
         behind.y
     );

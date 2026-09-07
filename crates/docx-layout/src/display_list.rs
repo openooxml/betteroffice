@@ -8948,9 +8948,9 @@ fn emit_cell_content(
         return;
     };
     let pad_left = cell.padding.and_then(|pd| pd.left).unwrap_or(7.0);
-    let pad_top = cell.padding.and_then(|pd| pd.top).unwrap_or(1.0);
+    let pad_top = cell.padding.and_then(|pd| pd.top).unwrap_or(0.0);
     let pad_right = cell.padding.and_then(|pd| pd.right).unwrap_or(7.0);
-    let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(1.0);
+    let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(0.0);
     let content_width = (p.width - pad_left - pad_right).max(0.0);
 
     // Drawn border widths inset the cell content box.
@@ -9020,17 +9020,14 @@ fn emit_cell_content(
     let content_height = stack_cursor + prev_after;
 
     // Content that fills or overflows the cell remains top-aligned.
-    let avail = (cell_h - border_top - border_bottom - pad_top - pad_bottom).max(0.0);
-    let content_fills = cell_measure.height >= cell_h - 0.5;
-    let v_offset = if content_fills {
-        0.0
-    } else {
-        match cell.vertical_align.as_deref() {
-            Some("center") => ((avail - content_height) / 2.0).max(0.0),
-            Some("bottom") => (avail - content_height).max(0.0),
-            _ => 0.0,
-        }
-    };
+    let v_offset = crate::cell_layout::cell_vertical_offset(
+        cell.vertical_align.as_deref(),
+        cell_h,
+        cell_measure.height,
+        content_height,
+        border_top + pad_top,
+        border_bottom + pad_bottom,
+    );
 
     let content_x = cx + border_left + pad_left;
     let content_top = cy + border_top + pad_top + v_offset;

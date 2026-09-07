@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::cell_layout::layout_cell_content;
+use crate::cell_layout::{cell_vertical_offset, layout_cell_content};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
 
@@ -57,6 +57,8 @@ fn cell_unbreakable_ranges(
             BlockExtent::Image(value) => Some(value.height),
             BlockExtent::TextBox(value) => Some(value.height),
             BlockExtent::Table(value) => Some(value.total_height),
+            BlockExtent::Shape(value) => Some(value.height),
+            BlockExtent::Chart(value) => Some(value.height),
             _ => None,
         };
         if let Some(height) = height {
@@ -116,24 +118,53 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
             };
             // OOXML TableNormal defaults top padding to zero.
             let pad_top = source_cell.padding.as_ref().map(|p| p.top).unwrap_or(0.0);
+            let pad_bottom = source_cell
+                .padding
+                .as_ref()
+                .map(|p| p.bottom)
+                .unwrap_or(0.0);
+            let border_width = |edge: Option<&crate::types::CellBorderSpec>| {
+                edge.filter(|edge| !matches!(edge.style.as_deref(), Some("none" | "nil")))
+                    .map_or(0.0, |edge| edge.width.unwrap_or(1.0))
+            };
+            let border_top = if g.row_index == 0 {
+                border_width(source_cell.borders.as_ref().and_then(|b| b.top.as_ref()))
+            } else {
+                0.0
+            };
+            let border_bottom =
+                border_width(source_cell.borders.as_ref().and_then(|b| b.bottom.as_ref()));
             let layout = layout_cell_content(
                 Some(&source_cell.blocks),
                 Some(&measured_cell.blocks),
                 pad_top,
             );
+            let cell_end = (g.row_index + g.row_span).min(row_count);
+            let cell_height = row_tops[cell_end] - row_tops[g.row_index];
+            let content_offset = border_top
+                + cell_vertical_offset(
+                    source_cell.vertical_align.as_deref(),
+                    cell_height,
+                    measured_cell.height,
+                    layout.content_height,
+                    pad_top + border_top,
+                    pad_bottom + border_bottom,
+                );
             // Map cell-content y (relative to the cell/region top at
             // row_tops[start_row]) into this row's coordinate space
             // (relative to row_tops[r]).
             let shift = row_tops[r] - row_tops[g.row_index];
             for &b in &layout.flat_bottoms {
-                let off = b - shift;
+                let off = b + content_offset - shift;
                 if off > 0.0 && off < row_height {
                     add_unique(&mut offsets, off);
                 }
             }
-            for (top, bottom) in
-                cell_unbreakable_ranges(&source_cell.blocks, &measured_cell.blocks, pad_top)
-            {
+            for (top, bottom) in cell_unbreakable_ranges(
+                &source_cell.blocks,
+                &measured_cell.blocks,
+                pad_top + content_offset,
+            ) {
                 unbreakable_ranges.push((top - shift, bottom - shift));
             }
         }
@@ -364,6 +395,52 @@ mod tests {
                 measured_cell(vec![line20]), measured_cell(vec![line30])
             ] }],
             "columnWidths": [100, 100], "totalWidth": 200, "totalHeight": 60,
+        }))
+        .unwrap();
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![60.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 40.0), 0.0);
+    }
+
+    #[test]
+    fn keeps_centered_cell_text_whole_across_a_page_break() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [
+                { "id": 0, "verticalAlign": "center", "blocks": [para()] },
+                { "id": 1, "blocks": [para()] }
+            ] }],
+            "columnWidths": [100, 100],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 40, "cells": [
+                { "blocks": [para_measure(1)], "width": 100, "height": 20 },
+                { "blocks": [para_measure(2)], "width": 100, "height": 40 }
+            ] }],
+            "columnWidths": [100, 100], "totalWidth": 200, "totalHeight": 40,
+        }))
+        .unwrap();
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![40.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 30.0), 0.0);
+    }
+
+    #[test]
+    fn offsets_bottom_aligned_text_inside_a_tall_row() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [
+                { "id": 0, "verticalAlign": "bottom", "blocks": [para()] }
+            ] }],
+            "columnWidths": [100],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 60, "cells": [
+                { "blocks": [para_measure(1)], "width": 100, "height": 20 }
+            ] }],
+            "columnWidths": [100], "totalWidth": 100, "totalHeight": 60,
         }))
         .unwrap();
         let info = build_table_row_break_info(&block, &measure);
