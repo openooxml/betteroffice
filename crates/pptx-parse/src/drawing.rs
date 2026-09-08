@@ -1169,6 +1169,7 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
             .and_then(|value| value.parse().ok())
             .unwrap_or_default(),
         margin_left: numeric_attribute(Some(element), "marL"),
+        margin_right: numeric_attribute(Some(element), "marR"),
         indent: numeric_attribute(Some(element), "indent"),
         bullet,
         line_spacing: element.child("lnSpc").and_then(parse_line_spacing),
@@ -2037,6 +2038,35 @@ mod tests {
         );
         let json = serde_json::to_string(&body).unwrap();
         assert_eq!(serde_json::from_str::<TextBody>(&json).unwrap(), body);
+    }
+
+    #[test]
+    fn reads_a_right_margin_from_a_list_style_and_a_paragraph() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:txBody><a:lstStyle><a:defPPr marR="228600"/><a:lvl1pPr marL="342900" marR="914400"/><a:lvl2pPr marR="0"/></a:lstStyle><a:p><a:pPr marR="457200"/><a:r><a:t>Item</a:t></a:r></a:p><a:p/></p:txBody>"#,
+            "text.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let body = parse_text_body(&root, "text.xml", &mut budget).unwrap();
+        assert_eq!(
+            body.default_list_style.as_ref().unwrap().margin_right,
+            Some(228_600)
+        );
+        assert_eq!(body.list_style[0].margin_right, Some(914_400));
+        assert_eq!(body.list_style[1].margin_right, Some(0));
+        assert_eq!(body.list_style[2].margin_right, None);
+        assert_eq!(body.paragraphs[0].properties.margin_right, Some(457_200));
+        assert_eq!(body.paragraphs[1].properties.margin_right, None);
+        let json = serde_json::to_value(&body).unwrap();
+        assert!(
+            json["paragraphs"][1]["properties"]
+                .get("marginRight")
+                .is_none()
+        );
+        assert_eq!(serde_json::from_value::<TextBody>(json).unwrap(), body);
     }
 
     #[test]

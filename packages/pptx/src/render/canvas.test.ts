@@ -930,6 +930,59 @@ describe('PPTX shape shadows', () => {
     } finally { restore(); }
   });
 
+  test('a picture casts its shadow from the bitmap it draws, not from its frame', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display: SlideDisplayList = {
+        contractVersion: 1, width: 160, height: 160,
+        primitives: [{
+          kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+          assetId: 'mark', shadow: { color: '#00000066', blur: 8, dx: 6, dy: 6 },
+        }],
+      };
+      await paintSlide(ctx, display, 2, 1.5, { resolveImage: () => ({} as CanvasImageSource) });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:shadow:none:40,40', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(12px):138,138', 'main:shadow:none:40,40',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('an unresolved picture casts nothing', async () => {
+    const { calls, ctx, restore } = harness();
+    try {
+      const display: SlideDisplayList = {
+        contractVersion: 1, width: 160, height: 160,
+        primitives: [{
+          kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+          assetId: 'mark', shadow: { color: '#00000066', blur: 8, dx: 6, dy: 6 },
+        }],
+      };
+      await paintSlide(ctx, display, 2, 1.5, { resolveImage: () => null });
+      expect(calls).toEqual([]);
+    } finally { restore(); }
+  });
+
+  test('picture shadows draw from the same slide budget as shape shadows', async () => {
+    const { surfaces, ctx, restore } = harness();
+    try {
+      const picture = {
+        kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+        assetId: 'mark', shadow: { color: '#00000066' },
+      };
+      const display = { contractVersion: 1, width: 160, height: 160, primitives: [picture] } as SlideDisplayList;
+      const options = { resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120 };
+      await paintSlide(ctx, display, 3, 1, options);
+      expect(surfaces).toEqual([[120, 120]]);
+      await expect(
+        paintSlide(ctx, display, 3, 1, { ...options, maxShadowPixels: 120 * 120 - 1 })
+      ).rejects.toThrow('pixel budget');
+      const many = { ...display, primitives: Array.from({ length: 10_000 }, () => picture) } as SlideDisplayList;
+      await expect(paintSlide(ctx, many, 3, 1, options)).rejects.toThrow('pixel budget');
+    } finally { restore(); }
+  });
+
   test('an unfilled outline casts a shadow even at zero blur and offset', async () => {
     const { calls, ctx, restore } = harness();
     try {

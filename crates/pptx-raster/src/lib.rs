@@ -300,6 +300,7 @@ impl Painter<'_, '_> {
                 crop,
                 path,
                 stroke,
+                shadow,
                 ..
             } => self.paint_image(
                 *x,
@@ -311,6 +312,7 @@ impl Painter<'_, '_> {
                 *crop,
                 path.as_deref(),
                 stroke.as_ref(),
+                shadow.as_ref(),
                 transform,
                 clip,
             ),
@@ -495,6 +497,7 @@ impl Painter<'_, '_> {
         crop: ImageCrop,
         commands: Option<&[GeometryPathCommand]>,
         stroke: Option<&SlideStroke>,
+        shadow: Option<&SlideShadow>,
         transform: Transform,
         clip: Option<&Mask>,
     ) -> Result<(), String> {
@@ -509,15 +512,16 @@ impl Painter<'_, '_> {
             return Ok(());
         };
         let (kept_x, kept_y) = crop.kept();
+        let bounded = !crop.is_whole() || commands.is_some();
+        let mut mask = None;
+        let mut decoded = None;
         if kept_x > 0.0 && kept_y > 0.0 {
-            let mask = if !crop.is_whole() || commands.is_some() {
-                let Some(mask) = self.clipped_path(clip, outline.clone(), transform)? else {
+            if bounded {
+                let Some(bound) = self.clipped_path(clip, outline.clone(), transform)? else {
                     return Ok(());
                 };
-                Some(mask)
-            } else {
-                None
-            };
+                mask = Some(bound);
+            }
             match asset_id.and_then(|asset_id| self.decode(asset_id, effects)) {
                 Some(source) => {
                     let fit = Transform::from_row(
@@ -528,7 +532,84 @@ impl Painter<'_, '_> {
                         frame.x() - crop.left * frame.width() / kept_x,
                         frame.y() - crop.top * frame.height() / kept_y,
                     );
-                    self.pixmap.draw_pixmap(
+                    decoded = Some((source, fit));
+                }
+                None => self.skipped_images += 1,
+            }
+        }
+        if let Some(shadow) = shadow {
+            self.paint_image_shadow(
+                [x, y, w, h],
+                &outline,
+                decoded.as_ref().map(|(source, fit)| (source, *fit)),
+                bounded,
+                stroke,
+                shadow,
+                transform,
+                clip,
+            )?;
+        }
+        if let Some((source, fit)) = &decoded {
+            self.pixmap.draw_pixmap(
+                0,
+                0,
+                source.as_ref(),
+                &PixmapPaint {
+                    quality: FilterQuality::Bicubic,
+                    ..PixmapPaint::default()
+                },
+                transform.pre_concat(*fit),
+                mask.as_ref().or(clip),
+            );
+        }
+        if let Some(stroke) = stroke {
+            self.stroke_path(&outline, stroke, [x, y, w, h], transform, clip)?;
+        }
+        Ok(())
+    }
+
+    /// A picture's shadow is the silhouette of its alpha, not of its frame.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_image_shadow(
+        &mut self,
+        bounds: [f32; 4],
+        outline: &Path,
+        decoded: Option<(&Pixmap, Transform)>,
+        bounded: bool,
+        stroke: Option<&SlideStroke>,
+        shadow: &SlideShadow,
+        transform: Transform,
+        clip: Option<&Mask>,
+    ) -> Result<(), String> {
+        let color = parse_color(&shadow.color)?;
+        if color.alpha() == 0.0 || (decoded.is_none() && stroke.is_none()) {
+            return Ok(());
+        }
+        let placed = placed_shadow(shadow, transform, self.scale);
+        let Some(placed_outline) = outline.clone().transform(placed) else {
+            return Ok(());
+        };
+        let reach = stroke.map_or(0.0, |stroke| {
+            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
+        });
+        self.paint_shadow_layer(
+            placed_outline.bounds(),
+            reach,
+            shadow,
+            color,
+            placed,
+            clip,
+            |scratch, local| {
+                if let Some((source, fit)) = decoded {
+                    let mask = if bounded {
+                        let mut mask = Mask::new(scratch.width(), scratch.height())
+                            .ok_or("invalid shadow mask size".to_string())?;
+                        mask.fill_path(outline, FillRule::Winding, true, local);
+                        Some(mask)
+                    } else {
+                        None
+                    };
+                    scratch.draw_pixmap(
                         0,
                         0,
                         source.as_ref(),
@@ -536,17 +617,18 @@ impl Painter<'_, '_> {
                             quality: FilterQuality::Bicubic,
                             ..PixmapPaint::default()
                         },
-                        transform.pre_concat(fit),
-                        mask.as_ref().or(clip),
+                        local.pre_concat(fit),
+                        mask.as_ref(),
                     );
                 }
-                None => self.skipped_images += 1,
-            }
-        }
-        if let Some(stroke) = stroke {
-            self.stroke_path(&outline, stroke, [x, y, w, h], transform, clip)?;
-        }
-        Ok(())
+                if let Some(stroke) = stroke
+                    && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
+                {
+                    scratch.stroke_path(outline, &paint, &stroke, local, None);
+                }
+                Ok(())
+            },
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -614,26 +696,58 @@ impl Painter<'_, '_> {
         if color.alpha() == 0.0 || (fill.is_none() && stroke.is_none()) {
             return Ok(());
         }
-        let placed = Transform::from_translate(shadow.dx * self.scale, shadow.dy * self.scale)
-            .pre_concat(Transform::from_scale(shadow.scale_x, shadow.scale_y))
-            .pre_concat(transform);
-        let radius = blur::box_radius(shadow.blur * self.scale / 2.0);
+        let placed = placed_shadow(shadow, transform, self.scale);
         let Some(placed_path) = path.clone().transform(placed) else {
             return Ok(());
         };
-        let margin = blur::spread(radius) as f32 + 1.0;
-        let outline = stroke.map_or(0.0, |stroke| {
+        let reach = stroke.map_or(0.0, |stroke| {
             stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
         });
-        let bounds = placed_path.bounds();
+        self.paint_shadow_layer(
+            placed_path.bounds(),
+            reach,
+            shadow,
+            color,
+            placed,
+            clip,
+            |scratch, local| {
+                if let Some(fill) = fill {
+                    let paint = shader_paint(fill, x, y, w, h)?;
+                    scratch.fill_path(path, &paint, FillRule::Winding, local, None);
+                }
+                if let Some(stroke) = stroke
+                    && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
+                {
+                    scratch.stroke_path(path, &paint, &stroke, local, None);
+                }
+                Ok(())
+            },
+        )
+    }
+
+    /// Blurs and tints whatever `draw` lays into a scratch surface, then composites it.
+    /// `draw` receives the transform that places the source in that surface.
+    #[allow(clippy::too_many_arguments)]
+    fn paint_shadow_layer(
+        &mut self,
+        bounds: Rect,
+        reach: f32,
+        shadow: &SlideShadow,
+        color: Color,
+        placed: Transform,
+        clip: Option<&Mask>,
+        draw: impl FnOnce(&mut Pixmap, Transform) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let radius = blur::box_radius(shadow.blur * self.scale / 2.0);
+        let margin = blur::spread(radius) as f32 + 1.0;
         let surface_width = self.pixmap.width() as f32;
         let surface_height = self.pixmap.height() as f32;
-        let left = (bounds.left() - margin - outline).floor().max(-margin);
-        let top = (bounds.top() - margin - outline).floor().max(-margin);
-        let right = (bounds.right() + margin + outline)
+        let left = (bounds.left() - margin - reach).floor().max(-margin);
+        let top = (bounds.top() - margin - reach).floor().max(-margin);
+        let right = (bounds.right() + margin + reach)
             .ceil()
             .min(surface_width + margin);
-        let bottom = (bounds.bottom() + margin + outline)
+        let bottom = (bounds.bottom() + margin + reach)
             .ceil()
             .min(surface_height + margin);
         if right <= left || bottom <= top {
@@ -648,16 +762,10 @@ impl Painter<'_, '_> {
         let Some(mut scratch) = Pixmap::new(scratch_w, scratch_h) else {
             return Ok(());
         };
-        let local = Transform::from_translate(-left, -top).pre_concat(placed);
-        if let Some(fill) = fill {
-            let paint = shader_paint(fill, x, y, w, h)?;
-            scratch.fill_path(path, &paint, FillRule::Winding, local, None);
-        }
-        if let Some(stroke) = stroke
-            && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
-        {
-            scratch.stroke_path(path, &paint, &stroke, local, None);
-        }
+        draw(
+            &mut scratch,
+            Transform::from_translate(-left, -top).pre_concat(placed),
+        )?;
         for pixel in scratch.pixels_mut() {
             let alpha = (f32::from(pixel.alpha()) * color.alpha()).round() as u8;
             *pixel = ColorU8::from_rgba(
@@ -701,6 +809,14 @@ impl Painter<'_, '_> {
         let bytes = self.resources.images.get(asset_id)?;
         self.images.decode(bytes, effects)
     }
+}
+
+/// Where a shadow's copy of the source lands: scaled about the surface origin,
+/// then offset. `algn` is already folded into `dx`/`dy`.
+fn placed_shadow(shadow: &SlideShadow, transform: Transform, scale: f32) -> Transform {
+    Transform::from_translate(shadow.dx * scale, shadow.dy * scale)
+        .pre_concat(Transform::from_scale(shadow.scale_x, shadow.scale_y))
+        .pre_concat(transform)
 }
 
 /// The rotate-and-flip a primitive applies about its own centre, matching
@@ -1061,6 +1177,7 @@ mod tests {
                     crop: ImageCrop::default(),
                     path: None,
                     stroke: Some(stroke),
+                    shadow: None,
                     transform: SlideTransform::default(),
                 }
             } else {
@@ -1500,6 +1617,155 @@ mod tests {
     }
 
     #[test]
+    fn a_picture_shadow_traces_the_alpha_rather_than_the_frame() {
+        let mut source = Pixmap::new(80, 80).unwrap();
+        for y in 20..60 {
+            for x in 20..60 {
+                source.pixels_mut()[y * 80 + x] =
+                    ColorU8::from_rgba(49, 94, 251, 255).premultiply();
+            }
+        }
+        let bytes = source.encode_png().unwrap();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("mark", bytes.as_slice())]);
+        let mut list = empty_list(300.0, 200.0);
+        list.primitives.push(Primitive::Image {
+            object_id: 1,
+            shape_id: None,
+            name: "Mark".into(),
+            x: 20.0,
+            y: 40.0,
+            w: 80.0,
+            h: 80.0,
+            asset_id: Some("mark".into()),
+            effects: Vec::new(),
+            crop: ImageCrop::default(),
+            path: None,
+            stroke: None,
+            shadow: Some(SlideShadow {
+                color: "#000000FF".into(),
+                blur: 0.0,
+                dx: 120.0,
+                dy: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            }),
+            transform: SlideTransform::default(),
+        });
+        let rendered = render_slide(
+            &list,
+            &resources(&fonts, &images),
+            &RenderOptions::default(),
+        )
+        .expect("the picture and its shadow render");
+        let image = Pixmap::decode_png(&rendered.bytes).unwrap();
+        assert_eq!(
+            image.pixel(180, 80).unwrap(),
+            ColorU8::from_rgba(0, 0, 0, 255).premultiply()
+        );
+        assert_eq!(
+            image.pixel(145, 45).unwrap(),
+            ColorU8::from_rgba(255, 255, 255, 255).premultiply(),
+            "the transparent corner of the source casts nothing"
+        );
+    }
+
+    fn opaque_mark() -> Vec<u8> {
+        let mut source = Pixmap::new(40, 40).unwrap();
+        for pixel in source.pixels_mut() {
+            *pixel = ColorU8::from_rgba(255, 0, 0, 255).premultiply();
+        }
+        source.encode_png().unwrap()
+    }
+
+    fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {
+        Primitive::Image {
+            object_id: 1,
+            shape_id: None,
+            name: "shadow probe".into(),
+            x: 40.0,
+            y: 40.0,
+            w: 40.0,
+            h: 40.0,
+            asset_id: Some(asset.into()),
+            effects: Vec::new(),
+            crop: ImageCrop::default(),
+            path: None,
+            stroke: None,
+            shadow: Some(shadow),
+            transform: SlideTransform::default(),
+        }
+    }
+
+    #[test]
+    fn an_opaque_picture_casts_the_shape_shadow_byte_for_byte() {
+        let bytes = opaque_mark();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("mark", bytes.as_slice())]);
+        let mut list = empty_list(160.0, 160.0);
+        list.primitives.push(shadowed_image(
+            "mark",
+            SlideShadow {
+                color: "#00000066".into(),
+                blur: 8.0,
+                dx: 60.0,
+                dy: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
+        ));
+        let picture = render_slide(
+            &list,
+            &resources(&fonts, &images),
+            &RenderOptions::default(),
+        )
+        .expect("the opaque picture renders");
+        let shape = render_probe(&shadow_probe(40.0, Some("#FF0000"), None, 8.0, 60.0), 1.0);
+        assert_eq!(Pixmap::decode_png(&picture.bytes).unwrap(), shape);
+    }
+
+    #[test]
+    fn picture_shadows_charge_the_slide_shadow_budget() {
+        let bytes = opaque_mark();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("mark", bytes.as_slice())]);
+        let resources = resources(&fonts, &images);
+        let mut list = empty_list(160.0, 160.0);
+        list.primitives.push(shadowed_image(
+            "mark",
+            SlideShadow {
+                color: "#00000066".into(),
+                blur: 0.0,
+                dx: 0.0,
+                dy: 0.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            },
+        ));
+        let options = RenderOptions {
+            max_shadow_pixels: 42 * 42,
+            ..Default::default()
+        };
+        render_slide(&list, &resources, &options).expect("one picture shadow fits the budget");
+        let tight = RenderOptions {
+            max_shadow_pixels: 42 * 42 - 1,
+            ..options.clone()
+        };
+        assert!(
+            render_slide(&list, &resources, &tight)
+                .unwrap_err()
+                .contains("shadows cover")
+        );
+        let mut many = list.clone();
+        many.primitives = vec![list.primitives[0].clone(); 10_000];
+        assert!(
+            render_slide(&many, &resources, &options)
+                .unwrap_err()
+                .contains("shadows cover")
+        );
+    }
+
+    #[test]
     fn outline_shadows_keep_the_center_hollow() {
         let stroke = SlideStroke {
             paint: None,
@@ -1678,6 +1944,7 @@ mod tests {
                         head_end: None,
                         tail_end: None,
                     }),
+                    shadow: None,
                     transform: SlideTransform {
                         flip_h,
                         ..Default::default()
@@ -1751,6 +2018,7 @@ mod tests {
                 crop: ImageCrop::default(),
                 path: None,
                 stroke: None,
+                shadow: None,
                 transform: SlideTransform::default(),
             });
             let rendered = render_slide(

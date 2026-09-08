@@ -13,7 +13,9 @@ pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
 const EMU_PER_PIXEL: f64 = 9525.0;
 /// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
-const MAX_AXIS_LINE_PX: f64 = 16.0;
+const MAX_LINE_PX: f64 = 16.0;
+/// The width a series line is drawn at when its `c:spPr` declares none.
+const DEFAULT_SERIES_LINE_PX: f64 = 2.0;
 pub const CHART_SERIES_COLORS: [&str; 8] = [
     "#4472C4", "#ED7D31", "#A5A5A5", "#FFC000", "#5B9BD5", "#70AD47", "#264478", "#9E480E",
 ];
@@ -383,6 +385,8 @@ pub struct PlotSeries<'a> {
     pub smooth: bool,
     /// This series' `c:dLbls`, already merged over its plot group's.
     pub labels: Option<PlotDataLabels<'a>>,
+    /// This series' own `c:spPr/a:ln`.
+    pub line: Option<PlotLine<'a>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -660,6 +664,11 @@ fn plot_series_from_model<'a>(
         bubble_sizes: series.bubble_sizes.as_deref().unwrap_or_default(),
         smooth: series.smooth.unwrap_or(false),
         labels,
+        line: series.line.as_ref().map(|line| PlotLine {
+            none: line.none,
+            color: line.color.as_deref(),
+            width_emu: line.width_emu,
+        }),
     }
 }
 
@@ -2115,10 +2124,26 @@ fn axis_stroke<'a>(axis: Option<&'a PlotAxis<'a>>) -> Option<(&'a str, f64)> {
 
 /// `a:ln/@w` as device pixels at the 96 DPI the plot geometry works in, never
 /// below the hairline a rasteriser would round it up to anyway.
-fn axis_line_width(width_emu: Option<f64>) -> f64 {
+fn line_width(width_emu: Option<f64>, default_px: f64) -> f64 {
     match width_emu {
-        Some(emu) if emu.is_finite() => (emu / EMU_PER_PIXEL).clamp(1.0, MAX_AXIS_LINE_PX),
-        _ => 1.0,
+        Some(emu) if emu.is_finite() => (emu / EMU_PER_PIXEL).clamp(1.0, MAX_LINE_PX),
+        _ => default_px,
+    }
+}
+
+fn axis_line_width(width_emu: Option<f64>) -> f64 {
+    line_width(width_emu, 1.0)
+}
+
+/// The width a series' own line is drawn at, or `None` when its `c:spPr/a:ln`
+/// is `a:noFill`.
+fn series_line_width(series: &PlotSeries<'_>) -> Option<f64> {
+    match series.line {
+        Some(line) if line.none => None,
+        line => Some(line_width(
+            line.and_then(|line| line.width_emu),
+            DEFAULT_SERIES_LINE_PX,
+        )),
     }
 }
 
@@ -2669,6 +2694,7 @@ fn emit_line<S: PlotSink + ?Sized>(
     let spans = &mut Vec::with_capacity(family.series.len());
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
+        let width = series_line_width(series.series);
         let markers = family.group.and_then(|group| group.markers) != Some(false);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..cat_count {
@@ -2683,8 +2709,8 @@ fn emit_line<S: PlotSink + ?Sized>(
             };
             let x = line_x(family, plot, i, cat_count);
             let y = scale.y(plot, value);
-            if let Some((prev_x, prev_y)) = prev {
-                push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
+            if let (Some(width), Some((prev_x, prev_y))) = (width, prev) {
+                push_line(ops, prev_x, prev_y, x, y, &color, width);
             }
             if markers {
                 push_marker(
@@ -2905,6 +2931,7 @@ fn emit_scatter<S: PlotSink + ?Sized>(
     let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
     for (ser_idx, series) in family.series.iter().enumerate() {
         let color = series_color(Some(series.series), ser_idx);
+        let width = series_line_width(series.series);
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..series.length().min(MAX_PLOT_DATA_SCAN) {
             if ops.exhausted() {
@@ -2916,8 +2943,8 @@ fn emit_scatter<S: PlotSink + ?Sized>(
             };
             let x = x_scale.x(plot, x_value);
             let y = y_scale.y(plot, y_value);
-            if lines && let Some((prev_x, prev_y)) = prev {
-                push_line(ops, prev_x, prev_y, x, y, &color, 2.0);
+            if lines && let (Some(width), Some((prev_x, prev_y))) = (width, prev) {
+                push_line(ops, prev_x, prev_y, x, y, &color, width);
             }
             if markers {
                 push_marker(
@@ -3093,12 +3120,12 @@ fn emit_radar<S: PlotSink + ?Sized>(
             commands.push(GeometryPathCommand::Close);
             push_path(ops, plot, commands, &color, None);
         }
-        if !filled {
+        if !filled && let Some(width) = series_line_width(series.series) {
             for (from, to) in ring_edges(&ring) {
                 if ops.exhausted() {
                     return;
                 }
-                push_line(ops, from.0, from.1, to.0, to.1, &color, 2.0);
+                push_line(ops, from.0, from.1, to.0, to.1, &color, width);
             }
         }
         for (index, (x, y)) in ring.iter().enumerate() {
@@ -5715,7 +5742,78 @@ mod tests {
         assert_eq!(axis_line_width(Some(3175.0)), 1.0);
         assert_eq!(axis_line_width(Some(38100.0)), 4.0);
         assert_eq!(axis_line_width(Some(f64::INFINITY)), 1.0);
-        assert_eq!(axis_line_width(Some(1e30)), MAX_AXIS_LINE_PX);
+        assert_eq!(axis_line_width(Some(1e30)), MAX_LINE_PX);
+    }
+
+    #[test]
+    fn a_series_line_takes_its_width_from_its_own_sp_pr() {
+        let data = source(&[1.0, 2.0]);
+        let widths = |line| {
+            let mut north = series("North", &data);
+            north.line = line;
+            plot_chart(&grouped("line", group("line", vec![north])), rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { color, width, .. } if color == CHART_SERIES_COLORS[0] => {
+                        Some(*width)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(widths(None), [DEFAULT_SERIES_LINE_PX]);
+        assert_eq!(
+            widths(Some(PlotLine {
+                width_emu: Some(41275.0),
+                ..PlotLine::default()
+            })),
+            [41275.0 / EMU_PER_PIXEL]
+        );
+        assert!(
+            widths(Some(PlotLine {
+                none: true,
+                width_emu: Some(41275.0),
+                ..PlotLine::default()
+            }))
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_series_line_width_stays_between_a_hairline_and_the_cap() {
+        let width = |line| {
+            series_line_width(&PlotSeries {
+                line,
+                ..PlotSeries::default()
+            })
+        };
+        assert_eq!(width(None), Some(DEFAULT_SERIES_LINE_PX));
+        assert_eq!(
+            width(Some(PlotLine::default())),
+            Some(DEFAULT_SERIES_LINE_PX)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(3175.0),
+                ..PlotLine::default()
+            })),
+            Some(1.0)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(1e30),
+                ..PlotLine::default()
+            })),
+            Some(MAX_LINE_PX)
+        );
+        assert_eq!(
+            width(Some(PlotLine {
+                width_emu: Some(f64::NAN),
+                ..PlotLine::default()
+            })),
+            Some(DEFAULT_SERIES_LINE_PX)
+        );
     }
 
     #[test]

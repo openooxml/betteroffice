@@ -6,6 +6,7 @@ import type {
   Paint,
   PlaceholderPrimitive,
   PositionedTextRun,
+  Shadow,
   ShapePrimitive,
   SlideDisplayList,
   SlidePrimitive,
@@ -87,7 +88,7 @@ async function paintPrimitive(
         paintShape(ctx, primitive, deviceScale, shadowBudget);
         break;
       case 'image':
-        await paintImage(ctx, primitive, options.resolveImage);
+        await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
         paintTextBox(ctx, primitive);
@@ -162,8 +163,29 @@ function paintShadowedShape(
   deviceScale: number,
   shadowBudget: ShadowBudget
 ): void {
-  const shadowScaleX = shape.shadow?.scaleX ?? 1;
-  const shadowScaleY = shape.shadow?.scaleY ?? 1;
+  paintShadowLayer(
+    ctx,
+    shape.shadow!,
+    pathPoints(shape.path, shape),
+    shape.stroke?.width ?? 0,
+    deviceScale,
+    shadowBudget,
+    (scratch) => paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget)
+  );
+}
+
+/** Blurs and tints whatever `draw` lays into an offscreen layer, then composites it. */
+function paintShadowLayer(
+  ctx: CanvasRenderingContext2D,
+  shadow: Shadow,
+  points: Array<[number, number]>,
+  reach: number,
+  deviceScale: number,
+  shadowBudget: ShadowBudget,
+  draw: (scratch: CanvasRenderingContext2D) => void
+): void {
+  const shadowScaleX = shadow.scaleX ?? 1;
+  const shadowScaleY = shadow.scaleY ?? 1;
   // The anchor is already in dx/dy, so the shadow scales about the surface origin.
   const base = ctx.getTransform();
   const transform = {
@@ -171,7 +193,6 @@ function paintShadowedShape(
     c: base.c * shadowScaleX, d: base.d * shadowScaleY,
     e: base.e * shadowScaleX, f: base.f * shadowScaleY,
   };
-  const points = pathPoints(shape);
   if (!points.length) return;
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const [x, y] of points) {
@@ -182,10 +203,9 @@ function paintShadowedShape(
     maxX = Math.max(maxX, px);
     maxY = Math.max(maxY, py);
   }
-  const shadow = shape.shadow!;
   const sigma = Math.min(Math.max(shadow.blur ?? 0, 0) * deviceScale / 2, 128);
   const spread = sigma * 3 + 1;
-  const outline = (shape.stroke?.width ?? 0) * deviceScale
+  const outline = reach * deviceScale
     * Math.max(Math.abs(shadowScaleX), Math.abs(shadowScaleY)) * 2;
   const dx = (shadow.dx ?? 0) * deviceScale;
   const dy = (shadow.dy ?? 0) * deviceScale;
@@ -204,7 +224,7 @@ function paintShadowedShape(
   const scratch = layer.getContext('2d') as CanvasRenderingContext2D | null;
   if (!scratch) return;
   scratch.setTransform(transform.a, transform.b, transform.c, transform.d, transform.e - left, transform.f - top);
-  paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget);
+  draw(scratch);
   ctx.save();
   try {
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -228,21 +248,34 @@ function paintShadowedShape(
   }
 }
 
-function pathPoints(shape: ShapePrimitive): Array<[number, number]> {
+type Frame = { x: number; y: number; w: number; h: number };
+
+function pathPoints(path: GeometryPathCommand[], frame: Frame): Array<[number, number]> {
   const points: Array<[number, number]> = [];
-  for (const command of shape.path) {
+  for (const command of path) {
     if (command.type === 'close') continue;
     if (command.type === 'quad') {
-      points.push([shape.x + command.cpx * shape.w, shape.y + command.cpy * shape.h]);
+      points.push([frame.x + command.cpx * frame.w, frame.y + command.cpy * frame.h]);
     } else if (command.type === 'cubic') {
-      points.push([shape.x + command.cp1x * shape.w, shape.y + command.cp1y * shape.h]);
-      points.push([shape.x + command.cp2x * shape.w, shape.y + command.cp2y * shape.h]);
+      points.push([frame.x + command.cp1x * frame.w, frame.y + command.cp1y * frame.h]);
+      points.push([frame.x + command.cp2x * frame.w, frame.y + command.cp2y * frame.h]);
     }
-    points.push([shape.x + command.x * shape.w, shape.y + command.y * shape.h]);
+    points.push([frame.x + command.x * frame.w, frame.y + command.y * frame.h]);
   }
   return points.filter(
     (point, index) => index === 0 || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]
   );
+}
+
+/** The picture's own outline when it has one, else its frame's corners. */
+function imagePoints(image: ImagePrimitive): Array<[number, number]> {
+  if (image.path) return pathPoints(image.path, image);
+  return [
+    [image.x, image.y],
+    [image.x + image.w, image.y],
+    [image.x + image.w, image.y + image.h],
+    [image.x, image.y + image.h],
+  ];
 }
 
 const LINE_END_KINDS = new Set(['triangle', 'stealth', 'arrow', 'diamond', 'oval']);
@@ -250,7 +283,7 @@ const LINE_END_KINDS = new Set(['triangle', 'stealth', 'arrow', 'diamond', 'oval
 function paintLineEnds(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void {
   const stroke = shape.stroke;
   if (!stroke || (!stroke.headEnd && !stroke.tailEnd)) return;
-  const points = pathPoints(shape);
+  const points = pathPoints(shape.path, shape);
   if (points.length < 2) return;
   const ends: Array<[StrokeEnd | undefined, [number, number], [number, number]]> = [
     [stroke.headEnd, points[1], points[0]],
@@ -481,15 +514,35 @@ function paintStyle(
 async function paintImage(
   ctx: CanvasRenderingContext2D,
   image: ImagePrimitive,
-  resolver: CanvasImageResolver | undefined
+  resolver: CanvasImageResolver | undefined,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
+  let source: CanvasImageSource | undefined;
   if (image.assetId && resolver) {
-    const source = await resolver(image.assetId);
-    if (source) {
-      const recoloured = image.effects?.length ? recolourImage(source, image.effects) : source;
-      drawCropped(ctx, recoloured, image);
-    }
+    const resolved = await resolver(image.assetId);
+    if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
+  if (image.shadow && (source || image.stroke)) {
+    paintShadowLayer(
+      ctx,
+      image.shadow,
+      imagePoints(image),
+      image.stroke?.width ?? 0,
+      deviceScale,
+      shadowBudget,
+      (scratch) => drawImageContent(scratch, image, source)
+    );
+  }
+  drawImageContent(ctx, image, source);
+}
+
+function drawImageContent(
+  ctx: CanvasRenderingContext2D,
+  image: ImagePrimitive,
+  source: CanvasImageSource | undefined
+): void {
+  if (source) drawCropped(ctx, source, image);
   if (image.stroke) {
     buildImageOutline(ctx, image);
     strokeCurrentPath(ctx, image.stroke, image.x, image.y, image.w, image.h);

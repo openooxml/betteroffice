@@ -113,7 +113,7 @@ pub struct StrokeEnd {
     pub length: f32,
 }
 
-/// An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted.
+/// An `a:outerShdw`: a blurred copy of what the primitive paints, offset and tinted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Shadow {
@@ -228,6 +228,8 @@ pub enum Primitive {
         path: Option<Vec<GeometryPathCommand>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<Shadow>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },
@@ -445,6 +447,7 @@ mod tests {
             crop: ImageCrop::default(),
             path: None,
             stroke: None,
+            shadow: None,
             transform: Transform::default(),
         };
         let before = r#"{"kind":"image","objectId":90,"shapeId":"slide:0:256:shape:9","name":"Media fixture","x":1280.0,"y":720.0,"w":0.5,"h":0.25,"assetId":"ppt/media/betteroffice-mark.png"}"#;

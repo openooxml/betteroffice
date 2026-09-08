@@ -333,6 +333,7 @@ export interface ImagePrimitive extends PrimitiveBase {
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
   stroke?: Stroke;
+  shadow?: Shadow;
 }
 
 export interface CaretStop {

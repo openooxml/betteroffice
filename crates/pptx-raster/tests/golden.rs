@@ -9,8 +9,8 @@ use ooxml_text::{FontId, FontStore};
 use pptx_raster::{AssetMap, Background, RenderOptions, RenderResources, render_slide};
 use pptx_render::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
-    PositionedTextLine, PositionedTextRun, Primitive, Stroke, SurfaceDisplayList, TextAnchor,
-    TextParagraph, Transform,
+    PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, SurfaceDisplayList,
+    TextAnchor, TextParagraph, Transform,
 };
 
 const CARLITO: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
@@ -73,8 +73,31 @@ static CHECKER: LazyLock<Vec<u8>> = LazyLock::new(|| {
     bytes
 });
 
+/// An 8x8 bitmap opaque only in its middle 4x4, so a frame-shaped shadow and an
+/// alpha-shaped one cannot be confused.
+static HOLLOW: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let mut pixels = vec![0u8; 8 * 8 * 4];
+    for y in 2..6 {
+        for x in 2..6 {
+            pixels[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].copy_from_slice(&[0x31, 0x5e, 0xfb, 0xff]);
+        }
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 8, 8);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&pixels).expect("png data");
+    }
+    bytes
+});
+
 fn assets() -> AssetMap<'static> {
-    AssetMap::from([("ppt/media/image1.png", CHECKER.as_slice())])
+    AssetMap::from([
+        ("ppt/media/image1.png", CHECKER.as_slice()),
+        ("ppt/media/image2.png", HOLLOW.as_slice()),
+    ])
 }
 
 fn slide(primitives: Vec<Primitive>) -> SurfaceDisplayList {
@@ -314,6 +337,37 @@ fn golden_image() {
                 head_end: None,
                 tail_end: None,
             }),
+            shadow: None,
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_picture_shadow() {
+    check(
+        "picture-shadow",
+        &slide(vec![Primitive::Image {
+            object_id: 5,
+            shape_id: Some("pic-2".into()),
+            name: "hollow mark".into(),
+            x: 60.0,
+            y: 20.0,
+            w: 80.0,
+            h: 80.0,
+            asset_id: Some("ppt/media/image2.png".into()),
+            effects: Vec::new(),
+            crop: Default::default(),
+            path: None,
+            stroke: None,
+            shadow: Some(Shadow {
+                color: "#00000099".into(),
+                blur: 6.0,
+                dx: 12.0,
+                dy: 12.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            }),
             transform: Transform::default(),
         }]),
     );
@@ -353,6 +407,7 @@ fn golden_picture_fill() {
                 Cmd::Close,
             ]),
             stroke: None,
+            shadow: None,
             transform: Transform::default(),
         }]),
     );

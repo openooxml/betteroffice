@@ -217,6 +217,41 @@ mod tests {
     }
 
     #[test]
+    fn a_series_line_reaches_the_model_with_its_own_width() {
+        let chart = parse(
+            r#"<c:chartSpace xmlns:c="c" xmlns:a="a"><c:chart><c:plotArea><c:lineChart>
+                 <c:ser>
+                   <c:spPr><a:ln w="41275" cap="rnd"><a:solidFill><a:schemeClr val="bg1"/></a:solidFill></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>3</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+                 <c:ser>
+                   <c:spPr><a:ln><a:noFill/></a:ln></c:spPr>
+                   <c:val><c:numCache><c:pt><c:v>1</c:v></c:pt></c:numCache></c:val>
+                 </c:ser>
+               </c:lineChart></c:plotArea></c:chart></c:chartSpace>"#,
+            &Theme::default(),
+        )
+        .expect("chart parses");
+        let series = &chart.plot_groups[0].series;
+        assert_eq!(
+            series[0].line,
+            Some(ChartLine {
+                none: false,
+                color: Some("#FFFFFF".to_owned()),
+                width_emu: Some(41275.0),
+            })
+        );
+        assert_eq!(
+            series[1].line,
+            Some(ChartLine {
+                none: true,
+                color: None,
+                width_emu: None,
+            })
+        );
+    }
+
+    #[test]
     fn a_chart_space_without_shape_properties_leaves_the_fill_to_the_renderer() {
         let space = |properties: &str| {
             parse(

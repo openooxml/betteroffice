@@ -495,6 +495,8 @@ pub struct ParagraphProperties {
     pub alignment: Option<String>,
     pub level: u32,
     pub margin_left: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin_right: Option<i64>,
     pub indent: Option<i64>,
     pub bullet: Option<Bullet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

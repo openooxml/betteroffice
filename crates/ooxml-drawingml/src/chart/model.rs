@@ -126,6 +126,9 @@ pub struct ChartSeries {
     pub bubble_sizes: Option<Vec<f64>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data_labels: Option<ChartDataLabels>,
+    /// `c:ser/c:spPr/a:ln`: the stroke of this series' own line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line: Option<ChartLine>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

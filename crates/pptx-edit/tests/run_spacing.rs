@@ -58,7 +58,7 @@ fn legacy_tracking_recovers_with_source_and_preserves_edits() {
         let meta = txn.get_map("pptx:meta").unwrap();
         assert_eq!(
             meta.get(&txn, "schemaVersion"),
-            Some(Out::Any(Any::Number(20.0)))
+            Some(Out::Any(Any::Number(21.0)))
         );
         assert!(meta.get(&txn, "spacingPendingSource").is_none());
     }

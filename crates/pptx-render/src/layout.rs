@@ -499,7 +499,11 @@ impl<'a> LayoutBuilder<'a> {
             .or_else(|| layout_node.and_then(node_effects))
             .or_else(|| master_node.and_then(node_effects));
         let shadow = node_effects
-            .filter(|_| shape.kind == ShapeKind::Shape && (fill.is_some() || outline.is_some()))
+            .filter(|_| match shape.kind {
+                ShapeKind::Shape => fill.is_some() || outline.is_some() || picture.is_some(),
+                ShapeKind::Picture => true,
+                ShapeKind::GraphicFrame | ShapeKind::Group => false,
+            })
             .and_then(|effects| {
                 shadow(
                     effects,
@@ -562,6 +566,7 @@ impl<'a> LayoutBuilder<'a> {
                     source.map(|picture| &picture.crop),
                     source.and_then(|picture| picture_mask(picture, rect)),
                     outline,
+                    shadow,
                 );
             }
             ShapeKind::GraphicFrame => {
@@ -571,6 +576,7 @@ impl<'a> LayoutBuilder<'a> {
                     &shape.name,
                     rect,
                     transform,
+                    space,
                     shape.graphic.as_ref(),
                 )?;
             }
@@ -641,10 +647,14 @@ impl<'a> LayoutBuilder<'a> {
                 let outline = self
                     .resolved_outline(&[Some(shape)])
                     .and_then(|outline| stroke(&outline, self.theme));
+                let picture = resolved_fill
+                    .as_ref()
+                    .filter(|fill| fill.fill_type == PICTURE_FILL)
+                    .and(value.picture_fill.as_deref());
                 let shadow = value
                     .effects
                     .as_ref()
-                    .filter(|_| fill.is_some() || outline.is_some())
+                    .filter(|_| fill.is_some() || outline.is_some() || picture.is_some())
                     .and_then(|effects| {
                         shadow(
                             effects,
@@ -684,10 +694,7 @@ impl<'a> LayoutBuilder<'a> {
                         transform,
                     },
                     &value.paths,
-                    resolved_fill
-                        .as_ref()
-                        .filter(|fill| fill.fill_type == PICTURE_FILL)
-                        .and(value.picture_fill.as_deref()),
+                    picture,
                 )?;
             }
             ShapeNode::Picture(value) => {
@@ -705,6 +712,17 @@ impl<'a> LayoutBuilder<'a> {
                     Some(&value.crop),
                     picture_mask(value, rect),
                     outline,
+                    value.shape_effects.as_ref().and_then(|effects| {
+                        shadow(
+                            effects,
+                            self.theme,
+                            space,
+                            rect,
+                            transform.rotation_deg,
+                            transform.flip_h,
+                            transform.flip_v,
+                        )
+                    }),
                 );
             }
             ShapeNode::GraphicFrame(value) => {
@@ -714,6 +732,7 @@ impl<'a> LayoutBuilder<'a> {
                     &base.name,
                     rect,
                     transform,
+                    space,
                     Some(&value.data),
                 )?;
             }
@@ -762,6 +781,7 @@ impl<'a> LayoutBuilder<'a> {
         crop: Option<&PictureCrop>,
         mask: Option<Vec<GeometryPathCommand>>,
         outline: Option<Stroke>,
+        shadow: Option<Shadow>,
     ) {
         if effects.is_empty()
             && self.push_metafile(
@@ -811,6 +831,7 @@ impl<'a> LayoutBuilder<'a> {
             crop: crop.map(image_crop).unwrap_or_default(),
             path: mask,
             stroke: outline,
+            shadow,
             transform,
         });
     }
@@ -939,6 +960,7 @@ impl<'a> LayoutBuilder<'a> {
 
     /// Plots a chart frame, or keeps the placeholder for graphics that carry
     /// no drawable data.
+    #[allow(clippy::too_many_arguments)]
     fn render_graphic_frame(
         &mut self,
         object_id: u32,
@@ -946,6 +968,7 @@ impl<'a> LayoutBuilder<'a> {
         name: &str,
         rect: PxRect,
         transform: Transform,
+        frame_space: Space,
         graphic: Option<&GraphicFrameData>,
     ) -> Result<(), RenderError> {
         if let Some(space) = self.chart_space(graphic) {
@@ -991,6 +1014,17 @@ impl<'a> LayoutBuilder<'a> {
                 Some(&picture.crop),
                 picture_mask(picture, rect),
                 outline,
+                picture.shape_effects.as_ref().and_then(|effects| {
+                    shadow(
+                        effects,
+                        self.theme,
+                        frame_space,
+                        rect,
+                        transform.rotation_deg,
+                        transform.flip_h,
+                        transform.flip_v,
+                    )
+                }),
             );
             return Ok(());
         }
@@ -1465,6 +1499,7 @@ struct ResolvedParagraph {
     justify: bool,
     level: u32,
     margin_left_px: f32,
+    margin_right_px: f32,
     line_spacing: Option<LineSpacing>,
     compat_line_spacing: bool,
     indent_px: f32,
@@ -1574,6 +1609,7 @@ fn resolve_content(
             justify: is_full_justification(alignment),
             level: paragraph.level,
             margin_left_px: emu_to_px(properties.margin_left.unwrap_or_default()),
+            margin_right_px: emu_to_px(properties.margin_right.unwrap_or_default()),
             line_spacing: properties.line_spacing,
             compat_line_spacing,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
@@ -1821,7 +1857,9 @@ fn layout_content(
     let mut y = rect.y;
     for paragraph in &content.paragraphs {
         let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
-        let paragraph_width = (rect.w - paragraph.margin_left_px.max(0.0)).max(1.0);
+        let paragraph_width =
+            (rect.w - paragraph.margin_left_px.max(0.0) - paragraph.margin_right_px.max(0.0))
+                .max(1.0);
         let mut paragraph_lines = layout_paragraph(
             fonts,
             paragraph,
@@ -1991,6 +2029,7 @@ fn prepend_bullet(
         justify: false,
         level: paragraph.level,
         margin_left_px: 0.0,
+        margin_right_px: 0.0,
         line_spacing: None,
         compat_line_spacing: false,
         indent_px: 0.0,
@@ -2864,6 +2903,9 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     if source.margin_left.is_some() {
         target.margin_left = source.margin_left;
     }
+    if source.margin_right.is_some() {
+        target.margin_right = source.margin_right;
+    }
     if source.indent.is_some() {
         target.indent = source.indent;
     }
@@ -3256,6 +3298,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             geometry,
             path,
             stroke,
+            shadow,
             transform,
             ..
         } => Primitive::Image {
@@ -3271,6 +3314,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             crop: picture_fill_crop(picture),
             path: (geometry != "rect").then_some(path),
             stroke,
+            shadow,
             transform,
         },
         other => other,
@@ -3877,6 +3921,7 @@ mod tests {
             justify: is_full_justification(Some(alignment)),
             level: 0,
             margin_left_px: 0.0,
+            margin_right_px: 0.0,
             line_spacing: None,
             compat_line_spacing: false,
             indent_px: 0.0,
@@ -4134,6 +4179,7 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                margin_right_px: 0.0,
                 line_spacing: None,
                 compat_line_spacing: false,
                 indent_px: 0.0,
@@ -4205,6 +4251,7 @@ mod tests {
                 justify: true,
                 level: 0,
                 margin_left_px: 0.0,
+                margin_right_px: 0.0,
                 line_spacing: None,
                 compat_line_spacing: false,
                 indent_px: 0.0,
@@ -4262,6 +4309,7 @@ mod tests {
                 justify: false,
                 level: 0,
                 margin_left_px: 0.0,
+                margin_right_px: 0.0,
                 line_spacing: None,
                 compat_line_spacing: false,
                 indent_px: 0.0,

@@ -225,6 +225,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     crop,
                     path,
                     stroke: stroke.map(Into::into),
+                    shadow: None,
                     transform,
                 });
             }

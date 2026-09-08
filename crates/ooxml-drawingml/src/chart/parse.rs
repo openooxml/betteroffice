@@ -112,6 +112,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
             x_values: None,
             bubble_sizes: None,
             data_labels: None,
+            line: None,
         })
         .collect::<Vec<_>>();
     let axis_list = plot_area
@@ -408,6 +409,7 @@ fn parse_series<E: ChartXml>(
                     .map(|element| parse_num_cache(Some(element), budget))
                     .filter(|values| !values.is_empty()),
                 data_labels: parse_data_labels(child(series, "dLbls"), budget),
+                line: parse_line(child(series, "spPr")),
             }
         })
         .collect::<Vec<_>>();

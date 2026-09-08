@@ -2,6 +2,7 @@
 /* eslint-disable */
 export const memory: WebAssembly.Memory;
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
+export const clear_measure_fonts: () => void;
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const hit_test_regions_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -19,7 +20,6 @@ export const vertical_move_by_handle: (a: number, b: number, c: number, d: numbe
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
-export const clear_measure_fonts: () => void;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

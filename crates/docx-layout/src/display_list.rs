@@ -7979,6 +7979,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
         labels: plot_labels_from(None, series.data_labels.as_ref()),
+        line: None,
     }
 }
 
