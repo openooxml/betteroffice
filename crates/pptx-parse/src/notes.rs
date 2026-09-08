@@ -101,11 +101,8 @@ pub(crate) fn patch_notes_xml(
     Ok(serialize_xml(&root))
 }
 
-/// Mints a brand-new, minimal `notesSlide` part for a slide that has none
-/// yet. No template exists anywhere for this in the wild; this is a
-/// deliberately minimal single-placeholder shape tree, not a full copy of
-/// PowerPoint's default notes layout (no slide image or slide number
-/// placeholders, and no notesMaster relationship).
+/// Mints a minimal `notesSlide` part for a slide that has none yet: a single
+/// body placeholder, no slide image or slide number placeholder.
 pub(crate) fn notes_slide_xml(text: &str) -> Vec<u8> {
     let tree = XmlElement::new("p:spTree")
         .with_child(

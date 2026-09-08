@@ -2018,6 +2018,8 @@ function PptxEditorContent({
           }
           counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
           exitLabel={t('presentation.exit')}
+          previousLabel={t('presentation.previousSlide')}
+          nextLabel={t('presentation.nextSlide')}
           onExit={() => setPresenting(false)}
         />
       ) : null}
@@ -2032,6 +2034,8 @@ function PresentationOverlay({
   resolveImage,
   counterLabel,
   exitLabel,
+  previousLabel,
+  nextLabel,
   onExit,
 }: {
   handle: PresentationHandle;
@@ -2040,6 +2044,8 @@ function PresentationOverlay({
   resolveImage: CanvasImageResolver;
   counterLabel: (current: number, total: number) => string;
   exitLabel: string;
+  previousLabel: string;
+  nextLabel: string;
   onExit: () => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -2118,6 +2124,7 @@ function PresentationOverlay({
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || viewport.width <= 0 || viewport.height <= 0) return;
+    let cancelled = false;
     try {
       const frame = handle.layoutSlide(index);
       const ctx = canvas.getContext('2d');
@@ -2125,10 +2132,16 @@ function PresentationOverlay({
       const scale = Math.min(viewport.width / frame.width, viewport.height / frame.height);
       const dpr = window.devicePixelRatio || 1;
       sizeCanvasForSlide(canvas, frame, dpr, scale);
-      void paintSlide(ctx, frame, dpr, scale, { resolveImage }).catch(() => undefined);
+      void paintSlide(ctx, frame, dpr, scale, {
+        resolveImage,
+        isCancelled: () => cancelled,
+      }).catch(() => undefined);
     } catch {
       // slide count may have changed underneath the presentation; ignore.
     }
+    return () => {
+      cancelled = true;
+    };
   }, [handle, index, resolveImage, viewport]);
 
   return (
@@ -2156,7 +2169,7 @@ function PresentationOverlay({
           type="button"
           onClick={() => step(-1)}
           disabled={index === 0}
-          aria-label="Previous slide"
+          aria-label={previousLabel}
           style={styles.presentationNavButton}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -2168,7 +2181,7 @@ function PresentationOverlay({
           type="button"
           onClick={() => step(1)}
           disabled={index >= slideCount - 1}
-          aria-label="Next slide"
+          aria-label={nextLabel}
           style={styles.presentationNavButton}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

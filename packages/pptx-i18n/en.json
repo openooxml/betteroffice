@@ -99,7 +99,9 @@
   },
   "presentation": {
     "exit": "Exit presentation (Esc)",
-    "slideCounter": "{current} / {total}"
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Previous slide",
+    "nextSlide": "Next slide"
   },
   "notes": {
     "panelLabel": "Speaker notes",
