@@ -327,6 +327,7 @@ function PptxEditorContent({
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
+  const [presenting, setPresenting] = useState(false);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -1650,6 +1651,11 @@ function PptxEditorContent({
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
 
+  const startPresenting = () => {
+    if (slideCount === 0) return;
+    setPresenting(true);
+  };
+
   // Export the current slide through the same canvas painter the editor draws
   // with, so the png matches what is on screen.
   const exportPng = () => {
@@ -1765,6 +1771,18 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
+        <button
+          type="button"
+          onClick={startPresenting}
+          disabled={slideCount === 0}
+          data-testid="pptx-present"
+          style={styles.presentButton}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M6 4.5v15l13-7.5Z" />
+          </svg>
+          {t('toolbar.present')}
+        </button>
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
@@ -1971,6 +1989,206 @@ function PptxEditorContent({
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
       </div>
+      {activeSlide ? (
+        <NotesPanel
+          key={activeSlide.id}
+          value={activeSlide.notes ?? ''}
+          disabled={!model}
+          label={t('notes.panelLabel')}
+          placeholder={t('notes.placeholder')}
+          onCommit={(text) => {
+            const handle = handleRef.current;
+            if (!handle) return;
+            try {
+              handle.setSlideNotes(activeSlide.id, text);
+              refreshAt(undefined, true);
+            } catch (value) {
+              reportError(value);
+            }
+          }}
+        />
+      ) : null}
+      {presenting && handleRef.current ? (
+        <PresentationOverlay
+          handle={handleRef.current}
+          slideCount={slideCount}
+          startIndex={currentSlide}
+          resolveImage={(assetId) =>
+            resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
+          }
+          counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
+          exitLabel={t('presentation.exit')}
+          previousLabel={t('presentation.previousSlide')}
+          nextLabel={t('presentation.nextSlide')}
+          onExit={() => setPresenting(false)}
+        />
+      ) : null}
+    </div>
+  );
+}
+
+function PresentationOverlay({
+  handle,
+  slideCount,
+  startIndex,
+  resolveImage,
+  counterLabel,
+  exitLabel,
+  previousLabel,
+  nextLabel,
+  onExit,
+}: {
+  handle: PresentationHandle;
+  slideCount: number;
+  startIndex: number;
+  resolveImage: CanvasImageResolver;
+  counterLabel: (current: number, total: number) => string;
+  exitLabel: string;
+  previousLabel: string;
+  nextLabel: string;
+  onExit: () => void;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  const [index, setIndex] = useState(clampSlideIndex(startIndex, slideCount));
+  const [viewport, setViewport] = useState({
+    width: typeof window === 'undefined' ? 0 : window.innerWidth,
+    height: typeof window === 'undefined' ? 0 : window.innerHeight,
+  });
+
+  const step = useCallback(
+    (delta: number) => {
+      setIndex((current) => clampSlideIndex(current + delta, slideCount));
+    },
+    [slideCount]
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (container?.requestFullscreen) {
+      void container.requestFullscreen().catch(() => undefined);
+    }
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) onExitRef.current();
+    };
+    document.addEventListener('fullscreenchange', onFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', onFullscreenChange);
+      if (document.fullscreenElement === container) {
+        void document.exitFullscreen().catch(() => undefined);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
+    onResize();
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (
+        event.key === 'ArrowRight' ||
+        event.key === 'ArrowDown' ||
+        event.key === ' ' ||
+        event.key === 'PageDown'
+      ) {
+        event.preventDefault();
+        step(1);
+      } else if (
+        event.key === 'ArrowLeft' ||
+        event.key === 'ArrowUp' ||
+        event.key === 'PageUp'
+      ) {
+        event.preventDefault();
+        step(-1);
+      } else if (event.key === 'Home') {
+        event.preventDefault();
+        setIndex(0);
+      } else if (event.key === 'End') {
+        event.preventDefault();
+        setIndex(Math.max(0, slideCount - 1));
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        onExitRef.current();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [slideCount, step]);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || viewport.width <= 0 || viewport.height <= 0) return;
+    let cancelled = false;
+    try {
+      const frame = handle.layoutSlide(index);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      const scale = Math.min(viewport.width / frame.width, viewport.height / frame.height);
+      const dpr = window.devicePixelRatio || 1;
+      sizeCanvasForSlide(canvas, frame, dpr, scale);
+      void paintSlide(ctx, frame, dpr, scale, {
+        resolveImage,
+        isCancelled: () => cancelled,
+      }).catch(() => undefined);
+    } catch {
+      // slide count may have changed underneath the presentation; ignore.
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [handle, index, resolveImage, viewport]);
+
+  return (
+    <div
+      ref={containerRef}
+      style={styles.presentationOverlay}
+      onClick={(event) => {
+        if (event.target === containerRef.current) step(1);
+      }}
+    >
+      <canvas ref={canvasRef} style={styles.presentationCanvas} />
+      <button
+        type="button"
+        onClick={onExit}
+        aria-label={exitLabel}
+        title={exitLabel}
+        style={styles.presentationExit}
+      >
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+          <path d="M6 6 18 18M18 6 6 18" />
+        </svg>
+      </button>
+      <div style={styles.presentationControls}>
+        <button
+          type="button"
+          onClick={() => step(-1)}
+          disabled={index === 0}
+          aria-label={previousLabel}
+          style={styles.presentationNavButton}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m15 6-6 6 6 6" />
+          </svg>
+        </button>
+        <span style={styles.presentationCounter}>{counterLabel(index + 1, slideCount)}</span>
+        <button
+          type="button"
+          onClick={() => step(1)}
+          disabled={index >= slideCount - 1}
+          aria-label={nextLabel}
+          style={styles.presentationNavButton}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="m9 6 6 6-6 6" />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }
@@ -2033,6 +2251,63 @@ function RemoteShapeOutline({
         </span>
       ) : null}
     </span>
+  );
+}
+
+function NotesPanel({
+  value,
+  disabled,
+  label,
+  placeholder,
+  onCommit,
+}: {
+  value: string;
+  disabled: boolean;
+  label: string;
+  placeholder: string;
+  onCommit: (text: string) => void;
+}) {
+  const [text, setText] = useState(value);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const committedRef = useRef(value);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    },
+    []
+  );
+
+  const commit = (next: string) => {
+    if (next === committedRef.current) return;
+    committedRef.current = next;
+    onCommit(next);
+  };
+
+  return (
+    <div style={styles.notesPanel}>
+      <span style={styles.notesLabel}>{label}</span>
+      <textarea
+        style={styles.notesTextarea}
+        value={text}
+        disabled={disabled}
+        placeholder={placeholder}
+        data-testid="pptx-notes-textarea"
+        onChange={(event) => {
+          const next = event.target.value;
+          setText(next);
+          if (timerRef.current) clearTimeout(timerRef.current);
+          timerRef.current = setTimeout(() => commit(next), 300);
+        }}
+        onBlur={() => {
+          if (timerRef.current) {
+            clearTimeout(timerRef.current);
+            timerRef.current = null;
+          }
+          commit(text);
+        }}
+      />
+    </div>
   );
 }
 
@@ -2484,8 +2759,108 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
+  notesPanel: {
+    flex: '0 0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '8px 14px 10px',
+    background: '#ffffff',
+    borderTop: '1px solid #e2e8f0',
+  },
+  notesLabel: {
+    fontSize: 11,
+    fontWeight: 650,
+    color: '#647087',
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
+  },
+  notesTextarea: {
+    width: '100%',
+    height: 64,
+    resize: 'vertical',
+    border: '1px solid #d8dee9',
+    borderRadius: 6,
+    padding: '6px 8px',
+    font: '13px ui-sans-serif, system-ui, sans-serif',
+    color: '#172033',
+    boxSizing: 'border-box',
+    outline: 'none',
+  },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  presentButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    flex: '0 0 auto',
+    margin: '0 12px 0 4px',
+    padding: '0 14px',
+    height: 30,
+    border: 0,
+    borderRadius: 15,
+    background: '#1a73e8',
+    color: '#ffffff',
+    font: '600 13px ui-sans-serif, system-ui, sans-serif',
+    cursor: 'pointer',
+  },
+  presentationOverlay: {
+    position: 'fixed',
+    inset: 0,
+    zIndex: 2147483000,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    background: '#000000',
+    cursor: 'pointer',
+  },
+  presentationCanvas: { display: 'block', pointerEvents: 'none' },
+  presentationExit: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 36,
+    height: 36,
+    border: 0,
+    borderRadius: 999,
+    background: 'rgba(255, 255, 255, 0.14)',
+    color: '#ffffff',
+    cursor: 'pointer',
+  },
+  presentationControls: {
+    position: 'absolute',
+    bottom: 20,
+    left: '50%',
+    transform: 'translateX(-50%)',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 12,
+    padding: '6px 14px',
+    borderRadius: 999,
+    background: 'rgba(255, 255, 255, 0.12)',
+  },
+  presentationNavButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 28,
+    height: 28,
+    border: 0,
+    borderRadius: 999,
+    background: 'rgba(255, 255, 255, 0.14)',
+    color: '#ffffff',
+    cursor: 'pointer',
+  },
+  presentationCounter: {
+    minWidth: 64,
+    color: '#ffffff',
+    fontSize: 12,
+    fontWeight: 600,
+    textAlign: 'center',
+  },
 };
 
 function presenceInitials(name: string): string {

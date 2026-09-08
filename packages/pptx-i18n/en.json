@@ -4,6 +4,7 @@
     "label": "Presentation formatting toolbar",
     "save": "Save",
     "exportPng": "Export PNG",
+    "present": "Present",
     "historyLabel": "History",
     "undo": "Undo",
     "redo": "Redo",
@@ -95,6 +96,16 @@
   },
   "objects": {
     "defaultTextBoxName": "Text Box"
+  },
+  "presentation": {
+    "exit": "Exit presentation (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Previous slide",
+    "nextSlide": "Next slide"
+  },
+  "notes": {
+    "panelLabel": "Speaker notes",
+    "placeholder": "Add speaker notes…"
   },
   "errors": {
     "decodeSlideImage": "could not decode slide image"

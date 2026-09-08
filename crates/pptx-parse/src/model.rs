@@ -135,6 +135,8 @@ pub struct Slide {
     pub show_master_shapes: bool,
     pub background: Option<ShapeFill>,
     pub shapes: Vec<ShapeNode>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

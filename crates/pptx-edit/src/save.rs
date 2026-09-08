@@ -6,9 +6,9 @@ use std::collections::HashMap;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, ParagraphWrite, Placeholder, PptxPackage, RunProperties,
-    RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite, SlideLayout,
-    SlideMaster, SlideWrite, TextTarget, TextWrite,
+    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, Placeholder, PptxPackage,
+    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
+    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -138,7 +138,31 @@ fn deck_write(
     Ok(DeckWrite {
         slides,
         comments: comments_write(current, baseline, package),
+        notes: notes_write(current, baseline),
     })
+}
+
+fn notes_write(current: &DeckSnapshot, baseline: &DeckSnapshot) -> Option<NotesWrite> {
+    let baseline_notes: HashMap<&str, &str> = baseline
+        .slides
+        .iter()
+        .map(|slide| (slide.id.as_str(), slide.notes.as_str()))
+        .collect();
+    let mut per_slide = Vec::new();
+    for (index, slide) in current.slides.iter().enumerate() {
+        let changed = baseline_notes
+            .get(slide.id.as_str())
+            .is_none_or(|base| *base != slide.notes.as_str());
+        if !changed {
+            continue;
+        }
+        let target = match slide.source_part_path.clone() {
+            Some(part_path) => CommentSlide::Existing(part_path),
+            None => CommentSlide::Added(index),
+        };
+        per_slide.push((target, slide.notes.clone()));
+    }
+    (!per_slide.is_empty()).then_some(NotesWrite { per_slide })
 }
 
 fn comments_write(

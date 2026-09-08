@@ -32,7 +32,17 @@ const MAX_SLIDE_ID: u32 = 2_147_483_647;
 pub struct DeckWrite {
     pub slides: Vec<SlideWrite>,
     pub comments: Option<CommentsWrite>,
+    pub notes: Option<NotesWrite>,
 }
+
+/// Speaker notes text per slide that changed since the baseline. Empty text
+/// removes the slide's notes part; non-empty text mints or patches it.
+pub struct NotesWrite {
+    pub per_slide: Vec<(CommentSlide, String)>,
+}
+
+const NOTES_SLIDE_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide";
 
 pub enum SlideWrite {
     /// Copy the source part through untouched.
@@ -292,6 +302,20 @@ pub fn write_pptx_with_edits(
         patch_comment_parts(
             package,
             comments,
+            &MintedSlides {
+                slides: &minted,
+                by_slide_index: &minted_by_slide,
+            },
+            &mut replacements,
+            &mut new_parts,
+            &mut removed_paths,
+            &mut budget,
+        )?;
+    }
+    if let Some(notes) = &deck.notes {
+        patch_notes_parts(
+            package,
+            notes,
             &MintedSlides {
                 slides: &minted,
                 by_slide_index: &minted_by_slide,
@@ -680,6 +704,108 @@ fn patch_comment_parts(
         drop_other_flavor(package, write, &mut sink, removed_paths, budget)?;
     }
     Ok(())
+}
+
+fn patch_notes_parts(
+    package: &PptxPackage,
+    write: &NotesWrite,
+    minted: &MintedSlides<'_>,
+    replacements: &mut HashMap<String, Vec<u8>>,
+    new_parts: &mut Vec<(String, Vec<u8>)>,
+    removed_paths: &mut HashSet<String>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let mut taken: HashSet<String> = package
+        .parts
+        .iter()
+        .map(|part| part.path.clone())
+        .chain(
+            package
+                .relationships
+                .values()
+                .flatten()
+                .filter(|relationship| relationship.is_type(NOTES_SLIDE_RELATIONSHIP_TYPE))
+                .filter_map(|relationship| relationship.resolved_target.clone()),
+        )
+        .collect();
+
+    let mut sink = PartSink {
+        package,
+        replacements,
+        new_parts,
+    };
+    for (slide, text) in &write.per_slide {
+        let slide_part_path = match slide {
+            CommentSlide::Existing(part_path) => part_path.clone(),
+            CommentSlide::Added(index) => {
+                let Some(slide) = minted.get(*index) else {
+                    continue;
+                };
+                slide.part_path.clone()
+            }
+        };
+        let relationships_path = slide_relationships_path(&slide_part_path);
+        let existing = existing_notes_part(package, &slide_part_path);
+
+        if text.is_empty() {
+            if let Some(part_path) = existing {
+                removed_paths.insert(part_path.clone());
+                sink.forget(&part_path);
+                remove_content_type_override(&mut sink, &part_path, budget)?;
+                remove_relationship(
+                    &mut sink,
+                    &relationships_path,
+                    NOTES_SLIDE_RELATIONSHIP_TYPE,
+                    budget,
+                )?;
+            }
+            continue;
+        }
+
+        let is_existing = existing.is_some();
+        let part_path = match existing {
+            Some(part_path) => part_path,
+            None => mint_notes_part_path(&slide_part_path, &mut taken),
+        };
+        removed_paths.remove(&part_path);
+        let bytes = match sink.current(&part_path) {
+            Some(bytes) => crate::notes::patch_notes_xml(&bytes, &part_path, text, budget)?,
+            None => crate::notes::notes_slide_xml(text),
+        };
+        sink.store(&part_path, bytes);
+        if !is_existing {
+            set_content_type_override(&mut sink, &part_path, crate::notes::CT_NOTES_SLIDE, budget)?;
+            set_relationship(
+                &mut sink,
+                &relationships_path,
+                NOTES_SLIDE_RELATIONSHIP_TYPE,
+                &relative_target(&slide_part_path, &part_path),
+                budget,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn existing_notes_part(package: &PptxPackage, slide_part_path: &str) -> Option<String> {
+    package
+        .relationships
+        .get(slide_part_path)?
+        .iter()
+        .find(|relationship| relationship.is_type(NOTES_SLIDE_RELATIONSHIP_TYPE))
+        .and_then(|relationship| relationship.resolved_target.clone())
+}
+
+fn mint_notes_part_path(slide_part_path: &str, taken: &mut HashSet<String>) -> String {
+    let preferred = slide_number(slide_part_path);
+    let mut number = preferred;
+    loop {
+        let candidate = format!("ppt/notesSlides/notesSlide{number}.xml");
+        if taken.insert(candidate.clone()) {
+            return candidate;
+        }
+        number += 1;
+    }
 }
 
 fn mint_comment_part_path(

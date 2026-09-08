@@ -333,8 +333,22 @@ fn write_element(element: &XmlElement, output: &mut String) {
     output.push('>');
 }
 
+/// The XML 1.0 `Char` production; anything else cannot appear in a
+/// well-formed document, even escaped.
+fn is_valid_xml_char(character: char) -> bool {
+    matches!(character,
+        '\u{9}' | '\u{A}' | '\u{D}'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{10FFFF}'
+    )
+}
+
 fn escape_into(value: &str, attribute: bool, output: &mut String) {
-    for character in value.chars() {
+    for character in value
+        .chars()
+        .filter(|character| is_valid_xml_char(*character))
+    {
         match character {
             '&' => output.push_str("&amp;"),
             '<' => output.push_str("&lt;"),
@@ -631,5 +645,15 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn drops_control_characters_that_would_break_well_formedness() {
+        let element = XmlElement::new("a:t")
+            .with_text("be\u{9}fore\u{0}mid\u{1}\u{B}after")
+            .with_attribute("attr", "va\u{0}lue");
+        let bytes = serialize_xml_fragment(&element);
+        let xml = String::from_utf8(bytes).expect("utf8");
+        assert_eq!(xml, "<a:t attr=\"value\">be\tforemidafter</a:t>");
     }
 }

@@ -107,6 +107,8 @@ export interface SlideSnapshot {
   sourcePartPath: string | null;
   layoutPartPath: string | null;
   name: string | null;
+  /** Speaker notes as plain text; absent when the slide has none. */
+  notes?: string;
   shapes: ShapeSnapshot[];
 }
 

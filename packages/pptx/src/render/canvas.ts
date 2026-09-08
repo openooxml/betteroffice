@@ -22,6 +22,9 @@ export type CanvasImageResolver = (
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
   maxShadowPixels?: number;
+  /** Checked before drawing starts and between primitives, so a stale paint
+   * superseded by a newer one stops instead of overwriting it. */
+  isCancelled?: () => boolean;
 }
 
 interface ShadowBudget {
@@ -60,14 +63,17 @@ export async function paintSlide(
     throw new Error('invalid shadow pixel budget');
   ctx.save();
   try {
+    if (options.isCancelled?.()) return;
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
     ctx.clearRect(0, 0, list.width, list.height);
     if (list.background) {
       ctx.fillStyle = paintStyle(ctx, list.background, 0, 0, list.width, list.height);
       ctx.fillRect(0, 0, list.width, list.height);
     }
-    for (const primitive of list.primitives)
+    for (const primitive of list.primitives) {
+      if (options.isCancelled?.()) return;
       await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
+    }
   } finally {
     ctx.restore();
   }
