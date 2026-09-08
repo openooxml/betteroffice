@@ -93,6 +93,9 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
         if let Some(name) = &slide.name {
             slide_map.insert(&mut txn, "name", name.as_str());
         }
+        if !slide.notes.is_empty() {
+            slide_map.insert(&mut txn, "notes", slide.notes.as_str());
+        }
         let shape_order = slide_map.insert(&mut txn, "shapes", ArrayPrelim::default());
         for (shape_index, shape) in slide.shapes.iter().enumerate() {
             let shape_id = seed_shape(
@@ -332,6 +335,20 @@ impl DeckSession {
             from_index: None,
             to_index: Some(index),
         })
+    }
+
+    pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
+        self.add_undo_barrier();
+        let mut txn = self.transact_for(context);
+        let slide = slide_ref(&txn, slide_id)?;
+        if text.is_empty() {
+            slide.remove(&mut txn, "notes");
+        } else {
+            slide.insert(&mut txn, "notes", text);
+        }
+        drop(txn);
+        self.add_undo_barrier();
+        Ok(())
     }
 
     pub fn delete_slide(&self, context: &EditCtx, slide_id: &str) -> EditResult<SlideReceipt> {
@@ -1523,6 +1540,7 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
             source_part_path,
             layout_part_path,
             name: map_string(&slide, &txn, "name"),
+            notes: map_string(&slide, &txn, "notes").unwrap_or_default(),
             shapes: shape_snapshots,
         });
     }

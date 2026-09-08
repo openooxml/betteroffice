@@ -74,6 +74,8 @@ export interface PresentationHandle extends CollaborationReplica {
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
+  /** Sets a slide's speaker notes; empty text clears them. */
+  setSlideNotes(slideId: string, text: string): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
   setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
@@ -352,6 +354,9 @@ export function openPresentation(
         () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
         true
       );
+    },
+    setSlideNotes(slideId, text): void {
+      jsonWasmCall(() => doc.setSlideNotesJson(JSON.stringify({ slideId, text })), true);
     },
     addComment(slideId, comment): CommentReceipt {
       return jsonWasmCall(

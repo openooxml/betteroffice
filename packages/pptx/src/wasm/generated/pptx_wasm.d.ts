@@ -50,6 +50,7 @@ export class PptxDocument {
     setShapeFillJson(args: string): string;
     setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
+    setSlideNotesJson(args: string): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
     storyJson(args: string): string;
@@ -123,6 +124,7 @@ export interface InitOutput {
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];

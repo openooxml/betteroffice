@@ -79,6 +79,13 @@ fn parse_package(
             &mut budget,
             shape_elements,
         )?;
+        let notes = match crate::notes::slide_notes_part(slide_relationships) {
+            Some(notes_path) => match parts.get(notes_path.as_str()) {
+                Some(bytes) => crate::notes::parse_notes_text(bytes, &notes_path, &mut budget)?,
+                None => String::new(),
+            },
+            None => String::new(),
+        };
         slides.push(Slide {
             part_path: reference.part_path.clone(),
             name: data.name,
@@ -89,6 +96,7 @@ fn parse_package(
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
             background: data.background,
             shapes: data.shapes,
+            notes,
         });
     }
 
@@ -901,6 +909,7 @@ mod tests {
                 show_master_shapes: true,
                 background: None,
                 shapes: vec![chart_shape(id)],
+                notes: String::new(),
             }
         }
 

@@ -1243,3 +1243,73 @@ fn a_minted_comment_part_never_overwrites_another_slides() {
     assert!(texts.contains(&"First slide, new comment."));
     assert_relationships_resolve(&parts(&saved));
 }
+
+#[test]
+fn notes_read_from_an_existing_part_default_to_empty() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    // Slide 2 already carries a notesSlide part in the fixture, but it has
+    // no body placeholder yet.
+    assert_eq!(snapshot.slides[1].notes, "");
+}
+
+#[test]
+fn setting_notes_patches_an_existing_notes_part_in_place() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Remember the demo flow.")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let notes_xml = part_text(&parts(&saved), "ppt/notesSlides/notesSlide1.xml");
+    assert!(notes_xml.contains("Remember the demo flow."));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[1].notes, "Remember the demo flow.");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn setting_notes_mints_a_new_part_for_a_slide_that_has_none() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Line one\nLine two")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    let notes_xml = part_text(&saved_parts, "ppt/notesSlides/notesSlide2.xml");
+    assert!(notes_xml.contains("Line one"));
+    assert!(notes_xml.contains("Line two"));
+    let slide1_rels = part_text(&saved_parts, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(slide1_rels.contains("relationships/notesSlide"));
+    let content_types = part_text(&saved_parts, "[Content_Types].xml");
+    assert!(content_types.contains("notesSlide2.xml"));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "Line one\nLine two");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn clearing_notes_removes_a_part_it_had_added() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Temporary note.")
+        .unwrap();
+    session.set_slide_notes(&context(), &slide_id, "").unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    assert!(!saved_parts.contains_key("ppt/notesSlides/notesSlide2.xml"));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "");
+    assert_relationships_resolve(&parts(&saved));
+}
