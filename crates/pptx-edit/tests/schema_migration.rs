@@ -642,3 +642,215 @@ fn a_pre_2_1_chart_carries_its_stored_text_and_recovers_it_from_a_source() {
     let reattached = DeckSession::open_from_update_with_source(&imported, source, 34703).unwrap();
     assert_eq!(reattached.encode_state_as_update_v1(), imported);
 }
+
+fn without_keys(value: &mut serde_json::Value, keys: &[&str]) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for key in keys {
+                map.remove(*key);
+            }
+            for value in map.values_mut() {
+                without_keys(value, keys);
+            }
+        }
+        serde_json::Value::Array(values) => values
+            .iter_mut()
+            .for_each(|value| without_keys(value, keys)),
+        _ => {}
+    }
+}
+
+fn without_outline_gradients(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(serde_json::Value::Object(outline)) = map.get_mut("outline") {
+                outline.remove("gradient");
+            }
+            for value in map.values_mut() {
+                without_outline_gradients(value);
+            }
+        }
+        serde_json::Value::Array(values) => values.iter_mut().for_each(without_outline_gradients),
+        _ => {}
+    }
+}
+
+fn pending_flag(update: &[u8], key: &str) -> Option<bool> {
+    let doc = hydrated(update);
+    let meta = meta(&doc);
+    match meta.get(&doc.transact(), key) {
+        Some(Out::Any(Any::Bool(value))) => Some(value),
+        _ => None,
+    }
+}
+
+/// Seeds `source` through a package stripped of what a released 2.0 writer never
+/// stored, then stamps the update 2.0.
+fn stored_2_0(source: &[u8], client_id: u64, strip: impl Fn(&mut serde_json::Value)) -> Vec<u8> {
+    let mut value = serde_json::to_value(pptx_parse::parse_pptx(source).unwrap()).unwrap();
+    strip(&mut value);
+    let package = serde_json::from_value(value).unwrap();
+    let legacy = DeckSession::from_package_with_source(package, source, client_id).unwrap();
+    restamped(&legacy.encode_state_as_update_v1(), Some(2.0))
+}
+
+fn assert_source_recovers(
+    source: &[u8],
+    client_id: u64,
+    pending: &[&str],
+    strip: impl Fn(&mut serde_json::Value),
+) {
+    let stored = stored_2_0(source, client_id, strip);
+    assert_eq!(stamped_version(&stored), Some(2.0));
+    let fresh = DeckSession::open(source, client_id + 1).unwrap();
+    let migrated = DeckSession::open_from_update(&stored, client_id + 2).unwrap();
+    let carried = migrated.encode_state_as_update_v1();
+    assert_eq!(stamped_version(&carried), Some(2.1));
+    assert_ne!(
+        serde_json::to_value(migrated.package()).unwrap(),
+        serde_json::to_value(fresh.package()).unwrap()
+    );
+    for key in pending {
+        assert_eq!(pending_flag(&carried, key), Some(true), "{key}");
+    }
+    let attached =
+        DeckSession::open_from_update_with_source(&carried, source, client_id + 3).unwrap();
+    assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
+    let imported = attached.encode_state_as_update_v1();
+    for key in pending {
+        assert_ne!(pending_flag(&imported, key), Some(true), "{key}");
+    }
+    let reopened = DeckSession::open_from_update(&imported, client_id + 4).unwrap();
+    assert_eq!(
+        serde_json::to_value(reopened.package()).unwrap(),
+        serde_json::to_value(fresh.package()).unwrap()
+    );
+    assert_eq!(reopened.snapshot().unwrap(), fresh.snapshot().unwrap());
+    let reattached =
+        DeckSession::open_from_update_with_source(&imported, source, client_id + 5).unwrap();
+    assert_eq!(reattached.encode_state_as_update_v1(), imported);
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_run_baselines() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/text-baseline-script.pptx"),
+        41000,
+        &["baselinesPendingSource"],
+        |value| without_keys(value, &["baselinePct"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_character_spacing() {
+    assert_source_recovers(
+        include_bytes!("fixtures/run-spacing-shadow.pptx"),
+        41100,
+        &["spacingPendingSource"],
+        |value| without_keys(value, &["spacingPt"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_outline_gradients() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-parse/tests/fixtures/gradient-outline.pptx"),
+        41200,
+        &["outlineGradientsPendingSource"],
+        without_outline_gradients,
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_bitmap_effects() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/blip-effects.pptx"),
+        41300,
+        &[],
+        |value| without_keys(value, &["effects"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_shape_shadows() {
+    assert_source_recovers(
+        include_bytes!("fixtures/blip-shadow.pptx"),
+        41400,
+        &[],
+        |value| without_keys(value, &["effects", "shapeEffects"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_picture_fills() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-parse/tests/fixtures/picture-fill.pptx"),
+        41500,
+        &[],
+        |value| without_keys(value, &["pictureFill"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_list_styles() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/list-style-bullets.pptx"),
+        41600,
+        &[],
+        |value| without_keys(value, &["listStyle", "defaultListStyle"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_explicit_overflow() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/text-overflow.pptx"),
+        41700,
+        &[],
+        |value| without_keys(value, &["verticalOverflow", "horizontalOverflow"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_chart_fills_and_axis_lines() {
+    assert_source_recovers(
+        include_bytes!("fixtures/chart-text-overflow.pptx"),
+        41800,
+        &[],
+        |value| {
+            if let Some(charts) = value.get_mut("charts") {
+                without_keys(charts, &["fill", "line", "text", "titleText"]);
+            }
+        },
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_ole_picture_previews() {
+    assert_source_recovers(
+        include_bytes!("fixtures/metafile-tracking.pptx"),
+        41900,
+        &["olePicturesPendingSource"],
+        |value| without_keys(value, &["picture"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_numbering_restarts() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/autonumber-bullets.pptx"),
+        42000,
+        &[],
+        |value| without_keys(value, &["restart"]),
+    );
+}
+
+#[test]
+fn a_2_0_snapshot_recovers_line_spacing() {
+    assert_source_recovers(
+        include_bytes!("../../pptx-render/tests/fixtures/line-spacing.pptx"),
+        42100,
+        &[],
+        |value| without_keys(value, &["lineSpacing", "compatLineSpacing"]),
+    );
+}

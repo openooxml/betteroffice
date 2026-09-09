@@ -67,8 +67,10 @@ The generator asserts that main seeds schema 6 before restamping.
 
 ## Composite source decks
 
-`blip-shadow.pptx`, `chart-text-overflow.pptx`, `metafile-tracking.pptx`, and
-`run-spacing-shadow.pptx` were built to pair with removed intermediate
-snapshots. They stay as ready-made decks that combine bitmap effects and shape
-shadows, chart fills and explicit overflow, OLE previews and character spacing,
-and shadows and character spacing respectively.
+`blip-shadow.pptx` (bitmap effects with shape shadows), `chart-text-overflow.pptx`
+(chart fills, axis `noFill` and explicit overflow), `metafile-tracking.pptx` (an OLE
+preview with 6-point character spacing) and `run-spacing-shadow.pptx` (a shadow with
+character spacing) each combine two features in one deck. `schema_migration.rs` drives
+them through synthetic 2.0 snapshots: it parses the deck, strips the fields a released
+2.0 writer never stored, stamps the seed 2.0, migrates it, and asserts the reattached
+source restores them.
