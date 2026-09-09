@@ -9,68 +9,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let branch = Path::new(&args[1]);
     let fixtures = branch.join("crates/pptx-edit/tests/fixtures");
     let source = fs::read(fixtures.join("hidden-shapes.pptx"))?;
-    for (version, package) in [
-        (2, legacy_package(&source)),
-        (5, pptx_parse::parse_pptx(&source)?),
-        (6, pptx_parse::parse_pptx(&source)?),
-    ] {
-        let session = DeckSession::from_package_with_source(package, &source, 4343)?;
-        assert_main(&session);
-        let ctx = EditCtx::local("fixture");
-        session.add_text_box(
-            &ctx,
-            "slide:1:257",
-            &ShapeDraft {
-                name: "Persisted v2 textbox".to_owned(),
-                rect: ShapeRect {
-                    x: 100_000,
-                    y: 100_000,
-                    width: 2_000_000,
-                    height: 600_000,
-                },
-                text: "persisted on v2".to_owned(),
-                style: TextStyle::default(),
+    let session = DeckSession::from_package_with_source(legacy_package(&source), &source, 4343)?;
+    assert_main(&session);
+    let ctx = EditCtx::local("fixture");
+    session.add_text_box(
+        &ctx,
+        "slide:1:257",
+        &ShapeDraft {
+            name: "Persisted v2 textbox".to_owned(),
+            rect: ShapeRect {
+                x: 100_000,
+                y: 100_000,
+                width: 2_000_000,
+                height: 600_000,
             },
-        )?;
-        session.insert_text(
-            &ctx,
-            "story:shape:4343:0:0",
-            0,
-            "edited ",
-            &TextStyle::default(),
-        )?;
-        session.remove_shape(&ctx, "slide:1:257", "slide:1:257:shape:4")?;
-        session.move_slide(&ctx, "slide:2:258", 0)?;
-        if version < 6 {
-            restamp_legacy(&session, version as f64);
-        }
-        fs::write(
-            fixtures.join(format!("deck-schema-v{version}-hidden.update.bin")),
-            session.encode_state_as_update_v1(),
-        )?;
-    }
-    let demo = fs::read(branch.join("apps/demo/public/betteroffice-demo.pptx"))?;
-    let session = DeckSession::open(&demo, 4343)?;
-    assert_main(&session);
-    fs::write(
-        fixtures.join("deck-schema-v5.snapshot.json"),
-        serde_json::to_string(&session.snapshot()?)?,
+            text: "persisted on v2".to_owned(),
+            style: TextStyle::default(),
+        },
     )?;
-    let source = fs::read(branch.join("crates/pptx-parse/tests/fixtures/style-matrix-deck.pptx"))?;
-    let mut package = pptx_parse::parse_pptx(&source)?;
-    package.presentation.first_slide_num = 10;
-    let ShapeNode::Shape(shape) = &mut package.slides[0].shapes[0] else {
-        panic!("expected a shape");
-    };
-    shape.base.hidden = true;
-    let session = DeckSession::from_package(package, 4343)?;
-    assert_main(&session);
-    assert!(!session.package().themes[0].format_scheme.is_empty());
-    restamp_legacy(&session, 5.0);
+    session.insert_text(
+        &ctx,
+        "story:shape:4343:0:0",
+        0,
+        "edited ",
+        &TextStyle::default(),
+    )?;
+    session.remove_shape(&ctx, "slide:1:257", "slide:1:257:shape:4")?;
+    session.move_slide(&ctx, "slide:2:258", 0)?;
+    restamp_legacy(&session, 2.0);
     fs::write(
-        fixtures.join("deck-schema-v5-theme-hidden.update.bin"),
+        fixtures.join("deck-schema-v2-hidden.update.bin"),
         session.encode_state_as_update_v1(),
     )?;
+    let source = fs::read(branch.join("crates/pptx-parse/tests/fixtures/style-matrix-deck.pptx"))?;
     let session = DeckSession::from_package_with_source(legacy_package(&source), &source, 9300)?;
     assert_main(&session);
     let story = session.snapshot()?.slides[0]
@@ -116,20 +87,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let source = fs::read(branch.join("crates/pptx-parse/tests/fixtures/custom-geometry.pptx"))?;
-    for (version, package) in [
-        (2, legacy_package(&source)),
-        (6, pptx_parse::parse_pptx(&source)?),
-    ] {
-        let session = DeckSession::from_package_with_source(package, &source, 285)?;
-        assert_main(&session);
-        if version == 2 {
-            restamp_legacy(&session, 2.0);
-        }
-        fs::write(
-            fixtures.join(format!("deck-custom-schema-v{version}.update.bin")),
-            session.encode_state_as_update_v1(),
-        )?;
-    }
+    let session = DeckSession::from_package_with_source(legacy_package(&source), &source, 285)?;
+    assert_main(&session);
+    restamp_legacy(&session, 2.0);
+    fs::write(
+        fixtures.join("deck-custom-schema-v2.update.bin"),
+        session.encode_state_as_update_v1(),
+    )?;
     Ok(())
 }
 

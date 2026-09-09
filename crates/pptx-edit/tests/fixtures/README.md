@@ -1,4 +1,17 @@
-# Hidden-shape fixtures
+# Deck schema fixtures
+
+Deck schema 2.1 replaces the never-released 3–21 chain: `migrate_doc` carries a
+released 1.0 or 2.0 snapshot forward in a single transaction. Only snapshots at
+those released versions are kept here; the intermediate `v3`–`v21` seeds and the
+generators that produced them were removed with that chain and remain in git
+history.
+
+`deck-schema-v1.update.bin` was produced by release `4bdccdd` and is documented
+in `../schema_migration.rs`. `deck-schema-v2*.update.bin` and
+`deck-custom-schema-v2.update.bin` are legacy v2 snapshots reproduced by the two
+generators below.
+
+## Hidden shapes
 
 `hidden-shapes.pptx` is the repository's demo deck with `hidden="1"` added to
 these `p:cNvPr` elements; every other ZIP part payload is unchanged:
@@ -15,7 +28,26 @@ Slide 1 loses 21 primitives: the cobalt rail, 14 child shapes, and six child
 text boxes. Thirteen children have no hidden flag of their own. Slide 2 loses
 the two marked shapes; slide 3 is unchanged.
 
-The schema fixtures are generated with current `origin/main` at
+`deck-schema-v2-hidden.update.bin` comes from the hidden fixture with client ID
+4343. Before encoding the update:
+
+1. Add a text box to `slide:1:257`, named `Persisted v2 textbox`, at
+   `(100000, 100000, 2000000, 600000)` EMU, containing `persisted on v2`.
+2. Insert `edited ` at offset 0 of `story:shape:4343:0:0`.
+3. Remove `slide:1:257:shape:4`.
+4. Move `slide:2:258` to index 0.
+
+The update uses main's legacy parser without connectors, defaults the slide
+numbering, omits shape/picture style references and theme formatting, drops
+main's seeded hidden shape-map keys, and is stamped version 2. Migration must
+recover four flags, preserve the edits, and leave the deleted shape absent.
+
+`deck-schema-v2.update.bin` is the same legacy seed of `style-matrix-deck.pptx`
+with `persisted-v2 ` inserted into its first story. `deck-custom-schema-v2.update.bin`
+is the legacy seed of `custom-geometry.pptx` with client ID 285; it omits custom
+paths, which the writer does not model.
+
+The generator runs against `origin/main` at
 `54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4` (schema 6), using its locked
 dependencies and a separate Cargo target directory. Copy
 `generate_hidden_schema_snapshots.rs` into that checkout's
@@ -25,269 +57,18 @@ dependencies and a separate Cargo target directory. Copy
 CARGO_TARGET_DIR=/absolute/path/to/main-target cargo run --locked -p betteroffice-pptx-edit --example generate_hidden_schema_snapshots -- /absolute/path/to/this/branch
 ```
 
-The generator asserts that main seeds schema 6. `deck-schema-v5.snapshot.json`
-is main's serialized snapshot of the unmodified demo deck, with no hidden keys.
+The generator asserts that main seeds schema 6 before restamping.
 
-`deck-schema-v2-hidden.update.bin` and `deck-schema-v5-hidden.update.bin`
-come from the hidden fixture with client ID 4343. Before encoding each update:
+## Connectors and comments
 
-1. Add a text box to `slide:1:257`, named `Persisted v2 textbox`, at
-   `(100000, 100000, 2000000, 600000)` EMU, containing `persisted on v2`.
-2. Insert `edited ` at offset 0 of `story:shape:4343:0:0`.
-3. Remove `slide:1:257:shape:4`.
-4. Move `slide:2:258` to index 0.
+`connectors.md` documents the connector decks and
+`generate_schema_snapshots.rs`; `modern-comments.md` documents
+`modern-comments.pptx` and `deck-schema-v2-comments.update.bin`.
 
-Both legacy updates have main’s seeded hidden shape-map keys removed before encoding; `deck-schema-v6-hidden.update.bin` retains them. Migration must recover four
-flags, preserve the edits, and leave the deleted shape absent. The v2 fixture
-uses main's legacy parser without connectors, defaults the slide numbering,
-and omits later shape/picture style references and theme formatting before
-seeding and stamping version 2. The v5 fixture uses main's normal parser and is stamped version 5.
+## Composite source decks
 
-`deck-schema-v5-theme-hidden.update.bin` is main's seed of
-`style-matrix-deck.pptx` with the first shape marked hidden and numbering set to
-10. Schema 6 must retain its nonempty theme format scheme and style references
-while recovering the hidden flag.
-
-The generator also refreshes main's v2 style and connector fixtures through the
-same legacy parser and defaults. The moved connector keeps `(952500, 1047750)`
-and the style fixture keeps `persisted-v2 Styled`. Released v1 and historical
-v3/v4 fixtures remain their independent migration oracles.
-
-The generator also opens `custom-geometry.pptx` with client ID 285. The
-legacy parser/defaults produce `deck-custom-schema-v2.update.bin`; main’s
-normal writer produces `deck-custom-schema-v6.update.bin`. Both omit custom
-paths, which current main does not model.
-
-The migration-order tests observe separate transactions: legacy v2 commits
-3, 4, 5, 6, 7, then 8; v5 commits 6, 7, then 8; v6 commits 7 then 8; current
-main v7 commits only 8. Hidden keys first appear in the schema-6 transaction and
-survive schema 7’s package rewrite and schema 8’s comment metadata. Main’s
-migrations retain their original version numbers.
-
-`deck-schema-v7-comments.update.bin` is documented in `modern-comments.md`.
-
-`deck-schema-v8-list-style.update.bin` was generated on main `1d0f41d9` from `../../pptx-render/tests/fixtures/list-style-bullets.pptx`, using `DeckSession::open` and `encode_state_as_update_v1` with client ID 29401. It exercises schema 8 to 9 migration and source reattachment when the old model did not store list styles.
-
-`deck-schema-v9-text-overflow.update.bin` was produced on main `2c90c17f` by opening `crates/pptx-render/tests/fixtures/text-overflow.pptx` with client ID 295 and calling `encode_state_as_update_v1()`. It proves schema v16 migration preserves the old JSON until source attachment recovers explicit overflow settings.
-
-`deck-schema-v9-picture-fill.update.bin` was generated on main `2c90c17f` from `../../pptx-parse/tests/fixtures/picture-fill.pptx` using `DeckSession::open` and `encode_state_as_update_v1` with client ID 33601. It remains the historical picture-fill migration oracle; current tests migrate it through schemas 10, 11, 12, and 13 and persist picture-fill data when the source is reattached.
-
-`run-baseline-main-v9.update.bin` and `run-baseline-edited-main-v9.update.bin`
-were generated on main `2c90c17f` from
-`../../pptx-render/tests/fixtures/text-baseline-script.pptx` with client ID 33101.
-The latter inserts `😀 ` at offset 0 of `story:slide:0:256:shape:3:0`.
-They test v9 to v10 migration, source baseline recovery, and preservation of edits.
-
-`outer-shadow-main-v10.update.bin` was generated on main `069e4d66` by opening
-`crates/pptx-render/tests/fixtures/outer-shadow.pptx` with client 33400 and calling
-`DeckSession::encode_state_as_update_v1`. It remains a historical pre-shadow migration oracle and exercises
-persistence of effects restored from the source package.
-
-`deck-schema-v10-text-overflow.update.bin` was generated from the same deck and client ID on main `069e4d66`. It verifies the v10 baseline migration remains intact and explicit overflow settings migrate separately in v16.
-
-`deck-schema-v9-autonumber.update.bin` was generated on main `2c90c17f`
-from `../../pptx-render/tests/fixtures/autonumber-bullets.pptx`. It remains
-the historical oracle for numbering before baseline and restart support.
-
-`deck-schema-v11-line-spacing.update.bin`, `deck-schema-v11-autonumber.update.bin`,
-and `deck-schema-v11-baseline.update.bin` are fresh seeds from main
-`cca2618cadd6bc08da67a1158623f11b632b9a92` (schema 11), using its locked
-dependencies and client ID 31401. Their sources are `line-spacing.pptx`,
-`autonumber-bullets.pptx`, and `text-baseline-script.pptx` in the renderer
-fixtures. The spacing seed inserts `Edited ` at the start of the first story.
-The historical `deck-schema-v9-line-spacing.update.bin` remains the independent
-pre-baseline oracle from main `2c90c17f`.
-
-`deck-schema-v12-line-spacing.update.bin`, `deck-schema-v12-autonumber.update.bin`,
-`deck-schema-v12-baseline.update.bin`, and `deck-schema-v12-picture-fill.update.bin`
-are fresh seeds from main `3d95068f1b8d58b84da727bf422e5cd1d8cfaa10` (schema 12),
-using locked dependencies and client ID 31401. The first three use the renderer
-sources above; the picture-fill seed uses `../../pptx-parse/tests/fixtures/picture-fill.pptx`.
-The spacing seed retains the `Edited ` insertion. Historical v9 and v11 seeds
-remain independent migration oracles.
-
-`deck-schema-v13-line-spacing.update.bin`, `deck-schema-v13-autonumber.update.bin`,
-`deck-schema-v13-baseline.update.bin`, `deck-schema-v13-picture-fill.update.bin`,
-and `deck-schema-v13-chart-space-fill.update.bin` are fresh seeds from main
-`9274a2ba042b4fcc05ecfad909ea0719ed8b13b1` (schema 13), using locked dependencies
-and client ID 31401. The chart seed uses
-`../../pptx-render/tests/fixtures/chart-space-fill.pptx`, whose chart parts
-declare a `c:chartSpace/c:spPr` fill and per-axis `a:ln` outlines that schema 13
-did not model. The spacing seed retains the `Edited ` insertion. Historical v9,
-v11, and v12 seeds remain independent migration oracles.
-
-The v10 autonumber and baseline fixtures are regenerated by this schema-13
-writer. Before seeding, their parsed packages omit explicit restart flags and
-line-spacing properties; the updates are then stamped 10. They reproduce the
-pre-numbering model while retaining baselines. These are constructed legacy
-cases, not native schema-10 writer output.
-
-Copy `generate_spacing_schema_snapshots.rs` into that main checkout's
-`crates/pptx-edit/examples/` and run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_spacing_schema_snapshots -- /absolute/path/to/this/branch
-```
-
-The generator asserts schema 13 and verifies that main reopens every fresh seed
-without changes. Tests observe separate baseline (10), numbering (11), spacing
-(12), picture-fill (13), gradient-outline (14), and chart-properties (15)
-transactions. Source attachment restores missing properties, preserves edits,
-and persists them for source-free reopening. Released v1 and historical v2–v12
-fixtures traverse every remaining migration in order; v13 seeds undergo only the
-gradient-outline and chart-properties migrations. Reopening is idempotent, and
-versions newer than 15 are rejected.
-
-`gradient-outline-main-v10.update.bin` was exported by `DeckSession::open` at
-main `069e4d66bf749869ad581114dd3e4e4c721ed07f` (schema 10) from
-`crates/pptx-parse/tests/fixtures/gradient-outline.pptx`, with client ID 322.
-It remains the historical oracle that traverses the numbering, line-spacing,
-picture-fill, and gradient-outline migrations in order.
-
-`gradient-outline-main-v13.update.bin` is the same deck seeded by current main
-`9274a2ba042b4fcc05ecfad909ea0719ed8b13b1` (schema 13), using its locked
-dependencies and client ID 322. Copy `generate_gradient_schema_snapshots.rs`
-into that main checkout's `crates/pptx-edit/examples/` and run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_gradient_schema_snapshots -- /absolute/path/to/this/branch
-```
-
-The generator asserts schema 13 and that main reopens the seed unchanged. Both
-fixtures test the schema-14 gradient-outline migration, deferred source
-recovery, part-preserving saves, and retention of explicit outline edits; the
-v13 seed undergoes only that migration and the schema-15 chart-properties
-migration, and versions newer than 15 are rejected.
-
-
-`chart-text-overflow.pptx` combines the chart-space-fill deck with the first
-clipping shape from slide 3 of `text-overflow.pptx`. The shape is appended to
-slide 1 with ID 295 and both `vertOverflow="clip"` and `horzOverflow="clip"`.
-It exercises chart fills, axis `noFill`, and explicit overflow in one document.
-
-`deck-schema-v14-chart-text-overflow.update.bin` is fresh output from main
-`899aac58d71952e4a73b2180e2b0bcc3c59a39c0` (schema 14).
-`deck-schema-v15-chart-text-overflow.update.bin` and
-`deck-schema-v15-text-overflow.update.bin` are fresh output from current main
-`d2aaf9cb97abe9acf087598c2b83dddcdfb40aa8` (schema 15, PR #327).
-They are byte-identical to the earlier combined base: main `899aac58` plus
-`dsaad68/pr/pptx-chart-series-axis` at
-`ef7f784105f375f68880a067d4c4c6d1d56b8b21`.
-All use client ID 29501 and the base's locked dependencies; no schema stamps
-are rewritten. The v15 writer already persists chart fills and axis lines.
-
-Copy `generate_overflow_schema_snapshots.rs` into the base checkout's
-`crates/pptx-edit/examples/` and run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_overflow_schema_snapshots -- /absolute/path/to/this/branch 15
-```
-
-Use `14` on the schema-14 main to regenerate its combined fixture. The generator
-checks the writer's version, omitted overflow properties, chart properties,
-and byte-identical reopening. Tests require separate transactions for schema
-15 then schema 16, preserve chart properties while importing overflow settings,
-retain edits, and reopen or reattach without another migration. Historical v9
-and v10 overflow fixtures and the sibling PRs' historical v11 fixtures remain
-independent migration oracles.
-
-`blip-effects-main-v9.update.bin` and `blip-effects-main-v10.update.bin` are
-historical seeds of `../../pptx-render/tests/fixtures/blip-effects.pptx` from
-main `2c90c17f` (schema 9) and `069e4d66` (schema 10) with client ID 312.
-`blip-effects-main-v16.update.bin` is fresh output from main `49ecafba` with
-PR #295 (`dsaad68/pr/pptx-text-overflow` at `394052a4`, schema 16), using its
-locked dependencies and the same client ID. Copy
-`generate_blip_schema_snapshots.rs` into that checkout's
-`crates/pptx-edit/examples/` and run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_blip_schema_snapshots -- /absolute/path/to/this/branch
-```
-
-The generator asserts schema 16, that the seed carries neither picture effects
-nor `blipEffectsJson` keys, and that the base reopens it unchanged. The tests
-migrate all three seeds to schema 17 without touching the package JSON, recover
-the effects once the source is attached, keep edits, save the source parts byte
-for byte, and reopen or reattach without another migration.
-
-
-`outer-shadow-main-v17.update.bin`, `outer-shadow-scale-main-v17.update.bin`, and
-`blip-shadow-main-v17.update.bin` were generated by the schema-17 base
-`75817a143566bc546e1accefabb90ea4181e5d26`, integrated with main
-`1af946fc0ef64a87232a5d452a6395415169694d`, using client ID 33400 and locked
-dependencies. They contain no shape-shadow model data. The first two use their
-namesake renderer fixtures; `blip-shadow.pptx` adds shape effects to the first
-two pictures of `blip-effects.pptx` while retaining their bitmap effects.
-
-Copy `generate_shadow_schema_snapshots.rs` into the schema-17 checkout's
-`crates/pptx-edit/examples/` and run it with this checkout's absolute path.
-It asserts the writer's version before generating the three seeds.
-Historical v1–v16 fixtures remain independent migration oracles. The new
-composition test also derives constructed legacy states from the v17 seed by
-restamping and removing bitmap-effect keys, then observes each migration's
-version and bitmap-effect keys through schema 18.
-
-## Run character spacing
-
-`run-spacing-main-v10.update.bin` was generated on main `069e4d66` from
-`crates/pptx-render/tests/fixtures/run-spacing.pptx` with client ID 32500.
-It exercises schema v19 source recovery, deferred attachment, and explicit zero overrides.
-
-`run-spacing-main-v11.update.bin` was generated from the same deck on main
-`cca2618c` with client ID 32500. Both main snapshots exercise migration to v19.
-
-`run-spacing-main-v12.update.bin` is the same source opened on main `3d95068f`
-with client ID 32500. All three native main snapshots recover tracking in v19.
-
-
-`run-spacing-main-v17.update.bin` and `run-spacing-shadow-main-v17.update.bin`
-are fresh schema-17 output from current main `1f30ea033b335af8cb5d8c1e02c96ffdf7a91913`.
-The corresponding `*-main-v18.update.bin` fixtures are fresh output from that
-main plus PR #334 at `42644c7297713d808e5733fa746b56166f73c25a`. They use locked
-dependencies and client ID 32500. No fixture version is restamped by the generator.
-
-`run-spacing-shadow.pptx` adds a black outer shadow (76200 EMU blur, 38100 EMU
-distance, 45 degrees, 40% opacity) to the first shape of `run-spacing.pptx`.
-The rest of the ZIP parts are unchanged. It demonstrates shadow and tracking
-recovery in the same document.
-
-Copy `generate_run_spacing_schema_snapshots.rs` to each base checkout's
-`crates/pptx-edit/examples/`, then run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_run_spacing_schema_snapshots -- /absolute/path/to/this/branch 18
-```
-
-Use `17` for the origin/main checkout. The generator verifies the base writer's
-schema and idempotent reopening. Historical v10/v11/v12 tracking snapshots and
-main's historical fixtures retain their original provenance. Tests observe every
-separate migration transaction through 18 and 19, then recover both shadows and
-tracking, preserve edits and explicit zero overrides, and reopen idempotently.
-
-
-## OLE pictures after character tracking
-
-`metafile-pictures-v18.update.bin` and `metafile-tracking-v18.update.bin` are
-fresh native output from main `22ce4e9436b25fc515c38b5073f91736dc22d288`.
-Their v19 counterparts are fresh native output from that main plus PR #325
-at `1cde1ed0413c1d539bb5f784290e3b773787756f`. Each uses client ID 31800 and
-locked dependencies; no generated version is restamped. The v12 metafile
-fixture remains a historical oracle from main `3d95068f`.
-
-`metafile-tracking.pptx` combines the four pictures from the public
-`metafile-pictures.pptx` repro with the first text shape from `run-spacing.pptx`,
-using source ID 99. It contains an OLE preview and explicit 6-point character
-spacing. The v18 reader retains neither property; v19 retains the spacing.
-
-Copy `generate_metafile_schema_snapshots.rs` into each base checkout's
-`crates/pptx-edit/examples/` and run:
-
-```sh
-cargo run --locked -p betteroffice-pptx-edit --example generate_metafile_schema_snapshots -- /absolute/path/to/this/branch 19
-```
-
-Use `18` for main. The generator checks the writer's native schema, absent OLE
-previews, version-dependent tracking, and byte-identical reopening. Tests use
-the native v18/v19 seeds plus explicitly constructed v1-v17 states to observe
-every migration transaction, with tracking at 19 before OLE pictures at 20.
-Historical v1/v2/v3 fixtures separately prove the complete legacy chain.
+`blip-shadow.pptx`, `chart-text-overflow.pptx`, `metafile-tracking.pptx`, and
+`run-spacing-shadow.pptx` were built to pair with removed intermediate
+snapshots. They stay as ready-made decks that combine bitmap effects and shape
+shadows, chart fills and explicit overflow, OLE previews and character spacing,
+and shadows and character spacing respectively.

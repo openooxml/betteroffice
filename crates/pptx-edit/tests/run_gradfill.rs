@@ -120,17 +120,3 @@ fn color_edits_replace_run_gradients() {
         );
     }
 }
-
-#[test]
-fn main_gradient_snapshot_saves_source_parts_unchanged() {
-    let session = DeckSession::open_from_update_with_source(
-        include_bytes!("fixtures/run-gradfill-main-v8.update.bin"),
-        FIXTURE,
-        300,
-    )
-    .unwrap();
-    assert_eq!(
-        ooxml_opc::unzip_parts(&session.save().unwrap()).unwrap(),
-        ooxml_opc::unzip_parts(FIXTURE).unwrap(),
-    );
-}
