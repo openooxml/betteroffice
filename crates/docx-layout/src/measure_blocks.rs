@@ -302,7 +302,14 @@ pub fn has_floating_zones(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<bool, String> {
-    Ok(!extract_floating_zones(blocks, content_width, config, page_geometry)?.is_empty())
+    Ok(!extract_floating_zones(
+        blocks,
+        content_width,
+        config,
+        page_geometry,
+        &BTreeMap::new(),
+    )?
+    .is_empty())
 }
 
 pub fn measure_blocks_with_floats(
@@ -311,8 +318,19 @@ pub fn measure_blocks_with_floats(
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
 ) -> Result<Vec<BlockExtent>, String> {
+    measure_blocks_with_shape_offsets(blocks, widths, config, page_geometry, &BTreeMap::new())
+}
+
+pub fn measure_blocks_with_shape_offsets(
+    blocks: &mut [LayoutBlock],
+    widths: &[f64],
+    config: &MeasurementConfig,
+    page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
+) -> Result<Vec<BlockExtent>, String> {
     let default_width = widths.first().copied().unwrap_or(0.0);
-    let extracted = extract_floating_zones(blocks, default_width, config, page_geometry)?;
+    let extracted =
+        extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
     let mut margin_groups = BTreeMap::<u64, Vec<AnchoredFloatingZone>>::new();
     let mut paragraph_zones = Vec::new();
     for anchored in extracted {
@@ -697,6 +715,7 @@ fn extract_floating_zones(
     content_width: f64,
     config: &MeasurementConfig,
     page_geometry: Option<&FloatPageGeometry>,
+    shape_offsets: &BTreeMap<usize, f64>,
 ) -> Result<Vec<AnchoredFloatingZone>, String> {
     let mut zones = Vec::new();
     for (block_index, block) in blocks.iter().enumerate() {
@@ -714,9 +733,14 @@ fn extract_floating_zones(
                 page_geometry,
                 &mut zones,
             ),
-            LayoutBlock::Shape(shape) => {
-                extract_shape_zone(shape, block_index, content_width, page_geometry, &mut zones)
-            }
+            LayoutBlock::Shape(shape) => extract_shape_zone(
+                shape,
+                block_index,
+                content_width,
+                page_geometry,
+                shape_offsets.get(&block_index).copied(),
+                &mut zones,
+            ),
             _ => {}
         }
     }
@@ -728,6 +752,7 @@ fn extract_shape_zone(
     block_index: usize,
     content_width: f64,
     geometry: Option<&FloatPageGeometry>,
+    resolved_x: Option<f64>,
     zones: &mut Vec<AnchoredFloatingZone>,
 ) {
     let Some(position) = shape.position.as_ref() else {
@@ -751,13 +776,15 @@ fn extract_shape_zone(
     } else {
         content_width
     };
-    let x = base_x
-        + match horizontal.and_then(|axis| axis.align.as_deref()) {
-            Some("right" | "outside") => frame_width - shape.width,
-            Some("center") => (frame_width - shape.width) / 2.0,
-            Some("left" | "inside") => 0.0,
-            _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
-        };
+    let x = resolved_x.unwrap_or_else(|| {
+        base_x
+            + match horizontal.and_then(|axis| axis.align.as_deref()) {
+                Some("right" | "outside") => frame_width - shape.width,
+                Some("center") => (frame_width - shape.width) / 2.0,
+                Some("left" | "inside") => 0.0,
+                _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
+            }
+    });
     let vertical = position.vertical.as_ref();
     let margin_top = geometry.map_or(0.0, |g| g.margin_top);
     let content_height = geometry.map_or(0.0, |g| g.content_height);

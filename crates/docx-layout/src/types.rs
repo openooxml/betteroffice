@@ -1924,6 +1924,8 @@ pub struct ImageFragment {
 #[serde(rename_all = "camelCase")]
 pub struct ShapeFragment {
     pub block_id: BlockId,
+    #[serde(skip)]
+    pub wrap_offset_x: Option<f64>,
     pub x: f64,
     pub y: f64,
     pub width: f64,

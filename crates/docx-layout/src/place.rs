@@ -1032,8 +1032,11 @@ fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Pagin
             measure.height,
             paginator,
         );
+        let state_idx = paginator.get_current();
+        let column_x = paginator.get_column_x(paginator.state(state_idx).column_index);
         paginator.push_fragment_direct(Fragment::Shape(ShapeFragment {
             block_id: block.id.clone(),
+            wrap_offset_x: Some(x - column_x),
             x,
             y,
             width: measure.width,
@@ -1055,6 +1058,7 @@ fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Pagin
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Shape(ShapeFragment {
         block_id: block.id.clone(),
+        wrap_offset_x: None,
         x: paginator.get_column_x(column_index),
         y: 0.0,
         width: measure.width,

@@ -228,6 +228,86 @@ fn initial_float_page_geometry(
     }
 }
 
+fn stabilize_shape_wrapping(
+    input: &mut LayoutInput,
+    regions: &DocumentRegions,
+    measurement: &docx_layout::measure_blocks::MeasurementConfig,
+) -> Result<(), docx_layout::LayoutError> {
+    let shapes = input
+        .measured
+        .iter()
+        .enumerate()
+        .filter_map(|(index, measured)| {
+            let LayoutBlock::Shape(shape) = &measured.block else {
+                return None;
+            };
+            let horizontal = shape.position.as_ref()?.horizontal.as_ref()?;
+            (matches!(
+                shape.wrap_type.as_deref(),
+                Some("square" | "tight" | "through" | "topAndBottom")
+            ) && (horizontal.align.as_deref() == Some("inside")
+                || matches!(
+                    horizontal.relative_to.as_deref(),
+                    Some("insideMargin" | "outsideMargin")
+                )))
+            .then(|| (index, shape.id.clone()))
+        })
+        .collect::<Vec<_>>();
+    if shapes.is_empty() {
+        return Ok(());
+    }
+    let mut blocks = input
+        .measured
+        .iter()
+        .map(|measured| measured.block.clone())
+        .collect::<Vec<_>>();
+    let widths = region_measurement_widths(&blocks, input, regions);
+    let geometry = initial_float_page_geometry(input, regions);
+    let mut previous_offsets = BTreeMap::new();
+    for _ in 0..shapes.len() + 2 {
+        let layout = docx_layout::place::layout_document(input)?;
+        let offsets = shapes
+            .iter()
+            .filter_map(|(index, id)| {
+                layout
+                    .pages
+                    .iter()
+                    .flat_map(|page| &page.fragments)
+                    .find_map(|fragment| {
+                        let docx_layout::types::Fragment::Shape(shape) = fragment else {
+                            return None;
+                        };
+                        (shape.block_id == *id)
+                            .then_some(shape.wrap_offset_x)
+                            .flatten()
+                            .map(|x| (*index, x))
+                    })
+            })
+            .collect::<BTreeMap<_, _>>();
+        if offsets == previous_offsets {
+            return Ok(());
+        }
+        let measures = docx_layout::measure_blocks::measure_blocks_with_shape_offsets(
+            &mut blocks,
+            &widths,
+            measurement,
+            Some(&geometry),
+            &offsets,
+        )
+        .map_err(docx_layout::LayoutError::Invalid)?;
+        for (measured, (block, measure)) in
+            input.measured.iter_mut().zip(blocks.iter().zip(measures))
+        {
+            measured.block = block.clone();
+            measured.measure = measure;
+        }
+        previous_offsets = offsets;
+    }
+    Err(docx_layout::LayoutError::Invalid(
+        "anchored shape wrapping did not converge".to_owned(),
+    ))
+}
+
 fn extend_input_for_header_footer(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
@@ -974,6 +1054,10 @@ impl EngineSession {
         } else {
             None
         };
+        if resident_body {
+            stabilize_shape_wrapping(&mut input, &regions, &measurement)
+                .map_err(layout_error_message)?;
+        }
         self.layout_document_value(input.clone())?;
         let mut initial_layout = self
             .pagination
@@ -1006,6 +1090,9 @@ impl EngineSession {
             |reserved| {
                 let mut pass = base_input.clone();
                 pass.options.footnote_reserved_heights = reservation_options(reserved);
+                if resident_body {
+                    stabilize_shape_wrapping(&mut pass, &regions, &measurement)?;
+                }
                 let mut layout = docx_layout::place::layout_document(&mut pass)?;
                 apply_document_regions(&mut layout, &regions);
                 Ok(layout)
@@ -1020,6 +1107,10 @@ impl EngineSession {
         if !stabilized.reserved_heights.is_empty() {
             input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
+            if resident_body {
+                stabilize_shape_wrapping(&mut input, &regions, &measurement)
+                    .map_err(layout_error_message)?;
+            }
             self.layout_document_value(input)?;
         }
         let mut pagination = self.pagination.borrow_mut();

@@ -2179,16 +2179,22 @@ fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
     tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
 }
 
-fn paragraph_flow_breaks(paragraph: &Value) -> (Option<&'static str>, Vec<&'static str>) {
+fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    let has_content = tokens.contains(&"visible");
+    if !tokens.contains(&"visible") {
+        let split = tokens
+            .iter()
+            .rposition(|token| *token == "columnBreak")
+            .map_or(0, |index| index + 1);
+        return (tokens[..split].to_vec(), tokens[split..].to_vec());
+    }
     let mut leading = None;
     let mut trailing = Vec::new();
     let mut visible = false;
     for token in tokens {
         if matches!(token, "pageBreak" | "columnBreak") {
-            if visible || leading.is_some() || !has_content {
+            if visible || leading.is_some() {
                 trailing.push(token);
             } else {
                 leading = Some(token);
@@ -2197,7 +2203,13 @@ fn paragraph_flow_breaks(paragraph: &Value) -> (Option<&'static str>, Vec<&'stat
             visible = true;
         }
     }
-    (leading, trailing)
+    (
+        leading
+            .filter(|kind| *kind == "columnBreak")
+            .into_iter()
+            .collect(),
+        trailing,
+    )
 }
 
 fn modifier(value: &str) -> f64 {
@@ -2800,15 +2812,17 @@ fn visit_story(
     for block in blocks {
         match string(field(Some(&block), "type")).unwrap_or_default() {
             "paragraph" => {
-                let (leading_break, trailing_breaks) = paragraph_flow_breaks(&block);
-                if options.include_page_breaks && leading_break == Some("columnBreak") {
-                    context.plans[plan_index].units.push(embed_unit(
-                        "columnBreak",
-                        JsonObject::new(),
-                        &[],
-                        None,
-                        1,
-                    ));
+                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(&block);
+                if options.include_page_breaks {
+                    for kind in leading_breaks {
+                        context.plans[plan_index].units.push(embed_unit(
+                            kind,
+                            JsonObject::new(),
+                            &[],
+                            None,
+                            1,
+                        ));
+                    }
                 }
                 let (units, mut ppr) =
                     paragraph_units(&block, &context.styles, None, &context.source_json);
