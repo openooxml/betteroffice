@@ -28,6 +28,8 @@ pub(crate) fn preserve_attribute(element: &str, attribute: &str) -> bool {
             | ("element", "minOccurs")
             | ("element", "maxOccurs")
             | ("element", "abstract")
+            | ("element", "block")
+            | ("element", "final")
             | ("element", "form")
             | ("element", "substitutionGroup")
             | ("attribute", "name")

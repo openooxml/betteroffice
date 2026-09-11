@@ -13,6 +13,7 @@ const WORD_STRICT: &[u8] = b"http://purl.oclc.org/ooxml/wordprocessingml/main";
 #[derive(Default)]
 pub(crate) struct StyleMap {
     replacements: HashMap<String, String>,
+    names: HashMap<String, String>,
 }
 
 impl StyleMap {
@@ -80,22 +81,38 @@ impl StyleMap {
         }
 
         let mut replacements = HashMap::new();
+        let mut names = HashMap::new();
         let mut index = 1;
         for style in styles {
-            if !style.custom || style.default {
+            let Some(id) = style.id else { continue };
+            let builtin_name = style.name.as_deref().unwrap_or(&id);
+            let builtin = (!style.custom || style.default) && is_builtin_name(builtin_name);
+            if builtin && is_builtin_name(&id) {
+                let name = builtin_name.to_owned();
+                names.insert(id, name);
                 continue;
             }
-            let Some(id) = style.id else { continue };
             let mut replacement = format!("RedactedStyle{index}");
             while reserved.contains(&key(&replacement)) {
                 index += 1;
                 replacement = format!("RedactedStyle{index}");
             }
             reserved.insert(key(&replacement));
+            names.insert(
+                id.clone(),
+                if builtin {
+                    builtin_name.to_owned()
+                } else {
+                    replacement.clone()
+                },
+            );
             replacements.insert(id, replacement);
             index += 1;
         }
-        Ok(Self { replacements })
+        Ok(Self {
+            replacements,
+            names,
+        })
     }
 
     pub(crate) fn replacement(
@@ -114,7 +131,7 @@ impl StyleMap {
             return self.replacements.get(value).cloned();
         }
         if (name_element || alias_element) && attribute.eq_ignore_ascii_case("val") {
-            return current_style_id.and_then(|id| self.replacements.get(id).cloned());
+            return current_style_id.and_then(|id| self.names.get(id).cloned());
         }
         let reference_element = matches_ignore_case(
             element,
@@ -207,6 +224,111 @@ fn is_true(value: &str) -> bool {
     )
 }
 
+fn is_builtin_name(value: &str) -> bool {
+    let name: String = value
+        .chars()
+        .filter(|character| *character == ' ' || character.is_ascii_alphanumeric())
+        .collect();
+    if name != value {
+        return false;
+    }
+    let name = name.replace(' ', "").to_ascii_lowercase();
+    if ["heading", "toc", "index"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            matches!(suffix, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+        })
+    }) {
+        return true;
+    }
+    matches!(
+        name.as_str(),
+        "normal"
+            | "defaultparagraphfont"
+            | "tablenormal"
+            | "normaltable"
+            | "nolist"
+            | "title"
+            | "subtitle"
+            | "caption"
+            | "header"
+            | "footer"
+            | "footnotetext"
+            | "footnotereference"
+            | "endnotetext"
+            | "endnotereference"
+            | "commenttext"
+            | "commentreference"
+            | "commentsubject"
+            | "annotationtext"
+            | "annotationreference"
+            | "annotationsubject"
+            | "balloontext"
+            | "bodytext"
+            | "bodytext2"
+            | "bodytext3"
+            | "bodytextindent"
+            | "bodytextindent2"
+            | "bodytextindent3"
+            | "bodytextfirstindent"
+            | "bodytextfirstindent2"
+            | "list"
+            | "list2"
+            | "list3"
+            | "list4"
+            | "list5"
+            | "listparagraph"
+            | "listbullet"
+            | "listbullet2"
+            | "listbullet3"
+            | "listbullet4"
+            | "listbullet5"
+            | "listnumber"
+            | "listnumber2"
+            | "listnumber3"
+            | "listnumber4"
+            | "listnumber5"
+            | "listcontinue"
+            | "listcontinue2"
+            | "listcontinue3"
+            | "listcontinue4"
+            | "listcontinue5"
+            | "nospacing"
+            | "quote"
+            | "intensequote"
+            | "emphasis"
+            | "intenseemphasis"
+            | "strong"
+            | "subtleemphasis"
+            | "subtlereference"
+            | "intensereference"
+            | "booktitle"
+            | "bibliography"
+            | "hyperlink"
+            | "followedhyperlink"
+            | "tocheading"
+            | "tableoffigures"
+            | "tableofauthorities"
+            | "toaheading"
+            | "indexheading"
+            | "linenumber"
+            | "pagenumber"
+            | "envelopeaddress"
+            | "envelopereturn"
+            | "macrotext"
+            | "htmlnormal"
+            | "htmlcode"
+            | "htmlpreformatted"
+            | "htmltypewriter"
+            | "htmlkeyboard"
+            | "htmlsample"
+            | "htmlvariable"
+            | "htmlacronym"
+            | "htmladdress"
+            | "htmldefinition"
+            | "tablegrid"
+    )
+}
+
 fn key(value: &str) -> String {
     value.to_ascii_lowercase()
 }
@@ -252,11 +374,11 @@ mod tests {
         assert_eq!(map.replacement("pStyle", "val", "custom", None), None);
         assert_eq!(
             map.replacement("pStyle", "val", "Custom", None),
-            Some("RedactedStyle2".into())
+            Some("RedactedStyle3".into())
         );
         assert_eq!(
             map.replacement("name", "val", "ignored", Some("Custom")),
-            Some("RedactedStyle2".into())
+            Some("RedactedStyle3".into())
         );
     }
 
@@ -287,11 +409,14 @@ mod tests {
     }
 
     #[test]
-    fn keeps_custom_marked_default_style() {
+    fn anonymizes_unrecognized_default_style_names() {
         let xml = format!(
             r#"<w:styles xmlns:w="{W}"><w:style w:styleId="Default" w:customStyle="1" w:default="on"><w:name w:val="Default"/></w:style></w:styles>"#
         );
         let map = StyleMap::collect("styles.xml", xml.as_bytes()).unwrap();
-        assert_eq!(map.replacement("style", "styleId", "Default", None), None);
+        assert_eq!(
+            map.replacement("style", "styleId", "Default", None),
+            Some("RedactedStyle1".into())
+        );
     }
 }

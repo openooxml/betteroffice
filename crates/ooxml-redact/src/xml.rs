@@ -53,6 +53,11 @@ pub(crate) fn redact_xml_with_styles(
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     charge_text(state.report, &decoded);
                 }
+                Event::CData(text) => {
+                    let decoded = text.decode().map_err(|error| xml_error(path, error))?;
+                    charge_text(state.report, &decoded);
+                }
+                Event::Comment(_) | Event::PI(_) => state.report.xml_comments += 1,
                 Event::Eof => return Err(xml_error(path, "unterminated schema element")),
                 _ => {}
             }
@@ -205,6 +210,8 @@ fn rewrite_start(
     for (key, value) in attributes {
         let local = attribute_local(&key);
         if local.eq_ignore_ascii_case("gfxdata")
+            && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                ResolveResult::Bound(namespace) if namespace.as_ref() == b"urn:schemas-microsoft-com:office:office")
             || schema && is_unqualified(&key) && schema::drop_attribute(element, local)
         {
             state.report.attributes += 1;
