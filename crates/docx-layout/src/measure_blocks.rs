@@ -33,6 +33,8 @@ struct AnchoredFloatingZone {
 
 #[derive(Clone, Debug)]
 pub struct FloatPageGeometry {
+    pub page_width: f64,
+    pub margin_left: f64,
     pub page_height: f64,
     pub margin_top: f64,
     pub content_height: f64,
@@ -213,8 +215,8 @@ fn collect_paragraph_font_requirements(
                 .as_deref()
                 .or(first_run_family)
                 .unwrap_or(default_family),
-            false,
-            false,
+            attrs.list_marker_bold.unwrap_or(false),
+            attrs.list_marker_italic.unwrap_or(false),
             scripts,
             requirements,
         );
@@ -349,6 +351,14 @@ pub fn measure_blocks_with_floats(
     let mut active_zones = Vec::new();
     let mut measured = Vec::with_capacity(blocks.len());
     for (index, block) in blocks.iter_mut().enumerate() {
+        if matches!(
+            block,
+            LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
+        ) || matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.attrs.as_ref().and_then(|attrs| attrs.page_break_before) == Some(true))
+        {
+            active_zones.clear();
+            cumulative_y = 0.0;
+        }
         if let Some(zones) = zones_by_anchor.get(&index) {
             cumulative_y = 0.0;
             active_zones.clone_from(zones);
@@ -361,7 +371,9 @@ pub fn measure_blocks_with_floats(
             (!active_zones.is_empty()).then_some(active_zones.as_slice()),
             cumulative_y,
         )?;
-        if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some()) {
+        if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
+            && !matches!(block, LayoutBlock::Shape(shape) if shape.position.is_some())
+        {
             cumulative_y += extent_height(&extent);
         }
         measured.push(extent);
@@ -702,10 +714,103 @@ fn extract_floating_zones(
                 page_geometry,
                 &mut zones,
             ),
+            LayoutBlock::Shape(shape) => {
+                extract_shape_zone(shape, block_index, content_width, page_geometry, &mut zones)
+            }
             _ => {}
         }
     }
     Ok(zones)
+}
+
+fn extract_shape_zone(
+    shape: &ShapeBlock,
+    block_index: usize,
+    content_width: f64,
+    geometry: Option<&FloatPageGeometry>,
+    zones: &mut Vec<AnchoredFloatingZone>,
+) {
+    let Some(position) = shape.position.as_ref() else {
+        return;
+    };
+    if !matches!(
+        shape.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "topAndBottom")
+    ) || shape.width <= 0.0
+        || shape.height <= 0.0
+    {
+        return;
+    }
+    let margin_left = geometry.map_or(0.0, |g| g.margin_left);
+    let page_width = geometry.map_or(content_width, |g| g.page_width);
+    let horizontal = position.horizontal.as_ref();
+    let page_relative = horizontal.and_then(|axis| axis.relative_to.as_deref()) == Some("page");
+    let base_x = if page_relative { -margin_left } else { 0.0 };
+    let frame_width = if page_relative {
+        page_width
+    } else {
+        content_width
+    };
+    let x = base_x
+        + match horizontal.and_then(|axis| axis.align.as_deref()) {
+            Some("right" | "outside") => frame_width - shape.width,
+            Some("center") => (frame_width - shape.width) / 2.0,
+            Some("left" | "inside") => 0.0,
+            _ => horizontal.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
+        };
+    let vertical = position.vertical.as_ref();
+    let margin_top = geometry.map_or(0.0, |g| g.margin_top);
+    let content_height = geometry.map_or(0.0, |g| g.content_height);
+    let (base_y, frame_height) = match vertical.and_then(|axis| axis.relative_to.as_deref()) {
+        Some("page") => (
+            -margin_top,
+            geometry.map_or(content_height, |g| g.page_height),
+        ),
+        Some("paragraph" | "line") => (0.0, 0.0),
+        _ => (0.0, content_height),
+    };
+    let y = base_y
+        + match vertical.and_then(|axis| axis.align.as_deref()) {
+            Some("bottom") => frame_height - shape.height,
+            Some("center") => (frame_height - shape.height) / 2.0,
+            Some("top") => 0.0,
+            _ => vertical.and_then(|axis| axis.pos_offset).unwrap_or(0.0),
+        };
+    let distances = shape.wrap_distances.as_ref();
+    let left = x - distances.map_or(0.0, |d| d.left);
+    let right = x + shape.width + distances.map_or(0.0, |d| d.right);
+    let top_y = y - distances.map_or(0.0, |d| d.top);
+    let bottom_y = y + shape.height + distances.map_or(0.0, |d| d.bottom);
+    if right <= 0.0 || left >= content_width || bottom_y <= 0.0 {
+        return;
+    }
+    let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
+        || (left <= 0.0 && right >= content_width);
+    let (left_margin, right_margin) = if full_width_block {
+        (0.0, 0.0)
+    } else {
+        let text_on_left = match shape.wrap_text.as_deref() {
+            Some("left") => true,
+            Some("right") => false,
+            _ => left > content_width - right,
+        };
+        if text_on_left {
+            (0.0, (content_width - left).max(0.0))
+        } else {
+            (right.max(0.0), 0.0)
+        }
+    };
+    zones.push(AnchoredFloatingZone {
+        zone: FloatingZone {
+            left_margin,
+            right_margin,
+            top_y,
+            bottom_y,
+            full_width_block,
+        },
+        anchor_block_index: block_index,
+        margin_relative: is_margin_relative(Some(position)),
+    });
 }
 
 fn extract_image_zones(
@@ -1164,7 +1269,7 @@ fn measure_table(
             source_row.height_rule.as_deref() == Some("exact") && source_row.height.is_some();
         measured_row.height = match (source_row.height, source_row.height_rule.as_deref()) {
             (Some(height), Some("exact")) => height,
-            (Some(height), _) => (max_height + max_border_height).max(height),
+            (Some(height), _) => max_height.max(height) + max_border_height,
             (None, _) => max_height + max_border_height,
         };
     }
@@ -1264,13 +1369,135 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
                 .as_ref()
                 .and_then(|border| border.width)
                 .unwrap_or(0.0)
-    })
+    }) / 2.0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn anchored_shapes_exclude_body_text_without_advancing_the_cursor() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        for (wrap, expected_offset, expected_skip) in [
+            ("square", 50.0, 0.0),
+            ("inFront", 0.0, 0.0),
+            ("topAndBottom", 0.0, 40.0),
+        ] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"shape","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":40,"height":40,"wrapType":wrap,"wrapDistances":{"left":0,"right":10,"top":0,"bottom":0},
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},"vertical":{"relativeTo":"paragraph","posOffset":0}}},
+                {"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"words words words words words words words words"}]}
+            ])).unwrap();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0, 200.0], &config, None).unwrap();
+            let BlockExtent::Paragraph(paragraph) = &measures[1] else {
+                panic!()
+            };
+            assert_eq!(
+                paragraph.lines[0].left_offset.unwrap_or(0.0),
+                expected_offset
+            );
+            assert_eq!(
+                paragraph.lines[0].float_skip_before.unwrap_or(0.0),
+                expected_skip
+            );
+
+            blocks.insert(
+                1,
+                serde_json::from_value(json!({"kind":"pageBreak","id":"break"})).unwrap(),
+            );
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            let BlockExtent::Paragraph(paragraph) = &measures[2] else {
+                panic!()
+            };
+            assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
+            assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
+        }
+    }
+
+    #[test]
+    fn vertical_table_labels_keep_a_single_rotated_line() {
+        for (direction, rotation) in [("btLr", -90.0), ("tbRl", 90.0)] {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([{
+                "kind":"table","id":"table","columnWidths":[30],"rows":[{
+                    "id":"row","height":150,"heightRule":"exact","cells":[{
+                        "id":"cell","textDirection":direction,"padding":{"left":0,"right":0,"top":0,"bottom":0},
+                        "blocks":[{"kind":"paragraph","id":"label","runs":[{"kind":"text","text":"Vertical label","fontSize":12}]}]
+                    }]
+                }]
+            }])).unwrap();
+            let measured =
+                measure_blocks(&mut blocks, 200.0, &MeasurementConfig::default()).unwrap();
+            let BlockExtent::Table(table) = &measured[0] else {
+                panic!()
+            };
+            let BlockExtent::Paragraph(label) = &table.rows[0].cells[0].blocks[0] else {
+                panic!()
+            };
+            assert_eq!(label.lines.len(), 1);
+            assert_eq!(table.total_height, 150.0);
+            let mut input = crate::types::Input {
+                measured: blocks
+                    .into_iter()
+                    .zip(measured)
+                    .map(|(block, measure)| crate::types::MeasuredBlock { block, measure })
+                    .collect(),
+                options: crate::types::LayoutOptions::default(),
+            };
+            let layout = crate::compute_layout_input(&mut input).unwrap();
+            let display = crate::build_display_list(&input, &layout).unwrap();
+            let text = display.pages[0]
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    crate::display_list::Primitive::Text(text) if text.text == "Vertical label" => {
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                text.rotation_deg
+                    .as_ref()
+                    .and_then(serde_json::Number::as_f64),
+                Some(rotation)
+            );
+        }
+    }
+
+    #[test]
+    fn collapsed_borders_expand_minimum_and_auto_rows_but_not_exact_rows() {
+        for (height, rule, expected) in [
+            (Some(40.0), "atLeast", 41.0),
+            (Some(40.0), "exact", 40.0),
+            (None, "auto", 17.0),
+        ] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "kind":"table", "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "height":height, "heightRule":rule, "cells":[{
+                    "id":"cell", "padding":{"top":0,"bottom":0,"left":0,"right":0},
+                    "borders":{"top":{"width":1},"bottom":{"width":1}},
+                    "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":16}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.total_height, expected);
+        }
+    }
 
     #[test]
     fn measures_non_text_blocks_without_host_callbacks() {

@@ -220,6 +220,8 @@ fn initial_float_page_geometry(
             .or(input.options.margins.as_ref()),
     );
     docx_layout::measure_blocks::FloatPageGeometry {
+        page_width: size.w,
+        margin_left: margins.left,
         page_height: size.h,
         margin_top: margins.top,
         content_height: size.h - margins.top - margins.bottom,

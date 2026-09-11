@@ -362,30 +362,14 @@ function looksSerif(family: string): boolean {
   );
 }
 
-/**
- * The always-available last-resort base face for ANY Word family. Broad-
- * coverage Latin: Liberation Serif for serif-looking names, Liberation Sans
- * otherwise. Both bundled Liberation families ship the full
- * Regular/Bold/Italic/BoldItalic set, so the exact (bold, italic) style always
- * resolves and this NEVER returns undefined.
- *
- * This is the terminal link of the measurement font chain (see the font
- * registry's chain contract): appended after the embedded and metric-compatible
- * faces so a run whose family has no embedded/bundled match still has real font
- * bytes to measure with, keeping it on the native (Rust) measurement path
- * instead of routing the whole block to browser `measureText`. The measured
- * metrics are Liberation's, not the requested font's — an accepted width
- * divergence for a truly-unknown font, in exchange for staying native. Latin
- * coverage only; per-script coverage (CJK/RTL) rides
- * {@link resolveScriptFallbackFace}, appended separately by the registry.
- */
+/** Choose a related family, then a serif or sans fallback. */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
 ): BundledFontFace {
-  // Liberation Sans/Serif always ship the full four-face set, so the
-  // metric-compat resolution is guaranteed to return a face here.
-  const base = looksSerif(family) ? 'Times New Roman' : 'Arial';
+  const base = family.trim().toLowerCase() === 'calibri light'
+    ? 'Calibri'
+    : looksSerif(family) ? 'Times New Roman' : 'Arial';
   return resolveMetricCompatFace(base, bold, italic)!;
 }

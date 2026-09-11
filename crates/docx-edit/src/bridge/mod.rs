@@ -1220,6 +1220,7 @@ fn lower_shape_block<T: ReadTxn>(
         scene: None,
         effects: None,
         text_body_properties: None,
+        wrap_distances: None,
         position: None,
         wrap_type: None,
         wrap_text: None,
@@ -1588,7 +1589,7 @@ fn lower_cell_padding(
         cell_margins
             .and_then(|margins| map_number(margins, key))
             .map(twips_to_pixels)
-            .filter(|value| *value > 0.0)
+            .filter(|value| *value >= 0.0)
             .or_else(|| {
                 table_margins
                     .and_then(|margins| map_number(margins, key))
@@ -1660,9 +1661,9 @@ fn lower_cell_border(
         "inset" => "inset",
         _ => "solid",
     };
-    let width = ((map_number(border, "size").unwrap_or(0.0) / 8.0) * 1.333)
-        .round()
-        .max(1.0);
+    let width = map_number(border, "size")
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .map_or(1.0, |size| size / 6.0);
     let color = border
         .get("color")
         .and_then(|value| resolve_color(value, env))
@@ -2716,6 +2717,15 @@ fn lower_paragraph_attrs(
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
+    if result.list_marker.is_some()
+        && let Some(Any::Map(formatting)) = values.get("defaultTextFormatting")
+    {
+        result.list_marker_bold = map_bool(formatting, "bold");
+        result.list_marker_italic = map_bool(formatting, "italic");
+        result.list_marker_color = formatting
+            .get("color")
+            .and_then(|color| resolve_color(color, env));
+    }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
     lower_paragraph_defaults(values, &mut result);
@@ -3380,6 +3390,58 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn list_markers_inherit_paragraph_mark_bold_italic_and_color() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            (
+                "listMarkerFontFamily".to_owned(),
+                Any::String("Arial".into()),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(true)),
+                    ("italic", Any::Bool(false)),
+                    ("color", any_map([("rgb", Any::String("FF0000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
+        assert_eq!(attrs.list_marker_bold, Some(true));
+        assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn table_cell_edges_preserve_fractional_borders_and_explicit_zero_padding() {
+        let border = std::collections::HashMap::from([
+            ("style".to_owned(), Any::String("single".into())),
+            ("size".to_owned(), Any::Number(4.0)),
+        ]);
+        let edge = lower_cell_border(&border, &RenderEnv::default()).unwrap();
+        assert_eq!(edge.width, Some(2.0 / 3.0));
+        let cell = std::collections::HashMap::from([(
+            "margins".to_owned(),
+            Any::Map(
+                std::collections::HashMap::from([("left".to_owned(), Any::Number(0.0))]).into(),
+            ),
+        )]);
+        let table = std::collections::HashMap::from([
+            ("left".to_owned(), Any::Number(108.0)),
+            ("right".to_owned(), Any::Number(108.0)),
+        ]);
+        let padding = lower_cell_padding(&cell, Some(&table));
+        assert_eq!(padding.left, 0.0);
+        assert!((padding.right - 7.2).abs() < 1e-10);
     }
 
     #[test]

@@ -561,7 +561,7 @@ fn place(
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore forces a fresh page before the block is placed
         if hooks::breaks_before_block(&mb.block)? {
-            paginator.force_page_break();
+            paginator.force_authored_page_break();
         }
 
         // at the head of a keep-with-next group, move to a fresh page when the
@@ -581,7 +581,7 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_page_break();
+                paginator.force_authored_page_break();
             }
         }
 
@@ -859,7 +859,7 @@ fn layout_paragraph(
         return Ok(());
     }
 
-    let space_before = paginator.leading_spacing(get_spacing_before(block));
+    let space_before = get_spacing_before(block);
     let space_after = get_spacing_after(block);
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
@@ -880,7 +880,10 @@ fn layout_paragraph(
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
         let capacity = state.content_limit - state.content_top;
-        let required = space_before.max(state.deferred_spacing) + paragraph_height;
+        let required = paginator
+            .leading_spacing(space_before)
+            .max(state.deferred_spacing)
+            + paragraph_height;
         if required <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
@@ -895,7 +898,9 @@ fn layout_paragraph(
 
         // Reserve leading space before fitting the first fragment.
         let reserved_before = if current_line_index == 0 {
-            space_before.max(deferred_spacing)
+            paginator
+                .leading_spacing(space_before)
+                .max(deferred_spacing)
         } else {
             0.0
         };
@@ -928,7 +933,7 @@ fn layout_paragraph(
                     sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
                 });
                 if reserved_before + first_two_height <= capacity {
-                    paginator.force_column_break();
+                    paginator.advance_for_overflow();
                     continue;
                 }
             }
@@ -1315,6 +1320,32 @@ mod pagination_rule_tests {
             .find(|checkpoint| checkpoint.page_index == 1)
             .unwrap();
         assert!(checkpoint.flow.suppress_leading_spacing);
+    }
+
+    #[test]
+    fn automatic_and_paragraph_page_breaks_discard_leading_spacing() {
+        for attrs in [
+            json!({"spacing":{"before":20}}),
+            json!({"spacing":{"before":20},"keepNext":true}),
+            json!({"spacing":{"before":20},"keepLines":true}),
+            json!({"spacing":{"before":20},"pageBreakBefore":true}),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 85.0, json!({"spacing":{"after":30}})),
+                paragraph(2, 1, 20.0, attrs),
+                paragraph(3, 1, 20.0, json!({})),
+            ]);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(heading) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            let Fragment::Paragraph(body) = &result.pages[1].fragments[1] else {
+                panic!()
+            };
+            assert_eq!(heading.y, 10.0);
+            assert_eq!(body.y, 30.0);
+        }
     }
 
     #[test]

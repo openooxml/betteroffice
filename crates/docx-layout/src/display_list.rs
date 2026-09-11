@@ -1822,6 +1822,12 @@ pub(crate) struct ParaAttrsIn {
     #[serde(default)]
     list_marker_font_size: Option<f64>,
     #[serde(default)]
+    list_marker_bold: Option<bool>,
+    #[serde(default)]
+    list_marker_italic: Option<bool>,
+    #[serde(default)]
+    list_marker_color: Option<String>,
+    #[serde(default)]
     list_marker_revision: Option<RevisionKind>,
     #[serde(default)]
     default_font_family: Option<String>,
@@ -4696,9 +4702,8 @@ fn recompose_hf_region(
         }
         HfKind::Footer => {
             let distance = hf.footer_distance.or(page.margins.footer).unwrap_or(48.0);
-            let actual = flow_height.max(24.0);
             (
-                page.size.h - distance - actual,
+                page.size.h - distance - flow_height,
                 page.size.h - distance - flow_height,
             )
         }
@@ -4714,8 +4719,9 @@ fn recompose_hf_region(
     let mut behind = Vec::new();
     let mut flow = Vec::new();
     let mut front = Vec::new();
-    let mut cursor = 0.0;
+    let mut hf_flow = crate::header_footer::HeaderFooterFlow::default();
     for measured in &variant.measured {
+        let cursor = hf_flow.cursor;
         match (&measured.block, &measured.measure) {
             (BlockIn::Paragraph(block), MeasureIn::Paragraph(measure)) => {
                 let before = block
@@ -4724,14 +4730,21 @@ fn recompose_hf_region(
                     .and_then(|attrs| attrs.spacing)
                     .and_then(|spacing| spacing.before)
                     .unwrap_or(0.0);
-                let y = origin_y + cursor + before;
-                emit_paragraph_floating_images(&mut behind, block, y, &geom, true);
+                let after = block
+                    .attrs
+                    .as_ref()
+                    .and_then(|attrs| attrs.spacing)
+                    .and_then(|spacing| spacing.after)
+                    .unwrap_or(0.0);
+                let content_height = (measure.total_height - before - after).max(0.0);
+                let y = origin_y + hf_flow.place(content_height, before, after);
+                emit_paragraph_floating_images(&mut behind, block, origin_y + cursor, &geom, true);
                 let fragment = ParagraphFragmentIn {
                     block_id: block.id.clone(),
                     x: page.margins.left,
                     y,
                     width: content_width,
-                    height: measure.total_height,
+                    height: content_height,
                     from_line: 0,
                     to_line: measure.lines.len(),
                     pm_start: block.pm_start,
@@ -4743,11 +4756,10 @@ fn recompose_hf_region(
                     &mut flow, &fragment, block, measure, &ctx, fragment.x, fragment.y, None, None,
                     true, true,
                 );
-                emit_paragraph_floating_images(&mut front, block, y, &geom, false);
-                cursor += measure.total_height;
+                emit_paragraph_floating_images(&mut front, block, origin_y + cursor, &geom, false);
             }
             (BlockIn::Table(block), MeasureIn::Table(measure)) => {
-                let (x, y, advances) = if let Some(floating) = &block.floating {
+                let (x, y) = if let Some(floating) = &block.floating {
                     let mut top = floating.tblp_y.unwrap_or(0.0);
                     if floating.vert_anchor.as_deref() == Some("page") {
                         top -= flow_top;
@@ -4758,9 +4770,12 @@ fn recompose_hf_region(
                     if floating.horz_anchor.as_deref() == Some("page") {
                         left -= page.margins.left;
                     }
-                    (page.margins.left + left, origin_y + top, false)
+                    (page.margins.left + left, origin_y + top)
                 } else {
-                    (page.margins.left, origin_y + cursor, true)
+                    (
+                        page.margins.left,
+                        origin_y + hf_flow.place(measure.total_height, 0.0, 0.0),
+                    )
                 };
                 let fragment = TableFragmentIn {
                     block_id: block.id.clone(),
@@ -4777,13 +4792,10 @@ fn recompose_hf_region(
                     carried_to_next: None,
                 };
                 emit_table_fragment(&mut flow, &fragment, block, measure, &ctx);
-                if advances {
-                    cursor += measure.total_height;
-                }
             }
             (BlockIn::Image(block), MeasureIn::Image(measure)) => {
                 let x = page.margins.left;
-                let y = origin_y + cursor;
+                let y = origin_y + hf_flow.place(measure.height, 0.0, 0.0);
                 let mut attrs = BlockRef::of(&block.id).attrs();
                 attrs.doc_start = block.pm_start;
                 attrs.doc_end = block.pm_end;
@@ -4807,15 +4819,21 @@ fn recompose_hf_region(
                     alt_text: capped_alt_text(block.alt.as_deref()),
                     attrs,
                 }));
-                cursor += measure.height;
             }
             (BlockIn::TextBox(block), MeasureIn::TextBox(measure)) => {
+                let flow_y = if block.display_mode.as_deref() != Some("float")
+                    && !is_floating_wrap_type(block.wrap_type.as_deref())
+                {
+                    hf_flow.place(measure.height, 0.0, 0.0)
+                } else {
+                    cursor
+                };
                 let (x, y) = resolve_hf_box_position(
                     block.position.as_ref(),
                     block.css_float.as_deref(),
                     measure.width,
                     measure.height,
-                    origin_y + cursor - page.margins.top,
+                    origin_y + flow_y - page.margins.top,
                     &geom,
                 );
                 let fragment = TextBoxFragmentIn {
@@ -4830,13 +4848,13 @@ fn recompose_hf_region(
                     z_index: None,
                 };
                 emit_text_box_fragment(&mut flow, &fragment, block, measure, &ctx);
-                if block.display_mode.as_deref() != Some("float")
-                    && !is_floating_wrap_type(block.wrap_type.as_deref())
-                {
-                    cursor += measure.height;
-                }
             }
             (BlockIn::Shape(block), MeasureIn::Shape(measure)) => {
+                let flow_y = if block.position.is_none() {
+                    hf_flow.place(measure.height, 0.0, 0.0)
+                } else {
+                    cursor
+                };
                 let prims = if block.position.is_none() {
                     &mut flow
                 } else if block.behind_doc.unwrap_or(false) {
@@ -4844,10 +4862,7 @@ fn recompose_hf_region(
                 } else {
                     &mut front
                 };
-                emit_hf_shape(prims, block, measure, &ctx, page, origin_y + cursor);
-                if block.position.is_none() {
-                    cursor += measure.height;
-                }
+                emit_hf_shape(prims, block, measure, &ctx, page, origin_y + flow_y);
             }
             _ => {}
         }
@@ -5890,6 +5905,8 @@ fn emit_line(
         && attrs.and_then(|attrs| attrs.list_marker_hidden) != Some(true)
     {
         let mut marker_format = RunFormattingIn::default();
+        marker_format.bold = attrs.and_then(|attrs| attrs.list_marker_bold);
+        marker_format.italic = attrs.and_then(|attrs| attrs.list_marker_italic);
         marker_format.font_family = attrs.and_then(|attrs| {
             attrs
                 .list_marker_font_family
@@ -5908,7 +5925,9 @@ fn emit_line(
         let color = match marker_revision {
             Some(RevisionKind::Ins) => REVISION_INS_COLOR,
             Some(RevisionKind::Del) => REVISION_DEL_COLOR,
-            None => "#000000",
+            None => attrs
+                .and_then(|attrs| attrs.list_marker_color.as_deref())
+                .unwrap_or("#000000"),
         };
         let mut marker_attrs = block_ref.attrs();
         marker_attrs.list_marker = Some(true);
@@ -10108,7 +10127,7 @@ mod tests {
 
     #[test]
     fn list_marker_emits_as_a_tracked_first_line_primitive() {
-        let input = json!({
+        let mut input = json!({
             "contractVersion": 1,
             "measured": [{
                 "block": {
@@ -10119,6 +10138,9 @@ mod tests {
                         "listMarker": "1.",
                         "listMarkerFontFamily": "Aptos",
                         "listMarkerFontSize": 12,
+                        "listMarkerBold": true,
+                        "listMarkerItalic": true,
+                        "listMarkerColor": "#FF0000",
                         "listMarkerRevision": "ins",
                         "indent": { "left": 48, "hanging": 24 }
                     },
@@ -10175,6 +10197,18 @@ mod tests {
         assert_eq!(marker["listMarkerRevision"], "ins");
         assert_eq!(marker["color"], REVISION_INS_COLOR);
         assert!(marker["font"].as_str().unwrap().contains("Aptos"));
+        assert!(marker["font"].as_str().unwrap().contains("700"));
+        assert!(marker["font"].as_str().unwrap().contains("italic"));
+        input["measured"][0]["block"]["attrs"]["listMarkerRevision"] = Value::Null;
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let marker = output["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["listMarker"] == true)
+            .unwrap();
+        assert_eq!(marker["color"], "#FF0000");
     }
 
     #[test]
@@ -10314,6 +10348,37 @@ mod tests {
         assert_eq!(image["flipH"], true);
         assert_eq!(image["w"], 44.641);
         assert_eq!(image["contentFrame"]["w"], 40);
+    }
+
+    #[test]
+    fn header_footer_spacing_collapses_and_short_footers_anchor_to_their_height() {
+        for (kind, height, spacings, expected) in [
+            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![59.0, 87.0]),
+            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![420.0, 448.0]),
+            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![454.0]),
+        ] {
+            let count = expected.len();
+            let measured: Vec<Value> = spacings.into_iter().take(count).enumerate().map(|(i,(before,after))|json!({
+                "block":{"kind":"paragraph","id":i,"runs":[{"kind":"text","text":"X"}],"attrs":{"spacing":{"before":before,"after":after}}},
+                "measure":{"kind":"paragraph","totalHeight":20.0+before+after,"lines":[{"headRun":0,"headChar":0,"tailRun":0,"tailChar":1,"width":10,"ascent":11,"descent":3,"lineHeight":20}]}
+            })).collect();
+            let input = json!({
+                "measured":[],"options":{},
+                "headersFooters":{"variants":[{"rId":"hf","kind":kind,"type":"default","height":height,"flowHeight":height,"measured":measured}]},
+                "layout":{"pages":[{"number":1,"size":{"w":300,"h":500},"margins":{"top":80,"right":20,"bottom":80,"left":20,"header":40,"footer":40},"fragments":[]}]}
+            });
+            let output: Value =
+                serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let ys: Vec<f64> = output["pages"][0][kind]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["text"] == "X")
+                .map(|p| p["baselineY"].as_f64().unwrap())
+                .collect();
+            assert_eq!(ys, expected, "{kind} {height}");
+        }
     }
 
     #[test]

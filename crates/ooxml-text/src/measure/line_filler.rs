@@ -5,8 +5,8 @@
 //! line breaks, how tall its box is, how floats narrow or displace it, and
 //! which [`TypesetRowOut`] fields come out. The rules it enforces:
 //!
-//! - A word is taken whole — trailing space included — and lands on the line
-//!   it ends, its full advance counted in that line's `width`. A line accepts
+//! - Trailing spaces retain their advance but do not force a word to wrap.
+//!   A line accepts
 //!   an overshoot of up to [`WRAP_SLACK_PX`], so a sub-half-pixel rounding
 //!   artifact never forces a wrap that exact twip arithmetic would not make.
 //! - A word too wide for a whole line is chopped: the current line takes what
@@ -63,6 +63,7 @@ const DEFAULT_SINGLE_LINE_RATIO: f32 = 1.15;
 
 /// Everything the filler needs that is fixed for the whole paragraph.
 pub(super) struct FillParams<'a> {
+    pub justify: bool,
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
     pub spacing: Option<&'a SpacingIn>,
@@ -94,6 +95,7 @@ struct LineState {
     tail_run: u32,
     tail_char: u32,
     width: f32,
+    space_width: f32,
     max_font_size_pt: f32,
     max_font: Option<FontId>,
     max_ascent: f32,
@@ -125,6 +127,7 @@ struct LineContribution {
     level: u8,
     logical_order: u32,
     shaped_cluster: bool,
+    is_space: bool,
 }
 
 /// Fill state: the paragraph's finished lines, the line in progress, and the
@@ -205,6 +208,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
             tail_run: 0,
             tail_char: 0,
             width: 0.0,
+            space_width: 0.0,
             max_font_size_pt: p.default_font_size_pt,
             max_font: None,
             max_ascent: 0.0,
@@ -476,15 +480,21 @@ impl Filler<'_> {
             // the line it ends (TypesetRow.width keeps trailing spaces).
             let word = &t.chars[char_idx..next_break];
             let word_width = span_width(word, t.letter_spacing);
+            let fitting_width = visible_span_width(word, t.letter_spacing);
 
-            if word_width > self.cur.available + WRAP_SLACK_PX {
+            if fitting_width > self.cur.available + WRAP_SLACK_PX {
                 // Overlong unbreakable word: fill the remaining space on the
                 // current line, then hard-break with at least one character.
                 let mut chunk_start = 0usize;
                 while chunk_start < word.len() {
                     let space_left = self.cur.available - self.cur.width + WRAP_SLACK_PX;
                     let remaining = &word[chunk_start..];
-                    let mut best = max_fitting(remaining, t.letter_spacing, space_left);
+                    let mut best = if visible_span_width(remaining, t.letter_spacing) <= space_left
+                    {
+                        remaining.len()
+                    } else {
+                        max_fitting(remaining, t.letter_spacing, space_left)
+                    };
                     if best == 0 {
                         if self.cur.width > 0.0 {
                             self.start_new_line(ri, utf16_at(t, char_idx + chunk_start))?;
@@ -514,7 +524,14 @@ impl Filler<'_> {
             }
 
             if self.cur.width > 0.0
-                && self.cur.width + word_width > self.cur.available + WRAP_SLACK_PX
+                && fitting_width > 0.0
+                && self.cur.width + fitting_width
+                    - if self.p.justify {
+                        self.cur.space_width * 0.25
+                    } else {
+                        0.0
+                    }
+                    > self.cur.available + WRAP_SLACK_PX
             {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
                 self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
@@ -575,6 +592,7 @@ impl Filler<'_> {
             level,
             logical_order: run_index.saturating_mul(1_000_000),
             shaped_cluster: false,
+            is_space: false,
         });
     }
 
@@ -583,6 +601,9 @@ impl Filler<'_> {
     /// across its trailing edge into the next word.
     fn record_text_clusters(&mut self, run_index: u32, chars: &[CharAdv], spacing: f32) {
         for (index, cluster) in chars.iter().enumerate() {
+            if cluster.is_space {
+                self.cur.space_width += cluster.advance.max(0.0);
+            }
             self.update_max_font(
                 cluster.font_size_pt,
                 cluster.metrics_font,
@@ -603,6 +624,7 @@ impl Filler<'_> {
                     .saturating_mul(1_000_000)
                     .saturating_add(cluster.logical_order),
                 shaped_cluster: true,
+                is_space: cluster.is_space,
             });
         }
     }
@@ -613,6 +635,28 @@ impl Filler<'_> {
     /// running Y by the *text* height only, so image growth never moves the
     /// next line's float probe.
     fn finalize_line(&mut self) -> Result<(), MeasureError> {
+        if self.p.justify {
+            let end = self
+                .cur
+                .contributions
+                .iter()
+                .rposition(|part| !part.is_space)
+                .map_or(0, |i| i + 1);
+            let parts = &mut self.cur.contributions[..end];
+            let visible_width = parts.iter().map(|part| part.advance).sum::<f32>();
+            let space_width = parts
+                .iter()
+                .filter(|part| part.is_space)
+                .map(|part| part.advance.max(0.0))
+                .sum::<f32>();
+            if visible_width > self.cur.available && space_width > 0.0 {
+                let compression = (visible_width - self.cur.available).min(space_width * 0.25);
+                for part in parts.iter_mut().filter(|part| part.is_space) {
+                    part.advance -= part.advance.max(0.0) / space_width * compression;
+                }
+                self.cur.width -= compression;
+            }
+        }
         if self.lines.len() >= MAX_LINES {
             return Err(MeasureError::Unsupported(format!(
                 "too many lines (> {MAX_LINES})"
@@ -783,6 +827,7 @@ impl Filler<'_> {
             tail_run: run,
             tail_char: char_utf16,
             width: 0.0,
+            space_width: 0.0,
             max_font_size_pt: self.p.default_font_size_pt,
             max_font: None,
             max_ascent: 0.0,
@@ -869,6 +914,14 @@ fn advance_metadata(
 /// UTF-16 offset of char index `i` (or the run's total length past the end).
 fn utf16_at(t: &PreparedText, i: usize) -> u32 {
     t.chars.get(i).map_or(t.utf16_len, |c| c.utf16_offset)
+}
+
+fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
+    let end = chars
+        .iter()
+        .rposition(|cluster| !cluster.is_space)
+        .map_or(0, |i| i + 1);
+    span_width(&chars[..end], letter_spacing)
 }
 
 /// Shaped advance sum plus tracking between complete clusters. This is the
@@ -985,6 +1038,7 @@ mod tests {
                     utf16_offset: 0,
                     utf16_len: 1,
                     advance: 10.0,
+                    is_space: false,
                     level: 0,
                     logical_order: 0,
                     font_size_pt: 12.0,
@@ -995,6 +1049,7 @@ mod tests {
                     utf16_offset: 1,
                     utf16_len: 2,
                     advance: 10.0,
+                    is_space: false,
                     level: 0,
                     logical_order: 1,
                     font_size_pt: 12.0,
@@ -1005,6 +1060,7 @@ mod tests {
                     utf16_offset: 3,
                     utf16_len: 1,
                     advance: 10.0,
+                    is_space: false,
                     level: 0,
                     logical_order: 2,
                     font_size_pt: 12.0,
@@ -1025,6 +1081,7 @@ mod tests {
     fn fill_at(width: f32, prepared: &[PreparedRun]) -> Vec<TypesetRowOut> {
         let compat = CompatIn::default();
         fill(FillParams {
+            justify: false,
             store: &{
                 let mut s = FontStore::new();
                 s.register(FIXTURE.to_vec()).unwrap();

@@ -1,8 +1,8 @@
 use std::f64::consts::PI;
 
 use docx_layout::types::{
-    AxisPosition, BlockId, ImageRunPosition, LineBreakRun, ParagraphAttrs, ParagraphBlock, Run,
-    RunFormatting, ShapeBlock, TabRun, TextRun,
+    AxisPosition, BlockId, BoxEdges, ImageRunPosition, LineBreakRun, ParagraphAttrs,
+    ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
 use serde_json::{Map, Value, json};
 
@@ -84,6 +84,20 @@ fn lower_shape(
         text_body_properties: field(shape, "textBodyProperties")
             .or_else(|| field(shape, "textBody"))
             .map(text_body_in_pixels),
+        wrap_distances: field(shape, "wrap").map(|wrap| BoxEdges {
+            top: field(wrap, "distT")
+                .and_then(Value::as_f64)
+                .map_or(0.0, emu_to_pixels),
+            right: field(wrap, "distR")
+                .and_then(Value::as_f64)
+                .map_or(0.0, emu_to_pixels),
+            bottom: field(wrap, "distB")
+                .and_then(Value::as_f64)
+                .map_or(0.0, emu_to_pixels),
+            left: field(wrap, "distL")
+                .and_then(Value::as_f64)
+                .map_or(0.0, emu_to_pixels),
+        }),
         wrap_type: field(shape, "wrap").and_then(|wrap| string(wrap, "type")),
         wrap_text: field(shape, "wrap").and_then(|wrap| string(wrap, "wrapText")),
         relative_height: field(shape, "relativeHeight")
@@ -865,6 +879,18 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_wrap_distances_lower_from_emu_to_pixels() {
+        let shape = json!({"shapeType":"rect","wrap":{"type":"square","distT":45720,"distB":0,"distL":114300,"distR":114300}});
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let distances = block.wrap_distances.unwrap();
+        assert!((distances.top - 4.8).abs() < 1e-10);
+        assert_eq!(
+            (distances.bottom, distances.left, distances.right),
+            (0.0, 12.0, 12.0)
+        );
+    }
 
     #[test]
     fn lowers_anchor_offsets_alignment_and_metadata() {

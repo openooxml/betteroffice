@@ -588,6 +588,12 @@ pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub list_marker_color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_suffix: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub list_marker_revision: Option<String>,
@@ -924,6 +930,8 @@ pub struct ShapeBlock {
     pub effects: Option<Vec<Value>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_body_properties: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wrap_distances: Option<BoxEdges>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<ImageRunPosition>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1424,6 +1432,7 @@ impl PartialEq for ShapeBlock {
             scene: _,
             effects: _,
             text_body_properties: _,
+            wrap_distances: _,
             position: _,
             wrap_type: _,
             wrap_text: _,
@@ -1454,6 +1463,7 @@ impl PartialEq for ShapeBlock {
             && self.scene == other.scene
             && self.effects == other.effects
             && self.text_body_properties == other.text_body_properties
+            && self.wrap_distances == other.wrap_distances
             && self.position == other.position
             && self.wrap_type == other.wrap_type
             && self.wrap_text == other.wrap_text
