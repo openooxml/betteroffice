@@ -34,15 +34,19 @@ const LINE_DASH: Record<'dashed' | 'dotted', number[]> = {
 /**
  * Paint a display list into a 2D context. `dpr` maps device-independent list
  * coordinates onto the backing store, so callers size the canvas at
- * `width * dpr` × `height * dpr` and this sets the matching transform.
+ * `width * dpr` × `height * dpr`. `origin` is in backing-store pixels.
  */
 export function paintDisplayList(
   ctx: CanvasRenderingContext2D,
   dl: DisplayList,
-  dpr: number
+  dpr: number,
+  origin: { x: number; y: number } = { x: 0, y: 0 }
 ): void {
   ctx.save();
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.setTransform(dpr, 0, 0, dpr, origin.x, origin.y);
+  ctx.beginPath();
+  ctx.rect(0, 0, dl.width, dl.height);
+  ctx.clip();
   ctx.clearRect(0, 0, dl.width, dl.height);
   for (const cmd of dl.commands) paintCommand(ctx, cmd);
   ctx.restore();
@@ -194,7 +198,7 @@ function fontString(cmd: TextCmd): string {
 }
 
 function fontSizePx(cmd: TextCmd): number {
-  return cmd.chart ? cmd.fontSize * PX_PER_PT : cmd.fontSize;
+  return cmd.fontSize * PX_PER_PT;
 }
 
 function paintDecorations(ctx: CanvasRenderingContext2D, cmd: TextCmd): void {

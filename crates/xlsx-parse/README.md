@@ -15,6 +15,11 @@ counts, and no allocation sized from a value in the file.
 | `MAX_HYPERLINKS` | 65,536 per worksheet |
 | `MAX_STYLE_ENTRIES` | 65,536 |
 
+Shared formulas expand only for explicitly shared cells, preserving absolute
+and mixed references. Expansion is limited to 32 KiB per formula and 32 MiB per
+worksheet; missing or invalid shared groups are rejected. Cached values remain
+unchanged until recalculation.
+
 `serialize_workbook` writes the model back out. It regenerates the parts the
 model represents; package parts the model does not cover are not retained.
 

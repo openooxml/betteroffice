@@ -18,6 +18,10 @@ pub fn serialize_block_content(
         BlockContent::Paragraph(paragraph) => serialize_paragraph(paragraph, context),
         BlockContent::Table(table) => serialize_table(table, context),
         BlockContent::BlockSdt(sdt) => serialize_block_sdt(sdt, context),
+        BlockContent::RawXml(raw) => {
+            super::raw::validate_replayed_fragment(&raw.xml)?;
+            Ok(raw.xml.clone())
+        }
     }
 }
 

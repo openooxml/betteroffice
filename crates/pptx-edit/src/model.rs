@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
-use pptx_parse::{GraphicFrameData, Placeholder};
+use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
+
+pub use pptx_parse::CommentFlavor;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -40,6 +42,10 @@ pub struct TextStyle {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -51,6 +57,10 @@ pub struct TextStylePatch {
     pub color: Option<String>,
     pub font_family: Option<String>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_pct: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +118,9 @@ pub struct ShapeSnapshot {
     pub rotation_deg: f64,
     pub flip_h: bool,
     pub flip_v: bool,
+    /// Hides this shape and its descendants.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub hidden: bool,
     pub geometry: String,
     pub adjust_values: BTreeMap<String, f64>,
     pub placeholder: Option<Placeholder>,
@@ -116,9 +129,15 @@ pub struct ShapeSnapshot {
     pub outline: Option<ShapeOutline>,
     pub resolved_outline_color: Option<String>,
     pub media_part_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blip_effects: Vec<BlipEffect>,
     pub graphic: Option<GraphicFrameData>,
     pub text_stories: Vec<StorySnapshot>,
     pub children: Vec<ShapeSnapshot>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -146,6 +165,38 @@ pub struct DeckSnapshot {
     pub width_emu: i64,
     pub height_emu: i64,
     pub slides: Vec<SlideSnapshot>,
+    #[serde(default, skip_serializing_if = "legacy_comment_flavor")]
+    pub comment_flavor: CommentFlavor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<CommentSnapshot>,
+}
+
+fn legacy_comment_flavor(flavor: &CommentFlavor) -> bool {
+    *flavor == CommentFlavor::Legacy
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentSnapshot {
+    pub id: String,
+    pub slide_id: String,
+    pub author: String,
+    pub initials: String,
+    pub text: String,
+    pub created: Option<String>,
+    pub x_emu: i64,
+    pub y_emu: i64,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommentReceipt {
+    pub comment_id: String,
+    pub slide_id: String,
+    pub parent_id: Option<String>,
+    pub resolved: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -272,6 +323,10 @@ pub enum EditError {
     ShapeNotFound(String),
     #[error("story {0:?} was not found")]
     StoryNotFound(String),
+    #[error("comment {0:?} was not found")]
+    CommentNotFound(String),
+    #[error("invalid comment: {0}")]
+    InvalidComment(String),
     #[error("index {index} is outside length {length}")]
     OutOfBounds { index: u32, length: u32 },
     #[error("text range {start}..{end} crosses a paragraph boundary")]
@@ -280,10 +335,36 @@ pub enum EditError {
     InvalidGeometry(String),
     #[error("invalid shape adjustment: {0}")]
     InvalidAdjustment(String),
+    #[error("invalid text: {0}")]
+    InvalidText(String),
     #[error("update observer failed: {0}")]
     Observer(String),
     #[error("JSON boundary error: {0}")]
     Json(String),
+    #[error("could not write PPTX: {0}")]
+    Write(String),
 }
 
 pub type EditResult<T> = Result<T, EditError>;
+
+/// Rejects characters XML 1.0 cannot carry, so a bad edit fails loudly
+/// instead of producing an unopenable file at save time.
+pub(crate) fn validate_xml_text(value: &str) -> EditResult<()> {
+    match value
+        .chars()
+        .find(|character| !legal_xml_character(*character))
+    {
+        Some(character) => Err(EditError::InvalidText(format!(
+            "character U+{:04X} cannot be stored in a PPTX file",
+            character as u32
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn legal_xml_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || ('\u{20}'..='\u{d7ff}').contains(&character)
+        || ('\u{e000}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{10ffff}').contains(&character)
+}

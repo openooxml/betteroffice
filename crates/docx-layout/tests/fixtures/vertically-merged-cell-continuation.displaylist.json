@@ -19,7 +19,7 @@
       "pageIndex": 0,
       "primitives": [
         {
-          "baselineY": 70.2,
+          "baselineY": 69.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -53,7 +53,7 @@
           "x": 57
         },
         {
-          "baselineY": 94.2,
+          "baselineY": 93.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -87,7 +87,7 @@
           "x": 57
         },
         {
-          "baselineY": 118.2,
+          "baselineY": 117.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -121,7 +121,7 @@
           "x": 57
         },
         {
-          "baselineY": 142.2,
+          "baselineY": 141.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -155,7 +155,7 @@
           "x": 57
         },
         {
-          "baselineY": 166.2,
+          "baselineY": 165.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -189,7 +189,7 @@
           "x": 57
         },
         {
-          "baselineY": 190.2,
+          "baselineY": 189.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -223,7 +223,7 @@
           "x": 57
         },
         {
-          "baselineY": 214.2,
+          "baselineY": 213.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -257,7 +257,7 @@
           "x": 57
         },
         {
-          "baselineY": 238.2,
+          "baselineY": 237.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -291,7 +291,7 @@
           "x": 57
         },
         {
-          "baselineY": 262.2,
+          "baselineY": 261.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -325,7 +325,7 @@
           "x": 57
         },
         {
-          "baselineY": 286.2,
+          "baselineY": 285.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -359,7 +359,7 @@
           "x": 57
         },
         {
-          "baselineY": 310.2,
+          "baselineY": 309.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -393,7 +393,7 @@
           "x": 57
         },
         {
-          "baselineY": 334.2,
+          "baselineY": 333.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -427,7 +427,7 @@
           "x": 57
         },
         {
-          "baselineY": 358.2,
+          "baselineY": 357.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -461,7 +461,7 @@
           "x": 57
         },
         {
-          "baselineY": 382.2,
+          "baselineY": 381.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -495,7 +495,7 @@
           "x": 57
         },
         {
-          "baselineY": 406.2,
+          "baselineY": 405.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -529,7 +529,7 @@
           "x": 57
         },
         {
-          "baselineY": 430.2,
+          "baselineY": 429.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -563,7 +563,7 @@
           "x": 57
         },
         {
-          "baselineY": 454.2,
+          "baselineY": 453.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -597,7 +597,7 @@
           "x": 57
         },
         {
-          "baselineY": 478.2,
+          "baselineY": 477.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -631,7 +631,7 @@
           "x": 57
         },
         {
-          "baselineY": 502.2,
+          "baselineY": 501.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -665,7 +665,7 @@
           "x": 57
         },
         {
-          "baselineY": 526.2,
+          "baselineY": 525.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -699,7 +699,7 @@
           "x": 57
         },
         {
-          "baselineY": 70.2,
+          "baselineY": 69.2,
           "blockId": 600002,
           "cell": {
             "cellId": "60-r0-c1",
@@ -733,7 +733,7 @@
           "x": 157
         },
         {
-          "baselineY": 94.2,
+          "baselineY": 93.2,
           "blockId": 600004,
           "cell": {
             "cellId": "60-r1-c1",
@@ -767,7 +767,7 @@
           "x": 157
         },
         {
-          "baselineY": 118.2,
+          "baselineY": 117.2,
           "blockId": 600006,
           "cell": {
             "cellId": "60-r2-c1",
@@ -822,42 +822,7 @@
       "pageIndex": 1,
       "primitives": [
         {
-          "baselineY": 46.2,
-          "blockId": 600001,
-          "cell": {
-            "cellId": "60-r0-c0",
-            "col": 0,
-            "colSpan": 1,
-            "continuation": true,
-            "row": 0,
-            "rowSpan": 3
-          },
-          "clipGroup": {
-            "clip": {
-              "h": 480,
-              "w": 100,
-              "x": 50,
-              "y": 50
-            },
-            "id": "clip-60-r0-c0"
-          },
-          "color": "#000000",
-          "font": "400 14.667px Calibri, sans-serif",
-          "kind": "text",
-          "lineIndex": 19,
-          "table": {
-            "columnCount": 2,
-            "rowCount": 3,
-            "rowEnd": 3,
-            "rowStart": 2,
-            "tableId": "60"
-          },
-          "text": "m",
-          "width": 100,
-          "x": 57
-        },
-        {
-          "baselineY": 70.2,
+          "baselineY": 69.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -892,7 +857,7 @@
           "x": 57
         },
         {
-          "baselineY": 94.2,
+          "baselineY": 93.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -927,7 +892,7 @@
           "x": 57
         },
         {
-          "baselineY": 118.2,
+          "baselineY": 117.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -962,7 +927,7 @@
           "x": 57
         },
         {
-          "baselineY": 142.2,
+          "baselineY": 141.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -997,7 +962,7 @@
           "x": 57
         },
         {
-          "baselineY": 166.2,
+          "baselineY": 165.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1032,7 +997,7 @@
           "x": 57
         },
         {
-          "baselineY": 190.2,
+          "baselineY": 189.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1067,7 +1032,7 @@
           "x": 57
         },
         {
-          "baselineY": 214.2,
+          "baselineY": 213.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1102,7 +1067,7 @@
           "x": 57
         },
         {
-          "baselineY": 238.2,
+          "baselineY": 237.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1137,7 +1102,7 @@
           "x": 57
         },
         {
-          "baselineY": 262.2,
+          "baselineY": 261.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1172,7 +1137,7 @@
           "x": 57
         },
         {
-          "baselineY": 286.2,
+          "baselineY": 285.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1207,7 +1172,7 @@
           "x": 57
         },
         {
-          "baselineY": 310.2,
+          "baselineY": 309.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1242,7 +1207,7 @@
           "x": 57
         },
         {
-          "baselineY": 334.2,
+          "baselineY": 333.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1277,7 +1242,7 @@
           "x": 57
         },
         {
-          "baselineY": 358.2,
+          "baselineY": 357.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1312,7 +1277,7 @@
           "x": 57
         },
         {
-          "baselineY": 382.2,
+          "baselineY": 381.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1347,7 +1312,7 @@
           "x": 57
         },
         {
-          "baselineY": 406.2,
+          "baselineY": 405.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1382,7 +1347,7 @@
           "x": 57
         },
         {
-          "baselineY": 430.2,
+          "baselineY": 429.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1417,7 +1382,7 @@
           "x": 57
         },
         {
-          "baselineY": 454.2,
+          "baselineY": 453.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1452,7 +1417,7 @@
           "x": 57
         },
         {
-          "baselineY": 478.2,
+          "baselineY": 477.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1487,7 +1452,7 @@
           "x": 57
         },
         {
-          "baselineY": 502.2,
+          "baselineY": 501.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",
@@ -1522,7 +1487,7 @@
           "x": 57
         },
         {
-          "baselineY": 526.2,
+          "baselineY": 525.2,
           "blockId": 600001,
           "cell": {
             "cellId": "60-r0-c0",

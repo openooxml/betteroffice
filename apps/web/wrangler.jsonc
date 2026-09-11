@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "betteroffice-web",
-  "main": ".open-next/worker.js",
+  "main": "worker.js",
   "compatibility_date": "2026-06-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "assets": {
@@ -9,6 +9,7 @@
     "binding": "ASSETS"
   },
   "routes": [{ "pattern": "betteroffice.dev", "custom_domain": true }],
+  "triggers": { "crons": ["0 */6 * * *"] },
   "kv_namespaces": [
     { "binding": "STATS_KV", "id": "3a3fa53e215b41f5838b5494f8be7aae" }
   ],

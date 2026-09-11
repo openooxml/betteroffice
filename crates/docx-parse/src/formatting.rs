@@ -503,6 +503,18 @@ pub struct ParagraphFormatting {
     pub indent_first_line: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hanging_indent: Option<bool>,
+    /// Hundredths of a character; overrides the twip indent in Word.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_left_chars: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_right_chars: Option<f64>,
+    /// Hundredths of a character, negative for `w:hangingChars`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_first_line_chars: Option<f64>,
+    /// Whether the character first-line indent is `w:hangingChars`; the sign
+    /// alone cannot say so once a zero has crossed JSON.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hanging_indent_chars: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub borders: Option<Borders>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -566,6 +578,14 @@ pub fn parse_paragraph_properties(
         if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hanging", 1.0) {
             value.indent_first_line = Some(-hanging);
             value.hanging_indent = Some(true);
+        }
+        value.indent_left_chars = indent.parse_numeric_attribute(Some("w"), "leftChars", 1.0);
+        value.indent_right_chars = indent.parse_numeric_attribute(Some("w"), "rightChars", 1.0);
+        value.indent_first_line_chars =
+            indent.parse_numeric_attribute(Some("w"), "firstLineChars", 1.0);
+        if let Some(hanging) = indent.parse_numeric_attribute(Some("w"), "hangingChars", 1.0) {
+            value.indent_first_line_chars = Some(-hanging);
+            value.hanging_indent_chars = Some(true);
         }
     }
     value.borders = parse_paragraph_borders(p_pr.child("w", "pBdr"));
@@ -639,8 +659,22 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.spacing_explicit, &source.spacing_explicit);
             overlay(&mut result.indent_left, &source.indent_left);
             overlay(&mut result.indent_right, &source.indent_right);
-            overlay(&mut result.indent_first_line, &source.indent_first_line);
-            overlay(&mut result.hanging_indent, &source.hanging_indent);
+            overlay_indent_kind(
+                (&mut result.indent_first_line, &mut result.hanging_indent),
+                (&source.indent_first_line, &source.hanging_indent),
+            );
+            overlay(&mut result.indent_left_chars, &source.indent_left_chars);
+            overlay(&mut result.indent_right_chars, &source.indent_right_chars);
+            overlay_indent_kind(
+                (
+                    &mut result.indent_first_line_chars,
+                    &mut result.hanging_indent_chars,
+                ),
+                (
+                    &source.indent_first_line_chars,
+                    &source.hanging_indent_chars,
+                ),
+            );
             if let Some(source) = &source.borders {
                 result.borders = Some(merge_borders(target.borders.as_ref(), source));
             }
@@ -1354,6 +1388,19 @@ fn merge_color_deep(target: Option<&ColorValue>, source: &ColorValue) -> ColorVa
     value
 }
 
+/// A first-line indent and whether it hangs are one fact: a source that
+/// supplies the value supplies the kind with it, so an inherited hanging flag
+/// cannot turn a more specific first-line indent back into a hanging one.
+fn overlay_indent_kind(
+    (value, hanging): (&mut Option<f64>, &mut Option<bool>),
+    (source_value, source_hanging): (&Option<f64>, &Option<bool>),
+) {
+    if source_value.is_some() {
+        *value = *source_value;
+        *hanging = *source_hanging;
+    }
+}
+
 fn overlay<T: Clone>(target: &mut Option<T>, source: &Option<T>) {
     if source.is_some() {
         target.clone_from(source);
@@ -1403,6 +1450,49 @@ mod tests {
                 .as_deref(),
             Some("continue")
         );
+    }
+
+    /// A more specific first-line indent replaces an inherited hanging one
+    /// kind and all, in either unit system.
+    #[test]
+    fn a_first_line_indent_does_not_inherit_a_hanging_kind_from_its_base() {
+        let base = root(
+            r#"<w:style><w:pPr><w:ind w:hanging="360" w:hangingChars="0"/></w:pPr></w:style>"#,
+        );
+        let base = parse_paragraph_properties(base.child("w", "pPr"), None).unwrap();
+        let child = root(
+            r#"<w:style><w:pPr><w:ind w:firstLine="200" w:firstLineChars="200"/></w:pPr></w:style>"#,
+        );
+        let child = parse_paragraph_properties(child.child("w", "pPr"), None).unwrap();
+
+        let merged = merge_paragraph_formatting(Some(&base), Some(&child)).unwrap();
+
+        assert_eq!(merged.indent_first_line, Some(200.0));
+        assert_eq!(merged.hanging_indent, None);
+        assert_eq!(merged.indent_first_line_chars, Some(200.0));
+        assert_eq!(merged.hanging_indent_chars, None);
+
+        let inherited = merge_paragraph_formatting(Some(&child), Some(&base)).unwrap();
+        assert_eq!(inherited.indent_first_line, Some(-360.0));
+        assert_eq!(inherited.hanging_indent, Some(true));
+        assert_eq!(inherited.hanging_indent_chars, Some(true));
+    }
+
+    #[test]
+    fn parses_character_unit_indents_alongside_their_twip_companions() {
+        let style = root(
+            r#"<w:style><w:pPr><w:ind w:left="200" w:leftChars="100" w:right="105" w:rightChars="50" w:firstLine="420" w:firstLineChars="200"/></w:pPr></w:style>"#,
+        );
+        let paragraph = parse_paragraph_properties(style.child("w", "pPr"), None).unwrap();
+        assert_eq!(paragraph.indent_left_chars, Some(100.0));
+        assert_eq!(paragraph.indent_right_chars, Some(50.0));
+        assert_eq!(paragraph.indent_first_line_chars, Some(200.0));
+        let hanging = root(
+            r#"<w:style><w:pPr><w:ind w:hanging="315" w:hangingChars="150"/></w:pPr></w:style>"#,
+        );
+        let hanging = parse_paragraph_properties(hanging.child("w", "pPr"), None).unwrap();
+        assert_eq!(hanging.indent_first_line_chars, Some(-150.0));
+        assert_eq!(hanging.hanging_indent, Some(true));
     }
 
     #[test]

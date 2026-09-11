@@ -75,17 +75,6 @@ export function InlineHeaderFooterEditor({
   const label = position === 'header' ? t('headerFooter.header') : t('headerFooter.footer');
 
   useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      event.stopPropagation();
-      onClose();
-    };
-    document.addEventListener('keydown', handleKeyDown, true);
-    return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [onClose]);
-
-  useEffect(() => {
     if (!showOptions) return;
     const handleClick = (event: MouseEvent) => {
       if (optionsRef.current && !optionsRef.current.contains(event.target as Node)) {

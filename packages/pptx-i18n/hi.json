@@ -2,6 +2,8 @@
   "_lang": "hi",
   "toolbar": {
     "label": null,
+    "save": "सहेजें",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,13 +18,21 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "फ़ाइल",
       "slides": null,
       "history": null,
       "zoom": null,
       "tools": null,
       "font": null,
       "text": null,
-      "shape": null
+      "shape": null,
+      "alignment": "संरेखण"
+    },
+    "align": {
+      "left": "बाएं संरेखित करें",
+      "center": "केंद्रित करें",
+      "right": "दाएं संरेखित करें",
+      "justify": "दोनों ओर संरेखित करें"
     },
     "newSlide": null,
     "newSlideWithLayout": null,

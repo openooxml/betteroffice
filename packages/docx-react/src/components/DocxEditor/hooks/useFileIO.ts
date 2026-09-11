@@ -107,6 +107,7 @@ export function useFileIO({
   comments,
   documentName,
   onSave,
+  downloadOnSave = true,
   onOpen,
   onError,
   onPrint,
@@ -120,6 +121,7 @@ export function useFileIO({
   comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
+  downloadOnSave?: boolean;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
   onError: ((error: Error) => void) | undefined;
   onPrint: (() => void) | undefined;
@@ -171,7 +173,7 @@ export function useFileIO({
 
   const handleDownloadDocument = useCallback(async () => {
     const buffer = await handleSave();
-    if (!buffer) return;
+    if (!buffer || !downloadOnSave) return;
     const blob = new Blob([buffer], {
       type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
     });
@@ -182,7 +184,7 @@ export function useFileIO({
     a.click();
     // Defer revoke so Safari has time to start the download.
     setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [handleSave, documentName]);
+  }, [handleSave, documentName, downloadOnSave]);
 
   const handleOpenDocument = useCallback(() => {
     docxInputRef.current?.click();

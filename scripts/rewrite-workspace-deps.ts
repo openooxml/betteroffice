@@ -14,6 +14,7 @@ interface PackageManifest {
   name?: string;
   version?: string;
   dependencies?: Record<string, unknown>;
+  devDependencies?: Record<string, unknown>;
   peerDependencies?: Record<string, unknown>;
   optionalDependencies?: Record<string, unknown>;
 }
@@ -24,8 +25,10 @@ interface ManifestEntry {
 }
 
 const PKG_DIR = 'packages';
+// A workspace:* anywhere in a packed manifest can make npm reject the tarball.
 const DEPENDENCY_FIELDS = [
   'dependencies',
+  'devDependencies',
   'peerDependencies',
   'optionalDependencies',
 ] as const;
@@ -46,6 +49,8 @@ function resolve(dep: string, range: string): string {
   const suffix = range.slice('workspace:'.length);
   if (suffix === '*' || suffix === '') return version;
   if (suffix === '^' || suffix === '~') return suffix + version;
+  // Preserve explicit ranges such as ^0; tightening them makes Changesets
+  // re-escalate suppressed peer dependents.
   return suffix; // workspace:1.2.3 → 1.2.3
 }
 

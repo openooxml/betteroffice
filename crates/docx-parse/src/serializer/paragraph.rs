@@ -3,8 +3,8 @@
 use crate::borders::Borders;
 use crate::formatting::{NumberingProperties, ParagraphFormatting, ParagraphFrame};
 use crate::inline::{
-    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation,
-    SdtProperties, SimpleField,
+    BookmarkEnd, BookmarkStart, ComplexField, Hyperlink, InlineNode, InlineSdt, MathEquation, Run,
+    RunContent, SdtProperties, SimpleField,
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
@@ -15,13 +15,22 @@ use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::foundation::{BorderSide, write_border};
-use super::raw::{validate_math_subtree, validate_raw_subtree};
+use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::run::{
     append_generated, nonempty, nonempty_trimmed, normalized_tracked_id, serialize_deleted_run,
     serialize_run, serialize_text_formatting, write_shading,
 };
 use super::section::serialize_section_properties;
 use super::xml_writer::{XmlWriter, int_attr, js_number};
+
+/// A replayed attribute name must be exactly one XML name, or it could
+/// smuggle markup into the tag.
+pub(crate) fn is_safe_attribute_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_' | '.')
+        })
+}
 
 /// Serialize one complete `w:p` element.
 pub fn serialize_paragraph(
@@ -46,6 +55,11 @@ fn serialize_paragraph_inner(
     if let Some(value) = nonempty(paragraph.text_id.as_deref()) {
         writer.attribute("w14:textId", value);
     }
+    for attribute in &paragraph.extra_attributes {
+        if is_safe_attribute_name(&attribute.name) {
+            writer.dynamic_attribute(&attribute.name, &attribute.value);
+        }
+    }
     let properties = serialize_paragraph_formatting(
         paragraph.formatting.as_ref(),
         paragraph.property_changes.as_deref(),
@@ -55,9 +69,34 @@ fn serialize_paragraph_inner(
         paragraph.section_properties.as_ref(),
     )?;
     append_generated(&mut writer, &properties);
+    let mut generated_comment_references = Vec::new();
     for content in &paragraph.content {
-        let content = serialize_paragraph_content(content, context)?;
-        append_generated(&mut writer, &content);
+        append_generated(&mut writer, &serialize_paragraph_content(content, context)?);
+        if let ParagraphContent::CommentRange(marker) = content
+            && marker.node_type == "commentRangeEnd"
+            && !generated_comment_references.contains(&marker.id)
+            && !paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(node) => has_comment_reference(node, marker.id),
+                ParagraphContent::Tracked(change) => change.content.iter().any(|node| {
+                    matches!(node, InlineNode::Run(_) | InlineNode::Hyperlink(_))
+                        && has_comment_reference(node, marker.id)
+                }),
+                _ => false,
+            })
+        {
+            writer
+                .start_element("w:r")
+                .start_element("w:rPr")
+                .start_element("w:rStyle")
+                .attribute("w:val", "CommentReference")
+                .end_element()
+                .end_element()
+                .start_element("w:commentReference")
+                .attribute("w:id", &js_number(marker.id))
+                .end_element()
+                .end_element();
+            generated_comment_references.push(marker.id);
+        }
     }
     writer.end_element();
     Ok(writer.finish())
@@ -192,6 +231,10 @@ pub(crate) fn serialize_inline_node(
         InlineNode::ComplexField(field) => serialize_complex_field(field, context),
         InlineNode::InlineSdt(sdt) => serialize_inline_sdt(sdt, context),
         InlineNode::Math(math) => serialize_math(math),
+        InlineNode::RawXml(raw) => {
+            validate_replayed_fragment(&raw.xml)?;
+            Ok(raw.xml.clone())
+        }
     }
 }
 
@@ -241,7 +284,7 @@ fn serialize_hyperlink(
         || nonempty(hyperlink.anchor.as_deref()).is_some()
         || nonempty(hyperlink.tooltip.as_deref()).is_some()
         || nonempty(hyperlink.target.as_deref()).is_some()
-        || hyperlink.history == Some(false)
+        || hyperlink.history.is_some()
         || nonempty(hyperlink.doc_location.as_deref()).is_some();
     if !has_attributes && nonempty(hyperlink.href.as_deref()).is_none() {
         return Ok(children);
@@ -252,8 +295,8 @@ fn serialize_hyperlink(
     optional_attr(&mut writer, "w:anchor", hyperlink.anchor.as_deref());
     optional_attr(&mut writer, "w:tooltip", hyperlink.tooltip.as_deref());
     optional_attr(&mut writer, "w:tgtFrame", hyperlink.target.as_deref());
-    if hyperlink.history == Some(false) {
-        writer.attribute("w:history", "0");
+    if let Some(history) = hyperlink.history {
+        writer.attribute("w:history", if history { "1" } else { "0" });
     }
     optional_attr(
         &mut writer,
@@ -269,38 +312,21 @@ fn serialize_simple_field(
     field: &SimpleField,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let properties = field
-        .content
-        .first()
-        .and_then(|run| run.formatting.as_ref())
-        .map(|formatting| serialize_text_formatting(Some(formatting)))
-        .unwrap_or_default();
     let mut output = String::new();
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"begin\"");
+    output.push_str("<w:fldSimple w:instr=\"");
+    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
+    output.push('"');
     if field.fld_lock == Some(true) {
         output.push_str(" w:fldLock=\"true\"");
     }
-    output.push_str("/></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:instrText");
-    if needs_preserve(&field.instruction) {
-        output.push_str(" xml:space=\"preserve\"");
+    if field.dirty == Some(true) {
+        output.push_str(" w:dirty=\"true\"");
     }
     output.push('>');
-    output.push_str(&super::xml_writer::escape_xml(&field.instruction));
-    output.push_str("</w:instrText></w:r>");
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
     for run in &field.content {
         output.push_str(&serialize_run(run, context)?);
     }
-    output.push_str("<w:r>");
-    output.push_str(&properties);
-    output.push_str("<w:fldChar w:fldCharType=\"end\"/></w:r>");
+    output.push_str("</w:fldSimple>");
     Ok(output)
 }
 
@@ -340,8 +366,20 @@ fn serialize_complex_field(
     output.push_str("<w:r>");
     output.push_str(&properties);
     output.push_str("<w:fldChar w:fldCharType=\"separate\"/></w:r>");
-    for run in &field.field_result {
-        output.push_str(&serialize_run(run, context)?);
+    // Run-level fallback: multi-block results and fields rebuilt by the edit path.
+    let structured = field
+        .structured_result
+        .as_ref()
+        .filter(|content| content.blocks.is_none())
+        .and_then(|content| content.inline.as_ref());
+    if let Some(nodes) = structured {
+        for node in nodes {
+            output.push_str(&serialize_inline_node(node, context)?);
+        }
+    } else {
+        for run in &field.field_result {
+            output.push_str(&serialize_run(run, context)?);
+        }
     }
     output.push_str("<w:r>");
     output.push_str(&properties);
@@ -535,6 +573,51 @@ fn serialize_range_end(marker: &RangeEnd) -> Result<String, ParseError> {
     Ok(writer.finish())
 }
 
+fn run_has_comment_reference(run: &Run, id: f64) -> bool {
+    run.content.iter().any(
+        |content| matches!(content, RunContent::CommentReference { id: reference } if *reference == Some(id)),
+    )
+}
+
+fn has_comment_reference(node: &InlineNode, id: f64) -> bool {
+    match node {
+        InlineNode::Run(run) => run_has_comment_reference(run, id),
+        InlineNode::Hyperlink(hyperlink) => hyperlink
+            .children
+            .iter()
+            .any(|node| matches!(node, InlineNode::Run(run) if run_has_comment_reference(run, id))),
+        InlineNode::InlineSdt(sdt) => sdt
+            .content
+            .iter()
+            .any(|node| has_comment_reference(node, id)),
+        InlineNode::SimpleField(field) => field
+            .content
+            .iter()
+            .any(|run| run_has_comment_reference(run, id)),
+        InlineNode::ComplexField(field) => {
+            field
+                .field_code
+                .iter()
+                .any(|run| run_has_comment_reference(run, id))
+                || field
+                    .structured_result
+                    .as_ref()
+                    .filter(|content| content.blocks.is_none())
+                    .and_then(|content| content.inline.as_ref())
+                    .map_or_else(
+                        || {
+                            field
+                                .field_result
+                                .iter()
+                                .any(|run| run_has_comment_reference(run, id))
+                        },
+                        |nodes| nodes.iter().any(|node| has_comment_reference(node, id)),
+                    )
+        }
+        _ => false,
+    }
+}
+
 fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(180);
     match marker.node_type.as_str() {
@@ -548,16 +631,6 @@ fn serialize_comment_range(marker: &CommentRange) -> Result<String, ParseError> 
             writer
                 .start_element("w:commentRangeEnd")
                 .attribute("w:id", &js_number(marker.id))
-                .end_element()
-                .start_element("w:r")
-                .start_element("w:rPr")
-                .start_element("w:rStyle")
-                .attribute("w:val", "CommentReference")
-                .end_element()
-                .end_element()
-                .start_element("w:commentReference")
-                .attribute("w:id", &js_number(marker.id))
-                .end_element()
                 .end_element();
         }
         _ => {}
@@ -690,21 +763,38 @@ fn write_spacing(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
 }
 
 fn write_indentation(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
-    let first = formatting.indent_first_line;
-    let has_first =
-        first.is_some_and(|value| formatting.hanging_indent == Some(true) || value != 0.0);
-    if formatting.indent_left.is_none() && formatting.indent_right.is_none() && !has_first {
+    let hanging = formatting.hanging_indent == Some(true);
+    if formatting.indent_left.is_none()
+        && formatting.indent_right.is_none()
+        && formatting.indent_first_line.is_none()
+        && formatting.indent_left_chars.is_none()
+        && formatting.indent_right_chars.is_none()
+        && formatting.indent_first_line_chars.is_none()
+    {
         return;
     }
     writer.start_element("w:ind");
     optional_int(writer, "w:left", formatting.indent_left);
+    optional_int(writer, "w:leftChars", formatting.indent_left_chars);
     optional_int(writer, "w:right", formatting.indent_right);
-    if let Some(first) = first {
-        if formatting.hanging_indent == Some(true) {
-            writer.attribute("w:hanging", &int_attr(Some(first.abs())));
-        } else if first != 0.0 {
-            writer.attribute("w:firstLine", &int_attr(Some(first)));
-        }
+    optional_int(writer, "w:rightChars", formatting.indent_right_chars);
+    if let Some(first) = formatting.indent_first_line {
+        let name = if hanging { "w:hanging" } else { "w:firstLine" };
+        writer.attribute(
+            name,
+            &int_attr(Some(if hanging { first.abs() } else { first })),
+        );
+    }
+    if let Some(first) = formatting.indent_first_line_chars {
+        let hanging = formatting
+            .hanging_indent_chars
+            .unwrap_or_else(|| first.is_sign_negative());
+        let name = if hanging {
+            "w:hangingChars"
+        } else {
+            "w:firstLineChars"
+        };
+        writer.attribute(name, &int_attr(Some(first.abs())));
     }
     writer.end_element();
 }
@@ -809,11 +899,40 @@ mod tests {
     }
 
     #[test]
+    fn a_simple_field_saves_back_as_a_simple_field() {
+        let field = SimpleField {
+            node_type: crate::inline::SimpleFieldType::SimpleField,
+            field_type: "PAGE".to_owned(),
+            instruction: " PAGE ".to_owned(),
+            content: vec![Run {
+                node_type: RunType::Run,
+                formatting: None,
+                property_changes: None,
+                content: vec![RunContent::Text {
+                    text: "3".to_owned(),
+                    preserve_space: None,
+                }],
+            }],
+            fld_lock: Some(true),
+            dirty: Some(true),
+            structured_result: None,
+            field_tree: None,
+        };
+        let output = serialize_simple_field(&field, &mut context()).unwrap();
+        assert_eq!(
+            output,
+            "<w:fldSimple w:instr=\" PAGE \" w:fldLock=\"true\" w:dirty=\"true\">\
+             <w:r><w:t>3</w:t></w:r></w:fldSimple>"
+        );
+    }
+
+    #[test]
     fn paragraph_bytes_pin_ids_properties_and_rendered_break_injection() {
         let paragraph = Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: Some("AA&BB\"CC".to_owned()),
             text_id: None,
+            extra_attributes: Vec::new(),
             formatting: Some(ParagraphFormatting {
                 keep_next: Some(false),
                 alignment: Some("center".to_owned()),
@@ -839,6 +958,90 @@ mod tests {
             serialize_paragraph(&paragraph, &mut context()).unwrap(),
             "<w:p w14:paraId=\"AA&amp;BB&quot;CC\"><w:pPr><w:keepNext w:val=\"0\"/><w:jc w:val=\"center\"/></w:pPr><w:r><w:lastRenderedPageBreak/><w:t>hello &amp; goodbye</w:t></w:r></w:p>"
         );
+    }
+
+    /// A hanging character indent of zero has no sign to carry its kind, so
+    /// the flag has to.
+    #[test]
+    fn a_zero_hanging_character_indent_stays_hanging() {
+        let mut writer = XmlWriter::with_capacity(64);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line_chars: Some(0.0),
+                hanging_indent_chars: Some(true),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(writer.finish(), "<w:ind w:hangingChars=\"0\"/>");
+    }
+
+    #[test]
+    fn indentation_keeps_character_units_and_an_explicit_zero_first_line() {
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_left: Some(200.0),
+                indent_left_chars: Some(100.0),
+                indent_first_line_chars: Some(200.0),
+                indent_first_line: Some(420.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:left=\"200\" w:leftChars=\"100\" w:firstLine=\"420\" w:firstLineChars=\"200\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line: Some(0.0),
+                indent_first_line_chars: Some(0.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:firstLine=\"0\" w:firstLineChars=\"0\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                hanging_indent: Some(true),
+                indent_first_line: Some(-315.0),
+                indent_first_line_chars: Some(-150.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:hanging=\"315\" w:hangingChars=\"150\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line: Some(420.0),
+                indent_first_line_chars: Some(-200.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(
+            writer.finish(),
+            "<w:ind w:firstLine=\"420\" w:hangingChars=\"200\"/>"
+        );
+        let mut writer = XmlWriter::with_capacity(128);
+        write_indentation(
+            &mut writer,
+            &ParagraphFormatting {
+                indent_first_line_chars: Some(-0.0),
+                ..ParagraphFormatting::default()
+            },
+        );
+        assert_eq!(writer.finish(), "<w:ind w:hangingChars=\"0\"/>");
     }
 
     #[test]

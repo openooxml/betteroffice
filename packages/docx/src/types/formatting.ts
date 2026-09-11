@@ -336,6 +336,14 @@ export interface ParagraphFormatting {
   indentFirstLine?: number;
   /** Whether first line is hanging indent */
   hangingIndent?: boolean;
+  /** Left indent in hundredths of a character (w:ind/@w:leftChars) */
+  indentLeftChars?: number;
+  /** Right indent in hundredths of a character (w:ind/@w:rightChars) */
+  indentRightChars?: number;
+  /** First line indent in hundredths of a character - negative for hanging (w:ind/@w:firstLineChars or @w:hangingChars) */
+  indentFirstLineChars?: number;
+  /** Whether the character first-line indent is hanging; the sign of a zero does not survive JSON */
+  hangingIndentChars?: boolean;
 
   // Borders
   /** Paragraph borders (w:pBdr) */

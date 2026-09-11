@@ -27,7 +27,7 @@ export interface YrsCoreSession {
   displayPositionToLoc(position: number, storyId?: string): YrsLoc | null;
   locToDisplayPosition(loc: YrsLoc): number | null;
   documentFromYrs(baseDocument?: Document | null): Document | null;
-  publishDirectInput(): void;
+  publishDirectInput(storyId?: string): void;
 }
 
 interface YrsCoreSessionCallbacks {
@@ -147,6 +147,13 @@ export function warmCompatibilityBase(
   } catch (error) {
     console.error('[yrs] failed to warm the save projection base', error);
   }
+}
+
+/** Story a direct-input edit dirties: the hf/note root it sits in, everything else the body. */
+export function dirtyProjectionStory(activeStory: string): string {
+  return ['hf:', 'fn:', 'en:'].some((prefix) => activeStory.startsWith(prefix))
+    ? activeStory.split(':', 2).join(':')
+    : 'body';
 }
 
 export function useYrsCoreSession(
@@ -325,14 +332,12 @@ export function useYrsCoreSession(
     }
   }, []);
 
-  const publishDirectInput = useCallback((): void => {
+  const publishDirectInput = useCallback((storyId?: string): void => {
     const live = sessionRef.current;
     if (!live || !live.storyIds().includes('body')) return;
     inputPositionMapsRef.current.clear();
-    const activeStory = live.selection()?.head.story ?? 'body';
-    projectionStoriesRef.current.add(
-      activeStory.startsWith('hf:') || activeStory.startsWith('fn:') ? activeStory : 'body'
-    );
+    const activeStory = storyId ?? live.selection()?.head.story ?? 'body';
+    projectionStoriesRef.current.add(dirtyProjectionStory(activeStory));
   }, []);
 
   return {

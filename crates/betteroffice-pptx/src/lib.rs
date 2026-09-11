@@ -2,10 +2,17 @@
 
 mod error;
 mod presentation;
+#[cfg(feature = "raster")]
+mod render;
 mod types;
 
 pub use error::Error;
 pub use presentation::Presentation;
+#[cfg(feature = "raster")]
+pub use render::{
+    Background, MAX_IMAGE_BYTES, MAX_IMAGE_PIXELS, MAX_SLIDE_DIM, MAX_SLIDE_PIXELS, RenderOptions,
+    RenderedPng,
+};
 pub use types::*;
 
 /// Largest collaboration update or state vector the engine will decode.

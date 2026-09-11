@@ -38,6 +38,7 @@ pub fn serialize_section_properties(properties: Option<&SectionProperties>) -> S
     write_paper_source(&mut writer, properties);
     write_page_borders(&mut writer, properties.page_borders.as_ref());
     write_line_numbers(&mut writer, properties);
+    write_page_numbering(&mut writer, properties);
     write_columns(&mut writer, properties);
 
     if properties.footnote_columns.is_some_and(|value| value > 1.0) {
@@ -97,18 +98,15 @@ fn page_margins_have_content(properties: &SectionProperties) -> bool {
 }
 
 fn columns_have_content(properties: &SectionProperties) -> bool {
-    let has_columns = properties
-        .columns
-        .as_ref()
-        .is_some_and(|columns| !columns.is_empty());
-    if properties.column_count.unwrap_or(0.0) == 0.0 && !has_columns {
-        return false;
-    }
+    // A count-less cols element still carries an authored space.
     properties.column_count.is_some_and(|value| value > 1.0)
         || properties.column_space.is_some()
         || properties.equal_width.is_some()
         || properties.separator == Some(true)
-        || has_columns
+        || properties
+            .columns
+            .as_ref()
+            .is_some_and(|columns| !columns.is_empty())
 }
 
 fn line_numbers_have_content(properties: &SectionProperties) -> bool {
@@ -155,6 +153,7 @@ fn has_serialized_content(properties: &SectionProperties) -> bool {
         || properties.paper_src_other.is_some()
         || page_borders_have_content(properties.page_borders.as_ref())
         || line_numbers_have_content(properties)
+        || properties.page_numbering.is_some()
         || columns_have_content(properties)
         || properties.footnote_columns.is_some_and(|value| value > 1.0)
         || nonempty(properties.vertical_align.as_deref()).is_some()
@@ -316,6 +315,26 @@ fn write_line_numbers(writer: &mut XmlWriter, properties: &SectionProperties) {
     }
     if let Some(value) = nonempty(line.restart.as_deref()) {
         writer.attribute("w:restart", value);
+    }
+    writer.end_element();
+}
+
+fn write_page_numbering(writer: &mut XmlWriter, properties: &SectionProperties) {
+    let Some(numbering) = properties.page_numbering.as_ref() else {
+        return;
+    };
+    writer.start_element("w:pgNumType");
+    if let Some(value) = nonempty(numbering.format.as_deref()) {
+        writer.attribute("w:fmt", value);
+    }
+    if numbering.start.is_some() {
+        writer.attribute("w:start", &int_attr(numbering.start));
+    }
+    if numbering.chapter_style.is_some() {
+        writer.attribute("w:chapStyle", &int_attr(numbering.chapter_style));
+    }
+    if let Some(value) = nonempty(numbering.chapter_separator.as_deref()) {
+        writer.attribute("w:chapSep", value);
     }
     writer.end_element();
 }

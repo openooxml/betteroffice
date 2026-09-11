@@ -52,6 +52,14 @@ fn opens_edits_renders_saves_and_reopens() {
     let reopened = Presentation::open(&saved).unwrap();
     assert_eq!(reopened.slides().len(), 3);
     assert_eq!(reopened.package().presentation.slides.len(), 3);
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(
+        (
+            snapshot.slides[0].shapes[0].x,
+            snapshot.slides[0].shapes[0].y
+        ),
+        (1_111_111, 2_222_222)
+    );
 }
 
 #[test]
@@ -82,6 +90,39 @@ fn collaborative_facade_exchanges_typed_updates() {
         ),
         (3_333_333, 4_444_444)
     );
+}
+
+#[test]
+fn facade_deletes_a_paragraph_break() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let story_id = presentation
+        .snapshot()
+        .unwrap()
+        .slides
+        .into_iter()
+        .flat_map(|slide| slide.shapes)
+        .flat_map(|shape| shape.text_stories)
+        .map(|story| story.id)
+        .next()
+        .unwrap();
+    let before = presentation.story(&story_id).unwrap();
+    let context = EditCtx::local("facade-test");
+    presentation
+        .insert_paragraph_break(&context, &story_id, 1)
+        .unwrap();
+    presentation
+        .delete_paragraph_break(&context, &story_id, 1)
+        .unwrap();
+    assert_eq!(presentation.story(&story_id).unwrap(), before);
+}
+
+#[test]
+fn a_facade_seeded_update_accepts_the_source_file() {
+    let presentation = Presentation::open(FIXTURE).unwrap();
+    let update = presentation.encode_state_as_update_v1();
+    let replica = pptx_edit::DeckSession::open_from_update_with_source(&update, FIXTURE, 303)
+        .expect("the facade fingerprints the file bytes");
+    assert!(replica.save().is_ok());
 }
 
 #[test]

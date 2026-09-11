@@ -1,28 +1,27 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
 use crate::types::{
     BlockExtent, ChartExtent, ImageExtent, ImageRunPosition, LayoutBlock, ParagraphBlock,
-    ParagraphExtent, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent, TableExtent,
-    TableRowExtent, TextBoxBlock, TextBoxExtent,
+    ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
+    TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
 };
+use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 const ANCHOR_PROXIMITY: usize = 4;
 
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FloatingZone {
-    left_margin: f64,
-    right_margin: f64,
-    top_y: f64,
-    bottom_y: f64,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    full_width_block: bool,
+#[derive(Clone, Debug)]
+pub(crate) struct FloatingZone {
+    pub(crate) left_margin: f64,
+    pub(crate) right_margin: f64,
+    pub(crate) top_y: f64,
+    pub(crate) bottom_y: f64,
+    pub(crate) full_width_block: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -462,85 +461,222 @@ fn measure_paragraph_with_context(
     if !content_width.is_finite() || content_width <= 0.0 {
         return Ok(synthetic_paragraph_extent(paragraph, content_width));
     }
-    let mut envelope = json!({
-        "block": LayoutBlock::Paragraph(paragraph.clone()),
-        "maxWidth": content_width,
-        "fontChains": config.font_chains,
-        "authoritativeShaping": config.authoritative_shaping,
-    });
-    let fields = envelope
-        .as_object_mut()
-        .expect("measurement envelope object");
-    if !config.defaults.is_null() {
-        fields.insert("defaults".to_owned(), config.defaults.clone());
+    match crate::typed_measure::measure_paragraph(
+        paragraph,
+        content_width,
+        config,
+        floating_zones,
+        cumulative_y,
+    ) {
+        Some(extent) => Ok(extent),
+        None => Ok(synthetic_paragraph_extent(paragraph, content_width)),
     }
-    if !config.compat.is_null() {
-        fields.insert("compat".to_owned(), config.compat.clone());
-    }
-    if let Some(zones) = floating_zones {
-        fields.insert(
-            "floatingZones".to_owned(),
-            serde_json::to_value(zones).expect("floating zones serialize"),
-        );
-        fields.insert("paragraphYOffset".to_owned(), json!(cumulative_y));
-    }
-    let Ok(extent) = crate::measure_paragraph_json_resident(&envelope.to_string()) else {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+}
+
+const SYNTHETIC_ADVANCE_EM: f64 = 1.0;
+
+fn valid_font_size(size: Option<f64>, fallback: f64) -> f64 {
+    size.filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(fallback)
+}
+
+fn synthetic_font_px(run: &crate::types::RunFormatting, default_font_size: f64) -> f64 {
+    let size = valid_font_size(run.font_size, default_font_size);
+    let script_scale = if run.superscript == Some(true) || run.subscript == Some(true) {
+        0.75
+    } else {
+        1.0
     };
-    serde_json::from_str(&extent)
-        .map_err(|error| format!("parse paragraph extent: {error}"))
-        .or_else(|_| Ok(synthetic_paragraph_extent(paragraph, content_width)))
+    size * 96.0 / 72.0 * script_scale
+}
+
+fn synthetic_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
+    if all_caps == Some(true) {
+        text.chars().flat_map(char::to_uppercase).count()
+    } else {
+        text.chars().count()
+    }
+}
+
+fn synthetic_text_width(
+    text: &str,
+    run: &crate::types::RunFormatting,
+    default_font_size: f64,
+) -> f64 {
+    let scalars = synthetic_scalar_count(text, run.all_caps) as f64;
+    let letter_spacing = run
+        .letter_spacing
+        .filter(|spacing| spacing.is_finite() && *spacing > 0.0 && *spacing <= 1_000.0)
+        .unwrap_or(0.0);
+    let horizontal_scale = run
+        .horizontal_scale
+        .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 600.0)
+        .map(|scale| scale / 100.0)
+        .unwrap_or(1.0);
+    scalars
+        * (synthetic_font_px(run, default_font_size) * SYNTHETIC_ADVANCE_EM + letter_spacing)
+        * horizontal_scale
+}
+
+fn synthetic_inline_image_width(image: &crate::types::ImageRun) -> f64 {
+    let floating = matches!(
+        image.wrap_type.as_deref(),
+        Some("square" | "tight" | "through" | "behind" | "inFront")
+    ) || image.display_mode.as_deref() == Some("float");
+    if floating {
+        return 0.0;
+    }
+    rotation_bound(&image.rotation_bounds, "width")
+        .unwrap_or(image.width)
+        .max(0.0)
+}
+
+/// `w:spacing` mapped onto a line rule, in the same precedence order the
+/// measured path uses. `None` is single spacing, which leaves the box alone.
+fn synthetic_line_rule(spacing: Option<&ParagraphSpacing>) -> Option<LineSpacingRule> {
+    let spacing = spacing?;
+    match (
+        spacing.line_rule.as_deref(),
+        spacing.line,
+        spacing.line_unit.as_deref(),
+    ) {
+        (Some("exact"), Some(line), _) => Some(LineSpacingRule::Exact {
+            px: line.max(0.0) as f32,
+        }),
+        (Some("atLeast"), Some(line), _) => Some(LineSpacingRule::AtLeast {
+            px: line.max(0.0) as f32,
+        }),
+        (_, Some(line), Some("multiplier")) => Some(LineSpacingRule::Auto {
+            line_240ths: (line * 240.0).round().clamp(0.0, 24_000_000.0) as u32,
+        }),
+        (_, Some(line), Some("px")) => Some(LineSpacingRule::Exact {
+            px: line.max(0.0) as f32,
+        }),
+        _ => None,
+    }
+}
+
+fn synthetic_row(
+    head_run: usize,
+    tail_run: usize,
+    tail_char: usize,
+    width: f64,
+    font_px: f64,
+    rule: Option<&LineSpacingRule>,
+) -> TypesetRow {
+    let (ascent, descent, line_height) = match rule {
+        // single spacing is the identity, so skip the f32 box round-trip
+        None | Some(LineSpacingRule::Auto { line_240ths: 240 }) => {
+            (font_px * 0.8, font_px * 0.2, font_px * 1.15)
+        }
+        Some(rule) => {
+            let ruled = apply_spacing_rule(
+                LineBox {
+                    ascent: (font_px * 0.8) as f32,
+                    descent: (font_px * 0.2) as f32,
+                    leading: (font_px * 0.15) as f32,
+                },
+                rule,
+            );
+            (
+                f64::from(ruled.ascent),
+                f64::from(ruled.descent),
+                f64::from(ruled.height()),
+            )
+        }
+    };
+    TypesetRow {
+        head_run,
+        head_char: 0,
+        tail_run,
+        tail_char,
+        width,
+        ascent,
+        descent,
+        line_height,
+        synthetic_fallback: Some(true),
+        ..TypesetRow::default()
+    }
 }
 
 fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) -> ParagraphExtent {
-    let mut font_size = paragraph
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.default_font_size)
-        .unwrap_or(11.0);
-    let mut character_count = 0;
-    for run in &paragraph.runs {
-        let Run::Text(text) = run else {
-            continue;
-        };
-        character_count += text.text.encode_utf16().count();
-        if let Some(size) = text.fmt.font_size.filter(|size| size.is_finite()) {
-            font_size = font_size.max(size);
-        }
-    }
-    if !font_size.is_finite() || font_size <= 0.0 {
-        font_size = 11.0;
-    }
-    let font_size_px = font_size * 96.0 / 72.0;
-    let line_height = font_size_px * 1.15;
-    let tail_run = paragraph.runs.len().saturating_sub(1);
-    let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
-        Run::Text(text) => text.text.encode_utf16().count(),
-        _ => 0,
-    });
+    let default_font_size = valid_font_size(
+        paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.default_font_size),
+        11.0,
+    );
+    let default_font_px = default_font_size * 96.0 / 72.0;
     let spacing = paragraph
         .attrs
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
+    let rule = synthetic_line_rule(spacing);
+    let measurable = content_width.is_finite() && content_width > 0.0;
+    let slot = |width: f64| if measurable { width } else { 0.0 };
+
+    let mut lines = Vec::new();
+    let mut head_run = 0usize;
+    let mut font_px = default_font_px;
+    let mut line_width = 0.0f64;
+    for (index, run) in paragraph.runs.iter().enumerate() {
+        match run {
+            Run::Text(text) => {
+                font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
+                line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+            }
+            Run::Tab(tab) => {
+                font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));
+                line_width += tab.width.unwrap_or(48.0).max(0.0);
+            }
+            Run::Image(image) => line_width += synthetic_inline_image_width(image),
+            Run::Field(field) => {
+                font_px = font_px.max(synthetic_font_px(&field.fmt, default_font_size));
+                let fallback = field
+                    .fallback
+                    .as_deref()
+                    .filter(|text| !text.is_empty())
+                    .unwrap_or("1");
+                line_width += synthetic_text_width(fallback, &field.fmt, default_font_size);
+            }
+            // an authored break is exact, so it splits the fallback rows even
+            // though their widths are guesses
+            Run::LineBreak(_) => {
+                lines.push(synthetic_row(
+                    head_run,
+                    index,
+                    0,
+                    slot(line_width),
+                    font_px,
+                    rule.as_ref(),
+                ));
+                head_run = index + 1;
+                font_px = default_font_px;
+                line_width = 0.0;
+            }
+            Run::Unsupported => {}
+        }
+    }
+    let tail_run = paragraph.runs.len().saturating_sub(1).max(head_run);
+    let tail_char = paragraph.runs.get(tail_run).map_or(0, |run| match run {
+        Run::Text(text) => text.text.encode_utf16().count(),
+        _ => 0,
+    });
+    lines.push(synthetic_row(
+        head_run,
+        tail_run,
+        tail_char,
+        slot(line_width),
+        font_px,
+        rule.as_ref(),
+    ));
+
     ParagraphExtent {
-        lines: vec![crate::types::TypesetRow {
-            head_run: 0,
-            head_char: 0,
-            tail_run,
-            tail_char,
-            width: if content_width.is_finite() && content_width > 0.0 {
-                content_width.min(character_count as f64 * font_size_px * 0.5)
-            } else {
-                0.0
-            },
-            ascent: font_size_px * 0.8,
-            descent: font_size_px * 0.2,
-            line_height,
-            ..crate::types::TypesetRow::default()
-        }],
         total_height: spacing.and_then(|value| value.before).unwrap_or(0.0)
-            + line_height
+            + lines.iter().map(|line| line.line_height).sum::<f64>()
             + spacing.and_then(|value| value.after).unwrap_or(0.0),
+        lines,
     }
 }
 
@@ -858,17 +994,31 @@ fn emu_to_pixels(value: f64) -> f64 {
     value / 9_525.0
 }
 
+/// One inset of the shape's text body in px, as the display list reads it, so
+/// the wrap width measured here is the width the text is later emitted into.
+fn text_body_inset(shape: &ShapeBlock, side: &str) -> f64 {
+    shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.get("margins"))
+        .and_then(|margins| margins.get(side))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0)
+}
+
 fn measure_shape(
     shape: &mut ShapeBlock,
     config: &MeasurementConfig,
 ) -> Result<ShapeExtent, String> {
+    let inner_width =
+        (shape.width - text_body_inset(shape, "left") - text_body_inset(shape, "right")).max(1.0);
     let inner_measures = shape
         .inner_text
         .as_ref()
         .map(|paragraphs| {
             paragraphs
                 .iter()
-                .map(|paragraph| measure_paragraph(paragraph, shape.width, config))
+                .map(|paragraph| measure_paragraph(paragraph, inner_width, config))
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?
@@ -1094,6 +1244,7 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn measures_non_text_blocks_without_host_callbacks() {
@@ -1177,7 +1328,7 @@ mod tests {
             panic!("paragraph expected");
         };
 
-        assert_eq!(extent.lines[0].width, 32.0);
+        assert_eq!(extent.lines[0].width, 64.0);
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);

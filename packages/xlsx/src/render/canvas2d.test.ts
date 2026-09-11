@@ -74,3 +74,50 @@ describe('Canvas2D paths', () => {
     expect({ fills, strokes }).toEqual({ fills: 1, strokes: 1 });
   });
 });
+
+describe('Canvas2D text', () => {
+  it('uses point-sized fonts for cells, ghosts, and charts at every display scale', () => {
+    const fonts: string[] = [];
+    const transforms: number[][] = [];
+    const context = {
+      font: '',
+      fillStyle: '',
+      textAlign: '',
+      textBaseline: '',
+      beginPath() {}, rect() {}, clip() {},
+      save() {},
+      restore() {},
+      setTransform(...values: number[]) { transforms.push(values); },
+      clearRect() {},
+      fillText() {
+        fonts.push(this.font);
+      },
+    };
+    const displayList: DisplayList = {
+      width: 120,
+      height: 80,
+      commands: [undefined, false, true].map((chart) => ({
+        op: 'text',
+        x: 0,
+        y: 20,
+        text: 'Quarterly revenue',
+        fontSize: 12,
+        fontFamily: 'Calibri',
+        color: '#000000',
+        chart,
+      })),
+    };
+    for (const scale of [1, 2]) {
+      paintDisplayList(
+        context as unknown as CanvasRenderingContext2D,
+        displayList,
+        scale
+      );
+    }
+    paintDisplayList(context as unknown as CanvasRenderingContext2D, { width: 1, height: 1, commands: [] }, 2, { x: 37.5, y: 37.5 });
+    expect(transforms[transforms.length - 1]).toEqual([2, 0, 0, 2, 37.5, 37.5]);
+    expect(fonts.map((font) => Number.parseFloat(font))).toEqual([
+      16, 16, 16, 16, 16, 16,
+    ]);
+  });
+});

@@ -13,7 +13,7 @@ use crate::paragraph::{
     DrawingContext, HexIdAllocator, Paragraph, ParagraphContent, parse_paragraph,
 };
 use crate::relationships::RelationshipMap;
-use crate::shape::{RelativeRect, Shape, ShapeTextBody};
+use crate::shape::{RelativeRect, Shape, ShapeTextBody, ShapeTextBodyProperties};
 use crate::smart_art::SmartArtContext;
 use crate::styles::{DocDefaults, StyleMap};
 use crate::table::{
@@ -41,6 +41,7 @@ pub enum BlockContent {
     Paragraph(Paragraph),
     Table(Table),
     BlockSdt(BlockSdt),
+    RawXml(crate::inline::RawInlineXml),
 }
 
 impl BlockContent {
@@ -48,6 +49,7 @@ impl BlockContent {
         match self {
             Self::Paragraph(paragraph) => &paragraph.node_type,
             Self::Table(table) => &table.node_type,
+            Self::RawXml(_) => "rawXml",
             Self::BlockSdt(sdt) => &sdt.node_type,
         }
     }
@@ -113,6 +115,11 @@ impl StoryParser<'_, '_> {
                 "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
             );
             if !recognized {
+                if let Some(crate::inline::InlineNode::RawXml(raw)) =
+                    crate::inline::raw_foreign_inline(child)
+                {
+                    content.push(BlockContent::RawXml(*raw));
+                }
                 continue;
             }
             let events = scan_field_block_events(child);
@@ -357,18 +364,25 @@ impl StoryParser<'_, '_> {
         {
             blocks = self.parse_blocks(container, depth.saturating_add(1), false)?;
         }
-        let mut shape = Shape::empty("rect".to_owned(), text_box.size);
+        let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
         shape.id = text_box.id;
+        shape.name = text_box.name;
         shape.position = text_box.position;
         shape.wrap = text_box.wrap;
         shape.fill = text_box.fill;
         shape.outline = text_box.outline;
+        let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
         shape.text_body = Some(ShapeTextBody {
-            vertical: None,
-            rotation: None,
-            anchor: None,
-            anchor_center: None,
-            auto_fit: None,
+            vertical: body.as_ref().and_then(|body| {
+                body.vertical
+                    .as_deref()
+                    .filter(|value| *value != "horizontal")
+                    .map(|_| true)
+            }),
+            rotation: body.as_ref().and_then(|body| body.rotation),
+            anchor: body.as_ref().and_then(|body| body.anchor.clone()),
+            anchor_center: body.as_ref().and_then(|body| body.anchor_center),
+            auto_fit: body.as_ref().and_then(|body| body.auto_fit.clone()),
             margins: text_box.margins.map(|margins| RelativeRect {
                 left: margins.left,
                 top: margins.top,
@@ -381,6 +395,7 @@ impl StoryParser<'_, '_> {
                 .collect::<Result<_, _>>()
                 .map_err(|error| ParseError::Canonical(error.to_string()))?,
         });
+        shape.text_body_properties = body;
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {
@@ -570,6 +585,7 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -600,6 +616,7 @@ fn empty_paragraph() -> Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
         text_id: None,
+        extra_attributes: Vec::new(),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,

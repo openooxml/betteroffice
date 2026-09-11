@@ -448,6 +448,8 @@ export type ParagraphAttrs = {
   indent?: ParagraphIndent;
   keepNext?: boolean;
   keepLines?: boolean;
+  /** w:widowControl, a toggle defaulting on: only an authored off is carried. */
+  widowControl?: boolean;
   pageBreakBefore?: boolean;
   styleId?: string;
   contextualSpacing?: boolean;
@@ -1027,6 +1029,8 @@ export type TypesetRow = {
   descent: number;
   /** Total line height in pixels. */
   lineHeight: number;
+  /** Deterministic line geometry produced without a measurement face. */
+  syntheticFallback?: boolean;
   /** Left offset from floating images (pixels from content left edge). */
   leftOffset?: number;
   /** Right offset from floating images (pixels from content right edge). */
@@ -1583,7 +1587,7 @@ export type LayoutOptions = {
   /** Per-page footnote reserved heights (pageNumber → height in pixels). */
   footnoteReservedHeights?: Map<number, number>;
   /** Section break type for the body-level (final) section (for section transition logic). */
-  bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage';
+  bodyBreakType?: 'continuous' | 'nextPage' | 'evenPage' | 'oddPage' | 'nextColumn';
   /** Effective section states, indexed by section. Undefined = legacy globals. */
   sections?: Array<{
     sectionId?: string;

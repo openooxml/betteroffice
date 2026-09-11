@@ -6,7 +6,7 @@
 //!
 //! A point is resolved in a fixed order. A direct hit inside a text or glyph
 //! primitive's box wins first (its vertical band is padded by
-//! [`BAND_SLACK`] so a click just above or below the glyphs still lands). Next
+//! `BAND_SLACK` so a click just above or below the glyphs still lands). Next
 //! comes a direct hit on an image that carries a document position, where the
 //! caret parks at its start. Failing both, the nearest line by vertical-centre
 //! distance is chosen, then the nearest primitive on that line — inside a run
@@ -30,16 +30,27 @@
 //! or block id — whichever identity is present. With no identity at all,
 //! adjacency of document positions decides.
 //!
-//! Region scoping matters because a page carries three independent documents.
-//! [`hit_test_regions`] tests the page's header and footer bands first (simple
-//! vertical containment against the band box) and resolves inside the winning
-//! band, returning the region kind and its `rId`; the position then addresses
-//! that header/footer document, never the body. [`range_rects_in_region`] is
-//! the selection-geometry twin, and [`range_rects`] the body-only wrapper. The
+//! Region scoping matters because a page carries several independent
+//! documents. [`hit_test_regions`] tests the page's header and footer bands
+//! first (simple vertical containment against the band box) and then its note
+//! areas, resolving inside the winning one and returning the region kind with
+//! the part that owns it — an `rId` for a band, a note id for a note, whose
+//! story is `fn:{id}` / `en:{id}`. The position then addresses THAT document,
+//! never the body. [`range_rects_in_region`] is the selection-geometry twin,
+//! scoped by [`RegionScope`], and [`range_rects`] the body-only wrapper. The
 //! same header/footer part paints on every page that uses it, so a scoped range
 //! query emits one rect set per such page, each stamped with its own page index.
+//!
+//! Resolving a point also reports what it landed on ([`HoverTarget`]), which a
+//! pointer cursor needs and a position cannot give: the nearest-line fallback
+//! answers everywhere on a page carrying any text. The target instead names
+//! what a click would act on, in the pointer path's own order — a selectable
+//! image, then a run's own box, then `in_typeable_area`.
 
-use crate::display_list::{DisplayList, DocAttrs, HfRegion, Primitive, TableCellRef};
+use crate::display_list::{
+    DisplayBounds, DisplayList, DisplayPage, DocAttrs, HfRegion, NoteRegion, Primitive,
+    TableCellRef, doc_attrs, note_group_id,
+};
 use serde::Serialize;
 use serde_json::Number;
 use std::collections::{BTreeMap, HashMap};
@@ -50,6 +61,7 @@ use unicode_segmentation::UnicodeSegmentation;
 thread_local! {
     static TEXT_HIT_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static LINE_OWNER_COMPARE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static CARET_STOPS_BUILD_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Vertical slack (px) added on each side of a run's band when testing a
@@ -76,6 +88,9 @@ fn font_px(font: &str) -> f64 {
 }
 
 /// a positioned text-bearing primitive flattened to shared hit geometry.
+/// Caret stops are built lazily: most queries walk every text primitive of a
+/// region for range overlap but resolve caret x for only the few that
+/// intersect, and stop construction is the expensive part.
 struct TextHit<'a> {
     attrs: &'a DocAttrs,
     x: f64,
@@ -85,7 +100,49 @@ struct TextHit<'a> {
     bottom: f64,
     doc_start: i64,
     doc_end: i64,
-    caret_stops: Vec<CaretStop>,
+    stops_source: StopsSource<'a>,
+    caret_stops: std::cell::OnceCell<Vec<CaretStop>>,
+}
+
+enum StopsSource<'a> {
+    Text {
+        text: &'a str,
+        rtl: bool,
+    },
+    Glyphs {
+        text: &'a str,
+        glyphs: &'a [crate::display_list::PlacedGlyph],
+        rtl: bool,
+    },
+}
+
+impl TextHit<'_> {
+    fn stops(&self) -> &[CaretStop] {
+        self.caret_stops.get_or_init(|| {
+            #[cfg(test)]
+            CARET_STOPS_BUILD_COUNT.with(|count| count.set(count.get() + 1));
+            match self.stops_source {
+                StopsSource::Text { text, rtl } => {
+                    text_caret_stops(text, self.x, self.width, rtl, self.doc_start, self.doc_end)
+                }
+                StopsSource::Glyphs { text, glyphs, rtl } => {
+                    let stops = glyph_caret_stops(text, glyphs, rtl, self.doc_start, self.doc_end);
+                    if stops.is_empty() {
+                        text_caret_stops(
+                            text,
+                            self.x,
+                            self.width,
+                            rtl,
+                            self.doc_start,
+                            self.doc_end,
+                        )
+                    } else {
+                        stops
+                    }
+                }
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -179,18 +236,23 @@ fn glyph_caret_stops(
         .collect();
     let utf16_len = text.encode_utf16().count() as i64;
     let mut stops = Vec::with_capacity(clusters.len() * 2);
+    // clusters are byte-ordered and contiguous (each ends where the next
+    // starts), so UTF-16 offsets accumulate in one linear pass — a per-cluster
+    // prefix rescan would be quadratic in the run length
+    let mut logical_cursor = clusters.first().map_or(0, |(byte, _, _)| {
+        text.get(..*byte)
+            .map_or(0, |prefix| prefix.encode_utf16().count() as i64)
+    });
     for (index, (byte_start, left, right)) in clusters.iter().copied().enumerate() {
         let byte_end = clusters
             .get(index + 1)
             .map_or(text.len(), |(byte, _, _)| *byte);
-        let Some(prefix) = text.get(..byte_start) else {
-            continue;
-        };
         let Some(cluster_text) = text.get(byte_start..byte_end) else {
             continue;
         };
-        let logical_start = prefix.encode_utf16().count() as i64;
+        let logical_start = logical_cursor;
         let logical_end = logical_start + cluster_text.encode_utf16().count() as i64;
+        logical_cursor = logical_end;
         let start_position = doc_position_at_utf16(doc_start, doc_end, logical_start, utf16_len);
         let end_position = doc_position_at_utf16(doc_start, doc_end, logical_end, utf16_len);
         stops.push(CaretStop {
@@ -242,7 +304,11 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops: text_caret_stops(&t.text, x, width, is_rtl(&t.attrs, t.rtl), ds, de),
+                stops_source: StopsSource::Text {
+                    text: &t.text,
+                    rtl: is_rtl(&t.attrs, t.rtl),
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         Primitive::GlyphRun(g) => {
@@ -269,10 +335,6 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 .fold(f64::NEG_INFINITY, f64::max);
             let width = (right - min_x).max(0.0);
             let rtl = is_rtl(&g.attrs, g.rtl);
-            let mut caret_stops = glyph_caret_stops(&g.text, &g.glyphs, rtl, ds, de);
-            if caret_stops.is_empty() {
-                caret_stops = text_caret_stops(&g.text, min_x, width, rtl, ds, de);
-            }
             Some(TextHit {
                 attrs: &g.attrs,
                 x: min_x,
@@ -282,7 +344,12 @@ fn text_hit(primitive: &Primitive) -> Option<TextHit<'_>> {
                 bottom: baseline + fp * 0.25,
                 doc_start: ds,
                 doc_end: de,
-                caret_stops,
+                stops_source: StopsSource::Glyphs {
+                    text: &g.text,
+                    glyphs: &g.glyphs,
+                    rtl,
+                },
+                caret_stops: std::cell::OnceCell::new(),
             })
         }
         _ => None,
@@ -294,12 +361,13 @@ fn text_hits(prims: &[Primitive]) -> Vec<TextHit<'_>> {
 }
 
 fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
-    let mut best = hit.caret_stops.first().copied().unwrap_or(CaretStop {
+    let stops = hit.stops();
+    let mut best = stops.first().copied().unwrap_or(CaretStop {
         x: hit.x,
         position: hit.doc_start,
     });
     let mut best_distance = (x - best.x).abs();
-    for stop in hit.caret_stops.iter().copied().skip(1) {
+    for stop in stops.iter().copied().skip(1) {
         let distance = (x - stop.x).abs();
         if distance < best_distance || (distance == best_distance && stop.x > best.x) {
             best = stop;
@@ -310,7 +378,7 @@ fn position_in_run(hit: &TextHit<'_>, x: f64) -> i64 {
 }
 
 fn x_at_position(hit: &TextHit<'_>, position: i64) -> f64 {
-    hit.caret_stops
+    hit.stops()
         .iter()
         .min_by(|left, right| {
             (left.position - position)
@@ -689,13 +757,106 @@ pub fn vertical_move(
 /// Region-aware callers use [`hit_test_regions`].
 pub fn hit_test(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<i64> {
     let page = dl.pages.get(page_index)?;
-    resolve_point(&page.primitives, x, y)
+    resolve_point(&page.primitives, in_typeable_area(page, x, y), x, y).pos
+}
+
+/// What a resolved point landed on: the caret position, plus the thing under
+/// the pointer that earned it.
+struct PointResolution {
+    pos: Option<i64>,
+    target: HoverTarget,
+}
+
+/// What sits under a point, for pointer-cursor feedback.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoverTarget {
+    /// typeable text — a run's own box, or the typeable area around it
+    #[serde(rename = "text")]
+    Text,
+    /// a selectable picture, which a click selects instead of typing into
+    #[serde(rename = "image")]
+    Image,
+    #[serde(rename = "none")]
+    None,
+}
+
+fn in_bounds(bounds: &DisplayBounds, x: f64, y: f64) -> bool {
+    let left = bounds.x.as_f64().unwrap_or(0.0);
+    let top = bounds.y.as_f64().unwrap_or(0.0);
+    x >= left
+        && x <= left + bounds.width.as_f64().unwrap_or(0.0)
+        && y >= top
+        && y <= top + bounds.height.as_f64().unwrap_or(0.0)
+}
+
+/// Whether a body point lies in the page's typeable area: the authored content
+/// box, so a column gutter counts like the columns it separates. Column boxes
+/// are the fallback for a list without a content box, and neither degrades to
+/// the runs alone.
+///
+/// Deliberately blind to content positioned OUTSIDE the content box — a
+/// floating text box in a margin. Its glyphs still read as text (a run's own
+/// box is tested first), but the blank tail of its lines does not, since no
+/// container rect for it exists in the display list. That under-claims, never
+/// over-claims: the cursor is an arrow where a click would still type.
+fn in_typeable_area(page: &DisplayPage, x: f64, y: f64) -> bool {
+    match &page.content_bounds {
+        Some(bounds) => in_bounds(bounds, x, y),
+        None => page.column_bounds.iter().any(|c| in_bounds(c, x, y)),
+    }
+}
+
+/// Whether a point lies in a note area — the vertical `[y, y + height]` test a
+/// header/footer band gets. An area stating no band, or a zero-height one, owns
+/// no point: the list does not say where its notes paint, so claiming the
+/// region would route a click out of the body with nowhere to send it.
+fn in_note_area(area: &NoteRegion, y: f64) -> bool {
+    let px = |value: &Option<Number>| value.as_ref().and_then(Number::as_f64);
+    let (Some(top), Some(height)) = (px(&area.y), px(&area.height)) else {
+        return false;
+    };
+    height > 0.0 && y >= top && y <= top + height
+}
+
+/// Whether the topmost image under the point is one a click would select.
+/// Mirrors `displayListImages.ts`: reverse paint order, and no document
+/// position means nothing selects it (a picture watermark), so text painted
+/// over such an image stays readable through it.
+fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
+    prims
+        .iter()
+        .rev()
+        .filter_map(|p| match p {
+            Primitive::Image(img) => Some(img),
+            _ => None,
+        })
+        .find(|img| {
+            let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+            let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+            x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+        })
+        .is_some_and(|img| img.attrs.doc_start.is_some())
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
-/// header/footer band, both of which use page coordinates.
-fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
+/// header/footer band, both of which use page coordinates. `typeable` says the
+/// point is in the region's typeable area (false for a band, which has no
+/// content box); it widens the target only, never the position.
+fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointResolution {
+    // outranks text for the CURSOR only: the pointer path selects an image
+    // before it asks for a position, so position resolution keeps its own order
+    let image_target = over_selectable_image(prims, x, y);
     let hits = text_hits(prims);
+    // What the point earns once no run claims it. An area with no positionable
+    // text is not typeable whatever it encloses: such a click is answered with
+    // the document's end.
+    let target = if image_target {
+        HoverTarget::Image
+    } else if typeable && !hits.is_empty() {
+        HoverTarget::Text
+    } else {
+        HoverTarget::None
+    };
 
     // 1. direct hit on a text primitive's box, in paint order
     for h in &hits {
@@ -703,11 +864,20 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
             continue;
         }
         if x >= h.x && x <= h.x + h.width && y >= h.top - BAND_SLACK && y <= h.bottom + BAND_SLACK {
-            return Some(position_in_run(h, x));
+            return PointResolution {
+                pos: Some(position_in_run(h, x)),
+                target: if image_target {
+                    HoverTarget::Image
+                } else {
+                    HoverTarget::Text
+                },
+            };
         }
     }
 
-    // 2. direct hit on an image with a doc position (caret parks before it)
+    // 2. direct hit on an image with a doc position (caret parks before it).
+    // Only the topmost image decides the target, so an unselectable one over
+    // this leaves the area's answer standing.
     for p in prims {
         let Primitive::Image(img) = p else { continue };
         let Some(ds) = img.attrs.doc_start else {
@@ -716,12 +886,15 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
         let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
         let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
         if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
-            return Some(ds);
+            return PointResolution {
+                pos: Some(ds),
+                target,
+            };
         }
     }
 
     if hits.is_empty() {
-        return None;
+        return PointResolution { pos: None, target };
     }
 
     // 3. nearest line by vertical center distance (blank-line markers included)
@@ -744,20 +917,28 @@ fn resolve_point(prims: &[Primitive], x: f64, y: f64) -> Option<i64> {
 
     // 4. nearest primitive on the line; inside -> interpolate, outside -> snap
     // to the closer edge's position
-    position_for_hits(line.iter().copied(), x)
+    PointResolution {
+        pos: position_for_hits(line.iter().copied(), x),
+        target,
+    }
 }
 
-/// Which part of the page owns a point, and the position inside that part's
-/// document. For `header` / `footer` the position addresses the header/footer
-/// document identified by `rId`, never the body document, so the caller must
-/// route the resulting selection to that editor.
+/// Which part of the page owns a point, the position inside that part's
+/// document, and what sits under the pointer. For `header` / `footer` the
+/// position addresses the header/footer document identified by `rId`, and for
+/// `footnote` / `endnote` the note story named by `noteId` — never the body
+/// document, so the caller must route the resulting selection to that editor.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct RegionHit {
     pub region: HitRegion,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub r_id: Option<String>,
+    /// note whose story the position addresses (`fn:{id}` / `en:{id}`)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note_id: Option<i64>,
     pub pos: Option<i64>,
+    pub target: HoverTarget,
 }
 
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -768,27 +949,154 @@ pub enum HitRegion {
     Header,
     #[serde(rename = "footer")]
     Footer,
+    #[serde(rename = "footnote")]
+    Footnote,
+    #[serde(rename = "endnote")]
+    Endnote,
 }
 
-/// parse the region discriminant used at the JSON/wasm boundary
-/// (`"body" | "header" | "footer"`), the string twin of [`HitRegion`]'s serde
-/// rename. Shared by the JSON-arg and session-handle range-rect exports.
-pub(crate) fn parse_region(region: &str) -> Result<HitRegion, String> {
+/// A scoped query's address: the page part, plus the instance of it that owns
+/// the document the positions belong to. A header/footer part is named by its
+/// `rId`, and `None` matches any band of the kind, since the same part paints
+/// on every page using it. A note is named by its id, which is never optional:
+/// two notes are two unrelated documents whose positions must not mix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionScope<'a> {
+    Body,
+    Header(Option<&'a str>),
+    Footer(Option<&'a str>),
+    Footnote(i64),
+    Endnote(i64),
+}
+
+impl RegionScope<'_> {
+    fn region(self) -> HitRegion {
+        match self {
+            Self::Body => HitRegion::Body,
+            Self::Header(_) => HitRegion::Header,
+            Self::Footer(_) => HitRegion::Footer,
+            Self::Footnote(_) => HitRegion::Footnote,
+            Self::Endnote(_) => HitRegion::Endnote,
+        }
+    }
+}
+
+/// parse the scope used at the JSON/wasm boundary: `region` is the string twin
+/// of [`HitRegion`]'s serde rename and `part_id` names the instance — a
+/// header/footer `rId` (empty ⇒ any band of the kind) or a note id. Shared by
+/// the JSON-arg and session-handle range-rect exports.
+pub fn parse_region_scope<'a>(region: &str, part_id: &'a str) -> Result<RegionScope<'a>, String> {
+    let r_id = (!part_id.is_empty()).then_some(part_id);
+    let note_id = || {
+        part_id
+            .parse::<i64>()
+            .map_err(|_| format!("region {region:?} needs a note id, got {part_id:?}"))
+    };
     match region {
-        "body" => Ok(HitRegion::Body),
-        "header" => Ok(HitRegion::Header),
-        "footer" => Ok(HitRegion::Footer),
+        "body" => Ok(RegionScope::Body),
+        "header" => Ok(RegionScope::Header(r_id)),
+        "footer" => Ok(RegionScope::Footer(r_id)),
+        "footnote" => Ok(RegionScope::Footnote(note_id()?)),
+        "endnote" => Ok(RegionScope::Endnote(note_id()?)),
         other => Err(format!("unknown region {other:?}")),
     }
 }
 
-/// Resolves a point against the page's header and footer bands before falling
-/// through to the body.
+/// One note's primitives inside a page's note area, with the id naming the
+/// `fn:{id}` / `en:{id}` story its positions belong to.
+struct NoteStory<'a> {
+    id: i64,
+    primitives: &'a [Primitive],
+}
+
+/// The kind string an area paints under, defaulting like the display-list
+/// emitter does when the layout left it unstated. Note paint-group ids are
+/// built from it, so the two must agree.
+fn note_kind(area: &NoteRegion) -> &str {
+    area.kind.as_deref().unwrap_or("footnote")
+}
+
+fn note_region(area: &NoteRegion) -> HitRegion {
+    if note_kind(area) == "endnote" {
+        HitRegion::Endnote
+    } else {
+        HitRegion::Footnote
+    }
+}
+
+/// The stories an area stacks, in paint order: one note's primitives are
+/// emitted contiguously under its paint-group id, so each story is one span of
+/// them. A primitive with no attrs to carry a group — a paragraph or table
+/// border line — belongs to the note it sits inside and must not end a span;
+/// one naming no listed note does end it, being the area's own chrome.
+fn note_stories(area: &NoteRegion) -> Vec<NoteStory<'_>> {
+    /// The span being accumulated: its note, and where the span starts.
+    #[derive(Clone, Copy)]
+    struct OpenSpan {
+        id: i64,
+        start: usize,
+    }
+
+    let kind = note_kind(area);
+    let mut stories = Vec::new();
+    let mut open: Option<OpenSpan> = None;
+    for (index, primitive) in area.primitives.iter().enumerate() {
+        let Some(attrs) = doc_attrs(primitive) else {
+            continue;
+        };
+        let id = attrs.group_id.as_deref().and_then(|group| {
+            area.note_ids
+                .iter()
+                .copied()
+                .find(|id| note_group_id(kind, *id) == group)
+        });
+        if id == open.map(|span| span.id) {
+            continue;
+        }
+        if let Some(span) = open {
+            stories.push(NoteStory {
+                id: span.id,
+                primitives: &area.primitives[span.start..index],
+            });
+        }
+        open = id.map(|id| OpenSpan { id, start: index });
+    }
+    if let Some(span) = open {
+        stories.push(NoteStory {
+            id: span.id,
+            primitives: &area.primitives[span.start..],
+        });
+    }
+    stories
+}
+
+/// Squared distance from a point to the nearest text box of a primitive list,
+/// zero inside one and infinite for a list painting no text. Both axes count:
+/// a note area lays its notes out in columns it starts at the same vertical
+/// position, so two of them can share a band and only `x` tells them apart.
+fn text_box_distance_squared(prims: &[Primitive], x: f64, y: f64) -> f64 {
+    text_hits(prims)
+        .iter()
+        .map(|hit| {
+            let dx = (hit.x - x).max(x - (hit.x + hit.width)).max(0.0);
+            let dy = (hit.top - y).max(y - hit.bottom).max(0.0);
+            dx * dx + dy * dy
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Resolves a point against the page's header and footer bands, then its note
+/// areas, before falling through to the body.
 ///
 /// Band membership is the vertical `[y, y + height]` test on the region's box.
 /// A point inside a band always identifies that region even when `pos` is
 /// `None` — an empty band still owns the click, and the region alone is what
 /// routes editing into that header or footer.
+///
+/// A note area stacks several independent documents, so it resolves against
+/// the story nearest the point rather than the area as a whole: a click cannot
+/// borrow a position from another note. Like a band it carries no content box,
+/// so only its runs read as typeable text.
 pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> Option<RegionHit> {
     let page = dl.pages.get(page_index)?;
 
@@ -801,25 +1109,50 @@ pub fn hit_test_regions(dl: &DisplayList, page_index: usize, x: f64, y: f64) -> 
     if let Some(h) = &page.header
         && in_band(h)
     {
+        let resolved = resolve_point(&h.primitives, false, x, y);
         return Some(RegionHit {
             region: HitRegion::Header,
             r_id: Some(h.r_id.clone()),
-            pos: resolve_point(&h.primitives, x, y),
+            note_id: None,
+            pos: resolved.pos,
+            target: resolved.target,
         });
     }
     if let Some(f) = &page.footer
         && in_band(f)
     {
+        let resolved = resolve_point(&f.primitives, false, x, y);
         return Some(RegionHit {
             region: HitRegion::Footer,
             r_id: Some(f.r_id.clone()),
-            pos: resolve_point(&f.primitives, x, y),
+            note_id: None,
+            pos: resolved.pos,
+            target: resolved.target,
         });
     }
+    if let Some(area) = page.note_areas.iter().find(|area| in_note_area(area, y)) {
+        let story = note_stories(area)
+            .into_iter()
+            .map(|story| (text_box_distance_squared(story.primitives, x, y), story))
+            .min_by(|(left, _), (right, _)| left.total_cmp(right))
+            .map(|(_, story)| story);
+        let primitives = story.as_ref().map_or(&[][..], |story| story.primitives);
+        let resolved = resolve_point(primitives, false, x, y);
+        return Some(RegionHit {
+            region: note_region(area),
+            r_id: None,
+            note_id: story.map(|story| story.id),
+            pos: resolved.pos,
+            target: resolved.target,
+        });
+    }
+    let resolved = resolve_point(&page.primitives, in_typeable_area(page, x, y), x, y);
     Some(RegionHit {
         region: HitRegion::Body,
         r_id: None,
-        pos: resolve_point(&page.primitives, x, y),
+        note_id: None,
+        pos: resolved.pos,
+        target: resolved.target,
     })
 }
 
@@ -856,17 +1189,21 @@ fn collect_range_rects(
     to: i64,
     out: &mut Vec<RangeRect>,
 ) {
+    let mut pending: Vec<(RectOwner<'_>, RangeRect)> = Vec::new();
     for h in text_hits(prims) {
         // blank-line marker: zero-length span selects as a thin sliver
         if h.doc_start == h.doc_end {
             if h.doc_start >= from && h.doc_start < to {
-                out.push(RangeRect {
-                    page_index,
-                    x: h.x,
-                    y: h.top,
-                    width: BLANK_LINE_SELECTION_WIDTH,
-                    height: h.bottom - h.top,
-                });
+                pending.push((
+                    rect_owner(&h),
+                    RangeRect {
+                        page_index,
+                        x: h.x,
+                        y: h.top,
+                        width: BLANK_LINE_SELECTION_WIDTH,
+                        height: h.bottom - h.top,
+                    },
+                ));
             }
             continue;
         }
@@ -877,15 +1214,19 @@ fn collect_range_rects(
         let end = to.max(h.doc_start).min(h.doc_end);
         let x0 = x_at_position(&h, start);
         let x1 = x_at_position(&h, end);
-        out.push(RangeRect {
-            page_index,
-            x: x0.min(x1),
-            y: h.top,
-            // degenerate overlaps keep a 1px floor like lineSpanRect
-            width: (x1 - x0).abs().max(1.0),
-            height: h.bottom - h.top,
-        });
+        pending.push((
+            rect_owner(&h),
+            RangeRect {
+                page_index,
+                x: x0.min(x1),
+                y: h.top,
+                // degenerate overlaps keep a 1px floor like lineSpanRect
+                width: (x1 - x0).abs().max(1.0),
+                height: h.bottom - h.top,
+            },
+        ));
     }
+    merge_line_rects(pending, out);
 
     for p in prims {
         let Primitive::Image(img) = p else { continue };
@@ -905,9 +1246,96 @@ fn collect_range_rects(
     }
 }
 
+const LINE_MERGE_BAND_EPSILON: f64 = 1.0;
+const LINE_MERGE_GAP: f64 = 2.0;
+
+/// Line identity for band merging, strict variant of [`same_line_owner`]:
+/// rects union only within one table cell, line, and block, so bands never
+/// bridge adjacent columns or cells that happen to align.
+struct RectOwner<'a> {
+    table_id: Option<&'a str>,
+    cell: Option<(u64, u64, Option<&'a str>)>,
+    line_index: Option<u64>,
+    para_id: Option<&'a str>,
+    block_key: Option<&'a str>,
+    block_id: Option<&'a Number>,
+    doc_start: i64,
+    doc_end: i64,
+}
+
+impl RectOwner<'_> {
+    fn matches(&self, other: &Self) -> bool {
+        self.table_id == other.table_id
+            && self.cell == other.cell
+            && self.line_index == other.line_index
+            && self.para_id == other.para_id
+            && self.block_key == other.block_key
+            && self.block_id == other.block_id
+            && (self.para_id.is_some()
+                || self.block_key.is_some()
+                || self.block_id.is_some()
+                || self.doc_end == other.doc_start
+                || other.doc_end == self.doc_start)
+    }
+
+    fn absorb(&mut self, other: &Self) {
+        self.doc_start = self.doc_start.min(other.doc_start);
+        self.doc_end = self.doc_end.max(other.doc_end);
+    }
+}
+
+fn rect_owner<'a>(hit: &TextHit<'a>) -> RectOwner<'a> {
+    let attrs = hit.attrs;
+    RectOwner {
+        table_id: attrs.table.as_ref().map(|table| table.table_id.as_str()),
+        cell: attrs
+            .cell
+            .as_ref()
+            .map(|cell| (cell.row, cell.col, cell.cell_id.as_deref())),
+        line_index: attrs.line_index,
+        para_id: attrs.para_id.as_deref(),
+        block_key: attrs.block_key.as_deref(),
+        block_id: attrs.block_id.as_ref(),
+        doc_start: hit.doc_start,
+        doc_end: hit.doc_end,
+    }
+}
+
+/// Coalesce one page's text rects into per-line bands: same-owner rects on the
+/// same band that touch or nearly touch horizontally union into one. Selection
+/// highlights are per line visually, so per-run granularity only multiplies
+/// the rect count — a full-document selection must stay O(lines), not O(runs).
+fn merge_line_rects(mut pending: Vec<(RectOwner<'_>, RangeRect)>, out: &mut Vec<RangeRect>) {
+    pending.sort_by(|a, b| a.1.y.total_cmp(&b.1.y).then(a.1.x.total_cmp(&b.1.x)));
+    let mut current: Option<(RectOwner<'_>, RangeRect)> = None;
+    for (owner, rect) in pending {
+        if let Some((held_owner, held)) = current.as_mut()
+            && held_owner.matches(&owner)
+            && (rect.y - held.y).abs() <= LINE_MERGE_BAND_EPSILON
+            && (rect.height - held.height).abs() <= LINE_MERGE_BAND_EPSILON
+            && rect.x <= held.x + held.width + LINE_MERGE_GAP
+            && held.x <= rect.x + rect.width + LINE_MERGE_GAP
+        {
+            let left = held.x.min(rect.x);
+            let right = (held.x + held.width).max(rect.x + rect.width);
+            held.x = left;
+            held.width = right - left;
+            held_owner.absorb(&owner);
+            continue;
+        }
+        if let Some((_, held)) = current.take() {
+            out.push(held);
+        }
+        current = Some((owner, rect));
+    }
+    if let Some((_, held)) = current {
+        out.push(held);
+    }
+}
+
 /// Returns body-document highlight rectangles across all pages.
 pub fn range_rects(dl: &DisplayList, from: i64, to: i64) -> Vec<RangeRect> {
-    range_rects_in_region(dl, HitRegion::Body, None, from, to)
+    range_rects_in_region(dl, RegionScope::Body, from, to)
 }
 
 /// Caret box for a body-document position: the first primitive on the earliest
@@ -986,20 +1414,15 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
 /// Highlight rectangles for a document range inside one page region — the
 /// selection-geometry twin of [`hit_test_regions`]'s scoping.
 ///
-/// [`HitRegion::Body`] behaves exactly like [`range_rects`] and ignores `r_id`,
-/// since the body is a single document. For [`HitRegion::Header`] and
-/// [`HitRegion::Footer`], `from` and `to` address the header/footer document
-/// named by `r_id`, and only bands whose `rId` matches contribute. Because that
-/// part paints on every page using it, a match yields one rect set per such
-/// page, each stamped with its own `page_index`.
-///
-/// `r_id = None` matches any band of the kind. Passing the active part's `rId`
-/// is preferred, so a first-page variant on another page cannot contribute
-/// stray rectangles.
+/// [`RegionScope::Body`] behaves exactly like [`range_rects`], since the body
+/// is a single document. Otherwise `from` and `to` address the document the
+/// scope names — a header/footer part, or a note story — and only the parts
+/// matching it contribute. A header/footer part paints on every page using it,
+/// so a match yields one rect set per such page, each stamped with its own
+/// `page_index`.
 pub fn range_rects_in_region(
     dl: &DisplayList,
-    region: HitRegion,
-    r_id: Option<&str>,
+    scope: RegionScope<'_>,
     from: i64,
     to: i64,
 ) -> Vec<RangeRect> {
@@ -1009,20 +1432,29 @@ pub fn range_rects_in_region(
         return rects;
     }
 
-    let matches = |band: &HfRegion| r_id.is_none_or(|id| id == band.r_id);
+    let band = |band: &HfRegion, r_id: Option<&str>| r_id.is_none_or(|id| id == band.r_id);
     for (page_index, page) in dl.pages.iter().enumerate() {
-        let prims: Option<&[Primitive]> = match region {
-            HitRegion::Body => Some(&page.primitives),
-            HitRegion::Header => page
+        let prims: Option<&[Primitive]> = match scope {
+            RegionScope::Body => Some(&page.primitives),
+            RegionScope::Header(r_id) => page
                 .header
                 .as_ref()
-                .filter(|h| matches(h))
+                .filter(|h| band(h, r_id))
                 .map(|h| h.primitives.as_slice()),
-            HitRegion::Footer => page
+            RegionScope::Footer(r_id) => page
                 .footer
                 .as_ref()
-                .filter(|f| matches(f))
+                .filter(|f| band(f, r_id))
                 .map(|f| f.primitives.as_slice()),
+            RegionScope::Footnote(note_id) | RegionScope::Endnote(note_id) => page
+                .note_areas
+                .iter()
+                .filter(|area| {
+                    note_region(area) == scope.region() && area.note_ids.contains(&note_id)
+                })
+                .flat_map(note_stories)
+                .find(|story| story.id == note_id)
+                .map(|story| story.primitives),
         };
         if let Some(prims) = prims {
             collect_range_rects(prims, page_index, from, to, &mut rects);
@@ -1074,26 +1506,27 @@ pub fn range_rects_json(display_list: &str, from: i64, to: i64) -> Result<String
 }
 
 /// `range_rects_in_region` over serialized inputs. `region` is
-/// `"body" | "header" | "footer"`; `r_id` is the HF part's relationship id
-/// (ignored for `body`; empty string ⇒ match any band of the kind). Returns a
-/// JSON array of rects, or a `parse:`/`unknown region` error string.
+/// `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` names the
+/// instance — the HF part's relationship id (empty ⇒ match any band of the
+/// kind) or the note id, and is ignored for `body`. Returns a JSON array of
+/// rects, or a `parse:`/`unknown region` error string.
 pub fn range_rects_region_json(
     display_list: &str,
     region: &str,
-    r_id: &str,
+    part_id: &str,
     from: i64,
     to: i64,
 ) -> Result<String, String> {
     let dl: DisplayList = serde_json::from_str(display_list).map_err(|e| format!("parse: {e}"))?;
-    let region = parse_region(region)?;
-    let r_id = if r_id.is_empty() { None } else { Some(r_id) };
-    serde_json::to_string(&range_rects_in_region(&dl, region, r_id, from, to))
+    let scope = parse_region_scope(region, part_id)?;
+    serde_json::to_string(&range_rects_in_region(&dl, scope, from, to))
         .map_err(|e| format!("serialize: {e}"))
 }
 
 /// `hit_test_regions` over serialized inputs; returns
-/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` or `"null"`
-/// for an out-of-range page
+/// `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,"noteId"?,`
+/// `"pos":n|null,"target":"text"|"image"|"none"}` or `"null"` for an
+/// out-of-range page
 pub fn hit_test_regions_json(
     display_list: &str,
     page_index: usize,
@@ -1110,6 +1543,439 @@ pub fn hit_test_regions_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn run(x: f64, baseline: f64, width: f64, doc_start: i64) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "text",
+            "text": "hello",
+            "x": x,
+            "baselineY": baseline,
+            "width": width,
+            "font": "400 16px Calibri",
+            "color": "#000000",
+            "docStart": doc_start,
+            "docEnd": doc_start + 5,
+            "blockId": doc_start,
+            "lineIndex": 0
+        })
+    }
+
+    fn image(x: f64, y: f64, doc_start: Option<i64>) -> serde_json::Value {
+        let mut image = serde_json::json!({
+            "kind": "image", "relId": "rId1", "x": x, "y": y, "w": 60, "h": 40
+        });
+        if let Some(doc_start) = doc_start {
+            image["docStart"] = doc_start.into();
+            image["docEnd"] = (doc_start + 1).into();
+        }
+        image
+    }
+
+    fn page(content: serde_json::Value, primitives: Vec<serde_json::Value>) -> DisplayList {
+        serde_json::from_value(serde_json::json!({
+            "pages": [{
+                "pageIndex": 0,
+                "width": 500,
+                "height": 500,
+                "contentBounds": content,
+                "primitives": primitives
+            }]
+        }))
+        .unwrap()
+    }
+
+    /// A content box at x 80..420 / y 80..420, one run whose band is y 84..104
+    /// (± [`BAND_SLACK`]) over x 100..150, and one inline image at
+    /// x 100..160 / y 200..240.
+    fn hover_fixture() -> DisplayList {
+        page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), image(100.0, 200.0, Some(10))],
+        )
+    }
+
+    fn note_run(baseline: f64, doc_start: i64, group_id: &str) -> serde_json::Value {
+        let mut run = run(100.0, baseline, 50.0, doc_start);
+        run["groupId"] = group_id.into();
+        run
+    }
+
+    /// [`hover_fixture`] plus a footnote area at y 360..420 stacking two note
+    /// stories over x 100..150, with bands y 374..394 and y 394..414.
+    fn note_fixture() -> DisplayList {
+        let mut dl = hover_fixture();
+        dl.pages[0].note_areas = serde_json::from_value(serde_json::json!([{
+            "kind": "footnote",
+            "y": 360,
+            "height": 60,
+            "noteIds": [7, 8],
+            "primitives": [note_run(390.0, 1, "footnote-7"), note_run(410.0, 20, "footnote-8")]
+        }]))
+        .unwrap();
+        dl
+    }
+
+    fn target(dl: &DisplayList, x: f64, y: f64) -> HoverTarget {
+        hit_test_regions(dl, 0, x, y).unwrap().target
+    }
+
+    #[test]
+    fn hover_target_reports_the_typeable_area_and_direct_hits() {
+        let dl = hover_fixture();
+
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 220.0), HoverTarget::Image);
+        // right of a short line and below the last one — typeable, no primitive
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 400.0), HoverTarget::Text);
+        // margins and page background
+        assert_eq!(target(&dl, 40.0, 95.0), HoverTarget::None);
+        assert_eq!(target(&dl, 120.0, 460.0), HoverTarget::None);
+    }
+
+    /// The target discriminates where the position cannot: the nearest-line
+    /// fallback answers over the margins too.
+    #[test]
+    fn hover_target_narrows_a_position_that_resolves_everywhere() {
+        let dl = hover_fixture();
+        let margin = hit_test_regions(&dl, 0, 40.0, 95.0).unwrap();
+        assert!(margin.pos.is_some());
+        assert_eq!(margin.target, HoverTarget::None);
+    }
+
+    /// Column boxes stand in for a list built without a content box; with
+    /// neither, only the runs' own boxes answer.
+    #[test]
+    fn hover_target_without_a_content_box_falls_back() {
+        let mut dl = hover_fixture();
+        dl.pages[0].content_bounds = None;
+        dl.pages[0].column_bounds = serde_json::from_value(
+            serde_json::json!([{"x": 80, "y": 80, "width": 340, "height": 340}]),
+        )
+        .unwrap();
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::Text);
+
+        dl.pages[0].column_bounds.clear();
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 380.0, 95.0), HoverTarget::None);
+    }
+
+    #[test]
+    fn hit_and_caret_resolve_combining_and_surrogate_clusters() {
+        let mut primitive = run(100.0, 200.0, 60.0, 10);
+        primitive["text"] = "a\u{301}😀b".into();
+        primitive["docEnd"] = 15.into();
+        let dl = page(serde_json::Value::Null, vec![primitive]);
+
+        assert_eq!(hit_test(&dl, 0, 126.0, 195.0), Some(12));
+        assert_eq!(hit_test(&dl, 0, 134.0, 195.0), Some(14));
+        assert!((caret_rect(&dl, 12).unwrap().x - 120.0).abs() < 0.01);
+        assert!((caret_rect(&dl, 14).unwrap().x - 140.0).abs() < 0.01);
+    }
+
+    /// Content positioned outside the content box — a floating text box in a
+    /// margin — reads as text over its glyphs but not over the blank tail of
+    /// its lines, which no container rect in the display list describes. The
+    /// cursor under-claims there; it must never claim what a click will not do.
+    #[test]
+    fn hover_target_outside_the_content_box_covers_glyphs_only() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), run(440.0, 450.0, 50.0, 20)],
+        );
+        assert_eq!(target(&dl, 460.0, 445.0), HoverTarget::Text);
+
+        let tail = hit_test_regions(&dl, 0, 520.0, 445.0).unwrap();
+        assert_eq!(tail.target, HoverTarget::None);
+        assert!(
+            tail.pos.is_some(),
+            "the blank tail still resolves a position"
+        );
+    }
+
+    /// The gutter between columns is typeable — a click there lands in one of
+    /// them — so the content box, not the column boxes, defines the area.
+    #[test]
+    fn hover_target_covers_the_gutter_between_columns() {
+        let mut dl = hover_fixture();
+        dl.pages[0].column_bounds = serde_json::from_value(serde_json::json!([
+            {"x": 80, "y": 80, "width": 150, "height": 340},
+            {"x": 270, "y": 80, "width": 150, "height": 340}
+        ]))
+        .unwrap();
+        assert_eq!(target(&dl, 250.0, 300.0), HoverTarget::Text);
+    }
+
+    /// Note text is its own story, so a point in a note area addresses that
+    /// note and its glyphs invite typing like the body's do.
+    #[test]
+    fn a_point_in_a_note_area_addresses_the_note_story() {
+        let dl = note_fixture();
+
+        let note = hit_test_regions(&dl, 0, 120.0, 385.0).unwrap();
+        assert_eq!(note.region, HitRegion::Footnote);
+        assert_eq!(note.note_id, Some(7));
+        assert_eq!(note.target, HoverTarget::Text);
+        assert!(matches!(note.pos, Some(pos) if (1..=6).contains(&pos)));
+
+        // the body line above the area still answers for the body
+        let body = hit_test_regions(&dl, 0, 120.0, 340.0).unwrap();
+        assert_eq!(body.region, HitRegion::Body);
+        assert_eq!(body.note_id, None);
+        assert_eq!(body.target, HoverTarget::Text);
+    }
+
+    /// An area stating no band of its own cannot say where its notes paint, so
+    /// it claims no point and the body answers — the same under-claim the
+    /// typeable area makes off the content box.
+    #[test]
+    fn a_note_area_without_a_band_claims_no_point() {
+        let mut dl = note_fixture();
+        dl.pages[0].note_areas[0].y = None;
+        let hit = hit_test_regions(&dl, 0, 120.0, 385.0).unwrap();
+        assert_eq!(hit.region, HitRegion::Body);
+        assert_eq!(hit.note_id, None);
+    }
+
+    /// One area stacks several independent stories, so a point must never
+    /// borrow a position from the note above or below the one it landed in.
+    #[test]
+    fn stacked_notes_resolve_against_the_story_the_point_landed_in() {
+        let dl = note_fixture();
+        let second = hit_test_regions(&dl, 0, 120.0, 405.0).unwrap();
+        assert_eq!(second.region, HitRegion::Footnote);
+        assert_eq!(second.note_id, Some(8));
+        assert!(matches!(second.pos, Some(pos) if (20..=25).contains(&pos)));
+    }
+
+    /// A note area carrying nothing still owns the click, like an empty
+    /// header band does, but names no story to route it to.
+    #[test]
+    fn an_empty_note_area_owns_the_point_without_a_story() {
+        let mut dl = hover_fixture();
+        dl.pages[0].note_areas = serde_json::from_value(
+            serde_json::json!([{"kind": "endnote", "y": 360, "height": 60}]),
+        )
+        .unwrap();
+        let note = hit_test_regions(&dl, 0, 120.0, 390.0).unwrap();
+        assert_eq!(note.region, HitRegion::Endnote);
+        assert_eq!(note.note_id, None);
+        assert_eq!(note.pos, None);
+        assert_eq!(note.target, HoverTarget::None);
+    }
+
+    #[test]
+    fn range_rects_merge_same_line_runs_into_one_band() {
+        // three adjacent same-line runs (a formatted or per-cluster line) and
+        // one run on the next line: selecting across them yields one rect per
+        // LINE, never one per run
+        let owned = |x: f64, baseline: f64, doc_start: i64, line_index: u64| {
+            let mut prim = run(x, baseline, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["lineIndex"] = line_index.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                owned(100.0, 200.0, 1, 0),
+                owned(140.0, 200.0, 6, 0),
+                owned(180.0, 200.0, 11, 0),
+                owned(100.0, 230.0, 16, 1),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 21);
+        assert_eq!(rects.len(), 2, "one merged band per line: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!(
+            (rects[0].width - 120.0).abs() < 0.01,
+            "merged width {}",
+            rects[0].width
+        );
+        assert!((rects[1].width - 40.0).abs() < 0.01);
+
+        // a selection whose runs do not touch horizontally stays split
+        let sparse = range_rects(&dl, 1, 3);
+        assert_eq!(sparse.len(), 1);
+        assert!(sparse[0].width < 40.0);
+    }
+
+    #[test]
+    fn range_rects_cover_both_half_point_runs_in_one_band() {
+        let sized = |x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized(140.0, 6, "400 15.333333px Calibri"),
+                sized(100.0, 1, "400 14.666667px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 1, "one merged band: {rects:?}");
+        assert!((rects[0].x - 100.0).abs() < 0.01);
+        assert!((rects[0].x + rects[0].width - 180.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn range_rects_do_not_bridge_unselected_text_between_leftward_runs() {
+        let sized = |text: &str, x: f64, doc_start: i64, font: &str| {
+            let mut prim = run(x, 200.0, 20.0, doc_start);
+            prim["text"] = text.into();
+            prim["docEnd"] = (doc_start + 2).into();
+            prim["blockId"] = 7.into();
+            prim["paraId"] = "paragraph-1".into();
+            prim["font"] = font.into();
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![
+                sized("ab", 100.0, 10, "400 14.666667px Calibri"),
+                sized("middle", 120.0, 20, "400 14.666667px Calibri"),
+                sized("cd", 140.0, 12, "400 15.333333px Calibri"),
+            ],
+        );
+
+        let rects = range_rects(&dl, 10, 14);
+        assert_eq!(rects.len(), 2, "separate selected bands: {rects:?}");
+        assert!(
+            rects
+                .iter()
+                .all(|rect| rect.x + rect.width <= 120.0 || rect.x >= 140.0),
+            "unselected middle range must remain uncovered: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn range_rects_do_not_merge_unowned_nonadjacent_runs() {
+        let unowned = |x: f64, doc_start: i64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim.as_object_mut().unwrap().remove("blockId");
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![unowned(100.0, 1), unowned(140.0, 20)],
+        );
+
+        let rects = range_rects(&dl, 1, 25);
+        assert_eq!(
+            rects.len(),
+            2,
+            "unowned document gaps stay split: {rects:?}"
+        );
+    }
+
+    #[test]
+    fn range_rects_never_merge_across_table_cells() {
+        // two aligned, touching runs in adjacent cells of one table: the band
+        // may not bridge the cell boundary even though the geometry allows it
+        let celled = |x: f64, doc_start: i64, col: u64| {
+            let mut prim = run(x, 200.0, 40.0, doc_start);
+            prim["blockId"] = 7.into();
+            prim["table"] = serde_json::json!({
+                "tableId": "t1", "rowStart": 0, "rowEnd": 1,
+                "rowCount": 1, "columnCount": 2
+            });
+            prim["cell"] = serde_json::json!({
+                "row": 0, "col": col, "rowSpan": 1, "colSpan": 1
+            });
+            prim
+        };
+        let dl = page(
+            serde_json::Value::Null,
+            vec![celled(100.0, 1, 0), celled(140.0, 6, 1)],
+        );
+
+        let rects = range_rects(&dl, 1, 11);
+        assert_eq!(rects.len(), 2, "one band per cell: {rects:?}");
+        assert!((rects[0].width - 40.0).abs() < 0.01);
+        assert!((rects[1].width - 40.0).abs() < 0.01);
+    }
+
+    /// Selection geometry follows the same scoping: a range in a note's story
+    /// highlights that note's glyphs, and the identical body range highlights
+    /// the body's — the two documents never share rectangles.
+    #[test]
+    fn range_rects_in_a_note_cover_that_note_only() {
+        let dl = note_fixture();
+
+        let note = range_rects_in_region(&dl, RegionScope::Footnote(7), 1, 6);
+        assert_eq!(note.len(), 1);
+        assert!((note[0].y - 374.0).abs() < 1.0, "note rect y {}", note[0].y);
+
+        let body = range_rects_in_region(&dl, RegionScope::Body, 1, 6);
+        assert_eq!(body.len(), 1);
+        assert!((body[0].y - 84.0).abs() < 1.0, "body rect y {}", body[0].y);
+
+        // the sibling note's story shares the position range and no geometry
+        let sibling = range_rects_in_region(&dl, RegionScope::Footnote(8), 1, 6);
+        assert!(sibling.is_empty());
+        // and an endnote scope matches no footnote area
+        assert!(range_rects_in_region(&dl, RegionScope::Endnote(7), 1, 6).is_empty());
+    }
+
+    /// A picture with a document position is a click target whatever its wrap
+    /// mode, and outranks text painted under it — the pointer path selects one
+    /// before it asks for a position.
+    #[test]
+    fn hover_target_prefers_a_selectable_image_over_the_text_it_covers() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![run(100.0, 100.0, 50.0, 1), image(100.0, 80.0, Some(10))],
+        );
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Image);
+    }
+
+    /// A picture with no document position cannot be selected (a watermark),
+    /// so text painted over it stays typeable.
+    #[test]
+    fn hover_target_reads_through_an_unpositioned_image() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![image(80.0, 80.0, None), run(100.0, 100.0, 50.0, 1)],
+        );
+        assert_eq!(target(&dl, 120.0, 95.0), HoverTarget::Text);
+        assert_eq!(target(&dl, 120.0, 110.0), HoverTarget::Text);
+    }
+
+    /// Only the TOPMOST image decides, as the click does: a watermark over a
+    /// positioned picture leaves nothing to select, and the reverse selects.
+    #[test]
+    fn hover_target_takes_the_topmost_of_stacked_images() {
+        let area = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let covered = page(
+            area.clone(),
+            vec![image(100.0, 200.0, Some(10)), image(80.0, 180.0, None)],
+        );
+        assert_eq!(target(&covered, 120.0, 220.0), HoverTarget::None);
+
+        let on_top = page(
+            area,
+            vec![image(80.0, 180.0, None), image(100.0, 200.0, Some(10))],
+        );
+        assert_eq!(target(&on_top, 120.0, 220.0), HoverTarget::Image);
+    }
+
+    /// With nothing positionable on the page a click jumps the caret to the
+    /// document's end, so the area must not advertise typing.
+    #[test]
+    fn hover_target_ignores_an_area_with_no_positionable_text() {
+        let dl = page(
+            serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340}),
+            vec![image(100.0, 200.0, None)],
+        );
+        let hit = hit_test_regions(&dl, 0, 300.0, 300.0).unwrap();
+        assert_eq!(hit.pos, None);
+        assert_eq!(hit.target, HoverTarget::None);
+    }
 
     #[test]
     fn vertical_move_materializes_hits_only_for_neighboring_pages() {
@@ -1146,6 +2012,44 @@ mod tests {
 
         assert_eq!(movement.position, 2511);
         assert_eq!(hit_builds, 4);
+    }
+
+    /// Range queries walk every text primitive for overlap, but caret-stop
+    /// construction (grapheme/cluster segmentation) must only run for the
+    /// primitives the range actually touches.
+    #[test]
+    fn range_rects_build_caret_stops_only_for_overlapping_runs() {
+        let runs: Vec<serde_json::Value> = (0..200)
+            .map(|index| {
+                let doc_start = 1 + index * 10;
+                serde_json::json!({
+                    "kind": "text",
+                    "text": "aaaaaaaaaa",
+                    "x": 100.0 + index as f64,
+                    "baselineY": 200,
+                    "width": 40,
+                    "font": "400 16px Calibri",
+                    "color": "#000000",
+                    "docStart": doc_start,
+                    "docEnd": doc_start + 10,
+                    "blockId": index,
+                    "lineIndex": index
+                })
+            })
+            .collect();
+        let dl: DisplayList = serde_json::from_value(serde_json::json!({
+            "pages": [{ "pageIndex": 0, "width": 816, "height": 1056, "primitives": runs }]
+        }))
+        .unwrap();
+
+        CARET_STOPS_BUILD_COUNT.with(|count| count.set(0));
+        let rects = range_rects(&dl, 15, 18);
+        let stop_builds = CARET_STOPS_BUILD_COUNT.with(std::cell::Cell::get);
+        assert_eq!(rects.len(), 1);
+        assert!(
+            stop_builds <= 2,
+            "a 3-char selection must not segment every run on the page ({stop_builds} builds)"
+        );
     }
 
     /// Dense pages (fine-print tables, per-character formatting) must not cost

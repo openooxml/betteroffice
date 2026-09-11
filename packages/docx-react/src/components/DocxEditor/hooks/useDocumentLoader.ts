@@ -170,6 +170,11 @@ export function useDocumentLoader({
     [loadGeneration]
   );
 
+  const reportLayoutError = useCallback(
+    (error: Error) => loadGeneration.reportError(yrsSeedGeneration, error, onError),
+    [loadGeneration, yrsSeedGeneration, onError]
+  );
+
   // React to documentBuffer / document prop changes.
   useEffect(() => {
     // External-content mode: the caller populates the document directly —
@@ -231,5 +236,6 @@ export function useDocumentLoader({
     isCurrentLoad,
     acceptHostDocument,
     failHostDocument,
+    reportLayoutError,
   };
 }

@@ -17,12 +17,19 @@
       "@betteroffice/docx",
       "@betteroffice/docx-react",
       "@betteroffice/docx-i18n"
+    ],
+    [
+      "@betteroffice/fonts",
+      "@betteroffice/fonts-cjk"
     ]
   ],
   "linked": [],
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
+  "___experimentalUnsafeOptions_WILL_CHANGE_IN_PATCH": {
+    "onlyUpdatePeerDependentsWhenOutOfRange": true
+  },
   "privatePackages": {
     "version": true,
     "tag": false

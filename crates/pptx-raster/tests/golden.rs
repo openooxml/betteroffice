@@ -1,0 +1,850 @@
+//! png golden harness: scenarios are byte-compared against committed pngs.
+//! regenerate deliberately with `GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-raster`.
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::sync::LazyLock;
+
+use ooxml_text::{FontId, FontStore};
+use pptx_raster::{AssetMap, Background, RenderOptions, RenderResources, render_slide};
+use pptx_render::{
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, Paint, PositionedGlyph,
+    PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, SurfaceDisplayList,
+    TextAnchor, TextParagraph, Transform,
+};
+
+const CARLITO: &[u8] = include_bytes!("assets/Carlito-Regular.ttf");
+
+fn golden_path(name: &str) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("golden")
+        .join(format!("{name}.png"))
+}
+
+fn check(name: &str, list: &SurfaceDisplayList) {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    let rendered = render_slide(list, &resources, &RenderOptions::default()).expect("render");
+    assert_eq!(
+        rendered.skipped_images, 0,
+        "{name} skipped an image the golden expects painted"
+    );
+    let actual = rendered.bytes;
+    let path = golden_path(name);
+    if std::env::var("GOLDEN_UPDATE").is_ok() {
+        std::fs::write(&path, &actual).expect("write golden");
+        return;
+    }
+    let expected = std::fs::read(&path).unwrap_or_else(|_| {
+        panic!(
+            "missing golden {}: regenerate with `GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-raster`",
+            path.display()
+        )
+    });
+    assert!(
+        actual == expected,
+        "golden mismatch for {name}: if intended, regenerate with `GOLDEN_UPDATE=1 cargo test -p betteroffice-pptx-raster`"
+    );
+}
+
+fn font_store() -> (FontStore, FontId) {
+    let mut fonts = FontStore::new();
+    let id = fonts.register(CARLITO.to_vec()).expect("register carlito");
+    (fonts, id)
+}
+
+/// A 2x2 checkerboard, small enough to keep the golden about the painter rather
+/// than the decoder, and asymmetric so a flipped draw is visible.
+static CHECKER: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let pixels: [u8; 16] = [
+        0xef, 0x44, 0x44, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x1d, 0x4e, 0xd8,
+        0xff,
+    ];
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 2, 2);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&pixels).expect("png data");
+    }
+    bytes
+});
+
+/// An 8x8 bitmap opaque only in its middle 4x4, so a frame-shaped shadow and an
+/// alpha-shaped one cannot be confused.
+static HOLLOW: LazyLock<Vec<u8>> = LazyLock::new(|| {
+    let mut pixels = vec![0u8; 8 * 8 * 4];
+    for y in 2..6 {
+        for x in 2..6 {
+            pixels[(y * 8 + x) * 4..(y * 8 + x) * 4 + 4].copy_from_slice(&[0x31, 0x5e, 0xfb, 0xff]);
+        }
+    }
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 8, 8);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(&pixels).expect("png data");
+    }
+    bytes
+});
+
+fn assets() -> AssetMap<'static> {
+    AssetMap::from([
+        ("ppt/media/image1.png", CHECKER.as_slice()),
+        ("ppt/media/image2.png", HOLLOW.as_slice()),
+    ])
+}
+
+fn slide(primitives: Vec<Primitive>) -> SurfaceDisplayList {
+    SurfaceDisplayList {
+        contract_version: CONTRACT_VERSION,
+        width: 240.0,
+        height: 135.0,
+        background: Some(Paint::Solid {
+            color: "#fdfdfd".into(),
+        }),
+        primitives,
+    }
+}
+
+fn rect_path() -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    use ooxml_drawingml::GeometryPathCommand as Cmd;
+    vec![
+        Cmd::Move { x: 0.0, y: 0.0 },
+        Cmd::Line { x: 1.0, y: 0.0 },
+        Cmd::Line { x: 1.0, y: 1.0 },
+        Cmd::Line { x: 0.0, y: 1.0 },
+        Cmd::Close,
+    ]
+}
+
+fn shape(x: f32, y: f32, w: f32, h: f32, fill: Option<Paint>, stroke: Option<Stroke>) -> Primitive {
+    Primitive::Shape {
+        clip: None,
+        even_odd: false,
+        object_id: 1,
+        shape_id: Some("shape-1".into()),
+        name: "rect".into(),
+        x,
+        y,
+        w,
+        h,
+        geometry: "rect".into(),
+        path: rect_path(),
+        adjust_values: BTreeMap::new(),
+        fill,
+        stroke,
+        shadow: None,
+        transform: Transform::default(),
+    }
+}
+
+/// Shapes a real run through the store so the golden covers the glyph path the
+/// layout engine feeds a rasterizer, not a hand-invented one.
+fn text_box(x: f32, y: f32, text: &str, size_px: f32, underline: bool) -> Primitive {
+    let (fonts, font) = font_store();
+    let shaped = ooxml_text::shape(&fonts, font, text, size_px, &[]).expect("shape");
+    let baseline = y + size_px;
+    let mut pen = x;
+    let mut glyphs = Vec::with_capacity(shaped.len());
+    for glyph in &shaped {
+        glyphs.push(PositionedGlyph {
+            glyph_id: glyph.glyph_id,
+            cluster: glyph.cluster,
+            x: pen,
+            advance: glyph.x_advance,
+            x_offset: glyph.x_offset,
+            y_offset: baseline + glyph.y_offset,
+        });
+        pen += glyph.x_advance;
+    }
+    let width = pen - x;
+    Primitive::TextBox {
+        object_id: 2,
+        shape_id: Some("text-1".into()),
+        story_id: Some("story-1".into()),
+        x,
+        y,
+        w: width + 8.0,
+        h: size_px * 2.0,
+        anchor: TextAnchor::Top,
+        paragraphs: vec![TextParagraph {
+            align: None,
+            level: 0,
+            runs: Vec::new(),
+        }],
+        lines: vec![PositionedTextLine {
+            x,
+            y,
+            width,
+            height: size_px * 1.2,
+            baseline,
+            start: 0,
+            end: text.len() as u32,
+            runs: vec![PositionedTextRun {
+                text: text.to_owned(),
+                start: 0,
+                end: text.len() as u32,
+                x,
+                width,
+                font_id: font.to_u32(),
+                font_family: "Carlito".into(),
+                font_size_px: size_px,
+                bold: false,
+                italic: false,
+                underline,
+                color: "#1b2733".into(),
+                baseline_offset_px: 0.0,
+                letter_spacing_px: 0.0,
+                glyphs,
+            }],
+            caret_stops: vec![CaretStop { position: 0, x }],
+        }],
+        overflow: false,
+        transform: Transform::default(),
+    }
+}
+
+#[test]
+fn golden_shapes() {
+    check(
+        "shapes",
+        &slide(vec![
+            shape(
+                12.0,
+                12.0,
+                90.0,
+                50.0,
+                Some(Paint::Solid {
+                    color: "#3b82f6".into(),
+                }),
+                Some(Stroke {
+                    color: "#1e3a8a".into(),
+                    width: 2.0,
+                    dashed: false,
+                    paint: None,
+                    head_end: None,
+                    tail_end: None,
+                }),
+            ),
+            shape(
+                120.0,
+                12.0,
+                90.0,
+                50.0,
+                None,
+                Some(Stroke {
+                    color: "#ef4444".into(),
+                    width: 3.0,
+                    dashed: true,
+                    paint: None,
+                    head_end: None,
+                    tail_end: None,
+                }),
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn golden_gradient() {
+    check(
+        "gradient",
+        &slide(vec![
+            shape(
+                10.0,
+                10.0,
+                100.0,
+                110.0,
+                Some(Paint::Gradient {
+                    gradient_type: GradientType::Linear,
+                    angle_deg: Some(45.0),
+                    stops: vec![
+                        GradientStop {
+                            position: 0.0,
+                            color: "#f97316".into(),
+                        },
+                        GradientStop {
+                            position: 1.0,
+                            color: "#7c3aed".into(),
+                        },
+                    ],
+                }),
+                None,
+            ),
+            shape(
+                130.0,
+                10.0,
+                100.0,
+                110.0,
+                Some(Paint::Gradient {
+                    gradient_type: GradientType::Radial,
+                    angle_deg: None,
+                    stops: vec![
+                        GradientStop {
+                            position: 0.0,
+                            color: "#ffffff".into(),
+                        },
+                        GradientStop {
+                            position: 1.0,
+                            color: "#0f766e".into(),
+                        },
+                    ],
+                }),
+                None,
+            ),
+        ]),
+    );
+}
+
+#[test]
+fn golden_text() {
+    check(
+        "text",
+        &slide(vec![
+            text_box(12.0, 20.0, "Quarterly review", 22.0, false),
+            text_box(12.0, 70.0, "Underlined subtitle", 14.0, true),
+        ]),
+    );
+}
+
+#[test]
+fn golden_image() {
+    check(
+        "image",
+        &slide(vec![Primitive::Image {
+            object_id: 3,
+            shape_id: Some("pic-1".into()),
+            name: "picture".into(),
+            x: 20.0,
+            y: 20.0,
+            w: 100.0,
+            h: 80.0,
+            asset_id: Some("ppt/media/image1.png".into()),
+            effects: Vec::new(),
+            crop: Default::default(),
+            path: None,
+            stroke: Some(Stroke {
+                color: "#111827".into(),
+                width: 2.0,
+                dashed: false,
+                paint: None,
+                head_end: None,
+                tail_end: None,
+            }),
+            shadow: None,
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_picture_shadow() {
+    check(
+        "picture-shadow",
+        &slide(vec![Primitive::Image {
+            object_id: 5,
+            shape_id: Some("pic-2".into()),
+            name: "hollow mark".into(),
+            x: 60.0,
+            y: 20.0,
+            w: 80.0,
+            h: 80.0,
+            asset_id: Some("ppt/media/image2.png".into()),
+            effects: Vec::new(),
+            crop: Default::default(),
+            path: None,
+            stroke: None,
+            shadow: Some(Shadow {
+                color: "#00000099".into(),
+                blur: 6.0,
+                dx: 12.0,
+                dy: 12.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+            }),
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_picture_fill() {
+    use ooxml_drawingml::GeometryPathCommand as Cmd;
+    check(
+        "picture-fill",
+        &slide(vec![Primitive::Image {
+            object_id: 4,
+            shape_id: Some("shape-2".into()),
+            name: "ring".into(),
+            x: 20.0,
+            y: 15.0,
+            w: 200.0,
+            h: 105.0,
+            asset_id: Some("ppt/media/image1.png".into()),
+            effects: Vec::new(),
+            crop: ImageCrop {
+                left: 0.25,
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+            },
+            path: Some(vec![
+                Cmd::Move { x: 0.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 0.0 },
+                Cmd::Line { x: 1.0, y: 1.0 },
+                Cmd::Line { x: 0.0, y: 1.0 },
+                Cmd::Close,
+                Cmd::Move { x: 0.25, y: 0.25 },
+                Cmd::Line { x: 0.25, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.75 },
+                Cmd::Line { x: 0.75, y: 0.25 },
+                Cmd::Close,
+            ]),
+            stroke: None,
+            shadow: None,
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_rotated() {
+    let mut rotated = shape(
+        70.0,
+        35.0,
+        100.0,
+        60.0,
+        Some(Paint::Solid {
+            color: "#0ea5e9".into(),
+        }),
+        None,
+    );
+    if let Primitive::Shape { transform, .. } = &mut rotated {
+        *transform = Transform {
+            rotation_deg: 30.0,
+            flip_h: false,
+            flip_v: true,
+        };
+    }
+    check("rotated", &slide(vec![rotated]));
+}
+
+#[test]
+fn golden_placeholder() {
+    check(
+        "placeholder",
+        &slide(vec![Primitive::Placeholder {
+            object_id: 4,
+            shape_id: Some("ph-1".into()),
+            name: "table".into(),
+            x: 30.0,
+            y: 30.0,
+            w: 180.0,
+            h: 70.0,
+            label: Some("Table".into()),
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+#[test]
+fn golden_chart() {
+    check(
+        "chart",
+        &slide(vec![Primitive::Chart {
+            object_id: 5,
+            shape_id: Some("chart-1".into()),
+            name: "chart".into(),
+            x: 20.0,
+            y: 20.0,
+            w: 120.0,
+            h: 90.0,
+            label: "Revenue by quarter".into(),
+            primitives: vec![
+                shape(
+                    30.0,
+                    60.0,
+                    24.0,
+                    50.0,
+                    Some(Paint::Solid {
+                        color: "#22c55e".into(),
+                    }),
+                    None,
+                ),
+                shape(
+                    64.0,
+                    40.0,
+                    24.0,
+                    70.0,
+                    Some(Paint::Solid {
+                        color: "#16a34a".into(),
+                    }),
+                    None,
+                ),
+                // Reaches past the chart rect, so the golden proves the clip.
+                shape(
+                    98.0,
+                    20.0,
+                    80.0,
+                    90.0,
+                    Some(Paint::Solid {
+                        color: "#15803d".into(),
+                    }),
+                    None,
+                ),
+            ],
+            transform: Transform::default(),
+        }]),
+    );
+}
+
+/// A 2x2 table at (20, 20, 140x80): cell fills, cell borders, cell text, and a
+/// last child that reaches past the table rect so the clip is exercised.
+fn table_children() -> Vec<Primitive> {
+    let border = || {
+        Some(Stroke {
+            color: "#9aa7bd".into(),
+            width: 1.0,
+            dashed: false,
+            paint: None,
+            head_end: None,
+            tail_end: None,
+        })
+    };
+    let cells = [
+        (20.0, 20.0, "#1f3864"),
+        (90.0, 20.0, "#1f3864"),
+        (20.0, 60.0, "#e8eef7"),
+        (90.0, 60.0, "#ffffff"),
+    ];
+    let mut children: Vec<Primitive> = cells
+        .iter()
+        .map(|(x, y, color)| {
+            shape(
+                *x,
+                *y,
+                70.0,
+                40.0,
+                Some(Paint::Solid {
+                    color: (*color).into(),
+                }),
+                None,
+            )
+        })
+        .collect();
+    children.extend(
+        cells
+            .iter()
+            .map(|(x, y, _)| shape(*x, *y, 70.0, 40.0, None, border())),
+    );
+    children.push(text_box(26.0, 26.0, "Q1", 12.0, false));
+    children.push(text_box(96.0, 26.0, "Q2", 12.0, false));
+    children.push(text_box(26.0, 66.0, "12", 12.0, false));
+    children.push(text_box(96.0, 66.0, "34", 12.0, false));
+    children.push(shape(
+        130.0,
+        90.0,
+        90.0,
+        40.0,
+        Some(Paint::Solid {
+            color: "#ef4444".into(),
+        }),
+        None,
+    ));
+    children
+}
+
+fn table(primitives: Vec<Primitive>) -> Primitive {
+    Primitive::Table {
+        object_id: 6,
+        shape_id: Some("table-1".into()),
+        name: "table".into(),
+        x: 20.0,
+        y: 20.0,
+        w: 140.0,
+        h: 80.0,
+        label: "Table, 2 rows, 2 columns".into(),
+        primitives,
+        transform: Transform::default(),
+    }
+}
+
+fn render(list: &SurfaceDisplayList) -> Vec<u8> {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    render_slide(list, &resources, &RenderOptions::default())
+        .expect("render")
+        .bytes
+}
+
+#[test]
+fn golden_table() {
+    check("table", &slide(vec![table(table_children())]));
+}
+
+#[test]
+fn a_table_paints_exactly_as_the_chart_container_does() {
+    let Primitive::Table {
+        object_id,
+        shape_id,
+        name,
+        x,
+        y,
+        w,
+        h,
+        label,
+        primitives,
+        transform,
+    } = table(table_children())
+    else {
+        unreachable!()
+    };
+    let as_chart = Primitive::Chart {
+        object_id,
+        shape_id,
+        name,
+        x,
+        y,
+        w,
+        h,
+        label,
+        primitives: primitives.clone(),
+        transform,
+    };
+    assert_eq!(
+        render(&slide(vec![table(primitives)])),
+        render(&slide(vec![as_chart]))
+    );
+}
+
+#[test]
+fn a_table_clips_its_children_to_its_rectangle() {
+    let rendered = render(&slide(vec![table(table_children())]));
+    let pixels = image::load_from_memory(&rendered).unwrap().to_rgba8();
+    let mut painted = 0;
+    for (x, y, pixel) in pixels.enumerate_pixels() {
+        if pixel.0 == [253, 253, 253, 255] {
+            continue;
+        }
+        painted += 1;
+        assert!(
+            (20..160).contains(&x) && (20..100).contains(&y),
+            "a table child painted at ({x}, {y}), outside the table rect"
+        );
+    }
+    assert!(painted > 0);
+}
+
+#[test]
+fn an_empty_table_paints_nothing() {
+    assert_eq!(
+        render(&slide(vec![table(Vec::new())])),
+        render(&slide(vec![]))
+    );
+}
+
+fn rotated(primitive: Primitive, rotation_deg: f32) -> Primitive {
+    let Primitive::Table {
+        object_id,
+        shape_id,
+        name,
+        x,
+        y,
+        w,
+        h,
+        label,
+        primitives,
+        ..
+    } = primitive
+    else {
+        unreachable!()
+    };
+    Primitive::Table {
+        object_id,
+        shape_id,
+        name,
+        x,
+        y,
+        w,
+        h,
+        label,
+        primitives,
+        transform: Transform {
+            rotation_deg,
+            ..Transform::default()
+        },
+    }
+}
+
+#[test]
+fn a_table_turns_its_cells_and_its_clip_under_its_own_transform() {
+    let turned = render(&slide(vec![rotated(table(table_children()), 30.0)]));
+    assert_ne!(turned, render(&slide(vec![table(table_children())])));
+    let Primitive::Table {
+        object_id,
+        shape_id,
+        name,
+        x,
+        y,
+        w,
+        h,
+        label,
+        primitives,
+        transform,
+    } = rotated(table(table_children()), 30.0)
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        turned,
+        render(&slide(vec![Primitive::Chart {
+            object_id,
+            shape_id,
+            name,
+            x,
+            y,
+            w,
+            h,
+            label,
+            primitives,
+            transform,
+        }]))
+    );
+}
+
+#[test]
+fn output_is_byte_deterministic() {
+    let list = slide(vec![
+        text_box(12.0, 20.0, "Deterministic", 20.0, false),
+        shape(
+            140.0,
+            20.0,
+            80.0,
+            60.0,
+            Some(Paint::Solid {
+                color: "#3b82f6".into(),
+            }),
+            None,
+        ),
+    ]);
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    let first = render_slide(&list, &resources, &RenderOptions::default()).expect("first");
+    let second = render_slide(&list, &resources, &RenderOptions::default()).expect("second");
+    assert_eq!(first.bytes, second.bytes);
+}
+
+#[test]
+fn a_transparent_render_differs_from_the_opaque_one() {
+    let mut list = slide(vec![]);
+    list.background = None;
+    let (fonts, _) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images);
+    let opaque = render_slide(&list, &resources, &RenderOptions::default()).expect("opaque");
+    let clear = render_slide(
+        &list,
+        &resources,
+        &RenderOptions {
+            background: Background::Transparent,
+            ..RenderOptions::default()
+        },
+    )
+    .expect("clear");
+    assert_ne!(opaque.bytes, clear.bytes);
+}
+
+#[test]
+fn overflowing_text_escapes_its_box_but_respects_the_parent_clip() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    for overflow in [false, true] {
+        for parent_clip in [false, true] {
+            let mut text = text_box(20.0, 20.0, "Overflowing text", 32.0, false);
+            if let Primitive::TextBox {
+                h, overflow: flag, ..
+            } = &mut text
+            {
+                *h = 8.0;
+                *flag = overflow;
+            }
+            let primitive = if parent_clip {
+                Primitive::Chart {
+                    object_id: 3,
+                    shape_id: None,
+                    name: "Clip".into(),
+                    x: 35.0,
+                    y: 10.0,
+                    w: 50.0,
+                    h: 60.0,
+                    label: "".into(),
+                    primitives: vec![text],
+                    transform: Transform::default(),
+                }
+            } else {
+                text
+            };
+            let png = render_slide(
+                &slide(vec![primitive]),
+                &resources,
+                &RenderOptions::default(),
+            )
+            .unwrap();
+            let pixels = image::load_from_memory(&png.bytes).unwrap().to_rgba8();
+            let mut outside_text = 0;
+            for (x, y, pixel) in pixels.enumerate_pixels() {
+                if pixel.0 == [253, 253, 253, 255] {
+                    continue;
+                }
+                if parent_clip {
+                    assert!((35..85).contains(&x) && (10..70).contains(&y));
+                }
+                if y >= 28 {
+                    outside_text += 1;
+                }
+            }
+            if overflow {
+                assert!(outside_text > 100, "parent clip: {parent_clip}");
+            } else {
+                assert_eq!(outside_text, 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn shifted_underlines_follow_run_baselines() {
+    let (fonts, font) = font_store();
+    let images = assets();
+    let resources = RenderResources::new(&fonts, &images).with_label_font(Some(font));
+    let rows = [0.0, 8.0, -8.0].map(|offset| {
+        let mut primitive = text_box(10.0, 20.0, "script", 20.0, true);
+        let Primitive::TextBox { lines, .. } = &mut primitive else {
+            unreachable!()
+        };
+        lines[0].runs[0].baseline_offset_px = offset;
+        lines[0].runs[0].glyphs.clear();
+        let rendered = render_slide(
+            &slide(vec![primitive]),
+            &resources,
+            &RenderOptions::default(),
+        )
+        .unwrap();
+        let pixels = image::load_from_memory(&rendered.bytes).unwrap().to_rgba8();
+        (0..pixels.height())
+            .filter(|y| (0..pixels.width()).any(|x| pixels.get_pixel(x, *y)[0] < 200))
+            .collect::<Vec<_>>()
+    });
+    assert!(!rows[0].is_empty());
+    assert_eq!(rows[1], rows[0].iter().map(|y| y - 8).collect::<Vec<_>>());
+    assert_eq!(rows[2], rows[0].iter().map(|y| y + 8).collect::<Vec<_>>());
+}

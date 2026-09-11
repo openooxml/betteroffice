@@ -94,7 +94,7 @@ pub(crate) fn parse_docx_story_projection(data: &[u8]) -> Result<S6Projection, P
         })
         .cloned()
         .collect();
-    let charts = parse_chart_parts(&all_xml, &mut budget)?;
+    let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = format!("{:x}", Sha256::digest(data));
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
@@ -161,6 +161,7 @@ fn project_s6_blocks(blocks: &mut [BlockContent], depth: usize) {
             }
             BlockContent::Table(table) => *table = crate::table::Table::empty(),
             BlockContent::BlockSdt(sdt) => project_s6_blocks(&mut sdt.content, depth + 1),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

@@ -15,7 +15,7 @@ jobs:
   deploy:
     name: Deploy ${{ matrix.app }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -34,18 +34,34 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         if: matrix.app == 'demo'
+        with:
+          shared-key: wasm
 
-      - name: Install wasm-pack
+      - uses: ./.github/actions/wasm-toolchain
         if: matrix.app == 'demo'
-        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      # Reads `wasm-opt --version`, so it has to follow the toolchain step.
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        if: matrix.app == 'demo'
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      # rust-cache prunes the workspace's own artifacts, and wasm-opt costs minutes per module.
+      - uses: actions/cache@v4
+        if: matrix.app == 'demo'
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@v2
+        if: matrix.app == 'demo'
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - name: Build packages
-        if: matrix.app == 'demo'
-        run: bun run build:packages
-
+      # The demo's prebuild builds the wasm and the packages it needs; a step here would repeat it.
       - name: Deploy
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

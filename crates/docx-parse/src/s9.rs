@@ -83,6 +83,8 @@ pub struct S9DocumentBodyWire {
     pub sections: Option<Vec<S9SectionWire>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub final_section_properties: Option<crate::section::SectionProperties>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub comments: Option<Vec<crate::comments::Comment>>,
 }
@@ -134,6 +136,7 @@ impl From<DocumentBody> for S9DocumentBodyWire {
             content: body.content,
             sections,
             final_section_properties: body.final_section_properties,
+            custom_root_bindings: body.custom_root_bindings,
             comments: body.comments,
         }
     }
@@ -185,6 +188,8 @@ pub fn parse_docx_s9_wire_with_limits(
 ) -> Result<S9WireEnvelope, ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
     let mut budget = ParseBudget::new(limits);
+    let document_path = crate::relationships::office_document_path(&parts, &mut budget)?;
+    let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
 
     let settings = parse_settings(
         find_part(&parts, "word/settings.xml").map(|(_, bytes)| bytes),
@@ -225,7 +230,7 @@ pub fn parse_docx_s9_wire_with_limits(
         "word/fontTable.xml",
         &mut budget,
     )?;
-    let relationships = match find_part(&parts, "word/_rels/document.xml.rels") {
+    let relationships = match find_part(&parts, &document_relationships_path) {
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
@@ -238,7 +243,7 @@ pub fn parse_docx_s9_wire_with_limits(
         })
         .cloned()
         .collect();
-    let charts = parse_chart_parts(&all_xml, &mut budget)?;
+    let charts = parse_chart_parts(&all_xml, limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = options
         .determinism_seed
@@ -246,7 +251,7 @@ pub fn parse_docx_s9_wire_with_limits(
         .unwrap_or_else(|| format!("{:x}", Sha256::digest(data)));
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
-    let document_part = find_part(&parts, "word/document.xml");
+    let document_part = find_part(&parts, &document_path);
     let mut warnings = Vec::new();
     let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
@@ -516,6 +521,7 @@ fn dedupe_blocks(
                 }
             }
             BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut sdt.content, seen, ids),
+            BlockContent::RawXml(_) => {}
         }
     }
 }

@@ -13,7 +13,7 @@
 
 use crate::font_store::FontStore;
 
-use super::input::{AttrsIn, MeasureInput};
+use super::input::{AttrsIn, MeasureRequest};
 use super::tabs::twips_to_px;
 use super::{MeasureError, pt_to_px};
 
@@ -24,7 +24,7 @@ const DEFAULT_TAB_STOP_TWIPS: f32 = 720.0;
 /// the marker is hidden; callers apply it only at zero hanging indent.
 pub(super) fn list_marker_inline_width(
     store: &FontStore,
-    input: &MeasureInput,
+    input: &MeasureRequest<'_>,
     attrs: &AttrsIn,
 ) -> Result<f32, MeasureError> {
     let marker = match attrs.list_marker.as_deref() {

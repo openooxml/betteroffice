@@ -109,6 +109,29 @@ struct ParaSpan {
     pilcrow: u32,
 }
 
+struct IndexedLoc {
+    para_id: String,
+    offset: u32,
+    node_offset: u32,
+}
+
+#[derive(Clone, Copy)]
+enum DeleteDirection {
+    Backward,
+    Forward,
+}
+
+#[derive(Clone, Copy)]
+enum AdjacentStoryUnit {
+    Content(u32),
+    Pilcrow,
+}
+
+/// Whether the layout gives an embed its own block.
+fn is_block_embed(kind: &str) -> bool {
+    matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
+}
+
 /// Resolves a paragraph to its story span by walking the public segment view.
 /// Story-scoped: a `para_id` that lives in another story is "not found".
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
@@ -150,25 +173,104 @@ fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Resul
 /// Transient story-global index -> public paragraph-keyed location. Sticky
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
-fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<(String, u32), JsValue> {
+fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
     let mut cursor = 0_u32;
     let mut para_start = 0_u32;
+    let mut node_start = 0_u32;
     for segment in doc.story_segments(story).map_err(js_err)? {
         match segment.content {
             SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
             SegmentContent::Pilcrow(properties) => {
                 if index <= cursor {
-                    return Ok((properties.para_id, index.saturating_sub(para_start)));
+                    return Ok(IndexedLoc {
+                        para_id: properties.para_id,
+                        offset: index.saturating_sub(para_start),
+                        node_offset: index.saturating_sub(node_start),
+                    });
                 }
                 cursor += 1;
                 para_start = cursor;
+                node_start = cursor;
             }
-            SegmentContent::OtherEmbed { .. } => cursor += 1,
+            SegmentContent::OtherEmbed { ref kind, .. } => {
+                if cursor == node_start && is_block_embed(kind) {
+                    node_start = cursor + 1;
+                }
+                cursor += 1;
+            }
         }
     }
     Err(js_err(format!(
         "selection index {index} does not resolve in story {story:?}"
     )))
+}
+
+fn adjacent_story_unit(
+    doc: &EditingDoc,
+    story: &str,
+    index: u32,
+    direction: DeleteDirection,
+) -> Result<Option<AdjacentStoryUnit>, JsValue> {
+    let mut cursor = 0_u32;
+    for segment in doc.story_segments(story).map_err(js_err)? {
+        match segment.content {
+            SegmentContent::Text(text) => {
+                let units: Vec<u16> = text.encode_utf16().collect();
+                let end = cursor + units.len() as u32;
+                let relative = match direction {
+                    DeleteDirection::Backward if index > cursor && index <= end => {
+                        Some((index - cursor) as usize)
+                    }
+                    DeleteDirection::Forward if index >= cursor && index < end => {
+                        Some((index - cursor) as usize)
+                    }
+                    _ => None,
+                };
+                if let Some(relative) = relative {
+                    let width = match direction {
+                        DeleteDirection::Backward
+                            if relative > 1
+                                && (0xdc00..=0xdfff).contains(&units[relative - 1])
+                                && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
+                        {
+                            2
+                        }
+                        DeleteDirection::Forward
+                            if relative + 1 < units.len()
+                                && (0xd800..=0xdbff).contains(&units[relative])
+                                && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
+                        {
+                            2
+                        }
+                        _ => 1,
+                    };
+                    return Ok(Some(AdjacentStoryUnit::Content(width)));
+                }
+                cursor = end;
+            }
+            SegmentContent::Pilcrow(_) => {
+                let adjacent = match direction {
+                    DeleteDirection::Backward => index == cursor + 1,
+                    DeleteDirection::Forward => index == cursor,
+                };
+                if adjacent {
+                    return Ok(Some(AdjacentStoryUnit::Pilcrow));
+                }
+                cursor += 1;
+            }
+            SegmentContent::OtherEmbed { .. } => {
+                let adjacent = match direction {
+                    DeleteDirection::Backward => index == cursor + 1,
+                    DeleteDirection::Forward => index == cursor,
+                };
+                if adjacent {
+                    return Ok(Some(AdjacentStoryUnit::Content(1)));
+                }
+                cursor += 1;
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held
@@ -747,6 +849,14 @@ fn parse_raw_op(value: &Value) -> Result<RawOp, JsValue> {
     }
 }
 
+fn parse_raw_ops(ops_json: &str) -> Result<Vec<RawOp>, JsValue> {
+    let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
+    let entries = value
+        .as_array()
+        .ok_or_else(|| js_err("apply_raw_ops expects an array of ops"))?;
+    entries.iter().map(parse_raw_op).collect()
+}
+
 /// Parses an accept/reject target from JSON: `{"revisionId": string}` (one
 /// coalesced revision, any story) or a Loc range
 /// `{"story","startPara","startOffset","endPara","endOffset"}`.
@@ -864,6 +974,7 @@ fn thin_header_footer(
                         story_type: part.story_type.clone(),
                         hdr_ftr_type: part.hdr_ftr_type.clone(),
                         content: Vec::new(),
+                        custom_root_bindings: part.custom_root_bindings.clone(),
                         watermark: part.watermark.clone(),
                     },
                 )
@@ -878,6 +989,7 @@ fn thin_notes(notes: &Option<Vec<docx_parse::Note>>) -> Option<Vec<docx_parse::N
             .iter()
             .map(|note| docx_parse::Note {
                 story_type: note.story_type.clone(),
+                custom_root_bindings: note.custom_root_bindings.clone(),
                 id: note.id,
                 note_type: note.note_type.clone(),
                 content: Vec::new(),
@@ -908,6 +1020,7 @@ fn thin_docx_envelope(envelope: &docx_parse::S9WireEnvelope) -> docx_parse::S9Wi
                     content: Vec::new(),
                     sections,
                     final_section_properties: package.document.final_section_properties.clone(),
+                    custom_root_bindings: package.document.custom_root_bindings.clone(),
                     comments: package.document.comments.clone(),
                 },
                 styles: package.styles.clone(),
@@ -955,7 +1068,7 @@ impl EditSession {
         Ok(json)
     }
 
-    fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32, u32), JsValue> {
+    fn collapsed_resident_input_selection(&self) -> Result<(String, String, u32), JsValue> {
         let selection = self.selection.borrow();
         let selection = selection
             .as_ref()
@@ -978,78 +1091,68 @@ impl EditSession {
                 "resident input currently requires a collapsed selection",
             ));
         }
-        let (para_id, offset) = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &para_id) {
+        let loc = index_loc(self.engine.doc(), &story, head)?;
+        if !self.engine.can_apply_input(&story, &loc.para_id) {
             return Err(js_err(
                 "resident input state is not ready for this paragraph",
             ));
         }
-        Ok((story, para_id, offset, head))
+        Ok((story, loc.para_id, head))
     }
 
     fn delete_resident_input(
         &self,
         direction: &str,
-        selection: (String, String, u32, u32),
+        selection: (String, String, u32),
     ) -> Result<String, JsValue> {
-        let (story, para_id, offset, head) = selection;
-        let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
-        let paragraph_index = paragraphs
-            .iter()
-            .position(|paragraph| paragraph.para_id == para_id)
-            .ok_or_else(|| js_err("resident input paragraph no longer resolves"))?;
-        let paragraph = &paragraphs[paragraph_index];
-        let units: Vec<u16> = paragraph.text.encode_utf16().collect();
+        let (story, para_id, head) = selection;
+        let direction = match direction {
+            "backward" => DeleteDirection::Backward,
+            "forward" => DeleteDirection::Forward,
+            _ => return Err(js_err("delete direction must be backward or forward")),
+        };
+        let adjacent = adjacent_story_unit(self.engine.doc(), &story, head, direction)?;
         let ctx = EditCtx::local("", "");
 
-        match direction {
-            "backward" if offset > 0 => {
-                let previous = if offset > 1
-                    && (0xdc00..=0xdfff).contains(&units[offset as usize - 1])
-                    && (0xd800..=0xdbff).contains(&units[offset as usize - 2])
-                {
-                    offset - 2
-                } else {
-                    offset - 1
+        match (direction, adjacent) {
+            (DeleteDirection::Backward, Some(AdjacentStoryUnit::Content(width))) => {
+                self.engine
+                    .doc()
+                    .delete_range(&ctx, StoryRange::new(&story, head - width, head))
+                    .map_err(js_err)?;
+            }
+            (DeleteDirection::Forward, Some(AdjacentStoryUnit::Content(width))) => {
+                self.engine
+                    .doc()
+                    .delete_range(&ctx, StoryRange::new(&story, head, head + width))
+                    .map_err(js_err)?;
+            }
+            (direction, Some(AdjacentStoryUnit::Pilcrow)) => {
+                let paragraphs = self.engine.doc().paragraphs(&story).map_err(js_err)?;
+                let paragraph_index = paragraphs
+                    .iter()
+                    .position(|paragraph| paragraph.para_id == para_id)
+                    .ok_or_else(|| js_err("resident input paragraph no longer resolves"))?;
+                let merge = match direction {
+                    DeleteDirection::Backward if paragraph_index > 0 => {
+                        Some(MergeDirection::Backward)
+                    }
+                    DeleteDirection::Forward if paragraph_index + 1 < paragraphs.len() => {
+                        Some(MergeDirection::Forward)
+                    }
+                    _ => None,
+                };
+                let Some(merge) = merge else {
+                    return Err(js_err("resident input has no character in that direction"));
                 };
                 self.engine
                     .doc()
-                    .delete_range(
-                        &ctx,
-                        StoryRange::new(&story, head - (offset - previous), head),
-                    )
+                    .merge_paragraphs(&ctx, &para_id, merge)
                     .map_err(js_err)?;
             }
-            "backward" if paragraph_index > 0 => {
-                self.engine
-                    .doc()
-                    .merge_paragraphs(&ctx, &para_id, MergeDirection::Backward)
-                    .map_err(js_err)?;
-            }
-            "forward" if (offset as usize) < units.len() => {
-                let next = if offset as usize + 1 < units.len()
-                    && (0xd800..=0xdbff).contains(&units[offset as usize])
-                    && (0xdc00..=0xdfff).contains(&units[offset as usize + 1])
-                {
-                    offset + 2
-                } else {
-                    offset + 1
-                };
-                self.engine
-                    .doc()
-                    .delete_range(&ctx, StoryRange::new(&story, head, head + (next - offset)))
-                    .map_err(js_err)?;
-            }
-            "forward" if paragraph_index + 1 < paragraphs.len() => {
-                self.engine
-                    .doc()
-                    .merge_paragraphs(&ctx, &para_id, MergeDirection::Forward)
-                    .map_err(js_err)?;
-            }
-            "backward" | "forward" => {
+            (_, None) => {
                 return Err(js_err("resident input has no character in that direction"));
             }
-            _ => return Err(js_err("delete direction must be backward or forward")),
         }
         Ok(story)
     }
@@ -1136,6 +1239,27 @@ impl EditSession {
             .map_err(|error| JsValue::from_str(&error))
     }
 
+    /// Same full region pass as [`Self::layout_document_with_regions_json`],
+    /// but the reply carries only `{ layout, headersFooters?, notesConverged }`
+    /// — the measured arena stays retained wasm-side and is fetched on demand
+    /// via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input: &str,
+    ) -> Result<String, JsValue> {
+        self.engine
+            .layout_document_with_regions_retained_json(input)
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
+    /// Retained `{ measured, options }` for the main-thread display-list
+    /// fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, JsValue> {
+        self.engine
+            .retained_kernel_inputs_json()
+            .map_err(|error| JsValue::from_str(&error))
+    }
+
     /// `{ measured, options, layout }` JSON in, `DisplayList` JSON out, built
     /// against the same resident font store this session measures with.
     pub fn build_display_list_json(&self, input: &str) -> Result<String, JsValue> {
@@ -1191,9 +1315,8 @@ impl EditSession {
                 drop(txn);
                 match (anchor, head) {
                     (Some(anchor), Some(head)) if anchor == head => {
-                        let (para_id, offset) =
-                            index_loc(self.engine.doc(), &selection.story, head)?;
-                        Some((para_id, offset))
+                        let loc = index_loc(self.engine.doc(), &selection.story, head)?;
+                        Some((loc.para_id, loc.node_offset))
                     }
                     _ => None,
                 }
@@ -1260,8 +1383,8 @@ impl EditSession {
                 "apply_input currently requires a collapsed selection",
             ));
         }
-        let (para_id, _) = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &para_id) {
+        let loc = index_loc(self.engine.doc(), &story, head)?;
+        if !self.engine.can_apply_input(&story, &loc.para_id) {
             return Err(js_err(
                 "resident input state is not ready for this paragraph",
             ));
@@ -1329,8 +1452,8 @@ impl EditSession {
                 "apply_input currently requires a collapsed selection",
             ));
         }
-        let (para_id, _) = index_loc(self.engine.doc(), &story, head)?;
-        if !self.engine.can_apply_input(&story, &para_id) {
+        let loc = index_loc(self.engine.doc(), &story, head)?;
+        if !self.engine.can_apply_input(&story, &loc.para_id) {
             return Err(js_err(
                 "resident input state is not ready for this paragraph",
             ));
@@ -1457,9 +1580,13 @@ impl EditSession {
 
     /// Region-aware hit test against the resident display list, so no
     /// display-list JSON crosses the boundary. `x`/`y` are page-local px.
-    /// Returns `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}`, or
-    /// `"null"` for a page index outside the frame. A header/footer `pos`
-    /// refers to that header/footer's own document, not the body.
+    /// Returns
+    /// `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,`
+    /// `"noteId"?,"pos":n|null,"target":"text"|"image"|"none"}`, or `"null"`
+    /// for a page index outside the frame. A header/footer `pos` refers to
+    /// that part's own document and a note `pos` to the `fn:{id}` / `en:{id}`
+    /// story, never the body; `target` is what sits under the point, which is
+    /// what a pointer cursor needs.
     pub fn display_hit_test_regions_json(
         &self,
         page_index: u32,
@@ -1499,21 +1626,22 @@ impl EditSession {
     }
 
     /// Same rectangles as [`EditSession::display_range_rects_json`], scoped to
-    /// a region. `region` is `"body"`, `"header"` or `"footer"`; `r_id` names
-    /// one header/footer part, and an empty string matches any. `from`/`to`
-    /// are positions in THAT region's document, and a header/footer part
-    /// paints on every page carrying it, so the result holds one rect set per
-    /// such page, each tagged with its `pageIndex`. Errors on an unknown
-    /// `region` and when no display list is resident.
+    /// a region. `region` is `"body"`, `"header"`, `"footer"`, `"footnote"` or
+    /// `"endnote"`; `part_id` names one header/footer part (an empty string
+    /// matches any) or the note whose story the positions belong to.
+    /// `from`/`to` are positions in THAT region's document, and a
+    /// header/footer part paints on every page carrying it, so the result
+    /// holds one rect set per such page, each tagged with its `pageIndex`.
+    /// Errors on an unknown `region` and when no display list is resident.
     pub fn display_range_rects_region_json(
         &self,
         region: &str,
-        r_id: &str,
+        part_id: &str,
         from: f64,
         to: f64,
     ) -> Result<String, JsValue> {
         self.engine
-            .display_range_rects_region_json(region, r_id, from as i64, to as i64)
+            .display_range_rects_region_json(region, part_id, from as i64, to as i64)
             .map_err(|error| JsValue::from_str(&error))
     }
 
@@ -1900,11 +2028,11 @@ impl EditSession {
     pub fn resolve_sticky_position(&self, story: &str, position: &[u8]) -> Result<String, JsValue> {
         let (index, _) = resolve_sticky_selection(self.engine.doc(), story, position, position)
             .map_err(js_err)?;
-        let (para_id, offset) = index_loc(self.engine.doc(), story, index)?;
+        let loc = index_loc(self.engine.doc(), story, index)?;
         Ok(json!({
             "story": story,
-            "paraId": para_id,
-            "offset": offset,
+            "paraId": loc.para_id,
+            "offset": loc.offset,
         })
         .to_string())
     }
@@ -1929,19 +2057,18 @@ impl EditSession {
             .ok_or_else(|| js_err("selection head no longer resolves"))?
             .index;
         drop(txn);
-        let (anchor_para, anchor_offset) =
-            index_loc(self.engine.doc(), &selection.story, anchor_index)?;
-        let (head_para, head_offset) = index_loc(self.engine.doc(), &selection.story, head_index)?;
+        let anchor = index_loc(self.engine.doc(), &selection.story, anchor_index)?;
+        let head = index_loc(self.engine.doc(), &selection.story, head_index)?;
         Ok(json!({
             "anchor": {
                 "story": selection.story,
-                "paraId": anchor_para,
-                "offset": anchor_offset,
+                "paraId": anchor.para_id,
+                "offset": anchor.offset,
             },
             "head": {
                 "story": selection.story,
-                "paraId": head_para,
-                "offset": head_offset,
+                "paraId": head.para_id,
+                "offset": head.offset,
             }
         })
         .to_string())
@@ -1975,18 +2102,18 @@ impl EditSession {
     ) -> Result<String, JsValue> {
         let (anchor_index, head_index) =
             resolve_sticky_selection(self.engine.doc(), story, anchor, head).map_err(js_err)?;
-        let (anchor_para, anchor_offset) = index_loc(self.engine.doc(), story, anchor_index)?;
-        let (head_para, head_offset) = index_loc(self.engine.doc(), story, head_index)?;
+        let anchor = index_loc(self.engine.doc(), story, anchor_index)?;
+        let head = index_loc(self.engine.doc(), story, head_index)?;
         Ok(json!({
             "anchor": {
                 "story": story,
-                "paraId": anchor_para,
-                "offset": anchor_offset,
+                "paraId": anchor.para_id,
+                "offset": anchor.offset,
             },
             "head": {
                 "story": story,
-                "paraId": head_para,
-                "offset": head_offset,
+                "paraId": head.para_id,
+                "offset": head.offset,
             }
         })
         .to_string())
@@ -2294,8 +2421,9 @@ impl EditSession {
         serde_json::to_string(&receipt).map_err(js_err)
     }
 
-    /// Replaces every selected cell's complete `tcPr.borders` object with the
-    /// JSON object `borders_json`. `range_json` is a [`TableRange`]. Always a
+    /// Merges the sides of the JSON object `borders_json` into every selected
+    /// cell's `tcPr.borders`; `insideH`/`insideV` resolve to the physical edges
+    /// interior to the selection. `range_json` is a [`TableRange`]. Always a
     /// plain local edit.
     pub fn set_cell_borders(
         &self,
@@ -2998,18 +3126,21 @@ impl EditSession {
     /// or a missing required field, and leaves the story untouched — parsing
     /// completes before the transaction opens.
     pub fn apply_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
-        let value: Value = serde_json::from_str(ops_json).map_err(js_err)?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| js_err("apply_raw_ops expects an array of ops"))?;
-        let ops = entries
-            .iter()
-            .map(parse_raw_op)
-            .collect::<Result<Vec<_>, _>>()?;
+        let ops = parse_raw_ops(ops_json)?;
         let ctx = EditCtx::local(String::new(), String::new());
         self.engine
             .doc()
             .apply_raw_ops(story, ops, &ctx)
+            .map_err(js_err)
+    }
+
+    /// Applies seed raw operations with deterministic item ordering.
+    pub fn apply_seed_raw_ops(&self, story: &str, ops_json: &str) -> Result<(), JsValue> {
+        let ops = parse_raw_ops(ops_json)?;
+        let ctx = EditCtx::local(String::new(), String::new());
+        self.engine
+            .doc()
+            .apply_raw_story_batches(vec![(story.to_owned(), ops)], &ctx)
             .map_err(js_err)
     }
 
@@ -3284,5 +3415,138 @@ impl EditSession {
             )
             .collect();
         serde_json::to_string(&items).map_err(js_err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EditCtx, RawOp};
+
+    fn seed_paragraph_after_embeds(doc: &EditingDoc, embeds: &[&str], text: &str) {
+        doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
+            .unwrap();
+        let ctx = EditCtx::local(String::new(), String::new());
+        let mut index = 6;
+        let mut ops = Vec::new();
+        for kind in embeds {
+            ops.push(RawOp::InsertEmbed {
+                index,
+                kind: (*kind).into(),
+                payload: Default::default(),
+                attrs: Default::default(),
+            });
+            index += 1;
+        }
+        ops.push(RawOp::Insert {
+            index,
+            text: text.into(),
+            attrs: Default::default(),
+        });
+        index += text.encode_utf16().count() as u32;
+        ops.push(RawOp::InsertEmbed {
+            index,
+            kind: "pilcrow".into(),
+            payload: vec![
+                ("paraId".into(), Any::from("p1")),
+                ("pStyle".into(), Any::from("Normal")),
+                ("alignment".into(), Any::from("left")),
+            ],
+            attrs: Default::default(),
+        });
+        doc.apply_raw_ops("body", ops, &ctx).unwrap();
+    }
+
+    fn caret_layout_input() -> String {
+        json!({
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "p1",
+                    "paraId": "p1",
+                    "runs": [{
+                        "kind": "text",
+                        "text": "ABCDE",
+                        "pmStart": 1,
+                        "pmEnd": 6
+                    }],
+                    "attrs": {},
+                    "pmStart": 0,
+                    "pmEnd": 7
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "lines": [{
+                        "headRun": 0,
+                        "headChar": 0,
+                        "tailRun": 0,
+                        "tailChar": 5,
+                        "width": 50,
+                        "ascent": 8,
+                        "descent": 2,
+                        "lineHeight": 20
+                    }],
+                    "totalHeight": 20
+                }
+            }],
+            "options": {
+                "pageSize": { "w": 200, "h": 120 },
+                "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn index_loc_returns_the_node_offset_for_cumulative_block_embeds() {
+        let kinds = ["table", "pageBreak", "columnBreak", "blockSdt"];
+        for count in 0..=kinds.len() {
+            let doc = EditingDoc::new(7 + count as u64);
+            seed_paragraph_after_embeds(&doc, &kinds[..count], "ABCDE");
+            let index = 6 + count as u32 + 3;
+            let loc = index_loc(&doc, "body", index).unwrap();
+
+            assert_eq!(loc.para_id, "p1");
+            assert_eq!(loc.offset, count as u32 + 3);
+            assert_eq!(loc.node_offset, 3);
+        }
+    }
+
+    #[test]
+    fn resident_backspace_after_a_leading_embed_deletes_the_previous_character() {
+        let session = EditSession::new(20.0).unwrap();
+        seed_paragraph_after_embeds(session.engine.doc(), &["table"], "ABCDE");
+        let head = loc_index(session.engine.doc(), "body", "p1", 6).unwrap();
+
+        session
+            .delete_resident_input("backward", ("body".into(), "p1".into(), head))
+            .unwrap();
+
+        let paragraphs = session.engine.doc().paragraphs("body").unwrap();
+        assert_eq!(paragraphs[1].text, "ABCD");
+    }
+
+    #[test]
+    fn resident_caret_snapshot_rebases_cumulative_block_embeds() {
+        let session = EditSession::new(21.0).unwrap();
+        seed_paragraph_after_embeds(
+            session.engine.doc(),
+            &["table", "pageBreak", "columnBreak", "blockSdt"],
+            "ABCDE",
+        );
+        session
+            .engine
+            .layout_document_json(&caret_layout_input())
+            .unwrap();
+        session.engine.build_display_list_frame("{}", 0).unwrap();
+        session.set_selection("body", "p1", 7, "p1", 7).unwrap();
+
+        let snapshot: Value =
+            serde_json::from_str(&session.resident_caret_snapshot_json().unwrap()).unwrap();
+        let caret = &snapshot["caretRect"];
+
+        assert_eq!(snapshot["frameEpoch"], 1);
+        assert_eq!(caret["pageIndex"], 0);
+        assert!((caret["x"].as_f64().unwrap() - 40.0).abs() < 0.001);
     }
 }

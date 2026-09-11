@@ -105,6 +105,15 @@ pub struct ListRendering {
     pub abstract_num_id: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub start_override: Option<f64>,
+    /// Level indents the paragraph inherits when neither direct formatting
+    /// nor the style chain sets its own; consumers apply them at layout
+    /// time so the paragraph's authored properties stay authored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_left: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub indent_first_line: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hanging_indent: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -598,6 +607,9 @@ pub fn compute_list_rendering(
         level_num_fmts,
         abstract_num_id: instance.map(|instance| instance.abstract_num_id),
         start_override: level_override.and_then(|value| value.start_override),
+        indent_left: None,
+        indent_first_line: None,
+        hanging_indent: None,
     })
 }
 

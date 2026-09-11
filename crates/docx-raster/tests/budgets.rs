@@ -457,6 +457,37 @@ fn an_oversized_text_run_is_refused_before_the_shaper_allocates() {
     );
 }
 
+/// A `font` shorthand is a display-list string of any length, and a page may
+/// carry a distinct one per run. Parsing each one once must not mean holding a
+/// copy of every raw string for the length of the page.
+#[test]
+fn a_page_of_distinct_font_shorthands_does_not_retain_them() {
+    let (fonts, chains) = carlito();
+    let images = ImageMap::new();
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let primitives: Vec<Value> = (0..512)
+        .map(|index| {
+            json!({
+                "kind": "text",
+                "text": "x",
+                "x": 1,
+                "baselineY": 6,
+                "width": 4,
+                "font": format!("400 {}12px Carlito, sans-serif", " ".repeat(16_384 + index)),
+                "color": "#000000",
+                "leaderGlyphs": {"glyph": ".", "count": 1, "advance": 0}
+            })
+        })
+        .collect();
+    let scene = list(8.0, 8.0, primitives);
+    let (result, allocated) = allocated_by(|| render_png(&scene, 0, &resources));
+    result.expect("render");
+    assert!(
+        allocated < MIB,
+        "a page of distinct shorthands allocated {allocated} bytes keeping them"
+    );
+}
+
 /// A leader repeats its glyph `count` times, and the glyph is a display-list
 /// string of any length. The charge is the product, not the count: 1:1 shaping
 /// leaves no excess for the shaped-glyph charge to recover.

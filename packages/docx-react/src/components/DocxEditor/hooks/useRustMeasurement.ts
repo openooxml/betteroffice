@@ -15,6 +15,7 @@ import { extractEmbeddedFontFaces } from '@betteroffice/docx/utils';
 export type RustFontChainsProvider = () => Record<string, number[]> | undefined;
 
 export interface UseRustMeasurementOptions {
+  onError?: (error: Error) => void;
   document: Document | null;
   fontProvider?: BundledFontProvider;
   fontChainsProviderRef?: React.RefObject<RustFontChainsProvider | null>;
@@ -33,6 +34,8 @@ export function useRustMeasurement(
   options: UseRustMeasurementOptions
 ): UseRustMeasurementReturn {
   const { document, fontProvider, fontChainsProviderRef, textEngine } = options;
+  const onErrorRef = useRef(options.onError);
+  onErrorRef.current = options.onError;
   const runLayoutPipelineRef = useRef<(() => void) | null>(null);
   const sourceRef = useRef<RustMeasureSource | null>(null);
   const sourceEngineRef = useRef<RustTextEngine | null>(null);
@@ -80,6 +83,7 @@ export function useRustMeasurement(
         if (firstLoad) runLayoutPipelineRef.current?.();
       } catch (error) {
         console.error('[useRustMeasurement] Rust font engine failed to load', error);
+        if (!cancelled) onErrorRef.current?.(error instanceof Error ? error : new Error(String(error)));
       }
     })();
     return () => {

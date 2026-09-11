@@ -100,6 +100,7 @@ export function IconGridDropdown<T extends string = string>({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
             backgroundColor: 'var(--doc-surface)',

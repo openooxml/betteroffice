@@ -711,6 +711,9 @@ pub struct TextRunPrimitive {
     pub baseline_y: Number,
     /// measured advance of the whole run
     pub width: Number,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// CSS font shorthand.
     pub font: String,
     pub color: String,
@@ -768,6 +771,9 @@ pub struct GlyphRunPrimitive {
     /// glyph `cluster`s index into it. REQUIRED.
     pub text: String,
     pub glyphs: Vec<PlacedGlyph>,
+    /// Guessed horizontal paint slot. Missing y/h leaves ink vertically unbounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint_clip: Option<ClipRect>,
     /// extra advance added after each U+0020 cluster on a justified line (px) —
     /// equivalent to [`TextRunPrimitive::word_spacing`]; the glyph `x` positions
     /// already fold this stretch in, so it is an interchange hint, not
@@ -1247,10 +1253,6 @@ struct HfVariantContentIn {
     height: Option<f64>,
     #[serde(default)]
     flow_height: Option<f64>,
-    #[serde(default)]
-    visual_top: Option<f64>,
-    #[serde(default)]
-    visual_bottom: Option<f64>,
     #[serde(default)]
     field_widths: Vec<HfFieldWidthContentIn>,
 }
@@ -2137,6 +2139,10 @@ pub(crate) struct ShapeBlockIn {
     pm_start: Option<i64>,
     #[serde(default)]
     pm_end: Option<i64>,
+    #[serde(default)]
+    pub(crate) position: Option<crate::types::ImageRunPosition>,
+    #[serde(default)]
+    pub(crate) behind_doc: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2201,6 +2207,8 @@ struct ChartTextIn {
     italic: Option<bool>,
     #[serde(default)]
     color: Option<String>,
+    #[serde(default)]
+    spacing_pt: Option<f64>,
 }
 
 #[derive(Deserialize, Default, Clone)]
@@ -2586,6 +2594,8 @@ pub(crate) struct LineIn {
     descent: f64,
     #[serde(default)]
     line_height: f64,
+    #[serde(default)]
+    synthetic_fallback: bool,
     #[serde(default)]
     left_offset: Option<f64>,
     #[serde(default)]
@@ -3093,6 +3103,32 @@ fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
     font_px_of(fmt) * script_scale_of(fmt)
 }
 
+fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
+    if all_caps == Some(true) {
+        text.chars().flat_map(char::to_uppercase).count()
+    } else {
+        text.chars().count()
+    }
+}
+
+fn fallback_text_width(text: &str, fmt: &RunFormattingIn, default_font_pt: f64) -> f64 {
+    let font_size = fmt
+        .font_size
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(default_font_pt);
+    let font_px = font_size * 96.0 / 72.0 * script_scale_of(fmt);
+    let letter_spacing = fmt
+        .letter_spacing
+        .filter(|spacing| spacing.is_finite() && *spacing > 0.0 && *spacing <= 1_000.0)
+        .unwrap_or(0.0);
+    let horizontal_scale = fmt
+        .horizontal_scale
+        .filter(|scale| scale.is_finite() && *scale > 0.0 && *scale <= 600.0)
+        .map(|scale| scale / 100.0)
+        .unwrap_or(1.0);
+    fallback_scalar_count(text, fmt.all_caps) as f64 * (font_px + letter_spacing) * horizontal_scale
+}
+
 /// Paint-only baseline offset. A positive `positionPx` raises the text, which
 /// is a smaller y coordinate.
 fn baseline_y_of(fmt: &RunFormattingIn, baseline: f64) -> f64 {
@@ -3490,6 +3526,7 @@ fn emit_text_watermark(prims: &mut Vec<Primitive>, wm: &TextWatermarkIn, page: &
         x: px(x),
         baseline_y: px(baseline),
         width: px(width),
+        paint_clip: None,
         font,
         color: wm.color.clone().unwrap_or_else(|| "#C0C0C0".to_string()),
         letter_spacing: None,
@@ -3931,6 +3968,14 @@ fn push_bidi_text_items<'a>(
     }
 
     let total_chars = chars.len();
+    let total_scalars = fallback_scalar_count(text, fmt.all_caps);
+    let mut utf16_offsets = Vec::with_capacity(total_chars + 1);
+    utf16_offsets.push(0usize);
+    let mut utf16_units = 0usize;
+    for character in &chars {
+        utf16_units += character.len_utf16();
+        utf16_offsets.push(utf16_units);
+    }
     let mut start = 0usize;
     while start < total_chars {
         let level = levels
@@ -3949,39 +3994,35 @@ fn push_bidi_text_items<'a>(
         }
 
         let slice: String = chars[start..end].iter().collect();
-        let slice_chars = end - start;
+        let slice_scalars = fallback_scalar_count(&slice, fmt.all_caps);
         let spaces = slice.chars().filter(|&ch| ch == ' ').count();
-        let base_width = if total_chars > 0 {
-            total_width * slice_chars as f64 / total_chars as f64
-        } else {
-            0.0
-        };
+        let base_width = total_width * slice_scalars as f64 / total_scalars as f64;
         let width = if word_space_extra > 0.0 {
             // `total_width` already includes the stretched spaces. Remove the
             // segment-level equal-share stretch and reapply it per bidi slice.
             let total_spaces = text.chars().filter(|&ch| ch == ' ').count();
             let unstretched = total_width - word_space_extra * total_spaces as f64;
-            (unstretched * slice_chars as f64 / total_chars as f64)
+            (unstretched * slice_scalars as f64 / total_scalars as f64)
                 + word_space_extra * spaces as f64
         } else {
             base_width
         };
 
         let slice_pm_end = if end == total_chars {
-            pm_end.or_else(|| pm_start.map(|p| p + end as i64))
+            pm_end.or_else(|| pm_start.map(|p| p + utf16_offsets[end] as i64))
         } else {
-            pm_start.map(|p| p + end as i64)
+            pm_start.map(|p| p + utf16_offsets[end] as i64)
         };
 
         out.push(LinePaintItem::Text(LineTextItem {
             text: slice,
             fmt,
-            pm_start: pm_start.map(|p| p + start as i64),
+            pm_start: pm_start.map(|p| p + utf16_offsets[start] as i64),
             pm_end: slice_pm_end,
             width,
             level,
-            source_start: start,
-            source_end: end,
+            source_start: utf16_offsets[start],
+            source_end: utf16_offsets[end],
             logical_order: fmt.logical_order,
             exact_advance: false,
             field,
@@ -4271,18 +4312,23 @@ fn note_partitions<'a>(notes: &'a [NoteItemIn], columns: usize) -> Vec<Vec<&'a N
     out
 }
 
+/// Paint-group id shared by every primitive of one note. Grouping a note
+/// area's primitives back into stories means rebuilding it, which hit testing
+/// and the a11y mirror both do.
+pub(crate) fn note_group_id(kind: &str, id: i64) -> String {
+    format!("{kind}-{id}")
+}
+
+/// Marks a note's primitives with its paint group. Their document positions
+/// stay the note story's own, so a point or range inside a note addresses that
+/// story; the body-reference range is linkage metadata and rides on the
+/// region's `notes` entry instead.
 fn stamp_note_item(prims: &mut [Primitive], start: usize, note: &NoteItemIn, kind: &str) {
     let Some(id) = note.id else { return };
-    let group_id = format!("{kind}-{id}");
+    let group_id = note_group_id(kind, id);
     for primitive in &mut prims[start..] {
         if let Some(attrs) = doc_attrs_mut(primitive) {
             attrs.group_id = Some(group_id.clone());
-            // The body-reference range is semantic linkage metadata, not the
-            // note story's own selectable range; H consumes it from the group.
-            if attrs.doc_start.is_none() && attrs.doc_end.is_none() {
-                attrs.doc_start = note.anchor_doc_start;
-                attrs.doc_end = note.anchor_doc_end;
-            }
         }
     }
 }
@@ -4558,6 +4604,48 @@ fn resolve_hf_box_position(
     (geom.margin_left + x, geom.margin_top + y)
 }
 
+pub(crate) fn emit_hf_shape(
+    prims: &mut Vec<Primitive>,
+    block: &ShapeBlockIn,
+    measure: &BoxExtentIn,
+    ctx: &RenderCtx<'_>,
+    page: &PageIn,
+    flow_y: f64,
+) {
+    let (x, y) = crate::anchor::resolve_position(
+        block.position.as_ref(),
+        measure.width,
+        measure.height,
+        &crate::anchor::AnchorFrame {
+            page_width: page.size.w,
+            page_height: page.size.h,
+            margin_left: page.margins.left,
+            margin_right: page.margins.right,
+            margin_top: page.margins.top,
+            margin_bottom: page.margins.bottom,
+            flow_x: page.margins.left,
+            flow_y,
+            flow_width: page.size.w - page.margins.left - page.margins.right,
+            flow_height: 0.0,
+            odd_page: ctx.page_number % 2 == 1,
+        },
+    );
+    let fragment = ShapeFragmentIn {
+        block_id: block.id.clone(),
+        x,
+        y,
+        width: measure.width,
+        height: measure.height,
+        doc_start: block.doc_start,
+        doc_end: block.doc_end,
+        pm_start: block.pm_start,
+        pm_end: block.pm_end,
+        is_anchored: Some(block.position.is_some()),
+        z_index: None,
+    };
+    emit_shape_fragment(prims, &fragment, block, ctx);
+}
+
 fn recompose_hf_region(
     region: &mut HfRegion,
     hf: &HeadersFootersContentIn,
@@ -4598,8 +4686,6 @@ fn recompose_hf_region(
     let height = variant
         .height
         .unwrap_or_else(|| variant.measured.iter().map(measured_block_height).sum());
-    let visual_top = variant.visual_top.unwrap_or(0.0);
-    let visual_bottom = variant.visual_bottom.unwrap_or(height);
     let flow_height = variant.flow_height.unwrap_or(height);
     let (origin_y, flow_top) = match region.kind {
         HfKind::Header => {
@@ -4608,9 +4694,9 @@ fn recompose_hf_region(
         }
         HfKind::Footer => {
             let distance = hf.footer_distance.or(page.margins.footer).unwrap_or(48.0);
-            let actual = (visual_bottom - visual_top).max(24.0);
+            let actual = flow_height.max(24.0);
             (
-                page.size.h - distance - actual - visual_top,
+                page.size.h - distance - actual,
                 page.size.h - distance - flow_height,
             )
         }
@@ -4745,6 +4831,19 @@ fn recompose_hf_region(
                 if block.display_mode.as_deref() != Some("float")
                     && !is_floating_wrap_type(block.wrap_type.as_deref())
                 {
+                    cursor += measure.height;
+                }
+            }
+            (BlockIn::Shape(block), MeasureIn::Shape(measure)) => {
+                let prims = if block.position.is_none() {
+                    &mut flow
+                } else if block.behind_doc.unwrap_or(false) {
+                    &mut behind
+                } else {
+                    &mut front
+                };
+                emit_hf_shape(prims, block, measure, &ctx, page, origin_y + cursor);
+                if block.position.is_none() {
                     cursor += measure.height;
                 }
             }
@@ -5427,6 +5526,7 @@ pub(crate) fn emit_paragraph_fragment(
             x: px(glyph_x),
             baseline_y: px(line.baseline),
             width: px(PARAGRAPH_MARK_GLYPH_WIDTH),
+            paint_clip: None,
             font: css_font(&RunFormattingIn::default()),
             color: structural_color(rev.kind).to_string(),
             letter_spacing: None,
@@ -5710,11 +5810,15 @@ fn emit_line(
 
     // distribute the measured line width over runs whose advance we don't know
     // individually: fixed-width runs (tabs, inline images) subtract first, the
-    // rest splits across text-ish segments by character count.
+    // rest splits across text-ish segments by their fallback slots.
     //
-    // Per-page field widths are fixed and removed from the character pool.
+    // Per-page field widths are fixed and removed from the text pool.
     let mut fixed_width = 0.0;
-    let mut pool_chars: usize = 0;
+    let default_font_pt = attrs
+        .and_then(|attrs| attrs.default_font_size)
+        .filter(|size| size.is_finite() && *size > 0.0)
+        .unwrap_or(DEFAULT_FONT_PT);
+    let mut pool_estimate = 0.0;
     let mut field_fixed = 0.0; // Σ per-page resolved widths of supplied fields
     let mut field_fallback = 0.0; // Σ their fallback widths baked into line.width
     if authoritative_items.is_none() {
@@ -5726,21 +5830,26 @@ fn emit_line(
                         fixed_width += image_layout_width(imr);
                     }
                 }
-                RunIn::Text(_) => pool_chars += seg.text.chars().count(),
+                RunIn::Text(text) => {
+                    pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt)
+                }
                 RunIn::Field(f) => match ctx.field_width(seg.pm_start) {
                     Some((fallback, resolved)) => {
                         field_fallback += fallback;
                         field_fixed += resolved;
                     }
-                    None => pool_chars += field_text(f, ctx).chars().count(),
+                    None => {
+                        pool_estimate +=
+                            fallback_text_width(&field_text(f, ctx), &f.fmt, default_font_pt)
+                    }
                 },
                 _ => {}
             }
         }
     }
     let pool_width = (line.width - fixed_width - field_fallback).max(0.0);
-    let width_per_char = if pool_chars > 0 {
-        pool_width / pool_chars as f64
+    let width_per_estimate = if pool_estimate > 0.0 {
+        pool_width / pool_estimate
     } else {
         0.0
     };
@@ -5807,6 +5916,7 @@ fn emit_line(
             x: px(marker_x),
             baseline_y: px(baseline),
             width: px(slot_width),
+            paint_clip: None,
             font: css_font(&marker_format),
             color: color.to_owned(),
             letter_spacing: None,
@@ -5835,7 +5945,7 @@ fn emit_line(
         );
     let mut word_space_px: Option<Number> = None;
     let mut word_space_extra = 0.0_f64;
-    if justified && (pool_chars > 0 || authoritative_items.is_some()) {
+    if justified && (pool_estimate > 0.0 || authoritative_items.is_some()) {
         let slack = (usable_width - effective_line_width).max(0.0);
         if slack > 0.0 {
             let mut space_count = 0usize;
@@ -5849,7 +5959,7 @@ fn emit_line(
                     let text = match seg.run {
                         RunIn::Text(_) => seg.text.clone(),
                         // a field with a supplied per-page width is fixed-width, so
-                        // it's out of the char pool and never absorbs justify slack
+                        // it's out of the text pool and never absorbs justify slack
                         RunIn::Field(f) if ctx.field_width(seg.pm_start).is_none() => {
                             field_text(f, ctx)
                         }
@@ -5888,7 +5998,8 @@ fn emit_line(
                 // editing view paints them dimmed rather than suppressing them, so
                 // the display list keeps their primitives for hit-testing too
                 RunIn::Text(t) => {
-                    let w = width_per_char * seg.text.chars().count() as f64
+                    let w = width_per_estimate
+                        * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
                         + word_space_extra
                             * seg.text.chars().filter(|&ch| ch == ' ').count() as f64;
                     push_bidi_text_items(
@@ -5911,7 +6022,8 @@ fn emit_line(
                     let (w, item_word_space_extra) = match ctx.field_width(seg.pm_start) {
                         Some((_, resolved)) => (resolved, 0.0),
                         None => (
-                            width_per_char * text.chars().count() as f64
+                            width_per_estimate
+                                * fallback_text_width(&text, &f.fmt, default_font_pt)
                                 + word_space_extra
                                     * text.chars().filter(|&ch| ch == ' ').count() as f64,
                             word_space_extra,
@@ -5998,6 +6110,7 @@ fn emit_line(
                     item.source_start,
                     item.source_end,
                     item.exact_advance,
+                    line.synthetic_fallback,
                     geom.line_top,
                     line_bottom,
                     block_ref,
@@ -6116,6 +6229,7 @@ fn emit_line(
                 x: px(geom.frag_x + pad_left + text_indent + left_offset),
                 baseline_y: px(baseline),
                 width: px(0.0),
+                paint_clip: None,
                 font: css_font(&RunFormattingIn::default()),
                 color: "#000000".to_string(),
                 letter_spacing: None,
@@ -6218,6 +6332,7 @@ fn emit_tab_leader(
             x: px(x),
             baseline_y: px(baseline),
             width: px(width),
+            paint_clip: None,
             font: css_font(&fmt),
             color: run_color(&fmt),
             letter_spacing: None,
@@ -6292,6 +6407,7 @@ fn emit_text_segment(
     source_start: usize,
     source_end: usize,
     exact_advance: bool,
+    synthetic_fallback: bool,
     line_top: f64,
     line_bottom: f64,
     block_ref: &BlockRef,
@@ -6440,6 +6556,12 @@ fn emit_text_segment(
     }
 
     let color = run_color(fmt);
+    let paint_clip = synthetic_fallback.then(|| ClipRect {
+        x: Some(px(x)),
+        y: None,
+        w: Some(px(width)),
+        h: None,
+    });
     // Unresolved or failed shaping falls back to a text primitive.
     let emitted_glyphs = match shape {
         Some(sf) => try_emit_glyph_runs(
@@ -6457,6 +6579,7 @@ fn emit_text_segment(
             logical_order,
             &attrs,
             &color,
+            &paint_clip,
         ),
         None => false,
     };
@@ -6468,6 +6591,7 @@ fn emit_text_segment(
             x: px(x),
             baseline_y: px(paint_baseline),
             width: px(width),
+            paint_clip,
             font: css_font(fmt),
             color: color.clone(),
             letter_spacing: fmt.letter_spacing.map(px),
@@ -6604,6 +6728,7 @@ fn try_emit_glyph_runs(
     logical_order: Option<u64>,
     attrs: &DocAttrs,
     color: &str,
+    paint_clip: &Option<ClipRect>,
 ) -> bool {
     if text.is_empty() {
         return false;
@@ -6781,6 +6906,7 @@ fn try_emit_glyph_runs(
             color: color.to_string(),
             text: sub_text,
             glyphs: placed,
+            paint_clip: paint_clip.clone(),
             word_spacing: word_spacing.clone(),
             rtl,
             opacity: None,
@@ -7742,6 +7868,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
                     .and_then(|legend| legend.text.as_ref()),
             ),
         },
+        fill: None,
     }
 }
 
@@ -7752,6 +7879,7 @@ fn plot_text_from(text: Option<&ChartTextIn>) -> PlotTextStyle<'_> {
         bold: text.bold,
         italic: text.italic,
         color: text.color.as_deref(),
+        spacing_pt: text.spacing_pt,
     })
     .unwrap_or_default()
 }
@@ -7825,6 +7953,7 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
+        line: None,
     }
 }
 
@@ -7853,6 +7982,7 @@ fn plot_series_from(series: &ChartSeriesIn) -> PlotSeries<'_> {
         bubble_sizes: &series.bubble_sizes,
         smooth: series.smooth,
         labels: plot_labels_from(None, series.data_labels.as_ref()),
+        line: None,
     }
 }
 
@@ -7942,14 +8072,16 @@ impl PlotSink for PrimitiveSink<'_> {
                 width,
                 font,
                 color,
+                align: _,
             } => prims.push(Primitive::Text(TextRunPrimitive {
                 text,
                 x: px(x),
                 baseline_y: px(baseline_y),
                 width: px(width),
+                paint_clip: None,
+                letter_spacing: (font.letter_spacing_px != 0.0).then(|| px(font.letter_spacing_px)),
                 font: font.css(),
                 color,
-                letter_spacing: None,
                 word_spacing: None,
                 rtl: None,
                 opacity: None,
@@ -8655,7 +8787,6 @@ pub(crate) fn emit_table_fragment(
             cx,
             cy,
             p.cell_h,
-            p.is_first_row,
             is_first_col,
             clip_top_y,
             clip_bottom_y,
@@ -8792,9 +8923,7 @@ pub(crate) fn emit_table_fragment(
 /// Adjacent paragraphs collapse `spacing.after` against the next
 /// `spacing.before`, a nested table flows after the previous paragraph's
 /// after-spacing, and a trailing after-spacing acts as the content box's bottom
-/// padding. Drawn border widths and padding inset the box on the sides this
-/// cell actually paints, and the resulting box is what `w:vAlign` measures its
-/// slack against.
+/// padding. Authored border insets remain stable across fragment cuts.
 #[allow(clippy::too_many_arguments)]
 fn emit_cell_content(
     prims: &mut Vec<Primitive>,
@@ -8804,7 +8933,6 @@ fn emit_cell_content(
     cx: f64,
     cy: f64,
     cell_h: f64,
-    is_first_row: bool,
     is_first_col: bool,
     clip_top_y: f64,
     clip_bottom_y: f64,
@@ -8820,9 +8948,9 @@ fn emit_cell_content(
         return;
     };
     let pad_left = cell.padding.and_then(|pd| pd.left).unwrap_or(7.0);
-    let pad_top = cell.padding.and_then(|pd| pd.top).unwrap_or(1.0);
+    let pad_top = cell.padding.and_then(|pd| pd.top).unwrap_or(0.0);
     let pad_right = cell.padding.and_then(|pd| pd.right).unwrap_or(7.0);
-    let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(1.0);
+    let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(0.0);
     let content_width = (p.width - pad_left - pad_right).max(0.0);
 
     // Drawn border widths inset the cell content box.
@@ -8835,7 +8963,11 @@ fn emit_cell_content(
     let (border_left, border_top, border_bottom) = match &cell.borders {
         Some(b) => (
             if is_first_col { edge_w(&b.left) } else { 0.0 },
-            if is_first_row { edge_w(&b.top) } else { 0.0 },
+            if p.row_index == 0 {
+                edge_w(&b.top)
+            } else {
+                0.0
+            },
             edge_w(&b.bottom),
         ),
         None => (0.0, 0.0, 0.0),
@@ -8892,17 +9024,14 @@ fn emit_cell_content(
     let content_height = stack_cursor + prev_after;
 
     // Content that fills or overflows the cell remains top-aligned.
-    let avail = (cell_h - border_top - border_bottom - pad_top - pad_bottom).max(0.0);
-    let content_fills = cell_measure.height >= cell_h - 0.5;
-    let v_offset = if content_fills {
-        0.0
-    } else {
-        match cell.vertical_align.as_deref() {
-            Some("center") => ((avail - content_height) / 2.0).max(0.0),
-            Some("bottom") => (avail - content_height).max(0.0),
-            _ => 0.0,
-        }
-    };
+    let v_offset = crate::cell_layout::cell_vertical_offset(
+        cell.vertical_align.as_deref(),
+        cell_h,
+        cell_measure.height,
+        content_height,
+        border_top + pad_top,
+        border_bottom + pad_bottom,
+    );
 
     let content_x = cx + border_left + pad_left;
     let content_top = cy + border_top + pad_top + v_offset;
@@ -9327,6 +9456,19 @@ fn primitive_v_extent(p: &Primitive) -> (f64, f64) {
     }
 }
 
+/// The document attributes a primitive carries, if its class has any.
+pub(crate) fn doc_attrs(p: &Primitive) -> Option<&DocAttrs> {
+    match p {
+        Primitive::Text(t) => Some(&t.attrs),
+        Primitive::GlyphRun(g) => Some(&g.attrs),
+        Primitive::Rect(r) => Some(&r.attrs),
+        Primitive::Image(i) => Some(&i.attrs),
+        Primitive::Shape(s) => Some(&s.attrs),
+        Primitive::Decoration(d) => Some(&d.attrs),
+        Primitive::Line(_) => None,
+    }
+}
+
 fn doc_attrs_mut(p: &mut Primitive) -> Option<&mut DocAttrs> {
     match p {
         Primitive::Text(t) => Some(&mut t.attrs),
@@ -9600,10 +9742,11 @@ pub fn update_resident_display_list_incremental_with_fonts_observed(
 ) -> Result<bool, String> {
     if previous.pages.len() != layout.pages.len()
         || resident.input.layout.pages.len() != layout.pages.len()
-        || rebuilt_page_start > rebuilt_page_end
-        || rebuilt_page_end > layout.pages.len()
     {
-        return Err("resident display input no longer matches pagination pages".to_owned());
+        return Ok(false);
+    }
+    if rebuilt_page_start > rebuilt_page_end || rebuilt_page_end > layout.pages.len() {
+        return Err("resident display incremental page range is invalid".to_owned());
     }
 
     refresh_resident_display_pages(
@@ -10099,6 +10242,60 @@ mod tests {
                 .iter()
                 .any(|primitive| primitive["kind"] == "text" && primitive["text"] == "box")
         );
+    }
+
+    /// Every primitive a note paints addresses the note's own story, so one
+    /// carrying no position of its own must stay unpositioned rather than
+    /// inherit the body range of the reference mark that anchors the note —
+    /// that range would hand a click inside the note a body position under a
+    /// note region. The reference label leading every note is exactly such a
+    /// primitive: it is presentation, not story content.
+    #[test]
+    fn note_primitives_never_inherit_the_body_anchor_range() {
+        let input = json!({
+            "measured": [],
+            "options": {},
+            "layout": { "pages": [{
+                "number": 1,
+                "size": { "w": 300, "h": 400 },
+                "margins": { "top": 20, "right": 20, "bottom": 20, "left": 20 },
+                "noteAreas": [{
+                    "kind": "footnote", "y": 330, "height": 40, "columns": 1,
+                    "notes": [{
+                        "id": 7, "anchorDocStart": 3, "anchorDocEnd": 4, "height": 30,
+                        "blocks": [{
+                            "kind": "paragraph",
+                            "id": "note-p",
+                            "runs": [
+                                { "kind": "text", "text": "1  " },
+                                { "kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5 }
+                            ],
+                            "pmStart": 1,
+                            "pmEnd": 6
+                        }],
+                        "measures": [{ "kind": "paragraph", "totalHeight": 16, "lines": [{ "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 4, "width": 50, "ascent": 11, "descent": 3, "lineHeight": 16 }] }]
+                    }]
+                }],
+                "fragments": []
+            }]}
+        });
+        let output: Value = serde_json::from_str(
+            &build_display_list_json(&input.to_string()).expect("display list builds"),
+        )
+        .expect("valid display JSON");
+        let primitives = output["pages"][0]["noteAreas"][0]["primitives"]
+            .as_array()
+            .expect("note primitives");
+
+        let label = &primitives[0];
+        assert_eq!(label["text"], "1  ");
+        assert_eq!(label["groupId"], "footnote-7");
+        assert!(label["docStart"].is_null() && label["docEnd"].is_null());
+
+        let text = &primitives[1];
+        assert_eq!(text["text"], "note");
+        assert_eq!(text["groupId"], "footnote-7");
+        assert_eq!((&text["docStart"], &text["docEnd"]), (&json!(1), &json!(5)));
     }
 
     #[test]

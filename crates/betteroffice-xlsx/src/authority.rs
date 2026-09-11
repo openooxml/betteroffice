@@ -5,9 +5,9 @@ use std::sync::Arc;
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
-    Cell, CellFormat, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue,
-    FreezePane, Hyperlink, MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetId, Stylesheet,
-    Workbook as WorkbookModel,
+    AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
+    ChartAnchor, ChartRef, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, MAX_COLS,
+    MAX_ROWS, Sheet, SheetChart, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -22,7 +22,7 @@ use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encoder, EncoderV1};
 use yrs::{
-    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Origin, Out, ReadTxn,
+    Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
     StateVector, Transact, TransactionMut, Update, WriteTxn,
 };
 
@@ -31,8 +31,12 @@ const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
 const SHEETS: &str = "xlsx:sheets";
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
+/// The schema each feature first appeared in. These are frozen: gating a
+/// feature on the current version instead would silently reclassify the
+/// newest schema as predating it the moment the current version moves on.
 const FREEZE_PANE_SCHEMA_VERSION: i64 = 4;
 const HYPERLINK_SCHEMA_VERSION: i64 = 5;
+const CHARTS_SCHEMA_VERSION: i64 = 6;
 const SCHEMA_VERSION: i64 = 6;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
@@ -96,22 +100,32 @@ struct WorkbookBase {
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
+    hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
 }
 
 impl WorkbookBase {
-    /// A legacy fingerprint hashes no chart state, so it cannot prove two
-    /// bases carry the same charts. A charted workbook therefore registers a
-    /// fingerprint only for the current schema.
+    /// A legacy fingerprint hashes no chart state, so a charted workbook pairs
+    /// with one on its other content alone and keeps the charts it parsed. It
+    /// is the only reading of a state written before charts were shared, and
+    /// refusing it would strand every snapshot an earlier release persisted.
+    #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, String> {
+        Self::from_model_with_legacy_dimensions(model, &[])
+    }
+
+    /// `legacy_dimensions` are the row heights and column widths releases
+    /// before hidden rows and columns read as zero stored, per sheet. Those
+    /// maps are hashed at every schema, so a peer that persisted its state
+    /// under one of those releases is only recognisable against them.
+    fn from_model_with_legacy_dimensions(
+        model: &WorkbookModel,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    ) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
-        let charted = model.sheets.iter().any(|sheet| !sheet.charts.is_empty());
         let mut fingerprints = BTreeMap::new();
         for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
-            if charted && version < SCHEMA_VERSION {
-                continue;
-            }
             let (version_fingerprint, _) = fingerprint_model_for_schema(model, version)?;
             fingerprints.insert(version, vec![version_fingerprint]);
         }
@@ -119,6 +133,21 @@ impl WorkbookBase {
             let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
             if !version_3.contains(&defined_names_v3) {
                 version_3.push(defined_names_v3);
+            }
+        }
+        if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
+            for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
+                let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
+                let accepted = fingerprints.entry(version).or_default();
+                if !accepted.contains(&legacy_fingerprint) {
+                    accepted.push(legacy_fingerprint);
+                }
+            }
+            if let Some(version_3) = fingerprints.get_mut(&3) {
+                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true)?;
+                if !version_3.contains(&defined_names_v3) {
+                    version_3.push(defined_names_v3);
+                }
             }
         }
         Ok(Self {
@@ -138,6 +167,7 @@ impl WorkbookBase {
                 .iter()
                 .map(|sheet| sheet.charts.clone())
                 .collect(),
+            hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
         })
@@ -160,6 +190,61 @@ impl WorkbookBase {
     }
 }
 
+/// The part of an anchor no move may rewrite: its kind, plus whatever the
+/// drawing writer cannot patch. Only the grid markers a save writes whole stay
+/// free, so this mirrors `only_grid_position_moved` in the writer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AnchorShape {
+    TwoCell {
+        edit_as: AnchorEditAs,
+    },
+    OneCell {
+        extent: AnchorExtent,
+    },
+    Absolute {
+        pos: AnchorPos,
+        extent: AnchorExtent,
+    },
+}
+
+impl AnchorShape {
+    fn of(anchor: &ChartAnchor) -> Self {
+        match anchor {
+            ChartAnchor::TwoCell { edit_as, .. } => Self::TwoCell { edit_as: *edit_as },
+            ChartAnchor::OneCell { extent, .. } => Self::OneCell { extent: *extent },
+            ChartAnchor::Absolute { pos, extent } => Self::Absolute {
+                pos: *pos,
+                extent: *extent,
+            },
+        }
+    }
+}
+
+/// What the freeze pins about a chart: which drawing anchors which part, what
+/// the part reads, and the shape of that anchor. Only where a grid-anchored
+/// chart sits is replicated content, so a peer may slide one without changing
+/// the structure this describes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ChartIdentity {
+    part: String,
+    drawing: String,
+    anchor_index: usize,
+    refs: Vec<ChartRef>,
+    anchor: AnchorShape,
+}
+
+impl ChartIdentity {
+    fn of(chart: &SheetChart) -> Self {
+        Self {
+            part: chart.part.clone(),
+            drawing: chart.drawing.clone(),
+            anchor_index: chart.anchor_index,
+            refs: chart.refs.clone(),
+            anchor: AnchorShape::of(&chart.anchor),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkbookStructure {
     generation: i64,
@@ -167,9 +252,23 @@ pub(crate) struct WorkbookStructure {
     sheet_names: Vec<String>,
     freeze_panes: Vec<Option<FreezePane>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
-    charts: Vec<Vec<SheetChart>>,
+    charts: Vec<Vec<ChartIdentity>>,
     merges: Vec<Vec<CellRange>>,
     shared_types: BTreeMap<String, SheetSharedTypes>,
+}
+
+impl WorkbookStructure {
+    /// Whether two structures describe the same workbook, disregarding the Yrs
+    /// branch identities. Replacing a bootstrap rebuilds every shared type, so
+    /// those always differ and cannot say whether the structure itself did.
+    pub(crate) fn describes_same_workbook(&self, other: &Self) -> bool {
+        self.sheet_keys == other.sheet_keys
+            && self.sheet_names == other.sheet_names
+            && self.freeze_panes == other.freeze_panes
+            && self.hyperlinks == other.hyperlinks
+            && self.charts == other.charts
+            && self.merges == other.merges
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -179,6 +278,16 @@ struct SheetSharedTypes {
     contents: BranchID,
     row_heights: BranchID,
     styles: BranchID,
+}
+
+/// What a replica can do with an update offered as its whole state.
+pub(crate) enum SnapshotAdoption {
+    /// Not a whole document, or this replica already holds more than its own
+    /// bootstrap. The update is an ordinary one; merge it.
+    NotApplicable,
+    /// A whole document this replica cannot take on.
+    Incompatible(String),
+    Replacement(Box<WorkbookAuthority>),
 }
 
 pub(crate) struct StagedUpdate {
@@ -197,6 +306,12 @@ pub(crate) struct StagedLocalUpdate {
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
     pub(crate) update: Vec<u8>,
+}
+
+pub(crate) struct AuthorityCheckpoint {
+    state: Vec<u8>,
+    undo_stack: Vec<StackItem<()>>,
+    redo_stack: Vec<StackItem<()>>,
 }
 
 pub(crate) struct HistoryUpdate {
@@ -233,22 +348,34 @@ pub(crate) struct WorkbookAuthority {
 }
 
 impl WorkbookAuthority {
-    pub(crate) fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, None)
+    #[cfg(test)]
+    fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
+        Self::from_model_internal(model, None, &[])
     }
 
-    pub(crate) fn from_model_with_client_id(
+    #[cfg(test)]
+    fn from_model_with_client_id(
         model: &WorkbookModel,
         client_id: u64,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, Some(client_id))
+        Self::from_model_internal(model, Some(client_id), &[])
+    }
+
+    pub(crate) fn from_source(
+        model: &WorkbookModel,
+        client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+    ) -> Result<Self, AuthorityError> {
+        Self::from_model_internal(model, client_id, legacy_dimensions)
     }
 
     fn from_model_internal(
         model: &WorkbookModel,
         client_id: Option<u64>,
+        legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
     ) -> Result<Self, AuthorityError> {
-        let base = WorkbookBase::from_model(model).map_err(AuthorityError::InvalidState)?;
+        let base = WorkbookBase::from_model_with_legacy_dimensions(model, legacy_dimensions)
+            .map_err(AuthorityError::InvalidState)?;
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -356,6 +483,73 @@ impl WorkbookAuthority {
         let state_vector = decode_state_vector_v1(remote_state_vector)
             .map_err(AuthorityError::InvalidStateVector)?;
         Ok(self.doc.transact().encode_diff_v1(&state_vector))
+    }
+
+    /// The replica this one would become by taking a persisted snapshot as its
+    /// whole state and upgrading it to the current schema.
+    ///
+    /// Merging cannot restore a snapshot an earlier release wrote. The
+    /// bootstrap client ID is the head of the base fingerprint, which hashes
+    /// the schema version, so a bootstrap this build seeds never dedupes
+    /// against the one such a snapshot carries: the two bases double up and
+    /// the survivor is whichever client ID sorts higher. A snapshot supersedes
+    /// an untouched bootstrap of the same workbook whatever schema it was
+    /// written at, and where the bootstraps do agree the two are the same
+    /// document, so adopting is never worse than merging.
+    pub(crate) fn snapshot_replacement(&self, update: &[u8]) -> SnapshotAdoption {
+        if !self.is_pristine() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        let doc = Doc::with_client_id(self.client_id());
+        if hydrate_doc(&doc, update).is_err() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        let candidate = Self {
+            doc,
+            base: self.base.clone(),
+            history: SheetOrderHistory::default(),
+            next_sheet_id: self.next_sheet_id,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+        };
+        if !candidate.is_whole_document() {
+            return SnapshotAdoption::NotApplicable;
+        }
+        if let Err(error) = candidate.upgrade_schema() {
+            return SnapshotAdoption::Incompatible(error);
+        }
+        match candidate.strict_materialize() {
+            Err(error) => SnapshotAdoption::Incompatible(error),
+            Ok(_) => SnapshotAdoption::Replacement(Box::new(candidate)),
+        }
+    }
+
+    /// True while the replica still holds nothing but its own bootstrap.
+    fn is_pristine(&self) -> bool {
+        let state_vector = self.doc.transact().state_vector();
+        state_vector.len() == 1
+            && state_vector
+                .iter()
+                .all(|(client, _)| client.get() == self.base.bootstrap_client_id)
+    }
+
+    /// True when the document stands on its own rather than being the tail of
+    /// someone else's — an incremental update hydrates into neither the roots
+    /// nor the metadata a whole workbook carries.
+    fn is_whole_document(&self) -> bool {
+        let txn = self.doc.transact();
+        if require_root_keys(&txn, &[CELL_FORMATS, META, SHEET_ORDER, SHEETS]).is_err() {
+            return false;
+        }
+        txn.get_map(META).is_some_and(|meta| {
+            require_map_keys(
+                &meta,
+                &txn,
+                &[BASE_FINGERPRINT, "schemaVersion", STRUCTURE_GENERATION],
+                "workbook metadata",
+            )
+            .is_ok()
+        })
     }
 
     pub(crate) fn stage_updates_v1(
@@ -538,6 +732,28 @@ impl WorkbookAuthority {
         self.redo_stack.len()
     }
 
+    /// The document and history as they stand, so a caller that rejects what a
+    /// history step produced can put the authority back. The step itself is
+    /// only half the change: the caller validates the other half.
+    pub(crate) fn checkpoint(&self) -> AuthorityCheckpoint {
+        AuthorityCheckpoint {
+            state: self.encode_state_as_update_v1(),
+            undo_stack: self.undo_stack.clone(),
+            redo_stack: self.redo_stack.clone(),
+        }
+    }
+
+    pub(crate) fn restore(
+        &mut self,
+        checkpoint: AuthorityCheckpoint,
+    ) -> Result<(), AuthorityError> {
+        self.rollback(
+            &checkpoint.state,
+            checkpoint.undo_stack,
+            checkpoint.redo_stack,
+        )
+    }
+
     pub(crate) fn undo(&mut self) -> Result<Option<HistoryUpdate>, AuthorityError> {
         self.apply_history_change(false)
     }
@@ -546,6 +762,10 @@ impl WorkbookAuthority {
         self.apply_history_change(true)
     }
 
+    /// Moves the document and both stacks. Every failure here leaves that half
+    /// done, so the caller holds a checkpoint and puts it back — one checkpoint
+    /// for the whole step rather than one here and another there, since this
+    /// runs on a keystroke and each costs a copy of the document.
     fn apply_history_change(
         &mut self,
         redo: bool,
@@ -576,6 +796,27 @@ impl WorkbookAuthority {
         }))
     }
 
+    /// Rebuilds the document from a checkpoint. The GUID is carried over
+    /// because a history entry names the document it came from: a fresh one
+    /// orphans every restored entry, and the undo manager discards orphans
+    /// silently, one whole stack at a time.
+    fn rollback(
+        &mut self,
+        restore: &[u8],
+        undo_stack: Vec<StackItem<()>>,
+        redo_stack: Vec<StackItem<()>>,
+    ) -> Result<(), AuthorityError> {
+        let doc = Doc::with_options(Options::with_guid_and_client_id(
+            self.doc.guid().clone(),
+            self.doc.client_id(),
+        ));
+        hydrate_doc(&doc, restore).map_err(AuthorityError::InvalidState)?;
+        self.doc = doc;
+        self.undo_stack = undo_stack;
+        self.redo_stack = redo_stack;
+        Ok(())
+    }
+
     pub(crate) fn clear_history(&mut self) {
         self.history = SheetOrderHistory::default();
     }
@@ -601,7 +842,16 @@ impl WorkbookAuthority {
                     .map_err(|error| format!("cannot encode sheet hyperlinks: {error}"))?;
                 let charts = serde_json::to_string(&sheet.charts)
                     .map_err(|error| format!("cannot encode sheet charts: {error}"))?;
-                Ok((key.clone(), (sheet.freeze_pane, hyperlinks, charts)))
+                Ok((
+                    key.clone(),
+                    (
+                        sheet.freeze_pane,
+                        hyperlinks,
+                        charts,
+                        sheet.col_widths.clone(),
+                        sheet.row_heights.clone(),
+                    ),
+                ))
             })
             .collect::<Result<BTreeMap<_, _>, String>>()?;
         let mut txn = self.doc.transact_mut_with(HYDRATE_ORIGIN);
@@ -614,9 +864,15 @@ impl WorkbookAuthority {
                 .get(&txn, &key)
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .ok_or_else(|| format!("sheet {key} is not a map"))?;
+            if let Some((.., col_widths, row_heights)) = features.get(&key) {
+                let widths: MapRef = sheet.get_or_init(&mut txn, COL_WIDTHS);
+                sync_numbers(&widths, &mut txn, col_widths);
+                let heights: MapRef = sheet.get_or_init(&mut txn, ROW_HEIGHTS);
+                sync_numbers(&heights, &mut txn, row_heights);
+            }
             let (freeze_pane, hyperlinks, charts) = features
                 .get(&key)
-                .map(|(freeze_pane, hyperlinks, charts)| {
+                .map(|(freeze_pane, hyperlinks, charts, ..)| {
                     (*freeze_pane, hyperlinks.as_str(), charts.as_str())
                 })
                 .unwrap_or((None, "[]", "[]"));
@@ -626,7 +882,7 @@ impl WorkbookAuthority {
             if version < HYPERLINK_SCHEMA_VERSION {
                 sheet.try_update(&mut txn, HYPERLINKS, hyperlinks);
             }
-            if version < SCHEMA_VERSION {
+            if version < CHARTS_SCHEMA_VERSION {
                 sheet.try_update(&mut txn, CHARTS, charts);
             }
         }
@@ -693,12 +949,6 @@ impl WorkbookAuthority {
             .and_then(|value| value.cast::<String>().ok())
             .ok_or_else(|| "missing workbook base fingerprint".to_string())?;
         if !self.base.accepts_fingerprint(version, &fingerprint) {
-            if version < SCHEMA_VERSION && self.base.charts.iter().any(|charts| !charts.is_empty())
-            {
-                return Err(format!(
-                    "schema version {version} carries no chart state, so it cannot pair with a charted workbook"
-                ));
-            }
             return Err("workbook base fingerprint does not match shared state".to_string());
         }
         let generation = structure_generation(&meta, &txn)?;
@@ -719,6 +969,7 @@ impl WorkbookAuthority {
         let mut model = self.base.workbook();
         model.styles = styles;
         let expected_sheet_keys = sheet_schema_keys(version);
+        let optional_sheet_keys = sheet_schema_optional_keys(version);
         for key in keys.iter() {
             if !seen.insert(key.clone()) {
                 return Err(format!("duplicate sheet key {key}"));
@@ -728,10 +979,11 @@ impl WorkbookAuthority {
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .ok_or_else(|| format!("missing sheet {key}"))?;
             if strict {
-                require_map_keys(
+                require_map_keys_with_optional(
                     &sheet_map,
                     &txn,
                     expected_sheet_keys,
+                    optional_sheet_keys,
                     &format!("sheet {key}"),
                 )?;
             }
@@ -748,16 +1000,23 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.charts.get(base))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
+            let hidden_dimensions = base_sheet
+                .and_then(|base| self.base.hidden_dimensions.get(base))
+                .unwrap_or(&EMPTY_HIDDEN_DIMENSIONS);
             model.sheets.push(materialize_sheet(
                 &sheet_map,
                 &txn,
                 &style_indices,
                 version,
-                freeze_pane,
-                hyperlinks,
-                charts,
+                SheetFallbacks {
+                    freeze_pane,
+                    hyperlinks,
+                    charts,
+                    hidden_dimensions,
+                },
             )?);
         }
+        project_shared_frame_anchors(&mut model.sheets);
         let active = keys.iter().cloned().collect::<BTreeSet<_>>();
         let all_keys = sheets
             .keys(&txn)
@@ -770,13 +1029,20 @@ impl WorkbookAuthority {
                 .and_then(|value| value.cast::<MapRef>().ok())
                 .ok_or_else(|| format!("sheet {key} is not a map"))?;
             if strict && !active.contains(&key) {
-                require_map_keys(
+                require_map_keys_with_optional(
                     &sheet_map,
                     &txn,
                     expected_sheet_keys,
+                    optional_sheet_keys,
                     &format!("inactive sheet {key}"),
                 )?;
-                materialize_sheet(&sheet_map, &txn, &style_indices, version, None, &[], &[])?;
+                materialize_sheet(
+                    &sheet_map,
+                    &txn,
+                    &style_indices,
+                    version,
+                    SheetFallbacks::default(),
+                )?;
             }
             shared_types.insert(key, sheet_shared_types(&sheet_map, &txn)?);
         }
@@ -797,7 +1063,7 @@ impl WorkbookAuthority {
             charts: model
                 .sheets
                 .iter()
-                .map(|sheet| sheet.charts.clone())
+                .map(|sheet| sheet.charts.iter().map(ChartIdentity::of).collect())
                 .collect(),
             merges: model
                 .sheets
@@ -1892,6 +2158,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
             | Op::SetCharts { .. }
+            | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
@@ -1984,6 +2251,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
         | Op::SetCharts { sheet, .. }
+        | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
         | Op::UnmergeCells { sheet, .. }
         | Op::PatchRangeStyle { sheet, .. }
@@ -2227,7 +2495,9 @@ fn materialize_cell_formats<T: ReadTxn>(
         let index = match known.get(&key) {
             Some(index) => *index,
             None => {
-                let index = styles.intern_cell_format(&format);
+                let index = styles
+                    .intern_cell_format(&format)
+                    .map_err(|_| "number format table is full".to_string())?;
                 known.insert(key.clone(), index);
                 index
             }
@@ -2299,14 +2569,33 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
     }
 }
 
+/// What a sheet reads from the workbook it was parsed from rather than from
+/// the shared document, because the document's schema cannot express it.
+#[derive(Clone, Copy)]
+struct SheetFallbacks<'a> {
+    freeze_pane: Option<FreezePane>,
+    hyperlinks: &'a [Hyperlink],
+    charts: &'a [SheetChart],
+    hidden_dimensions: &'a HiddenDimensions,
+}
+
+impl Default for SheetFallbacks<'_> {
+    fn default() -> Self {
+        Self {
+            freeze_pane: None,
+            hyperlinks: &[],
+            charts: &[],
+            hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
+        }
+    }
+}
+
 fn materialize_sheet<T: ReadTxn>(
     sheet_map: &MapRef,
     txn: &T,
     style_indices: &BTreeMap<String, Option<u32>>,
     version: i64,
-    fallback_freeze_pane: Option<FreezePane>,
-    fallback_hyperlinks: &[Hyperlink],
-    fallback_charts: &[SheetChart],
+    fallbacks: SheetFallbacks<'_>,
 ) -> Result<Sheet, String> {
     let name = sheet_map
         .get(txn, NAME)
@@ -2348,12 +2637,20 @@ fn materialize_sheet<T: ReadTxn>(
         MAX_ROWS,
         "row height",
     )?;
+    if version < SCHEMA_VERSION {
+        for (&at, &size) in &fallbacks.hidden_dimensions.col_widths {
+            sheet.col_widths.entry(at).or_insert(size);
+        }
+        for (&at, &size) in &fallbacks.hidden_dimensions.row_heights {
+            sheet.row_heights.entry(at).or_insert(size);
+        }
+    }
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
             return Err("sheet is missing freeze pane".to_string());
         }
-        _ => fallback_freeze_pane,
+        _ => fallbacks.freeze_pane,
     };
     sheet.hyperlinks = match (version, sheet_map.get(txn, HYPERLINKS)) {
         (HYPERLINK_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => {
@@ -2365,19 +2662,48 @@ fn materialize_sheet<T: ReadTxn>(
         (HYPERLINK_SCHEMA_VERSION.., None) => {
             return Err("sheet is missing hyperlinks".to_string());
         }
-        _ => fallback_hyperlinks.to_vec(),
+        _ => fallbacks.hyperlinks.to_vec(),
     };
     sheet.charts = match (version, sheet_map.get(txn, CHARTS)) {
-        (SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
-        (SCHEMA_VERSION.., Some(_)) => return Err("sheet charts are not a string".to_string()),
-        (SCHEMA_VERSION.., None) => return Err("sheet is missing charts".to_string()),
-        _ => fallback_charts.to_vec(),
+        (CHARTS_SCHEMA_VERSION.., Some(Out::Any(Any::String(json)))) => decode_charts(&json)?,
+        (CHARTS_SCHEMA_VERSION.., Some(_)) => {
+            return Err("sheet charts are not a string".to_string());
+        }
+        _ => fallbacks.charts.to_vec(),
     };
     sheet.merges = match sheet_map.get(txn, MERGES) {
         Some(Out::Any(value)) => merges_from_any(&value)?,
         _ => return Err("sheet is missing merges".to_string()),
     };
     Ok(sheet)
+}
+
+/// One drawing anchor is one element however many sheets point at it, but each
+/// sheet's chart state is assigned on its own. Two replicas can each write a
+/// legal value for a different sheet and only disagree once the two are merged,
+/// so the disagreement is settled on the way out rather than refused on the way
+/// in: refusing it would make integration depend on delivery order, and the
+/// replicas would never meet again. Sheet order is shared, so first-in-order
+/// wins is the same answer everywhere.
+///
+/// Removing a sheet is structural and refused while collaborative. Were that
+/// ever allowed, dropping the donor would hand the frame to whatever the
+/// surviving sheet's blob holds — which may be a value this has been quietly
+/// covering for, and which nothing has checked since it arrived.
+fn project_shared_frame_anchors(sheets: &mut [Sheet]) {
+    let mut chosen = BTreeMap::new();
+    for sheet in sheets.iter() {
+        for chart in &sheet.charts {
+            chosen.entry(chart.frame_id()).or_insert(chart.anchor);
+        }
+    }
+    for sheet in sheets.iter_mut() {
+        for chart in &mut sheet.charts {
+            if let Some(anchor) = chosen.get(&chart.frame_id()) {
+                chart.anchor = *anchor;
+            }
+        }
+    }
 }
 
 fn nested_map<T: ReadTxn>(parent: &MapRef, txn: &T, key: &str) -> Result<MapRef, String> {
@@ -2479,7 +2805,6 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
         STYLES,
     ];
     const V6: &[&str] = &[
-        CHARTS,
         COL_WIDTHS,
         CONTENTS,
         FREEZE_PANE,
@@ -2494,6 +2819,20 @@ fn sheet_schema_keys(version: i64) -> &'static [&'static str] {
         FREEZE_PANE_SCHEMA_VERSION => V4,
         HYPERLINK_SCHEMA_VERSION => V5,
         _ => V6,
+    }
+}
+
+/// Chart state is the one sheet key two replicas can assign at once, because
+/// repinning a chart is an ordinary edit. Undoing the assignment that won
+/// deletes the key outright, so it reads as absent and falls back to what the
+/// source package holds rather than failing the whole workbook.
+fn sheet_schema_optional_keys(version: i64) -> &'static [&'static str] {
+    const NONE: &[&str] = &[];
+    const V6: &[&str] = &[CHARTS];
+    if version >= CHARTS_SCHEMA_VERSION {
+        V6
+    } else {
+        NONE
     }
 }
 
@@ -2519,12 +2858,33 @@ fn require_map_keys<T: ReadTxn>(
     expected: &[&str],
     label: &str,
 ) -> Result<(), String> {
+    require_map_keys_with_optional(map, txn, expected, &[], label)
+}
+
+/// `optional` keys may be present or absent. A key two replicas assign at once
+/// is deleted outright when the winning assignment is undone, so any such key
+/// has to read as absent rather than as a broken document.
+fn require_map_keys_with_optional<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    expected: &[&str],
+    optional: &[&str],
+    label: &str,
+) -> Result<(), String> {
     let actual = map.keys(txn).map(str::to_string).collect::<BTreeSet<_>>();
     let expected = expected
         .iter()
         .map(|key| (*key).to_string())
         .collect::<BTreeSet<_>>();
-    if actual == expected {
+    let optional = optional
+        .iter()
+        .map(|key| (*key).to_string())
+        .collect::<BTreeSet<_>>();
+    if expected.is_subset(&actual)
+        && actual
+            .difference(&expected)
+            .all(|key| optional.contains(key))
+    {
         Ok(())
     } else {
         Err(format!("{label} keys do not match the schema"))
@@ -2792,6 +3152,71 @@ fn any_bool(value: &Any, label: &str) -> Result<bool, String> {
     }
 }
 
+/// Dimensions only this build's parser records: a hidden row or column with no
+/// authored size. A state written before it did carries no entry at all, so
+/// materializing one has to put them back or the row silently unhides.
+#[derive(Clone, Debug, Default)]
+struct HiddenDimensions {
+    col_widths: BTreeMap<u32, f64>,
+    row_heights: BTreeMap<u32, f64>,
+}
+
+static EMPTY_HIDDEN_DIMENSIONS: HiddenDimensions = HiddenDimensions {
+    col_widths: BTreeMap::new(),
+    row_heights: BTreeMap::new(),
+};
+
+fn hidden_dimensions(
+    model: &WorkbookModel,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+) -> Vec<HiddenDimensions> {
+    model
+        .sheets
+        .iter()
+        .enumerate()
+        .map(|(index, sheet)| {
+            let Some(legacy) = legacy_dimensions.get(index) else {
+                return HiddenDimensions::default();
+            };
+            let only_current = |current: &BTreeMap<u32, f64>, before: &BTreeMap<u32, f64>| {
+                current
+                    .iter()
+                    .filter(|(at, _)| !before.contains_key(at))
+                    .map(|(at, size)| (*at, *size))
+                    .collect()
+            };
+            HiddenDimensions {
+                col_widths: only_current(&sheet.col_widths, &legacy.col_widths),
+                row_heights: only_current(&sheet.row_heights, &legacy.row_heights),
+            }
+        })
+        .collect()
+}
+
+/// The same workbook as an earlier release would have modelled it, or `None`
+/// when no sheet's dimensions changed meaning and the two agree already.
+fn model_with_legacy_dimensions(
+    model: &WorkbookModel,
+    legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+) -> Option<WorkbookModel> {
+    let differs = model
+        .sheets
+        .iter()
+        .zip(legacy_dimensions)
+        .any(|(sheet, legacy)| {
+            sheet.col_widths != legacy.col_widths || sheet.row_heights != legacy.row_heights
+        });
+    if !differs {
+        return None;
+    }
+    let mut legacy_model = model.clone();
+    for (sheet, legacy) in legacy_model.sheets.iter_mut().zip(legacy_dimensions) {
+        sheet.col_widths.clone_from(&legacy.col_widths);
+        sheet.row_heights.clone_from(&legacy.row_heights);
+    }
+    Some(legacy_model)
+}
+
 fn fingerprint_model(model: &WorkbookModel) -> Result<(String, u64), String> {
     fingerprint_model_for_schema(model, SCHEMA_VERSION)
 }
@@ -2883,7 +3308,7 @@ fn fingerprint_model_with_schema(
                 .map_err(|error| format!("cannot fingerprint sheet hyperlinks: {error}"))?;
             hash_bytes(&mut hasher, &hyperlinks);
         }
-        if schema_version >= SCHEMA_VERSION {
+        if schema_version >= CHARTS_SCHEMA_VERSION {
             let charts = serde_json::to_vec(&sheet.charts)
                 .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
             hash_bytes(&mut hasher, &charts);
@@ -3014,7 +3439,7 @@ mod tests {
                     .get(&txn, &key)
                     .and_then(|value| value.cast::<MapRef>().ok())
                     .unwrap();
-                if version < SCHEMA_VERSION {
+                if version < CHARTS_SCHEMA_VERSION {
                     sheet.remove(&mut txn, CHARTS);
                 }
                 if version < HYPERLINK_SCHEMA_VERSION {
@@ -3157,21 +3582,84 @@ mod tests {
         );
     }
 
-    /// A v3-v5 fingerprint hashes no chart state, so it cannot prove two bases
-    /// carry the same charts; a charted workbook refuses to pair with one.
+    /// A v3-v5 state carries no chart state at all, so a charted workbook
+    /// pairs with it on the rest and keeps the charts it parsed. Refusing
+    /// instead would strand every snapshot written before charts were shared.
     #[test]
-    fn a_charted_workbook_refuses_a_legacy_fingerprint() {
+    fn a_charted_workbook_pairs_with_a_legacy_fingerprint() {
         let mut model = WorkbookModel::default();
         model.sheets.push(charted("Report", "Report!$A$1"));
         for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
             let update = legacy_update(&model, version, true);
             let authority = authority_from_update(&model, &update, 130 + version as u64);
-            let error = authority.materialize().unwrap_err();
-            assert!(
-                format!("{error:?}").contains("cannot pair with a charted workbook"),
-                "version {version}: {error:?}"
+            let materialized = authority.materialize().unwrap();
+            assert_eq!(materialized, model, "version {version}");
+            assert!(authority.upgrade_schema().unwrap());
+            assert_eq!(authority.strict_materialize().unwrap().0, model);
+        }
+    }
+
+    /// Charts must stay pinned to the schema that introduced them. Gating them
+    /// on the current version instead reads the newest schema as pre-chart the
+    /// moment the current version moves past it, which is how a released
+    /// snapshot came to be unreadable in the first place.
+    ///
+    /// The key is optional rather than required, because repinning is an
+    /// ordinary edit and undoing the assignment that won a race deletes it. An
+    /// absent key falls back to the source package, so the schema gate is what
+    /// decides whether the document's own chart state is read at all.
+    #[test]
+    fn chart_state_is_gated_on_the_schema_that_introduced_it() {
+        const { assert!(CHARTS_SCHEMA_VERSION <= SCHEMA_VERSION) };
+        const { assert!(HYPERLINK_SCHEMA_VERSION < CHARTS_SCHEMA_VERSION) };
+
+        let mut model = WorkbookModel::default();
+        model.sheets.push(charted("Report", "Report!$A$1"));
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 140).unwrap();
+
+        // present: the document's own chart state wins over the fallback.
+        let mut moved = model.sheets[0].charts.clone();
+        moved[0].refs[0].formula = "Report!$B$9".to_owned();
+        {
+            let mut txn = authority.doc.transact_mut_with("test:charts-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(
+                &mut txn,
+                CHARTS,
+                serde_json::to_string(&moved).unwrap().as_str(),
             );
         }
+        assert_eq!(
+            authority.materialize().unwrap().sheets[0].charts[0].refs[0].formula,
+            "Report!$B$9",
+            "a document at the chart schema must read its own chart state"
+        );
+
+        // absent: the source package answers, and the chart is still there.
+        {
+            let mut txn = authority.doc.transact_mut_with("test:charts-gate");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.remove(&mut txn, CHARTS);
+        }
+        let fallen_back = authority
+            .materialize()
+            .expect("an absent chart key must read as absent, not as a broken workbook");
+        assert_eq!(fallen_back.sheets[0].charts, model.sheets[0].charts);
+
+        let gated = |version: i64| {
+            sheet_schema_keys(version).contains(&CHARTS)
+                || sheet_schema_optional_keys(version).contains(&CHARTS)
+        };
+        assert!(gated(CHARTS_SCHEMA_VERSION));
+        assert!(!gated(CHARTS_SCHEMA_VERSION - 1));
     }
 
     #[test]
@@ -3440,5 +3928,272 @@ mod tests {
         let (restored, structure) = authority.strict_materialize().unwrap();
         assert_eq!(restored, model);
         assert_eq!(structure.shared_types["sheet:1"], retained);
+    }
+
+    fn sliding_chart(name: &str) -> Sheet {
+        let mut sheet = Sheet::new(name);
+        sheet.charts.push(SheetChart {
+            part: "xl/charts/chart1.xml".to_owned(),
+            drawing: "xl/drawings/drawing1.xml".to_owned(),
+            anchor_index: 0,
+            anchor: ChartAnchor::TwoCell {
+                from: xlsx_model::AnchorCell::default(),
+                to: xlsx_model::AnchorCell {
+                    col: 4,
+                    col_off: 0,
+                    row: 8,
+                    row_off: 0,
+                },
+                edit_as: AnchorEditAs::TwoCell,
+            },
+            refs: vec![ChartRef {
+                kind: xlsx_model::ChartRefKind::Values,
+                formula: "Data!$A$1:$A$2".to_owned(),
+            }],
+        });
+        sheet
+    }
+
+    fn sliding_model() -> WorkbookModel {
+        let mut model = WorkbookModel::default();
+        model.sheets.push(sliding_chart("Report"));
+        model
+    }
+
+    /// An update that assigns a sheet's chart state without touching the
+    /// structure generation, as a peer forked from `authority`'s state.
+    fn peer_chart_update(authority: &WorkbookAuthority, client_id: u64, charts: &str) -> Vec<u8> {
+        let peer = Doc::with_client_id(client_id);
+        hydrate_doc(&peer, &authority.encode_state_as_update_v1()).unwrap();
+        let before = peer.transact().state_vector();
+        {
+            let mut txn = peer.transact_mut_with("test:peer-charts");
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.try_update(&mut txn, CHARTS, charts);
+        }
+        peer.transact().encode_diff_v1(&before)
+    }
+
+    fn slid_anchor(cols: i64) -> ChartAnchor {
+        ChartAnchor::TwoCell {
+            from: xlsx_model::AnchorCell {
+                col: cols as u32,
+                ..xlsx_model::AnchorCell::default()
+            },
+            to: xlsx_model::AnchorCell {
+                col: 4 + cols as u32,
+                col_off: 0,
+                row: 8,
+                row_off: 0,
+            },
+            edit_as: AnchorEditAs::TwoCell,
+        }
+    }
+
+    /// The freeze pins what a chart *is*, so a peer cannot pass a remap off as
+    /// a move. The structure generation is untouched here, which is what makes
+    /// this the identity check rather than the generation counter.
+    #[test]
+    fn a_peer_cannot_disguise_a_chart_remap_as_a_move() {
+        let model = sliding_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 41).unwrap();
+        let frozen = authority.structure().unwrap();
+        let generation = frozen.generation;
+
+        for (label, charts) in [
+            (
+                "refs",
+                r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"to":{"col":4,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Hijacked!$A$1"}]}]"#,
+            ),
+            (
+                "part",
+                r#"[{"part":"xl/charts/other.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"to":{"col":4,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#,
+            ),
+            (
+                "anchorIndex",
+                r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":3,"anchor":{"kind":"twoCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"to":{"col":4,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#,
+            ),
+        ] {
+            let update = peer_chart_update(&authority, 42, charts);
+            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            assert_eq!(
+                staged.structure.generation, generation,
+                "{label} must not move the generation, or it proves nothing"
+            );
+            assert_ne!(
+                staged.structure, frozen,
+                "a rewritten {label} must change the frozen structure"
+            );
+        }
+    }
+
+    /// A move may slide a grid-anchored chart and nothing else. The drawing
+    /// writer refuses a changed kind, `editAs` mode or one-cell extent, so the
+    /// freeze has to refuse them too rather than accept a workbook that can no
+    /// longer be saved.
+    #[test]
+    fn a_peer_cannot_reshape_an_anchor_a_save_can_only_slide() {
+        let model = sliding_model();
+        let authority = WorkbookAuthority::from_model_with_client_id(&model, 43).unwrap();
+        let frozen = authority.structure().unwrap();
+
+        for (label, charts) in [
+            (
+                "editAs",
+                r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"to":{"col":4,"colOff":0,"row":8,"rowOff":0},"edit_as":"oneCell"},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#,
+            ),
+            (
+                "kind",
+                r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"oneCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"extent":{"cx":100000,"cy":100000}},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#,
+            ),
+        ] {
+            let update = peer_chart_update(&authority, 44, charts);
+            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            assert_ne!(
+                staged.structure, frozen,
+                "a rewritten anchor {label} must change the frozen structure"
+            );
+        }
+
+        // sliding the same anchor across the grid is the one accepted change.
+        let slid = r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":2,"colOff":0,"row":0,"rowOff":0},"to":{"col":6,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#;
+        let update = peer_chart_update(&authority, 44, slid);
+        let staged = authority.stage_updates_v1(&[&update]).unwrap();
+        assert_eq!(staged.structure, frozen);
+    }
+
+    /// A checkpoint has to put back everything a history step moves: the
+    /// document, both stacks, and the identity the stacks name. Restoring into
+    /// a fresh document would look right and leave the history unusable — the
+    /// undo manager drops entries belonging to a document it does not know,
+    /// silently, a whole stack at a time — so the proof is that undo still
+    /// works afterwards.
+    #[test]
+    fn a_restored_checkpoint_brings_back_a_working_history() {
+        let model = sliding_model();
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 61).unwrap();
+        let commit = |authority: &mut WorkbookAuthority, to| {
+            let ops = [Op::SetChartAnchor {
+                sheet: SheetId(0),
+                frame: "xl/drawings/drawing1.xml#0".to_owned(),
+                part: "xl/charts/chart1.xml".to_owned(),
+                from: authority.materialize().unwrap().sheets[0].charts[0].anchor,
+                to,
+            }];
+            let staged = authority
+                .stage_local_ops_v1(&ops, SyncOrigin::User)
+                .unwrap();
+            authority
+                .apply_local_update_v1(&staged.update, SyncOrigin::User)
+                .unwrap();
+        };
+
+        commit(&mut authority, slid_anchor(2));
+        let checkpoint = authority.checkpoint();
+        let vector = authority.encode_state_vector_v1();
+        let anchor = authority.materialize().unwrap().sheets[0].charts[0].anchor;
+        let depth = authority.undo_depth();
+        assert!(depth > 0);
+
+        commit(&mut authority, slid_anchor(5));
+        assert_ne!(
+            authority.materialize().unwrap().sheets[0].charts[0].anchor,
+            anchor
+        );
+
+        authority.restore(checkpoint).unwrap();
+        assert_eq!(
+            authority.materialize().unwrap().sheets[0].charts[0].anchor,
+            anchor,
+            "restore must bring the document back"
+        );
+        assert_eq!(
+            authority.encode_state_vector_v1(),
+            vector,
+            "restore must wind the document back, not forward"
+        );
+        assert_eq!(
+            authority.undo_depth(),
+            depth,
+            "restore must bring back the stacks"
+        );
+
+        // the history still belongs to this document, so it can still be spent
+        let undone = authority
+            .undo()
+            .expect("a restored history must still apply")
+            .expect("the entry is on the stack");
+        assert_eq!(
+            undone.model.sheets[0].charts[0].anchor,
+            model.sheets[0].charts[0].anchor
+        );
+        assert_eq!(authority.undo_depth(), depth - 1);
+    }
+
+    /// A peer's chart write can lose the merge to a concurrent local one and
+    /// sit in the document unseen. Undoing the local write must not strand the
+    /// authority on state it cannot read: the step is refused and the replica
+    /// stays exactly as usable as it was.
+    #[test]
+    fn a_hidden_chart_conflict_leaves_the_replica_usable() {
+        let model = sliding_model();
+        let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 304).unwrap();
+        let frozen = authority.structure().unwrap();
+        let hostile = peer_chart_update(
+            &authority,
+            111,
+            r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":0,"colOff":0,"row":0,"rowOff":0},"to":{"col":4,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Hijacked!$A$1"}]}]"#,
+        );
+
+        let ops = [Op::SetChartAnchor {
+            sheet: SheetId(0),
+            frame: "xl/drawings/drawing1.xml#0".to_owned(),
+            part: "xl/charts/chart1.xml".to_owned(),
+            from: model.sheets[0].charts[0].anchor,
+            to: slid_anchor(2),
+        }];
+        let local = authority
+            .stage_local_ops_v1(&ops, SyncOrigin::User)
+            .unwrap();
+        authority
+            .apply_local_update_v1(&local.update, SyncOrigin::User)
+            .unwrap();
+
+        // the hostile value loses the merge, so the freeze sees only the move.
+        let staged = authority.stage_updates_v1(&[&hostile]).unwrap();
+        assert_eq!(staged.structure, frozen);
+        authority.apply_update_v1(&staged.commit_update).unwrap();
+        let merged = authority.materialize().unwrap();
+        assert_eq!(
+            merged.sheets[0].charts[0].refs,
+            model.sheets[0].charts[0].refs
+        );
+
+        // undoing the move succeeds, takes the anchor back, and never lets the
+        // hidden remap through.
+        let undone = authority
+            .undo()
+            .expect("a hidden conflict must not fail the undo")
+            .expect("the move is on the stack, so undo must do something");
+        assert_eq!(undone.structure, frozen);
+        let after = authority.materialize().unwrap();
+        assert_eq!(
+            after.sheets[0].charts[0].refs,
+            model.sheets[0].charts[0].refs
+        );
+        assert_eq!(
+            after.sheets[0].charts[0].anchor, model.sheets[0].charts[0].anchor,
+            "undo must put the chart back where it started"
+        );
+        assert_eq!(authority.structure().unwrap(), frozen);
+        assert!(
+            !authority.can_undo(),
+            "one undo must consume exactly the one entry, not drain a longer stack"
+        );
+        let _ = merged;
     }
 }

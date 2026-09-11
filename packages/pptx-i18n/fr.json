@@ -2,6 +2,8 @@
   "_lang": "fr",
   "toolbar": {
     "label": null,
+    "save": "Enregistrer",
+    "exportPng": null,
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -16,13 +18,21 @@
     "objectsLabel": null,
     "addTextBox": null,
     "groups": {
+      "file": "Fichier",
       "slides": null,
       "history": null,
       "zoom": null,
       "tools": null,
       "font": null,
       "text": null,
-      "shape": null
+      "shape": null,
+      "alignment": "Alignement"
+    },
+    "align": {
+      "left": "Aligner à gauche",
+      "center": "Centrer",
+      "right": "Aligner à droite",
+      "justify": "Justifier"
     },
     "newSlide": null,
     "newSlideWithLayout": null,

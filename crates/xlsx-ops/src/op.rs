@@ -3,8 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 use xlsx_model::{
-    Cell, CellRange, CellRef, CellValue, ColId, DefinedName, FreezePane, Hyperlink, RowId,
-    SheetChart, SheetId,
+    Cell, CellRange, CellRef, CellValue, ChartAnchor, ColId, DefinedName, FreezePane, Hyperlink,
+    RowId, SheetChart, SheetId,
 };
 
 use crate::formatting::{CapturedFormat, NumberFormatMutation, StylePatch};
@@ -105,6 +105,20 @@ pub enum Op {
     SetCharts {
         sheet: SheetId,
         charts: Vec<SheetChart>,
+    },
+    /// Repin one chart frame, addressed by its `SheetChart::frame_id`. A frame
+    /// id names an ordinal in a drawing, and a drawing another editor has since
+    /// added to, reordered or thinned renumbers those ordinals, so the id alone
+    /// cannot survive being stored. `part` and `from` are the chart part and
+    /// the anchor the frame held when the op was recorded, and a replay that
+    /// finds either changed is refused instead of moving whoever now sits
+    /// there.
+    SetChartAnchor {
+        sheet: SheetId,
+        frame: String,
+        part: String,
+        from: ChartAnchor,
+        to: ChartAnchor,
     },
     MergeCells {
         sheet: SheetId,
