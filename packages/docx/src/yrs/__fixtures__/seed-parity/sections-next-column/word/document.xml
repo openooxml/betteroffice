@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml">
+  <w:body>
+    <w:p w14:paraId="5EC10001">
+      <w:r><w:t>Two-column section one.</w:t></w:r>
+    </w:p>
+    <w:p w14:paraId="5EC10002">
+      <w:pPr>
+        <w:sectPr>
+          <w:type w:val="nextColumn"/>
+          <w:pgSz w:w="12240" w:h="15840"/>
+          <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>
+          <w:cols w:num="2" w:space="720"/>
+        </w:sectPr>
+      </w:pPr>
+      <w:r><w:t>Section one ends on this paragraph mark.</w:t></w:r>
+    </w:p>
+    <w:p w14:paraId="5EC10003">
+      <w:r><w:t>Section two starts in the next column.</w:t></w:r>
+    </w:p>
+    <w:sectPr>
+      <w:type w:val="nextColumn"/>
+      <w:pgSz w:w="12240" w:h="15840"/>
+      <w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/>
+      <w:cols w:num="2" w:space="720"/>
+    </w:sectPr>
+  </w:body>
+</w:document>

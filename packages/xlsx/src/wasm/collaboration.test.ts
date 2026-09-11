@@ -8,14 +8,23 @@ import { initWasm, openWorkbook } from './loader';
 import type { WorkbookHandle, WorkbookUpdateOrigin } from './loader';
 
 const FIXTURE = resolve(import.meta.dir, '../../test-fixtures/sample.xlsx');
+const CHART_FIXTURE = resolve(import.meta.dir, '../../test-fixtures/charts.xlsx');
 const WASM = resolve(import.meta.dir, './generated/xlsx_wasm_bg.wasm');
 
 function sampleBytes(): Uint8Array {
   return new Uint8Array(readFileSync(FIXTURE));
 }
 
+function chartBytes(): Uint8Array {
+  return new Uint8Array(readFileSync(CHART_FIXTURE));
+}
+
 function collaborative(clientId: number): WorkbookHandle {
   return openWorkbook(sampleBytes(), { collaborative: true, clientId });
+}
+
+function collaborativeCharts(clientId: number): WorkbookHandle {
+  return openWorkbook(chartBytes(), { collaborative: true, clientId });
 }
 
 function requireReplica(replica: CollaborationReplica): CollaborationReplica {
@@ -199,6 +208,35 @@ describe('wasm collaboration', () => {
     }
   });
 
+  // the wasm event arrives as `[origin, ...update]`, so a listener that reaches
+  // for `.buffer` must not find the origin tag riding along — and the shape must
+  // not depend on how many other listeners happen to be subscribed.
+  it('delivers exact update buffers regardless of subscriber count', () => {
+    for (const extraSubscriber of [false, true]) {
+      const source = collaborative(extraSubscriber ? 2102 : 2101);
+      const peer = collaborative(extraSubscriber ? 2104 : 2103);
+      const received: Uint8Array[] = [];
+      try {
+        source.onUpdate((update, origin) => {
+          if (origin === 'local') received.push(update);
+        });
+        if (extraSubscriber) source.onUpdate(() => {});
+
+        source.editCell(0, 22, 0, 'exact buffer');
+        expect(received).toHaveLength(1);
+        const update = received[0];
+        expect(update.byteOffset).toBe(0);
+        expect(update.buffer.byteLength).toBe(update.byteLength);
+
+        peer.applyUpdate(new Uint8Array(update.buffer));
+        expect(peer.cell(0, 22, 0).input).toBe('exact buffer');
+      } finally {
+        source.dispose();
+        peer.dispose();
+      }
+    }
+  });
+
   it('unsubscribes idempotently', () => {
     const handle = collaborative(3001);
     let calls = 0;
@@ -318,6 +356,27 @@ describe('wasm collaboration', () => {
     } finally {
       target.dispose();
       structuralSource.dispose();
+    }
+  });
+
+  it('drags a chart in a collaborative session and converges the peer', () => {
+    const source = collaborativeCharts(6101);
+    const target = collaborativeCharts(6102);
+    const viewport = { x: 0, y: 0, width: 800, height: 800 };
+    try {
+      const before = (source.displayList(viewport).charts ?? [])[0];
+      expect(source.moveChart(0, before.id, 24, 12).applied).toBe(true);
+
+      const moved = (source.displayList(viewport).charts ?? [])[0];
+      expect(moved.rect.x).toBeCloseTo(before.rect.x + 24, 1);
+      expect(moved.rect.y).toBeCloseTo(before.rect.y + 12, 1);
+
+      const update = source.encodeStateAsUpdate(target.encodeStateVector());
+      expect(target.applyUpdate(update).applied).toBe(true);
+      expect((target.displayList(viewport).charts ?? [])[0].rect).toEqual(moved.rect);
+    } finally {
+      source.dispose();
+      target.dispose();
     }
   });
 

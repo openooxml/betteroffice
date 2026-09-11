@@ -131,10 +131,30 @@ pub struct HyperlinkRegion {
     pub tooltip: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ChartA11yAttrs {
+/// a chart's placement in the frame: the id that addresses it across the wasm
+/// boundary, what a screen reader reads, whether the renderer managed to draw
+/// it, its full viewport-local rect and the visible part after pane clipping.
+/// A chart that degraded to a placeholder still gets a region, so it stays an
+/// addressable object on the sheet.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartRegion {
+    /// `SheetChart::frame_id` — the drawing part and the anchor in it, unique
+    /// within a sheet. Not the chart part, which two anchors may share.
+    pub id: String,
     pub label: String,
+    /// the chart could not be drawn; a neutral box occupies its rect instead.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub placeholder: bool,
+    pub rect: Rect,
+    /// `rect` intersected with the pane band it paints in — the hit area.
+    pub clip: Rect,
+    /// whether the anchor can be repinned; an absolute one cannot.
+    pub movable: bool,
 }
+
+/// former name of [`ChartRegion`], when it carried the label alone.
+pub type ChartA11yAttrs = ChartRegion;
 
 /// a full frame for one viewport, sized in pixels; commands are emitted in a
 /// fixed order so serialized output is deterministic.
@@ -147,7 +167,7 @@ pub struct DisplayList {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hyperlinks: Vec<HyperlinkRegion>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub charts: Vec<ChartA11yAttrs>,
+    pub charts: Vec<ChartRegion>,
 }
 
 /// scale every coordinate, size, stroke width, and font size by `factor`,
@@ -269,7 +289,18 @@ pub fn scaled(dl: DisplayList, factor: f32) -> DisplayList {
                 .collect(),
         },
         hyperlinks: dl.hyperlinks,
-        charts: dl.charts,
+        charts: dl
+            .charts
+            .into_iter()
+            .map(|chart| ChartRegion {
+                id: chart.id,
+                label: chart.label,
+                placeholder: chart.placeholder,
+                rect: scale_rect(chart.rect, factor),
+                clip: scale_rect(chart.clip, factor),
+                movable: chart.movable,
+            })
+            .collect(),
     }
 }
 
@@ -400,8 +431,23 @@ mod tests {
                 col_offsets: vec![0.0, 64.0],
             },
             hyperlinks: Vec::new(),
-            charts: vec![ChartA11yAttrs {
+            charts: vec![ChartRegion {
+                id: "xl/charts/chart1.xml".into(),
                 label: "Revenue chart".into(),
+                placeholder: false,
+                rect: Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 30.0,
+                    h: 40.0,
+                },
+                clip: Rect {
+                    x: 10.0,
+                    y: 20.0,
+                    w: 15.0,
+                    h: 40.0,
+                },
+                movable: true,
             }],
         }
     }
@@ -465,6 +511,17 @@ mod tests {
         assert_eq!(dl.grid.start_row, 1);
         assert_eq!(dl.grid.col_offsets, vec![0.0, 128.0]);
         assert_eq!(dl.charts[0].label, "Revenue chart");
+        assert_eq!(dl.charts[0].id, "xl/charts/chart1.xml");
+        assert_eq!(
+            dl.charts[0].rect,
+            Rect {
+                x: 20.0,
+                y: 40.0,
+                w: 60.0,
+                h: 80.0
+            }
+        );
+        assert_eq!(dl.charts[0].clip.w, 30.0);
     }
 
     #[test]

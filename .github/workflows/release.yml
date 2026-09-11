@@ -59,13 +59,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install wasm-pack
+      - uses: ./.github/actions/wasm-toolchain
         if: steps.pending.outputs.publishing == 'true'
-        run: cargo install wasm-pack --version 0.15.0 --locked
+
+      - uses: taiki-e/install-action@v2
+        if: steps.pending.outputs.publishing == 'true'
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Type check
         if: steps.pending.outputs.publishing == 'true'
-        run: bun run --filter './packages/*' typecheck
+        run: bun run typecheck:packages
 
       - name: Test
         if: steps.pending.outputs.publishing == 'true'
@@ -91,6 +95,21 @@ jobs:
         id: crates-auth
         if: steps.pending.outputs.publishing == 'true' && steps.crates-bootstrap.outputs.enabled != 'true'
         uses: rust-lang/crates-io-auth-action@v1
+
+      # Both registries are checked before the first upload: a guard that fails
+      # after the crates publish leaves the release half-published.
+      - name: Check crates.io publish targets
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
+        run: node scripts/check-publish-targets.mjs --crates
+
+      # Publishing here means there are no pending changesets, so changesets/action
+      # runs no `version` command: these manifests carry the versions it publishes.
+      # It reads name and version, which the pin below leaves alone.
+      - name: Check npm publish targets
+        if: steps.pending.outputs.publishing == 'true'
+        run: node scripts/check-publish-targets.mjs --npm
 
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true'
@@ -133,7 +152,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
-      bindings: ${{ steps.registry.outputs.bindings }}
       publish: ${{ steps.registry.outputs.publish }}
     permissions:
       contents: read
@@ -146,8 +164,8 @@ jobs:
           if [ -n "$TOKEN" ]; then
             echo "::error::PYPI_API_TOKEN is readable by a job that declares no environment, so it is a repository or organization secret and every binding's publish leg can upload with it."
             echo "::error::Delete it under Settings > Secrets and variables > Actions, then revoke it on PyPI."
-            echo "::error::Preferred: add a PyPI Trusted Publisher (owner openooxml, repository betteroffice, workflow release.yml, environment pypi-<binding>) and keep no token at all."
-            echo "::error::Otherwise: mint a project-scoped token and re-add it as an environment secret on the pypi-<binding> environment only. This step cannot tell a project-scoped token from an account-scoped one, so an account-scoped token would pass."
+            echo "::error::Add a PyPI Trusted Publisher instead (owner openooxml, repository betteroffice, workflow publish-python-binding.yml, environment pypi-<binding>) and keep no token at all."
+            echo "::error::There is no token path: publish-python-binding.yml refuses every PYPI_API_TOKEN it can read, including an environment secret on pypi-<binding>."
             echo "::error::See RELEASING.md."
             exit 1
           fi
@@ -156,76 +174,52 @@ jobs:
 
       - id: registry
         run: |
-          {
-            echo "bindings=$(node scripts/python-bindings.mjs)"
-            echo "publish=$(node scripts/python-bindings.mjs --publish)"
-          } >> "$GITHUB_OUTPUT"
+          publish=$(node scripts/python-bindings.mjs --pending)
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
 
-  python-dist:
-    name: Python ${{ matrix.binding }}
-    needs: python-bindings
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: ${{ fromJSON(needs.python-bindings.outputs.bindings) }}
-    uses: ./.github/workflows/python-dist.yml
-    with:
-      binding: ${{ matrix.binding }}
-    permissions:
-      contents: read
-
-  # Never a reusable workflow: the OIDC claim must name release.yml.
+  # A PyPI Trusted Publisher is scoped to the file that runs the upload, and every
+  # publisher here names publish-python-binding.yml, so the release dispatches that
+  # workflow instead of uploading. The dispatch carries this run's commit, because
+  # main moves; the wait is what makes a failed upload fail the release.
   python-pypi:
-    name: Publish betteroffice-${{ matrix.binding }}
-    needs: [python-bindings, python-dist]
-    # `needs` collapses the python-dist matrix: `success()` would skip every binding on one failure.
-    if: ${{ !cancelled() && needs.python-bindings.result == 'success' && needs.python-bindings.outputs.publish != '[]' }}
+    name: Publish Python bindings
+    needs: python-bindings
+    if: needs.python-bindings.outputs.publish != '[]'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        binding: ${{ fromJSON(needs.python-bindings.outputs.publish) }}
-    # Scopes each Trusted Publisher to one project; the workflow alone cannot.
-    environment: pypi-${{ matrix.binding }}
+    # Covers the dispatched workflow's own worst case: 45 (wheels) + 5 + 15 (publish).
+    timeout-minutes: 75
     permissions:
-      id-token: write # OIDC Trusted Publishing
+      actions: write # dispatch publish-python-binding.yml
     steps:
-      - name: Require a complete build
-        uses: actions/download-artifact@v4
-        with:
-          name: built-${{ matrix.binding }}
-          path: receipt
-
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: python-${{ matrix.binding }}.*
-          path: dist
-          merge-multiple: true
-
-      # Never at repository scope: one secret would reach every binding's leg.
-      - name: Detect PyPI token
-        id: pypi-token
+      - name: Dispatch a publish per binding, then wait for each
         env:
-          TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          PUBLISH: ${{ needs.python-bindings.outputs.publish }}
+          SHA: ${{ github.sha }}
         run: |
-          if [ -n "$TOKEN" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
-          fi
+          status=0
+          runs=""
+          for binding in $(echo "$PUBLISH" | jq -r '.[]'); do
+            # From API version 2026-03-10 the dispatch returns the created run's id,
+            # so the wait below watches exactly the runs this job started.
+            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GH_REPO/actions/workflows/publish-python-binding.yml/dispatches" \
+              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+              runs="$runs $binding:$run"
+            else
+              echo "::error::Dispatching the publish of betteroffice-$binding failed."
+              status=1
+            fi
+          done
 
-      - name: Publish with API token
-        if: steps.pypi-token.outputs.enabled == 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
-          packages-dir: dist
-          skip-existing: true
-
-      - name: Publish via Trusted Publishing
-        if: steps.pypi-token.outputs.enabled != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: dist
-          skip-existing: true
+          for entry in $runs; do
+            binding=${entry%%:*}
+            run=${entry#*:}
+            if ! gh run watch "$run" --exit-status; then
+              echo "::error::betteroffice-$binding did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+              status=1
+            fi
+          done
+          exit $status

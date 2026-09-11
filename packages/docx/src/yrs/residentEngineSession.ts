@@ -24,7 +24,7 @@ export type ResidentEngineSession = Pick<
   | 'encodeStateVector'
   | 'layoutDocumentJson'
   | 'layoutFontRequirementsJson'
-  | 'layoutDocumentWithRegionsJson'
+  | 'layoutDocumentWithRegionsRetainedJson'
   | 'loadState'
   | 'measureParagraphJson'
   | 'onUpdate'
@@ -71,7 +71,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
     measureParagraphJson: (input) => session.measure_paragraph_json(input),
     layoutDocumentJson: (input) => session.layout_document_json(input),
     layoutFontRequirementsJson: (input) => session.layout_font_requirements_json(input),
-    layoutDocumentWithRegionsJson: (input) => session.layout_document_with_regions_json(input),
+    layoutDocumentWithRegionsRetainedJson: (input) =>
+      session.layout_document_with_regions_retained_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
     residentCaretSnapshot: () =>

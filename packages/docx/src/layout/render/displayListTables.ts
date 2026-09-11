@@ -36,7 +36,7 @@
  *
  * Body region only. The HF caret + selection on canvas are now sourced from the
  * region-aware `hfRangeRects` / `hfCaretRects` queries (see
- * `CanvasHfSelectionOverlay`), but HF *table* resize handles remain a documented
+ * `CanvasPartSelectionOverlay`), but HF *table* resize handles remain a documented
  * gap: this walker takes `page.primitives` (body), and the overlay's
  * `tableKeyOf` / commit path resolves against the body doc. Closing it needs
  * (1) an optional region parameter here to walk `page.header|footer.primitives`,

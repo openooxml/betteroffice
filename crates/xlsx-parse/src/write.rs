@@ -3,15 +3,17 @@
 //! are copied through byte for byte; only what changed is reserialized, and
 //! that reserialization carries just the subset `read` models.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
 use std::io;
+use std::iter::Peekable;
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use xlsx_model::addr::RowId;
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
-    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetId, Workbook,
+    Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart, SheetId,
+    Workbook,
 };
 
 use crate::ParseError;
@@ -23,8 +25,8 @@ use crate::package::{
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
-const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
-const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+pub(crate) const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+pub(crate) const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
 const NS_R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 const NS_CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
 const NS_PKG_REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
@@ -190,8 +192,10 @@ pub struct SaveEdits {
     /// the caller guarantees an untouched model, which is returned as the
     /// source bytes; true drops the now-stale calculation chain.
     pub changed: bool,
-    /// an edit moved cell addresses, so every preserved part naming them must
-    /// be one this crate can rewrite.
+    /// an edit moved cells a preserved part names but this crate cannot
+    /// rewrite. The caller resolves that against
+    /// [`PreservedPackage::unpatchable_references`], because only it knows
+    /// which edits were applied.
     pub moved_references: bool,
 }
 
@@ -473,33 +477,39 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
     Ok(parts.finish())
 }
 
+/// What one sheet wants written into a chart part it anchors.
+struct ChartClaim<'a> {
+    refs: &'a [ChartRef],
+    sheet: &'a str,
+}
+
+/// What one sheet wants written into a drawing anchor it holds.
+struct AnchorClaim<'a> {
+    anchor: ChartAnchor,
+    sheet: &'a str,
+    moved: bool,
+}
+
 /// Writes moved chart references and anchors back into the parts that hold
 /// them. Each part is patched once, from its source bytes, so unmodelled chart
-/// markup survives byte for byte.
+/// markup survives byte for byte. A part two sheets anchor is written only when
+/// both want the same bytes out of it, because one part cannot hold two.
 fn patch_chart_parts(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
     parts: &mut PartStore<'_>,
 ) -> Result<(), ParseError> {
-    let mut chart_refs: BTreeMap<&str, (&[ChartRef], &str)> = BTreeMap::new();
-    let mut anchors: BTreeMap<&str, Vec<(usize, ChartAnchor)>> = BTreeMap::new();
+    let mut chart_refs: BTreeMap<&str, Vec<ChartClaim<'_>>> = BTreeMap::new();
+    let mut moved_refs: HashSet<&str> = HashSet::new();
+    let mut anchors: BTreeMap<&str, BTreeMap<usize, AnchorClaim<'_>>> = BTreeMap::new();
     for (sheet, origin) in wb.sheets.iter().zip(origins) {
         let source = origin
             .and_then(|origin| package.original_workbook.sheets.get(origin))
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
-            let original = source
-                .iter()
-                .find(|other| other.part == chart.part)
-                .ok_or_else(|| unwritable_chart(&chart.part, &sheet.name))?;
-            if original.drawing != chart.drawing || original.anchor_index != chart.anchor_index {
-                return Err(ParseError::UnsupportedEdit(format!(
-                    "chart {} no longer names the drawing and anchor it was read from",
-                    chart.part
-                )));
-            }
+            let original = source_chart(source, chart, &sheet.name)?;
             if original.refs.len() != chart.refs.len()
                 || original
                     .refs
@@ -512,28 +522,42 @@ fn patch_chart_parts(
                     chart.part
                 )));
             }
+            chart_refs
+                .entry(chart.part.as_str())
+                .or_default()
+                .push(ChartClaim {
+                    refs: chart.refs.as_slice(),
+                    sheet: sheet.name.as_str(),
+                });
             if original.refs != chart.refs {
-                chart_refs.insert(
-                    chart.part.as_str(),
-                    (chart.refs.as_slice(), sheet.name.as_str()),
-                );
+                moved_refs.insert(chart.part.as_str());
             }
-            if original.anchor != chart.anchor {
-                anchors
-                    .entry(chart.drawing.as_str())
-                    .or_default()
-                    .push((chart.anchor_index, chart.anchor));
-            }
+            claim_anchor(
+                anchors.entry(chart.drawing.as_str()).or_default(),
+                chart,
+                &sheet.name,
+                original.anchor != chart.anchor,
+            )?;
         }
     }
-    for (path, (refs, owner)) in chart_refs {
+    for (path, claims) in chart_refs {
+        if !moved_refs.contains(path) {
+            continue;
+        }
         let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
-        parts.set(
-            path.to_owned(),
-            crate::chart::patch_chart_refs(source, refs, wb, owner)?,
-        )?;
+        if let Some(bytes) = agreed_chart_bytes(source, path, &claims, wb)? {
+            parts.set(path.to_owned(), bytes)?;
+        }
     }
-    for (path, moved) in anchors {
+    for (path, claims) in anchors {
+        let moved = claims
+            .into_iter()
+            .filter(|(_, claim)| claim.moved)
+            .map(|(index, claim)| (index, claim.anchor))
+            .collect::<Vec<_>>();
+        if moved.is_empty() {
+            continue;
+        }
         let source = package.part_bytes(path).ok_or_else(|| missing_part(path))?;
         parts.set(
             path.to_owned(),
@@ -541,6 +565,69 @@ fn patch_chart_parts(
         )?;
     }
     Ok(())
+}
+
+/// Records what one sheet wants at a drawing anchor, refusing when a sheet
+/// that shares the drawing already asked for a different one.
+fn claim_anchor<'a>(
+    claims: &mut BTreeMap<usize, AnchorClaim<'a>>,
+    chart: &SheetChart,
+    sheet: &'a str,
+    moved: bool,
+) -> Result<(), ParseError> {
+    match claims.entry(chart.anchor_index) {
+        btree_map::Entry::Vacant(slot) => {
+            slot.insert(AnchorClaim {
+                anchor: chart.anchor,
+                sheet,
+                moved,
+            });
+        }
+        btree_map::Entry::Occupied(mut slot) => {
+            if slot.get().anchor != chart.anchor {
+                return Err(conflicting_shared_part(
+                    &chart.drawing,
+                    slot.get().sheet,
+                    sheet,
+                ));
+            }
+            slot.get_mut().moved |= moved;
+        }
+    }
+    Ok(())
+}
+
+/// The bytes a chart part must take, refused when the sheets anchoring it do
+/// not all patch it into the same thing. A shared part's references may be
+/// unqualified, so the sheet a cache is rebuilt against is part of what the
+/// sheets must agree on.
+fn agreed_chart_bytes(
+    source: &[u8],
+    path: &str,
+    claims: &[ChartClaim<'_>],
+    wb: &Workbook,
+) -> Result<Option<Vec<u8>>, ParseError> {
+    let mut agreed: Option<(Vec<u8>, &str)> = None;
+    for claim in claims {
+        let bytes = crate::chart::patch_chart_refs(source, claim.refs, wb, claim.sheet)?;
+        match &agreed {
+            Some((first, owner)) if *first != bytes => {
+                return Err(conflicting_shared_part(path, owner, claim.sheet));
+            }
+            Some(_) => {}
+            None => agreed = Some((bytes, claim.sheet)),
+        }
+    }
+    Ok(agreed.map(|(bytes, _)| bytes))
+}
+
+/// Two sheets anchor one part and no longer agree on what it holds. The part
+/// can carry only one of them, so the save is refused rather than rewriting the
+/// chart the other sheet shows.
+fn conflicting_shared_part(path: &str, first: &str, second: &str) -> ParseError {
+    ParseError::UnsupportedEdit(format!(
+        "{path} is anchored by both sheet {first} and sheet {second}, which no longer agree on what it holds, and one part cannot carry both"
+    ))
 }
 
 fn missing_part(path: &str) -> ParseError {
@@ -569,45 +656,65 @@ fn preflight_preserved_save(
 }
 
 /// Charts, pivot caches and their friends name sheets and cells this crate
-/// never patches. Moving cells, or dropping, reordering or renaming a source
-/// sheet while one of them is preserved strands it, so the serializer refuses
-/// that here instead of trusting every caller to have checked.
+/// never patches. Dropping, reordering or renaming a sheet one of them names —
+/// or moving cells it names, which the caller reports — strands it, so the
+/// serializer refuses that here instead of trusting every caller to have
+/// checked. A sheet no preserved reference names moves freely.
 fn ensure_preserved_references_stay_valid(
     wb: &Workbook,
     package: &PreservedPackage,
     origins: &[Option<usize>],
     edits: SaveEdits,
 ) -> Result<(), ParseError> {
-    let Some(part) = package.unpatchable_reference_part() else {
-        return Ok(());
+    let refused = |part: &str| {
+        ParseError::UnsupportedEdit(format!(
+            "{part} references sheets or cells this save would move, and it cannot be rewritten"
+        ))
     };
-    let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
-    let kept_in_order = retained.len() == package.sheets.len()
-        && retained
-            .iter()
-            .enumerate()
-            .all(|(position, origin)| *origin == position);
-    let renamed = origins.iter().zip(&wb.sheets).any(|(origin, sheet)| {
-        origin.is_some_and(|origin| {
-            package
-                .original_workbook
-                .sheets
-                .get(origin)
-                .is_some_and(|original| original.name != sheet.name)
-        })
-    });
-    if kept_in_order && !renamed && !edits.moved_references {
-        return Ok(());
+    if edits.moved_references
+        && let Some(part) = package.unpatchable_reference_part()
+    {
+        return Err(refused(part));
     }
-    Err(ParseError::UnsupportedEdit(format!(
-        "{part} references sheets or cells this save would move, and it cannot be rewritten"
-    )))
+    for name in displaced_source_sheets(wb, package, origins) {
+        if let Some(part) = package.reference_naming_sheet(&name) {
+            return Err(refused(part));
+        }
+    }
+    Ok(())
+}
+
+/// The names of the source sheets this save does not leave where and as they
+/// were: one that is gone, one whose rank among the survivors changed, one
+/// renamed.
+fn displaced_source_sheets(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+) -> Vec<String> {
+    let retained = origins.iter().flatten().copied().collect::<Vec<_>>();
+    let mut ranked = retained.clone();
+    ranked.sort_unstable();
+    let mut displaced = Vec::new();
+    for (index, original) in package.original_workbook.sheets.iter().enumerate() {
+        let rank = retained.iter().position(|origin| *origin == index);
+        let kept_in_place = rank.is_some_and(|rank| ranked.get(rank) == Some(&index))
+            && origins
+                .iter()
+                .zip(&wb.sheets)
+                .any(|(origin, sheet)| *origin == Some(index) && sheet.name == original.name);
+        if !kept_in_place {
+            displaced.push(original.name.clone());
+        }
+    }
+    displaced
 }
 
 /// This crate patches chart parts in place; it can neither create one nor
-/// delete one. Every chart a retained sheet carries must therefore name
-/// exactly one chart the same source sheet was read with, and every chart that
-/// source held must still be there.
+/// delete one. Every chart frame a retained sheet carries must therefore name
+/// exactly one frame the same source sheet was read with, and every frame that
+/// source held must still be there. Frames, not parts: two anchors may share
+/// one chart part, and each of them is written back on its own.
 fn ensure_chart_provenance(
     wb: &Workbook,
     package: &PreservedPackage,
@@ -619,25 +726,55 @@ fn ensure_chart_provenance(
             .map(|sheet| sheet.charts.as_slice())
             .unwrap_or_default();
         for chart in &sheet.charts {
-            if source
-                .iter()
-                .filter(|other| other.part == chart.part)
-                .count()
-                != 1
-            {
-                return Err(unwritable_chart(&chart.part, &sheet.name));
-            }
+            source_chart(source, chart, &sheet.name)?;
         }
         for original in source {
-            if !sheet.charts.iter().any(|chart| chart.part == original.part) {
-                return Err(ParseError::UnsupportedEdit(format!(
-                    "chart {} was dropped from sheet {}, and this crate cannot delete one",
-                    original.part, sheet.name
-                )));
+            match sheet
+                .charts
+                .iter()
+                .filter(|chart| chart.is_same_frame(original))
+                .count()
+            {
+                1 => {}
+                0 => {
+                    return Err(ParseError::UnsupportedEdit(format!(
+                        "chart {} was dropped from sheet {}, and this crate cannot delete one",
+                        original.part, sheet.name
+                    )));
+                }
+                _ => {
+                    return Err(ParseError::UnsupportedEdit(format!(
+                        "sheet {} carries the anchor holding chart {} twice, and one anchor cannot hold two",
+                        sheet.name, original.part
+                    )));
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The source frame a modelled one must be patched from: same drawing anchor,
+/// same chart part. A frame that repointed either has no source to patch, and
+/// patching the one it used to hold would rewrite somebody else's chart.
+fn source_chart<'a>(
+    source: &'a [SheetChart],
+    chart: &SheetChart,
+    sheet: &str,
+) -> Result<&'a SheetChart, ParseError> {
+    let mut frames = source
+        .iter()
+        .filter(|other| other.is_same_frame(chart) && other.part == chart.part);
+    match (frames.next(), frames.next()) {
+        (Some(original), None) => Ok(original),
+        (None, _) if source.iter().any(|other| other.part == chart.part) => {
+            Err(ParseError::UnsupportedEdit(format!(
+                "chart {} no longer names the drawing and anchor it was read from",
+                chart.part
+            )))
+        }
+        _ => Err(unwritable_chart(&chart.part, sheet)),
+    }
 }
 
 /// The relationship ids a worksheet's `<hyperlink>` elements point at, beside
@@ -2457,24 +2594,33 @@ fn write_sheet_data(
         }
     }
 
-    let mut rows: Vec<RowId> = sheet.iter_cells().map(|(r, _)| r.row).collect();
-    rows.extend(sheet.row_heights.keys().copied());
-    rows.sort_unstable();
-    rows.dedup();
+    let mut cells = sheet.iter_cells().peekable();
+    let mut heights = sheet.row_heights.keys().copied().peekable();
 
     writer
         .create_element("sheetData")
         .write_inner_content(|writer| {
-            for &row in &rows {
+            loop {
+                let cell_row = cells.peek().map(|(addr, _)| addr.row);
+                let height_row = heights.peek().copied();
+                let row = match (cell_row, height_row) {
+                    (Some(a), Some(b)) => a.min(b),
+                    (Some(a), None) | (None, Some(a)) => a,
+                    (None, None) => break,
+                };
                 write_row(
                     writer,
                     sheet,
                     row,
+                    &mut cells,
                     wb,
                     &sst_index,
                     retained,
                     shared_string_plan,
                 )?;
+                if height_row == Some(row) {
+                    heights.next();
+                }
             }
             Ok(())
         })?;
@@ -2581,15 +2727,20 @@ fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
     Ok(())
 }
 
-fn write_row(
+#[allow(clippy::too_many_arguments)]
+fn write_row<'a, I>(
     w: &mut Writer<Vec<u8>>,
     sheet: &Sheet,
     row: RowId,
+    cells: &mut Peekable<I>,
     wb: &Workbook,
     sst_index: &HashMap<&str, usize>,
     retained: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    I: Iterator<Item = (CellRef, &'a Cell)>,
+{
     let r = (row as u64 + 1).to_string();
     let mut start = BytesStart::new("row");
     start.push_attribute(("r", r.as_str()));
@@ -2602,7 +2753,7 @@ fn write_row(
         }
     }
     w.write_event(Event::Start(start))?;
-    for (addr, cell) in sheet.iter_cells().filter(|(a, _)| a.row == row) {
+    while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
         let source = retained.get(&(addr.row, addr.col)).copied();
         let retained = match (&cell.value, shared_string_plan) {
             (CellValue::Text { value }, Some(plan)) => {

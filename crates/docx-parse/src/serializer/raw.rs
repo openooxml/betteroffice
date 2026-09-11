@@ -1,6 +1,6 @@
 //! Validation for the narrowly allowed lossless XML replay fields.
 
-use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml};
+use crate::xml::{ParseBudget, ParseError, ParseLimits, XmlElement, parse_xml_strict};
 
 /// Complete namespace context used by WordprocessingML content fragments.
 /// The wrapper is never emitted; it only makes captured prefixed subtrees
@@ -31,6 +31,20 @@ pub(super) const CONTENT_FRAGMENT_PREFIX: &str = concat!(
     "xmlns:wps=\"http://schemas.microsoft.com/office/word/2010/wordprocessingShape\">"
 );
 
+/// A replayed foreign fragment must still be exactly one well-formed
+/// element; the resolver-free reader accepts its authored prefixes as-is.
+pub(crate) fn validate_replayed_fragment(xml: &str) -> Result<(), ParseError> {
+    let limits = ParseLimits::default();
+    let mut budget = ParseBudget::new(&limits);
+    let document = parse_xml_strict(xml.as_bytes(), "replayed-fragment", &mut budget)?;
+    if document.root().is_none() {
+        return Err(ParseError::Canonical(
+            "replayed fragment must contain exactly one element".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_raw_subtree(
     xml: &str,
     expected_prefix: &str,
@@ -38,7 +52,7 @@ pub(crate) fn validate_raw_subtree(
 ) -> Result<(), ParseError> {
     let source = format!("{CONTENT_FRAGMENT_PREFIX}{xml}</s11:root>");
     let limits = ParseLimits::default();
-    let document = parse_xml(
+    let document = parse_xml_strict(
         source.as_bytes(),
         "serializer-validated-raw.xml",
         &mut ParseBudget::new(&limits),
@@ -61,7 +75,7 @@ pub(crate) fn validate_raw_subtree(
 pub(crate) fn validate_math_subtree(xml: &str) -> Result<(), ParseError> {
     let source = format!("{CONTENT_FRAGMENT_PREFIX}{xml}</s11:root>");
     let limits = ParseLimits::default();
-    let document = parse_xml(
+    let document = parse_xml_strict(
         source.as_bytes(),
         "serializer-validated-math.xml",
         &mut ParseBudget::new(&limits),
@@ -118,5 +132,26 @@ mod tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+
+    #[test]
+    fn replay_validation_rejects_unescaped_emitted_values() {
+        for xml in [
+            r#"<x:block x:q="a&b"/>"#,
+            r#"<x:block x:q="a<b"/>"#,
+            "<x:block>a&b</x:block>",
+            "<x:block/><x:block/>",
+        ] {
+            assert!(validate_replayed_fragment(xml).is_err(), "{xml}");
+        }
+        validate_replayed_fragment(
+            r#"<x:block x:q="a&amp;&lt;&gt;&quot;b">a&amp;&lt;&gt;b</x:block>"#,
+        )
+        .unwrap();
     }
 }

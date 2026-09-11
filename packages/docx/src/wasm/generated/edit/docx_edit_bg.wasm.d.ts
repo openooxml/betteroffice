@@ -12,6 +12,7 @@ export const editsession_apply_input_profiled: (a: number, b: number, c: number,
 export const editsession_apply_local_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_paragraph_style: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number];
 export const editsession_apply_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
+export const editsession_apply_seed_raw_ops: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_apply_update: (a: number, b: number, c: number) => [number, number];
 export const editsession_apply_update_with_inference: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_build_display_list_frame: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -52,6 +53,7 @@ export const editsession_insert_text: (a: number, b: number, c: number, d: numbe
 export const editsession_insert_watermark: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_layout_document_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_document_with_regions_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_layout_document_with_regions_retained_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_layout_font_requirements_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_list_revisions: (a: number) => [number, number, number, number];
 export const editsession_load_json: (a: number, b: number, c: number) => [number, number, number, number];
@@ -74,6 +76,7 @@ export const editsession_resident_caret_snapshot_json: (a: number) => [number, n
 export const editsession_resolve_comment: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_resolve_encoded_selection: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_resolve_sticky_position: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_retained_kernel_inputs_json: (a: number) => [number, number, number, number];
 export const editsession_seed_from_docx: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_selection: (a: number) => [number, number, number, number];
 export const editsession_selection_context: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
@@ -119,9 +122,6 @@ export const serialize_docx_s10: (a: number, b: number) => [number, number, numb
 export const serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
 export const write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-export const rezip_docx: (a: any) => [number, number, number, number];
-export const sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-export const unzip_docx: (a: number, b: number) => [number, number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];
@@ -141,11 +141,11 @@ export const vertical_move_json: (a: number, b: number, c: number, d: number, e:
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
 export const clear_measure_fonts: () => void;
-export const __wbindgen_malloc: (a: number, b: number) => number;
-export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
 export const __externref_drop_slice: (a: number, b: number) => void;

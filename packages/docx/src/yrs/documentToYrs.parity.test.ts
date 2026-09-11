@@ -32,6 +32,7 @@ describe('DOCX engine seeding', () => {
 
       expectEquivalentStories(engine, projected);
       expect(engine.encodeStateVector()).toEqual(projected.encodeStateVector());
+      expect(engine.encodeState()).toEqual(projected.encodeState());
 
       const projectedStatePeer = await createYrsSession({ clientId: 47002 });
       const engineStatePeer = await createYrsSession({ clientId: 47003 });

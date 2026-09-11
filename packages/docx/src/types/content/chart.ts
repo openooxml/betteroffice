@@ -28,6 +28,7 @@ export interface ChartTextProperties {
   bold?: boolean;
   italic?: boolean;
   color?: string;
+  spacingPt?: number;
 }
 
 /** One `c:dLbl`: an index plus the switches it overrides. */

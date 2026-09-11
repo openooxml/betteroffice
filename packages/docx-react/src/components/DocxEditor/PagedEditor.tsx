@@ -124,7 +124,11 @@ import {
   yrsTableSelectionRange,
   type YrsEditorCommand,
 } from './yrsCommands';
-import { YrsPositionProjection } from './internals/yrsPositionProjection';
+import {
+  createYrsPositionProjection,
+  type YrsPositionProjection,
+} from './internals/yrsPositionProjection';
+import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
 import type { DocxEditorCollaborationOptions } from './types';
 
 export { DEFAULT_PAGE_WIDTH };
@@ -209,11 +213,11 @@ export interface PagedEditorProps {
   pluginOverlays?: React.ReactNode;
   /** Callback when header or footer is double-clicked for editing. */
   onHeaderFooterDoubleClick?: (position: 'header' | 'footer', pageNumber?: number) => void;
-  /** Active header/footer editing mode (dims body, intercepts body clicks). */
-  hfEditMode?: 'header' | 'footer' | null;
-  /** Relationship id of the exact HF part active on the edited page. */
-  hfEditRId?: string | null;
-  /** Called when user clicks the body area while in HF editing mode. */
+  /** Callback when a note area is clicked for editing. */
+  onNoteClick?: (note: NoteEdit) => void;
+  /** The one non-body part open for editing (dims body, intercepts body clicks). */
+  partEdit?: PartEdit | null;
+  /** Called when user clicks the body area while a part is open. */
   onBodyClick?: () => void;
   /** Custom class name. */
   className?: string;
@@ -268,8 +272,8 @@ export interface PagedEditorProps {
   sidebarCommentIds?: readonly (string | number)[];
   /** yrs-authoritative tracked-change list, emitted while standard yrs input is active. */
   onYrsTrackedChangesChange?: (result: TrackedChangesResult) => void;
-  /** Sticky yrs HF selection, expressed in the active HF root's display positions. */
-  onYrsHfSelectionChange?: (rId: string, selection: { from: number; to: number }) => void;
+  /** Sticky yrs selection inside the open part, in that part's display positions. */
+  onYrsPartSelectionChange?: (part: PartEdit, selection: { from: number; to: number }) => void;
   /**
    * Callback fired when the page count changes after a layout pass.
    * Parents use this to keep their own page counters (e.g. scroll indicator,
@@ -278,6 +282,7 @@ export interface PagedEditorProps {
   onTotalPagesChange?: (totalPages: number) => void;
   /** Layout of each pass (null on reset) — canvas renderer plumbing. */
   onLayoutComputed?: (layout: Layout | null, engine?: YrsSession | null) => void;
+  onError?: (error: Error) => void;
   /** One-call resident body-text edit supplied by the canvas frame owner. */
   applyResidentInput?: (text: string) => Promise<ResidentFrameApplyResult | null>;
   /** One-call resident body-text deletion supplied by the canvas frame owner. */
@@ -437,13 +442,13 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsHistoryChange,
       onSelectionChange,
       onYrsSelectionChange,
-      onYrsHfSelectionChange,
+      onYrsPartSelectionChange,
       onReady,
       onRenderedDomContextReady,
       pluginOverlays,
       onHeaderFooterDoubleClick,
-      hfEditMode,
-      hfEditRId,
+      onNoteClick,
+      partEdit = null,
       onBodyClick,
       className,
       style,
@@ -457,6 +462,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onYrsTrackedChangesChange,
       onTotalPagesChange,
       onLayoutComputed,
+      onError,
       applyResidentInput,
       applyResidentDelete,
       hyperlinkPopupData,
@@ -519,7 +525,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         numericIds: {},
       };
     }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
-    const activeYrsRootStory = hfEditMode && hfEditRId ? `hf:${hfEditRId}` : 'body';
+    const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
       [activeYrsRootStory, yrsCore.inputPositionMap]
@@ -536,7 +542,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const map = yrsCore.inputPositionMap(loc.story);
         if (!map) return null;
         const local = yrsLocToLocalDisplayPosition(map, loc);
-        const rootStory = loc.story.startsWith('hf:') ? activeYrsRootStory : 'body';
+        const rootStory =
+          loc.story === 'body' || loc.story.startsWith('body:') ? 'body' : activeYrsRootStory;
         return (
           getYrsPositionProjectionRef.current(rootStory)?.positionForLoc(loc) ??
           (loc.story === rootStory ? local : null)
@@ -563,14 +570,14 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // when parent passes unstable callback references
     const onSelectionChangeRef = useRef(onSelectionChange);
     const onYrsSelectionChangeRef = useRef(onYrsSelectionChange);
-    const onYrsHfSelectionChangeRef = useRef(onYrsHfSelectionChange);
+    const onYrsPartSelectionChangeRef = useRef(onYrsPartSelectionChange);
     const onYrsContentChangeRef = useRef(onYrsContentChange);
     const onYrsHistoryChangeRef = useRef(onYrsHistoryChange);
     const onReadyRef = useRef(onReady);
     // Keep refs in sync with latest props
     onSelectionChangeRef.current = onSelectionChange;
     onYrsSelectionChangeRef.current = onYrsSelectionChange;
-    onYrsHfSelectionChangeRef.current = onYrsHfSelectionChange;
+    onYrsPartSelectionChangeRef.current = onYrsPartSelectionChange;
     onYrsContentChangeRef.current = onYrsContentChange;
     onYrsHistoryChangeRef.current = onYrsHistoryChange;
     onReadyRef.current = onReady;
@@ -584,18 +591,18 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const [isFocused, setIsFocused] = useState(false);
 
     useEffect(() => {
-      if (hfEditMode) setIsFocused(false);
-    }, [hfEditMode]);
+      if (partEdit) setIsFocused(false);
+    }, [partEdit]);
 
     useEffect(() => {
       if (!isFocused) onCaretInterrupt?.();
     }, [isFocused, onCaretInterrupt]);
 
-    // Read-only / suggesting / HF-edit transitions bypass the resident input
+    // Read-only / suggesting / part-edit transitions bypass the resident input
     // path, so any painted caret line would go stale — swap to the DOM caret.
     useEffect(() => {
       onCaretInterrupt?.();
-    }, [readOnly, isSuggesting, hfEditMode, onCaretInterrupt]);
+    }, [readOnly, isSuggesting, partEdit, onCaretInterrupt]);
 
     // Image selection state — `isImageInteractingRef` lives at the parent so
     // useSelectionOverlay can read it (to gate the deferred image-info clear)
@@ -617,15 +624,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       residentMeasurementConfig,
       runLayoutPipelineRef,
     } = useRustMeasurement({
+      onError,
       document,
       fontProvider: measurementFontProvider,
       fontChainsProviderRef: rustFontChainsProviderRef,
       textEngine: yrsCore.session,
     });
 
-    // Layout pipeline — owns layout/blocks/measures state, the rAF-coalesced
-    // scheduler, scroll-restore plumbing, and the page-count
-    // notifier.
+    // Layout pipeline — owns layout state, the rAF-coalesced scheduler,
+    // scroll-restore plumbing, and the page-count notifier.
     const publishResidentLayout = useCallback(
       (nextLayout: Layout | null) => onLayoutComputed?.(nextLayout, yrsCore.session),
       [onLayoutComputed, yrsCore.session]
@@ -637,6 +644,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       scheduleLayout,
       cancelPendingScrollRestore,
     } = useLayoutPipeline({
+      onError,
       document,
       session: yrsCore.session,
       renderEnv: yrsRenderEnv,
@@ -703,8 +711,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const publishYrsDirectInput = useCallback((): void => {
-      yrsCore.publishDirectInput();
+    const publishYrsDirectInput = useCallback((dirtyStory?: string): void => {
+      yrsCore.publishDirectInput(dirtyStory);
       // Structural input can mint a paragraph before the existing projection
       // can map its new sticky caret. Invalidate first so emitSelection can
       // rebuild the projection and reach the normal layout-refresh callback.
@@ -783,8 +791,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           }
         }
 
-        if (activeYrsRootStory.startsWith('hf:') && hfEditRId) {
-          onYrsHfSelectionChangeRef.current?.(hfEditRId, {
+        if (partEdit && activeYrsRootStory !== 'body') {
+          onYrsPartSelectionChangeRef.current?.(partEdit, {
             from: selection.anchor,
             to: selection.head,
           });
@@ -823,7 +831,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       [
         activeYrsRootStory,
         collaboration?.presence,
-        hfEditRId,
+        partEdit,
         refreshYrsLayout,
         updateSelectionOverlay,
         yrsCore.inputPositionMap,
@@ -848,11 +856,15 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     }, [collaboration?.presence, yrsCore.session]);
 
     const syncYrsInputState = useCallback(
-      (docChanged: boolean, origin: LayoutUpdateOrigin = 'local'): boolean => {
+      (
+        docChanged: boolean,
+        origin: LayoutUpdateOrigin = 'local',
+        dirtyStory?: string
+      ): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
         if (docChanged) {
-          yrsCore.publishDirectInput();
+          yrsCore.publishDirectInput(dirtyStory);
         }
         handleYrsStateChange(displaySelection, docChanged, false, false, origin);
         return true;
@@ -1255,7 +1267,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const getYrsPositionProjection = useCallback(
       (rootStory: string): YrsPositionProjection | null => {
         const session = yrsCore.session;
-        if (!session) return null;
+        if (!session || !session.storyIds().includes(rootStory)) return null;
         const cached = yrsPositionProjectionCacheRef.current;
         if (
           cached?.version === yrsProjectionVersionRef.current &&
@@ -1264,7 +1276,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         ) {
           return cached.projection;
         }
-        const projection = new YrsPositionProjection(session, rootStory);
+        const projection = createYrsPositionProjection(session, rootStory);
+        if (!projection) return null;
         yrsPositionProjectionCacheRef.current = {
           version: yrsProjectionVersionRef.current,
           session,
@@ -1307,7 +1320,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       syncYrsInputState,
       readOnly,
-      hfEditMode,
+      partEdit,
       displayListQueries,
       canvasHostRef,
       canvasOverlayTarget,
@@ -1315,6 +1328,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       onContextMenu,
       onHyperlinkClick,
       onHeaderFooterDoubleClick,
+      onNoteClick,
       setSelectionRects,
       setCaretPosition,
       setIsFocused,
@@ -1592,7 +1606,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       documentFromYrs: yrsCore.documentFromYrs,
       yrsSession: yrsCore.session,
       yrsLocToDisplayPosition,
-      syncYrsInputState,
+      syncYrsInputState: (docChanged, dirtyStory) =>
+        syncYrsInputState(docChanged, 'local', dirtyStory),
       applyYrsFormatting,
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
@@ -1647,7 +1662,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         <YrsInput
           ref={yrsInputRef}
           enabled
-          readOnly={readOnly || (!!hfEditMode && !hfEditRId)}
+          readOnly={readOnly || (!!partEdit && activeYrsRootStory === 'body')}
           session={yrsCore.session}
           story={activeYrsRootStory}
           isSuggesting={isSuggesting}
@@ -1688,11 +1703,11 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             canvasDisplayList &&
             (residentCaretAuthoritative || displayListQueries) && (
               <CanvasSelectionOverlay
-                selectionRects={hfEditMode ? [] : selectionRects}
+                selectionRects={partEdit ? [] : selectionRects}
                 // While the worker paints the caret into the presented frame,
                 // the DOM blink caret stays unmounted (two-mode caret).
-                caretPosition={hfEditMode || paintedCaretActive ? null : caretPosition}
-                isFocused={isFocused && !hfEditMode}
+                caretPosition={partEdit || paintedCaretActive ? null : caretPosition}
+                isFocused={isFocused && !partEdit}
                 readOnly={readOnly}
                 overlayTarget={canvasOverlayTarget}
                 canvasHostRef={interactionPageHostRef}
@@ -1723,7 +1738,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
               />
             )}
 
-          {canvasOverlayTarget && displayListQueries && !hfEditMode && (
+          {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasCellSelectionOverlay
               session={yrsCore.session}
               positionProjection={getYrsPositionProjection('body')}
@@ -1737,8 +1752,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
 
           {canvasOverlayTarget && displayListQueries && (
             <CanvasImageSelectionOverlay
-              pmPos={hfEditMode ? null : canvasSelectedImagePos}
-              isFocused={isFocused && !hfEditMode}
+              pmPos={partEdit ? null : canvasSelectedImagePos}
+              isFocused={isFocused && !partEdit}
               readOnly={readOnly}
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}
@@ -1755,7 +1770,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
             />
           )}
 
-          {canvasOverlayTarget && displayListQueries && !hfEditMode && (
+          {canvasOverlayTarget && displayListQueries && !partEdit && (
             <CanvasTableResizeOverlay
               overlayTarget={canvasOverlayTarget}
               canvasHostRef={interactionPageHostRef}

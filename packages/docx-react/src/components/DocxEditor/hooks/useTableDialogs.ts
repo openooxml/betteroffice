@@ -98,13 +98,12 @@ export function useTableDialogs({
           borderSpecRef.current = { ...borderSpecRef.current, size: action.size };
           applyBorders(allBorders(borderSpecRef.current));
         } else if (action.type === 'cellBorder') {
-          applyBorders({
-            [action.side]: {
-              style: action.style,
-              size: action.size,
-              color: { rgb: action.color.replace(/^#/, '') },
-            },
-          });
+          const border = {
+            style: action.style,
+            size: action.size,
+            color: { rgb: action.color.replace(/^#/, '') },
+          };
+          applyBorders(action.side === 'all' ? allBorders(border) : { [action.side]: border });
         } else if (action.type === 'openTableProperties') {
           setTablePropsOpen(true);
         } else if (action.type === 'applyTableStyle') {

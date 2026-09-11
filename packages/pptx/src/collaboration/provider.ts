@@ -36,6 +36,9 @@ import {
 } from './types';
 
 const DEFAULT_MAX_PENDING_BYTES = 16 * 1024 * 1024;
+const DOCUMENT_FINGERPRINT_TAG = new TextEncoder().encode(
+  '\0betteroffice-document-fingerprint-v1\0'
+);
 
 function validateLimit(name: string, value: number, allowZero: boolean): number {
   if (!Number.isSafeInteger(value) || value < (allowZero ? 0 : 1)) {
@@ -64,6 +67,16 @@ function requireBytes(value: unknown, operation: string): Uint8Array {
     throw new TypeError(`${operation} must return a Uint8Array`);
   }
   return value.slice();
+}
+
+function withoutDocumentFingerprint(payload: Uint8Array): Uint8Array {
+  const suffixLength = DOCUMENT_FINGERPRINT_TAG.byteLength + 32;
+  const tagOffset = payload.byteLength - suffixLength;
+  if (tagOffset < 0) return payload;
+  for (let index = 0; index < DOCUMENT_FINGERPRINT_TAG.byteLength; index += 1) {
+    if (payload[tagOffset + index] !== DOCUMENT_FINGERPRINT_TAG[index]) return payload;
+  }
+  return payload.subarray(0, tagOffset);
 }
 
 function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
@@ -530,7 +543,7 @@ export class CollaborationProvider {
     let update: Uint8Array;
     try {
       update = requireBytes(
-        this.replica.encodeStateAsUpdate(remoteStateVector.slice()),
+        this.replica.encodeStateAsUpdate(withoutDocumentFingerprint(remoteStateVector).slice()),
         'encodeStateAsUpdate'
       );
     } catch (cause) {
@@ -550,7 +563,7 @@ export class CollaborationProvider {
 
   private applyRemoteUpdate(token: number, update: Uint8Array): boolean {
     try {
-      this.replica.applyUpdate(update.slice());
+      this.replica.applyUpdate(withoutDocumentFingerprint(update).slice());
       return true;
     } catch (cause) {
       this.failConnection(

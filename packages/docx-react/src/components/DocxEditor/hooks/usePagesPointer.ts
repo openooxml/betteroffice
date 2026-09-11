@@ -18,7 +18,21 @@ import type { YrsCellLoc, YrsSession } from '@betteroffice/docx/yrs';
 
 import type { YrsInputRef } from '../YrsInput';
 import { useDragAutoScroll } from '../../../hooks/useDragAutoScroll';
+import {
+  canvasHoverCursor,
+  createCursorPainter,
+  type CanvasHoverCursor,
+} from '../hoverCursor';
 import type { YrsPositionProjection } from '../internals/yrsPositionProjection';
+import {
+  hitBelongsToPart,
+  isNoteAreaHit,
+  noteEditFromHit,
+  partEditStory,
+  partImageRegion,
+  type NoteEdit,
+  type PartEdit,
+} from '../partEdit';
 import type { YrsEditorCommand } from '../yrsCommands';
 
 interface TableInsertButtonState {
@@ -44,7 +58,8 @@ export interface UsePagesPointerOptions {
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   syncYrsInputState: (docChanged: boolean) => boolean;
   readOnly: boolean;
-  hfEditMode?: 'header' | 'footer' | null;
+  /** the non-body part open for editing — the body is inert behind it */
+  partEdit?: PartEdit | null;
   displayListQueries?: DisplayListQueries | null;
   canvasHostRef?: React.RefObject<HTMLDivElement | null>;
   canvasOverlayTarget?: HTMLElement | null;
@@ -62,6 +77,8 @@ export interface UsePagesPointerOptions {
     position: { top: number; left: number };
   }) => void;
   onHeaderFooterDoubleClick?: (position: 'header' | 'footer', pageNumber?: number) => void;
+  /** A single click landed in a note area — the host opens it for editing. */
+  onNoteClick?: (note: NoteEdit) => void;
   setSelectionRects: React.Dispatch<React.SetStateAction<SelectionRect[]>>;
   setCaretPosition: React.Dispatch<React.SetStateAction<CaretPosition | null>>;
   setIsFocused: React.Dispatch<React.SetStateAction<boolean>>;
@@ -71,6 +88,8 @@ export interface UsePagesPointerOptions {
 export interface UsePagesPointerReturn {
   handlePagesMouseDown: (e: React.MouseEvent) => void;
   handlePagesMouseMove: (e: React.MouseEvent) => void;
+  /** drops the hover cursor when the pointer leaves the pages */
+  handlePagesMouseLeave: () => void;
   handlePagesClick: (e: React.MouseEvent) => void;
   handlePagesContextMenu: (e: React.MouseEvent) => void;
   handleTableInsertClick: (e: React.MouseEvent) => void;
@@ -159,7 +178,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     applyYrsCommand,
     syncYrsInputState,
     readOnly,
-    hfEditMode,
+    partEdit = null,
     displayListQueries,
     canvasHostRef,
     canvasOverlayTarget,
@@ -167,6 +186,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     onContextMenu,
     onHyperlinkClick,
     onHeaderFooterDoubleClick,
+    onNoteClick,
     setSelectionRects,
     setCaretPosition,
     setIsFocused,
@@ -175,6 +195,12 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const isDraggingRef = useRef(false);
   const dragAnchorRef = useRef<number | null>(null);
+  const pendingPartCaretRef = useRef<{
+    session: YrsSession;
+    story: string;
+    position: number;
+  } | null>(null);
+  const [pendingPartCaretVersion, setPendingPartCaretVersion] = useState(0);
   const yrsCellDragAnchorRef = useRef<YrsCellLoc | null>(null);
   const yrsCellDraggingRef = useRef(false);
   const [tableInsertButton, setTableInsertButton] = useState<TableInsertButtonState | null>(null);
@@ -214,14 +240,48 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [displayListQueries, canvasHostRef, pagesContainerRef]
   );
 
+  // written straight to the DOM: hover fires on every pointer move, and
+  // re-rendering the editor for it is not affordable
+  const cursorPainterRef = useRef(createCursorPainter());
+  const paintHoverCursor = useCallback(
+    (cursor: CanvasHoverCursor) => {
+      cursorPainterRef.current(canvasHostRef?.current ?? pagesContainerRef.current, cursor);
+    },
+    [canvasHostRef, pagesContainerRef]
+  );
+  // last point over the pages, so a cursor that outlived what it described can
+  // be re-resolved without waiting for a move. Null while it is elsewhere.
+  const hoverPointRef = useRef<{ x: number; y: number } | null>(null);
+  const resolveHoverCursor = useCallback(
+    (clientX: number, clientY: number) => {
+      hoverPointRef.current = { x: clientX, y: clientY };
+      const hit = readOnly ? null : (resolveCanvasHit(clientX, clientY, false)?.hit ?? null);
+      paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, hit));
+    },
+    [paintHoverCursor, partEdit, readOnly, resolveCanvasHit]
+  );
+  // A mode flip changes what is typeable under a pointer that has not moved.
+  // A gesture still holds its own cursor; the release resolves the new mode.
+  useEffect(() => {
+    const point = hoverPointRef.current;
+    if (!point || isDraggingRef.current || yrsCellDraggingRef.current) return;
+    resolveHoverCursor(point.x, point.y);
+  }, [resolveHoverCursor]);
+  // Clears the cursor on unmount only. Keying this on the painter would clear
+  // it on every identity change too — the effect above re-resolves in the same
+  // commit, so nothing shows, but the write is redundant and reads as an exit.
+  const paintHoverCursorRef = useRef(paintHoverCursor);
+  paintHoverCursorRef.current = paintHoverCursor;
+  useEffect(() => () => paintHoverCursorRef.current('default'), []);
+
   const getPositionFromMouse = useCallback(
     (clientX: number, clientY: number): number | null => {
       const hit = resolveCanvasHit(clientX, clientY, isDraggingRef.current)?.hit;
       if (!hit) return null;
-      if (hfEditMode) return hit.region === hfEditMode ? hit.pos : null;
+      if (partEdit) return hitBelongsToPart(partEdit, hit) ? hit.pos : null;
       return hit.region === 'body' ? hit.pos : null;
     },
-    [hfEditMode, resolveCanvasHit]
+    [partEdit, resolveCanvasHit]
   );
 
   const resolveTarget = useCallback(
@@ -278,8 +338,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseDown = useCallback(
     (e: React.MouseEvent) => {
-      const projection = getYrsPositionProjection(yrsRootStory);
-      if (!projection) return;
+      pendingPartCaretRef.current = null;
       if (e.button === 2) {
         e.preventDefault();
         return;
@@ -291,24 +350,56 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (readOnly) return;
 
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
-      const region = point?.hit?.region ?? null;
-      if (hfEditMode) {
-        if (region !== hfEditMode && onBodyClick) {
+      const hit = point?.hit ?? null;
+      const region = hit?.region ?? null;
+      // A note area opens on a single click, wherever the caret was before:
+      // one part is open at a time, so this both leaves the old one and picks
+      // the note up. The caret the click asked for is placed once the editor
+      // is on that note's story.
+      const note = noteEditFromHit(hit);
+      if (isNoteAreaHit(hit) && !note) return;
+      if (note && onNoteClick && !hitBelongsToPart(partEdit, hit)) {
+        e.stopPropagation();
+        const pending =
+          hit?.pos == null || !yrsSession
+            ? null
+            : {
+                session: yrsSession,
+                story: partEditStory(note),
+                position: hit.pos,
+              };
+        pendingPartCaretRef.current = pending;
+        onNoteClick(note);
+        if (pending) setPendingPartCaretVersion((version) => version + 1);
+        return;
+      }
+      if (partEdit) {
+        if (!hitBelongsToPart(partEdit, hit) && onBodyClick) {
           e.stopPropagation();
+          const pending =
+            hit?.region === 'body' && hit.pos != null && yrsSession
+              ? { session: yrsSession, story: 'body', position: hit.pos }
+              : null;
+          pendingPartCaretRef.current = pending;
           onBodyClick();
+          if (pending) setPendingPartCaretVersion((version) => version + 1);
           return;
         }
       } else if ((region === 'header' || region === 'footer') && e.detail !== 2) {
         return;
       }
 
-      if (displayListQueries && point) {
+      const projection = getYrsPositionProjection(yrsRootStory);
+      if (!projection) return;
+
+      const imageRegion = partImageRegion(partEdit);
+      if (displayListQueries && point && imageRegion) {
         const image = displayListQueries.imageAtPoint(
           point.pageIndex,
           point.x,
           point.y,
-          hfEditMode ?? 'body',
-          point.hit?.rId
+          imageRegion,
+          hit?.rId
         );
         if (image) {
           e.stopPropagation();
@@ -316,7 +407,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
           setSelectionRects([]);
           setCaretPosition(null);
           focusInput();
-          if (!hfEditMode) setIsFocused(true);
+          if (!partEdit) setIsFocused(true);
           return;
         }
       }
@@ -329,7 +420,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       dragAnchorRef.current = targetPos;
       setTextSelection(targetPos);
       focusInput();
-      if (!hfEditMode) setIsFocused(true);
+      if (!partEdit) setIsFocused(true);
     },
     [
       clearTableInsertTimer,
@@ -337,8 +428,9 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onBodyClick,
+      onNoteClick,
+      partEdit,
       readOnly,
       resolveCanvasHit,
       resolveTarget,
@@ -347,8 +439,35 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       setSelectionRects,
       setTextSelection,
       yrsRootStory,
+      yrsSession,
     ]
   );
+
+  useEffect(() => {
+    const pending = pendingPartCaretRef.current;
+    if (!pending) return;
+    pendingPartCaretRef.current = null;
+    if (
+      pending.session !== yrsSession ||
+      pending.story !== yrsRootStory ||
+      pending.story !== partEditStory(partEdit)
+    ) {
+      return;
+    }
+    const projection = getYrsPositionProjection(yrsRootStory);
+    if (!projection) return;
+    const position = Math.min(Math.max(0, pending.position), Math.max(0, projection.size - 1));
+    setTextSelection(position);
+    focusInput();
+  }, [
+    focusInput,
+    getYrsPositionProjection,
+    partEdit,
+    pendingPartCaretVersion,
+    setTextSelection,
+    yrsRootStory,
+    yrsSession,
+  ]);
 
   dragExtendRef.current = (cx, cy) => {
     if (!isDraggingRef.current || dragAnchorRef.current == null) return;
@@ -383,12 +502,19 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
     [extendCellSelection, getPositionFromMouse, setTextSelection, updateDragScroll]
   );
 
-  const handleMouseUp = useCallback(() => {
-    isDraggingRef.current = false;
-    yrsCellDragAnchorRef.current = null;
-    yrsCellDraggingRef.current = false;
-    stopDragAutoScroll();
-  }, [stopDragAutoScroll]);
+  const handleMouseUp = useCallback(
+    (e: MouseEvent) => {
+      const wasDragging = isDraggingRef.current || yrsCellDraggingRef.current;
+      isDraggingRef.current = false;
+      yrsCellDragAnchorRef.current = null;
+      yrsCellDraggingRef.current = false;
+      stopDragAutoScroll();
+      // the gesture held its own cursor; a pointer that never moves again
+      // gets its answer here
+      if (wasDragging) resolveHoverCursor(e.clientX, e.clientY);
+    },
+    [resolveHoverCursor, stopDragAutoScroll]
+  );
 
   useEffect(() => {
     window.addEventListener('mousemove', handleMouseMove);
@@ -401,7 +527,13 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
 
   const handlePagesMouseMove = useCallback(
     (e: React.MouseEvent) => {
-      if (readOnly || isDraggingRef.current || yrsCellDraggingRef.current) return;
+      // a live gesture keeps the cursor it started with, and the release is
+      // what re-reads the point under it
+      if (isDraggingRef.current || yrsCellDraggingRef.current) return;
+      hoverPointRef.current = { x: e.clientX, y: e.clientY };
+      const point = readOnly ? null : resolveCanvasHit(e.clientX, e.clientY, false);
+      paintHoverCursor(canvasHoverCursor({ readOnly, partEdit }, point?.hit ?? null));
+      if (readOnly) return;
       const scheduleHide = () => {
         tableInsertHideTimerRef.current ??= setTimeout(() => {
           setTableInsertButton(null);
@@ -413,21 +545,25 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const overlayTarget = canvasOverlayTarget ?? pagesContainerRef.current?.parentElement;
       const projection = getYrsPositionProjection(yrsRootStory);
       if (!queries || !host || !overlayTarget || !projection) return;
-      const point = resolveCanvasHit(e.clientX, e.clientY, false);
       const pageSize = point ? queries.pageSize(point.pageIndex) : null;
       const pageRect = point ? resolveDisplayPageClientRect(host, queries, point.pageIndex) : null;
       if (!point || !pageSize || !pageRect) {
         scheduleHide();
         return;
       }
+      // Table affordances are indexed by band; a note carries none, so an open
+      // note has no table to offer a row/column on.
       let region: DisplayListTableRegion = { kind: 'body' };
-      if (hfEditMode) {
-        if (point.hit?.region !== hfEditMode || !point.hit.rId) {
+      if (partEdit) {
+        const inBand =
+          (partEdit.kind === 'header' || partEdit.kind === 'footer') &&
+          hitBelongsToPart(partEdit, point.hit ?? null);
+        if (!inBand || !point.hit?.rId) {
           scheduleHide();
           return;
         }
-        region = { kind: hfEditMode, rId: point.hit.rId };
-      } else if (point.hit?.region === 'header' || point.hit?.region === 'footer') {
+        region = { kind: partEdit.kind, rId: point.hit.rId };
+      } else if (point.hit && point.hit.region !== 'body') {
         scheduleHide();
         return;
       }
@@ -461,13 +597,21 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       clearTableInsertTimer,
       displayListQueries,
       getYrsPositionProjection,
-      hfEditMode,
       pagesContainerRef,
+      paintHoverCursor,
+      partEdit,
       readOnly,
       resolveCanvasHit,
       yrsRootStory,
     ]
   );
+
+  const handlePagesMouseLeave = useCallback(() => {
+    // a drag that runs off the pages keeps its cursor, like the move path
+    if (isDraggingRef.current || yrsCellDraggingRef.current) return;
+    hoverPointRef.current = null;
+    paintHoverCursor('default');
+  }, [paintHoverCursor]);
 
   const handleTableInsertClick = useCallback(
     (e: React.MouseEvent) => {
@@ -501,21 +645,24 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       const host = canvasHostRef?.current ?? pagesContainerRef.current;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
       if (projection && queries && host && point) {
-        const hitRegion = point.hit?.region;
-        let region: DisplayListTableRegion = { kind: 'body' };
-        if (hfEditMode && hitRegion === hfEditMode) {
-          region = { kind: hfEditMode, rId: point.hit?.rId };
-        }
-        const displayHit =
-          !hfEditMode || hitRegion === hfEditMode
-            ? findDisplayListHyperlinkAtPoint(
-                queries.displayList,
-                point.pageIndex,
-                point.x,
-                point.y,
-                region
-              )
+        // Hyperlink primitives are indexed by band, so an open note — whose
+        // area the index does not cover — resolves none and falls through to
+        // the multi-click selection below.
+        const inOpenPart = hitBelongsToPart(partEdit, point.hit ?? null);
+        const region: DisplayListTableRegion | null = !partEdit
+          ? { kind: 'body' }
+          : inOpenPart && (partEdit.kind === 'header' || partEdit.kind === 'footer')
+            ? { kind: partEdit.kind, rId: point.hit?.rId }
             : null;
+        const displayHit = region
+          ? findDisplayListHyperlinkAtPoint(
+              queries.displayList,
+              point.pageIndex,
+              point.x,
+              point.y,
+              region
+            )
+          : null;
         const href = sanitizeHref(displayHit?.href ?? '');
         if (href) {
           e.preventDefault();
@@ -560,7 +707,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
         }
       }
 
-      if (e.detail === 2 && !hfEditMode && onHeaderFooterDoubleClick) {
+      if (e.detail === 2 && !partEdit && onHeaderFooterDoubleClick) {
         const region = point?.hit?.region;
         if (region === 'header' || region === 'footer') {
           e.preventDefault();
@@ -588,10 +735,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onHeaderFooterDoubleClick,
       onHyperlinkClick,
       pagesContainerRef,
+      partEdit,
       resolveCanvasHit,
       resolveTarget,
       scrollToPositionImpl,
@@ -618,21 +765,27 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       };
       let imageInfo: ImageInfo | null = null;
       const point = resolveCanvasHit(e.clientX, e.clientY, false);
-      if (displayListQueries && point) {
+      const imageRegion = partImageRegion(partEdit);
+      if (displayListQueries && point && imageRegion) {
         const image = displayListQueries.imageAtPoint(
           point.pageIndex,
           point.x,
           point.y,
-          hfEditMode ?? 'body',
+          imageRegion,
           point.hit?.rId
         );
         if (image) imageInfo = readImageNodeAt(image.pos);
       }
       const selection = yrsInputRef.current?.displaySelection();
-      if (!imageInfo && selection && Math.abs(selection.anchor - selection.head) === 1) {
+      if (
+        !imageInfo &&
+        imageRegion &&
+        selection &&
+        Math.abs(selection.anchor - selection.head) === 1
+      ) {
         imageInfo = readImageNodeAt(Math.min(selection.anchor, selection.head));
       }
-      if (imageInfo?.wrapType === 'inline' && displayListQueries && !hfEditMode) {
+      if (imageInfo?.wrapType === 'inline' && displayListQueries && !partEdit) {
         imageInfo.inlinePositionEmu = captureInlinePositionEmuFromDisplayList(
           displayListQueries,
           imageInfo.pos
@@ -651,7 +804,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       ) {
         setTextSelection(pmPos);
         focusInput();
-        if (!hfEditMode) setIsFocused(true);
+        if (!partEdit) setIsFocused(true);
       }
       const latest = yrsInputRef.current?.displaySelection();
       onContextMenu({
@@ -666,8 +819,8 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       focusInput,
       getPositionFromMouse,
       getYrsPositionProjection,
-      hfEditMode,
       onContextMenu,
+      partEdit,
       resolveCanvasHit,
       resolveTarget,
       setIsFocused,
@@ -682,12 +835,14 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   const canvasHandlersRef = useRef({
     mousedown: handlePagesMouseDown,
     mousemove: handlePagesMouseMove,
+    mouseleave: handlePagesMouseLeave,
     click: handlePagesClick,
     contextmenu: handlePagesContextMenu,
   });
   canvasHandlersRef.current = {
     mousedown: handlePagesMouseDown,
     mousemove: handlePagesMouseMove,
+    mouseleave: handlePagesMouseLeave,
     click: handlePagesClick,
     contextmenu: handlePagesContextMenu,
   };
@@ -703,7 +858,10 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousedown(asReactEvent(e));
     };
     const onMouseMove = (e: MouseEvent) => {
+      // no event fires once the pointer is off the pages, so the move that
+      // leaves them is what drops the hover cursor
       if (onCurrentCanvas(e)) canvasHandlersRef.current.mousemove(asReactEvent(e));
+      else canvasHandlersRef.current.mouseleave();
     };
     const onClick = (e: MouseEvent) => {
       if (onCurrentCanvas(e)) canvasHandlersRef.current.click(asReactEvent(e));
@@ -729,6 +887,7 @@ export function usePagesPointer(opts: UsePagesPointerOptions): UsePagesPointerRe
   return {
     handlePagesMouseDown,
     handlePagesMouseMove,
+    handlePagesMouseLeave,
     handlePagesClick,
     handlePagesContextMenu,
     handleTableInsertClick,

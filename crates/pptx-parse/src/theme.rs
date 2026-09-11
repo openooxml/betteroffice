@@ -1,5 +1,6 @@
-use ooxml_drawingml::{Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme};
+use ooxml_drawingml::{Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, ThemeFormatScheme};
 
+use crate::drawing::{parse_fill_element, parse_outline_element};
 use crate::xml::XmlElement;
 
 pub(crate) fn parse_theme(root: &XmlElement) -> Theme {
@@ -9,6 +10,32 @@ pub(crate) fn parse_theme(root: &XmlElement) -> Theme {
         color_scheme: parse_color_scheme(elements.and_then(|value| value.child("clrScheme"))),
         font_scheme: parse_font_scheme(elements.and_then(|value| value.child("fontScheme"))),
     }
+}
+
+pub(crate) fn parse_format_scheme(root: &XmlElement) -> ThemeFormatScheme {
+    let Some(element) = root
+        .child("themeElements")
+        .and_then(|value| value.child("fmtScheme"))
+    else {
+        return ThemeFormatScheme::default();
+    };
+    ThemeFormatScheme {
+        background_fills: style_list(element.child("bgFillStyleLst"), parse_fill_element),
+        fills: style_list(element.child("fillStyleLst"), parse_fill_element),
+        lines: style_list(element.child("lnStyleLst"), parse_outline_element),
+    }
+}
+
+/// Preserves unsupported entries as empty slots.
+fn style_list<T>(
+    element: Option<&XmlElement>,
+    parse: impl Fn(&XmlElement) -> Option<T>,
+) -> Vec<Option<T>> {
+    element
+        .into_iter()
+        .flat_map(XmlElement::child_elements)
+        .map(parse)
+        .collect()
 }
 
 fn parse_color_scheme(element: Option<&XmlElement>) -> ThemeColorScheme {

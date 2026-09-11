@@ -16,11 +16,34 @@ pub struct CellContentLayout {
     pub content_height: f64,
 }
 
-/// Returns the numeric total height carried by paragraph and table extents.
+pub(crate) fn cell_vertical_offset(
+    alignment: Option<&str>,
+    cell_height: f64,
+    measured_height: f64,
+    content_height: f64,
+    top_inset: f64,
+    bottom_inset: f64,
+) -> f64 {
+    if measured_height >= cell_height - 0.5 {
+        return 0.0;
+    }
+    let slack = (cell_height - top_inset - bottom_inset - content_height).max(0.0);
+    match alignment {
+        Some("center") => slack / 2.0,
+        Some("bottom") => slack,
+        _ => 0.0,
+    }
+}
+
+/// Returns a measured block's stacked height.
 fn extent_total_height(measure: &BlockExtent) -> Option<f64> {
     match measure {
         BlockExtent::Paragraph(p) => Some(p.total_height),
         BlockExtent::Table(t) => Some(t.total_height),
+        BlockExtent::Image(image) => Some(image.height),
+        BlockExtent::TextBox(text_box) => Some(text_box.height),
+        BlockExtent::Shape(shape) => Some(shape.height),
+        BlockExtent::Chart(chart) => Some(chart.height),
         _ => None,
     }
 }
@@ -57,7 +80,8 @@ pub fn layout_cell_content(
             prev_after = spacing.and_then(|s| s.after).unwrap_or(0.0);
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
-            y += prev_after + total_height;
+            y += prev_after;
+            y += total_height;
             line_tops.push(Vec::new());
             flat_bottoms.push(y);
             prev_after = 0.0;
@@ -170,5 +194,23 @@ mod tests {
         assert_eq!(layout.line_tops[0], vec![5.0, 5.0 + LINE]);
         assert_eq!(layout.line_tops[1], vec![5.0 + 2.0 * LINE]);
         assert_eq!(layout.content_height, 3.0 * LINE);
+    }
+
+    #[test]
+    fn includes_atomic_images_in_cell_height_and_break_boundaries() {
+        let image: LayoutBlock = serde_json::from_value(json!({
+            "kind": "image", "id": 1, "src": "rId1", "width": 50, "height": 40
+        }))
+        .unwrap();
+        let image_measure: BlockExtent = serde_json::from_value(json!({
+            "kind": "image", "width": 50, "height": 40
+        }))
+        .unwrap();
+        let blocks = vec![para(Some((0.0, 5.0))), image, para(None)];
+        let measures = vec![pm(1, Some((0.0, 5.0))), image_measure, pm(1, None)];
+        let layout = layout_cell_content(Some(&blocks), Some(&measures), 2.0);
+        assert_eq!(layout.line_tops, vec![vec![2.0], vec![], vec![67.0]]);
+        assert_eq!(layout.flat_bottoms, vec![22.0, 67.0, 87.0]);
+        assert_eq!(layout.content_height, 85.0);
     }
 }

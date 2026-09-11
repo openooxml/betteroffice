@@ -1,14 +1,18 @@
 import type {
   ChartPrimitive,
   GeometryPathCommand,
+  ImageEffect,
   ImagePrimitive,
   Paint,
   PlaceholderPrimitive,
   PositionedTextRun,
+  Shadow,
   ShapePrimitive,
   SlideDisplayList,
   SlidePrimitive,
   Stroke,
+  StrokeEnd,
+  TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
 
@@ -18,7 +22,14 @@ export type CanvasImageResolver = (
 
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
+  maxShadowPixels?: number;
 }
+
+interface ShadowBudget {
+  remaining: number;
+}
+
+const MAX_SHADOW_PIXELS = 134_217_728;
 
 export interface SlideCanvasLike {
   width: number;
@@ -45,6 +56,9 @@ export async function paintSlide(
   scale = 1,
   options: PaintSlideOptions = {}
 ): Promise<void> {
+  const shadowBudget = { remaining: options.maxShadowPixels ?? MAX_SHADOW_PIXELS };
+  if (!Number.isSafeInteger(shadowBudget.remaining) || shadowBudget.remaining < 0)
+    throw new Error('invalid shadow pixel budget');
   ctx.save();
   try {
     ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
@@ -53,7 +67,8 @@ export async function paintSlide(
       ctx.fillStyle = paintStyle(ctx, list.background, 0, 0, list.width, list.height);
       ctx.fillRect(0, 0, list.width, list.height);
     }
-    for (const primitive of list.primitives) await paintPrimitive(ctx, primitive, options);
+    for (const primitive of list.primitives)
+      await paintPrimitive(ctx, primitive, options, dpr * scale, shadowBudget);
   } finally {
     ctx.restore();
   }
@@ -62,17 +77,19 @@ export async function paintSlide(
 async function paintPrimitive(
   ctx: CanvasRenderingContext2D,
   primitive: SlidePrimitive,
-  options: PaintSlideOptions
+  options: PaintSlideOptions,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
   ctx.save();
   try {
     applyTransform(ctx, primitive);
     switch (primitive.kind) {
       case 'shape':
-        paintShape(ctx, primitive);
+        paintShape(ctx, primitive, deviceScale, shadowBudget);
         break;
       case 'image':
-        await paintImage(ctx, primitive, options.resolveImage);
+        await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
         paintTextBox(ctx, primitive);
@@ -81,7 +98,8 @@ async function paintPrimitive(
         paintPlaceholder(ctx, primitive);
         break;
       case 'chart':
-        await paintChart(ctx, primitive, options);
+      case 'table':
+        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget);
         break;
     }
   } finally {
@@ -89,15 +107,18 @@ async function paintPrimitive(
   }
 }
 
-async function paintChart(
+async function paintContainer(
   ctx: CanvasRenderingContext2D,
-  chart: ChartPrimitive,
-  options: PaintSlideOptions
+  container: ChartPrimitive | TablePrimitive,
+  options: PaintSlideOptions,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
   ctx.beginPath();
-  ctx.rect(chart.x, chart.y, chart.w, chart.h);
+  ctx.rect(container.x, container.y, container.w, container.h);
   ctx.clip();
-  for (const primitive of chart.primitives) await paintPrimitive(ctx, primitive, options);
+  for (const primitive of container.primitives)
+    await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget);
 }
 
 function applyTransform(
@@ -114,13 +135,300 @@ function applyTransform(
   ctx.translate(-centerX, -centerY);
 }
 
-function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void {
+function paintShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapePrimitive,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
+): void {
+  if (shape.clip) {
+    buildPath(ctx, shape.clip, shape.x, shape.y, shape.w, shape.h);
+    ctx.clip();
+  }
+  if (shape.shadow && (shape.fill || shape.stroke)) {
+    paintShadowedShape(ctx, shape, deviceScale, shadowBudget);
+  }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
   if (shape.fill) {
     ctx.fillStyle = paintStyle(ctx, shape.fill, shape.x, shape.y, shape.w, shape.h);
-    ctx.fill();
+    ctx.fill(shape.evenOdd ? 'evenodd' : 'nonzero');
   }
-  if (shape.stroke) strokeCurrentPath(ctx, shape.stroke);
+  if (shape.stroke) {
+    strokeCurrentPath(ctx, shape.stroke, shape.x, shape.y, shape.w, shape.h);
+    paintLineEnds(ctx, shape);
+  }
+}
+
+function paintShadowedShape(
+  ctx: CanvasRenderingContext2D,
+  shape: ShapePrimitive,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
+): void {
+  paintShadowLayer(
+    ctx,
+    shape.shadow!,
+    pathPoints(shape.path, shape),
+    shape.stroke?.width ?? 0,
+    deviceScale,
+    shadowBudget,
+    (scratch) => paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget)
+  );
+}
+
+/** Blurs and tints whatever `draw` lays into an offscreen layer, then composites it. */
+function paintShadowLayer(
+  ctx: CanvasRenderingContext2D,
+  shadow: Shadow,
+  points: Array<[number, number]>,
+  reach: number,
+  deviceScale: number,
+  shadowBudget: ShadowBudget,
+  draw: (scratch: CanvasRenderingContext2D) => void
+): void {
+  const shadowScaleX = shadow.scaleX ?? 1;
+  const shadowScaleY = shadow.scaleY ?? 1;
+  // The anchor is already in dx/dy, so the shadow scales about the surface origin.
+  const base = ctx.getTransform();
+  const transform = {
+    a: base.a * shadowScaleX, b: base.b * shadowScaleY,
+    c: base.c * shadowScaleX, d: base.d * shadowScaleY,
+    e: base.e * shadowScaleX, f: base.f * shadowScaleY,
+  };
+  if (!points.length) return;
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const [x, y] of points) {
+    const px = transform.a * x + transform.c * y + transform.e;
+    const py = transform.b * x + transform.d * y + transform.f;
+    minX = Math.min(minX, px);
+    minY = Math.min(minY, py);
+    maxX = Math.max(maxX, px);
+    maxY = Math.max(maxY, py);
+  }
+  const sigma = Math.min(Math.max(shadow.blur ?? 0, 0) * deviceScale / 2, 128);
+  const spread = sigma * 3 + 1;
+  const outline = reach * deviceScale
+    * Math.max(Math.abs(shadowScaleX), Math.abs(shadowScaleY)) * 2;
+  const dx = (shadow.dx ?? 0) * deviceScale;
+  const dy = (shadow.dy ?? 0) * deviceScale;
+  const left = Math.floor(Math.max(minX - outline, -spread - dx));
+  const top = Math.floor(Math.max(minY - outline, -spread - dy));
+  const right = Math.ceil(Math.min(maxX + outline, ctx.canvas.width + spread - dx));
+  const bottom = Math.ceil(Math.min(maxY + outline, ctx.canvas.height + spread - dy));
+  if (right <= left || bottom <= top) return;
+  const pixels = (right - left) * (bottom - top);
+  if (!Number.isSafeInteger(pixels) || pixels > shadowBudget.remaining)
+    throw new Error('shadows exceed the pixel budget on one slide');
+  shadowBudget.remaining -= pixels;
+  const layer = typeof OffscreenCanvas !== 'undefined'
+    ? new OffscreenCanvas(right - left, bottom - top)
+    : Object.assign(document.createElement('canvas'), { width: right - left, height: bottom - top });
+  const scratch = layer.getContext('2d') as CanvasRenderingContext2D | null;
+  if (!scratch) return;
+  scratch.setTransform(transform.a, transform.b, transform.c, transform.d, transform.e - left, transform.f - top);
+  draw(scratch);
+  ctx.save();
+  try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    if (typeof ctx.filter === 'string') {
+      scratch.setTransform(1, 0, 0, 1, 0, 0);
+      scratch.globalCompositeOperation = 'source-in';
+      scratch.fillStyle = shadow.color;
+      scratch.fillRect(0, 0, layer.width, layer.height);
+      ctx.filter = `blur(${sigma}px)`;
+      ctx.drawImage(layer, left + dx, top + dy);
+    } else {
+      const sourceXOutsideCanvas = ctx.canvas.width + 1;
+      ctx.shadowColor = shadow.color;
+      ctx.shadowBlur = sigma * 2;
+      ctx.shadowOffsetX = left + dx - sourceXOutsideCanvas;
+      ctx.shadowOffsetY = dy;
+      ctx.drawImage(layer, sourceXOutsideCanvas, top);
+    }
+  } finally {
+    ctx.restore();
+  }
+}
+
+type Frame = { x: number; y: number; w: number; h: number };
+
+function pathPoints(path: GeometryPathCommand[], frame: Frame): Array<[number, number]> {
+  const points: Array<[number, number]> = [];
+  for (const command of path) {
+    if (command.type === 'close') continue;
+    if (command.type === 'quad') {
+      points.push([frame.x + command.cpx * frame.w, frame.y + command.cpy * frame.h]);
+    } else if (command.type === 'cubic') {
+      points.push([frame.x + command.cp1x * frame.w, frame.y + command.cp1y * frame.h]);
+      points.push([frame.x + command.cp2x * frame.w, frame.y + command.cp2y * frame.h]);
+    }
+    points.push([frame.x + command.x * frame.w, frame.y + command.y * frame.h]);
+  }
+  return points.filter(
+    (point, index) => index === 0 || point[0] !== points[index - 1][0] || point[1] !== points[index - 1][1]
+  );
+}
+
+/** The picture's own outline when it has one, else its frame's corners. */
+function imagePoints(image: ImagePrimitive): Array<[number, number]> {
+  if (image.path) return pathPoints(image.path, image);
+  return [
+    [image.x, image.y],
+    [image.x + image.w, image.y],
+    [image.x + image.w, image.y + image.h],
+    [image.x, image.y + image.h],
+  ];
+}
+
+const LINE_END_KINDS = new Set(['triangle', 'stealth', 'arrow', 'diamond', 'oval']);
+
+function paintLineEnds(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void {
+  const stroke = shape.stroke;
+  if (!stroke || (!stroke.headEnd && !stroke.tailEnd)) return;
+  const points = pathPoints(shape.path, shape);
+  if (points.length < 2) return;
+  const ends: Array<[StrokeEnd | undefined, [number, number], [number, number]]> = [
+    [stroke.headEnd, points[1], points[0]],
+    [stroke.tailEnd, points[points.length - 2], points[points.length - 1]],
+  ];
+  ctx.save();
+  ctx.setLineDash([]);
+  const style = stroke.paint
+    ? paintStyle(ctx, stroke.paint, shape.x, shape.y, shape.w, shape.h)
+    : stroke.color;
+  ctx.fillStyle = style;
+  ctx.strokeStyle = style;
+  ctx.lineWidth = stroke.width;
+  ctx.lineJoin = 'miter';
+  for (const [end, from, tip] of ends) {
+    if (!end || !LINE_END_KINDS.has(end.kind)) continue;
+    const [dx, dy] = [tip[0] - from[0], tip[1] - from[1]];
+    const distance = Math.hypot(dx, dy);
+    if (distance < 1e-6) continue;
+    paintLineEnd(ctx, end, tip, dx / distance, dy / distance);
+  }
+  ctx.restore();
+}
+
+function paintLineEnd(
+  ctx: CanvasRenderingContext2D,
+  end: StrokeEnd,
+  [tx, ty]: [number, number],
+  ux: number,
+  uy: number
+): void {
+  const half = end.width / 2;
+  const [nx, ny] = [-uy * half, ux * half];
+  const [bx, by] = [tx - ux * end.length, ty - uy * end.length];
+  ctx.beginPath();
+  switch (end.kind) {
+    case 'triangle':
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'stealth':
+      ctx.moveTo(tx, ty);
+      ctx.lineTo(bx + nx, by + ny);
+      ctx.lineTo(tx - ux * end.length * 0.6, ty - uy * end.length * 0.6);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    case 'arrow':
+      ctx.moveTo(bx + nx, by + ny);
+      ctx.lineTo(tx, ty);
+      ctx.lineTo(bx - nx, by - ny);
+      ctx.stroke();
+      break;
+    case 'diamond': {
+      const [ax, ay] = [(ux * end.length) / 2, (uy * end.length) / 2];
+      ctx.moveTo(tx + ax, ty + ay);
+      ctx.lineTo(tx + nx, ty + ny);
+      ctx.lineTo(tx - ax, ty - ay);
+      ctx.lineTo(tx - nx, ty - ny);
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+    case 'oval':
+      ctx.ellipse(tx, ty, end.length / 2, half, Math.atan2(uy, ux), 0, Math.PI * 2);
+      ctx.fill();
+      break;
+  }
+}
+
+/** Canvas shadow offsets and blur ignore the current transform, so they carry the device scale. */
+
+
+
+
+/** Draws the cropped source through the picture's outline. */
+function drawCropped(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  image: ImagePrimitive
+): void {
+  const crop = image.crop;
+  const left = clampCrop(crop?.left);
+  const top = clampCrop(crop?.top);
+  const keptX = 1 - left - clampCrop(crop?.right);
+  const keptY = 1 - top - clampCrop(crop?.bottom);
+  const masked = image.path !== undefined || keptX !== 1 || keptY !== 1;
+  if (keptX <= 0 || keptY <= 0) return;
+  if (masked) {
+    ctx.save();
+    buildImageOutline(ctx, image);
+    ctx.clip();
+  }
+  const width = sourceWidth(source);
+  const height = sourceHeight(source);
+  if (width > 0 && height > 0) {
+    ctx.drawImage(
+      source,
+      left * width,
+      top * height,
+      keptX * width,
+      keptY * height,
+      image.x,
+      image.y,
+      image.w,
+      image.h
+    );
+  } else {
+    ctx.drawImage(source, image.x, image.y, image.w, image.h);
+  }
+  if (masked) ctx.restore();
+}
+
+/** The picture's own outline when it has one, else its frame. */
+function buildImageOutline(ctx: CanvasRenderingContext2D, image: ImagePrimitive): void {
+  if (image.path) buildPath(ctx, image.path, image.x, image.y, image.w, image.h);
+  else {
+    ctx.beginPath();
+    ctx.rect(image.x, image.y, image.w, image.h);
+  }
+}
+
+/** `a:srcRect` also encodes outsets as negatives, which canvas cannot express. */
+function clampCrop(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 0;
+  return Math.min(Math.max(value, 0), 1);
+}
+
+function sourceWidth(source: CanvasImageSource): number {
+  if ('naturalWidth' in source && typeof source.naturalWidth === 'number') return source.naturalWidth;
+  if ('width' in source && typeof source.width === 'number') return source.width;
+  return 0;
+}
+
+function sourceHeight(source: CanvasImageSource): number {
+  if ('naturalHeight' in source && typeof source.naturalHeight === 'number')
+    return source.naturalHeight;
+  if ('height' in source && typeof source.height === 'number') return source.height;
+  return 0;
 }
 
 function buildPath(
@@ -165,8 +473,15 @@ function buildPath(
   }
 }
 
-function strokeCurrentPath(ctx: CanvasRenderingContext2D, stroke: Stroke): void {
-  ctx.strokeStyle = stroke.color;
+function strokeCurrentPath(
+  ctx: CanvasRenderingContext2D,
+  stroke: Stroke,
+  x: number,
+  y: number,
+  width: number,
+  height: number
+): void {
+  ctx.strokeStyle = stroke.paint ? paintStyle(ctx, stroke.paint, x, y, width, height) : stroke.color;
   ctx.lineWidth = stroke.width;
   ctx.setLineDash(stroke.dashed ? [Math.max(3, stroke.width * 2), Math.max(2, stroke.width)] : []);
   ctx.stroke();
@@ -201,23 +516,264 @@ function paintStyle(
 async function paintImage(
   ctx: CanvasRenderingContext2D,
   image: ImagePrimitive,
-  resolver: CanvasImageResolver | undefined
+  resolver: CanvasImageResolver | undefined,
+  deviceScale: number,
+  shadowBudget: ShadowBudget
 ): Promise<void> {
+  let source: CanvasImageSource | undefined;
   if (image.assetId && resolver) {
-    const source = await resolver(image.assetId);
-    if (source) ctx.drawImage(source, image.x, image.y, image.w, image.h);
+    const resolved = await resolver(image.assetId);
+    if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
+  if (image.shadow && (source || image.stroke)) {
+    paintShadowLayer(
+      ctx,
+      image.shadow,
+      imagePoints(image),
+      image.stroke?.width ?? 0,
+      deviceScale,
+      shadowBudget,
+      (scratch) => drawImageContent(scratch, image, source)
+    );
+  }
+  drawImageContent(ctx, image, source);
+}
+
+function drawImageContent(
+  ctx: CanvasRenderingContext2D,
+  image: ImagePrimitive,
+  source: CanvasImageSource | undefined
+): void {
+  if (source) drawCropped(ctx, source, image);
   if (image.stroke) {
-    ctx.beginPath();
-    ctx.rect(image.x, image.y, image.w, image.h);
-    strokeCurrentPath(ctx, image.stroke);
+    buildImageOutline(ctx, image);
+    strokeCurrentPath(ctx, image.stroke, image.x, image.y, image.w, image.h);
+  }
+}
+
+/** Matches `MAX_IMAGE_PIXELS` in pptx-raster: the most pixels one recolouring pass walks. */
+const MAX_EFFECT_PIXELS = 33_554_432;
+/** Matches `MAX_SLIDE_IMAGE_PIXELS` in pptx-raster: recoloured surfaces kept for later paints. */
+const MAX_RETAINED_EFFECT_PIXELS = 67_108_864;
+
+function imageSourceSize(source: CanvasImageSource): { width: number; height: number } | null {
+  const candidate = source as {
+    naturalWidth?: number;
+    naturalHeight?: number;
+    videoWidth?: number;
+    videoHeight?: number;
+    displayWidth?: number;
+    displayHeight?: number;
+    width?: unknown;
+    height?: unknown;
+  };
+  const width =
+    candidate.naturalWidth ??
+    candidate.videoWidth ??
+    candidate.displayWidth ??
+    (typeof candidate.width === 'number' ? candidate.width : 0);
+  const height =
+    candidate.naturalHeight ??
+    candidate.videoHeight ??
+    candidate.displayHeight ??
+    (typeof candidate.height === 'number' ? candidate.height : 0);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/** The largest surface at or below the pixel cap that keeps the source's proportions. */
+function boundedSize(size: { width: number; height: number }): { width: number; height: number } {
+  const pixels = size.width * size.height;
+  if (pixels <= MAX_EFFECT_PIXELS) return size;
+  const factor = Math.sqrt(MAX_EFFECT_PIXELS / pixels);
+  return {
+    width: Math.max(1, Math.floor(size.width * factor)),
+    height: Math.max(1, Math.floor(size.height * factor)),
+  };
+}
+
+type Recolourings = Map<string, CanvasImageSource>;
+
+const recoloured = new WeakMap<object, Recolourings>();
+/** Least recently used first; holds the surfaces, never the sources they came from. */
+const retained: { entries: Recolourings; key: string; pixels: number }[] = [];
+let retainedPixels = 0;
+
+/** A video, canvas or frame may change between paints, so its recolouring is never kept. */
+function isMutableSource(source: CanvasImageSource): boolean {
+  const candidate = source as { videoWidth?: unknown; displayWidth?: unknown; getContext?: unknown };
+  return 'videoWidth' in candidate || 'displayWidth' in candidate || typeof candidate.getContext === 'function';
+}
+
+function recallRecolouring(source: object, key: string): CanvasImageSource | undefined {
+  const entries = recoloured.get(source);
+  const surface = entries?.get(key);
+  if (!entries || !surface) return undefined;
+  const index = retained.findIndex((entry) => entry.entries === entries && entry.key === key);
+  if (index >= 0) retained.push(...retained.splice(index, 1));
+  return surface;
+}
+
+function retainRecolouring(source: object, key: string, surface: CanvasImageSource, pixels: number): void {
+  let entries = recoloured.get(source);
+  if (!entries) {
+    entries = new Map();
+    recoloured.set(source, entries);
+  }
+  entries.set(key, surface);
+  retained.push({ entries, key, pixels });
+  retainedPixels += pixels;
+  while (retainedPixels > MAX_RETAINED_EFFECT_PIXELS && retained.length > 1) {
+    const oldest = retained.shift();
+    if (!oldest) break;
+    oldest.entries.delete(oldest.key);
+    retainedPixels -= oldest.pixels;
+  }
+}
+
+function offscreen(width: number, height: number): HTMLCanvasElement | OffscreenCanvas | null {
+  if (typeof OffscreenCanvas !== 'undefined') return new OffscreenCanvas(width, height);
+  if (typeof document === 'undefined') return null;
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  return canvas;
+}
+
+/** Recolours readable bitmaps on a private surface, kept for later paints while the budget allows. */
+function recolourImage(source: CanvasImageSource, effects: ImageEffect[]): CanvasImageSource {
+  const size = imageSourceSize(source);
+  if (!size) return source;
+  const key = JSON.stringify(effects);
+  const reusable = !isMutableSource(source);
+  if (reusable) {
+    const cached = recallRecolouring(source as object, key);
+    if (cached) return cached;
+  }
+  // A slide's bitmap is whatever the file carried, and every effect walks all of it, so
+  // an oversized source is recoloured at the cap and drawn back up to size.
+  const bounds = boundedSize(size);
+  try {
+    const canvas = offscreen(bounds.width, bounds.height);
+    const ctx = canvas?.getContext('2d') as CanvasRenderingContext2D | null;
+    if (!canvas || !ctx) return source;
+    ctx.drawImage(source, 0, 0, bounds.width, bounds.height);
+    const data = ctx.getImageData(0, 0, bounds.width, bounds.height);
+    applyImageEffects(data.data, effects);
+    ctx.putImageData(data, 0, 0);
+    const result = canvas as CanvasImageSource;
+    if (reusable) retainRecolouring(source as object, key, result, bounds.width * bounds.height);
+    return result;
+  } catch {
+    return source;
+  }
+}
+
+/** Rec. 601 luma, the weighting `biLevel` and `duotone` are defined against. */
+function luma(data: Uint8ClampedArray, index: number): number {
+  return 0.299 * data[index] + 0.587 * data[index + 1] + 0.114 * data[index + 2];
+}
+
+/** `a:lum` as a 256-entry ramp, fitted to what LibreOffice draws for the same
+ * brightness and contrast. */
+function luminanceMap(brightness: number, contrast: number): Uint8ClampedArray {
+  const clamped = Math.min(Math.max(contrast, -1), 1);
+  const slope = clamped >= 0 ? 128 / (128 - 127 * clamped) : (128 + 127 * clamped) / 128;
+  const offset =
+    128 - 128 * slope + (255 * Math.min(Math.max(brightness, -1), 1) * (1 + slope)) / 2;
+  const map = new Uint8ClampedArray(256);
+  for (let value = 0; value < 256; value += 1) map[value] = Math.round(slope * value + offset);
+  return map;
+}
+
+function rgba(color: string): [number, number, number, number] | null {
+  const hex = color.startsWith('#') ? color.slice(1) : color;
+  const expanded = hex.length === 3 || hex.length === 4 ? [...hex].map((c) => c + c).join('') : hex;
+  if (expanded.length !== 6 && expanded.length !== 8) return null;
+  const byte = (at: number) => Number.parseInt(expanded.slice(at, at + 2), 16);
+  const channels: [number, number, number, number] = [
+    byte(0),
+    byte(2),
+    byte(4),
+    expanded.length === 8 ? byte(6) : 255,
+  ];
+  return channels.some(Number.isNaN) ? null : channels;
+}
+
+/** `getImageData` hands back straight alpha, which is what these are defined on. */
+export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[]): void {
+  for (const effect of effects) {
+    switch (effect.kind) {
+      case 'biLevel': {
+        const threshold = Math.min(Math.max(effect.threshold, 0), 1) * 255;
+        for (let index = 0; index < data.length; index += 4) {
+          const value = luma(data, index) < threshold ? 0 : 255;
+          data[index] = value;
+          data[index + 1] = value;
+          data[index + 2] = value;
+        }
+        break;
+      }
+      case 'grayscale': {
+        for (let index = 0; index < data.length; index += 4) {
+          const value = Math.round(luma(data, index));
+          data[index] = value;
+          data[index + 1] = value;
+          data[index + 2] = value;
+        }
+        break;
+      }
+      case 'luminance': {
+        const map = luminanceMap(effect.brightness, effect.contrast);
+        for (let index = 0; index < data.length; index += 4) {
+          data[index] = map[data[index]];
+          data[index + 1] = map[data[index + 1]];
+          data[index + 2] = map[data[index + 2]];
+        }
+        break;
+      }
+      case 'duotone': {
+        const shadow = rgba(effect.shadow);
+        const highlight = rgba(effect.highlight);
+        if (!shadow || !highlight) break;
+        for (let index = 0; index < data.length; index += 4) {
+          const ratio = luma(data, index) / 255;
+          for (let channel = 0; channel < 3; channel += 1) {
+            data[index + channel] = Math.round(
+              shadow[channel] * (1 - ratio) + highlight[channel] * ratio
+            );
+          }
+          // An endpoint may be translucent. It modulates the source's own alpha rather
+          // than replacing it, or a transparent pixel would turn opaque.
+          const endpoint = shadow[3] * (1 - ratio) + highlight[3] * ratio;
+          data[index + 3] = Math.round((data[index + 3] * endpoint) / 255);
+        }
+        break;
+      }
+      case 'colorChange': {
+        const from = rgba(effect.from);
+        const to = rgba(effect.to);
+        if (!from || !to) break;
+        for (let index = 0; index < data.length; index += 4) {
+          if (data[index] !== from[0] || data[index + 1] !== from[1] || data[index + 2] !== from[2] || (effect.useAlpha !== false && data[index + 3] !== from[3])) {
+            continue;
+          }
+          data[index] = to[0];
+          data[index + 1] = to[1];
+          data[index + 2] = to[2];
+          if (effect.useAlpha !== false) data[index + 3] = to[3];
+        }
+        break;
+      }
+    }
   }
 }
 
 function paintTextBox(ctx: CanvasRenderingContext2D, textBox: TextBoxPrimitive): void {
-  ctx.beginPath();
-  ctx.rect(textBox.x, textBox.y, textBox.w, textBox.h);
-  ctx.clip();
+  if (!textBox.overflow) {
+    ctx.beginPath();
+    ctx.rect(textBox.x, textBox.y, textBox.w, textBox.h);
+    ctx.clip();
+  }
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
   for (const line of textBox.lines) {
@@ -234,10 +790,44 @@ function paintTextRun(
   const weight = run.bold ? 'bold ' : '';
   ctx.font = `${style}${weight}${run.fontSizePx}px ${quoteFamily(run.fontFamily)}`;
   ctx.fillStyle = run.color;
-  ctx.fillText(run.text, run.x, baseline);
-  if (run.underline) {
-    ctx.fillRect(run.x, baseline + run.fontSizePx * 0.08, run.width, Math.max(1, run.fontSizePx * 0.05));
+  const spacing = run.letterSpacingPx ?? 0;
+  ctx.letterSpacing = spacing === 0 ? '0px' : `${spacing}px`;
+  const runBaseline = baseline - (run.baselineOffsetPx ?? 0);
+  for (const chunk of positionedTextChunks(run)) {
+    ctx.fillText(chunk.text, chunk.x, runBaseline);
   }
+  ctx.letterSpacing = '0px';
+  if (run.underline) {
+    ctx.fillRect(
+      run.x,
+      runBaseline + run.fontSizePx * 0.08,
+      run.width,
+      Math.max(1, run.fontSizePx * 0.05)
+    );
+  }
+}
+
+function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: number }> {
+  if (run.glyphs.length < 2) return [{ text: run.text, x: run.x }];
+  const chunks: Array<{ text: string; x: number }> = [];
+  let textStart = 0;
+  let x = run.x;
+  let expectedX = run.glyphs[0].x;
+  for (const glyph of run.glyphs) {
+    const offset = glyph.cluster - run.start;
+    if (
+      offset > textStart &&
+      offset < run.text.length &&
+      Math.abs(glyph.x - expectedX) > 0.0001
+    ) {
+      chunks.push({ text: run.text.slice(textStart, offset), x });
+      textStart = offset;
+      x = glyph.x;
+    }
+    expectedX = Math.fround(Math.fround(glyph.x) + Math.fround(glyph.advance));
+  }
+  chunks.push({ text: run.text.slice(textStart), x });
+  return chunks;
 }
 
 function quoteFamily(family: string): string {

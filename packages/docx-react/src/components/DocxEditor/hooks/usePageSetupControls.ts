@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import type { Document, SectionProperties } from '@betteroffice/docx/types/document';
+import { updateFinalSectionProperties } from '@betteroffice/docx/editor';
 import type { PagedEditorRef } from '../PagedEditor';
 
 /**
@@ -31,13 +32,10 @@ export function usePageSetupControls({
           ...document,
           package: {
             ...document.package,
-            document: {
-              ...document.package.document,
-              finalSectionProperties: {
-                ...document.package.document.finalSectionProperties,
-                [property]: marginTwips,
-              },
-            },
+            document: updateFinalSectionProperties(document.package.document, (properties) => ({
+              ...properties,
+              [property]: marginTwips,
+            })),
           },
         };
         handleDocumentChange(newDoc);
@@ -69,13 +67,10 @@ export function usePageSetupControls({
         ...document,
         package: {
           ...document.package,
-          document: {
-            ...document.package.document,
-            finalSectionProperties: {
-              ...document.package.document.finalSectionProperties,
-              ...props,
-            },
-          },
+          document: updateFinalSectionProperties(document.package.document, (properties) => ({
+            ...properties,
+            ...props,
+          })),
         },
       };
       handleDocumentChange(newDoc);

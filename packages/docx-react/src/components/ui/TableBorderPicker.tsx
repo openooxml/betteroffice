@@ -77,6 +77,7 @@ export function TableBorderPicker({ onAction, disabled = false }: TableBorderPic
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
             backgroundColor: 'var(--doc-surface)',

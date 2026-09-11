@@ -824,6 +824,42 @@ fn consume_non_whitespace(value: &str, mut cursor: usize) -> usize {
     cursor
 }
 
+/// An inline element the model does not type, kept as authored markup and
+/// replayed verbatim on save; dropping markup the parser never read is a loss.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RawInlineXml {
+    #[serde(rename = "type")]
+    pub node_type: RawInlineXmlType,
+    pub xml: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RawInlineXmlType {
+    #[serde(rename = "rawXml")]
+    RawXml,
+}
+
+/// Prefixes the typed model owns; an element under any other prefix is
+/// foreign markup that survives as a raw inline node.
+const MODELLED_PREFIXES: [&str; 26] = [
+    "w", "r", "m", "mc", "o", "v", "a", "pic", "wp", "wp14", "w10", "w14", "w15", "w16", "w16cex",
+    "w16cid", "w16du", "w16sdtdh", "w16sdtfl", "w16se", "wne", "wpc", "wpg", "wpi", "wps", "xml",
+];
+
+pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
+    let prefix = match element.name.split_once(':') {
+        Some((prefix, _)) => prefix,
+        None => "",
+    };
+    if MODELLED_PREFIXES.contains(&prefix) {
+        return None;
+    }
+    Some(InlineNode::RawXml(Box::new(RawInlineXml {
+        node_type: RawInlineXmlType::RawXml,
+        xml: element.to_raw_inline_xml(),
+    })))
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum InlineNode {
@@ -835,6 +871,7 @@ pub enum InlineNode {
     ComplexField(Box<ComplexField>),
     InlineSdt(Box<InlineSdt>),
     Math(MathEquation),
+    RawXml(Box<RawInlineXml>),
 }
 
 impl InlineNode {
@@ -848,6 +885,7 @@ impl InlineNode {
             Self::ComplexField(_) => "complexField",
             Self::InlineSdt(_) => "inlineSdt",
             Self::Math(_) => "mathEquation",
+            Self::RawXml(_) => "rawXml",
         }
     }
 }
@@ -1164,8 +1202,11 @@ pub fn parse_hyperlink(
         .attribute(Some("w"), "tgtFrame")
         .filter(|value| !value.is_empty())
         .map(|value| truncate_chars(value, 255));
-    let history =
-        matches!(element.attribute(Some("w"), "history"), Some("1" | "true")).then_some(true);
+    let history = match element.attribute(Some("w"), "history") {
+        Some("1" | "true") => Some(true),
+        Some("0" | "false") => Some(false),
+        _ => None,
+    };
     let doc_location = element
         .attribute(Some("w"), "docLocation")
         .filter(|value| !value.is_empty())
@@ -1742,7 +1783,7 @@ fn parse_hyperlink_inline_sdt(
 }
 
 #[derive(Clone, Debug)]
-struct OpenComplexField {
+pub(crate) struct OpenComplexField {
     instruction: String,
     code_runs: Vec<Run>,
     result_runs: Vec<Run>,
@@ -1753,6 +1794,103 @@ struct OpenComplexField {
     fld_lock: bool,
     dirty: bool,
     formatting: Option<TextFormatting>,
+}
+
+impl OpenComplexField {
+    pub(crate) fn opening(run: &Run) -> Self {
+        let flags = run.content.iter().find_map(|content| match content {
+            RunContent::FieldChar {
+                char_type,
+                fld_lock,
+                dirty,
+                ..
+            } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
+            _ => None,
+        });
+        Self {
+            instruction: String::new(),
+            code_runs: Vec::new(),
+            result_runs: Vec::new(),
+            structured_code: Vec::new(),
+            structured_result: Vec::new(),
+            children: Vec::new(),
+            mode: FieldMode::Code,
+            fld_lock: flags.is_some_and(|flags| flags.0),
+            dirty: flags.is_some_and(|flags| flags.1),
+            formatting: run.formatting.clone(),
+        }
+    }
+
+    pub(crate) fn append_instruction(&mut self, instruction: &str) {
+        self.instruction.push_str(instruction);
+    }
+
+    pub(crate) fn adopt_formatting(&mut self, run: &Run) {
+        if self.formatting.is_none() {
+            self.formatting.clone_from(&run.formatting);
+        }
+    }
+
+    pub(crate) fn switch_to_result(&mut self) {
+        self.mode = FieldMode::Result;
+    }
+
+    /// A node inside an open field joins the field's structure in place; its
+    /// runs flatten into the run-level view consumers read for text. Pushing
+    /// it to the paragraph instead would reorder it before the field on save.
+    pub(crate) fn absorb(&mut self, node: InlineNode, runs: Vec<Run>) {
+        match self.mode {
+            FieldMode::Code => {
+                self.code_runs.extend(runs);
+                self.structured_code.push(node);
+            }
+            FieldMode::Result => {
+                self.result_runs.extend(runs);
+                self.structured_result.push(node);
+            }
+        }
+    }
+
+    pub(crate) fn absorb_nested(&mut self, field: ComplexField) {
+        let tree = field.field_tree.clone();
+        self.absorb(InlineNode::ComplexField(Box::new(field)), Vec::new());
+        if let Some(tree) = tree {
+            self.children.push(tree);
+        }
+    }
+
+    pub(crate) fn finish(self) -> ComplexField {
+        let structured_code = (!self.structured_code.is_empty()).then(|| StructuredFieldContent {
+            inline: Some(self.structured_code),
+            blocks: None,
+        });
+        let structured_result =
+            (!self.structured_result.is_empty()).then(|| StructuredFieldContent {
+                inline: Some(self.structured_result),
+                blocks: None,
+            });
+        let field_tree = StructuredFieldTree {
+            version: Some(1.0),
+            code: structured_code.clone(),
+            result: structured_result.clone(),
+            children: (!self.children.is_empty()).then_some(self.children),
+            display_mode: Some("result".to_owned()),
+        };
+        let instruction = self.instruction.trim().to_owned();
+        ComplexField {
+            node_type: ComplexFieldType::ComplexField,
+            field_type: parse_field_type(&instruction),
+            instruction,
+            field_code: self.code_runs,
+            field_result: self.result_runs,
+            formatting: self.formatting,
+            fld_lock: self.fld_lock.then_some(true),
+            dirty: self.dirty.then_some(true),
+            structured_code,
+            structured_result,
+            field_tree: Some(field_tree),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1805,34 +1943,21 @@ pub fn parse_inline_container(
                             part: part.to_owned(),
                         });
                     }
-                    fields.push(create_open_complex_field(&run));
+                    fields.push(OpenComplexField::opening(&run));
                 }
                 if let Some(active) = fields.last_mut() {
-                    if !instruction.is_empty() {
-                        active.instruction.push_str(&instruction);
-                    }
-                    if active.formatting.is_none() {
-                        active.formatting.clone_from(&run.formatting);
-                    }
+                    active.append_instruction(&instruction);
+                    active.adopt_formatting(&run);
                     if has_separate {
-                        active.mode = FieldMode::Result;
+                        active.switch_to_result();
                     }
                     if !has_begin && !has_separate && !has_end {
-                        match active.mode {
-                            FieldMode::Code => {
-                                active.code_runs.push(run.clone());
-                                active.structured_code.push(InlineNode::Run(run));
-                            }
-                            FieldMode::Result => {
-                                active.result_runs.push(run.clone());
-                                active.structured_result.push(InlineNode::Run(run));
-                            }
-                        }
+                        active.absorb(InlineNode::Run(run.clone()), vec![run]);
                     }
                     if has_end {
-                        let completed = finalize_open_complex_field(fields.pop().unwrap());
+                        let completed = fields.pop().unwrap().finish();
                         if let Some(parent) = fields.last_mut() {
-                            append_nested_field(parent, completed);
+                            parent.absorb_nested(completed);
                         } else {
                             output.push(InlineNode::ComplexField(Box::new(completed)));
                         }
@@ -1841,27 +1966,62 @@ pub fn parse_inline_container(
                     output.push(InlineNode::Run(run));
                 }
             }
-            "hyperlink" => output.push(InlineNode::Hyperlink(Box::new(parse_hyperlink(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                part,
-                budget,
-            )?))),
-            "bookmarkStart" => output.push(InlineNode::BookmarkStart(parse_bookmark_start(child))),
-            "bookmarkEnd" => output.push(InlineNode::BookmarkEnd(parse_bookmark_end(child))),
-            "fldSimple" => output.push(InlineNode::SimpleField(Box::new(parse_rich_simple_field(
-                child,
-                relationships,
-                theme,
-                styles,
-                doc_defaults,
-                part,
-                budget,
-                depth + 1,
-            )?))),
+            "hyperlink" => {
+                let hyperlink = parse_hyperlink(
+                    child,
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    part,
+                    budget,
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs: Vec<Run> = hyperlink
+                        .children
+                        .iter()
+                        .filter_map(|node| match node {
+                            InlineNode::Run(run) => Some(run.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    active.absorb(InlineNode::Hyperlink(Box::new(hyperlink)), runs);
+                } else {
+                    output.push(InlineNode::Hyperlink(Box::new(hyperlink)));
+                }
+            }
+            "bookmarkStart" => {
+                let node = InlineNode::BookmarkStart(parse_bookmark_start(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(node),
+                }
+            }
+            "bookmarkEnd" => {
+                let node = InlineNode::BookmarkEnd(parse_bookmark_end(child));
+                match fields.last_mut() {
+                    Some(active) => active.absorb(node, Vec::new()),
+                    None => output.push(node),
+                }
+            }
+            "fldSimple" => {
+                let field = parse_rich_simple_field(
+                    child,
+                    relationships,
+                    theme,
+                    styles,
+                    doc_defaults,
+                    part,
+                    budget,
+                    depth + 1,
+                )?;
+                if let Some(active) = fields.last_mut() {
+                    let runs = field.content.clone();
+                    active.absorb(InlineNode::SimpleField(Box::new(field)), runs);
+                } else {
+                    output.push(InlineNode::SimpleField(Box::new(field)));
+                }
+            }
             "sdt" => {
                 if let Some(content) = child.child("w", "sdtContent") {
                     let parsed = parse_inline_container(
@@ -1902,9 +2062,9 @@ pub fn parse_inline_container(
     // Pinned compatibility: unterminated fields remain inert structured nodes
     // so later block parsing can attach following result blocks.
     while let Some(field) = fields.pop() {
-        let completed = finalize_open_complex_field(field);
+        let completed = field.finish();
         if let Some(parent) = fields.last_mut() {
-            append_nested_field(parent, completed);
+            parent.absorb_nested(completed);
         } else {
             output.push(InlineNode::ComplexField(Box::new(completed)));
         }
@@ -1979,77 +2139,6 @@ fn parse_rich_simple_field(
         structured_result,
         field_tree,
     })
-}
-
-fn create_open_complex_field(run: &Run) -> OpenComplexField {
-    let flags = run.content.iter().find_map(|content| match content {
-        RunContent::FieldChar {
-            char_type,
-            fld_lock,
-            dirty,
-            ..
-        } if char_type == "begin" => Some((*fld_lock == Some(true), *dirty == Some(true))),
-        _ => None,
-    });
-    OpenComplexField {
-        instruction: String::new(),
-        code_runs: Vec::new(),
-        result_runs: Vec::new(),
-        structured_code: Vec::new(),
-        structured_result: Vec::new(),
-        children: Vec::new(),
-        mode: FieldMode::Code,
-        fld_lock: flags.is_some_and(|flags| flags.0),
-        dirty: flags.is_some_and(|flags| flags.1),
-        formatting: run.formatting.clone(),
-    }
-}
-
-fn finalize_open_complex_field(field: OpenComplexField) -> ComplexField {
-    let structured_code = (!field.structured_code.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_code),
-        blocks: None,
-    });
-    let structured_result = (!field.structured_result.is_empty()).then(|| StructuredFieldContent {
-        inline: Some(field.structured_result),
-        blocks: None,
-    });
-    let field_tree = StructuredFieldTree {
-        version: Some(1.0),
-        code: structured_code.clone(),
-        result: structured_result.clone(),
-        children: (!field.children.is_empty()).then_some(field.children),
-        display_mode: Some("result".to_owned()),
-    };
-    let instruction = field.instruction.trim().to_owned();
-    ComplexField {
-        node_type: ComplexFieldType::ComplexField,
-        field_type: parse_field_type(&instruction),
-        instruction,
-        field_code: field.code_runs,
-        field_result: field.result_runs,
-        formatting: field.formatting,
-        fld_lock: field.fld_lock.then_some(true),
-        dirty: field.dirty.then_some(true),
-        structured_code,
-        structured_result,
-        field_tree: Some(field_tree),
-    }
-}
-
-fn append_nested_field(parent: &mut OpenComplexField, field: ComplexField) {
-    let tree = field.field_tree.clone();
-    match parent.mode {
-        FieldMode::Code => parent
-            .structured_code
-            .push(InlineNode::ComplexField(Box::new(field))),
-        FieldMode::Result => parent
-            .structured_result
-            .push(InlineNode::ComplexField(Box::new(field))),
-    }
-    if let Some(tree) = tree {
-        parent.children.push(tree);
-    }
 }
 
 fn parse_paragraph_math(element: &XmlElement) -> MathEquation {
@@ -2144,7 +2233,7 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .as_deref()
             .map(|text| text.encode_utf16().count())
             .unwrap_or(0),
-        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => 0,
+        InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) | InlineNode::RawXml(_) => 0,
     }
 }
 

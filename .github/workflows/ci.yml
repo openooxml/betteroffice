@@ -24,18 +24,37 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: wasm
 
-      - name: Install wasm-pack
-        run: cargo install wasm-pack --version 0.15.0 --locked
+      - uses: ./.github/actions/wasm-toolchain
+
+      # Reads `wasm-opt --version`, so it has to follow the toolchain step.
+      - name: Fingerprint the wasm inputs
+        id: wasm
+        run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
+
+      # rust-cache prunes the workspace's own artifacts, and wasm-opt costs minutes per module.
+      - uses: actions/cache@v4
+        with:
+          path: target/wasm-pack
+          key: wasm-pack-${{ steps.wasm.outputs.key }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
       - name: Type check
-        run: bun run --filter './packages/*' typecheck
+        run: bun run typecheck:packages
 
       - name: Test
         run: bun run test
+
+      - name: Check generated Wasm declarations
+        run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
 
       - name: Check demo assets
         run: |
@@ -48,6 +67,7 @@ jobs:
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
+          cargo check -p pptx-wasm --target wasm32-unknown-unknown
 
       - name: Build
         run: bun run build:packages
@@ -69,8 +89,11 @@ jobs:
         run: bun audit
         continue-on-error: true
 
+      # GHSA-5p4m-2wfm-xmqj reaches only read-yaml-file under @changesets/cli,
+      # which parses our own changesets; every way to move it is worse than the
+      # advisory. See SECURITY.md.
       - name: Fail on high or critical advisories
-        run: bun audit --audit-level=high
+        run: bun audit --audit-level=high --ignore=GHSA-5p4m-2wfm-xmqj
 
   rust:
     name: Rust gate
@@ -103,6 +126,7 @@ jobs:
         run: |
           cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -121,6 +145,7 @@ jobs:
         run: |
           cargo test -p betteroffice-drawingml --all-features
           cargo test -p betteroffice-docx --all-features
+          cargo test -p betteroffice-pptx --all-features
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'

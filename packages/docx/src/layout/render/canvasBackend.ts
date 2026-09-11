@@ -16,6 +16,7 @@ import type {
   ShapePrimitive,
   PageBorderPrimitive,
   DisplayBorderStyle,
+  DisplayPaintClip,
 } from './displayList';
 import type { GlyphCache } from './glyphCache';
 import { glyphRunRect, textRunRect, type GeoRect } from './displayListGeometry';
@@ -316,9 +317,11 @@ async function drawPrimitiveCore(
 // only flips the bidi resolution, never the anchor, so x stays the run's
 // left edge exactly as measured upstream
 function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void {
-  let wrapped = beginVisualState(
+  const rect = textRunRect(run);
+  let wrapped = beginTextVisualState(
     ctx,
-    textRunRect(run),
+    rect,
+    run.paintClip,
     run.hidden && run.opacity === undefined ? 0.4 : run.opacity,
     run.rotationDeg,
     run.horizontalScale
@@ -348,7 +351,7 @@ function drawTextRun(ctx: CanvasRenderingContext2D, run: TextRunPrimitive): void
   const text = run.allCaps ? run.text.toUpperCase() : run.text;
   if (run.leaderGlyphs?.glyph && (run.leaderGlyphs.count ?? 0) > 0) {
     drawLeaderText(ctx, run);
-  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, textRunRect(run))) {
+  } else if (!drawModernRunText(ctx, text, run.x, run.baselineY, run, rect)) {
     drawCanvasTextWithEffects(ctx, text, run.x, run.baselineY, run);
   }
   drawTextEmphasisMarks(ctx, text, run.x, run.baselineY, run.width, run);
@@ -381,15 +384,26 @@ function warnGlyphFallbackOnce(error: unknown): void {
   );
 }
 
+let syntheticPaintClipWarned = false;
+function warnSyntheticPaintClipOnce(): void {
+  if (syntheticPaintClipWarned) return;
+  syntheticPaintClipWarned = true;
+  console.warn(
+    '[canvasBackend] synthetic text metrics active; clipping paint to estimated layout slots'
+  );
+}
+
 /** Paints cached glyph outlines, falling back to `fillText` for unresolved runs. */
 function drawGlyphRun(
   ctx: CanvasRenderingContext2D,
   run: GlyphRunPrimitive,
   cache: GlyphCache | undefined
 ): void {
-  let wrapped = beginVisualState(
+  const rect = glyphRunRect(run);
+  let wrapped = beginTextVisualState(
     ctx,
-    glyphRunRect(run),
+    rect,
+    run.paintClip,
     run.hidden && run.opacity === undefined ? 0.4 : run.opacity,
     run.rotationDeg,
     run.horizontalScale
@@ -402,7 +416,6 @@ function drawGlyphRun(
     try {
       const outlines = run.glyphs.map((g) => cache.get(run.fontId, g.id));
       const effects = run.modernEffects;
-      const rect = glyphRunRect(run);
       const paint = modernTextFillStyle(ctx, effects, rect, run.color);
       const paintOutlines = (): void => {
         for (let i = 0; i < run.glyphs.length; i++) {
@@ -1438,6 +1451,36 @@ function drawImageBorder(
   ctx.lineWidth = width;
   ctx.setLineDash(border.dash ?? shapeDashPattern(border.style, width));
   ctx.strokeRect(frame.x, frame.y, frame.w, frame.h);
+}
+
+function clipTextPaintToSlot(ctx: CanvasRenderingContext2D, clip: DisplayPaintClip): void {
+  const verticalExtent = 1_000_000_000;
+  ctx.beginPath();
+  ctx.rect(
+    finiteOr(clip.x, 0),
+    -verticalExtent,
+    Math.max(0, finiteOr(clip.w, 0)),
+    verticalExtent * 2
+  );
+  ctx.clip();
+}
+
+function beginTextVisualState(
+  ctx: CanvasRenderingContext2D,
+  rect: GeoRect,
+  paintClip: DisplayPaintClip | undefined,
+  opacity?: number,
+  rotationDeg?: number,
+  horizontalScale?: number
+): boolean {
+  if (!paintClip) {
+    return beginVisualState(ctx, rect, opacity, rotationDeg, horizontalScale);
+  }
+  warnSyntheticPaintClipOnce();
+  ctx.save();
+  clipTextPaintToSlot(ctx, paintClip);
+  beginPrimitiveVisualTransform(ctx, rect, opacity, rotationDeg, horizontalScale);
+  return true;
 }
 
 function beginVisualState(

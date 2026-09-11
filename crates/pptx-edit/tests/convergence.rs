@@ -251,6 +251,37 @@ fn cross_paragraph_format_is_one_undoable_operation() {
 }
 
 #[test]
+fn cross_paragraph_alignment_is_one_undoable_operation() {
+    let session = DeckSession::open(FIXTURE, 407).unwrap();
+    let story_id = first_multi_paragraph_story(&session);
+    let before = session.story(&story_id).unwrap();
+
+    session
+        .set_paragraph_alignment(
+            &EditCtx::local("local"),
+            &story_id,
+            0,
+            before.length,
+            Some("r"),
+        )
+        .unwrap();
+
+    let aligned = session.story(&story_id).unwrap();
+    assert!(aligned.paragraphs.len() >= 2);
+    assert!(
+        aligned
+            .paragraphs
+            .iter()
+            .all(|paragraph| paragraph.alignment.as_deref() == Some("r"))
+    );
+
+    session.add_undo_barrier();
+    assert!(session.undo());
+    assert_eq!(session.story(&story_id).unwrap(), before);
+    assert!(!session.can_undo());
+}
+
+#[test]
 fn cross_paragraph_format_rejects_out_of_bounds_ranges() {
     let session = DeckSession::open(FIXTURE, 406).unwrap();
     let story_id = first_multi_paragraph_story(&session);
@@ -355,4 +386,108 @@ fn explicit_text_style_converges_after_update_exchange() {
         left.story(&story_id).unwrap(),
         right.story(&story_id).unwrap()
     );
+}
+
+#[test]
+fn two_sessions_converge_after_comment_edits() {
+    let left = DeckSession::open(FIXTURE, 404).unwrap();
+    let right = DeckSession::open(FIXTURE, 505).unwrap();
+    let context = EditCtx::local("local");
+    let initial = left.snapshot().unwrap();
+    let first_slide = initial.slides[0].id.clone();
+    let second_slide = initial.slides[1].id.clone();
+
+    let mine = left
+        .add_comment(
+            &context,
+            &first_slide,
+            "Ada Lovelace",
+            "AL",
+            "Check this figure.",
+            "2026-09-01T10:00:00.000",
+            914_400,
+            457_200,
+        )
+        .unwrap();
+    right
+        .add_comment(
+            &context,
+            &second_slide,
+            "Grace Hopper",
+            "GH",
+            "Reword the heading.",
+            "2026-09-01T10:01:00.000",
+            0,
+            0,
+        )
+        .unwrap();
+
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1())
+        .unwrap();
+    left.apply_update_v1(&right.encode_state_as_update_v1())
+        .unwrap();
+
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let converged = left.snapshot().unwrap();
+    assert_eq!(converged.comments.len(), 2);
+    assert_eq!(
+        converged
+            .comments
+            .iter()
+            .map(|comment| comment.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Check this figure.", "Reword the heading."],
+        "comments order by (created, id) on every peer"
+    );
+
+    left.remove_comment(&context, &mine.comment_id).unwrap();
+    right
+        .apply_update_v1(&left.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    assert_eq!(right.snapshot().unwrap().comments.len(), 1);
+}
+
+#[test]
+fn comment_ids_are_deterministic_per_client_not_random() {
+    let left = DeckSession::open(FIXTURE, 606).unwrap();
+    let right = DeckSession::open(FIXTURE, 606).unwrap();
+    let context = EditCtx::local("local");
+    let slide = left.snapshot().unwrap().slides[0].id.clone();
+    let arguments = ("Ada", "AL", "Same edit.", "2026-09-01T10:00:00.000");
+
+    let mine = left
+        .add_comment(
+            &context,
+            &slide,
+            arguments.0,
+            arguments.1,
+            arguments.2,
+            arguments.3,
+            0,
+            0,
+        )
+        .unwrap();
+    let theirs = right
+        .add_comment(
+            &context,
+            &slide,
+            arguments.0,
+            arguments.1,
+            arguments.2,
+            arguments.3,
+            0,
+            0,
+        )
+        .unwrap();
+
+    assert_eq!(mine.comment_id, theirs.comment_id);
+    assert_eq!(mine.comment_id, "comment:606:0");
+    assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    let second = left
+        .add_comment(&context, &slide, "Ada", "AL", "Second", arguments.3, 0, 0)
+        .unwrap();
+    assert_eq!(second.comment_id, "comment:606:1");
+    assert_ne!(mine.comment_id, second.comment_id);
 }

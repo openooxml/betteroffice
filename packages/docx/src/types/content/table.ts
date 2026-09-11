@@ -3,7 +3,7 @@
  */
 
 import type { TableFormatting, TableRowFormatting, TableCellFormatting } from '../formatting';
-import type { Paragraph } from './paragraph';
+import type { BlockContent } from './section';
 import type {
   TablePropertyChange,
   TableRowPropertyChange,
@@ -26,7 +26,7 @@ export interface TableCell {
   /** Tracked structural changes (cell insert/delete/merge) */
   structuralChange?: TableStructuralChangeInfo;
   /** Cell content (paragraphs, tables, etc.) */
-  content: (Paragraph | Table)[];
+  content: BlockContent[];
 }
 
 /**

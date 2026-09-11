@@ -113,7 +113,10 @@ export function buildA11yGrid(
 ): A11yGrid {
   const grid = displayList.grid;
   const label = fill(t.gridLabel, { sheet: sheetName });
-  const charts = (displayList.charts ?? []).map((chart) => ({ label: chart.label }));
+  const charts = (displayList.charts ?? []).map((chart) => ({
+    label: chart.label,
+    placeholder: chart.placeholder ?? false,
+  }));
   if (!grid) return { label, sheetName, columnHeaders: [], rows: [], charts };
 
   const cols = grid.colOffsets.length - 1;

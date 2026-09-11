@@ -19,6 +19,10 @@ export class DocumentLoadGeneration {
     return this.generation === generation;
   }
 
+  reportError(generation: number, error: Error, onError?: (error: Error) => void): void {
+    if (this.isCurrent(generation)) onError?.(error);
+  }
+
   waitForCompletion(generation: number): Promise<void> {
     if (!this.isCurrent(generation) || this.completedGeneration === generation) {
       return Promise.resolve();

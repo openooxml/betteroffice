@@ -57,6 +57,7 @@
 //! registry lives in this file. Everything below the wrappers is pure and
 //! native-testable.
 
+mod anchor;
 pub mod canonical;
 pub mod hooks;
 pub mod page_flow;
@@ -82,6 +83,8 @@ pub mod section_breaks;
 pub mod session;
 pub mod table_grid;
 pub mod table_row_break;
+
+mod typed_measure;
 
 use wasm_bindgen::prelude::*;
 
@@ -390,24 +393,26 @@ pub fn range_rects_json(display_list: &str, from: f64, to: f64) -> Result<String
 }
 
 /// wasm wrapper over [`hit::range_rects_region_json`]: region-aware range rects.
-/// `region` is `"body" | "header" | "footer"`; `r_id` scopes a header/footer to
-/// one HF part (empty for body / match-any). The `from`/`to` refer to that
+/// `region` is `"body" | "header" | "footer" | "footnote" | "endnote"`;
+/// `part_id` scopes a header/footer to one HF part (empty for body / match-any)
+/// and names the note id for a note region. The `from`/`to` refer to that
 /// region's doc. The plain `range_rects_json` export stays body-only.
 #[wasm_bindgen]
 pub fn range_rects_region_json(
     display_list: &str,
     region: &str,
-    r_id: &str,
+    part_id: &str,
     from: f64,
     to: f64,
 ) -> Result<String, JsValue> {
-    hit::range_rects_region_json(display_list, region, r_id, from as i64, to as i64)
+    hit::range_rects_region_json(display_list, region, part_id, from as i64, to as i64)
         .map_err(|e| JsValue::from_str(&e))
 }
 
 /// wasm wrapper over [`hit::hit_test_regions_json`]: region-aware hit test —
-/// `{"region":"body"|"header"|"footer","rId"?,"pos":n|null}` (or `"null"` for
-/// an out-of-range page). The plain `hit_test_json` export stays body-only.
+/// `{"region":"body"|"header"|"footer"|"footnote"|"endnote","rId"?,"noteId"?,`
+/// `"pos":n|null,"target":"text"|"image"|"none"}` (or `"null"` for an
+/// out-of-range page). The plain `hit_test_json` export stays body-only.
 #[wasm_bindgen]
 pub fn hit_test_regions_json(
     display_list: &str,
@@ -491,18 +496,19 @@ pub fn range_rects_by_handle(handle: u32, from: f64, to: f64) -> Result<String, 
 
 /// wasm wrapper over [`session::range_rects_region_by_handle`]: region-aware
 /// range rects against a stored display list. `region` is
-/// `"body" | "header" | "footer"`; `r_id` scopes header/footer to one HF part.
+/// `"body" | "header" | "footer" | "footnote" | "endnote"`; `part_id` scopes
+/// header/footer to one HF part and names the note id for a note region.
 /// `Err` on an unknown/closed handle so the caller can fall back to
 /// [`range_rects_region_json`].
 #[wasm_bindgen]
 pub fn range_rects_region_by_handle(
     handle: u32,
     region: &str,
-    r_id: &str,
+    part_id: &str,
     from: f64,
     to: f64,
 ) -> Result<String, JsValue> {
-    session::range_rects_region_by_handle(handle, region, r_id, from as i64, to as i64)
+    session::range_rects_region_by_handle(handle, region, part_id, from as i64, to as i64)
         .map_err(|e| JsValue::from_str(&e))
 }
 
@@ -551,6 +557,14 @@ pub fn measure_paragraph_json(input: &str) -> Result<String, JsValue> {
 /// remeasures a dirty paragraph inside a larger operation.
 pub fn measure_paragraph_json_resident(input: &str) -> Result<String, String> {
     MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_json(&store.borrow(), input))
+}
+
+/// Typed form of [`measure_paragraph_json_resident`] against the same font
+/// store, skipping both JSON round trips.
+pub(crate) fn measure_paragraph_typed_resident(
+    request: &ooxml_text::MeasureRequest<'_>,
+) -> Result<ooxml_text::ParagraphExtentOut, ooxml_text::MeasureError> {
+    MEASURE_FONTS.with(|store| ooxml_text::measure_paragraph_typed(&store.borrow(), request))
 }
 
 /// wasm wrapper over [`ooxml_text::FontStore::outline_glyph_json`]: the outline

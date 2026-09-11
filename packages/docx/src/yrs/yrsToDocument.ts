@@ -2,6 +2,7 @@
 
 /* eslint-disable max-lines -- the inverse mapping stays co-located with its save orchestrator */
 
+import { isRawXml } from '../types/content/rawXml';
 import { pixelsToEmu } from '../utils/units';
 import {
   applyContentControlValue,
@@ -41,6 +42,8 @@ import type {
   InlineSdt,
   SdtProperties,
   Comment,
+  Footnote,
+  Endnote,
 } from '../types/document';
 import type { YrsSession } from './index';
 
@@ -129,6 +132,7 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   renderedPageBreakBefore: null,
   keepNext: null,
   keepLines: null,
+  widowControl: null,
   contextualSpacing: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
@@ -200,6 +204,7 @@ interface BookmarkBoundary extends CommentBoundary {
 
 interface OriginalRunBoundary {
   text: string;
+  noteMarks?: string[];
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
@@ -675,16 +680,32 @@ function imageRunFromPayload(payload: Attrs): Run {
   return { type: 'run', content: [{ type: 'drawing', image }] };
 }
 
+/** The seeded shape, carrying the text body and everything else no payload field describes. */
+function storedShape(value: unknown): Shape | undefined {
+  const json = asString(value);
+  if (!json || json.length > 2_000_000) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Shape;
+    if (parsed?.type !== 'shape' || typeof parsed.shapeType !== 'string') return undefined;
+    if (!asObject(parsed.size)) parsed.size = { width: 0, height: 0 };
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
-  const shape: Shape = {
+  const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
-    shapeType: (asString(payload.shapeType) || 'rect') as Shape['shapeType'],
-    id: asString(payload.shapeId) || undefined,
-    size: {
-      width: payload.width ? pixelsToEmu(Number(payload.width)) : 0,
-      height: payload.height ? pixelsToEmu(Number(payload.height)) : 0,
-    },
+    shapeType: 'rect',
+    size: { width: 0, height: 0 },
   };
+  const shapeType = asString(payload.shapeType);
+  if (shapeType) shape.shapeType = shapeType as Shape['shapeType'];
+  const shapeId = asString(payload.shapeId);
+  if (shapeId) shape.id = shapeId;
+  if (payload.width) shape.size = { ...shape.size, width: pixelsToEmu(Number(payload.width)) };
+  if (payload.height) shape.size = { ...shape.size, height: pixelsToEmu(Number(payload.height)) };
   if (Array.isArray(payload.geometryPath) && payload.geometryPath.length > 0) {
     shape.geometryPath = payload.geometryPath as NonNullable<Shape['geometryPath']>;
   }
@@ -921,7 +942,83 @@ function addToHyperlink(hyperlink: Hyperlink, item: InlineItem): void {
   }
 }
 
+function projectionSignature(items: InlineItem[]): string {
+  const normalized: InlineItem[] = [];
+  for (const source of items) {
+    const attributes = { ...source.attributes };
+    delete attributes.fieldResult;
+    const item: InlineItem = source.kind === 'embed' && source.embedKind === 'tab'
+      ? { kind: 'text', text: '\t', attributes }
+      : { ...source, attributes };
+    const previous = normalized.at(-1);
+    if (item.kind === 'text' && previous?.kind === 'text' && stableStringify(previous.attributes) === stableStringify(attributes)) {
+      previous.text += item.text;
+    } else normalized.push(item);
+  }
+  return stableStringify(normalized);
+}
+
+function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
+  const owners: { id: number; owner: EmbedItem; position: number }[] = [];
+  for (const [position, item] of items.entries()) {
+    if (item.kind !== 'embed' || item.embedKind !== 'field') continue;
+    const id = asFiniteNumber(asObject(item.payload.resultProjection)?.id);
+    if (id !== undefined) owners.push({ id, owner: item, position });
+  }
+  if (owners.length === 0) return items;
+  const groups = new Map<EmbedItem, Map<number, InlineItem[]>>();
+  const remaining = items.filter((item, position) => {
+    const marker = asObject(item.attributes.fieldResult);
+    const id = asFiniteNumber(marker?.id);
+    const index = asFiniteNumber(marker?.index);
+    const owner = owners.find((entry) => entry.id === id && entry.position > position)?.owner;
+    if (index === undefined || !owner) return true;
+    const children = groups.get(owner) ?? new Map<number, InlineItem[]>();
+    const group = children.get(index) ?? [];
+    const attributes = { ...item.attributes };
+    delete attributes.fieldResult;
+    group.push({ ...item, attributes });
+    children.set(index, group);
+    groups.set(owner, children);
+    return false;
+  });
+  for (const { owner } of owners) {
+    const stored = fieldFromPayload(owner.payload, owner.attributes);
+    if (stored.type !== 'complexField') continue;
+    const projection = asObject(owner.payload.resultProjection);
+    const originals = Array.isArray(projection?.children) ? projection.children : [];
+    const replacements = new Map<number, ReturnType<typeof inlineSdtContent>>();
+    for (const raw of originals) {
+      const child = asObject(raw);
+      const index = asFiniteNumber(child?.index);
+      if (index === undefined || !Array.isArray(child?.items)) continue;
+      const current = groups.get(owner)?.get(index) ?? [];
+      if (projectionSignature(current) === projectionSignature(child.items as InlineItem[])) continue;
+      const rebuilt = inlineSdtContent(buildParagraphContent(current));
+      const original = index < 0 ? stored.structuredCode?.inline?.[-index - 1] : stored.structuredResult?.inline?.[index];
+      if (original?.type === 'hyperlink' && rebuilt.length === 1 && rebuilt[0]?.type === 'hyperlink') {
+        rebuilt[0] = { ...original, ...rebuilt[0], structuredChildren: rebuilt[0].structuredChildren };
+      }
+      replacements.set(index, rebuilt);
+    }
+    if (replacements.size === 0) continue;
+    const inline = (stored.structuredResult?.inline ?? []).flatMap((child, index) => replacements.get(index) ?? [child]);
+    const code = stored.structuredCode?.inline?.flatMap((child, index) => replacements.get(-index - 1) ?? [child]);
+    stored.structuredResult = { ...stored.structuredResult, inline };
+    if (code) stored.structuredCode = { ...stored.structuredCode, inline: code };
+    if (stored.fieldTree) {
+      stored.fieldTree.result = { ...stored.fieldTree.result, inline };
+      if (code) stored.fieldTree.code = { ...stored.fieldTree.code, inline: code };
+    }
+    stored.fieldResult = inline.flatMap((child) => child.type === 'run' ? [child]
+      : child.type === 'hyperlink' ? child.children.filter((entry): entry is Run => entry.type === 'run') : []);
+    owner.payload = { ...owner.payload, fieldData: JSON.stringify(stored) };
+  }
+  return remaining;
+}
+
 function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
+  items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
   let currentFormattingKey: string | null = null;
@@ -1022,6 +1119,14 @@ function marksKeyToYrsAttrs(marksKey: string | undefined): Attrs | null {
   return attrs;
 }
 
+/** Rebuilds the note number marks a run held; they occupy no story unit. */
+function noteMarkContent(boundary: OriginalRunBoundary): RunContent[] | null {
+  if (!boundary.noteMarks?.length) return null;
+  return boundary.noteMarks.map((mark) => ({
+    type: mark === 'endnote' ? 'endnoteRefMark' : 'footnoteRefMark',
+  }));
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1032,7 +1137,8 @@ function restoreOriginalRuns(
     !content.every(
       (child) => child.type === 'run' && child.content.every((entry) => entry.type === 'text')
     ) ||
-    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink)
+    items.some((item) => item.kind !== 'text' || item.attributes.hyperlink) ||
+    boundaries.some((boundary) => boundary.noteMarks?.length && boundary.text.length > 0)
   ) {
     return content;
   }
@@ -1048,8 +1154,8 @@ function restoreOriginalRuns(
     restoredAttrs.push(expected);
     let remaining = boundary.text.length;
     while (remaining > 0) {
-      const item = items[itemIndex] as TextItem | undefined;
-      if (!item) return content;
+      const item = items[itemIndex];
+      if (item?.kind !== 'text') return content;
       if (stableStringify(formattingAttrs(item.attributes)) !== stableStringify(expected)) {
         return content;
       }
@@ -1064,6 +1170,8 @@ function restoreOriginalRuns(
     }
   }
 
+  if (itemIndex !== items.length || itemOffset !== 0) return content;
+
   return boundaries.map((boundary, index) => {
     // restoreOriginalRuns restores the original segmentation/property-change
     // cache, but non-empty runs keep formatting reconstructed from their live
@@ -1074,7 +1182,7 @@ function restoreOriginalRuns(
         : attrsToTextFormatting(restoredAttrs[index]);
     const run: Run = {
       type: 'run',
-      content: runContentForText(boundary.text, formatting ?? {}),
+      content: noteMarkContent(boundary) ?? runContentForText(boundary.text, formatting ?? {}),
     };
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
@@ -1090,7 +1198,9 @@ function runTextLength(run: Run): number {
     if (
       content.type === 'tab' ||
       content.type === 'softHyphen' ||
-      content.type === 'noBreakHyphen'
+      content.type === 'noBreakHyphen' ||
+      content.type === 'footnoteRef' ||
+      content.type === 'endnoteRef'
     ) {
       return length + 1;
     }
@@ -1219,6 +1329,18 @@ function bookmarkBoundaries(properties: Attrs): BookmarkBoundary[] {
   return result;
 }
 
+function restoreRawInlines(content: ParagraphContent[], base: Paragraph | undefined): ParagraphContent[] {
+  if (!base) return content;
+  const length = content.reduce((sum, child) => sum + paragraphContentLength(child), 0);
+  const boundaries: CommentBoundary[] = [];
+  let offset = 0;
+  for (const [index, child] of base.content.entries()) {
+    if (child.type === 'rawXml') boundaries.push({ id: index, kind: 'start', offset: Math.min(offset, length) });
+    offset += paragraphContentLength(child);
+  }
+  return insertBoundaries(content, boundaries, (boundary) => base.content[boundary.id]!);
+}
+
 function paragraphAttrs(properties: Attrs): ParagraphSaveAttrs {
   const attrs = { ...PARAGRAPH_ATTR_DEFAULTS, ...properties } as Attrs;
   attrs.styleId = properties.pStyle ?? null;
@@ -1244,6 +1366,7 @@ function paragraphFromStory(
       ? (attrs._originalRunBoundaries as OriginalRunBoundary[])
       : undefined
   );
+  content = restoreRawInlines(content, baseParagraph);
   content = insertBoundaries(content, commentBoundaries);
 
   const bookmarks = bookmarkBoundaries(properties).map((boundary) => ({
@@ -1297,30 +1420,26 @@ function paragraphFromStory(
   return paragraph;
 }
 
+/**
+ * Lifts a `w:tblBorders` back out of the per-cell edges seeding pushed down:
+ * outer sides come from the cells owning the table's boundary, `insideH`/
+ * `insideV` from an interior edge. Sides no cell authors stay absent.
+ */
 function inferTableBorders(rows: TableRow[]): TableBorders | undefined {
-  for (const row of rows) {
-    for (const cell of row.cells) {
-      const borders = cell.formatting?.borders;
-      if (!borders) continue;
-      const base =
-        borders.top ||
-        borders.left ||
-        borders.right ||
-        borders.bottom ||
-        borders.insideH ||
-        borders.insideV;
-      if (!base) return undefined;
-      return {
-        top: borders.top ?? base,
-        bottom: borders.bottom ?? base,
-        left: borders.left ?? base,
-        right: borders.right ?? base,
-        insideH: borders.insideH ?? borders.bottom ?? base,
-        insideV: borders.insideV ?? borders.right ?? base,
-      };
-    }
-  }
-  return undefined;
+  const firstRow = rows[0]?.cells;
+  const lastRow = rows[rows.length - 1]?.cells;
+  const corner = firstRow?.[0]?.formatting?.borders;
+  if (!firstRow || !lastRow || !corner) return undefined;
+  const borders: TableBorders = {
+    top: corner.top,
+    left: corner.left,
+    bottom: lastRow[0]?.formatting?.borders?.bottom,
+    right: firstRow[firstRow.length - 1]?.formatting?.borders?.right,
+    insideH: rows.length > 1 ? corner.bottom : undefined,
+    insideV: firstRow.length > 1 ? corner.right : undefined,
+  };
+  const authored = Object.entries(borders).filter(([, value]) => value !== undefined);
+  return authored.length > 0 ? (Object.fromEntries(authored) as TableBorders) : undefined;
 }
 
 function normalizeVMergeRuns(rows: TableRow[]): void {
@@ -1381,12 +1500,7 @@ function tableCellFromPayload(context: SaveContext, payload: TableCellPayload): 
   } as unknown as TableCellSaveAttrs;
   const content =
     payload.story && context.storyIds.has(payload.story)
-      ? context
-          .storyToBlocks(payload.story)
-          .filter(
-            (block): block is Paragraph | Table =>
-              block.type === 'paragraph' || block.type === 'table'
-          )
+      ? context.storyToBlocks(payload.story)
       : [];
   const cell: TableCell = {
     type: 'tableCell',
@@ -1539,6 +1653,51 @@ function pageBreakParagraph(): Paragraph {
   };
 }
 
+/** A note number mark run, or a tracked-change wrapper holding only those. */
+function isNoteMark(content: ParagraphContent): boolean {
+  if (
+    content.type === 'insertion' ||
+    content.type === 'deletion' ||
+    content.type === 'moveFrom' ||
+    content.type === 'moveTo'
+  ) {
+    return content.content.length > 0 && content.content.every(isNoteMark);
+  }
+  return (
+    content.type === 'run' &&
+    content.content.length > 0 &&
+    content.content.every(
+      (entry) => entry.type === 'footnoteRefMark' || entry.type === 'endnoteRefMark'
+    )
+  );
+}
+
+function hasNoteMark(blocks: readonly BlockContent[]): boolean {
+  return blocks.some((block) => block.type === 'paragraph' && block.content.some(isNoteMark));
+}
+
+/**
+ * Reinstates the `w:footnoteRef` / `w:endnoteRef` number mark on a projected
+ * note. The mark carries no story unit, so an edit that invalidates the run
+ * boundary cache would otherwise drop it; the source note is the only record.
+ */
+function restoreNoteMarks(
+  projected: BlockContent[],
+  base: readonly BlockContent[]
+): BlockContent[] {
+  if (hasNoteMark(projected)) return projected;
+  const opening = base.find((block) => block.type === 'paragraph')?.content ?? [];
+  const end = opening.findIndex((child) => !isNoteMark(child));
+  const marks = opening.slice(0, end < 0 ? opening.length : end);
+  if (marks.length === 0) return projected;
+  const index = projected.findIndex((block) => block.type === 'paragraph');
+  if (index < 0) return projected;
+  const target = projected[index] as Paragraph;
+  const restored = [...projected];
+  restored[index] = { ...target, content: [...marks, ...target.content] };
+  return restored;
+}
+
 function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
   const paragraphs = new Map<string, Paragraph>();
   const visit = (blocks: readonly BlockContent[]): void => {
@@ -1547,7 +1706,7 @@ function collectBaseParagraphs(document: Document): Map<string, Paragraph> {
         if (block.paraId && !paragraphs.has(block.paraId)) paragraphs.set(block.paraId, block);
       } else if (block.type === 'table') {
         for (const row of block.rows) for (const cell of row.cells) visit(cell.content);
-      } else {
+      } else if (block.type === 'blockSdt') {
         visit(block.content);
       }
     }
@@ -1565,7 +1724,12 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   const visit = (storyId: string, blocks: readonly BlockContent[]): void => {
     stories.set(storyId, blocks);
     let tableIndex = 0;
+    let sdtIndex = 0;
     for (const block of blocks) {
+      if (block.type === 'blockSdt') {
+        visit(`${storyId}:sdt${sdtIndex++}`, block.content);
+        continue;
+      }
       if (block.type !== 'table') continue;
       const currentTableIndex = tableIndex++;
       block.rows.forEach((row, rowIndex) => {
@@ -1580,6 +1744,7 @@ function collectBaseStories(document: Document): Map<string, readonly BlockConte
   for (const [rId, part] of document.package.headers ?? []) visit(`hf:${rId}`, part.content);
   for (const [rId, part] of document.package.footers ?? []) visit(`hf:${rId}`, part.content);
   for (const note of document.package.footnotes ?? []) visit(`fn:${note.id}`, note.content);
+  for (const note of document.package.endnotes ?? []) visit(`en:${note.id}`, note.content);
   return stories;
 }
 
@@ -1613,6 +1778,24 @@ function commentRanges(
   return byStory;
 }
 
+function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent[]): BlockContent[] {
+  let offset = 0;
+  for (let index = 0; index < base.length; index += 1) {
+    const block = base[index]!;
+    if (!isRawXml(block)) continue;
+    const following = base.slice(index + 1).find((candidate) =>
+      candidate.type === 'paragraph' && candidate.paraId && projected.some((entry) =>
+        entry.type === 'paragraph' && entry.paraId === candidate.paraId));
+    const anchor = following?.type === 'paragraph'
+      ? projected.findIndex((entry) => entry.type === 'paragraph' && entry.paraId === following.paraId)
+      : -1;
+    const position = anchor >= 0 ? anchor : Math.min(index + offset, projected.length);
+    projected.splice(position, 0, block);
+    offset = Math.max(0, position - index);
+  }
+  return projected;
+}
+
 class SaveContext {
   readonly storyIds: Set<string>;
   private readonly baseParagraphs: Map<string, Paragraph>;
@@ -1632,6 +1815,7 @@ class SaveContext {
   storyToBlocks(storyId: string): BlockContent[] {
     const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
+    const baseParagraphBlocks = baseBlocks?.filter((block): block is Paragraph => block.type === 'paragraph');
     const segments = this.session.storySegments(storyId);
     const storyComments = this.comments.get(storyId) ?? [];
     let items: InlineItem[] = [];
@@ -1682,7 +1866,9 @@ class SaveContext {
             segment.properties,
             items,
             paragraphCommentBoundaries(storyOffset),
-            this.baseParagraphs.get(segment.paraId)
+            this.baseParagraphs.get(segment.paraId) ?? (segment.paraId === generatedId
+              ? baseParagraphBlocks?.[paragraphIndex]
+              : undefined)
           )
         );
         items = [];
@@ -1739,7 +1925,7 @@ class SaveContext {
     if (items.length > 0) {
       blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
     }
-    return blocks;
+    return restoreRawBlocks(blocks, baseBlocks ?? []);
   }
 }
 
@@ -1803,17 +1989,27 @@ export function yrsToDocument(
     );
   }
 
-  const shouldProjectFootnotes =
-    options.storyIds === undefined ||
-    base.package.footnotes?.some((note) => shouldProject(`fn:${note.id}`));
-  const footnotes = shouldProjectFootnotes
-    ? base.package.footnotes?.map((note) => {
-        const storyId = `fn:${note.id}`;
-        return context.storyIds.has(storyId) && shouldProject(storyId)
-          ? { ...note, content: context.storyToBlocks(storyId), verbatimXml: undefined }
-          : note;
-      })
-    : base.package.footnotes;
+  const projectNotes = <T extends Footnote | Endnote>(
+    notes: T[] | undefined,
+    prefix: string
+  ): T[] | undefined => {
+    const shouldProjectNotes =
+      options.storyIds === undefined ||
+      notes?.some((note) => shouldProject(`${prefix}${note.id}`));
+    if (!shouldProjectNotes) return notes;
+    return notes?.map((note) => {
+      const storyId = `${prefix}${note.id}`;
+      return context.storyIds.has(storyId) && shouldProject(storyId)
+        ? {
+            ...note,
+            content: restoreNoteMarks(context.storyToBlocks(storyId), note.content),
+            verbatimXml: undefined,
+          }
+        : note;
+    });
+  };
+  const footnotes = projectNotes(base.package.footnotes, 'fn:');
+  const endnotes = projectNotes(base.package.endnotes, 'en:');
 
   return {
     ...base,
@@ -1826,6 +2022,7 @@ export function yrsToDocument(
       ...(headers ? { headers } : {}),
       ...(footers ? { footers } : {}),
       ...(footnotes ? { footnotes } : {}),
+      ...(endnotes ? { endnotes } : {}),
     },
   };
 }

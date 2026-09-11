@@ -5,6 +5,7 @@ import type {
   EndnoteProperties,
 } from '@betteroffice/docx/types/document';
 import { toolbarValueToLayoutTarget } from '@betteroffice/docx/docx';
+import { updateFinalSectionProperties } from '@betteroffice/docx/editor';
 import {
   captureInlinePositionEmuFromDisplayList,
   type DisplayListQueries,
@@ -146,19 +147,15 @@ export function useImageActions({
   const handleApplyFootnoteProperties = useCallback(
     (footnotePr: FootnoteProperties, endnotePr: EndnoteProperties) => {
       if (!document?.package) return;
-      const newDoc = {
-        ...document.package.document,
-        finalSectionProperties: {
-          ...document.package.document.finalSectionProperties,
-          footnotePr,
-          endnotePr,
-        },
-      };
       pushDocument({
         ...document,
         package: {
           ...document.package,
-          document: newDoc,
+          document: updateFinalSectionProperties(document.package.document, (properties) => ({
+            ...properties,
+            footnotePr,
+            endnotePr,
+          })),
         },
       });
     },

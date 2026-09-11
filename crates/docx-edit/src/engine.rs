@@ -1,5 +1,6 @@
 //! Resident editor-engine state.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
@@ -15,7 +16,7 @@ use docx_layout::header_footer::{
     HeaderFooterVariant, extend_body_margins, measure_header_footer,
     resolve_header_footer_field_widths,
 };
-use docx_layout::hit::{CaretRect, HitRegion, VerticalDirection};
+use docx_layout::hit::{CaretRect, VerticalDirection};
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -38,7 +39,9 @@ use crate::frame_delta::{
 struct LoweredStory {
     doc_epoch: u64,
     env: RenderEnv,
-    blocks: Vec<LayoutBlock>,
+    /// Shared so a reader can hold the lowering it asked for without the cache
+    /// borrow, and without copying the story.
+    blocks: Rc<Vec<LayoutBlock>>,
     /// Lazily serialized layout blocks.
     serialized_blocks: Option<String>,
 }
@@ -450,15 +453,6 @@ fn measured_fingerprints(input: &LayoutInput) -> Result<Vec<u64>, String> {
     input.measured.iter().map(measured_fingerprint).collect()
 }
 
-fn block_fingerprint(block: &LayoutBlock) -> Result<u64, String> {
-    let mut value = serde_json::to_value(block)
-        .map_err(|error| format!("fingerprint layout block: {error}"))?;
-    strip_absolute_positions(&mut value);
-    serde_json::to_vec(&value)
-        .map(|bytes| hash_bytes(&bytes))
-        .map_err(|error| format!("fingerprint layout block: {error}"))
-}
-
 fn value_block_key(value: &serde_json::Value) -> Option<String> {
     let id = value.get("block")?.get("id")?;
     match id {
@@ -485,11 +479,11 @@ fn options_fingerprint(input: &LayoutInput) -> Result<u64, String> {
         .map_err(|error| format!("fingerprint layout options: {error}"))
 }
 
-fn block_key(id: &BlockId) -> String {
+fn block_key(id: &BlockId) -> Cow<'_, str> {
     match id {
-        BlockId::Num(value) if value.fract() == 0.0 => format!("{}", *value as i64),
-        BlockId::Num(value) => value.to_string(),
-        BlockId::Str(value) => value.clone(),
+        BlockId::Num(value) if value.fract() == 0.0 => Cow::Owned(format!("{}", *value as i64)),
+        BlockId::Num(value) => Cow::Owned(value.to_string()),
+        BlockId::Str(value) => Cow::Borrowed(value),
     }
 }
 
@@ -530,7 +524,7 @@ fn position_deltas(previous: &LayoutInput, next: &LayoutInput) -> HashMap<String
                 return None;
             }
             let delta = next_start? as i64 - previous_start? as i64;
-            (delta != 0).then_some((key, delta))
+            (delta != 0).then_some((key.into_owned(), delta))
         })
         .collect()
 }
@@ -593,9 +587,8 @@ impl EngineSession {
         }
     }
 
-    /// Internal editing surface for the wasm facade.
-    #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
-    pub(crate) fn doc(&self) -> &EditingDoc {
+    /// Editing document.
+    pub fn doc(&self) -> &EditingDoc {
         &self.doc
     }
 
@@ -610,38 +603,69 @@ impl EngineSession {
         env: &RenderEnv,
         read: impl FnOnce(&[LayoutBlock]) -> T,
     ) -> Result<T, BridgeError> {
-        let epoch = self.doc_epoch();
-        let is_hit = self
-            .render
+        self.with_lowered_story_observed(story, env, &mut || {}, read)
+    }
+
+    /// Whether `story` is already lowered for this document epoch and
+    /// environment.
+    fn story_is_resident(&self, story: &str, epoch: u64, env: &RenderEnv) -> bool {
+        self.render
             .borrow()
             .stories
             .get(story)
-            .is_some_and(|cached| cached.doc_epoch == epoch && cached.env == *env);
+            .is_some_and(|cached| cached.doc_epoch == epoch && cached.env == *env)
+    }
 
-        if !is_hit {
-            let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
-            let mut render = self.render.borrow_mut();
-            render.cache_misses = render.cache_misses.wrapping_add(1);
-            render.stories.insert(
-                story.to_owned(),
-                LoweredStory {
-                    doc_epoch: epoch,
-                    env: env.clone(),
-                    blocks,
-                    serialized_blocks: None,
-                },
-            );
-        } else {
+    fn lower_story_into_cache(
+        &self,
+        story: &str,
+        epoch: u64,
+        env: &RenderEnv,
+    ) -> Result<(), BridgeError> {
+        let blocks = yrs_doc_to_layout_blocks(&self.doc, story, env)?;
+        let mut render = self.render.borrow_mut();
+        render.cache_misses = render.cache_misses.wrapping_add(1);
+        render.stories.insert(
+            story.to_owned(),
+            LoweredStory {
+                doc_epoch: epoch,
+                env: env.clone(),
+                blocks: Rc::new(blocks),
+                serialized_blocks: None,
+            },
+        );
+        Ok(())
+    }
+
+    /// [`Self::with_lowered_story`] with a hook between lowering and the read.
+    /// The lowering is claimed before `after_lower` fires, so an observer
+    /// supplied by the host may re-enter the engine — even re-lowering this
+    /// story — without disturbing what the caller reads.
+    fn with_lowered_story_observed<T>(
+        &self,
+        story: &str,
+        env: &RenderEnv,
+        after_lower: &mut dyn FnMut(),
+        read: impl FnOnce(&[LayoutBlock]) -> T,
+    ) -> Result<T, BridgeError> {
+        let epoch = self.doc_epoch();
+        if self.story_is_resident(story, epoch, env) {
             let mut render = self.render.borrow_mut();
             render.cache_hits = render.cache_hits.wrapping_add(1);
+        } else {
+            self.lower_story_into_cache(story, epoch, env)?;
         }
-
-        let render = self.render.borrow();
-        let cached = render
-            .stories
-            .get(story)
-            .expect("resident story exists after lowering");
-        Ok(read(&cached.blocks))
+        let blocks = Rc::clone(
+            &self
+                .render
+                .borrow()
+                .stories
+                .get(story)
+                .expect("resident story exists after lowering")
+                .blocks,
+        );
+        after_lower();
+        Ok(read(&blocks))
     }
 
     /// Serializes resident lowered blocks.
@@ -748,15 +772,13 @@ impl EngineSession {
         {
             return Some(template.envelope.clone());
         }
-        let previous_fingerprint = block_fingerprint(previous_block).ok()?;
         measurement.templates.values().find_map(|template| {
             if !template.resident_safe {
                 return None;
             }
             let block: LayoutBlock =
                 serde_json::from_value(template.envelope.get("block")?.clone()).ok()?;
-            (block_fingerprint(&block).ok()? == previous_fingerprint)
-                .then(|| template.envelope.clone())
+            (block == *previous_block).then(|| template.envelope.clone())
         })
     }
 
@@ -849,6 +871,59 @@ impl EngineSession {
             state.headers_footers.as_ref(),
             notes_converged,
         )
+    }
+
+    /// Full region pass whose reply omits the measured arena — tens of MB of
+    /// shaping data a worker-rendered host never reads. Fetch the retained
+    /// inputs on demand via [`Self::retained_kernel_inputs_json`].
+    pub fn layout_document_with_regions_retained_json(
+        &self,
+        input_json: &str,
+    ) -> Result<String, String> {
+        let notes_converged = self.layout_document_with_regions_value(input_json)?;
+        let pagination = self.pagination.borrow();
+        let regions_state = self.regions.borrow();
+        let state = regions_state
+            .as_ref()
+            .expect("region state retained after successful region layout");
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedRegionLayoutOutput<'a> {
+            layout: &'a Layout,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            headers_footers: Option<&'a serde_json::Value>,
+            notes_converged: bool,
+        }
+        serde_json::to_string(&RetainedRegionLayoutOutput {
+            layout: pagination
+                .layout
+                .as_ref()
+                .expect("layout retained after successful pagination"),
+            headers_footers: state.headers_footers.as_ref(),
+            notes_converged,
+        })
+        .map_err(|error| format!("serialize: {error}"))
+    }
+
+    /// The retained measured arena and layout options, for a host taking the
+    /// main-thread display-list fallback after a retained-only region layout.
+    pub fn retained_kernel_inputs_json(&self) -> Result<String, String> {
+        let pagination = self.pagination.borrow();
+        let input = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        #[derive(Serialize)]
+        #[serde(rename_all = "camelCase")]
+        struct RetainedKernelInputs<'a> {
+            measured: &'a [MeasuredBlock],
+            options: &'a docx_layout::types::LayoutOptions,
+        }
+        serde_json::to_string(&RetainedKernelInputs {
+            measured: &input.measured,
+            options: &input.options,
+        })
+        .map_err(|error| format!("serialize: {error}"))
     }
 
     /// The full region pass minus the JSON envelope: pagination, note
@@ -1300,40 +1375,42 @@ impl EngineSession {
             .get(story)
             .map(|story| story.env.clone())
             .ok_or_else(|| format!("resident render environment missing for story {story:?}"))?;
-        let blocks = self
-            .with_lowered_story(story, &env, <[LayoutBlock]>::to_vec)
-            .map_err(|error| error.to_string())?;
-        after_lower();
-        self.resident_layout_input_from_blocks(blocks, &mut |_, key, previous_block, next_block| {
-            let mut envelope = self
-                .measurement_envelope_for_block(key, previous_block)
-                .ok_or_else(|| {
-                    format!("resident measurement template missing for block {key:?}")
-                })?;
-            let fields = envelope
-                .as_object_mut()
-                .ok_or_else(|| "resident measurement envelope is not an object".to_owned())?;
-            fields.insert(
-                "block".to_owned(),
-                serde_json::to_value(&*next_block)
-                    .map_err(|error| format!("serialize dirty paragraph: {error}"))?,
-            );
-            let envelope_json = serde_json::to_string(&envelope)
-                .map_err(|error| format!("serialize measurement envelope: {error}"))?;
-            let extent_json = docx_layout::measure_paragraph_json_resident(&envelope_json)?;
-            let extent: ParagraphExtent = serde_json::from_str(&extent_json)
-                .map_err(|error| format!("parse resident paragraph extent: {error}"))?;
-            Ok(BlockExtent::Paragraph(extent))
+        self.with_lowered_story_observed(story, &env, after_lower, |blocks| {
+            self.resident_layout_input_from_blocks(
+                blocks,
+                &mut |_, key, previous_block, next_block| {
+                    let mut envelope = self
+                        .measurement_envelope_for_block(key, previous_block)
+                        .ok_or_else(|| {
+                            format!("resident measurement template missing for block {key:?}")
+                        })?;
+                    let fields = envelope.as_object_mut().ok_or_else(|| {
+                        "resident measurement envelope is not an object".to_owned()
+                    })?;
+                    fields.insert(
+                        "block".to_owned(),
+                        serde_json::to_value(&*next_block)
+                            .map_err(|error| format!("serialize dirty paragraph: {error}"))?,
+                    );
+                    let envelope_json = serde_json::to_string(&envelope)
+                        .map_err(|error| format!("serialize measurement envelope: {error}"))?;
+                    let extent_json = docx_layout::measure_paragraph_json_resident(&envelope_json)?;
+                    let extent: ParagraphExtent = serde_json::from_str(&extent_json)
+                        .map_err(|error| format!("parse resident paragraph extent: {error}"))?;
+                    Ok(BlockExtent::Paragraph(extent))
+                },
+            )
         })
+        .map_err(|error| error.to_string())?
     }
 
-    /// Shared dirty-block walk over a freshly lowered story: fingerprint-clean
+    /// Shared dirty-block walk over a freshly lowered story: structurally clean
     /// blocks reuse their retained extents (with fresh absolute positions),
     /// changed paragraph blocks are re-measured through `measure_dirty`
     /// (`(block_index, block_key, previous_block, next_block) -> extent`).
     fn resident_layout_input_from_blocks(
         &self,
-        blocks: Vec<LayoutBlock>,
+        blocks: &[LayoutBlock],
         measure_dirty: &mut dyn FnMut(
             usize,
             &str,
@@ -1341,16 +1418,12 @@ impl EngineSession {
             &mut LayoutBlock,
         ) -> Result<BlockExtent, String>,
     ) -> Result<ResidentLayoutInput, String> {
-        let (previous, previous_fingerprints) = {
-            let pagination = self.pagination.borrow();
-            (
-                pagination
-                    .input
-                    .clone()
-                    .ok_or_else(|| "resident pagination input is not built".to_owned())?,
-                pagination.block_fingerprints.clone(),
-            )
-        };
+        let pagination = self.pagination.borrow();
+        let previous = pagination
+            .input
+            .as_ref()
+            .ok_or_else(|| "resident pagination input is not built".to_owned())?;
+        let previous_fingerprints = &pagination.block_fingerprints;
         let paragraph_merge = blocks.len().checked_add(1) == Some(previous.measured.len());
         if blocks.len() != previous.measured.len() && !paragraph_merge {
             return Err("resident plain-text input changed the block structure".to_owned());
@@ -1359,22 +1432,17 @@ impl EngineSession {
             return Err("resident pagination fingerprints are not built".to_owned());
         }
 
-        let mut previous_blocks = previous
-            .measured
-            .into_iter()
-            .zip(previous_fingerprints)
-            .peekable();
+        let mut previous_blocks = previous.measured.iter().zip(previous_fingerprints);
         let mut skipped_merged_paragraph = false;
         let mut measured = Vec::with_capacity(blocks.len());
         let mut block_fingerprints = Vec::with_capacity(blocks.len());
         let mut resident_measure_calls = 0_u64;
         let mut resident_reused_blocks = 0_u64;
-        for (block_index, mut next_block) in blocks.into_iter().enumerate() {
+        for (block_index, next_block) in blocks.iter().enumerate() {
             let mut previous_entry = previous_blocks.next().ok_or_else(|| {
                 "resident plain-text input changed the block structure".to_owned()
             })?;
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, &next_block)
-            {
+            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
                 if skipped_merged_paragraph || paragraph_identity(&previous_entry.0.block).is_none()
                 {
                     return Err("resident plain-text input changed the block structure".to_owned());
@@ -1384,25 +1452,24 @@ impl EngineSession {
                     "resident plain-text input changed the block structure".to_owned()
                 })?;
             }
-            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, &next_block)
-            {
+            if paragraph_merge && !resident_block_slots_match(&previous_entry.0.block, next_block) {
                 return Err("resident plain-text input changed stable block identity".to_owned());
             }
             let (previous_measured, previous_fingerprint) = previous_entry;
             let (Some((next_id, _)), Some((previous_id, _))) = (
-                paragraph_identity(&next_block),
+                paragraph_identity(next_block),
                 paragraph_identity(&previous_measured.block),
             ) else {
-                if block_fingerprint(&next_block)? != block_fingerprint(&previous_measured.block)? {
+                if *next_block != previous_measured.block {
                     return Err(
                         "resident plain-text input changed a non-paragraph block".to_owned()
                     );
                 }
                 measured.push(MeasuredBlock {
-                    block: next_block,
-                    measure: previous_measured.measure,
+                    block: next_block.clone(),
+                    measure: previous_measured.measure.clone(),
                 });
-                block_fingerprints.push(previous_fingerprint);
+                block_fingerprints.push(*previous_fingerprint);
                 resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
                 continue;
             };
@@ -1410,20 +1477,25 @@ impl EngineSession {
             if key != block_key(previous_id) {
                 return Err("resident plain-text input changed stable block identity".to_owned());
             }
-            if block_fingerprint(&next_block)? == block_fingerprint(&previous_measured.block)? {
+            if *next_block == previous_measured.block {
                 measured.push(MeasuredBlock {
-                    block: next_block,
-                    measure: previous_measured.measure,
+                    block: next_block.clone(),
+                    measure: previous_measured.measure.clone(),
                 });
-                block_fingerprints.push(previous_fingerprint);
+                block_fingerprints.push(*previous_fingerprint);
                 resident_reused_blocks = resident_reused_blocks.wrapping_add(1);
                 continue;
             }
 
-            let measure =
-                measure_dirty(block_index, &key, &previous_measured.block, &mut next_block)?;
+            let mut next_measured_block = next_block.clone();
+            let measure = measure_dirty(
+                block_index,
+                &key,
+                &previous_measured.block,
+                &mut next_measured_block,
+            )?;
             let measured_block = MeasuredBlock {
-                block: next_block,
+                block: next_measured_block,
                 measure,
             };
             block_fingerprints.push(measured_fingerprint(&measured_block)?);
@@ -1454,7 +1526,7 @@ impl EngineSession {
         Ok(ResidentLayoutInput {
             input: LayoutInput {
                 measured,
-                options: previous.options,
+                options: previous.options.clone(),
             },
             block_fingerprints,
         })
@@ -1530,43 +1602,54 @@ impl EngineSession {
             };
             lowered.env.clone()
         };
-        let blocks = self
-            .with_lowered_story(story, &env, <[LayoutBlock]>::to_vec)
-            .map_err(|error| error.to_string())?;
-        phase(RegionResidentPhase::Lowered);
-        let (widths, geometry, previous_pages) = {
-            let pagination = self.pagination.borrow();
-            let (Some(input), Some(layout)) =
-                (pagination.input.as_ref(), pagination.layout.as_ref())
-            else {
-                return Ok(false);
-            };
-            (
-                region_measurement_widths(&blocks, input, &regions),
-                initial_float_page_geometry(input, &regions),
-                layout.pages.len(),
+        let outcome = self
+            .with_lowered_story_observed(
+                story,
+                &env,
+                &mut || phase(RegionResidentPhase::Lowered),
+                |blocks| -> Result<Option<(ResidentLayoutInput, usize)>, String> {
+                    let (widths, geometry, previous_pages) = {
+                        let pagination = self.pagination.borrow();
+                        let (Some(input), Some(layout)) =
+                            (pagination.input.as_ref(), pagination.layout.as_ref())
+                        else {
+                            return Ok(None);
+                        };
+                        (
+                            region_measurement_widths(blocks, input, &regions),
+                            initial_float_page_geometry(input, &regions),
+                            layout.pages.len(),
+                        )
+                    };
+                    let default_width = widths.first().copied().unwrap_or(0.0);
+                    if docx_layout::measure_blocks::has_floating_zones(
+                        blocks,
+                        default_width,
+                        measurement.as_ref(),
+                        Some(&geometry),
+                    )? {
+                        return Ok(None);
+                    }
+                    match self.resident_layout_input_from_blocks(
+                        blocks,
+                        &mut |index, _key, _previous_block, next_block| {
+                            let width = widths.get(index).copied().unwrap_or(default_width);
+                            docx_layout::measure_blocks::measure_block(
+                                next_block,
+                                width,
+                                measurement.as_ref(),
+                            )
+                        },
+                    ) {
+                        Ok(resident) => Ok(Some((resident, previous_pages))),
+                        Err(_) => Ok(None),
+                    }
+                },
             )
-        };
-        let default_width = widths.first().copied().unwrap_or(0.0);
-        if docx_layout::measure_blocks::has_floating_zones(
-            &blocks,
-            default_width,
-            measurement.as_ref(),
-            Some(&geometry),
-        )? {
-            return Ok(false);
-        }
-        let resident = match self.resident_layout_input_from_blocks(
-            blocks,
-            &mut |index, _key, _previous_block, next_block| {
-                let width = widths.get(index).copied().unwrap_or(default_width);
-                docx_layout::measure_blocks::measure_block(next_block, width, measurement.as_ref())
-            },
-        ) {
-            Ok(resident) => resident,
-            // Structural mismatch (beyond the supported plain-edit shapes) —
-            // the full pass handles it.
-            Err(_) => return Ok(false),
+            .map_err(|error| error.to_string())??;
+        let (resident, previous_pages) = match outcome {
+            Some(resident) => resident,
+            None => return Ok(false),
         };
         phase(RegionResidentPhase::Measured);
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
@@ -1925,23 +2008,18 @@ impl EngineSession {
             .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
     }
 
-    /// Header/footer/body range geometry directly against the resident list.
+    /// Body, header/footer and note range geometry directly against the
+    /// resident list.
     pub fn display_range_rects_region_json(
         &self,
         region: &str,
-        r_id: &str,
+        part_id: &str,
         from: i64,
         to: i64,
     ) -> Result<String, String> {
-        let region = match region {
-            "body" => HitRegion::Body,
-            "header" => HitRegion::Header,
-            "footer" => HitRegion::Footer,
-            other => return Err(format!("unknown region {other:?}")),
-        };
-        let r_id = (!r_id.is_empty()).then_some(r_id);
+        let scope = docx_layout::hit::parse_region_scope(region, part_id)?;
         self.with_display_list(|list| {
-            docx_layout::hit::range_rects_in_region(list, region, r_id, from, to)
+            docx_layout::hit::range_rects_in_region(list, scope, from, to)
         })
         .ok_or_else(|| "resident display list is not built".to_owned())
         .and_then(|rects| serde_json::to_string(&rects).map_err(|error| error.to_string()))
@@ -2104,9 +2182,35 @@ mod tests {
     }
 
     #[test]
-    fn region_layout_operation_stabilizes_and_emits_note_areas() {
+    fn region_layout_accepts_a_next_column_section_start() {
         let engine = EngineSession::new(132);
         let request = serde_json::json!({
+            "measured": [],
+            "options": {
+                "pageSize": {"w": 816, "h": 1056},
+                "margins": {"top": 96, "right": 96, "bottom": 96, "left": 96}
+            },
+            "regions": {
+                "sections": [{
+                    "sectionId": "main",
+                    "properties": {"sectionStart": "nextColumn", "columnCount": 2}
+                }]
+            }
+        });
+
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(output["options"]["bodyBreakType"], "nextColumn");
+    }
+
+    /// One 200x120 page (10px margins, so a content box of x 10..190 /
+    /// y 10..110) whose single paragraph carries a footnote reference.
+    fn note_area_layout_request() -> serde_json::Value {
+        serde_json::json!({
             "measured": [{
                 "block": {
                     "kind": "paragraph",
@@ -2150,13 +2254,41 @@ mod tests {
                 }]
             },
             "notes": {
-                "contents": [{"id": 7, "height": 20}]
+                "contents": [{
+                    "id": 7,
+                    "height": 20,
+                    "blocks": [{
+                        "kind": "paragraph",
+                        "id": "note-p",
+                        "runs": [{"kind": "text", "text": "note", "pmStart": 1, "pmEnd": 5}],
+                        "pmStart": 1,
+                        "pmEnd": 6
+                    }],
+                    "measures": [{
+                        "kind": "paragraph",
+                        "lines": [{
+                            "headRun": 0,
+                            "headChar": 0,
+                            "tailRun": 0,
+                            "tailChar": 4,
+                            "width": 40,
+                            "ascent": 8,
+                            "descent": 2,
+                            "lineHeight": 20
+                        }],
+                        "totalHeight": 20
+                    }]
+                }]
             }
-        });
+        })
+    }
 
+    #[test]
+    fn region_layout_operation_stabilizes_and_emits_note_areas() {
+        let engine = EngineSession::new(132);
         let output: serde_json::Value = serde_json::from_str(
             &engine
-                .layout_document_with_regions_json(&request.to_string())
+                .layout_document_with_regions_json(&note_area_layout_request().to_string())
                 .unwrap(),
         )
         .unwrap();
@@ -2170,6 +2302,44 @@ mod tests {
         assert_eq!(page["noteAreas"][0]["columns"], 2);
         assert_eq!(page["noteAreas"][0]["notes"][0]["displayLabel"], "III");
         assert_eq!(engine.stats().pagination_calls, 2);
+    }
+
+    /// A laid-out note is reachable through the resident hit test: the point
+    /// addresses the note's own story and its glyphs invite typing.
+    #[test]
+    fn a_laid_out_note_area_resolves_to_its_own_story() {
+        let engine = EngineSession::new(133);
+        let output = engine
+            .layout_document_with_regions_json(&note_area_layout_request().to_string())
+            .unwrap();
+        engine.build_display_list_json(&output).unwrap();
+        let run = engine
+            .with_display_list(|list| {
+                let run = list.pages[0].note_areas[0]
+                    .primitives
+                    .iter()
+                    .find_map(|primitive| match primitive {
+                        docx_layout::display_list::Primitive::Text(run) => Some(run),
+                        _ => None,
+                    })
+                    .expect("the note area paints its text");
+                (
+                    run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
+                    run.baseline_y.as_f64().unwrap(),
+                )
+            })
+            .expect("the display list is built");
+
+        let hit = |x: f64, y: f64| -> serde_json::Value {
+            serde_json::from_str(&engine.display_hit_test_regions_json(0, x, y).unwrap()).unwrap()
+        };
+        let note = hit(run.0, run.1 - 2.0);
+        assert_eq!(note["region"], "footnote");
+        assert_eq!(note["noteId"], 7);
+        assert_eq!(note["target"], "text");
+        assert!(note["pos"].is_i64(), "the note resolved no position");
+        // the body line above the area stays the body's
+        assert_eq!(hit(20.0, 20.0)["region"], "body");
     }
 
     #[test]
@@ -2822,7 +2992,7 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let para_id = block_key(paragraph_identity(&block).unwrap().0);
+        let para_id = block_key(paragraph_identity(&block).unwrap().0).into_owned();
         let initial_input = LayoutInput {
             measured: vec![MeasuredBlock {
                 block,
@@ -2876,6 +3046,448 @@ mod tests {
         docx_layout::clear_measure_fonts();
     }
 
+    /// The profiler clock is host code: re-entering the engine from it must not
+    /// abort an edit the document has already committed.
+    #[test]
+    fn a_reentrant_profiler_clock_does_not_abort_the_edit() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(4242);
+        engine
+            .doc()
+            .create_story("body", "hello", "Normal", "left")
+            .unwrap();
+        let env = RenderEnv::default();
+        let block = engine
+            .with_lowered_story("body", &env, |blocks| blocks[0].clone())
+            .unwrap();
+        let extent: ParagraphExtent = serde_json::from_str(
+            &engine
+                .measure_paragraph_json(
+                    &serde_json::json!({
+                        "block": block,
+                        "maxWidth": 180,
+                        "fontChains": { "liberation sans|0|0": [font_id] },
+                        "defaults": { "fontSize": 12, "fontFamily": "Liberation Sans" },
+                        "authoritativeShaping": true
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        engine
+            .layout_document_value(LayoutInput {
+                measured: vec![MeasuredBlock {
+                    block,
+                    measure: BlockExtent::Paragraph(extent),
+                }],
+                options: serde_json::from_value(serde_json::json!({
+                    "pageSize": { "w": 200, "h": 120 },
+                    "margins": { "top": 10, "right": 10, "bottom": 10, "left": 10 }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+        engine.build_display_list_frame("{}", 0).unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                "!",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+
+        let foreign_env = RenderEnv {
+            default_tab_stop_twips: Some(720.0),
+            ..RenderEnv::default()
+        };
+        let mut ticks = 0_u32;
+        let mut clock = || {
+            ticks += 1;
+            // Tick 2 is the post-lowering hook; re-lowering under another
+            // environment there must not steal the story the edit is reading.
+            let env = if ticks == 2 { &foreign_env } else { &env };
+            engine.lower_story_json("body", env).unwrap();
+            ticks as f64
+        };
+        let (frame, _) = engine
+            .apply_and_layout_profiled("body", 1, &mut clock)
+            .unwrap();
+        assert!(!frame.is_empty());
+        let pagination = engine.pagination.borrow();
+        let LayoutBlock::Paragraph(paragraph) =
+            &pagination.input.as_ref().unwrap().measured[0].block
+        else {
+            panic!("paragraph expected");
+        };
+        assert_eq!(
+            paragraph
+                .attrs
+                .as_ref()
+                .and_then(|attrs| attrs.default_tab_stop_twips),
+            None,
+            "the edit keeps the environment it asked for, not the observer's"
+        );
+        drop(pagination);
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// The region twin of [`a_reentrant_profiler_clock_does_not_abort_the_edit`].
+    #[test]
+    fn a_reentrant_profiler_clock_does_not_abort_a_region_edit() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(4243);
+        engine
+            .doc()
+            .create_story("body", "AlphaBravo", "Normal", "left")
+            .unwrap();
+        engine
+            .doc()
+            .split_paragraph(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                None,
+            )
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine
+            .build_display_list_frame(
+                &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0,
+            )
+            .unwrap();
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 2),
+                "xx",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+
+        let env = RenderEnv::default();
+        let mut ticks = 0_u32;
+        let mut clock = || {
+            ticks += 1;
+            engine.lower_story_json("body", &env).unwrap();
+            ticks as f64
+        };
+        let (frame, _) = engine
+            .apply_and_layout_profiled("body", 1, &mut clock)
+            .unwrap();
+        assert!(!frame.is_empty());
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// Rust float equality makes `-0.0 == 0.0`, so a sign-only change to a
+    /// layout number keeps its retained measurement. Signed zero measures
+    /// identically, so the reuse still matches a full pass.
+    #[test]
+    fn a_sign_only_zero_change_reuses_a_measurement_matching_the_full_pass() {
+        const FONT: &[u8] =
+            include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(FONT).unwrap();
+        let engine = EngineSession::new(777);
+        let ctx = crate::EditCtx::local("", "");
+        engine
+            .doc()
+            .create_story(
+                "body",
+                "Alpha bravo charlie delta echo foxtrot",
+                "Normal",
+                "left",
+            )
+            .unwrap();
+        engine
+            .doc()
+            .split_paragraph(&ctx, crate::Position::new("body", 5), None)
+            .unwrap();
+        let para_ids: Vec<String> = engine
+            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+                blocks
+                    .iter()
+                    .filter_map(|block| {
+                        paragraph_identity(block).map(|(id, _)| block_key(id).into_owned())
+                    })
+                    .collect()
+            })
+            .unwrap();
+        engine
+            .doc()
+            .set_paragraph_attr(&para_ids[0], "indentLeft", yrs::Any::Number(0.0))
+            .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "measurement": {
+                "fontChains": {"calibri|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        engine.layout_document_with_regions_json(&request).unwrap();
+        engine
+            .build_display_list_frame(
+                &serde_json::json!({"fontChains": {"calibri|0|0": [font_id]}}).to_string(),
+                0,
+            )
+            .unwrap();
+
+        engine
+            .doc()
+            .set_paragraph_attr(&para_ids[0], "indentLeft", yrs::Any::Number(-0.0))
+            .unwrap();
+        let lowered = engine
+            .with_lowered_story("body", &RenderEnv::default(), |blocks| {
+                serde_json::to_string(&blocks[0]).unwrap()
+            })
+            .unwrap();
+        assert!(
+            lowered.contains("-0.0"),
+            "the sign-only change must reach the lowered block: {lowered}"
+        );
+
+        let before = engine.stats();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine.apply_and_layout("body", epoch).unwrap();
+        let after = engine.stats();
+        assert_eq!(
+            after.resident_measure_calls, before.resident_measure_calls,
+            "a sign-only zero change is structurally clean"
+        );
+        assert_eq!(
+            after.resident_reused_blocks,
+            before.resident_reused_blocks + 2,
+            "both paragraphs reuse their retained extents"
+        );
+        let fast_json = {
+            let pagination = engine.pagination.borrow();
+            let regions_state = engine.regions.borrow();
+            serialize_region_layout(
+                pagination.input.as_ref().unwrap(),
+                pagination.layout.as_ref().unwrap(),
+                regions_state.as_ref().unwrap().headers_footers.as_ref(),
+                true,
+            )
+            .unwrap()
+        };
+        let full_json = engine.layout_document_with_regions_json(&request).unwrap();
+        assert_eq!(
+            fast_json, full_json,
+            "the reused measurement matches a full pass"
+        );
+        docx_layout::clear_measure_fonts();
+    }
+
+    /// A paragraph-table-paragraph body for dirty-block detection checks.
+    fn resident_walk_fixture() -> String {
+        let paragraph = |id: &str, text: &str, start: f64| {
+            serde_json::json!({
+                "block": {
+                    "kind": "paragraph",
+                    "id": id,
+                    "runs": [{
+                        "kind": "text",
+                        "text": text,
+                        "pmStart": start + 1.0,
+                        "pmEnd": start + 2.0
+                    }],
+                    "pmStart": start,
+                    "pmEnd": start + 2.0
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "lines": [{
+                        "headRun": 0,
+                        "headChar": 0,
+                        "tailRun": 0,
+                        "tailChar": 1,
+                        "width": 10.0,
+                        "ascent": 8.0,
+                        "descent": 2.0,
+                        "lineHeight": 20.0
+                    }],
+                    "totalHeight": 20.0
+                }
+            })
+        };
+        let cell_paragraph = serde_json::json!({
+            "kind": "paragraph",
+            "id": "c0",
+            "runs": [{"kind": "text", "text": "cell", "pmStart": 2.0, "pmEnd": 6.0}],
+            "pmStart": 1.0,
+            "pmEnd": 6.0
+        });
+        serde_json::json!({
+            "measured": [
+                paragraph("p0", "alpha", 0.0),
+                {
+                    "block": {
+                        "kind": "table",
+                        "id": "t0",
+                        "rows": [{
+                            "id": "r0",
+                            "cells": [{"id": "c0-cell", "blocks": [cell_paragraph]}]
+                        }],
+                        "pmStart": 22.0,
+                        "pmEnd": 42.0
+                    },
+                    "measure": {
+                        "kind": "table",
+                        "rows": [{
+                            "cells": [{"blocks": [], "width": 100.0, "height": 20.0}],
+                            "height": 20.0
+                        }],
+                        "columnWidths": [100.0],
+                        "totalWidth": 100.0,
+                        "totalHeight": 20.0
+                    }
+                },
+                paragraph("p1", "omega", 42.0)
+            ],
+            "options": {
+                "pageSize": {"w": 200.0, "h": 120.0},
+                "margins": {"top": 10.0, "right": 10.0, "bottom": 10.0, "left": 10.0}
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn resident_walk_marks_only_structurally_changed_blocks_dirty() {
+        let engine = EngineSession::new(21);
+        engine
+            .layout_document_json(&resident_walk_fixture())
+            .unwrap();
+        let baseline: Vec<LayoutBlock> = {
+            let pagination = engine.pagination.borrow();
+            pagination
+                .input
+                .as_ref()
+                .unwrap()
+                .measured
+                .iter()
+                .map(|measured| measured.block.clone())
+                .collect()
+        };
+        let walk = |blocks: &[LayoutBlock]| {
+            let mut dirty: Vec<(usize, String)> = Vec::new();
+            engine
+                .resident_layout_input_from_blocks(blocks, &mut |index, key, _, _| {
+                    dirty.push((index, key.to_owned()));
+                    Ok(BlockExtent::Paragraph(ParagraphExtent {
+                        lines: Vec::new(),
+                        total_height: 20.0,
+                    }))
+                })
+                .map(|_| dirty)
+        };
+
+        assert_eq!(
+            walk(&baseline).unwrap(),
+            Vec::<(usize, String)>::new(),
+            "a no-op relower marks nothing dirty"
+        );
+
+        let edited_first = {
+            let mut blocks = baseline.clone();
+            let LayoutBlock::Paragraph(paragraph) = &mut blocks[0] else {
+                panic!("paragraph expected");
+            };
+            if let Run::Text(text) = &mut paragraph.runs[0] {
+                text.text.push('!');
+            }
+            blocks
+        };
+        assert_eq!(
+            walk(&edited_first).unwrap(),
+            vec![(0, "p0".to_owned())],
+            "an inserted character dirties exactly its own block"
+        );
+
+        let repositioned_tail = {
+            let mut blocks = baseline.clone();
+            let LayoutBlock::Paragraph(paragraph) = &mut blocks[2] else {
+                panic!("paragraph expected");
+            };
+            paragraph.pm_start = Some(60.0);
+            paragraph.pm_end = Some(64.0);
+            if let Run::Text(text) = &mut paragraph.runs[0] {
+                text.pm_start = Some(61.0);
+                text.pm_end = Some(63.0);
+            }
+            blocks
+        };
+        assert_eq!(
+            walk(&repositioned_tail).unwrap(),
+            Vec::<(usize, String)>::new(),
+            "fresh absolute positions alone never dirty a block"
+        );
+
+        let retitled_cell = {
+            let mut blocks = baseline.clone();
+            let LayoutBlock::Table(table) = &mut blocks[1] else {
+                panic!("table expected");
+            };
+            let LayoutBlock::Paragraph(cell_paragraph) = &mut table.rows[0].cells[0].blocks[0]
+            else {
+                panic!("cell paragraph expected");
+            };
+            if let Run::Text(text) = &mut cell_paragraph.runs[0] {
+                text.text.push('!');
+            }
+            blocks
+        };
+        let error = walk(&retitled_cell).unwrap_err();
+        assert!(error.contains("non-paragraph"), "{error}");
+
+        let repositioned_cell = {
+            let mut blocks = baseline.clone();
+            let LayoutBlock::Table(table) = &mut blocks[1] else {
+                panic!("table expected");
+            };
+            let LayoutBlock::Paragraph(cell_paragraph) = &mut table.rows[0].cells[0].blocks[0]
+            else {
+                panic!("cell paragraph expected");
+            };
+            cell_paragraph.pm_start = Some(30.0);
+            cell_paragraph.pm_end = Some(34.0);
+            if let Run::Text(text) = &mut cell_paragraph.runs[0] {
+                text.pm_start = Some(31.0);
+                text.pm_end = Some(35.0);
+            }
+            blocks
+        };
+        assert_eq!(
+            walk(&repositioned_cell).unwrap(),
+            Vec::<(usize, String)>::new(),
+            "absolute positions inside a table cell are ignored too"
+        );
+    }
+
     #[test]
     fn display_list_is_retained_with_json() {
         let engine = EngineSession::new(17);
@@ -2910,7 +3522,7 @@ mod tests {
             engine
                 .display_hit_test_regions_json(0, 100.0, 100.0)
                 .unwrap(),
-            r#"{"region":"body","pos":null}"#
+            r#"{"region":"body","pos":null,"target":"none"}"#
         );
         assert_eq!(engine.display_range_rects_json(0, 1).unwrap(), "[]");
         assert_eq!(
@@ -2979,5 +3591,431 @@ mod tests {
 
         assert_eq!(hit["region"], "body");
         assert!((target.3..=target.4).contains(&position));
+        assert_eq!(hit["target"], "text");
+
+        // the same line's left margin resolves a position all the same, but is
+        // not typeable area
+        let margin: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(target.0, 8.0, target.2)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(margin["pos"].is_i64());
+        assert_eq!(margin["target"], "none");
+    }
+
+    /// What a laid-out note area gives a hit probe: the note it carries, and
+    /// the two runs every note paints — its presentation label, then its story
+    /// text.
+    struct PaintedNote {
+        kind: Option<String>,
+        note_ids: Vec<i64>,
+        label_doc_start: Option<i64>,
+        text_doc_start: Option<i64>,
+        text_doc_end: i64,
+        text_center_x: f64,
+        text_baseline: f64,
+    }
+
+    fn painted_notes(engine: &EngineSession) -> Vec<PaintedNote> {
+        engine
+            .with_display_list(|list| {
+                list.pages[0]
+                    .note_areas
+                    .iter()
+                    .map(|area| {
+                        let runs = area
+                            .primitives
+                            .iter()
+                            .filter_map(|primitive| match primitive {
+                                docx_layout::display_list::Primitive::Text(run) => Some(run),
+                                _ => None,
+                            })
+                            .collect::<Vec<_>>();
+                        let (label, text) = (runs[0], runs[1]);
+                        PaintedNote {
+                            kind: area.kind.clone(),
+                            note_ids: area.note_ids.clone(),
+                            label_doc_start: label.attrs.doc_start,
+                            text_doc_start: text.attrs.doc_start,
+                            text_doc_end: text.attrs.doc_end.expect("note text is positioned"),
+                            text_center_x: text.x.as_f64().unwrap()
+                                + text.width.as_f64().unwrap() / 2.0,
+                            text_baseline: text.baseline_y.as_f64().unwrap(),
+                        }
+                    })
+                    .collect()
+            })
+            .expect("the display list is built")
+    }
+
+    /// Footnotes and endnotes seeded from a real file, laid out and painted
+    /// through the resident path, resolve to their own `fn:{id}` / `en:{id}`
+    /// stories. The presentation label every note carries has no position of
+    /// its own, so this is also where inheriting the body anchor would hand a
+    /// click a body position under a note region.
+    #[test]
+    fn real_notes_resolve_to_their_own_stories() {
+        let engine = EngineSession::new(19);
+        crate::seed::seed_from_docx(
+            engine.doc(),
+            include_bytes!("../tests/fixtures/footnote-anchor.docx"),
+        )
+        .unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": {}}]},
+            "notes": {"contents": [
+                {"id": 2, "noteKind": "footnote", "height": 0},
+                {"id": 3, "noteKind": "endnote", "height": 0}
+            ]},
+            "measurement": {
+                "fontChains": {},
+                "defaults": {"fontSize": 11, "fontFamily": "Calibri"},
+                "authoritativeShaping": false
+            },
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        engine.build_display_list_json(&output).unwrap();
+
+        let painted = painted_notes(&engine);
+        assert_eq!(painted.len(), 2, "one area per note kind");
+
+        for (kind, note_id) in [("footnote", 2), ("endnote", 3)] {
+            let note = painted
+                .iter()
+                .find(|note| note.kind.as_deref() == Some(kind))
+                .unwrap_or_else(|| panic!("no {kind} area"));
+            assert_eq!(note.note_ids, vec![note_id]);
+            assert_eq!(
+                note.label_doc_start, None,
+                "the {kind} label carries a position"
+            );
+            assert_eq!(
+                note.text_doc_start,
+                Some(1),
+                "the {kind} text lost its story position"
+            );
+
+            let hit: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_hit_test_regions_json(0, note.text_center_x, note.text_baseline - 2.0)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(hit["region"], kind);
+            assert_eq!(hit["noteId"], note_id);
+            assert_eq!(hit["target"], "text");
+            let position = hit["pos"].as_i64().expect("the note hit has a position");
+            assert!(
+                (1..=note.text_doc_end).contains(&position),
+                "{kind} hit resolved {position}, outside its story"
+            );
+
+            // that story's selection geometry lands in its own area, below the
+            // body rects for the very same positions
+            let note_rects: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_range_rects_region_json(
+                        kind,
+                        &note_id.to_string(),
+                        1,
+                        note.text_doc_end,
+                    )
+                    .unwrap(),
+            )
+            .unwrap();
+            let body_rects: serde_json::Value = serde_json::from_str(
+                &engine
+                    .display_range_rects_json(1, note.text_doc_end)
+                    .unwrap(),
+            )
+            .unwrap();
+            let note_y = note_rects[0]["y"].as_f64().expect("a note rect");
+            let body_y = body_rects[0]["y"].as_f64().expect("a body rect");
+            assert!(
+                note_y > body_y,
+                "{kind} rect y {note_y} is not below the body rect y {body_y}"
+            );
+        }
+
+        // the body reference marks anchoring the notes are still the body's
+        let anchor: serde_json::Value = serde_json::from_str(
+            &engine
+                .display_hit_test_regions_json(0, 100.0, 110.0)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(anchor["region"], "body");
+    }
+
+    const LIBERATION: &[u8] =
+        include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+
+    const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>"#;
+
+    const PACKAGE_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"#;
+
+    const DOCUMENT_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>"#;
+
+    fn docx_bytes(styles_body: &str, document_body: &str) -> Vec<u8> {
+        let styles = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Liberation Sans" w:hAnsi="Liberation Sans"/><w:sz w:val="22"/></w:rPr></w:rPrDefault></w:docDefaults>
+{styles_body}
+</w:styles>"#
+        );
+        let document = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+<w:body>{document_body}</w:body>
+</w:document>"#
+        );
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), CONTENT_TYPES.into()),
+            ("_rels/.rels".to_owned(), PACKAGE_RELS.into()),
+            (
+                "word/_rels/document.xml.rels".to_owned(),
+                DOCUMENT_RELS.into(),
+            ),
+            ("word/styles.xml".to_owned(), styles.into_bytes()),
+            ("word/document.xml".to_owned(), document.into_bytes()),
+        ])
+        .expect("zip the fixture")
+    }
+
+    fn layout_pages(bytes: &[u8], client_id: u64, content_height: f64) -> serde_json::Value {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(client_id);
+        crate::seed::seed_from_docx(engine.doc(), bytes).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "options": {
+                "pageSize": { "w": 400.0, "h": content_height + 40.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 20.0 },
+            },
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "pageSize": { "w": 400.0, "h": content_height + 40.0 },
+                "margins": { "top": 20.0, "right": 20.0, "bottom": 20.0, "left": 20.0 },
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output = engine
+            .layout_document_with_regions_json(&request.to_string())
+            .unwrap();
+        serde_json::from_str(&output).expect("layout json")
+    }
+
+    fn paragraph_slices(layout: &serde_json::Value, block_index: usize) -> Vec<(usize, u64, u64)> {
+        let block_id = layout["measured"][block_index]["block"]["id"].clone();
+        layout["layout"]["pages"]
+            .as_array()
+            .expect("pages")
+            .iter()
+            .enumerate()
+            .flat_map(|(page_index, page)| {
+                page["fragments"]
+                    .as_array()
+                    .expect("fragments")
+                    .iter()
+                    .filter(|fragment| fragment["blockId"] == block_id)
+                    .map(move |fragment| {
+                        (
+                            page_index,
+                            fragment["fromLine"].as_u64().unwrap_or(0),
+                            fragment["toLine"].as_u64().unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    fn line_height(layout: &serde_json::Value, block_index: usize) -> f64 {
+        layout["measured"][block_index]["measure"]["lines"][0]["lineHeight"]
+            .as_f64()
+            .expect("measured line height")
+    }
+
+    fn line_count(layout: &serde_json::Value, block_index: usize) -> usize {
+        layout["measured"][block_index]["measure"]["lines"]
+            .as_array()
+            .expect("measured lines")
+            .len()
+    }
+
+    #[test]
+    fn resident_display_falls_back_when_input_adds_a_page() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let engine = EngineSession::new(204);
+        let body = format!(
+            "{}<w:p><w:r><w:t>Editable paragraph</w:t></w:r></w:p>",
+            "<w:p><w:r><w:t>Filler paragraph</w:t></w:r></w:p>".repeat(6)
+        );
+        crate::seed::seed_from_docx(engine.doc(), &docx_bytes("", &body)).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": { "sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 4320,
+                    "pageHeight": 2880,
+                    "marginTop": 300,
+                    "marginRight": 300,
+                    "marginBottom": 300,
+                    "marginLeft": 300
+                }
+            }] },
+            "measurement": {
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        });
+        let output: serde_json::Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(&request.to_string())
+                .unwrap(),
+        )
+        .unwrap();
+        let measured = output["measured"].as_array().unwrap();
+        for measured_block in measured {
+            let template = serde_json::json!({
+                "block": measured_block["block"],
+                "maxWidth": 248,
+                "fontChains": { "liberation sans|0|0": [font_id] },
+                "defaults": { "fontSize": 11, "fontFamily": "Liberation Sans" },
+                "authoritativeShaping": true
+            });
+            engine
+                .measure_paragraph_json(&template.to_string())
+                .unwrap();
+        }
+        engine
+            .layout_document_json(
+                &serde_json::json!({
+                    "measured": output["measured"],
+                    "options": output["options"]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let extras =
+            serde_json::json!({ "fontChains": { "liberation sans|0|0": [font_id] } }).to_string();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+
+        let initial_page_count = engine
+            .pagination
+            .borrow()
+            .layout
+            .as_ref()
+            .unwrap()
+            .pages
+            .len();
+        let paragraph = engine.doc().paragraphs("body").unwrap().pop().unwrap();
+        let insertion = " typed text that makes the editable paragraph wrap";
+        let mut offset = u32::try_from(paragraph.text.encode_utf16().count()).unwrap();
+        let mut frame_epoch = engine.display.borrow().binary_frame_epoch;
+        let mut page_count_changed = false;
+
+        for _ in 0..64 {
+            engine
+                .doc()
+                .insert_text(
+                    &crate::EditCtx::local("", ""),
+                    crate::Position::new("body", offset),
+                    insertion,
+                    crate::FormatPolicy::Inherit,
+                )
+                .unwrap();
+            offset += u32::try_from(insertion.encode_utf16().count()).unwrap();
+            let incremental_display_builds = engine.stats().incremental_display_builds;
+            engine.apply_and_layout("body", frame_epoch).unwrap();
+            frame_epoch = engine.display.borrow().binary_frame_epoch;
+
+            let retained = engine.with_display_list(Clone::clone).unwrap();
+            let rebuilt = {
+                let pagination = engine.pagination.borrow();
+                docx_layout::build_display_list_value_from_resident(
+                    pagination.input.as_ref().unwrap(),
+                    pagination.layout.as_ref().unwrap(),
+                    &extras,
+                )
+                .unwrap()
+            };
+            assert_eq!(retained.pages.len(), rebuilt.pages.len());
+            for (retained_page, rebuilt_page) in retained.pages.iter().zip(&rebuilt.pages) {
+                assert_eq!(retained_page, rebuilt_page);
+            }
+
+            if retained.pages.len() > initial_page_count {
+                assert!(engine.pagination.borrow().last_incremental);
+                assert_eq!(
+                    engine.stats().incremental_display_builds,
+                    incremental_display_builds
+                );
+                page_count_changed = true;
+                break;
+            }
+        }
+
+        assert!(page_count_changed, "the edit must add a page");
+        docx_layout::clear_measure_fonts();
+    }
+
+    const WIDOW_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:pPr><w:widowControl w:val="0"/><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Body"><w:name w:val="Body"/><w:basedOn w:val="Normal"/></w:style>"#;
+
+    fn widow_document(paragraph_ppr: &str) -> String {
+        let long = "Widow and orphan control decides where this paragraph may break \
+                    across a page boundary, so it has to be long enough to wrap onto \
+                    several lines of the narrow page this test lays out.";
+        format!(
+            r#"<w:p><w:pPr><w:pStyle w:val="Body"/></w:pPr><w:r><w:t>Filler</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Body"/>{paragraph_ppr}</w:pPr><w:r><w:t>{long}</w:t></w:r></w:p>"#
+        )
+    }
+
+    #[test]
+    fn authored_widow_control_off_survives_a_docx_round_trip_into_pagination() {
+        let inherited = docx_bytes(WIDOW_STYLES, &widow_document(""));
+        let probe = layout_pages(&inherited, 201, 4000.0);
+        let line = line_height(&probe, 1);
+        assert!(line_count(&probe, 1) >= 4, "the rule needs four lines");
+        let content_height = line * 2.5;
+
+        let overridden = docx_bytes(WIDOW_STYLES, &widow_document("<w:widowControl/>"));
+        let off = layout_pages(&inherited, 202, content_height);
+        let on = layout_pages(&overridden, 203, content_height);
+
+        assert_eq!(paragraph_slices(&off, 1)[0], (0, 0, 1));
+        assert!(paragraph_slices(&on, 1).iter().all(|(page, ..)| *page > 0));
+        assert_eq!(paragraph_slices(&on, 1)[0].1, 0);
     }
 }
