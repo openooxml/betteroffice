@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, MutationResult, NumberFormatMutation, Op, Proposal,
+    CellRef, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -69,6 +69,22 @@ struct CellPosition {
 struct RangeArgs {
     sheet: u32,
     range: String,
+}
+
+#[derive(Deserialize)]
+struct ChartHitArgs {
+    viewport: Viewport,
+    x: f32,
+    y: f32,
+}
+
+#[derive(Deserialize)]
+struct MoveChartArgs {
+    sheet: u32,
+    /// a `ChartRegion` id: the frame, not the chart part backing it.
+    chart: String,
+    dx: f32,
+    dy: f32,
 }
 
 #[derive(Deserialize)]
@@ -234,6 +250,23 @@ impl Session {
             .map_err(|error| error.to_string())
     }
 
+    pub fn print_display_list_json(&self, args: &str) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct Args {
+            sheet: u32,
+            range: String,
+            metrics: PrintMetrics,
+            gridlines: bool,
+        }
+        let args: Args = serde_json::from_str(args).map_err(|e| format!("bad print args: {e}"))?;
+        let range = CellRange::parse_a1(&args.range).map_err(|e| e.to_string())?;
+        let display_list = self
+            .workbook
+            .print_display_list(SheetId(args.sheet), range, &args.metrics, args.gridlines)
+            .map_err(|e| e.to_string())?;
+        serde_json::to_string(&display_list).map_err(|e| e.to_string())
+    }
+
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, String> {
         let viewport: Viewport = serde_json::from_str(viewport_json)
             .map_err(|error| format!("bad viewport: {error}"))?;
@@ -242,6 +275,36 @@ impl Session {
             .display_list(&viewport)
             .map_err(|error| error.to_string())?;
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
+    }
+
+    pub fn chart_at_point_json(&self, args: &str) -> Result<String, String> {
+        let args: ChartHitArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad chart hit args: {error}"))?;
+        let hit = self
+            .workbook
+            .chart_at_point(&args.viewport, args.x, args.y)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_string(&hit).map_err(|error| error.to_string())
+    }
+
+    pub fn move_chart_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+    ) -> Result<String, String> {
+        let args: MoveChartArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad chart move args: {error}"))?;
+        let result = self
+            .workbook
+            .move_chart(
+                SheetId(args.sheet),
+                &args.chart,
+                args.dx,
+                args.dy,
+                calculation_options(now_serial),
+            )
+            .map_err(|error| error.to_string())?;
+        self.edit_result(result)
     }
 
     #[cfg(feature = "raster")]
@@ -1097,14 +1160,15 @@ mod tests {
         let ghosted = session
             .display_list_json(r#"{"x":0,"y":0,"width":200,"height":80}"#)
             .unwrap();
-        assert!(
-            ghosted.contains(r##""text":"$2,000.00","fontSize":11.0,"color":"#2e7d32""##),
-            "{ghosted}"
-        );
-        assert!(
-            ghosted.contains(r##""text":"$1,000.00","fontSize":11.0,"color":"#c62828""##),
-            "{ghosted}"
-        );
+        let rendered: serde_json::Value = serde_json::from_str(&ghosted).unwrap();
+        let commands = rendered["commands"].as_array().unwrap();
+        for (text, color) in [("$2,000.00", "#2e7d32"), ("$1,000.00", "#c62828")] {
+            assert!(
+                commands
+                    .iter()
+                    .any(|command| command["text"] == text && command["color"] == color)
+            );
+        }
         assert!(ghosted.contains(r#""strike":true"#), "{ghosted}");
         session
             .edit_cell_json(r#"{"sheet":0,"row":0,"col":0,"input":"3000"}"#, None)

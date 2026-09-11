@@ -10,30 +10,38 @@
     "crates"
   ],
   "overrides": {
-    "@hono/node-server": "2.0.10",
-    "esbuild": "0.28.1",
-    "fast-uri": "3.1.4",
-    "postcss": "8.5.23",
-    "sharp": "^0.35.0",
-    "brace-expansion": "5.0.8",
-    "minimatch": "^10.2.5"
+    "@hono/node-server": "^2.0.10",
+    "esbuild": "^0.28.1",
+    "fast-uri": "^3.1.6",
+    "postcss": "^8.5.23",
+    "sharp": "^0.35.4",
+    "brace-expansion": "^5.0.9",
+    "minimatch": "^10.2.5",
+    "nanoid": "^3.3.17",
+    "undici": "^7.29.0",
+    "ip-address": "^10.4.0",
+    "browserslist": "^4.28.7"
   },
   "scripts": {
     "dev": "bun run --filter './apps/web' dev",
     "dev:docs": "bun run --filter './apps/docs' dev",
     "dev:demo": "bun run --filter './apps/demo' dev",
-    "pretest": "bun run build:pptx-wasm && bun run build:vsdx-wasm",
+    "pretest": "bun run build:pptx-wasm && bun run build:vsdx-wasm && bun run build:fonts",
     "build:pptx-wasm": "bun scripts/build-pptx-wasm.ts",
     "build:vsdx-wasm": "bun scripts/build-vsdx-wasm.ts",
     "build:pptx": "bun run --filter '@betteroffice/pptx-i18n' build && bun run --filter '@betteroffice/pptx' build && bun run --filter '@betteroffice/pptx-react' build",
     "build:vsdx": "bun run --filter '@betteroffice/vsdx' build",
     "build:xlsx-wasm": "bun scripts/build-xlsx-wasm.ts",
     "build:xlsx": "bun run --filter '@betteroffice/xlsx-i18n' build && bun run --filter '@betteroffice/xlsx' build && bun run --filter '@betteroffice/xlsx-react' build",
-    "build:packages": "bun run build:xlsx && bun run build:docx && bun run build:pptx && bun run build:vsdx",
+    "build:fonts": "bun run --filter '@betteroffice/fonts' build",
+    "build:packages": "bun run build:fonts && bun run build:xlsx && bun run build:docx && bun run build:pptx && bun run build:vsdx",
     "deploy:docs": "bun run --filter './apps/docs' deploy",
     "deploy:demo": "bun run --filter './apps/demo' deploy",
     "build": "bun run --filter './apps/web' build",
-    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test packages apps/web/app apps/demo/lib scripts",
+    "test": "bun run build:xlsx-wasm && bun run build:docx-wasm && bun test packages apps/web/app apps/web/lib apps/demo/lib scripts",
+    "pretypecheck:packages": "bun run build:fonts",
+    "typecheck:packages": "bun run --filter './packages/*' typecheck",
+    "pretypecheck": "bun run build:packages",
     "typecheck": "bun run --filter '*' typecheck",
     "rust:check": "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test",
     "changeset": "changeset",
@@ -55,6 +63,8 @@
   },
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
-    "jszip": "3.10.1"
+    "jszip": "3.10.1",
+    "vite": "8.1.4",
+    "playwright": "1.61.1"
   }
 }

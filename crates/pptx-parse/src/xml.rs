@@ -5,6 +5,10 @@ use quick_xml::events::{BytesStart, Event};
 
 use crate::PptxError;
 
+pub(crate) const DRAWINGML_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+pub(crate) const PRESENTATIONML_NS: &str =
+    "http://schemas.openxmlformats.org/presentationml/2006/main";
+
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
     pub max_xml_bytes: usize,
@@ -17,6 +21,7 @@ pub struct ParseLimits {
     pub max_shapes: usize,
     pub max_paragraphs: usize,
     pub max_runs: usize,
+    pub max_comments: usize,
 }
 
 impl Default for ParseLimits {
@@ -32,6 +37,7 @@ impl Default for ParseLimits {
             max_shapes: 100_000,
             max_paragraphs: 500_000,
             max_runs: 2_000_000,
+            max_comments: 100_000,
         }
     }
 }
@@ -46,6 +52,7 @@ pub(crate) struct ParseBudget<'a> {
     shapes: usize,
     paragraphs: usize,
     runs: usize,
+    comments: usize,
 }
 
 impl<'a> ParseBudget<'a> {
@@ -59,7 +66,13 @@ impl<'a> ParseBudget<'a> {
             shapes: 0,
             paragraphs: 0,
             runs: 0,
+            comments: 0,
         }
+    }
+
+    /// XML events this budget has been charged, including the one that broke it.
+    pub fn xml_events_spent(&self) -> usize {
+        self.xml_events
     }
 
     pub fn charge_relationship(&mut self, part: &str) -> Result<(), PptxError> {
@@ -88,6 +101,16 @@ impl<'a> ParseBudget<'a> {
 
     pub fn charge_run(&mut self, part: &str) -> Result<(), PptxError> {
         charge(&mut self.runs, 1, self.limits.max_runs, "runs", part)
+    }
+
+    pub fn charge_comment(&mut self, part: &str) -> Result<(), PptxError> {
+        charge(
+            &mut self.comments,
+            1,
+            self.limits.max_comments,
+            "comments",
+            part,
+        )
     }
 }
 
@@ -167,6 +190,40 @@ impl XmlElement {
         append_text(self, &mut output);
         output
     }
+
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            attributes: BTreeMap::new(),
+            children: Vec::new(),
+        }
+    }
+
+    pub fn with_attribute(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.attributes.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn with_child(mut self, child: XmlElement) -> Self {
+        self.children.push(XmlNode::Element(child));
+        self
+    }
+
+    pub fn with_text(mut self, text: impl Into<String>) -> Self {
+        self.children.push(XmlNode::Text(text.into()));
+        self
+    }
+
+    pub fn set_attribute(&mut self, name: impl Into<String>, value: impl Into<String>) {
+        self.attributes.insert(name.into(), value.into());
+    }
+
+    pub fn child_mut(&mut self, name: &str) -> Option<&mut XmlElement> {
+        self.children.iter_mut().find_map(|child| match child {
+            XmlNode::Element(element) if element.local_name() == name => Some(element),
+            _ => None,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -193,8 +250,104 @@ fn append_text(element: &XmlElement, output: &mut String) {
     }
 }
 
+/// The `mc:AlternateContent` branch this crate reads: the first `mc:Choice`
+/// whose `Requires` namespaces are all supported, else the `mc:Fallback`.
+pub(crate) fn alternate_content_branch(element: &XmlElement) -> Option<&XmlElement> {
+    match &element.children[alternate_content_branch_index(element)?] {
+        XmlNode::Element(branch) => Some(branch),
+        XmlNode::Text(_) => None,
+    }
+}
+
+/// Index into `children` of the branch [`alternate_content_branch`] reads.
+pub(crate) fn alternate_content_branch_index(element: &XmlElement) -> Option<usize> {
+    let mut fallback = None;
+    for (index, child) in element.children.iter().enumerate() {
+        let XmlNode::Element(branch) = child else {
+            continue;
+        };
+        match branch.local_name() {
+            "Choice" if choice_is_supported(element, branch) => return Some(index),
+            "Fallback" if fallback.is_none() => fallback = Some(index),
+            _ => {}
+        }
+    }
+    fallback
+}
+
+fn choice_is_supported(alternate: &XmlElement, choice: &XmlElement) -> bool {
+    let Some(requires) = choice.attribute("Requires") else {
+        return false;
+    };
+    let mut prefixes = requires.split_whitespace().peekable();
+    prefixes.peek().is_some()
+        && prefixes.all(|prefix| {
+            let declaration = format!("xmlns:{prefix}");
+            choice
+                .attribute(&declaration)
+                .or_else(|| alternate.attribute(&declaration))
+                .is_some_and(|uri| [DRAWINGML_NS, PRESENTATIONML_NS].contains(&uri))
+        })
+}
+
 pub(crate) fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, local)| local)
+}
+
+pub(crate) fn serialize_xml(root: &XmlElement) -> Vec<u8> {
+    let mut output =
+        String::from("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n");
+    write_element(root, &mut output);
+    output.into_bytes()
+}
+
+pub(crate) fn serialize_xml_fragment(root: &XmlElement) -> Vec<u8> {
+    let mut output = String::new();
+    write_element(root, &mut output);
+    output.into_bytes()
+}
+
+fn write_element(element: &XmlElement, output: &mut String) {
+    output.push('<');
+    output.push_str(&element.name);
+    for (key, value) in &element.attributes {
+        output.push(' ');
+        output.push_str(key);
+        output.push_str("=\"");
+        escape_into(value, true, output);
+        output.push('"');
+    }
+    if element.children.is_empty() {
+        output.push_str("/>");
+        return;
+    }
+    output.push('>');
+    for child in &element.children {
+        match child {
+            XmlNode::Element(child) => write_element(child, output),
+            XmlNode::Text(text) => escape_into(text, false, output),
+        }
+    }
+    output.push_str("</");
+    output.push_str(&element.name);
+    output.push('>');
+}
+
+fn escape_into(value: &str, attribute: bool, output: &mut String) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '"' if attribute => output.push_str("&quot;"),
+            // A literal CR would be normalized away on reparse.
+            '\r' => output.push_str("&#xD;"),
+            '\n' | '\t' if attribute => {
+                output.push_str(&format!("&#x{:X};", character as u32));
+            }
+            _ => output.push(character),
+        }
+    }
 }
 
 pub(crate) fn parse_xml(

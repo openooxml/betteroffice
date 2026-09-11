@@ -5,7 +5,7 @@ import {
   type YrsSession,
   type YrsStorySegment,
 } from '@betteroffice/docx/yrs';
-import { YrsPositionProjection } from './yrsPositionProjection';
+import { createYrsPositionProjection, YrsPositionProjection } from './yrsPositionProjection';
 
 const segments: Record<string, YrsStorySegment[]> = {
   body: [
@@ -34,20 +34,40 @@ const session = {
 } as unknown as YrsSession;
 
 describe('YrsPositionProjection', () => {
+  test('returns null without reading a missing story', () => {
+    let readStory = false;
+    const missingStorySession = {
+      storyIds: () => ['body'],
+      storySegments: () => {
+        readStory = true;
+        throw new Error('missing story');
+      },
+    } as unknown as YrsSession;
+    let projection: YrsPositionProjection | null = null;
+
+    expect(() => {
+      projection = createYrsPositionProjection(missingStorySession, 'fn:2');
+    }).not.toThrow();
+    expect(projection).toBeNull();
+    expect(readStory).toBe(false);
+  });
+
   test('maps post-table positions back to the root story input map', () => {
     const projection = new YrsPositionProjection(session, 'body');
+    // `paragraph_spans` measures a paragraph from the previous pilcrow, so the
+    // table embed ahead of `body:p1` counts as one of its six units.
     const map = createYrsInputPositionMap('body', [
       { paraId: 'body:p0', length: 6 },
-      { paraId: 'body:p1', length: 5 },
+      { paraId: 'body:p1', length: 6 },
     ]);
     const target = projection.targetAt(23);
     const loc = displayPositionToYrsLoc(map, target.displayPosition);
 
-    expect(target).toEqual({ story: 'body', displayPosition: 11 });
+    expect(target).toEqual({ story: 'body', displayPosition: 12 });
     expect(loc).toEqual({
       story: 'body',
       paraId: 'body:p1',
-      offset: 2,
+      offset: 3,
     });
     expect(projection.positionForLoc(loc!)).toBe(23);
   });

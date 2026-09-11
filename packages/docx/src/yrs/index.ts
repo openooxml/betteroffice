@@ -604,12 +604,14 @@ export interface YrsCellBorder {
 }
 
 /**
- * Complete per-side border object for {@link YrsSession.setCellBorders}.
+ * Per-side border patch for {@link YrsSession.setCellBorders}. An omitted side
+ * is left alone, `style: 'none'` authors an explicit no-border, and `null`
+ * drops the authored side.
  *
  * @public
  */
 export type YrsCellBorders = Partial<
-  Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder>
+  Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
 /**
@@ -634,6 +636,11 @@ export interface YrsSession extends CollaborationReplica {
   layoutFontRequirementsJson(input: string): string;
   /** Paginate and compose section/page regions in the resident engine. */
   layoutDocumentWithRegionsJson(input: string): string;
+  /** Same pass, but the reply omits the measured arena (fetch it on demand
+   * through {@link YrsSession.retainedKernelInputsJson}). */
+  layoutDocumentWithRegionsRetainedJson(input: string): string;
+  /** Retained `{ measured, options }` for the main-thread display fallback. */
+  retainedKernelInputsJson(expectedLayoutRevision: number): string;
   /** Build display primitives against the session's resident font store. */
   buildDisplayListJson(input: string): string;
   /** Build a binary FrameDelta v1 against the last host-applied frame. */
@@ -730,6 +737,8 @@ export interface YrsSession extends CollaborationReplica {
   cellSelection(): YrsTableRange | null;
   /** Lazily begin local-origin undo capture after import/seeding has completed. */
   beginUndoCapture(story: string, includeTableStories?: boolean): void;
+  /** Story owned by the current undo/redo scope, or null before the first local edit. */
+  historyStory(): string | null;
   /** Coalesce the stack entries added since `startDepth` into one host undo intent. */
   markUndoGroup(startDepth: number): void;
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
@@ -776,7 +785,10 @@ export interface YrsSession extends CollaborationReplica {
     range: YrsTableRange,
     patch: Readonly<Record<string, unknown>>
   ): YrsTableReceipt;
-  /** Replaces the complete selected-cell border property object. */
+  /**
+   * Merges border sides into the selected cells. `insideH`/`insideV` resolve
+   * per cell to the physical edges interior to the selection.
+   */
   setCellBorders(range: YrsTableRange, borders: YrsCellBorders): YrsTableReceipt;
   /** Sets one authored grid-column width in twips. */
   setColumnWidth(at: YrsCellLoc, widthTwips: number): YrsTableReceipt;
@@ -835,6 +847,8 @@ export interface YrsSession extends CollaborationReplica {
   insertWatermark(at: YrsLoc, watermark: YrsWatermark): void;
   /** Applies raw story operations in one transaction. */
   applyRawOps(story: string, ops: readonly YrsRawOp[]): void;
+  /** Applies seed raw operations with deterministic item ordering. */
+  applySeedRawOps(story: string, ops: readonly YrsRawOp[]): void;
   /** Sets one paragraph property (any JSON value). `paraId` is reserved. */
   setParagraphAttr(paraId: string, key: string, value: unknown): void;
   /** Adds a sticky-anchored comment over one or more ranges. */
@@ -1151,6 +1165,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentLayoutRevision += 1;
       return output;
     },
+    layoutDocumentWithRegionsRetainedJson: (input) => {
+      const output = session.layout_document_with_regions_retained_json(input);
+      residentLayoutInput = input;
+      residentLayoutWithRegions = true;
+      residentLayoutRevision += 1;
+      return output;
+    },
+    retainedKernelInputsJson: (expectedLayoutRevision) => {
+      if (expectedLayoutRevision !== residentLayoutRevision) {
+        throw new Error(
+          `retained layout revision mismatch: expected ${expectedLayoutRevision}, current ${residentLayoutRevision}`
+        );
+      }
+      return session.retained_kernel_inputs_json();
+    },
     buildDisplayListJson: (input) => session.build_display_list_json(input),
     buildDisplayListFrame: (input, expectedFrameEpoch) =>
       session.build_display_list_frame(input, expectedFrameEpoch),
@@ -1321,6 +1350,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: (story, includeTableStories = false) =>
       includeTableStories ? ensureTableUndo(story) : ensureUndo(story),
+    historyStory: () =>
+      undoStory?.startsWith('table:') ? undoStory.slice('table:'.length) : undoStory,
     markUndoGroup: (startDepth) => {
       const endDepth = session.undo_depth();
       const size = Math.max(0, endDepth - startDepth);
@@ -1681,6 +1712,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     applyRawOps: (story, ops) => mutate(() => session.apply_raw_ops(story, JSON.stringify(ops))),
+    applySeedRawOps: (story, ops) =>
+      mutate(() => session.apply_seed_raw_ops(story, JSON.stringify(ops))),
     setParagraphAttr: (paraId, key, value) =>
       mutate(() => session.set_paragraph_attr(paraId, key, JSON.stringify(value ?? null))),
     addComment: (ranges, commentAuthor, date, body) =>

@@ -30,6 +30,13 @@ pub struct ColorValue {
     pub alpha: Option<f64>,
 }
 
+impl ColorValue {
+    /// A plain `w:val`/`w:fill` attribute, where `auto` defers to the consumer.
+    pub fn from_attribute(value: &str) -> Self {
+        parse_color_value(Some(value), None, None, None)
+    }
+}
+
 pub fn parse_color_value(
     rgb: Option<&str>,
     theme_color: Option<&str>,

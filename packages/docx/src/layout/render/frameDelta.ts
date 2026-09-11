@@ -556,6 +556,51 @@ function bumpDisplayPageRevision(page: DisplayPage): void {
   });
 }
 
+const DISPLAY_PAGE_SHIFT_LOG = '__betterofficePageShiftLog';
+// Deep enough that a long typing burst between two query-store primes (one
+// recorded shift per applied frame) still replays as compact ops.
+const SHIFT_LOG_LIMIT = 64;
+
+interface DisplayPageShiftLogEntry {
+  /** Revision the page reached when these runs were applied. */
+  readonly revision: number;
+  readonly runs: readonly FramePositionShiftRun[];
+}
+
+function displayPageShiftLog(page: DisplayPage): DisplayPageShiftLogEntry[] {
+  return ((page as unknown as Record<string, unknown>)[DISPLAY_PAGE_SHIFT_LOG] as
+    | DisplayPageShiftLogEntry[]
+    | undefined) ?? [];
+}
+
+function recordDisplayPageShift(page: DisplayPage, runs: readonly FramePositionShiftRun[]): void {
+  const log = displayPageShiftLog(page);
+  log.push({ revision: displayPageRevision(page), runs });
+  if (log.length > SHIFT_LOG_LIMIT) log.splice(0, log.length - SHIFT_LOG_LIMIT);
+  Object.defineProperty(page, DISPLAY_PAGE_SHIFT_LOG, {
+    value: log,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+}
+
+/**
+ * Ordered shift-run lists advancing the page from `sinceRevision` to its
+ * current revision, or null when the bounded log no longer covers that span.
+ */
+export function displayPageShiftsSince(
+  page: DisplayPage,
+  sinceRevision: number
+): ReadonlyArray<readonly FramePositionShiftRun[]> | null {
+  const current = displayPageRevision(page);
+  if (current === sinceRevision) return [];
+  if (current < sinceRevision) return null;
+  const entries = displayPageShiftLog(page).filter((entry) => entry.revision > sinceRevision);
+  if (entries.length !== current - sinceRevision) return null;
+  return entries.map((entry) => entry.runs);
+}
+
 function shiftDisplayPagePositionsOwned(
   page: DisplayPage,
   runs: readonly FramePositionShiftRun[],
@@ -563,7 +608,6 @@ function shiftDisplayPagePositionsOwned(
 ): DisplayPage {
   // primitives are mutated through this object below, whether or not a new
   // page wrapper is returned
-  bumpDisplayPageRevision(page);
   let primitiveIndex = 0;
   let runIndex = 0;
   const visit = (primitives: readonly DisplayPrimitive[]): void => {
@@ -591,6 +635,8 @@ function shiftDisplayPagePositionsOwned(
   if (runs.some((run) => run.start + run.count > primitiveIndex)) {
     invalid('position shift range exceeds retained primitive count');
   }
+  bumpDisplayPageRevision(page);
+  recordDisplayPageShift(page, runs);
   return page.pageIndex === pageIndex ? page : { ...page, pageIndex };
 }
 

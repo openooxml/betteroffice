@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -15,6 +16,7 @@ import {
   GlyphCache,
   loadGlyphOutlineProvider,
   type DisplayList,
+  type DisplayPage,
   type GlyphOutlineProvider,
   type ImageResolver,
   type RetainedFrame,
@@ -116,7 +118,44 @@ function nextPageWindow(
   return { start, end };
 }
 
-/** Replays display-list pages to canvas with accessibility mirrors. */
+/**
+ * One page's surface: canvas + a11y mirror + optional interactive overlay.
+ * Memoized so a keystroke's snapshot commit re-renders only the pages whose
+ * `DisplayPage` identity actually changed — the owned frame-delta path keeps
+ * untouched pages' identity stable across keystrokes.
+ */
+const CanvasPageSurface = memo(function CanvasPageSurface({
+  page,
+  pageKey,
+  zoom,
+  interactive,
+  registerCanvas,
+}: {
+  page: DisplayPage;
+  pageKey: string;
+  zoom: number;
+  interactive: boolean;
+  registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
+}) {
+  return (
+    <div className="canvas-page" style={{ position: 'relative' }}>
+      <canvas
+        ref={(el) => registerCanvas(pageKey, el)}
+        data-page-index={page.pageIndex}
+        style={{
+          display: 'block',
+          width: page.width * zoom,
+          height: page.height * zoom,
+          background: '#ffffff',
+          boxShadow: '0 1px 3px var(--doc-shadow)',
+        }}
+      />
+      <CanvasPageMirror page={page} zoom={zoom} />
+      {interactive ? <CanvasInteractiveOverlay page={page} zoom={zoom} /> : null}
+    </div>
+  );
+});
+
 export function CanvasPagesView({
   displayList,
   frame,
@@ -158,6 +197,10 @@ export function CanvasPagesView({
   onWorkerPresentationChange?: (active: boolean) => void;
 }) {
   const canvasesRef = useRef(new Map<string, HTMLCanvasElement>());
+  const registerCanvas = useCallback((pageKey: string, el: HTMLCanvasElement | null) => {
+    if (el) canvasesRef.current.set(pageKey, el);
+    else canvasesRef.current.delete(pageKey);
+  }, []);
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const presentedCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
   const offscreenSignatureRef = useRef('');
@@ -514,29 +557,19 @@ export function CanvasPagesView({
           const retainedPage = frame?.pages[i];
           const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
           const surfaceKey = `${pageKey}:${offscreenEligible && !offscreenFailed ? 'offscreen' : 'dom'}`;
+          // per-page wrapper so the mirror positions 1:1 over its canvas.
+          // Every page keeps its full DOM (canvas element, a11y mirror, SDT
+          // overlay) — the page window releases only bitmap backing stores,
+          // so the accessible document and page geometry never shrink.
           return (
-            // per-page wrapper so the mirror positions 1:1 over its canvas.
-            // Every page keeps its full DOM (canvas element, a11y mirror, SDT
-            // overlay) — the page window releases only bitmap backing stores,
-            // so the accessible document and page geometry never shrink.
-            <div key={surfaceKey} className="canvas-page" style={{ position: 'relative' }}>
-              <canvas
-                ref={(el) => {
-                  if (el) canvasesRef.current.set(pageKey, el);
-                  else canvasesRef.current.delete(pageKey);
-                }}
-                data-page-index={page.pageIndex}
-                style={{
-                  display: 'block',
-                  width: page.width * zoom,
-                  height: page.height * zoom,
-                  background: '#ffffff',
-                  boxShadow: '0 1px 3px var(--doc-shadow)',
-                }}
-              />
-              <CanvasPageMirror page={page} zoom={zoom} />
-              {interactive ? <CanvasInteractiveOverlay page={page} zoom={zoom} /> : null}
-            </div>
+            <CanvasPageSurface
+              key={surfaceKey}
+              page={page}
+              pageKey={pageKey}
+              zoom={zoom}
+              interactive={interactive}
+              registerCanvas={registerCanvas}
+            />
           );
         })}
       </div>

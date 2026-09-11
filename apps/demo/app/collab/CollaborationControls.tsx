@@ -9,6 +9,8 @@ interface CollaborationControlsProps {
   synced: boolean;
   peerCount: number | null;
   error: string | null;
+  /** False for a locally opened document, which no link can reach. */
+  shared?: boolean;
 }
 
 export function CollaborationControls({
@@ -16,6 +18,7 @@ export function CollaborationControls({
   synced,
   peerCount,
   error,
+  shared = true,
 }: CollaborationControlsProps) {
   const [copied, setCopied] = useState(false);
 
@@ -25,17 +28,19 @@ export function CollaborationControls({
     return () => clearTimeout(timer);
   }, [copied]);
 
-  const label = [
-    error ? "error" : status,
-    synced ? "synced" : null,
-    peerCount === null
-      ? null
-      : `${peerCount} ${peerCount === 1 ? "peer" : "peers"}`,
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  const label = shared
+    ? [
+        error ? "error" : status,
+        synced ? "synced" : null,
+        peerCount === null
+          ? null
+          : `${peerCount} ${peerCount === 1 ? "peer" : "peers"}`,
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : "not shared";
 
-  const indicator = error ? "error" : status;
+  const indicator = shared ? (error ? "error" : status) : "disconnected";
 
   return (
     <div className="inline-flex flex-none items-center gap-2 font-mono text-[11px] leading-none">
@@ -58,17 +63,19 @@ export function CollaborationControls({
         />
         {label}
       </span>
-      <button
-        className="min-h-7 cursor-pointer rounded-[5px] border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-fg hover:bg-surface max-[760px]:hidden"
-        type="button"
-        onClick={() => {
-          void navigator.clipboard
-            .writeText(window.location.href)
-            .then(() => setCopied(true));
-        }}
-      >
-        {copied ? "Copied" : "Copy collaboration link"}
-      </button>
+      {shared && (
+        <button
+          className="min-h-7 cursor-pointer rounded-[5px] border border-hairline-strong bg-white px-[9px] whitespace-nowrap text-fg hover:bg-surface max-[760px]:hidden"
+          type="button"
+          onClick={() => {
+            void navigator.clipboard
+              .writeText(window.location.href)
+              .then(() => setCopied(true));
+          }}
+        >
+          {copied ? "Copied" : "Copy collaboration link"}
+        </button>
+      )}
     </div>
   );
 }

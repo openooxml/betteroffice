@@ -1,6 +1,6 @@
 # BetterOffice
 
-> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers, plus VSDX diagram support in development. The OOXML engines are written in Rust, in-house, and ship two ways — compiled to WebAssembly for the browser packages, and published to crates.io as native crates for servers. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
+> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers, plus VSDX diagram support in development. The OOXML engines are written in Rust, in-house, and ship three ways — compiled to WebAssembly for the browser packages, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
 
 DOCX, XLSX, and PPTX are available today as full editors or read-only viewers. VSDX support is in development; its framework-free core is published, but no React editor or live demo is available yet. Versions are `0.0.x` and the APIs are still settling; breaking changes are listed in each package changelog.
 
@@ -11,10 +11,12 @@ Published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are
 - [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package so untouched parts are preserved.
 - [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes.
 - [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n): UI locale strings for the DOCX React editor.
+- [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled metric-compatible Latin fonts plus Hebrew and Arabic coverage faces for deterministic document measurement.
+- [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional CJK coverage faces for Chinese, Japanese, and Korean documents.
 - [@betteroffice/xlsx](https://www.npmjs.com/package/@betteroffice/xlsx): framework-free XLSX core — SpreadsheetML parse/serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects.
 - [@betteroffice/xlsx-react](https://www.npmjs.com/package/@betteroffice/xlsx-react): the spreadsheet editor and viewer as a React component.
 - [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n): UI locale strings for the XLSX React editor.
-- [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing and collaboration are live; writing edits back to a .pptx file is not yet exposed here.
+- [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing, collaboration, and saving are live; untouched slides keep their exact source part bytes on save.
 - [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component.
 - [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
 - [@betteroffice/vsdx](https://www.npmjs.com/package/@betteroffice/vsdx): framework-free VSDX core in development — parses, resolves, renders, and round-trips `.vsdx` packages while preserving untouched parts byte-exactly. It supports transactional editing that honours `GUARD`, `SETATREF`, and Lock cells; a convergent Yrs CRDT; a WebAssembly boundary; glue resolution; and a deterministic documented routing policy. Formula evaluation covers 52.62% of corpus formulas (3,679/6,992). Of these evaluated formulas, 3,670 have a comparable Visio cached value and 100% agree; nine are excluded because their caches are stale.
@@ -46,6 +48,7 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-pptx-parse](https://crates.io/crates/betteroffice-pptx-parse): PresentationML parsing and part-preserving package writes.
 - [betteroffice-pptx-edit](https://crates.io/crates/betteroffice-pptx-edit): the Yrs deck model for PPTX.
 - [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display-list compiler.
+- [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): the tiny-skia backend that paints a PPTX display list to PNG.
 - [betteroffice-vsdx-parse](https://crates.io/crates/betteroffice-vsdx-parse): lossless VSDX package parsing and byte-exact preservation of untouched parts.
 - [betteroffice-vsdx-formula](https://crates.io/crates/betteroffice-vsdx-formula): VSDX ShapeSheet formula parsing.
 - [betteroffice-vsdx-resolve](https://crates.io/crates/betteroffice-vsdx-resolve): VSDX inheritance and glue resolution.
@@ -55,6 +58,14 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
 
+## Python packages
+
+Published to PyPI, Apache-2.0. The Rust engine is compiled into each wheel — no Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels cover Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64) against the stable ABI for CPython 3.9 and up. The [Python guide](https://docs.betteroffice.dev/docs/python) carries the install line and a first example.
+
+- [betteroffice-docx](https://pypi.org/project/betteroffice-docx/): `pip install betteroffice-docx`. Read paragraphs, tables, and sections, rewrite the text of a plain single-run paragraph, and save back to DOCX with everything the model does not represent reused from the package it opened. It also paginates an already-measured projection of the document and rasterizes one page of the resulting display list; no font is compiled into the wheel, so a family you never registered is an error rather than invisible text.
+- [betteroffice-xlsx](https://pypi.org/project/betteroffice-xlsx/): `pip install betteroffice-xlsx`. Open, recalculate, style, render to PNG, and save XLSX workbooks; formulas are evaluated by this engine rather than read back from the file. Yrs collaboration and agent proposals are exposed as byte-level primitives, and opening, recalculating, rendering, and saving release the GIL.
+- [betteroffice-pptx](https://pypi.org/project/betteroffice-pptx/): `pip install betteroffice-pptx`. Read, edit, and save PPTX decks, lay slides out into the display-list contract the canvas paints, and rasterize a slide to PNG with `render_png`, which resolves pictures out of the package. No font ships in the wheel, so `register_font` must supply at least one face before a slide with text lays out. Yrs collaboration is exposed as byte-level primitives, and a deck is pinned to the thread that opened it.
+
 ## Collaboration
 
 Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the standard Yjs sync-v1 wire protocol used by y-websocket. Room routing, authentication, awareness, and reconnection stay transport concerns, so any reliable binary transport works. Updates flow between the connection and the Rust replica without a second JavaScript `Y.Doc`.
@@ -62,6 +73,7 @@ Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the s
 ## Docs and demos
 
 - [Documentation](https://docs.betteroffice.dev): guides and API reference.
+- [Packages](https://docs.betteroffice.dev/docs/packages): what to install from npm, crates.io, and PyPI, and what each one does.
 - [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors running in the browser. VSDX has no live demo yet.
 
 ## Migrating from eigenpal

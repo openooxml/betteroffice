@@ -6,8 +6,8 @@ use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeStroke, TextStyle,
-    TextStylePatch, UpdateEvent, UpdateOrigin,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeRect,
+    ShapeStroke, TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -53,6 +53,61 @@ struct FormatTextArgs {
     end: u32,
     #[serde(default)]
     patch: TextStylePatch,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetParagraphAlignmentArgs {
+    story_id: String,
+    start: u32,
+    end: u32,
+    #[serde(default)]
+    alignment: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddCommentArgs {
+    slide_id: String,
+    author: String,
+    #[serde(default)]
+    initials: String,
+    text: String,
+    created: String,
+    #[serde(default)]
+    x_emu: i64,
+    #[serde(default)]
+    y_emu: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplyCommentArgs {
+    comment_id: String,
+    author: String,
+    #[serde(default)]
+    initials: String,
+    text: String,
+    created: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentStatusArgs {
+    comment_id: String,
+    resolved: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentIdArgs {
+    comment_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CommentFlavorArgs {
+    flavor: CommentFlavor,
 }
 
 #[derive(Deserialize)]
@@ -123,6 +178,14 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetShapeRectArgs {
+    slide_id: String,
+    shape_id: String,
+    rect: ShapeRect,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetShapeFillArgs {
     slide_id: String,
     shape_id: String,
@@ -166,18 +229,27 @@ impl PptxDocument {
             .map_err(js_error)
     }
 
+    /// `source` is the file the update was seeded from; when it matches the
+    /// recorded fingerprint the session keeps its part bytes and can save.
+    /// Any other bytes fall back to the bare update session, whose `saveBytes`
+    /// fails — joining a room must not depend on carrying the right file.
     #[wasm_bindgen(js_name = openCollaborativeFromUpdate)]
     pub fn open_collaborative_from_update(
         update: &[u8],
         client_id: f64,
+        source: Option<Vec<u8>>,
     ) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
-        DeckSession::open_from_update(update, client_id)
-            .map(|session| Self {
-                session,
-                update_observer: None,
+        let session = source
+            .and_then(|source| {
+                DeckSession::open_from_update_with_source(update, &source, client_id).ok()
             })
-            .map_err(js_error)
+            .map_or_else(|| DeckSession::open_from_update(update, client_id), Ok)
+            .map_err(js_error)?;
+        Ok(Self {
+            session,
+            update_observer: None,
+        })
     }
 
     #[wasm_bindgen(getter, js_name = clientId)]
@@ -205,6 +277,12 @@ impl PptxDocument {
             .find(|media| media.part_path == part_path)
             .map(|media| media.bytes.clone())
             .ok_or_else(|| JsValue::from_str("media part was not found"))
+    }
+
+    /// Serializes the deck back to `.pptx` bytes, edits included.
+    #[wasm_bindgen(js_name = saveBytes)]
+    pub fn save_bytes(&self) -> Result<Vec<u8>, JsValue> {
+        self.session.save().map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = encodeStateVector)]
@@ -321,6 +399,93 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = setParagraphAlignmentJson)]
+    pub fn set_paragraph_alignment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetParagraphAlignmentArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_paragraph_alignment(
+                    &local_context(),
+                    &args.story_id,
+                    args.start,
+                    args.end,
+                    args.alignment.as_deref(),
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = addCommentJson)]
+    pub fn add_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: AddCommentArgs = parse_args(args)?;
+        json(
+            self.session
+                .add_comment(
+                    &local_context(),
+                    &args.slide_id,
+                    &args.author,
+                    &args.initials,
+                    &args.text,
+                    &args.created,
+                    args.x_emu,
+                    args.y_emu,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = replyToCommentJson)]
+    pub fn reply_to_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ReplyCommentArgs = parse_args(args)?;
+        json(
+            self.session
+                .reply_to_comment(
+                    &local_context(),
+                    &args.comment_id,
+                    &args.author,
+                    &args.initials,
+                    &args.text,
+                    &args.created,
+                )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setCommentStatusJson)]
+    pub fn set_comment_status_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentStatusArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_status(&local_context(), &args.comment_id, args.resolved)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = removeCommentJson)]
+    pub fn remove_comment_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentIdArgs = parse_args(args)?;
+        json(
+            self.session
+                .remove_comment(&local_context(), &args.comment_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setCommentFlavorJson)]
+    pub fn set_comment_flavor_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentFlavorArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_flavor(&local_context(), args.flavor)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = commentsJson)]
+    pub fn comments_json(&self) -> Result<String, JsValue> {
+        json(self.session.comments().map_err(js_error)?)
+    }
+
     #[wasm_bindgen(js_name = insertParagraphBreakJson)]
     pub fn insert_paragraph_break_json(&self, args: &str) -> Result<String, JsValue> {
         let args: ParagraphBreakArgs = parse_args(args)?;
@@ -423,6 +588,16 @@ impl PptxDocument {
                     args.width,
                     args.height,
                 )
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = setShapeRectJson)]
+    pub fn set_shape_rect_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetShapeRectArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_shape_rect(&local_context(), &args.slide_id, &args.shape_id, args.rect)
                 .map_err(js_error)?,
         )
     }

@@ -35,6 +35,9 @@ fn walk(
         Expr::Range { sheet, range } => {
             push_unique(out, seen, sheet.clone(), *range);
         }
+        Expr::ColumnRange { sheet, range } => {
+            push_unique(out, seen, sheet.clone(), range.cell_range());
+        }
         Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, out, seen),
         Expr::Binary { lhs, rhs, .. } => {
             walk(lhs, out, seen);

@@ -82,6 +82,9 @@ impl Expr {
             Expr::Range { sheet, range } => {
                 format!("{}{}", sheet_prefix(sheet), range.to_a1())
             }
+            Expr::ColumnRange { sheet, range } => {
+                format!("{}{}", sheet_prefix(sheet), range.to_a1())
+            }
             Expr::Name { scope, name } => format!("{}{name}", sheet_prefix(scope)),
             Expr::Unary { op, expr } => {
                 // 6 > every binary bp: unary minus binds tighter than all binary ops

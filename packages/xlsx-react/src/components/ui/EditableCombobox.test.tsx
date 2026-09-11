@@ -1,5 +1,5 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
-import { afterEach, describe, expect, it } from 'bun:test';
+import { afterAll, afterEach, describe, expect, it } from 'bun:test';
 import { useState } from 'react';
 import { EditableCombobox } from './EditableCombobox';
 
@@ -7,6 +7,10 @@ if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 const { cleanup, fireEvent, render } = await import('@testing-library/react');
 
 afterEach(cleanup);
+// The globals are process-wide; leaving them installed poisons every later suite.
+afterAll(async () => {
+  if (GlobalRegistrator.isRegistered) await GlobalRegistrator.unregister();
+});
 
 describe('EditableCombobox', () => {
   it('restores the applied value after a rejected commit', () => {

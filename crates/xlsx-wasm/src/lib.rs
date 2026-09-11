@@ -173,11 +173,34 @@ impl XlsxDocument {
         Ok(encoded)
     }
 
+    #[wasm_bindgen(js_name = printDisplayListJson)]
+    pub fn print_display_list_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .print_display_list_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// serialized `DisplayList` for a serialized `Viewport`.
     #[wasm_bindgen(js_name = displayListJson)]
     pub fn display_list_json(&self, viewport_json: &str) -> Result<String, JsValue> {
         self.session
             .display_list_json(viewport_json)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// the chart under a viewport-local point, or `null`.
+    #[wasm_bindgen(js_name = chartAtPointJson)]
+    pub fn chart_at_point_json(&self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .chart_at_point_json(args)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    /// slide a chart by a pixel delta as one undo step.
+    #[wasm_bindgen(js_name = moveChartJson)]
+    pub fn move_chart_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .move_chart_json(args, now_serial())
             .map_err(|e| JsValue::from_str(&e))
     }
 

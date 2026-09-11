@@ -1,11 +1,14 @@
 use std::cell::Cell;
 
-use ooxml_drawingml::chart::{ChartLegend, ChartSeries, ChartSpace};
+use ooxml_drawingml::chart::{ChartLegend, ChartPlotGroup, ChartSeries, ChartSpace};
 use serde_json::{Value, json};
 use xlsx_model::chart::{AnchorCell, AnchorExtent, AnchorPos, ChartAnchor, SheetChart};
 use xlsx_model::workbook::{Cell as SheetCell, FreezePane, Sheet};
 use xlsx_model::{CellRef, CellValue, SheetId, Workbook};
-use xlsx_render::{DrawCmd, GridGeometry, Viewport, build_display_list_with_charts};
+use xlsx_render::{
+    DisplayList, DrawCmd, GridGeometry, RenderError, Viewport, build_display_list,
+    build_display_list_with_charts,
+};
 
 fn chart_space() -> ChartSpace {
     ChartSpace {
@@ -263,4 +266,218 @@ fn charts_clip_to_the_body_and_precede_pane_dividers() {
         assert!(clip.x >= frozen_x);
         assert!(clip.y >= frozen_y);
     }
+}
+
+/// one neutral fill plus its four border lines.
+const PLACEHOLDER_OPS: usize = 5;
+
+fn placeholder_fills(display_list: &DisplayList) -> usize {
+    display_list
+        .commands
+        .iter()
+        .filter(|command| {
+            matches!(
+                command,
+                DrawCmd::FillRect { color, clip: Some(_), .. } if color == "#f2f2f2"
+            )
+        })
+        .count()
+}
+
+/// A worksheet carrying one chart plus a cell, so every assertion below is
+/// about what survives when that chart cannot be drawn.
+fn frame_with_one_chart<F>(resolver: F) -> DisplayList
+where
+    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+{
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        SheetCell {
+            value: CellValue::Text {
+                value: "beside the chart".into(),
+            },
+            ..SheetCell::default()
+        },
+    );
+    sheet.charts.push(absolute_chart());
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    build_display_list_with_charts(
+        &workbook,
+        SheetId(0),
+        &Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
+        resolver,
+    )
+    .unwrap()
+}
+
+fn assert_degrades_locally(display_list: &DisplayList, label: &str) {
+    assert!(display_list.commands.iter().any(|command| matches!(
+        command,
+        DrawCmd::Text { text, chart: false, .. } if text == "beside the chart"
+    )));
+    assert!(!display_list.grid.row_offsets.is_empty());
+    assert_eq!(placeholder_fills(display_list), 1);
+    // the placeholder is the chart layer's *entire* contribution: one fill plus
+    // four border lines, and nothing the refused plot managed to emit.
+    assert_eq!(
+        display_list
+            .commands
+            .iter()
+            .filter(|command| is_chart_command(command))
+            .count(),
+        PLACEHOLDER_OPS
+    );
+    assert_eq!(display_list.charts.len(), 1);
+    assert!(display_list.charts[0].placeholder);
+    assert_eq!(display_list.charts[0].label, label);
+}
+
+#[test]
+fn an_unparseable_chart_degrades_to_a_placeholder() {
+    let display_list = frame_with_one_chart(|chart| {
+        Err(RenderError::ChartParseFailed {
+            part: chart.part.clone(),
+        })
+    });
+    assert_degrades_locally(&display_list, "Chart, not shown");
+}
+
+#[test]
+fn a_missing_chart_part_degrades_to_a_placeholder() {
+    let display_list = frame_with_one_chart(|chart| {
+        Err(RenderError::ChartPartMissing {
+            part: chart.part.clone(),
+        })
+    });
+    assert_degrades_locally(&display_list, "Chart, not shown");
+}
+
+#[test]
+fn an_unsupported_family_degrades_to_a_placeholder() {
+    let display_list = frame_with_one_chart(|_| {
+        Ok(ChartSpace {
+            chart_type: "treemap".into(),
+            title: Some("Spend".into()),
+            ..chart_space()
+        })
+    });
+    assert_degrades_locally(&display_list, "Spend, treemap chart, not shown");
+}
+
+#[test]
+fn an_unsupported_feature_degrades_to_a_placeholder() {
+    let display_list = frame_with_one_chart(|_| {
+        Ok(ChartSpace {
+            title: Some("Spend".into()),
+            series: Vec::new(),
+            plot_groups: vec![ChartPlotGroup {
+                chart_type: Some("column".into()),
+                grouping: Some("percentStacked".into()),
+                series: vec![ChartSeries {
+                    name: Some("Total".into()),
+                    categories: vec!["All".into()],
+                    values: vec![5.0],
+                    color: "#4472C4".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+            ..chart_space()
+        })
+    });
+    assert_degrades_locally(
+        &display_list,
+        "Spend, column chart, 1 series, 1 categories, not shown",
+    );
+}
+
+#[test]
+fn a_chart_anchored_off_the_grid_is_skipped_entirely() {
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        SheetCell {
+            value: CellValue::Text {
+                value: "beside the chart".into(),
+            },
+            ..SheetCell::default()
+        },
+    );
+    sheet.charts.push(sheet_chart(ChartAnchor::Absolute {
+        pos: AnchorPos { x: 0, y: 0 },
+        extent: AnchorExtent { cx: 0, cy: 0 },
+    }));
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    let display_list = build_display_list_with_charts(
+        &workbook,
+        SheetId(0),
+        &Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
+        |_| Ok(chart_space()),
+    )
+    .unwrap();
+
+    assert!(display_list.commands.iter().any(|command| matches!(
+        command,
+        DrawCmd::Text { text, chart: false, .. } if text == "beside the chart"
+    )));
+    assert!(display_list.charts.is_empty());
+    assert_eq!(placeholder_fills(&display_list), 0);
+}
+
+/// `build_display_list` supplies no chart source at all, so every visible chart
+/// is a placeholder rather than a refused frame.
+#[test]
+fn the_resolverless_builder_places_holders_instead_of_failing() {
+    let mut sheet = Sheet::new("Sheet1");
+    sheet.set_cell(
+        CellRef::new(0, 0),
+        SheetCell {
+            value: CellValue::Text {
+                value: "beside the chart".into(),
+            },
+            ..SheetCell::default()
+        },
+    );
+    sheet.charts.push(absolute_chart());
+    let mut workbook = Workbook::default();
+    workbook.sheets.push(sheet);
+    let display_list = build_display_list(
+        &workbook,
+        SheetId(0),
+        &Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: 300.0,
+            height: 200.0,
+        },
+    )
+    .unwrap();
+    assert_degrades_locally(&display_list, "Chart, not shown");
+}
+
+#[test]
+fn a_drawable_chart_is_not_marked_as_a_placeholder() {
+    let display_list = frame_with_one_chart(|_| Ok(chart_space()));
+    assert_eq!(display_list.charts.len(), 1);
+    assert!(!display_list.charts[0].placeholder);
+    assert_eq!(placeholder_fills(&display_list), 0);
+    assert!(
+        display_list
+            .commands
+            .iter()
+            .any(|command| matches!(command, DrawCmd::Path { .. }))
+    );
 }

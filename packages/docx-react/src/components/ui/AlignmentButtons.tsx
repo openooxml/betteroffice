@@ -198,6 +198,7 @@ export function AlignmentButtons({
       {isOpen && !disabled && (
         <div
           ref={dropdownRef}
+          data-docx-escape-layer="true"
           style={{
             ...dropdownStyle,
             backgroundColor: 'var(--doc-surface)',

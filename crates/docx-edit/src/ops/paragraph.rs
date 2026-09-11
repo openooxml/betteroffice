@@ -41,7 +41,7 @@ use crate::{
 /// The paragraph attributes a style definition owns. Applying a style resets
 /// every one of them to the style's value, or clears it when the style has
 /// none — an attribute here is never left over from the previous style.
-pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
+pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 16] = [
     "alignment",
     "spaceBefore",
     "spaceAfter",
@@ -54,6 +54,7 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 15] = [
     "contextualSpacing",
     "keepNext",
     "keepLines",
+    "widowControl",
     "pageBreakBefore",
     "outlineLevel",
     "defaultTextFormatting",

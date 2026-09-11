@@ -1,0 +1,255 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #141414;
+  background: #fff;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+  color-scheme: light;
+}
+*,
+::before,
+::after {
+  box-sizing: border-box;
+  border-width: 0;
+  border-style: solid;
+  border-color: #e5e7eb;
+}
+body {
+  margin: 0;
+}
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  margin: 0;
+}
+button {
+  cursor: pointer;
+  appearance: none;
+  background-color: transparent;
+  background-image: none;
+}
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid #059669;
+  outline-offset: 3px;
+}
+.desktop {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  height: 54px;
+  flex: none;
+  padding: 0 22px;
+  border-bottom: 1px solid #eee;
+}
+.brand {
+  font-size: 14px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.brand span {
+  font-weight: 400;
+  color: #8c8c8c;
+  margin-left: 5px;
+}
+.document-name {
+  font-size: 12px;
+  color: #777;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.title-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+.quiet-button {
+  border: 0;
+  background: transparent;
+  color: #666;
+  border-radius: 5px;
+  padding: 7px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.quiet-button:hover {
+  background: #f4f4f4;
+  color: #141414;
+}
+.start-screen {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  overflow: auto;
+  padding: clamp(44px, 12vh, 110px) 28px 40px;
+}
+.start-screen.dragging {
+  outline: 2px solid #059669;
+  outline-offset: -12px;
+  border-radius: 16px;
+  background: #fafffc;
+}
+.start-content {
+  width: 390px;
+  max-width: 100%;
+}
+.document-mark {
+  color: #059669;
+  margin-bottom: 24px;
+}
+.start-content h1 {
+  font-size: 29px;
+  letter-spacing: -0.8px;
+  font-weight: 600;
+  margin: 0 0 11px;
+}
+.intro {
+  font-size: 14px;
+  color: #777;
+  margin: 0 0 32px;
+}
+.open-primary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 15px 17px;
+  border: none;
+  background: #059669;
+  color: #fff;
+  border-radius: 7px;
+  font-size: 14px;
+  font-weight: 550;
+}
+.open-primary:hover {
+  background: #047f59;
+}
+kbd {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 400;
+  opacity: 0.8;
+}
+.drop-hint {
+  font-size: 12px;
+  color: #999;
+  margin: 14px 0 0;
+}
+.drop-hint span {
+  margin: 0 7px;
+}
+.recent {
+  margin-top: 39px;
+}
+.recent h2 {
+  font-size: 11px;
+  color: #888;
+  font-weight: 550;
+  margin: 0 0 10px;
+}
+.recent-file {
+  display: flex;
+  flex-direction: column;
+  width: calc(100% + 20px);
+  margin-left: -10px;
+  padding: 10px;
+  gap: 4px;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+.recent-file:hover {
+  background: #f6f6f6;
+}
+.recent-name {
+  font-size: 13px;
+  color: #333;
+}
+.recent-folder {
+  font-size: 11px;
+  color: #999;
+}
+.recent-name,
+.recent-folder {
+  width: 100%;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.editor-stage {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.editor-stage > * {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.notice {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 9px 22px;
+  font-size: 12px;
+  background: #fff6f4;
+  color: #a33122;
+}
+.notice button {
+  margin-left: auto;
+  border: 0;
+  background: transparent;
+  color: inherit;
+}
+.loading {
+  margin: auto;
+  color: #777;
+  font-size: 14px;
+}
+.room-panel {
+  border: 0;
+  border-bottom: 1px solid #eee;
+  padding: 12px 22px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  flex-wrap: wrap;
+}
+.room-panel input {
+  border: 1px solid #ddd;
+  border-radius: 5px;
+  padding: 7px 9px;
+}
+.room-panel p {
+  flex-basis: 100%;
+  color: #888;
+  margin: 0;
+}
+@media (max-width: 700px) {
+  .document-name {
+    display: none;
+  }
+  .titlebar {
+    padding: 0 12px;
+    gap: 6px;
+  }
+}

@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 
 use pptx_edit::{
-    DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeReceipt, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot,
-    TextReceipt, TextStyle, TextStylePatch, TransformReceipt,
+    CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
+    EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt,
+    ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot, TextReceipt,
+    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -18,6 +19,8 @@ const STANDALONE_CLIENT_ID: u64 = 1;
 pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
+    #[cfg(feature = "raster")]
+    glyphs: crate::render::GlyphRegistry,
 }
 
 impl Presentation {
@@ -47,10 +50,12 @@ impl Presentation {
         client_id: u64,
     ) -> Result<Self> {
         let package = pptx_parse::parse_pptx_with_limits(bytes, limits)?;
-        let session = DeckSession::from_package(package, client_id)?;
+        let session = DeckSession::from_package_with_source(package, bytes, client_id)?;
         Ok(Self {
             session,
             renderer: SlideRenderer::new(),
+            #[cfg(feature = "raster")]
+            glyphs: crate::render::GlyphRegistry::default(),
         })
     }
 
@@ -92,6 +97,14 @@ impl Presentation {
 
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
         Ok(self.session.story(story_id)?)
+    }
+
+    pub fn anchor_caret(&self, story_id: &str, index: u32) -> Result<CaretAnchor> {
+        Ok(self.session.anchor_caret(story_id, index)?)
+    }
+
+    pub fn resolve_caret_anchor(&self, anchor: &CaretAnchor) -> Option<u32> {
+        self.session.resolve_caret_anchor(anchor)
     }
 
     pub fn insert_slide(
@@ -205,6 +218,18 @@ impl Presentation {
             .resize_shape(context, slide_id, shape_id, width, height)?)
     }
 
+    pub fn set_shape_rect(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        rect: ShapeRect,
+    ) -> Result<TransformReceipt> {
+        Ok(self
+            .session
+            .set_shape_rect(context, slide_id, shape_id, rect)?)
+    }
+
     pub fn insert_text(
         &self,
         context: &EditCtx,
@@ -241,6 +266,81 @@ impl Presentation {
             .format_text(context, story_id, start, end, patch)?)
     }
 
+    pub fn set_paragraph_alignment(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        start: u32,
+        end: u32,
+        alignment: Option<&str>,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .set_paragraph_alignment(context, story_id, start, end, alignment)?)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_comment(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+        x_emu: i64,
+        y_emu: i64,
+    ) -> Result<CommentReceipt> {
+        Ok(self.session.add_comment(
+            context, slide_id, author, initials, text, created, x_emu, y_emu,
+        )?)
+    }
+
+    pub fn reply_to_comment(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        author: &str,
+        initials: &str,
+        text: &str,
+        created: &str,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .reply_to_comment(context, comment_id, author, initials, text, created)?)
+    }
+
+    pub fn set_comment_status(
+        &self,
+        context: &EditCtx,
+        comment_id: &str,
+        resolved: bool,
+    ) -> Result<CommentReceipt> {
+        Ok(self
+            .session
+            .set_comment_status(context, comment_id, resolved)?)
+    }
+
+    pub fn remove_comment(&self, context: &EditCtx, comment_id: &str) -> Result<CommentReceipt> {
+        Ok(self.session.remove_comment(context, comment_id)?)
+    }
+
+    pub fn set_comment_flavor(
+        &self,
+        context: &EditCtx,
+        flavor: CommentFlavor,
+    ) -> Result<CommentFlavor> {
+        Ok(self.session.set_comment_flavor(context, flavor)?)
+    }
+
+    pub fn comments(&self) -> Result<Vec<CommentSnapshot>> {
+        Ok(self.session.comments()?)
+    }
+
+    pub fn comment_flavor(&self) -> Result<CommentFlavor> {
+        Ok(self.session.comment_flavor()?)
+    }
+
     pub fn insert_paragraph_break(
         &self,
         context: &EditCtx,
@@ -250,6 +350,17 @@ impl Presentation {
         Ok(self
             .session
             .insert_paragraph_break(context, story_id, index)?)
+    }
+
+    pub fn delete_paragraph_break(
+        &self,
+        context: &EditCtx,
+        story_id: &str,
+        index: u32,
+    ) -> Result<TextReceipt> {
+        Ok(self
+            .session
+            .delete_paragraph_break(context, story_id, index)?)
     }
 
     pub fn register_font(
@@ -262,6 +373,16 @@ impl Presentation {
         Ok(self.renderer.register_font(family, bold, italic, bytes)?)
     }
 
+    #[cfg(feature = "raster")]
+    pub(crate) fn renderer(&self) -> &SlideRenderer {
+        &self.renderer
+    }
+
+    #[cfg(feature = "raster")]
+    pub(crate) fn glyphs(&self) -> &crate::render::GlyphRegistry {
+        &self.glyphs
+    }
+
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
         let snapshot = self.session.snapshot()?;
         Ok(self
@@ -269,10 +390,12 @@ impl Presentation {
             .layout_slide(self.session.package(), &snapshot, slide_index)?)
     }
 
-    /// Re-zips the retained parts. Part bytes survive unchanged; the container
-    /// is rebuilt, so the output is not byte-identical to the source.
+    /// Serializes the deck with all edits applied. Untouched slides keep their
+    /// exact source part bytes; edited slides are patched at the XML level.
+    /// The container is rebuilt, so the output is not byte-identical to the
+    /// source even without edits.
     pub fn save(&self) -> Result<Vec<u8>> {
-        Ok(pptx_parse::write_pptx(self.session.package())?)
+        Ok(self.session.save()?)
     }
 
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -289,6 +412,13 @@ impl Presentation {
 
     pub fn apply_update_v1(&self, update: &[u8]) -> Result<DeckSnapshot> {
         Ok(self.session.apply_update_v1(update)?)
+    }
+
+    pub fn observe_update_v1<F>(&self, callback: F) -> Result<UpdateSubscription>
+    where
+        F: Fn(UpdateEvent) + 'static,
+    {
+        Ok(self.session.observe_update_v1(callback)?)
     }
 
     pub fn undo(&self) -> bool {

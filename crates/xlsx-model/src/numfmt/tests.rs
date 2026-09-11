@@ -337,3 +337,247 @@ fn escaped_and_quoted_literals() {
     assert_eq!(fv(5.0, "0\\ \\k\\g"), "5 kg");
     assert_eq!(fv(100.0, "\"$\"#,##0"), "$100");
 }
+
+#[test]
+fn repeated_codes_render_identically_through_cache() {
+    let codes = [
+        "#,##0.00",
+        "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+        "m/d/yyyy h:mm",
+        "@",
+        "\"p\"0.00",
+    ];
+    for code in codes {
+        let expected = fv(1234.5678, code);
+        for i in 0..(FORMAT_CACHE_CAP * 2) {
+            let _ = fv(i as f64, &format!("\"churn{i}\"0.000"));
+            assert_eq!(fv(1234.5678, code), expected);
+        }
+    }
+    let hello = CellValue::Text {
+        value: "hello".to_string(),
+    };
+    let expected = format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900);
+    for _ in 0..(FORMAT_CACHE_CAP * 2) {
+        assert_eq!(
+            format_value(&hello, "[Red]\"pre \"@", DateSystem::V1900),
+            expected
+        );
+    }
+}
+
+#[test]
+fn eviction_past_capacity_keeps_outputs_identical() {
+    let rounds = FORMAT_CACHE_CAP * 3;
+    let codes: Vec<String> = (0..rounds).map(|i| format!("\"p{i}\"0.00")).collect();
+    let first: Vec<String> = codes.iter().map(|c| fv(7.625, c)).collect();
+    for (i, code) in codes.iter().enumerate() {
+        assert_eq!(fv(7.625, code), format!("p{i}7.63"));
+    }
+    for (code, expected) in codes.iter().zip(&first) {
+        assert_eq!(fv(-7.625, code), format!("-{expected}"));
+    }
+}
+
+fn parse_code(code: &str) -> Arc<[Section]> {
+    split_sections(code).iter().map(|s| tokenize(s)).collect()
+}
+
+#[test]
+fn distinct_insertions_never_exceed_two_generations() {
+    let mut cache = FormatCache::default();
+    for i in 0..=FORMAT_CACHE_CAP * 4 {
+        let key = format!("\"s{i}\"0");
+        cache.insert(&key, parse_code(&key));
+        assert!(cache.hot.len() <= FORMAT_CACHE_CAP);
+        assert!(cache.hot.len() + cache.cold.len() <= FORMAT_CACHE_CAP * 2);
+    }
+}
+
+#[test]
+fn repeat_lookup_returns_the_same_arc() {
+    let mut cache = FormatCache::default();
+    cache.insert("0.000", parse_code("0.000"));
+    let first = cache.get("0.000").unwrap();
+    for _ in 0..3 {
+        let again = cache.get("0.000").unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+    }
+    assert!(cache.get("0.00").is_none());
+}
+
+#[test]
+fn a_full_generation_ages_out_but_still_answers_once() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"e{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+    assert!(cache.cold.is_empty());
+
+    let newcomer = "\"fresh\"0";
+    cache.insert(newcomer, parse_code(newcomer));
+    assert_eq!(cache.hot.len(), 1);
+    assert_eq!(cache.cold.len(), FORMAT_CACHE_CAP);
+    assert!(cache.hot.contains_key(newcomer));
+
+    assert!(cache.get(&keys[0]).is_some());
+    assert!(cache.hot.contains_key(&keys[0]));
+}
+
+#[test]
+fn memoized_path_reuses_one_parse_across_lookups() {
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
+    let b = parsed_sections_in(&mut cache, "[Red]#,##0.00;(#,##0.00)");
+    assert!(Arc::ptr_eq(&a, &b));
+    assert_eq!(cache.hot.len(), 1);
+}
+
+#[test]
+fn oversize_codes_render_correctly_but_are_never_cached() {
+    let literal = "x".repeat(MAX_CACHED_CODE_LEN + 1);
+    let code = format!("\"{literal}\"0.00");
+    let mut cache = FormatCache::default();
+    let a = parsed_sections_in(&mut cache, &code);
+    let b = parsed_sections_in(&mut cache, &code);
+    assert!(!Arc::ptr_eq(&a, &b));
+    assert!(cache.hot.is_empty() && cache.cold.is_empty());
+    assert_eq!(fv(7.625, &code), format!("{literal}7.63"));
+}
+
+const CACHE_CORPUS: [&str; 14] = [
+    "#,##0.00",
+    "[Red]0.00%;\"neg\";\"zero\";\"txt:\"@",
+    "m/d/yyyy h:mm",
+    "[$-409]dddd, mmmm d, yyyy",
+    "_($* #,##0.00_);_($* (#,##0.00);_($* \"-\"??_);_(@_)",
+    "0.00E+00",
+    "[>100]\"big\";[<0][Red]0.00;0.0",
+    "# ??/??",
+    "0\\ \\k\\g",
+    "@",
+    // pairs that diverge only late, so a partial key would alias them
+    "#,##0.00;[Red](#,##0.00)",
+    "#,##0.00;[Blue](#,##0.00)",
+    "0.000000000;;\"zero\";@",
+    "0.000000000;;\"nil\";@",
+];
+
+/// every lookup below is a proven hit, and each must equal a fresh parse.
+#[test]
+fn a_cache_hit_returns_what_a_fresh_parse_would() {
+    for code in CACHE_CORPUS {
+        let mut cache = FormatCache::default();
+        let seeded = parsed_sections_in(&mut cache, code);
+        assert_eq!(*seeded, *tokenize_all(code), "{code}");
+
+        for j in 1..FORMAT_CACHE_CAP {
+            let _ = parsed_sections_in(&mut cache, &format!("\"j{j}\"0"));
+        }
+        assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+        assert!(cache.hot.contains_key(code));
+        let hot_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &hot_hit), "{code}: not a hot hit");
+
+        let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+        assert!(cache.cold.contains_key(code) && !cache.hot.contains_key(code));
+        let cold_hit = parsed_sections_in(&mut cache, code);
+        assert!(Arc::ptr_eq(&seeded, &cold_hit), "{code}: not a cold hit");
+        assert_eq!(*cold_hit, *tokenize_all(code), "{code}");
+    }
+}
+
+#[test]
+fn a_cold_hit_promotes_even_when_hot_is_already_full() {
+    let code = "[Red]#,##0.00;(#,##0.00);\"-\";@";
+    let mut cache = FormatCache::default();
+    let seeded = parsed_sections_in(&mut cache, code);
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"a{j}\"0"));
+    }
+    let _ = parsed_sections_in(&mut cache, "\"flip\"0");
+    assert!(cache.cold.contains_key(code));
+    for j in 1..FORMAT_CACHE_CAP {
+        let _ = parsed_sections_in(&mut cache, &format!("\"b{j}\"0"));
+    }
+    assert_eq!(cache.hot.len(), FORMAT_CACHE_CAP);
+
+    let promoted = parsed_sections_in(&mut cache, code);
+    assert!(Arc::ptr_eq(&seeded, &promoted));
+    assert!(cache.hot.contains_key(code));
+    assert_eq!(*promoted, *tokenize_all(code));
+}
+
+#[test]
+fn reinserting_a_present_key_at_capacity_loses_nothing() {
+    let mut cache = FormatCache::default();
+    let keys: Vec<String> = (0..FORMAT_CACHE_CAP)
+        .map(|i| format!("\"r{i}\"0"))
+        .collect();
+    for key in &keys {
+        cache.insert(key, parse_code(key));
+    }
+    let repeat = &keys[FORMAT_CACHE_CAP / 2];
+    cache.insert(repeat, parse_code(repeat));
+    assert!(cache.hot.contains_key(repeat));
+    for key in &keys {
+        assert!(
+            cache.hot.contains_key(key) || cache.cold.contains_key(key),
+            "{key} was dropped"
+        );
+    }
+}
+
+/// only the first four sections are ever selected, so the parse stops there.
+#[test]
+fn sections_past_the_fourth_are_never_selected() {
+    assert_eq!(fv(1.0, "\"a\";\"b\";\"c\";\"d\";\"e\";\"f\""), "a");
+    assert_eq!(fv(-1.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "b");
+    assert_eq!(fv(0.0, "\"a\";\"b\";\"c\";\"d\";\"e\""), "c");
+    let text = CellValue::Text {
+        value: "x".to_string(),
+    };
+    assert_eq!(
+        format_value(&text, "\"a\";\"b\";\"c\";\"d\"@;\"e\"@", DateSystem::V1900).text,
+        "dx"
+    );
+    assert_eq!(tokenize_all("0;0;0;0;0;0;0").len(), USED_SECTIONS);
+}
+
+/// the parse is shared but the date system is not: it is applied after lookup.
+#[test]
+fn one_cached_code_still_honours_both_date_systems() {
+    let code = "m/d/yyyy h:mm";
+    let serial = 45_000.5;
+    let v1900 = fv(serial, code);
+    let v1904 = fv04(serial, code);
+    assert_ne!(v1900, v1904);
+    for _ in 0..8 {
+        assert_eq!(fv04(serial, code), v1904);
+        assert_eq!(fv(serial, code), v1900);
+    }
+}
+
+#[test]
+fn concurrent_callers_agree_with_a_single_threaded_render() {
+    let codes: Vec<String> = (0..FORMAT_CACHE_CAP + 64)
+        .map(|i| format!("\"c{i}\"#,##0.00;[Red](#,##0.00)"))
+        .collect();
+    let expected: Vec<String> = codes.iter().map(|c| fv(-1234.5678, c)).collect();
+    std::thread::scope(|s| {
+        for _ in 0..4 {
+            let (codes, expected) = (&codes, &expected);
+            s.spawn(move || {
+                for _ in 0..4 {
+                    for (code, want) in codes.iter().zip(expected) {
+                        assert_eq!(&fv(-1234.5678, code), want);
+                    }
+                }
+            });
+        }
+    });
+}

@@ -11,6 +11,10 @@ on:
         description: The bindings/python-<binding> distribution to build.
         required: true
         type: string
+      sha:
+        description: The commit to build. A branch would move under the build.
+        required: true
+        type: string
 
 jobs:
   wheels:
@@ -38,6 +42,8 @@ jobs:
             manylinux: auto
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -60,6 +66,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
 
       - uses: PyO3/maturin-action@v1
         with:

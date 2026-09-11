@@ -92,7 +92,7 @@ pub fn measure_header_footer(
         .filter(|(block, _)| contributes_to_flow(block))
         .map(|(_, measure)| extent_height(measure))
         .sum();
-    let (visual_top, visual_bottom) = visual_bounds(&blocks, &measures, height, metrics);
+    let (visual_top, visual_bottom) = visual_bounds(&blocks, &measures, flow_height, metrics);
     let measured = blocks
         .into_iter()
         .zip(measures)
@@ -280,7 +280,8 @@ pub fn contributes_to_flow(block: &LayoutBlock) -> bool {
         LayoutBlock::Image(image) => {
             image.anchor.as_ref().and_then(|anchor| anchor.is_anchored) != Some(true)
         }
-        LayoutBlock::Shape(_) | LayoutBlock::Chart(_) => true,
+        LayoutBlock::Shape(shape) => shape.position.is_none(),
+        LayoutBlock::Chart(_) => true,
         LayoutBlock::TextBox(text_box) => {
             matches!(text_box.display_mode.as_deref(), None | Some("inline"))
         }
@@ -322,6 +323,39 @@ fn visual_bounds(
                 if text_box.display_mode.as_deref() != Some("float") {
                     cursor += block_height;
                 }
+            }
+            LayoutBlock::Shape(shape) if shape.position.is_some() => {
+                let distance = match metrics.kind {
+                    HeaderFooterKind::Header => metrics.margins.header,
+                    HeaderFooterKind::Footer => metrics.margins.footer,
+                }
+                .unwrap_or(DEFAULT_HF_DISTANCE_PX);
+                let flow_top = match metrics.kind {
+                    HeaderFooterKind::Header => distance,
+                    HeaderFooterKind::Footer => metrics.page_size.h - distance - height,
+                };
+                let (_, top) = crate::anchor::resolve_position(
+                    shape.position.as_ref(),
+                    shape.width,
+                    shape.height,
+                    &crate::anchor::AnchorFrame {
+                        page_width: metrics.page_size.w,
+                        page_height: metrics.page_size.h,
+                        margin_left: metrics.margins.left,
+                        margin_right: metrics.margins.right,
+                        margin_top: metrics.margins.top,
+                        margin_bottom: metrics.margins.bottom,
+                        flow_x: metrics.margins.left,
+                        flow_y: flow_top + cursor,
+                        flow_width: metrics.page_size.w
+                            - metrics.margins.left
+                            - metrics.margins.right,
+                        flow_height: 0.0,
+                        odd_page: true,
+                    },
+                );
+                visual_top = visual_top.min(top - flow_top);
+                visual_bottom = visual_bottom.max(top - flow_top + block_height);
             }
             LayoutBlock::Table(_)
             | LayoutBlock::Image(_)

@@ -24,6 +24,10 @@ receives its arguments **unevaluated**, so control-flow functions (`IF`, `IFS`,
 `SWITCH`, `IFERROR`, `IFNA`, `CHOOSE`, `AND`, `OR`) evaluate only the branches
 they take.
 
+Whole-column references (`S:V`, `$S:$V`, `'Data Sheet'!S:V`) retain their anchors
+and full-height dependencies. Lookups read cells on demand; the existing
+evaluation limits still apply to large scans and aggregates.
+
 ## Registry
 
 Function names resolve **case-insensitively** (`sum`, `SUM`, `Sum` are one

@@ -28,6 +28,7 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   outlineLevel?: number;
   contextualSpacing?: boolean;
   pageBreakBefore?: boolean;
+  widowControl?: boolean | null;
   bidi?: boolean;
   _originalFormatting?: ParagraphFormatting;
   _originalRunBoundaries?: unknown[];
@@ -66,6 +67,9 @@ export function paragraphAttrsToFormatting(
     if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
       result.pageBreakBefore = attrs.pageBreakBefore || undefined;
     }
+    if (attrs.widowControl !== (orig.widowControl ?? undefined)) {
+      result.widowControl = attrs.widowControl ?? undefined;
+    }
     if (attrs.bidi !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
@@ -88,6 +92,7 @@ export function paragraphAttrsToFormatting(
     attrs.outlineLevel != null ||
     attrs.contextualSpacing ||
     attrs.pageBreakBefore ||
+    attrs.widowControl != null ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
 
@@ -109,6 +114,7 @@ export function paragraphAttrsToFormatting(
     outlineLevel: attrs.outlineLevel ?? undefined,
     contextualSpacing: attrs.contextualSpacing || undefined,
     pageBreakBefore: attrs.pageBreakBefore || undefined,
+    widowControl: attrs.widowControl ?? undefined,
     bidi: attrs.bidi || undefined,
   };
 }

@@ -5,8 +5,38 @@
  * handling and the selection overlay share one geometry source with the painter.
  */
 
-import type { GridMeta, Rect } from '../display-list/types';
+import type { ChartRegion, GridMeta, Rect } from '../display-list/types';
 import type { CellAddr, CellRange } from '../selection/index';
+
+/**
+ * The topmost chart whose visible region contains a viewport-local point, or
+ * `null`. Mirrors `chart_at_point` in crates/xlsx-render/src/hit.rs: regions are
+ * in paint order so the last match wins, and the clipped region bounds the hit,
+ * so a chart scrolled under a frozen pane is not hit where it is hidden.
+ *
+ * Every coordinate is rounded to f32 first. The regions arrive as f32 off the
+ * wire, and the engine compares against `clip.x + clip.w` computed in f32; the
+ * same sum in f64 lands on the other side of the edge at reachable coordinates.
+ */
+export function chartRegionAtPoint(
+  charts: readonly ChartRegion[] | undefined,
+  x: number,
+  y: number
+): ChartRegion | null {
+  if (!charts) return null;
+  const px = Math.fround(x);
+  const py = Math.fround(y);
+  if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+  for (let index = charts.length - 1; index >= 0; index--) {
+    const clip = charts[index].clip;
+    const left = Math.fround(clip.x);
+    const top = Math.fround(clip.y);
+    const right = Math.fround(left + Math.fround(clip.w));
+    const bottom = Math.fround(top + Math.fround(clip.h));
+    if (px >= left && px < right && py >= top && py < bottom) return charts[index];
+  }
+  return null;
+}
 
 // largest index i in [0, offsets.length-2] with offsets[i] <= target, or -1 when
 // target is left of the first edge. offsets is ascending; the last entry is the

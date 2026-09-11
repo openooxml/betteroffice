@@ -42,11 +42,16 @@
  */
 
 import type { DisplayList, DisplayPrimitive } from './displayList';
-import { displayPageRevision } from './frameDelta';
+import {
+  displayPageRevision,
+  displayPageShiftsSince,
+  type FramePositionShiftRun,
+} from './frameDelta';
 import { displayPrimitiveRect, type GeoRect } from './displayListGeometry';
 import {
   findImagePrimitiveAtPoint,
   findImagePrimitiveByDocPos,
+  type DisplayListImageRegion,
   type LocatedImagePrimitive,
 } from './displayListImages';
 import { loadRustDisplayListQueryEngine, type RustDisplayListQueryEngine } from './rustDisplayList';
@@ -65,26 +70,39 @@ export interface ResidentDisplayListQueryEngine {
   ): string;
   displayRangeRectsJson(from: number, to: number): string;
   displayRangeRectsRegionJson(
-    region: 'body' | 'header' | 'footer',
-    rId: string,
+    region: DisplayListHitRegion,
+    partId: string,
     from: number,
     to: number
   ): string;
 }
 
 /** which part of a page owns a hit — mirrors `HitRegion` in hit.rs */
-export type DisplayListHitRegion = 'body' | 'header' | 'footer';
+export type DisplayListHitRegion = 'body' | 'header' | 'footer' | 'footnote' | 'endnote';
+
+/**
+ * What a click at a hit point would act on — mirrors `HoverTarget` in hit.rs.
+ * `'text'` is the typeable area (a run's box, or the content box around it),
+ * which is what a pointer cursor keys off; `pos` cannot say, since it resolves
+ * everywhere on a page that carries text.
+ */
+export type DisplayListHoverTarget = 'text' | 'image' | 'none';
 
 /**
  * Region-aware hit result. For `header`/`footer` the position refers to the
- * header/footer document identified by `rId`, NOT the body document — the
- * caller must route the selection to that editor. `pos` is null when the point
- * is inside the region but resolves to no position.
+ * header/footer document identified by `rId`, and for `footnote`/`endnote` to
+ * the note story named by `noteId` — NOT the body document, so the caller must
+ * route the selection to that editor. `pos` is null when the point is inside
+ * the region but resolves to no position.
  */
 export interface DisplayListRegionHit {
   region: DisplayListHitRegion;
   rId?: string;
+  /** note whose story a `footnote`/`endnote` position addresses */
+  noteId?: number;
   pos: number | null;
+  /** Absent from a wasm build predating it; read that as "not text". */
+  target?: DisplayListHoverTarget;
 }
 
 /**
@@ -163,13 +181,13 @@ export interface DisplayListQueries {
     pageIndex: number,
     x: number,
     y: number,
-    region?: DisplayListHitRegion,
+    region?: DisplayListImageRegion,
     rId?: string
   ): DisplayListImageGeometry | null;
   /** Image whose atom starts at `pos`. Body by default. */
   imageByPos(
     pos: number,
-    region?: DisplayListHitRegion,
+    region?: DisplayListImageRegion,
     rId?: string
   ): DisplayListImageGeometry | null;
   /** region-aware point → doc position (page-local coordinates) */
@@ -196,12 +214,29 @@ export interface DisplayListQueries {
     to: number
   ): DisplayListRect[];
   /**
+   * Note document range → highlight rects for that note's story. `from`/`to`
+   * are positions in the `fn:{noteId}` / `en:{noteId}` document, never the
+   * body's. A note paints on one page only, so every rect shares its
+   * `pageIndex`.
+   */
+  noteRangeRects(
+    region: 'footnote' | 'endnote',
+    noteId: number,
+    from: number,
+    to: number
+  ): DisplayListRect[];
+  /**
    * Caret geometry for a collapsed HF selection — the HF twin of `caretRect`.
    * Resolves `[pos, pos+1)` in the HF doc (left edge is the caret), falling back
    * to `[pos-1, pos)` (right edge) at end-of-line / end-of-doc. Returns one
    * caret rect per page carrying the part; the caller picks the edited page.
    */
   hfCaretRects(region: 'header' | 'footer', rId: string, pos: number): DisplayListRect[];
+  /**
+   * Caret geometry for a collapsed selection in a note story — the note twin of
+   * `hfCaretRects`. A note paints on one page, so this returns at most one rect.
+   */
+  noteCaretRects(region: 'footnote' | 'endnote', noteId: number, pos: number): DisplayListRect[];
   /** Header/footer sidebar anchors, one per page carrying the part. */
   hfAnchorRects(region: 'header' | 'footer', rId: string, pos: number): DisplayListRect[];
   /**
@@ -266,10 +301,10 @@ const handleFinalizers: HandleFinalizationRegistry | null = (() => {
  */
 interface FacadeDeltaSeed {
   list: DisplayList;
-  /** Per-page in-place mutation revisions captured at facade creation. The
-   * owned frame-delta path patches positions through the SAME page objects,
-   * so identity alone cannot prove a page still matches the parsed store. */
-  pageRevisions: number[];
+  /** Per-page mutation revisions as parsed into the Rust store (null before
+   * a handle opened or adopted). Owned frame deltas patch through the same
+   * page objects, so identity alone cannot prove a page matches the store. */
+  storeRevisions(): readonly number[] | null;
   engine(): RustDisplayListQueryEngine | null;
   /** Relinquish the live handle (the donor's queries fall back to JSON-arg). */
   takeHandle(): number | null;
@@ -315,33 +350,62 @@ function isWasmTrap(error: unknown): boolean {
   return error.name === 'RuntimeError';
 }
 
+type StoreShiftRun = [start: number, count: number, mask: number, delta: number];
+
 /**
  * Page-delta between two display lists, exploiting the retained-frame
  * invariant that unchanged pages keep object identity across builds. A page
- * is reusable only when both its identity and its in-place mutation revision
- * are unchanged since the donor parsed it. Returns null when nothing is
- * reusable (a full open costs the same).
+ * whose identity and in-place mutation revision are unchanged since the store
+ * parsed it is reused outright; a page that only accumulated recorded
+ * position shifts ships those shifts as compact ops the store replays,
+ * instead of re-serializing the page. Returns null when nothing is reusable
+ * (a full open costs the same).
  */
 function buildDisplayListUpdateJson(seed: FacadeDeltaSeed, next: DisplayList): string | null {
+  const storeRevisions = seed.storeRevisions();
+  if (!storeRevisions) return null;
   const previousIndex = new Map<unknown, number>();
   seed.list.pages.forEach((page, index) => previousIndex.set(page, index));
   const reuse: Array<[number, number]> = [];
   const replace: Array<[number, unknown]> = [];
+  const shift: Array<[number, number, StoreShiftRun[][]]> = [];
   next.pages.forEach((page, index) => {
     const from = previousIndex.get(page);
-    if (from !== undefined && displayPageRevision(page) === seed.pageRevisions[from]) {
-      reuse.push([index, from]);
-      previousIndex.delete(page);
-    } else {
+    if (from === undefined) {
       replace.push([index, page]);
+      return;
+    }
+    previousIndex.delete(page);
+    const storeRevision = storeRevisions[from];
+    if (storeRevision === undefined) {
+      replace.push([index, page]);
+      return;
+    }
+    const runLists =
+      displayPageRevision(page) === storeRevision
+        ? []
+        : displayPageShiftsSince(page, storeRevision);
+    if (runLists === null) {
+      replace.push([index, page]);
+    } else if (runLists.length === 0) {
+      reuse.push([index, from]);
+    } else {
+      shift.push([
+        index,
+        from,
+        runLists.map((runs: readonly FramePositionShiftRun[]) =>
+          runs.map((run): StoreShiftRun => [run.start, run.count, run.changedMask, run.delta])
+        ),
+      ]);
     }
   });
-  if (reuse.length === 0) return null;
+  if (reuse.length === 0 && shift.length === 0) return null;
   return JSON.stringify({
     total: next.pages.length,
     ...(next.contractVersion !== undefined ? { contractVersion: next.contractVersion } : {}),
     reuse,
     replace,
+    ...(shift.length > 0 ? { shift } : {}),
   });
 }
 
@@ -362,7 +426,17 @@ export function createDisplayListQueries(
   previous?: DisplayListQueries | null
 ): DisplayListQueries {
   let json: string | null = null;
-  const getJson = (): string => (json ??= JSON.stringify(list));
+  let jsonRevisions: readonly number[] | null = null;
+  const getJson = (): string => {
+    if (json === null) {
+      jsonRevisions = list.pages.map(displayPageRevision);
+      json = JSON.stringify(list);
+    }
+    return json;
+  };
+  // Revisions of the pages as parsed into the Rust store; null until a handle
+  // is opened or adopted. Kept exact so shift replay can never double-apply.
+  let storeRevisions: readonly number[] | null = null;
 
   const resident: ResidentDisplayListQueryEngine | null = isResidentQueryEngine(engine)
     ? engine
@@ -461,6 +535,7 @@ export function createDisplayListQueries(
     if (!donor || !eng?.updateDisplayList || !eng.hasDisplayListUpdate?.()) return false;
     const seed = facadeDeltaSeeds.get(donor);
     if (!seed || seed.engine() !== eng) return false;
+    const revisionsAtBuild = list.pages.map(displayPageRevision);
     const update = buildDisplayListUpdateJson(seed, list);
     if (!update) return false;
     const adopted = seed.takeHandle();
@@ -468,6 +543,7 @@ export function createDisplayListQueries(
     try {
       eng.updateDisplayList(adopted, update);
       handle = adopted;
+      storeRevisions = revisionsAtBuild;
       return true;
     } catch (error) {
       // the Rust side closes the handle on a failed update; close defensively
@@ -492,6 +568,7 @@ export function createDisplayListQueries(
     if (adoptHandle()) return;
     try {
       handle = eng.openDisplayList(getJson());
+      storeRevisions = jsonRevisions;
     } catch (error) {
       handle = null;
       if (isWasmTrap(error)) {
@@ -645,16 +722,18 @@ export function createDisplayListQueries(
     return parseQuery(raw, null, 'vertical_move');
   };
 
-  const hfRangeRects = (
-    region: 'header' | 'footer',
-    rId: string,
+  // The one scoped range-rect path. `partId` names the instance the positions
+  // belong to: an HF part's rId, or a note's id.
+  const regionRangeRects = (
+    region: DisplayListHitRegion,
+    partId: string,
     from: number,
     to: number
   ): DisplayListRect[] => {
     if (resident) {
       return parseQuery(
         residentQuery(
-          () => resident.displayRangeRectsRegionJson(region, rId, from, to),
+          () => resident.displayRangeRectsRegionJson(region, partId, from, to),
           'range_rects_region'
         ),
         [],
@@ -667,56 +746,74 @@ export function createDisplayListQueries(
     if (!eng || !eng.hasRangeRectsRegion?.()) return [];
     const raw = runQuery(
       eng.rangeRectsRegionByHandle &&
-        ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, rId, from, to)),
-      () => eng!.rangeRectsRegionJson!(getJson(), region, rId, from, to),
+        ((h: number) => eng!.rangeRectsRegionByHandle!(h, region, partId, from, to)),
+      () => eng!.rangeRectsRegionJson!(getJson(), region, partId, from, to),
       'range_rects_region'
     );
     return parseQuery(raw, [], 'range_rects_region');
+  };
+
+  const hfRangeRects = (
+    region: 'header' | 'footer',
+    rId: string,
+    from: number,
+    to: number
+  ): DisplayListRect[] => regionRangeRects(region, rId, from, to);
+
+  const noteRangeRects = (
+    region: 'footnote' | 'endnote',
+    noteId: number,
+    from: number,
+    to: number
+  ): DisplayListRect[] => regionRangeRects(region, String(noteId), from, to);
+
+  /**
+   * One caret per page from a scoped range query. An HF part paints on every
+   * page carrying it, so the caller picks the edited page; a note paints on
+   * exactly one, so the single answer is already the right one.
+   */
+  const scopedCaretRects = (
+    scopedRangeRects: (from: number, to: number) => DisplayListRect[],
+    pos: number
+  ): DisplayListRect[] => {
+    // The leading edge is the first slice on a page, the trailing edge the last.
+    const caretsByPage = (rects: DisplayListRect[], leading: boolean) => {
+      const byPage = new Map<number, DisplayListRect>();
+      for (const rect of rects) {
+        if (leading && byPage.has(rect.pageIndex)) continue;
+        byPage.set(rect.pageIndex, {
+          pageIndex: rect.pageIndex,
+          x: leading ? rect.x : rect.x + rect.width,
+          y: rect.y,
+          width: 0,
+          height: rect.height,
+        });
+      }
+      return [...byPage.values()];
+    };
+    const forward = scopedRangeRects(pos, pos + 1);
+    if (forward.length > 0) return caretsByPage(forward, true);
+    if (pos > 0) {
+      // end of line / end of doc: trailing edge of the previous position
+      const backward = scopedRangeRects(pos - 1, pos);
+      if (backward.length > 0) return caretsByPage(backward, false);
+    }
+    return [];
   };
 
   const hfCaretRects = (
     region: 'header' | 'footer',
     rId: string,
     pos: number
-  ): DisplayListRect[] => {
-    // The same HF doc paints on every page carrying the part, so a caret query
-    // returns one candidate per page; the caller renders the edited one.
-    const forward = hfRangeRects(region, rId, pos, pos + 1);
-    if (forward.length > 0) {
-      // left edge of the first slice on each page is the caret there
-      const byPage = new Map<number, DisplayListRect>();
-      for (const r of forward) {
-        if (!byPage.has(r.pageIndex)) {
-          byPage.set(r.pageIndex, {
-            pageIndex: r.pageIndex,
-            x: r.x,
-            y: r.y,
-            width: 0,
-            height: r.height,
-          });
-        }
-      }
-      return [...byPage.values()];
-    }
-    if (pos > 0) {
-      // end of line / end of doc: trailing edge of the previous position
-      const backward = hfRangeRects(region, rId, pos - 1, pos);
-      if (backward.length > 0) {
-        const byPage = new Map<number, DisplayListRect>();
-        for (const r of backward) {
-          byPage.set(r.pageIndex, {
-            pageIndex: r.pageIndex,
-            x: r.x + r.width,
-            y: r.y,
-            width: 0,
-            height: r.height,
-          });
-        }
-        return [...byPage.values()];
-      }
-    }
-    return [];
-  };
+  ): DisplayListRect[] =>
+    scopedCaretRects((from, to) => hfRangeRects(region, rId, from, to), pos);
+
+  const noteCaretRects = (
+    region: 'footnote' | 'endnote',
+    noteId: number,
+    pos: number
+  ): DisplayListRect[] =>
+    scopedCaretRects((from, to) => noteRangeRects(region, noteId, from, to), pos);
 
   const caretRect = (pos: number): DisplayListRect | null => {
     const forward = rangeRects(pos, pos + 1);
@@ -961,14 +1058,14 @@ export function createDisplayListQueries(
     pageIndex: number,
     x: number,
     y: number,
-    region: DisplayListHitRegion = 'body',
+    region: DisplayListImageRegion = 'body',
     rId?: string
   ): DisplayListImageGeometry | null =>
     imageGeometry(findImagePrimitiveAtPoint(list, pageIndex, x, y, region, rId));
 
   const imageByPos = (
     pos: number,
-    region: DisplayListHitRegion = 'body',
+    region: DisplayListImageRegion = 'body',
     rId?: string
   ): DisplayListImageGeometry | null =>
     imageGeometry(findImagePrimitiveByDocPos(list, pos, region, rId));
@@ -1007,7 +1104,9 @@ export function createDisplayListQueries(
     verticalMove,
     rangeRects,
     hfRangeRects,
+    noteRangeRects,
     hfCaretRects,
+    noteCaretRects,
     hfAnchorRects,
     caretRect,
     anchorRect,
@@ -1023,7 +1122,7 @@ export function createDisplayListQueries(
 
   facadeDeltaSeeds.set(queries, {
     list,
-    pageRevisions: list.pages.map(displayPageRevision),
+    storeRevisions: () => storeRevisions,
     engine: () => eng,
     hasHandle: () => handle !== null,
     donor: () => donorFacade,

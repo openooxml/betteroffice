@@ -1,8 +1,8 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
 use super::model::{
-    ChartAxes, ChartAxis, ChartDataLabels, ChartLegend, ChartMarker, ChartPlotGroup, ChartPoint,
-    ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartMarker,
+    ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
 };
 
 pub const DEFAULT_SERIES_COLORS: [&str; 8] = [
@@ -18,6 +18,8 @@ const MAX_CHART_POINTS: usize = 200_000;
 const MAX_AXIS_IDS: usize = 16;
 /// Per-series `c:dLbl` overrides, charged against the chart-wide point budget.
 const MAX_POINT_LABELS: usize = 4_096;
+/// `a:defRPr/@spc` in hundredths of a point, matching the shape text path.
+const MAX_TEXT_SPACING_HUNDREDTHS: f64 = 400_000.0;
 
 /// What one `c:chartSpace` may still allocate, shared across its plot groups.
 struct Budget {
@@ -112,6 +114,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
             x_values: None,
             bubble_sizes: None,
             data_labels: None,
+            line: None,
         })
         .collect::<Vec<_>>();
     let axis_list = plot_area
@@ -131,10 +134,8 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
         plot_groups,
         axis_list: (!axis_list.is_empty()).then_some(axis_list),
         text: parse_text_properties(child(chart_space, "txPr")),
-        title_text: title.and_then(|title| {
-            parse_text_properties(child(title, "txPr"))
-                .or_else(|| parse_text_properties(first_deep(title, "rich", 0)))
-        }),
+        title_text: title.and_then(parse_title_text),
+        fill: parse_fill(child(chart_space, "spPr")),
     })
 }
 
@@ -407,6 +408,7 @@ fn parse_series<E: ChartXml>(
                     .map(|element| parse_num_cache(Some(element), budget))
                     .filter(|values| !values.is_empty()),
                 data_labels: parse_data_labels(child(series, "dLbls"), budget),
+                line: parse_line(child(series, "spPr")),
             }
         })
         .collect::<Vec<_>>();
@@ -469,12 +471,32 @@ fn label_switches<E: ChartXml>(labels: &E) -> ChartDataLabels {
     }
 }
 
+/// The title's style: the first run of its `c:rich` over its `c:txPr`, because
+/// a literal run overrides the paragraph default it sits under.
+fn parse_title_text<E: ChartXml>(title: &E) -> Option<ChartTextProperties> {
+    let base = parse_text_properties(child(title, "txPr"))
+        .or_else(|| parse_text_properties(first_deep(title, "rich", 0)));
+    let run = first_deep(title, "rich", 0)
+        .and_then(|rich| first_deep(rich, "rPr", 0))
+        .map(run_properties)
+        .filter(|parsed| !parsed.is_empty());
+    match (run, base) {
+        (Some(run), Some(base)) => Some(run.over(&base)),
+        (run, base) => run.or(base),
+    }
+}
+
 /// Run properties off a `c:txPr` or a `c:rich`: the first `a:defRPr`, else the
 /// first `a:rPr`, whichever the producer wrote.
 fn parse_text_properties<E: ChartXml>(container: Option<&E>) -> Option<ChartTextProperties> {
     let container = container?;
     let run = first_deep(container, "defRPr", 0).or_else(|| first_deep(container, "rPr", 0))?;
-    let parsed = ChartTextProperties {
+    let parsed = run_properties(run);
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+fn run_properties<E: ChartXml>(run: &E) -> ChartTextProperties {
+    ChartTextProperties {
         font: first_deep(run, "latin", 0)
             .and_then(|latin| latin.attribute(None, "typeface"))
             .and_then(nonempty_trimmed),
@@ -492,8 +514,10 @@ fn parse_text_properties<E: ChartXml>(container: Option<&E>) -> Option<ChartText
             _ => None,
         },
         color: first_deep(run, "solidFill", 0).and_then(E::solid_fill_hex),
-    };
-    (!parsed.is_empty()).then_some(parsed)
+        spacing_pt: parse_number(run.attribute(None, "spc"))
+            .filter(|spacing| spacing.abs() <= MAX_TEXT_SPACING_HUNDREDTHS)
+            .map(|spacing| spacing / 100.0),
+    }
 }
 
 fn child_formula<E: ChartXml>(parent: Option<&E>) -> Option<String> {
@@ -560,7 +584,35 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         major_gridlines: child(axis, "majorGridlines").is_some(),
         minor_gridlines: child(axis, "minorGridlines").is_some(),
         text: parse_text_properties(child(axis, "txPr")),
+        line: parse_line(child(axis, "spPr")),
     }
+}
+
+/// The fill declared directly on a `c:spPr`, ignoring the one its `a:ln` carries.
+fn parse_fill<E: ChartXml>(properties: Option<&E>) -> Option<ChartFill> {
+    let properties = properties?;
+    if child(properties, "noFill").is_some() {
+        return Some(ChartFill::None);
+    }
+    if let Some(solid) = child(properties, "solidFill") {
+        return solid
+            .solid_fill_hex()
+            .map(|color| ChartFill::Solid { color });
+    }
+    let pattern = child(properties, "pattFill")?;
+    Some(ChartFill::Pattern {
+        foreground: child(pattern, "fgClr").and_then(E::solid_fill_hex),
+        background: child(pattern, "bgClr").and_then(E::solid_fill_hex),
+    })
+}
+
+fn parse_line<E: ChartXml>(properties: Option<&E>) -> Option<ChartLine> {
+    let line = child(properties?, "ln")?;
+    Some(ChartLine {
+        none: child(line, "noFill").is_some(),
+        color: child(line, "solidFill").and_then(E::solid_fill_hex),
+        width_emu: parse_number(line.attribute(None, "w")),
+    })
 }
 
 fn parse_axes<E: ChartXml>(plot_area: &E, first_series: Option<&ChartSeries>) -> Option<ChartAxes> {
@@ -1383,6 +1435,107 @@ mod tests {
         assert!(axis.major_gridlines);
         assert!(!axis.minor_gridlines);
         assert_eq!(axis.text.as_ref().unwrap().size_pt, Some(8.0));
+    }
+
+    #[test]
+    fn a_title_run_overrides_the_paragraph_default_it_sits_under() {
+        let title = Node::el(
+            "c:title",
+            vec![
+                Node::el(
+                    "c:tx",
+                    vec![Node::el(
+                        "c:rich",
+                        vec![Node::el(
+                            "a:p",
+                            vec![Node::el(
+                                "a:r",
+                                vec![
+                                    Node::el("a:rPr", Vec::new()).attr("spc", "600"),
+                                    Node::text("a:t", "Revenue"),
+                                ],
+                            )],
+                        )],
+                    )],
+                ),
+                Node::el(
+                    "c:txPr",
+                    vec![Node::el(
+                        "a:p",
+                        vec![Node::el(
+                            "a:pPr",
+                            vec![
+                                Node::el(
+                                    "a:defRPr",
+                                    vec![
+                                        Node::el("a:latin", Vec::new()).attr("typeface", "+mj-lt"),
+                                    ],
+                                )
+                                .attr("spc", "300")
+                                .attr("i", "1"),
+                            ],
+                        )],
+                    )],
+                ),
+            ],
+        );
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![
+                    title,
+                    Node::el(
+                        "c:plotArea",
+                        vec![Node::el("c:barChart", vec![Node::val("c:barDir", "col")])],
+                    ),
+                ],
+            )],
+        );
+        let parsed = parse_chart_space(&space).expect("chart space parses");
+        assert_eq!(parsed.title.as_deref(), Some("Revenue"));
+        let text = parsed.title_text.expect("title text parses");
+        assert_eq!(text.spacing_pt, Some(6.0));
+        assert_eq!(text.italic, Some(true));
+        assert_eq!(text.font.as_deref(), Some("+mj-lt"));
+    }
+
+    #[test]
+    fn character_spacing_parses_in_points_and_declines_an_absurd_one() {
+        let space = |spacing: &str| {
+            Node::el(
+                "c:chartSpace",
+                vec![
+                    Node::el(
+                        "c:txPr",
+                        vec![Node::el(
+                            "a:p",
+                            vec![Node::el(
+                                "a:pPr",
+                                vec![Node::el("a:defRPr", Vec::new()).attr("spc", spacing)],
+                            )],
+                        )],
+                    ),
+                    Node::el(
+                        "c:chart",
+                        vec![Node::el(
+                            "c:plotArea",
+                            vec![Node::el("c:barChart", vec![Node::val("c:barDir", "col")])],
+                        )],
+                    ),
+                ],
+            )
+        };
+        let spacing = |raw: &str| {
+            parse_chart_space(&space(raw))
+                .expect("chart space parses")
+                .text
+                .and_then(|text| text.spacing_pt)
+        };
+        assert_eq!(spacing("300"), Some(3.0));
+        assert_eq!(spacing("-150"), Some(-1.5));
+        assert_eq!(spacing("400001"), None);
+        assert_eq!(spacing(""), None);
     }
 
     #[test]

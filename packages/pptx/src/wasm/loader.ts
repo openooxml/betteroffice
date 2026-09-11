@@ -10,15 +10,20 @@ import type {
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
 import type {
+  CommentFlavor,
+  CommentReceipt,
+  CommentSnapshot,
   DeckSnapshot,
   HistoryResult,
   HitTestResult,
+  ParagraphAlignment,
   PresetShapeDraft,
   PptxFontFace,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
   ShapeReceipt,
+  ShapeRect,
   ShapeStroke,
   ShapeStrokeReceipt,
   SlideDisplayList,
@@ -35,6 +40,12 @@ export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenPresentationOptions {
   clientId?: number;
   fonts?: ReadonlyArray<PptxFontFace>;
+  /**
+   * Opens from a collaboration update instead of parsing the file bytes.
+   * When the bytes are the file the update was seeded from, the session
+   * keeps them and `save()` works; any other bytes open without a source
+   * and `save()` throws.
+   */
   initialUpdate?: Uint8Array;
 }
 
@@ -46,10 +57,20 @@ export interface PresentationHandle extends CollaborationReplica {
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(partPath: string): Uint8Array;
+  /** serialize the presentation back to .pptx bytes, edits included. */
+  save(): Uint8Array;
   insertText(storyId: string, index: number, text: string, style?: TextStyle): TextReceipt;
   deleteText(storyId: string, start: number, end: number): TextReceipt;
   formatText(storyId: string, start: number, end: number, patch: TextStylePatch): TextReceipt;
   insertParagraphBreak(storyId: string, index: number): TextReceipt;
+  /** Sets the alignment of every paragraph the range touches; `null` restores
+   *  the inherited value. */
+  setParagraphAlignment(
+    storyId: string,
+    start: number,
+    end: number,
+    alignment: ParagraphAlignment | null
+  ): TextReceipt;
   insertSlide(index: number, layoutPartPath?: string): SlideReceipt;
   deleteSlide(slideId: string): SlideReceipt;
   moveSlide(slideId: string, toIndex: number): SlideReceipt;
@@ -67,8 +88,32 @@ export interface PresentationHandle extends CollaborationReplica {
     adjustments: Record<string, number>
   ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
+  /** Adds a slide comment; coordinates are EMU. */
+  addComment(
+    slideId: string,
+    comment: {
+      author: string;
+      initials?: string;
+      text: string;
+      created: string;
+      xEmu?: number;
+      yEmu?: number;
+    }
+  ): CommentReceipt;
+  /** Modern decks only; legacy `p:cm` has no reply list. */
+  replyToComment(
+    commentId: string,
+    reply: { author: string; initials?: string; text: string; created: string }
+  ): CommentReceipt;
+  /** Resolves or reopens a modern comment. */
+  setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  removeComment(commentId: string): CommentReceipt;
+  /** Only legal while the deck has no comments. */
+  setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
+  comments(): CommentSnapshot[];
   moveShape(slideId: string, shapeId: string, x: number, y: number): TransformReceipt;
   resizeShape(slideId: string, shapeId: string, width: number, height: number): TransformReceipt;
+  setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
   undo(): HistoryResult;
@@ -128,7 +173,8 @@ export function openPresentation(
       ? PptxDocument.openCollaborative(bytes, collaborationClientId)
       : PptxDocument.openCollaborativeFromUpdate(
           options.initialUpdate.slice(),
-          collaborationClientId
+          collaborationClientId,
+          bytes.slice()
         )
   );
   const renderer = construct(() => new PptxRenderer());
@@ -182,7 +228,7 @@ export function openPresentation(
         throw new Error(`pptx wasm returned unknown update origin ${origin}`);
       }
       pendingUpdates.push({
-        update: encoded.slice(1),
+        update: encoded.subarray(1),
         origin: origin === 0 ? 'local' : 'remote',
       });
     }
@@ -255,7 +301,10 @@ export function openPresentation(
       return jsonWasmCall(() => renderer.hitTestJson(x, y));
     },
     mediaBytes(partPath: string): Uint8Array {
-      return wasmCall(() => doc.mediaBytes(partPath).slice());
+      return wasmCall(() => doc.mediaBytes(partPath));
+    },
+    save(): Uint8Array {
+      return wasmCall(() => doc.saveBytes());
     },
     insertText(storyId, index, text, style = {}): TextReceipt {
       return jsonWasmCall(
@@ -281,6 +330,13 @@ export function openPresentation(
         true
       );
     },
+    setParagraphAlignment(storyId, start, end, alignment): TextReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.setParagraphAlignmentJson(JSON.stringify({ storyId, start, end, alignment })),
+        true
+      );
+    },
     insertSlide(index, layoutPartPath): SlideReceipt {
       return jsonWasmCall(
         () =>
@@ -296,6 +352,53 @@ export function openPresentation(
         () => doc.moveSlideJson(JSON.stringify({ slideId, toIndex })),
         true
       );
+    },
+    addComment(slideId, comment): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.addCommentJson(
+            JSON.stringify({
+              slideId,
+              author: comment.author,
+              initials: comment.initials ?? '',
+              text: comment.text,
+              created: comment.created,
+              xEmu: comment.xEmu ?? 0,
+              yEmu: comment.yEmu ?? 0,
+            })
+          ),
+        true
+      );
+    },
+    replyToComment(commentId, reply): CommentReceipt {
+      return jsonWasmCall(
+        () =>
+          doc.replyToCommentJson(
+            JSON.stringify({
+              commentId,
+              author: reply.author,
+              initials: reply.initials ?? '',
+              text: reply.text,
+              created: reply.created,
+            })
+          ),
+        true
+      );
+    },
+    setCommentStatus(commentId, resolved): CommentReceipt {
+      return jsonWasmCall(
+        () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
+        true
+      );
+    },
+    removeComment(commentId): CommentReceipt {
+      return jsonWasmCall(() => doc.removeCommentJson(JSON.stringify({ commentId })), true);
+    },
+    setCommentFlavor(flavor): CommentFlavor {
+      return jsonWasmCall(() => doc.setCommentFlavorJson(JSON.stringify({ flavor })), true);
+    },
+    comments(): CommentSnapshot[] {
+      return jsonWasmCall(() => doc.commentsJson());
     },
     addTextBox(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addTextBoxJson(JSON.stringify({ slideId, draft })), true);
@@ -339,6 +442,12 @@ export function openPresentation(
         true
       );
     },
+    setShapeRect(slideId, shapeId, rect): TransformReceipt {
+      return jsonWasmCall(
+        () => doc.setShapeRectJson(JSON.stringify({ slideId, shapeId, rect })),
+        true
+      );
+    },
     canUndo(): boolean {
       return wasmCall(() => doc.canUndo());
     },
@@ -352,20 +461,20 @@ export function openPresentation(
       return jsonWasmCall(() => doc.redoJson(), true);
     },
     encodeStateVector(): Uint8Array {
-      return wasmCall(() => doc.encodeStateVector().slice());
+      return wasmCall(() => doc.encodeStateVector());
     },
     encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array {
       return wasmCall(() =>
         remoteStateVector === undefined
-          ? doc.encodeStateAsUpdate().slice()
-          : doc.encodeDiff(remoteStateVector.slice()).slice()
+          ? doc.encodeStateAsUpdate()
+          : doc.encodeDiff(remoteStateVector)
       );
     },
     encodeDiff(remoteStateVector): Uint8Array {
-      return wasmCall(() => doc.encodeDiff(remoteStateVector.slice()).slice());
+      return wasmCall(() => doc.encodeDiff(remoteStateVector));
     },
     applyUpdate(update): DeckSnapshot {
-      return jsonWasmCall(() => doc.applyUpdateJson(update.slice()), true);
+      return jsonWasmCall(() => doc.applyUpdateJson(update), true);
     },
     onUpdate(listener): () => void {
       assertAlive();

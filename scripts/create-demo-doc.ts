@@ -11,7 +11,7 @@
  * The OOXML parts are hand-authored, zipped with JSZip, and written to the
  * public/ folder of BOTH example apps.
  *
- * Run: bun scripts/create-demo-doc.mjs
+ * Run: bun scripts/create-demo-doc.ts [output.docx]
  */
 
 import JSZip from 'jszip';
@@ -20,7 +20,9 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT_PATHS = [path.join(ROOT, 'apps/demo/public/betteroffice-demo.docx')];
+const OUT_PATHS = process.argv[2]
+  ? [path.resolve(process.argv[2])]
+  : [path.join(ROOT, 'apps/demo/public/betteroffice-demo.docx')];
 const ZIP_DATE = new Date('2026-01-01T00:00:00Z');
 
 /** Escape a string for use as XML text or an attribute value. */
@@ -478,8 +480,8 @@ const BODY = [
     ),
     '<w:pBdr><w:left w:val="single" w:sz="18" w:space="10" w:color="2E74B5"/></w:pBdr>' +
       '<w:shd w:val="clear" w:color="auto" w:fill="F2F6FB"/>' +
-      '<w:ind w:left="360" w:right="360"/>' +
-      '<w:spacing w:before="120" w:after="120"/>',
+      '<w:spacing w:before="120" w:after="120"/>' +
+      '<w:ind w:left="360" w:right="360"/>',
   ),
 
   para(

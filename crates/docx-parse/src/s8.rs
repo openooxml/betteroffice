@@ -50,6 +50,8 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
     let limits = ParseLimits::default();
     let mut budget = ParseBudget::new(&limits);
+    let document_path = crate::relationships::office_document_path(&parts, &mut budget)?;
+    let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
     let settings = parse_settings(
         find_part(&parts, "word/settings.xml").map(|(_, bytes)| bytes),
         "word/settings.xml",
@@ -82,7 +84,7 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
         "word/numbering.xml",
         &mut budget,
     )?;
-    let document_relationships = match find_part(&parts, "word/_rels/document.xml.rels") {
+    let document_relationships = match find_part(&parts, &document_relationships_path) {
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
@@ -95,12 +97,12 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
         })
         .cloned()
         .collect();
-    let charts = parse_chart_parts(&all_xml, &mut budget)?;
+    let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = format!("{:x}", Sha256::digest(data));
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
-    let mut body = match find_part(&parts, "word/document.xml") {
+    let mut body = match find_part(&parts, &document_path) {
         Some((path, xml)) => {
             let document = parse_xml(xml, path, &mut budget)?;
             match document.root() {
@@ -313,6 +315,7 @@ pub(crate) fn parse_comment_part(
         root,
         find_part(parts, "word/commentsExtensible.xml").map(|(_, bytes)| bytes),
         find_part(parts, "word/commentsExtended.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/commentsIds.xml").map(|(_, bytes)| bytes),
         &mut parser,
     )
 }

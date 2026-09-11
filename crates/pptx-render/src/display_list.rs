@@ -2,7 +2,7 @@ use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const CONTRACT_VERSION: u32 = 1;
+pub const CONTRACT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,13 +49,95 @@ pub struct GradientStop {
     pub color: String,
 }
 
+/// Bitmap effects with resolved colours.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ImageEffect {
+    BiLevel {
+        threshold: f32,
+    },
+    Grayscale,
+    Luminance {
+        brightness: f32,
+        contrast: f32,
+    },
+    Duotone {
+        shadow: String,
+        highlight: String,
+    },
+    ColorChange {
+        from: String,
+        to: String,
+        #[serde(
+            default = "default_use_alpha",
+            skip_serializing_if = "use_alpha_is_default"
+        )]
+        use_alpha: bool,
+    },
+}
+
+fn default_use_alpha() -> bool {
+    true
+}
+
+fn use_alpha_is_default(value: &bool) -> bool {
+    *value
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Stroke {
+    /// Solid colour or first gradient stop.
     pub color: String,
     pub width: f32,
     #[serde(default, skip_serializing_if = "is_false")]
     pub dashed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint: Option<Paint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_end: Option<StrokeEnd>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail_end: Option<StrokeEnd>,
+}
+
+/// End dimensions in CSS pixels.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrokeEnd {
+    pub kind: String,
+    pub width: f32,
+    pub length: f32,
+}
+
+/// An `a:outerShdw`: a blurred copy of what the primitive paints, offset and tinted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Shadow {
+    pub color: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub blur: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dx: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub dy: f32,
+    /// `sx`/`sy`. The anchor `algn` names is already folded into `dx`/`dy`, so a backend
+    /// scales about the surface origin and then translates.
+    #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_x: f32,
+    #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
+    pub scale_y: f32,
+}
+
+fn unit_scale() -> f32 {
+    1.0
+}
+
+fn is_unit_scale(value: &f32) -> bool {
+    *value == 1.0
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -67,6 +149,31 @@ pub struct Transform {
     pub flip_h: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub flip_v: bool,
+}
+
+/// Source fractions discarded by `a:srcRect`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageCrop {
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub left: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub top: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub right: f32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub bottom: f32,
+}
+
+impl ImageCrop {
+    pub fn is_whole(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// The fraction of the source that survives on each axis.
+    pub fn kept(&self) -> (f32, f32) {
+        (1.0 - self.left - self.right, 1.0 - self.top - self.bottom)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -87,12 +194,18 @@ pub enum Primitive {
         h: f32,
         geometry: String,
         path: Vec<GeometryPathCommand>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        clip: Option<Vec<GeometryPathCommand>>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        even_odd: bool,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         adjust_values: BTreeMap<String, f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         fill: Option<Paint>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<Shadow>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },
@@ -107,8 +220,16 @@ pub enum Primitive {
         h: f32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         asset_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        effects: Vec<ImageEffect>,
+        #[serde(default, skip_serializing_if = "ImageCrop::is_whole")]
+        crop: ImageCrop,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<Vec<GeometryPathCommand>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shadow: Option<Shadow>,
         #[serde(default, skip_serializing_if = "Transform::is_identity")]
         transform: Transform,
     },
@@ -148,6 +269,22 @@ pub enum Primitive {
     /// A plotted chart: one addressable object whose parts paint clipped to
     /// its rectangle, and whose `label` is the screen-reader summary.
     Chart {
+        object_id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shape_id: Option<String>,
+        name: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: String,
+        primitives: Vec<Primitive>,
+        #[serde(default, skip_serializing_if = "Transform::is_identity")]
+        transform: Transform,
+    },
+    /// A laid-out table: one addressable object whose cells paint clipped to
+    /// its rectangle, and whose `label` is the screen-reader summary.
+    Table {
         object_id: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         shape_id: Option<String>,
@@ -240,6 +377,12 @@ pub struct PositionedTextRun {
     pub italic: bool,
     pub underline: bool,
     pub color: String,
+    /// Tracking between clusters in pixels.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub letter_spacing_px: f32,
+    /// Pixels this run's baseline sits above the line's; negative is subscript.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub baseline_offset_px: f32,
     pub glyphs: Vec<PositionedGlyph>,
 }
 
@@ -273,6 +416,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn solid_stroke_keeps_legacy_json_and_reads_missing_paint() {
+        let json = r##"{"color":"#123456","width":2.0,"dashed":true}"##;
+        let stroke: Stroke = serde_json::from_str(json).unwrap();
+        assert!(stroke.paint.is_none());
+        assert_eq!(serde_json::to_string(&stroke).unwrap(), json);
+    }
+
+    #[test]
     fn identity_transform_is_omitted_from_json() {
         let list = SurfaceDisplayList {
             contract_version: CONTRACT_VERSION,
@@ -295,5 +446,45 @@ mod tests {
         let json = serde_json::to_string(&list).expect("serialize display list");
         assert!(!json.contains("transform"));
         assert!(json.contains("contractVersion"));
+    }
+
+    #[test]
+    fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
+        let mut image = Primitive::Image {
+            object_id: 90,
+            shape_id: Some("slide:0:256:shape:9".into()),
+            name: "Media fixture".into(),
+            x: 1280.0,
+            y: 720.0,
+            w: 0.5,
+            h: 0.25,
+            asset_id: Some("ppt/media/betteroffice-mark.png".into()),
+            effects: Vec::new(),
+            crop: ImageCrop::default(),
+            path: None,
+            stroke: None,
+            shadow: None,
+            transform: Transform::default(),
+        };
+        let before = r#"{"kind":"image","objectId":90,"shapeId":"slide:0:256:shape:9","name":"Media fixture","x":1280.0,"y":720.0,"w":0.5,"h":0.25,"assetId":"ppt/media/betteroffice-mark.png"}"#;
+        assert_eq!(serde_json::to_string(&image).unwrap(), before);
+        assert_eq!(serde_json::from_str::<Primitive>(before).unwrap(), image);
+
+        let Primitive::Image { crop, path, .. } = &mut image else {
+            unreachable!()
+        };
+        *crop = ImageCrop {
+            top: 0.1,
+            bottom: 0.2,
+            ..ImageCrop::default()
+        };
+        *path = Some(vec![
+            GeometryPathCommand::Move { x: 0.0, y: 0.5 },
+            GeometryPathCommand::Close,
+        ]);
+        let json = serde_json::to_string(&image).unwrap();
+        assert!(json.contains(r#""crop":{"top":0.1,"bottom":0.2}"#));
+        assert!(json.contains(r#""path":[{"type":"move","x":0.0,"y":0.5},{"type":"close"}]"#));
+        assert_eq!(serde_json::from_str::<Primitive>(&json).unwrap(), image);
     }
 }
