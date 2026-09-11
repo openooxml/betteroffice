@@ -695,6 +695,8 @@ pub struct PreferredWidth {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TableCell {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_direction: Option<String>,
     pub id: BlockId,
     pub blocks: Vec<LayoutBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]

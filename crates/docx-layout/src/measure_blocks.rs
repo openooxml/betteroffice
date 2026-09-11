@@ -1080,11 +1080,17 @@ fn measure_table(
                 .padding
                 .as_ref()
                 .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
-            let measures = measure_blocks(
-                &mut cell.blocks,
-                (cell_width - left - right).max(1.0),
-                config,
-            )?;
+            let rotated = matches!(cell.text_direction.as_deref(), Some("btLr" | "tbRl"));
+            let measure_width = if rotated {
+                let padding = cell
+                    .padding
+                    .as_ref()
+                    .map_or(0.0, |padding| padding.top + padding.bottom);
+                row.height.unwrap_or(content_width) - padding
+            } else {
+                cell_width - left - right
+            };
+            let measures = measure_blocks(&mut cell.blocks, measure_width.max(1.0), config)?;
             cells.push(TableCellExtent {
                 blocks: measures,
                 width: cell_width,
@@ -1118,6 +1124,26 @@ fn measure_table(
                 let after = spacing.and_then(|value| value.after).unwrap_or(0.0);
                 content_height += previous_after.max(before) + visual - before - after;
                 previous_after = after;
+            }
+            if matches!(source_cell.text_direction.as_deref(), Some("btLr" | "tbRl")) {
+                content_height = measured_cell
+                    .blocks
+                    .iter()
+                    .filter_map(|measure| {
+                        if let BlockExtent::Paragraph(paragraph) = measure {
+                            Some(
+                                paragraph
+                                    .lines
+                                    .iter()
+                                    .map(|line| line.width)
+                                    .fold(0.0, f64::max),
+                            )
+                        } else {
+                            None
+                        }
+                    })
+                    .fold(0.0, f64::max);
+                previous_after = 0.0;
             }
             measured_cell.height = content_height
                 + previous_after

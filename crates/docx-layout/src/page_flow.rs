@@ -35,6 +35,7 @@ use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
 /// by the page geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageFlowGeometry {
+    pub suppress_leading_spacing: bool,
     pub page_size: Size,
     pub margins: PageMargins,
     pub columns: ColumnLayout,
@@ -73,6 +74,7 @@ fn calculate_column_width(
 
 /// The page/column cursor and the pages it has produced so far.
 pub struct Paginator {
+    suppress_leading_spacing: bool,
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
     page_size: Size,
@@ -106,6 +108,7 @@ impl Paginator {
             calculate_column_width(page_size.w, margins.left, margins.right, &columns);
         let column_region_top = margins.top;
         Ok(Paginator {
+            suppress_leading_spacing: false,
             pages: Vec::new(),
             states: Vec::new(),
             page_size,
@@ -141,6 +144,7 @@ impl Paginator {
         paginator.pending_margins = geometry.pending_margins.clone();
         paginator.pending_columns = geometry.pending_columns.clone();
         paginator.start_page_number = start_page_number;
+        paginator.suppress_leading_spacing = geometry.suppress_leading_spacing;
         Ok(paginator)
     }
 
@@ -157,6 +161,7 @@ impl Paginator {
     /// only when [`Self::clean_page_start`] returns a page.
     pub fn snapshot_geometry(&self) -> PageFlowGeometry {
         PageFlowGeometry {
+            suppress_leading_spacing: self.suppress_leading_spacing,
             page_size: self.page_size.clone(),
             margins: self.margins.clone(),
             columns: self.columns.clone(),
@@ -413,7 +418,9 @@ impl Paginator {
     ) -> (f64, f64) {
         // Read deferred spacing before fitting can advance the state.
         let cur = self.get_current();
-        let effective_space_before = space_before.max(self.states[cur].deferred_spacing);
+        let effective_space_before = self
+            .leading_spacing(space_before)
+            .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
 
         let idx = self.ensure_fits(total_height);
@@ -432,6 +439,7 @@ impl Paginator {
         let state = &mut self.states[idx];
         state.pen_y = y + height;
         state.deferred_spacing = space_after;
+        self.suppress_leading_spacing = false;
 
         (x, y)
     }
@@ -444,6 +452,20 @@ impl Paginator {
         }
     }
 
+    pub fn force_authored_page_break(&mut self) -> usize {
+        let index = self.force_page_break();
+        self.suppress_leading_spacing = true;
+        index
+    }
+
+    pub fn leading_spacing(&self, spacing: f64) -> f64 {
+        if self.suppress_leading_spacing {
+            0.0
+        } else {
+            spacing
+        }
+    }
+
     /// Non-idempotent page creation for the truly blank sheet required by an
     /// evenPage/oddPage section start.
     pub fn insert_blank_page(&mut self) -> usize {
@@ -452,6 +474,7 @@ impl Paginator {
 
     /// Moves to the next column, or the next page from the last column.
     pub fn force_column_break(&mut self) -> usize {
+        self.suppress_leading_spacing = false;
         let idx = self.get_current();
         self.advance_column(idx).0
     }

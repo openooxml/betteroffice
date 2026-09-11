@@ -343,7 +343,7 @@ mod tests {
         let sections = body.sections.as_ref().unwrap();
         assert_eq!(sections.len(), 2);
         assert_eq!(sections[1].properties.margin_left, Some(720.0));
-        assert_eq!(sections[1].properties.title_pg, Some(true));
+        assert_eq!(sections[1].properties.title_pg, None);
         assert_eq!(
             sections[1].properties.header_references.as_ref().unwrap()[0].relationship_id,
             "rH"

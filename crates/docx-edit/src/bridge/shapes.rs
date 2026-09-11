@@ -36,12 +36,12 @@ fn lower_shape(
     let size = object(shape, "size");
     let width = size
         .and_then(|value| number_in(value, "width"))
-        .filter(|value| *value != 0.0)
+        .filter(|value| *value >= 0.0)
         .map(emu_to_pixels)
         .unwrap_or(100.0);
     let height = size
         .and_then(|value| number_in(value, "height"))
-        .filter(|value| *value != 0.0)
+        .filter(|value| *value >= 0.0)
         .map(emu_to_pixels)
         .unwrap_or(80.0);
     let (width, height) = constrain_to_page(width, height, env);
@@ -81,7 +81,9 @@ fn lower_shape(
         children,
         scene: field(shape, "scene").cloned(),
         effects: array(shape, "effects").cloned(),
-        text_body_properties: field(shape, "textBodyProperties").map(text_body_in_pixels),
+        text_body_properties: field(shape, "textBodyProperties")
+            .or_else(|| field(shape, "textBody"))
+            .map(text_body_in_pixels),
         wrap_type: field(shape, "wrap").and_then(|wrap| string(wrap, "type")),
         wrap_text: field(shape, "wrap").and_then(|wrap| string(wrap, "wrapText")),
         relative_height: field(shape, "relativeHeight")
@@ -346,13 +348,24 @@ fn shape_paragraph(paragraph: &Value, block_id: String) -> ParagraphBlock {
 }
 
 fn shape_paragraph_content_runs(content: &Value) -> Vec<Run> {
+    shape_content_runs(content, 0)
+}
+
+fn shape_content_runs(content: &Value, depth: usize) -> Vec<Run> {
+    if depth >= MAX_SHAPE_BODY_DEPTH {
+        return Vec::new();
+    }
     match string(content, "type").as_deref() {
         Some("run") => shape_document_runs(content),
         Some("hyperlink") => array(content, "children")
             .into_iter()
             .flatten()
-            .filter(|child| string(child, "type").as_deref() == Some("run"))
-            .flat_map(shape_document_runs)
+            .flat_map(|child| shape_content_runs(child, depth + 1))
+            .collect(),
+        Some("inlineSdt") => array(content, "content")
+            .into_iter()
+            .flatten()
+            .flat_map(|child| shape_content_runs(child, depth + 1))
             .collect(),
         _ => Vec::new(),
     }
@@ -934,6 +947,46 @@ mod tests {
     /// Word writes the insets in EMU on every text box; layout reads them next
     /// to pixel widths, so a raw inset pushed the text a thousand inches off the
     /// page.
+    #[test]
+    fn shape_text_in_content_controls_keeps_formatting_and_body_insets() {
+        let shape = json!({
+            "shapeType":"rect", "size":{"width":914400,"height":457200},
+            "textBody":{"margins":{"left":91440,"top":45720},"content":[{
+                "type":"paragraph", "content":[{"type":"inlineSdt","content":[{
+                    "type":"run", "formatting":{"fontSize":48,"color":{"rgb":"FF0000"}},
+                    "content":[{"type":"text","text":"Cover title"}]
+                }]}]
+            }]}
+        });
+        let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+        let Run::Text(run) = &block.inner_text.as_ref().unwrap()[0].runs[0] else {
+            panic!()
+        };
+        assert_eq!(run.text, "Cover title");
+        assert_eq!(run.fmt.font_size, Some(24.0));
+        assert_eq!(run.fmt.color.as_deref(), Some("#FF0000"));
+        assert!(
+            (block.text_body_properties.unwrap()["margins"]["left"]
+                .as_f64()
+                .unwrap()
+                - 9.6)
+                .abs()
+                < 1e-10
+        );
+    }
+
+    #[test]
+    fn zero_extent_connectors_keep_their_authored_axis() {
+        for (width, height) in [(0, 914400), (914400, 0)] {
+            let shape = json!({"shapeType":"line","size":{"width":width,"height":height}});
+            let block = lower_shape_json(&shape, 1, &RenderEnv::default()).unwrap();
+            assert_eq!(
+                (block.width, block.height),
+                (emu_to_pixels(width as f64), emu_to_pixels(height as f64))
+            );
+        }
+    }
+
     #[test]
     fn lowers_text_body_insets_from_emu_to_pixels() {
         let shape = json!({

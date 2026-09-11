@@ -364,13 +364,16 @@ impl StoryParser<'_, '_> {
         {
             blocks = self.parse_blocks(container, depth.saturating_add(1), false)?;
         }
-        let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
-        shape.id = text_box.id;
-        shape.name = text_box.name;
-        shape.position = text_box.position;
-        shape.wrap = text_box.wrap;
-        shape.fill = text_box.fill;
-        shape.outline = text_box.outline;
+        let mut shape = crate::shape::parse_shape_from_drawing(drawing).unwrap_or_else(|| {
+            let mut shape = Shape::empty("textBox".to_owned(), text_box.size);
+            shape.id = text_box.id;
+            shape.name = text_box.name;
+            shape.position = text_box.position;
+            shape.wrap = text_box.wrap;
+            shape.fill = text_box.fill;
+            shape.outline = text_box.outline;
+            shape
+        });
         let body: Option<ShapeTextBodyProperties> = text_box.body_properties.map(Into::into);
         shape.text_body = Some(ShapeTextBody {
             vertical: body.as_ref().and_then(|body| {
@@ -395,7 +398,7 @@ impl StoryParser<'_, '_> {
                 .collect::<Result<_, _>>()
                 .map_err(|error| ParseError::Canonical(error.to_string()))?,
         });
-        shape.text_body_properties = body;
+        shape.text_body_properties = shape.text_body_properties.or(body);
         let mut target = run_index;
         if target >= paragraph.content.len() {
             let Some(last_run) = paragraph.content.iter().rposition(|content| {

@@ -1970,6 +1970,8 @@ pub(crate) struct TableRowIn {
 #[serde(rename_all = "camelCase")]
 struct TableCellIn {
     #[serde(default)]
+    text_direction: Option<String>,
+    #[serde(default)]
     blocks: Vec<BlockIn>,
     #[serde(default)]
     col_span: Option<u32>,
@@ -8941,17 +8943,36 @@ fn emit_cell_content(
     cell_ref: &TableCellRef,
     block_ref: &BlockRef,
 ) {
+    let stamp_from = prims.len();
+    let rotation = match cell.text_direction.as_deref() {
+        Some("btLr") => -90.0,
+        Some("tbRl") => 90.0,
+        _ => 0.0,
+    };
+    let rotated = rotation != 0.0;
+    let physical = (cx, cy, p.width, cell_h);
+    let logical_width = if rotated { cell_h } else { p.width };
+    let (cx, cy, cell_h, clip_top_y, clip_bottom_y) = if rotated {
+        (0.0, 0.0, p.width, -1e9, 1e9)
+    } else {
+        (cx, cy, cell_h, clip_top_y, clip_bottom_y)
+    };
     let Some(row_measure) = measure.rows.get(p.row_index) else {
         return;
     };
     let Some(cell_measure) = row_measure.cells.get(p.cell_index) else {
         return;
     };
-    let pad_left = cell.padding.and_then(|pd| pd.left).unwrap_or(7.0);
-    let pad_top = cell.padding.and_then(|pd| pd.top).unwrap_or(0.0);
-    let pad_right = cell.padding.and_then(|pd| pd.right).unwrap_or(7.0);
-    let pad_bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(0.0);
-    let content_width = (p.width - pad_left - pad_right).max(0.0);
+    let left = cell.padding.and_then(|pd| pd.left).unwrap_or(7.0);
+    let top = cell.padding.and_then(|pd| pd.top).unwrap_or(0.0);
+    let right = cell.padding.and_then(|pd| pd.right).unwrap_or(7.0);
+    let bottom = cell.padding.and_then(|pd| pd.bottom).unwrap_or(0.0);
+    let (pad_left, pad_top, pad_right, pad_bottom) = match rotation {
+        -90.0 => (bottom, left, top, right),
+        90.0 => (top, right, bottom, left),
+        _ => (left, top, right, bottom),
+    };
+    let content_width = (logical_width - pad_left - pad_right).max(0.0);
 
     // Drawn border widths inset the cell content box.
     let edge_w = |e: &Option<BorderEdgeIn>| -> f64 {
@@ -9027,7 +9048,11 @@ fn emit_cell_content(
     let v_offset = crate::cell_layout::cell_vertical_offset(
         cell.vertical_align.as_deref(),
         cell_h,
-        cell_measure.height,
+        if rotated {
+            content_height + pad_top + pad_bottom
+        } else {
+            cell_measure.height
+        },
         content_height,
         border_top + pad_top,
         border_bottom + pad_bottom,
@@ -9249,6 +9274,129 @@ fn emit_cell_content(
         selectable,
         false,
     );
+    if rotated {
+        rotate_cell_content(&mut prims[stamp_from..], physical, rotation);
+    }
+}
+
+fn rotate_cell_content(primitives: &mut [Primitive], cell: (f64, f64, f64, f64), rotation: f64) {
+    let point = |x: f64, y: f64| {
+        if rotation < 0.0 {
+            (cell.0 + y, cell.1 + cell.3 - x)
+        } else {
+            (cell.0 + cell.2 - y, cell.1 + x)
+        }
+    };
+    let rect = |x: &mut Number, y: &mut Number, w: &mut Number, h: &mut Number| {
+        let width = num_f64(w);
+        let height = num_f64(h);
+        let (center_x, center_y) = point(num_f64(x) + width / 2.0, num_f64(y) + height / 2.0);
+        *x = px(center_x - height / 2.0);
+        *y = px(center_y - width / 2.0);
+        *w = px(height);
+        *h = px(width);
+    };
+    for primitive in primitives {
+        match primitive {
+            Primitive::Text(text) => {
+                let size = text
+                    .font
+                    .split_whitespace()
+                    .find_map(|part| {
+                        part.strip_suffix("px")
+                            .and_then(|size| size.parse::<f64>().ok())
+                    })
+                    .unwrap_or(11.0 * 96.0 / 72.0);
+                let center = (
+                    num_f64(&text.x) + num_f64(&text.width) / 2.0,
+                    num_f64(&text.baseline_y) - size * 0.2,
+                );
+                let mapped = point(center.0, center.1);
+                text.x = px(num_f64(&text.x) + mapped.0 - center.0);
+                text.baseline_y = px(num_f64(&text.baseline_y) + mapped.1 - center.1);
+                text.rotation_deg = Some(px(rotation));
+                text.paint_clip = None;
+            }
+            Primitive::GlyphRun(run) => {
+                let Some(first) = run.glyphs.first() else {
+                    continue;
+                };
+                let left = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f64::INFINITY, f64::min);
+                let right = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x + glyph.advance)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let center = ((left + right) / 2.0, first.y - run.size * 0.2);
+                let mapped = point(center.0, center.1);
+                for glyph in &mut run.glyphs {
+                    glyph.x += mapped.0 - center.0;
+                    glyph.y += mapped.1 - center.1;
+                }
+                run.rotation_deg = Some(px(rotation));
+                run.paint_clip = None;
+            }
+            Primitive::Rect(value) => rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h),
+            Primitive::Decoration(value) => {
+                rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h)
+            }
+            Primitive::Line(value) => {
+                let first = point(num_f64(&value.x1), num_f64(&value.y1));
+                let last = point(num_f64(&value.x2), num_f64(&value.y2));
+                value.x1 = px(first.0);
+                value.y1 = px(first.1);
+                value.x2 = px(last.0);
+                value.y2 = px(last.1);
+            }
+            Primitive::Image(value) => {
+                let center = point(
+                    num_f64(&value.x) + num_f64(&value.w) / 2.0,
+                    num_f64(&value.y) + num_f64(&value.h) / 2.0,
+                );
+                value.x = px(center.0 - num_f64(&value.w) / 2.0);
+                value.y = px(center.1 - num_f64(&value.h) / 2.0);
+                value.rotation_deg = Some(px(
+                    value.rotation_deg.as_ref().map_or(0.0, num_f64) + rotation
+                ));
+            }
+            Primitive::Shape(value) => {
+                let transform = |x: &mut Number, y: &mut Number| {
+                    let mapped = point(num_f64(x), num_f64(y));
+                    *x = px(mapped.0);
+                    *y = px(mapped.1);
+                };
+                for command in &mut value.geometry_path {
+                    match command {
+                        ShapePathCommand::Move { x, y } | ShapePathCommand::Line { x, y } => {
+                            transform(x, y)
+                        }
+                        ShapePathCommand::Quad { cpx, cpy, x, y } => {
+                            transform(cpx, cpy);
+                            transform(x, y);
+                        }
+                        ShapePathCommand::Cubic {
+                            cp1x,
+                            cp1y,
+                            cp2x,
+                            cp2y,
+                            x,
+                            y,
+                        } => {
+                            transform(cp1x, cp1y);
+                            transform(cp2x, cp2y);
+                            transform(x, y);
+                        }
+                        ShapePathCommand::Close => {}
+                    }
+                }
+                rect(&mut value.x, &mut value.y, &mut value.w, &mut value.h);
+            }
+        }
+    }
 }
 
 fn postprocess_cell_primitives(

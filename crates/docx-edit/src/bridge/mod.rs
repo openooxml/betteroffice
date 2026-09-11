@@ -194,6 +194,7 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
+        let mut hidden_field_paragraphs = BTreeSet::new();
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
@@ -231,7 +232,11 @@ fn lower_story<T: ReadTxn>(
                         list_state,
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
-                    blocks.extend(paragraph_blocks);
+                    if !shared_map_string(&pilcrow, txn, "paraId")
+                        .is_some_and(|id| hidden_field_paragraphs.contains(&id))
+                    {
+                        blocks.extend(paragraph_blocks);
+                    }
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
                     let values = pilcrow_values(&pilcrow, txn);
@@ -404,6 +409,17 @@ fn lower_story<T: ReadTxn>(
                 Out::YMap(field)
                     if shared_map_string(&field, txn, "_kind").as_deref() == Some("field") =>
                 {
+                    let instruction = shared_map_string(&field, txn, "instruction")
+                        .filter(|value| !value.is_empty());
+                    let hidden = instruction
+                        .as_deref()
+                        .is_some_and(super::seed::numeric_field_instruction);
+                    if hidden
+                        && let Some(data) = shared_map_string(&field, txn, "fieldData")
+                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
+                    {
+                        collect_hidden_field_paragraphs(&data, &mut hidden_field_paragraphs);
+                    }
                     let field_type = shared_map_string(&field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
                     let mapped_type = match field_type.as_str() {
@@ -414,11 +430,12 @@ fn lower_story<T: ReadTxn>(
                         kind: RawRunKind::Field {
                             field_type: mapped_type.clone(),
                             raw_type: (field_type != mapped_type).then_some(field_type),
-                            instruction: shared_map_string(&field, txn, "instruction")
-                                .filter(|value| !value.is_empty()),
-                            fallback: Some(
-                                shared_map_string(&field, txn, "displayText").unwrap_or_default(),
-                            ),
+                            instruction,
+                            fallback: Some(if hidden {
+                                String::new()
+                            } else {
+                                shared_map_string(&field, txn, "displayText").unwrap_or_default()
+                            }),
                         },
                         formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
@@ -587,6 +604,23 @@ pub fn yrsDocToLayoutBlocks(
     yrs_doc_to_layout_blocks(doc, story_id, env)
 }
 
+fn collect_hidden_field_paragraphs(data: &serde_json::Value, hidden: &mut BTreeSet<String>) {
+    let Some(blocks) = data["structuredResult"]["blocks"].as_array() else {
+        return;
+    };
+    if !blocks.last().is_some_and(|block| {
+        block["type"].as_str() == Some("paragraph")
+            && block["content"].as_array().is_some_and(Vec::is_empty)
+    }) {
+        return;
+    }
+    for block in blocks {
+        if let Some(id) = block["paraId"].as_str() {
+            hidden.insert(id.to_owned());
+        }
+    }
+}
+
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {
     BridgeError::MalformedTable {
         story: story.to_owned(),
@@ -734,7 +768,7 @@ fn lower_table<T: ReadTxn>(
                     format!("row {row_index} cell {cell_index} is missing story"),
                 )
             })?;
-            let (blocks, content_size) = lower_story(
+            let (mut blocks, content_size) = lower_story(
                 txn,
                 &cell_story,
                 env,
@@ -752,7 +786,24 @@ fn lower_table<T: ReadTxn>(
                         _ => None,
                     }
                 });
+            let background = map_string(tc_pr, "backgroundColor").map(|value| format!("#{value}"));
+            if background.as_deref().is_some_and(dark_cell_background) {
+                for block in &mut blocks {
+                    if let LayoutBlock::Paragraph(paragraph) = block {
+                        for run in &mut paragraph.runs {
+                            let formatting = match run {
+                                Run::Text(value) => &mut value.fmt,
+                                Run::Tab(value) => &mut value.fmt,
+                                Run::Field(value) => &mut value.fmt,
+                                _ => continue,
+                            };
+                            formatting.color.get_or_insert_with(|| "#FFFFFF".to_owned());
+                        }
+                    }
+                }
+            }
             cells.push(TableCell {
+                text_direction: map_string(tc_pr, "textDirection"),
                 id: BlockId::Str(cell_story),
                 blocks,
                 col_span: map_number(tc_pr, "colspan"),
@@ -765,7 +816,7 @@ fn lower_table<T: ReadTxn>(
                 min_content_width: None,
                 max_content_width: None,
                 vertical_align: map_string(tc_pr, "verticalAlign"),
-                background: map_string(tc_pr, "backgroundColor").map(|value| format!("#{value}")),
+                background,
                 borders: lower_cell_borders(tc_pr, env),
                 padding: Some(lower_cell_padding(tc_pr, table_margins)),
                 no_wrap: (map_bool(tc_pr, "noWrap") == Some(true)).then_some(true),
@@ -843,6 +894,20 @@ fn lower_table<T: ReadTxn>(
         },
         node_size,
     ))
+}
+
+fn dark_cell_background(color: &str) -> bool {
+    let Some(value) = color
+        .strip_prefix('#')
+        .filter(|value| value.len() == 6)
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+    else {
+        return false;
+    };
+    let red = (value >> 16) & 255;
+    let green = (value >> 8) & 255;
+    let blue = value & 255;
+    299 * red + 587 * green + 114 * blue < 128_000
 }
 
 fn any_json(value: &Any) -> Option<Value> {
