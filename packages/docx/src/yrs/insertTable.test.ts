@@ -107,7 +107,7 @@ describe('a table inserted into a document without a bordered table style', () =
         for (const cell of row.cells) {
           for (const side of ['top', 'bottom', 'left', 'right'] as const) {
             expect(cell.borders?.[side], `reseeded rendered ${side} rule`).toEqual({
-              width: 1,
+              width: 2 / 3,
               color: '#000000',
               style: 'solid',
             });

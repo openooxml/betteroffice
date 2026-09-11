@@ -139,6 +139,66 @@ fn wrap_at_space_keeps_trailing_space_in_line_width() {
     approx(v["totalHeight"].as_f64().unwrap(), 2.0 * LH, "totalHeight");
 }
 
+#[test]
+fn trailing_spaces_can_overhang_without_wrapping_the_word() {
+    for spaces in [" ", "   "] {
+        let text = format!("0 00{spaces}0");
+        let value = measure(json!([{ "kind": "text", "text": text }]), 3.0 * W0 + SP).unwrap();
+        let end = 4 + spaces.len() as u64;
+        assert_eq!(spans(&value), vec![(0, 0, 0, end), (0, end, 0, end + 1)]);
+        approx(
+            value["lines"][0]["width"].as_f64().unwrap(),
+            3.0 * W0 + (spaces.len() + 1) as f64 * SP,
+            "retained whitespace advance",
+        );
+    }
+    let value = measure(json!([{ "kind": "text", "text": "00 " }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    let value = measure(json!([{ "kind": "text", "text": "0000   " }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 2), (0, 2, 0, 7)]);
+    let value = measure(json!([{ "kind": "text", "text": "00\u{00a0}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 2), (0, 2, 0, 3)]);
+}
+
+#[test]
+fn justified_text_compresses_spaces_before_wrapping() {
+    let natural = 12.0 * W0 + 3.0 * SP;
+    let minimum = natural - 0.25 * 3.0 * SP;
+    for (alignment, width, expected_lines) in [
+        ("left", minimum, 2),
+        ("justify", minimum, 1),
+        ("justify", minimum - 1.0, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000 000 000 000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(measured["lines"].as_array().unwrap().len(), expected_lines);
+        if expected_lines == 1 {
+            let line = &measured["lines"][0];
+            approx(
+                line["width"].as_f64().unwrap(),
+                width,
+                "compressed line width",
+            );
+            approx(
+                line["clusterAdvances"][3]["advance"].as_f64().unwrap(),
+                SP * 0.75,
+                "compressed space",
+            );
+            approx(
+                line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+                W0,
+                "unchanged glyph advance",
+            );
+        }
+    }
+}
+
 // 3. overlong unbreakable word hard-breaks mid-word, minimum 1 char/line
 #[test]
 fn overlong_word_hard_breaks() {
@@ -1097,6 +1157,23 @@ fn list_marker_font_and_zero_width_paths() {
     .expect("empty paragraph never measures its marker");
 }
 
+#[test]
+fn visible_list_marker_reserves_the_hanging_slot_on_the_first_line() {
+    for hidden in [false, true] {
+        let block = json!({
+            "kind":"paragraph", "runs":[{"kind":"text","text":"000 000"}],
+            "attrs":{"listMarker":"1.","listMarkerHidden":hidden,"indent":{"left":24,"hanging":24}}
+        });
+        let measured = measure_with(block, 64.0).unwrap();
+        let expected = if hidden {
+            vec![(0, 0, 0, 7)]
+        } else {
+            vec![(0, 0, 0, 4), (0, 4, 0, 7)]
+        };
+        assert_eq!(spans(&measured), expected);
+    }
+}
+
 // ---- inline images ------------------------------------------------------
 //
 // Lines without a font-bearing run use the fallback at the 12pt default: ascent
@@ -1695,7 +1772,7 @@ fn left_zone_narrows_covered_lines_then_releases() {
     let v = measure_floats(
         runs,
         100.0,
-        json!([{ "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 35.0 }]),
+        json!([{ "leftMargin": 44.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 35.0 }]),
     )
     .unwrap();
     assert_eq!(
@@ -1705,7 +1782,7 @@ fn left_zone_narrows_covered_lines_then_releases() {
     for i in [0, 1] {
         approx(
             v["lines"][i]["leftOffset"].as_f64().unwrap(),
-            40.0,
+            44.0,
             "covered line leftOffset",
         );
         approx(
@@ -1739,13 +1816,13 @@ fn right_and_both_side_zones_emit_offsets() {
     let v = measure_floats(
         runs.clone(),
         100.0,
-        json!([{ "leftMargin": 0.0, "rightMargin": 40.0, "topY": 0.0, "bottomY": 17.0 }]),
+        json!([{ "leftMargin": 0.0, "rightMargin": 44.0, "topY": 0.0, "bottomY": 17.0 }]),
     )
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 0, 4), (0, 4, 0, 11)]);
     approx(
         v["lines"][0]["rightOffset"].as_f64().unwrap(),
-        40.0,
+        44.0,
         "rightOffset",
     );
     assert!(

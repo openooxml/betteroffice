@@ -465,6 +465,9 @@ export type ParagraphAttrs = {
   listMarkerHidden?: boolean; // w:vanish on numbering level rPr
   listMarkerFontFamily?: string; // from numbering level rPr (w:rFonts)
   listMarkerFontSize?: number; // from numbering level rPr, in points
+  listMarkerBold?: boolean;
+  listMarkerItalic?: boolean;
+  listMarkerColor?: string;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing'; // §17.9.25 w:suff; default 'tab'
   /**
    * Tracked-change state of the list numbering itself. When a list is applied
@@ -795,6 +798,7 @@ export type ShapeBlock = {
   effects?: ShapeEffect[];
   /** Full text-body/autofit settings. */
   textBodyProperties?: ShapeTextBodyProperties;
+  wrapDistances?: { top: number; right: number; bottom: number; left: number };
   /** Anchor/wrap metadata. Undefined = in-flow. */
   position?: ImageRunPosition;
   wrapType?: string;

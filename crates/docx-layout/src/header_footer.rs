@@ -11,6 +11,39 @@ use crate::types::{
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
 const MIN_CONTENT_HEIGHT_PX: f64 = 24.0;
 
+#[derive(Default)]
+pub(crate) struct HeaderFooterFlow {
+    pub cursor: f64,
+    after: f64,
+}
+
+impl HeaderFooterFlow {
+    pub fn place(&mut self, height: f64, before: f64, after: f64) -> f64 {
+        let y = self.cursor + self.after.max(before);
+        self.cursor = y + height;
+        self.after = after;
+        y
+    }
+
+    pub fn height(&self) -> f64 {
+        self.cursor + self.after
+    }
+}
+
+fn block_spacing(block: &LayoutBlock) -> (f64, f64) {
+    let spacing = match block {
+        LayoutBlock::Paragraph(paragraph) => paragraph
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.spacing.as_ref()),
+        _ => None,
+    };
+    (
+        spacing.and_then(|s| s.before).unwrap_or(0.0),
+        spacing.and_then(|s| s.after).unwrap_or(0.0),
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum HeaderFooterKind {
@@ -86,12 +119,18 @@ pub fn measure_header_footer(
     let mut blocks = normalize_header_footer_blocks(blocks);
     let measures = measure_blocks(&mut blocks, content_width, config)?;
     let height = measures.iter().map(extent_height).sum();
-    let flow_height = blocks
-        .iter()
-        .zip(&measures)
-        .filter(|(block, _)| contributes_to_flow(block))
-        .map(|(_, measure)| extent_height(measure))
-        .sum();
+    let mut flow = HeaderFooterFlow::default();
+    for (block, measure) in blocks.iter().zip(&measures) {
+        if contributes_to_flow(block) {
+            let (before, after) = block_spacing(block);
+            flow.place(
+                (extent_height(measure) - before - after).max(0.0),
+                before,
+                after,
+            );
+        }
+    }
+    let flow_height = flow.height();
     let (visual_top, visual_bottom) = visual_bounds(&blocks, &measures, flow_height, metrics);
     let measured = blocks
         .into_iter()
@@ -225,30 +264,17 @@ fn normalize_block_slice(blocks: &mut [LayoutBlock]) {
         if let LayoutBlock::Table(table) = block {
             normalize_table(table);
         }
-        let LayoutBlock::Paragraph(paragraph) = block else {
-            continue;
-        };
-        let Some(attrs) = paragraph.attrs.as_mut() else {
-            continue;
-        };
-        if let Some(spacing) = attrs.spacing.as_mut() {
-            let explicit = attrs.spacing_explicit.as_ref();
-            if explicit.and_then(|value| value.before) != Some(true) {
-                spacing.before = None;
-            }
-            if explicit.and_then(|value| value.after) != Some(true) {
-                spacing.after = None;
-            }
-        }
     }
     for index in trailing_empty {
         let LayoutBlock::Paragraph(paragraph) = &mut blocks[index] else {
             continue;
         };
-        paragraph
-            .attrs
-            .get_or_insert_with(Default::default)
-            .suppress_empty_paragraph_height = Some(true);
+        let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+        attrs.suppress_empty_paragraph_height = Some(true);
+        if let Some(spacing) = attrs.spacing.as_mut() {
+            spacing.before = None;
+            spacing.after = None;
+        }
     }
 }
 
@@ -276,7 +302,8 @@ fn has_authored_visuals(paragraph: &crate::types::ParagraphBlock) -> bool {
 
 pub fn contributes_to_flow(block: &LayoutBlock) -> bool {
     match block {
-        LayoutBlock::Paragraph(_) | LayoutBlock::Table(_) => true,
+        LayoutBlock::Paragraph(_) => true,
+        LayoutBlock::Table(table) => table.floating.is_none(),
         LayoutBlock::Image(image) => {
             image.anchor.as_ref().and_then(|anchor| anchor.is_anchored) != Some(true)
         }
@@ -297,9 +324,16 @@ fn visual_bounds(
 ) -> (f64, f64) {
     let mut visual_top = 0.0_f64;
     let mut visual_bottom = 0.0_f64;
-    let mut cursor = 0.0_f64;
+    let mut flow = HeaderFooterFlow::default();
     for (block, measure) in blocks.iter().zip(measures) {
-        let block_height = extent_height(measure);
+        let (before, after) = block_spacing(block);
+        let block_height = (extent_height(measure) - before - after).max(0.0);
+        let anchor_y = flow.cursor;
+        let cursor = if contributes_to_flow(block) {
+            flow.place(block_height, before, after)
+        } else {
+            flow.cursor
+        };
         match block {
             LayoutBlock::Paragraph(paragraph) => {
                 visual_top = visual_top.min(cursor);
@@ -311,18 +345,14 @@ fn visual_bounds(
                     if image.position.is_none() {
                         continue;
                     }
-                    let top = image_visual_top(image, cursor, height, metrics);
+                    let top = image_visual_top(image, anchor_y, height, metrics);
                     visual_top = visual_top.min(top);
                     visual_bottom = visual_bottom.max(top + image.height);
                 }
-                cursor += block_height;
             }
-            LayoutBlock::TextBox(text_box) => {
+            LayoutBlock::TextBox(_) => {
                 visual_top = visual_top.min(cursor);
                 visual_bottom = visual_bottom.max(cursor + block_height);
-                if text_box.display_mode.as_deref() != Some("float") {
-                    cursor += block_height;
-                }
             }
             LayoutBlock::Shape(shape) if shape.position.is_some() => {
                 let distance = match metrics.kind {
@@ -363,12 +393,11 @@ fn visual_bounds(
             | LayoutBlock::Chart(_) => {
                 visual_top = visual_top.min(cursor);
                 visual_bottom = visual_bottom.max(cursor + block_height);
-                cursor += block_height;
             }
             _ => {}
         }
     }
-    (visual_top, visual_bottom)
+    (visual_top, visual_bottom.max(flow.height()))
 }
 
 fn image_visual_top(
@@ -459,21 +488,72 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalization_strips_inherited_spacing_and_suppresses_table_tail() {
+    fn normalization_preserves_style_spacing_except_for_empty_table_tails() {
         let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind": "paragraph", "id": "heading", "runs": [{"kind":"text","text":"Heading"}], "attrs": {"spacing": {"before": 8, "after": 9}}},
             {"kind": "table", "id": "t", "rows": []},
             {"kind": "paragraph", "id": "p", "runs": [], "attrs": {"spacing": {"before": 8, "after": 9}}}
         ]))
         .unwrap();
 
         let normalized = normalize_header_footer_blocks(blocks);
-        let LayoutBlock::Paragraph(paragraph) = &normalized[1] else {
+        let LayoutBlock::Paragraph(heading) = &normalized[0] else {
+            panic!("paragraph expected");
+        };
+        let spacing = heading.attrs.as_ref().unwrap().spacing.as_ref().unwrap();
+        assert_eq!((spacing.before, spacing.after), (Some(8.0), Some(9.0)));
+        let LayoutBlock::Paragraph(paragraph) = &normalized[2] else {
             panic!("paragraph expected");
         };
         let attrs = paragraph.attrs.as_ref().unwrap();
         assert_eq!(attrs.spacing.as_ref().unwrap().before, None);
         assert_eq!(attrs.spacing.as_ref().unwrap().after, None);
         assert_eq!(attrs.suppress_empty_paragraph_height, Some(true));
+    }
+
+    #[test]
+    fn measured_header_height_includes_collapsed_style_spacing() {
+        let blocks = serde_json::from_value(json!([
+            {"kind":"paragraph","id":"a","runs":[{"kind":"text","text":"A"}],"attrs":{"spacing":{"before":5,"after":8}}},
+            {"kind":"paragraph","id":"b","runs":[{"kind":"text","text":"B"}],"attrs":{"spacing":{"before":4,"after":6}}}
+        ])).unwrap();
+        let size = Size { w: 300.0, h: 500.0 };
+        let margins = PageMargins {
+            top: 40.0,
+            right: 40.0,
+            bottom: 40.0,
+            left: 40.0,
+            header: Some(20.0),
+            footer: Some(20.0),
+        };
+        let variant = measure_header_footer(
+            "header".to_owned(),
+            HeaderFooterKind::Header,
+            HeaderFooterType::Default,
+            0,
+            blocks,
+            220.0,
+            HeaderFooterMetrics {
+                kind: HeaderFooterKind::Header,
+                page_size: &size,
+                margins: &margins,
+            },
+            &MeasurementConfig::default(),
+        )
+        .unwrap()
+        .unwrap();
+        let text_height: f64 = variant
+            .measured
+            .iter()
+            .map(|m| match &m.measure {
+                BlockExtent::Paragraph(p) => {
+                    p.lines.iter().map(|line| line.line_height).sum::<f64>()
+                }
+                _ => panic!("paragraph expected"),
+            })
+            .sum();
+        assert_eq!(variant.flow_height, text_height + 5.0 + 8.0 + 6.0);
+        assert_eq!(variant.visual_bottom, variant.flow_height);
     }
 
     #[test]

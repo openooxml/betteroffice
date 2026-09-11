@@ -19,7 +19,7 @@ QUALITY_OUTPUT=.source/office-quality/run \
 node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 ```
 
-The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the three demos and 48 English Open XML SDK fixtures. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
+The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the three demos and `bo-corpus-1`, a redacted industry document. The [`docx` collection](https://corpus.betteroffice.dev/collections/docx.json) contains exactly `betteroffice-demo` and `bo-corpus-1`. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
 
 XLSX capture uses `printDisplayList` when available, with font metrics measured
 at 72 layout DPI for the frozen Mac Office capture and the worksheet's explicit defaults.
@@ -99,10 +99,11 @@ The `betteroffice-corpus` R2 bucket is served at **https://corpus.betteroffice.d
 | Sample metadata | Format | Reference pages |
 | --- | --- | ---: |
 | [betteroffice-demo](https://corpus.betteroffice.dev/betteroffice-demo/metadata.json) | DOCX | 2 |
+| [bo-corpus-1](https://corpus.betteroffice.dev/bo-corpus-1/metadata.json) | DOCX | 17 |
 | [betteroffice-slides](https://corpus.betteroffice.dev/betteroffice-slides/metadata.json) | PPTX | 3 |
 | [betteroffice-workbook](https://corpus.betteroffice.dev/betteroffice-workbook/metadata.json) | XLSX | 9 |
 
-Collection manifests live at `collections/<id>.json` with `schema_version: 1`, the collection `id`, and a `samples` array of folder names. Sample metadata links the source and PNGs and records capture provenance, hashes, comparisons, and licensing. The SDK fixtures retain their upstream MIT notice; private inputs and captures stay local. Publishing additional authorized samples requires authenticated Wrangler:
+Collection manifests live at `collections/<id>.json` with `schema_version: 1`, the collection `id`, and a `samples` array of folder names. Sample metadata links the source and PNGs and records capture provenance, hashes, comparisons, and licensing. The DOCX corpus contains only the demo and the authorized redacted sample; private inputs and captures stay local. Publishing additional authorized samples requires authenticated Wrangler:
 
 ```sh
 bunx wrangler r2 object put betteroffice-corpus/<key> --file <local-file> --remote

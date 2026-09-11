@@ -16,9 +16,8 @@
 //! Word collapses adjacent vertical spacing to the larger of the two instead of
 //! summing, so [`Paginator::add_fragment`] takes `max(space_before,
 //! deferred_spacing)` and leaves `space_after` deferred for the next fragment.
-//! The deferred value is read before fitting can advance the state, and a new
-//! page or column resets it to zero, which is what lets an explicit `w:before`
-//! still apply at the top of a page.
+//! Page breaks and automatic overflow suppress leading spacing; authored
+//! column breaks retain it.
 //!
 //! Columns live in a *region* starting at `column_region_top`. A new page
 //! resets that to the content top; [`Paginator::update_columns`] sets it to the
@@ -35,6 +34,7 @@ use crate::types::{ColumnLayout, Fragment, Page, PageMargins, Size};
 /// by the page geometry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PageFlowGeometry {
+    pub suppress_leading_spacing: bool,
     pub page_size: Size,
     pub margins: PageMargins,
     pub columns: ColumnLayout,
@@ -73,6 +73,7 @@ fn calculate_column_width(
 
 /// The page/column cursor and the pages it has produced so far.
 pub struct Paginator {
+    suppress_leading_spacing: bool,
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
     page_size: Size,
@@ -106,6 +107,7 @@ impl Paginator {
             calculate_column_width(page_size.w, margins.left, margins.right, &columns);
         let column_region_top = margins.top;
         Ok(Paginator {
+            suppress_leading_spacing: false,
             pages: Vec::new(),
             states: Vec::new(),
             page_size,
@@ -141,6 +143,7 @@ impl Paginator {
         paginator.pending_margins = geometry.pending_margins.clone();
         paginator.pending_columns = geometry.pending_columns.clone();
         paginator.start_page_number = start_page_number;
+        paginator.suppress_leading_spacing = geometry.suppress_leading_spacing;
         Ok(paginator)
     }
 
@@ -157,6 +160,7 @@ impl Paginator {
     /// only when [`Self::clean_page_start`] returns a page.
     pub fn snapshot_geometry(&self) -> PageFlowGeometry {
         PageFlowGeometry {
+            suppress_leading_spacing: self.suppress_leading_spacing,
             page_size: self.page_size.clone(),
             margins: self.margins.clone(),
             columns: self.columns.clone(),
@@ -366,6 +370,7 @@ impl Paginator {
     /// Moves to the next column of the current region, or opens a new page once
     /// the region's columns are spent, reporting which of the two it did.
     fn advance_column(&mut self, idx: usize) -> (usize, bool) {
+        self.suppress_leading_spacing = true;
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
             let region_top = self.column_region_top;
             let state = &mut self.states[idx];
@@ -413,14 +418,16 @@ impl Paginator {
     ) -> (f64, f64) {
         // Read deferred spacing before fitting can advance the state.
         let cur = self.get_current();
-        let effective_space_before = space_before.max(self.states[cur].deferred_spacing);
+        let effective_space_before = self
+            .leading_spacing(space_before)
+            .max(self.states[cur].deferred_spacing);
         let total_height = effective_space_before + height;
 
         let idx = self.ensure_fits(total_height);
 
-        // Word 2013+ honors an explicit w:before at the top of a page/column;
-        // deferred spacing was already reset when the page/column started.
-        let actual_space_before = effective_space_before;
+        let actual_space_before = self
+            .leading_spacing(space_before)
+            .max(self.states[idx].deferred_spacing);
 
         let x = self.get_column_x(self.states[idx].column_index);
         let y = self.states[idx].pen_y + actual_space_before;
@@ -432,6 +439,7 @@ impl Paginator {
         let state = &mut self.states[idx];
         state.pen_y = y + height;
         state.deferred_spacing = space_after;
+        self.suppress_leading_spacing = false;
 
         (x, y)
     }
@@ -444,6 +452,20 @@ impl Paginator {
         }
     }
 
+    pub fn force_authored_page_break(&mut self) -> usize {
+        let index = self.force_page_break();
+        self.suppress_leading_spacing = true;
+        index
+    }
+
+    pub fn leading_spacing(&self, spacing: f64) -> f64 {
+        if self.suppress_leading_spacing {
+            0.0
+        } else {
+            spacing
+        }
+    }
+
     /// Non-idempotent page creation for the truly blank sheet required by an
     /// evenPage/oddPage section start.
     pub fn insert_blank_page(&mut self) -> usize {
@@ -452,6 +474,13 @@ impl Paginator {
 
     /// Moves to the next column, or the next page from the last column.
     pub fn force_column_break(&mut self) -> usize {
+        let idx = self.get_current();
+        let next = self.advance_column(idx).0;
+        self.suppress_leading_spacing = false;
+        next
+    }
+
+    pub fn advance_for_overflow(&mut self) -> usize {
         let idx = self.get_current();
         self.advance_column(idx).0
     }

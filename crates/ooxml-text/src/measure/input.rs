@@ -355,12 +355,16 @@ pub struct AttrsIn {
     pub list_marker_hidden: bool,
     /// Marker face from the numbering level rPr; falls back to the first
     /// text run's font, then the paragraph/document defaults. The host must
-    /// provide the resolved family's **regular** (`|0|0`) chain.
+    /// provide the resolved family's requested style chain.
     #[serde(default)]
     pub list_marker_font_family: Option<String>,
     /// Points.
     #[serde(default)]
     pub list_marker_font_size: Option<f32>,
+    #[serde(default)]
+    pub list_marker_bold: bool,
+    #[serde(default)]
+    pub list_marker_italic: bool,
     /// §17.9.25 `w:suff`: `"tab"` (default) / `"space"` / `"nothing"`.
     #[serde(default)]
     pub list_marker_suffix: Option<String>,

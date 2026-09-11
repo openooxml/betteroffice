@@ -52,8 +52,7 @@
 //! - **An overlong unbreakable word** fills the room left on the current
 //!   line and then hard-breaks, at least one shaped cluster per line.
 //! - **Trailing whitespace stays** on the line it ends, and its advance is
-//!   included in that line's `width` — words are measured with their
-//!   trailing space and never trimmed.
+//!   included in that line's `width`, while wrapping ignores trailing spaces.
 //! - **Widths come from shaping whole same-style subranges**, so kerning and
 //!   ligature advances straddling a hard-break cut are attributed to the
 //!   line before the cut.
@@ -386,12 +385,23 @@ pub fn measure_paragraph_typed(
     let indent = attrs.and_then(|a| a.indent.as_ref());
     let indent_left = indent.and_then(|i| i.left).unwrap_or(0.0);
     let indent_right = indent.and_then(|i| i.right).unwrap_or(0.0);
-    let first_line_offset = indent.and_then(|i| i.first_line).unwrap_or(0.0)
-        - indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    let visible_marker = attrs.is_some_and(|a| {
+        !a.list_marker_hidden
+            && a.list_marker
+                .as_ref()
+                .is_some_and(|marker| !marker.is_empty())
+    });
+    let hanging = indent.and_then(|i| i.hanging).unwrap_or(0.0);
+    let first_line_offset = if visible_marker && hanging > 0.0 {
+        0.0
+    } else {
+        indent.and_then(|i| i.first_line).unwrap_or(0.0) - hanging
+    };
     let body_width = (request.max_width - indent_left - indent_right).max(1.0);
     let first_line_width = (body_width - first_line_offset - marker_inline_width).max(1.0);
 
     line_filler::fill(line_filler::FillParams {
+        justify: attrs.and_then(|attrs| attrs.alignment.as_deref()) == Some("justify"),
         store,
         prepared: &prepared,
         spacing,

@@ -3,8 +3,7 @@
 //!
 //! The marker's face resolves in precedence order — numbering level, then the
 //! paragraph's first text run, then the paragraph default, then the document
-//! default — and always through that family's regular chain, since a marker
-//! is never bold or italic here. `w:suff` then fixes the footprint:
+//! default — using the marker's bold and italic style. `w:suff` then fixes the footprint:
 //! `nothing` is the marker's own width, `space` adds one space glyph, and
 //! `tab` (the default) grows the marker out to the nearest stop past its end,
 //! taking whichever is closer of the first custom stop and the first
@@ -51,7 +50,7 @@ pub(super) fn list_marker_inline_width(
     super::input::validate_pt_size(size_pt, "attrs.listMarkerFontSize")?;
     let size_px = pt_to_px(size_pt);
 
-    let chain = input.chain_for(family, false, false)?;
+    let chain = input.chain_for(family, attrs.list_marker_bold, attrs.list_marker_italic)?;
     super::prepare::validate_chain(store, &chain)?;
     // Marker text under the paragraph's base direction (`w:bidi` → RTL);
     // like everywhere else, direction affects segmentation, never the sum.
