@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, spyOn } from 'bun:test';
+import { beforeAll, describe, expect, it, mock, spyOn } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
@@ -7,7 +7,11 @@ import {
   preloadLayoutWasm,
   registerMeasureFont,
 } from '../../wasm/layout';
-import { drawPrimitive } from './canvasBackend';
+import {
+  drawPrimitive,
+  rasterizeDisplayPageToBackBuffer,
+  sizeCanvasForPage,
+} from './canvasBackend';
 import type {
   DisplayList,
   DisplayPaintClip,
@@ -246,6 +250,65 @@ function syntheticMixedFamilyDisplayList(): DisplayList {
   };
   return JSON.parse(buildDisplayListJson(JSON.stringify(input))) as DisplayList;
 }
+
+describe('Canvas page extents', () => {
+  it.each(['direct', 'back buffer'] as const)(
+    'keeps fractional page edges in the %s raster',
+    async (mode) => {
+      let width = 0;
+      let height = 0;
+      let resizes = 0;
+      const context = {
+        scale: mock(() => {}),
+        resetTransform: mock(() => {}),
+        clearRect: mock(() => {}),
+      } as unknown as CanvasRenderingContext2D;
+      const canvas = {
+        get width() {
+          return width;
+        },
+        set width(value: number) {
+          width = Math.trunc(value);
+          resizes += 1;
+        },
+        get height() {
+          return height;
+        },
+        set height(value: number) {
+          height = Math.trunc(value);
+          resizes += 1;
+        },
+        style: { width: '', height: '' },
+        getContext: () => context,
+      };
+      const page = {
+        pageIndex: 0,
+        width: 11906 / 15,
+        height: 16838 / 15,
+        primitives: [],
+      };
+      if (mode === 'direct') {
+        sizeCanvasForPage(canvas, context, page, 1.25, 1.25);
+        expect(canvas.style.width).toBe(`${page.width * 1.25}px`);
+        expect(canvas.style.height).toBe(`${page.height * 1.25}px`);
+      } else {
+        for (let frame = 0; frame < 2; frame += 1) {
+          await rasterizeDisplayPageToBackBuffer(
+            canvas as unknown as HTMLCanvasElement,
+            page,
+            {},
+            1.25,
+            1.25
+          );
+        }
+        expect(resizes).toBe(2);
+      }
+      expect(canvas.width).toBe(1241);
+      expect(canvas.height).toBe(1754);
+      expect(context.scale).toHaveBeenLastCalledWith(1.5625, 1.5625);
+    }
+  );
+});
 
 describe('Canvas text-run slot clipping', () => {
   it('clips a Rust-shaped run from a synthetic mixed-family line', async () => {
