@@ -60,7 +60,7 @@ pub fn handle_section_break(
     paginator: &mut Paginator,
     next_section_config: &SectionLayoutConfig,
     next_section_type: Option<SectionBreakType>,
-) -> Result<(), LayoutError> {
+) -> Result<bool, LayoutError> {
     section_breaks::handle_section_break(block, paginator, next_section_config, next_section_type)
 }
 

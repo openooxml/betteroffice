@@ -1,0 +1,69 @@
+---
+title: Packages
+description: What to install from npm, crates.io, and PyPI, and what each package does
+---
+
+Every BetterOffice package is a face on the same Rust engines — one parser, one
+editing core, and one layout pass per format. What changes between registries is
+the runtime you call them from and how much of the pipeline is exposed.
+
+| Runtime | Install | Guide |
+| --- | --- | --- |
+| Browser, React, or Node | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
+| Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
+| Python | `pip install betteroffice-docx` | [Python](./python) |
+
+## What exists per format
+
+| Format | npm | crates.io | PyPI |
+| --- | --- | --- | --- |
+| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | `betteroffice-docx` |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
+| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
+
+All three registries carry all three formats.
+
+## Fonts
+
+Word documents overwhelmingly reference the MS core fonts, whose binaries cannot
+be redistributed. These packages ship the open metric-compatible replacements —
+same advance widths, so line breaks and pagination match Word.
+
+| Package | Size | Contents |
+| --- | --- | --- |
+| `@betteroffice/fonts` | 7.9 MB | Carlito, Caladea, Liberation Sans/Serif/Mono, Noto Hebrew/Arabic |
+| `@betteroffice/fonts-cjk` | 33 MB | Noto Sans SC/TC/JP/KR, Noto Serif SC |
+
+The engine loads no fonts on its own and never reaches for a font package.
+Install `@betteroffice/fonts` and hand it over once, before any editor mounts:
+
+```ts
+import { configureDefaultFonts } from "@betteroffice/docx/layout";
+import * as fonts from "@betteroffice/fonts";
+
+configureDefaultFonts({ fonts });
+```
+
+Add a `baseUrl` alongside it to fetch the binaries from your own CDN instead of
+the package assets; the module stays required either way, because it carries the
+manifest that maps a Word font name to a face. Add `@betteroffice/fonts-cjk`
+only for Chinese, Japanese, or Korean text — it is separate so nobody installs
+33 MB they do not need.
+
+Unconfigured, families a document does not embed measure with synthetic metrics
+and pagination will not match Word. Neither package is installed automatically;
+both are declared optional peers.
+
+## Picking one
+
+- **An editor UI in a React app** — the `-react` packages. They own the toolbar,
+  canvas, selection, keyboard, and review UI.
+- **Your own UI in the browser** — the framework-free cores. Same engine, no
+  React: display lists, hit-testing, and a document handle.
+- **A server, a CLI, or a pipeline in Rust** — the three facade crates.
+- **A server, a notebook, or an agent in Python** — the three `betteroffice-*`
+  distributions on PyPI.
+- **One stage of the pipeline** — the per-layer crates, published individually.
+
+Versions are `0.0.x` and the APIs are still settling. Breaking changes are listed
+in each package's changelog.

@@ -67,7 +67,8 @@ instead of independently importing the same DOCX.
 ## Development
 
 The generated `.wasm` binaries are intentionally not committed. From the
-repository root, install `wasm-pack` 0.15.0 and run `bun run build:docx-wasm`.
+repository root, install `wasm-pack` 0.15.0 and `binaryen`, then run
+`bun run build:docx-wasm`.
 Package builds, demo startup, and CI run this step automatically.
 
 Docs: https://betteroffice.dev · Apache-2.0.

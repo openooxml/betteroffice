@@ -4,7 +4,7 @@ use std::sync::Arc;
 use yrs::sync::time::Clock;
 use yrs::{Doc, Origin, ReadTxn, Transact};
 
-use crate::{EditError, EditResult, SHAPES, SLIDE_ORDER, SLIDES, STORIES};
+use crate::{COMMENTS, EditError, EditResult, META, SHAPES, SLIDE_ORDER, SLIDES, STORIES};
 
 const CAPTURE_TIMEOUT_MS: u64 = 500;
 
@@ -27,6 +27,12 @@ impl DeckUndoManager {
         let stories = txn
             .get_map(STORIES)
             .ok_or_else(|| EditError::InvalidState("missing stories map".to_owned()))?;
+        let comments = txn
+            .get_map(COMMENTS)
+            .ok_or_else(|| EditError::InvalidState("missing comments map".to_owned()))?;
+        let meta = txn
+            .get_map(META)
+            .ok_or_else(|| EditError::InvalidState("missing meta map".to_owned()))?;
         drop(txn);
         let options = yrs::undo::Options {
             capture_timeout_millis: CAPTURE_TIMEOUT_MS,
@@ -41,6 +47,8 @@ impl DeckUndoManager {
         inner.expand_scope(doc, &slides);
         inner.expand_scope(doc, &shapes);
         inner.expand_scope(doc, &stories);
+        inner.expand_scope(doc, &comments);
+        inner.expand_scope(doc, &meta);
         Ok(Self { inner })
     }
 

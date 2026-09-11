@@ -41,3 +41,43 @@ Copyright 2013 The Carlito Project Authors, with Reserved Font Name "Carlito".
 
 License: SIL Open Font License, Version 1.1
 (`crates/xlsx-raster/assets/OFL.txt`).
+
+---
+
+## Bundled font binaries (`packages/fonts`, `packages/fonts-cjk`)
+
+Thirty font binaries are vendored unmodified and redistributed in the published
+`@betteroffice/fonts` and `@betteroffice/fonts-cjk` packages. All are licensed
+under the SIL Open Font License, Version 1.1. Each package ships the applicable
+license texts, with the copyright notices they cover, under its `LICENSES/`
+directory; those files are the authoritative copies for redistribution.
+
+`packages/fonts/assets` — 25 faces:
+
+- **Carlito** (4 faces) — Copyright 2013 The Carlito Project Authors, with
+  Reserved Font Name "Carlito". From google/fonts `ofl/carlito`; upstream
+  https://github.com/googlefonts/carlito. `LICENSES/OFL-Carlito.txt`.
+- **Caladea** (4 faces) — Copyright 2012 The Caladea Project Authors. From
+  google/fonts `ofl/caladea`; upstream
+  https://github.com/huertatipografica/Caladea. `LICENSES/OFL-Caladea.txt`.
+- **Liberation Sans / Serif / Mono** (12 faces) — Digitized data copyright (c)
+  2010 Google Corporation; Copyright (c) 2012 Red Hat, Inc., with Reserved Font
+  Name "Liberation". From the Liberation Fonts 2.1.5 release,
+  https://github.com/liberationfonts/liberation-fonts.
+  `LICENSES/OFL-Liberation.txt`.
+- **Noto Sans Arabic, Noto Naskh Arabic** (3 faces) — Copyright 2022 The Noto
+  Project Authors. From https://github.com/notofonts/notofonts.github.io;
+  upstream https://github.com/notofonts/arabic. `LICENSES/OFL-NotoArabic.txt`.
+- **Noto Sans Hebrew** (2 faces) — Copyright 2022 The Noto Project Authors.
+  From https://github.com/notofonts/notofonts.github.io; upstream
+  https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`.
+
+`packages/fonts-cjk/assets` — 5 faces:
+
+- **Noto Sans SC / TC / JP / KR** (4 faces) — Copyright 2014-2021 Adobe, with
+  Reserved Font Name "Source".
+- **Noto Serif SC** (1 face) — Copyright 2017-2024 Adobe, with Reserved Font
+  Name "Source".
+
+Both are static `SubsetOTF` Regulars from
+https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.

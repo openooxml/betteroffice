@@ -25,9 +25,9 @@
 //! Positions come out in two coordinate systems. Story offsets are the UTF-16
 //! indices above; the `pm_*` fields carry the paragraph-node positions that
 //! [`pm_position`] derives, in which every paragraph adds two positions for
-//! its own open and close. They usually track each other, and diverge where
-//! one story unit displays as several characters — a `noteRef` embed occupies
-//! one unit but shows a multi-digit number.
+//! its own open and close. Inline content occupies the same width in both, so
+//! an embed that displays as several characters — a `noteRef` showing a
+//! multi-digit number — still spans exactly one position.
 //!
 //! Values the story cannot supply — theme colors, the default tab stop, the
 //! page content height, and the mapping from yrs ids to the numeric ids the
@@ -388,19 +388,17 @@ fn lower_story<T: ReadTxn>(
                     if !comment_ids.is_empty() {
                         formatting.comment_ids = Some(comment_ids);
                     }
-                    let label = note_ref_label(id);
-                    let label_width = utf16_len(&label);
                     paragraph_runs.push(RawRun {
-                        kind: RawRunKind::Text(label),
+                        kind: RawRunKind::Text(note_ref_label(id)),
                         formatting,
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
-                        pm_end: paragraph_pm_units + label_width,
+                        pm_end: paragraph_pm_units + 1,
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
-                    paragraph_pm_units += label_width;
+                    paragraph_pm_units += 1;
                     at_block_boundary = false;
                 }
                 Out::YMap(field)
@@ -992,7 +990,7 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
     let command = |value: Value| value;
     let close = || serde_json::json!({ "type": "close" });
     Some(match shape_type {
-        "rect" => vec![
+        "rect" | "textBox" => vec![
             command(serde_json::json!({"type":"move","x":0,"y":0})),
             command(serde_json::json!({"type":"line","x":1,"y":0})),
             command(serde_json::json!({"type":"line","x":1,"y":1})),
@@ -1468,21 +1466,17 @@ fn lower_inline_sdt_values(
                     } else {
                         formatting.endnote_ref_id = Some(id);
                     }
-                    let label = note_ref_label(id);
-                    let width = utf16_len(&label);
                     runs.push(RawRun {
-                        kind: RawRunKind::Text(label),
+                        kind: RawRunKind::Text(note_ref_label(id)),
                         formatting,
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
-                        pm_end: child_pm_start + width,
+                        pm_end: child_pm_start + 1,
                         inline_sdt_widget: widget.clone(),
                     });
-                    width
-                } else {
-                    1
                 }
+                1
             }
             "sdt" => payload.map_or(2, |payload| {
                 lower_inline_sdt_values(
@@ -1644,10 +1638,8 @@ struct RawRun {
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
-    /// Rendered bounds relative to the paragraph's content start. Usually the
-    /// same width as the story bounds; they diverge where one story unit
-    /// displays as several characters, as a `noteRef` does when its id has
-    /// more than one digit.
+    /// Rendered bounds relative to the paragraph's content start, always the
+    /// same width as the story bounds.
     pm_start: u32,
     pm_end: u32,
     /// Checkbox chrome inherited from the nearest editable inline SDT.
@@ -1958,7 +1950,7 @@ fn section_break_type(value: &str) -> Option<SectionBreakType> {
         "nextPage" => Some(SectionBreakType::NextPage),
         "evenPage" => Some(SectionBreakType::EvenPage),
         "oddPage" => Some(SectionBreakType::OddPage),
-        // `nextColumn` has no variant in the layout engine's enum.
+        "nextColumn" => Some(SectionBreakType::NextColumn),
         _ => None,
     }
 }
@@ -2291,18 +2283,29 @@ fn compute_list_marker(values: &BTreeMap<String, Any>, state: &mut ListState) ->
     }
 
     let level = map_number(num_pr, "ilvl").unwrap_or(0.0).max(0.0) as usize;
-    let formats = list_level_formats(values);
+    let mut formats = list_level_formats(values);
     let level_format = formats
         .get(level)
         .cloned()
         .or_else(|| value_string(values.get("listNumFmt")));
-    if level_format.as_deref() == Some("none") {
-        return marker.filter(|value| !value.is_empty());
-    }
-
     let counter_key = value_number(values.get("listAbstractNumId"))
         .unwrap_or(num_id)
         .to_string();
+    if level_format.as_deref() == Some("none") {
+        if level < 9 && formats.len() <= level {
+            formats.resize(level + 1, "decimal".to_owned());
+            formats[level] = "none".to_owned();
+        }
+        let counters = state
+            .counters
+            .get(&counter_key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        return marker
+            .map(|template| resolve_list_template(&template, counters, &formats))
+            .filter(|value| !value.is_empty());
+    }
+
     let counters = state
         .counters
         .entry(counter_key)
@@ -2626,6 +2629,7 @@ fn lower_paragraph_attrs(
 
     result.keep_next = true_property(values, "keepNext");
     result.keep_lines = true_property(values, "keepLines");
+    result.widow_control = false_property(values, "widowControl");
     result.page_break_before = true_property(values, "pageBreakBefore");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
@@ -3172,6 +3176,11 @@ fn true_property(values: &BTreeMap<String, Any>, key: &str) -> Option<bool> {
     (values.get(key).and_then(any_bool) == Some(true)).then_some(true)
 }
 
+/// Returns only an authored false for a default-on toggle.
+fn false_property(values: &BTreeMap<String, Any>, key: &str) -> Option<bool> {
+    (values.get(key).and_then(any_bool) == Some(false)).then_some(false)
+}
+
 fn attribute<'a>(attributes: Option<&'a Attrs>, key: &str) -> Option<&'a Any> {
     attributes
         .and_then(|attributes| attributes.get(key))
@@ -3306,6 +3315,47 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn none_format_without_level_formats_suppresses_an_existing_counter() {
+        let mut state = ListState::default();
+        state.counters.insert("41".to_owned(), vec![3]);
+        let values = BTreeMap::from([
+            (
+                "numPr".to_owned(),
+                any_map([("numId", Any::Number(41.0)), ("ilvl", Any::Number(0.0))]),
+            ),
+            ("listNumFmt".to_owned(), Any::String("none".into())),
+            ("listMarker".to_owned(), Any::String("%1".into())),
+        ]);
+        assert_eq!(compute_list_marker(&values, &mut state), None);
+        assert_eq!(state.counters["41"], [3]);
+    }
+
+    #[test]
+    fn none_format_preserves_references_to_numbered_ancestors() {
+        let mut state = ListState::default();
+        state.counters.insert("41".to_owned(), vec![3, 0]);
+        let values = BTreeMap::from([
+            (
+                "numPr".to_owned(),
+                any_map([("numId", Any::Number(42.0)), ("ilvl", Any::Number(1.0))]),
+            ),
+            ("listAbstractNumId".to_owned(), Any::Number(41.0)),
+            (
+                "listLevelNumFmts".to_owned(),
+                Any::from_json(r#"["decimal", "none"]"#).unwrap(),
+            ),
+            (
+                "listMarker".to_owned(),
+                Any::String("Parent %1 child %2".into()),
+            ),
+        ]);
+        assert_eq!(
+            compute_list_marker(&values, &mut state).as_deref(),
+            Some("Parent 3 child ")
+        );
     }
 
     fn format_range(doc: &EditingDoc, start: u32, end: u32, attrs: Vec<(&'static str, Any)>) {
@@ -3541,6 +3591,54 @@ mod tests {
     }
 
     #[test]
+    fn native_multi_digit_note_ref_occupies_one_position() {
+        let doc = EditingDoc::new(44);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::Insert {
+                    index: 0,
+                    text: "A".to_owned(),
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "noteRef".to_owned(),
+                    payload: vec![("footnoteRefId".to_owned(), Any::Number(12.0))],
+                    attrs: Attrs::new(),
+                },
+                RawOp::Insert {
+                    index: 2,
+                    text: "B".to_owned(),
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 3,
+                    kind: "pilcrow".to_owned(),
+                    payload: vec![("paraId".to_owned(), Any::from("body-p"))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        replace_story_with_paragraph(&doc, "fn:12", "fn-p", "Footnote text");
+
+        let body = serde_json::to_value(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body[0]["runs"][1]["text"], json!("12"));
+        assert_eq!(body[0]["runs"][1]["pmStart"], json!(2.0));
+        assert_eq!(body[0]["runs"][1]["pmEnd"], json!(3.0));
+        assert_eq!(body[0]["runs"][2]["text"], json!("B"));
+        assert_eq!(body[0]["runs"][2]["pmStart"], json!(3.0));
+        assert_eq!(body[0]["pmEnd"], json!(5.0));
+    }
+
+    #[test]
     fn native_page_and_column_break_embeds_lower_without_fallback() {
         let doc = EditingDoc::new(43);
         doc.create_story("body", "", "Normal", "left").unwrap();
@@ -3632,6 +3730,47 @@ mod tests {
         assert_eq!(value[0]["innerText"][0]["runs"][0]["text"], "Native");
         assert_eq!(value[0]["pmStart"], 1.0);
         assert_eq!(value[0]["pmEnd"], 2.0);
+    }
+
+    #[test]
+    fn legacy_text_box_payload_lowers_to_a_rectangle() {
+        let doc = EditingDoc::new(45);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![
+                RawOp::Delete { index: 0, len: 1 },
+                RawOp::InsertEmbed {
+                    index: 0,
+                    kind: "shape".to_owned(),
+                    payload: vec![
+                        ("shapeType".to_owned(), Any::from("textBox")),
+                        ("width".to_owned(), Any::from(200.0)),
+                        ("height".to_owned(), Any::from(100.0)),
+                    ],
+                    attrs: Attrs::new(),
+                },
+                RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "pilcrow".to_owned(),
+                    payload: vec![("paraId".to_owned(), Any::from("shape-anchor"))],
+                    attrs: Attrs::new(),
+                },
+            ],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+
+        let value = serde_json::to_value(
+            yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(value[0]["kind"], "shape");
+        assert_eq!(value[0]["shapeType"], "textBox");
+        assert_eq!(value[0]["geometryPath"].as_array().unwrap().len(), 5);
+        assert_eq!(value[0]["width"], 200.0);
+        assert_eq!(value[0]["height"], 100.0);
     }
 
     #[test]
@@ -4110,5 +4249,57 @@ mod tests {
             value[1],
             json!({ "kind": "sectionBreak", "id": format!("sect:{para}"), "type": "oddPage" })
         );
+    }
+
+    #[test]
+    fn next_column_section_start_reaches_the_layout_block() {
+        let doc = EditingDoc::new(49);
+        let para = doc.create_story("body", "end", "Normal", "left").unwrap();
+        doc.set_paragraph_attr(
+            &para,
+            "sectPr",
+            any_map([
+                ("sectionStart", Any::from("nextColumn")),
+                ("columnCount", Any::Number(2.0)),
+                ("columnSpace", Any::Number(360.0)),
+            ]),
+        )
+        .unwrap();
+
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        let value = serde_json::to_value(&blocks).unwrap();
+        assert_eq!(
+            value[1],
+            json!({
+                "kind": "sectionBreak",
+                "id": format!("sect:{para}"),
+                "type": "nextColumn",
+                "columns": { "count": 2.0, "gap": 24.0, "equalWidth": true }
+            })
+        );
+    }
+
+    #[test]
+    fn authored_widow_control_off_reaches_the_layout_attrs() {
+        let doc = EditingDoc::new(49);
+        let para = doc.create_story("body", "text", "Normal", "left").unwrap();
+        let attrs = |doc: &EditingDoc| {
+            let blocks = yrs_doc_to_layout_blocks(doc, "body", &RenderEnv::default()).unwrap();
+            serde_json::to_value(&blocks).unwrap()[0]["attrs"].clone()
+        };
+
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Null)
+            .unwrap();
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Bool(true))
+            .unwrap();
+        assert_eq!(attrs(&doc).get("widowControl"), None);
+
+        doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
+            .unwrap();
+        assert_eq!(attrs(&doc)["widowControl"], json!(false));
     }
 }

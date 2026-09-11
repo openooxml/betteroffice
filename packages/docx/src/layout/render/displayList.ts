@@ -197,6 +197,12 @@ export interface DisplayClipGroupMetadata {
   opacity?: number;
 }
 
+/** Horizontal paint slot for text laid out with guessed metrics. */
+export interface DisplayPaintClip {
+  x: number;
+  w: number;
+}
+
 export interface StructuralRevision {
   scope: 'pmark' | 'table' | 'row' | 'cell';
   author: string;
@@ -345,6 +351,7 @@ export interface TextRunPrimitive extends DocAttrs {
   x: number; // pen origin
   baselineY: number;
   width: number; // measured advance of the whole run
+  paintClip?: DisplayPaintClip;
   font: string;
   color: string;
   letterSpacing?: number;
@@ -412,6 +419,7 @@ export interface GlyphRunPrimitive extends DocAttrs {
   color: string; // "#rrggbb"
   text: string; // source text — the a11y mirror renders this as a real text node
   glyphs: PositionedGlyph[];
+  paintClip?: DisplayPaintClip;
   // resolved CSS font shorthand of the face this run was shaped with (same
   // recipe as TextRunPrimitive.font). The canvas backend's fillText safety net
   // uses it when glyph outlines are unavailable, so the fallback keeps the

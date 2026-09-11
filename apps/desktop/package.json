@@ -1,0 +1,30 @@
+{
+  "name": "@betteroffice/desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "@betteroffice/docx": "workspace:*",
+    "@betteroffice/docx-react": "workspace:*",
+    "@betteroffice/xlsx": "workspace:*",
+    "@betteroffice/xlsx-react": "workspace:*",
+    "@betteroffice/pptx": "workspace:*",
+    "@betteroffice/pptx-react": "workspace:*",
+    "@betteroffice/fonts": "workspace:*",
+    "@betteroffice/fonts-cjk": "workspace:*",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^6.0.3",
+    "vite": "8.1.4"
+  }
+}

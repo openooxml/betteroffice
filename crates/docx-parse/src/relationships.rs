@@ -158,6 +158,44 @@ pub fn parse_relationships(
     Ok(relationships)
 }
 
+pub(crate) fn office_document_path(
+    parts: &[(String, Vec<u8>)],
+    budget: &mut ParseBudget<'_>,
+) -> Result<String, ParseError> {
+    let Some((path, xml)) = parts.iter().find(|(path, _)| path == "_rels/.rels") else {
+        return Ok("word/document.xml".to_owned());
+    };
+    let relationships = parse_relationships(xml, path, budget)?;
+    let Some(relationship) = relationships.values().find(|relationship| {
+        relationship.relationship_type == relationship_types::OFFICE_DOCUMENT
+            || relationship.relationship_type
+                == "http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument"
+    }) else {
+        return Ok("word/document.xml".to_owned());
+    };
+    let RelationshipTarget::Internal(target) = resolve_relationship_target(path, relationship)?
+    else {
+        return Err(ParseError::Relationship {
+            part: path.clone(),
+            message: "officeDocument target must be internal".to_owned(),
+        });
+    };
+    if !parts.iter().any(|(path, _)| path == &target) {
+        return Err(ParseError::Relationship {
+            part: path.clone(),
+            message: format!("officeDocument target is missing: {target}"),
+        });
+    }
+    Ok(target)
+}
+
+pub(crate) fn relationship_part_path(part: &str) -> String {
+    match part.rsplit_once('/') {
+        Some((directory, name)) => format!("{directory}/_rels/{name}.rels"),
+        None => format!("_rels/{part}.rels"),
+    }
+}
+
 pub fn get_relationship_type_name(relationship_type: &str) -> &str {
     use relationship_types::*;
     match relationship_type {

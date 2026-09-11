@@ -2,8 +2,8 @@
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
-    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, chart_aria_label,
-    plot_chart_into,
+    ChartSpace, PlotChart, PlotDataLabels, PlotFont, PlotOp, PlotRect, PlotSink, PlotTextAlign,
+    chart_aria_label, plot_chart_into,
 };
 
 use crate::{Paint, Primitive, RenderError, Stroke, Transform};
@@ -26,16 +26,22 @@ pub(crate) struct ChartText<'a> {
     pub width: f64,
     pub font: PlotFont,
     pub color: &'a str,
+    pub align: PlotTextAlign,
 }
 
-/// The chart primitive for `space`, with at most `budget` parts.
-pub(crate) fn chart_primitive(
+/// The chart primitive for `space`, with at most `budget` parts. Chart text
+/// naming no typeface inherits `default_font`.
+pub(crate) fn chart_primitive<'a>(
     frame: ChartFrame<'_>,
-    space: &ChartSpace,
+    space: &'a ChartSpace,
+    default_font: &'a str,
     budget: usize,
     text: &mut dyn FnMut(ChartText<'_>) -> Result<Primitive, RenderError>,
 ) -> Result<Primitive, RenderError> {
-    let chart = plot_model(space);
+    let mut chart = plot_model(space);
+    if !default_font.is_empty() {
+        chart.text.chart.font.get_or_insert(default_font);
+    }
     let mut primitives = Vec::new();
     let mut sink = ChartSink {
         primitives: &mut primitives,
@@ -62,9 +68,7 @@ pub(crate) fn chart_primitive(
     })
 }
 
-/// The shared geometry reads `c:dLbls` itself. A part that only carries the
-/// legacy `show_data_labels` flag — one with no switches of its own — still
-/// gets the values Excel would default to.
+/// Supplies value labels only for legacy charts without `c:dLbls`.
 fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
     let mut chart = PlotChart::from(space);
     for (group, plotted) in space.plot_groups.iter().zip(chart.plot_groups.iter_mut()) {
@@ -72,16 +76,13 @@ fn plot_model(space: &ChartSpace) -> PlotChart<'_> {
             continue;
         }
         for (model, series) in group.series.iter().zip(plotted.series.iter_mut()) {
-            let declared = model.data_labels.is_some() || group.data_labels.is_some();
-            if declared && series.labels.is_none() {
+            if model.data_labels.is_some() || group.data_labels.is_some() {
                 continue;
             }
-            if series.labels.is_none_or(|labels| !labels.shows_anything()) {
-                series.labels = Some(PlotDataLabels {
-                    show_value: true,
-                    ..PlotDataLabels::default()
-                });
-            }
+            series.labels = Some(PlotDataLabels {
+                show_value: true,
+                ..PlotDataLabels::default()
+            });
         }
     }
     chart
@@ -100,6 +101,29 @@ struct ChartSink<'a> {
 impl PlotSink for ChartSink<'_> {
     fn accepts_more(&mut self) -> bool {
         self.remaining > 0 && self.error.is_none()
+    }
+
+    fn measure_text(&mut self, text: &str, font: &PlotFont) -> Option<f64> {
+        if !self.accepts_more() {
+            return None;
+        }
+        match (self.text)(ChartText {
+            object_id: self.object_id,
+            text,
+            x: 0.0,
+            baseline_y: 0.0,
+            width: 1.0,
+            font: font.clone(),
+            color: "#000000",
+            align: PlotTextAlign::Start,
+        }) {
+            Ok(Primitive::TextBox { lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+            Ok(_) => None,
+            Err(error) => {
+                self.error = Some(error);
+                None
+            }
+        }
     }
 
     fn push_op(&mut self, op: PlotOp) -> bool {
@@ -149,6 +173,9 @@ impl PlotSink for ChartSink<'_> {
                         color,
                         width: width as f32,
                         dashed: false,
+                        paint: None,
+                        head_end: None,
+                        tail_end: None,
                     }),
                 )
             }
@@ -175,6 +202,9 @@ impl PlotSink for ChartSink<'_> {
                     color: stroke.color,
                     width: stroke.width as f32,
                     dashed: false,
+                    paint: None,
+                    head_end: None,
+                    tail_end: None,
                 }),
             ),
             PlotOp::Text {
@@ -184,6 +214,7 @@ impl PlotSink for ChartSink<'_> {
                 width,
                 font,
                 color,
+                align,
             } => {
                 let request = ChartText {
                     object_id: self.object_id,
@@ -193,6 +224,7 @@ impl PlotSink for ChartSink<'_> {
                     width,
                     font,
                     color: &color,
+                    align,
                 };
                 match (self.text)(request) {
                     Ok(primitive) => primitive,
@@ -222,6 +254,8 @@ impl ChartSink<'_> {
         stroke: Option<Stroke>,
     ) -> Primitive {
         Primitive::Shape {
+            clip: None,
+            even_odd: false,
             object_id: self.object_id,
             shape_id: None,
             name: String::new(),
@@ -234,6 +268,7 @@ impl ChartSink<'_> {
             adjust_values: Default::default(),
             fill,
             stroke,
+            shadow: None,
             transform: Transform::default(),
         }
     }
@@ -340,6 +375,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_dlbls_with_every_switch_off_suppresses_the_default_labels() {
+        let all_off = ChartDataLabels {
+            show_value: Some(false),
+            show_category_name: Some(false),
+            show_series_name: Some(false),
+            show_percent: Some(false),
+            show_legend_key: Some(false),
+            show_bubble_size: Some(false),
+            ..ChartDataLabels::default()
+        };
+        let mut declared = group("bar", vec![series("Series 1", &[4.0, 2.0, 3.0], "#4472C4")]);
+        declared.show_data_labels = true;
+        declared.data_labels = Some(all_off);
+        let declared_space = space("bar", vec![declared]);
+        let chart = plot_model(&declared_space);
+        assert!(
+            chart.plot_groups[0].series[0]
+                .labels
+                .is_none_or(|labels| !labels.shows_anything()),
+            "a declared c:dLbls that shows nothing must stay showing nothing"
+        );
+
+        let mut legacy = group("bar", vec![series("Series 1", &[4.0, 2.0, 3.0], "#4472C4")]);
+        legacy.show_data_labels = true;
+        let legacy_space = space("bar", vec![legacy]);
+        let chart = plot_model(&legacy_space);
+        assert!(
+            chart.plot_groups[0].series[0]
+                .labels
+                .is_some_and(|labels| labels.show_value),
+            "a part with no switches of its own should default to showing the value"
+        );
+    }
+
     fn frame(name: &str) -> ChartFrame<'_> {
         ChartFrame {
             object_id: 7,
@@ -357,7 +427,7 @@ mod tests {
 
     /// Plots `space` with a text callback that needs no fonts.
     fn plot(space: &ChartSpace) -> Primitive {
-        chart_primitive(frame("Chart 1"), space, 100_000, &mut |text| {
+        chart_primitive(frame("Chart 1"), space, "", 100_000, &mut |text| {
             Ok(Primitive::TextBox {
                 object_id: text.object_id,
                 shape_id: None,
@@ -614,6 +684,7 @@ mod tests {
         let chart = chart_primitive(
             frame("Wide"),
             &space("line", vec![group]),
+            "",
             512,
             &mut |text| {
                 Ok(Primitive::Placeholder {
@@ -689,7 +760,7 @@ mod tests {
             vec![group("line", vec![series("Wide", &values, "#112233")])],
         );
         assert_eq!(parts(&plot(&space)).len(), 100_000);
-        let chart = chart_primitive(frame("Wide"), &space, 64, &mut |text| {
+        let chart = chart_primitive(frame("Wide"), &space, "", 64, &mut |text| {
             Ok(Primitive::Placeholder {
                 object_id: text.object_id,
                 shape_id: None,
@@ -736,6 +807,7 @@ mod tests {
                     ..frame("Degenerate")
                 },
                 &space,
+                "",
                 100_000,
                 &mut |_| {
                     Ok(Primitive::Placeholder {

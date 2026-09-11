@@ -1,10 +1,10 @@
 //! Run, text-formatting, image, and shape serializers.
 
+use crate::block::BlockContent;
 use crate::drawingml::{ShapeFill, ShapeOutline};
 use crate::formatting::TextFormatting;
 use crate::image::{Image, ImagePosition, ImageWrap};
 use crate::inline::{Run, RunContent, RunPropertyChange};
-use crate::paragraph::Paragraph;
 use crate::scalars::{ColorValue, ShadingProperties};
 use crate::shape::Shape;
 use crate::xml::ParseError;
@@ -51,6 +51,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
             fonts.h_ansi_theme.as_deref(),
             fonts.east_asia_theme.as_deref(),
             fonts.cs_theme.as_deref(),
+            fonts.hint.as_deref(),
         ]
         .into_iter()
         .any(|value| nonempty(value).is_some());
@@ -68,6 +69,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
                 fonts.east_asia_theme.as_deref(),
             );
             optional_nonempty_attr(&mut body, "w:csTheme", fonts.cs_theme.as_deref());
+            optional_nonempty_attr(&mut body, "w:hint", fonts.hint.as_deref());
             body.end_element();
         }
     }
@@ -329,11 +331,24 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
-        RunContent::CommentReference { .. }
-        | RunContent::Chart { .. }
-        | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::CommentReference { id } => {
+            writer.start_element("w:commentReference");
+            if let Some(id) = id {
+                writer.attribute("w:id", &js_number(*id));
+            }
+            writer.end_element();
+        }
+        RunContent::Chart { .. } | RunContent::OpaqueDrawing { .. } => {}
     }
     Ok(writer.finish())
+}
+
+/// The authored z-order when the anchor carried one; Word's default otherwise.
+fn relative_height_attr(position: Option<&crate::image::ImagePosition>) -> String {
+    position
+        .and_then(|position| position.relative_height)
+        .map(|value| int_attr(Some(value)))
+        .unwrap_or_else(|| "251658240".to_owned())
 }
 
 /// Serializes one image as WordprocessingDrawing XML.
@@ -344,9 +359,10 @@ pub fn serialize_drawing_content(
     let floating = image.wrap.wrap_type != "inline";
     let id = drawing_id(image.id.as_deref(), context);
     let name = image
-        .title
+        .name
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or_else(|| image.title.as_deref().filter(|value| !value.is_empty()))
         .or_else(|| image.filename.as_deref().filter(|value| !value.is_empty()))
         .map(str::to_owned)
         .unwrap_or_else(|| format!("Picture {id}"));
@@ -361,7 +377,10 @@ pub fn serialize_drawing_content(
             .attribute("distL", &int_attr(image.wrap.dist_l))
             .attribute("distR", &int_attr(image.wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(image.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if image.wrap.wrap_type == "behind" {
@@ -496,10 +515,20 @@ pub fn serialize_shape_content(
         let mut body_properties = XmlWriter::with_capacity(160);
         body_properties
             .start_element("wps:bodyPr")
-            .attribute("rot", "0")
-            .attribute("vert", "horz");
-        if let Some(anchor) = nonempty(text_body.anchor.as_deref()) {
-            body_properties.attribute("anchor", if anchor == "middle" { "ctr" } else { anchor });
+            .attribute(
+                "rot",
+                &int_attr(Some(text_body.rotation.unwrap_or(0.0) * 60_000.0)),
+            )
+            .attribute("vert", vertical_token(shape));
+        if let Some(wrap) = shape
+            .text_body_properties
+            .as_ref()
+            .and_then(|properties| nonempty(properties.wrap.as_deref()))
+        {
+            body_properties.attribute("wrap", wrap);
+        }
+        if let Some(anchor) = nonempty(text_body.anchor.as_deref()).and_then(anchor_token) {
+            body_properties.attribute("anchor", anchor);
         }
         if text_body.anchor_center == Some(true) {
             body_properties.attribute("anchorCtr", "1");
@@ -510,20 +539,21 @@ pub fn serialize_shape_content(
             optional_int_attr(&mut body_properties, "rIns", margins.right);
             optional_int_attr(&mut body_properties, "bIns", margins.bottom);
         }
+        write_auto_fit(&mut body_properties, shape);
         body_properties.end_element();
         if is_text_box {
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
             for value in &text_body.content {
-                let paragraph: Paragraph =
+                let block: BlockContent =
                     serde_json::from_value(value.clone()).map_err(|error| {
                         ParseError::Canonical(format!(
-                            "shape text body contains an invalid paragraph: {error}"
+                            "shape text body contains an invalid block: {error}"
                         ))
                     })?;
-                let paragraph = super::paragraph::serialize_paragraph(&paragraph, context)?;
-                append_generated(&mut graphic, &paragraph);
+                let block = super::sdt::serialize_block_content(&block, context)?;
+                append_generated(&mut graphic, &block);
             }
             graphic.end_element().end_element();
         }
@@ -543,7 +573,10 @@ pub fn serialize_shape_content(
             .attribute("distL", &int_attr(wrap.dist_l))
             .attribute("distR", &int_attr(wrap.dist_r))
             .attribute("simplePos", "0")
-            .attribute("relativeHeight", "251658240")
+            .attribute(
+                "relativeHeight",
+                &relative_height_attr(shape.position.as_ref()),
+            )
             .attribute(
                 "behindDoc",
                 if wrap.wrap_type == "behind" { "1" } else { "0" },
@@ -582,6 +615,72 @@ pub fn serialize_shape_content(
     Ok(writer.finish())
 }
 
+/// `ST_TextAnchoringType` for the canonical anchor the parser reads it into.
+fn anchor_token(anchor: &str) -> Option<&'static str> {
+    match anchor {
+        "top" => Some("t"),
+        "middle" => Some("ctr"),
+        "bottom" => Some("b"),
+        "distributed" => Some("dist"),
+        "justified" => Some("just"),
+        _ => None,
+    }
+}
+
+fn vertical_token(shape: &Shape) -> &'static str {
+    match shape
+        .text_body_properties
+        .as_ref()
+        .and_then(|properties| properties.vertical.as_deref())
+    {
+        Some("vertical") => "vert",
+        Some("vertical270") => "vert270",
+        Some("wordArtVertical") => "wordArtVert",
+        Some("eastAsianVertical") => "eaVert",
+        Some("mongolianVertical") => "mongolianVert",
+        Some("horizontal") => "horz",
+        _ if shape
+            .text_body
+            .as_ref()
+            .is_some_and(|body| body.vertical == Some(true)) =>
+        {
+            "vert"
+        }
+        _ => "horz",
+    }
+}
+
+fn write_auto_fit(writer: &mut XmlWriter, shape: &Shape) {
+    let properties = shape.text_body_properties.as_ref();
+    let auto_fit = shape
+        .text_body
+        .as_ref()
+        .and_then(|body| body.auto_fit.as_deref());
+    match auto_fit {
+        Some("none") => {
+            writer.start_element("a:noAutofit").end_element();
+        }
+        Some("normal") => {
+            writer.start_element("a:normAutofit");
+            optional_int_attr(
+                writer,
+                "fontScale",
+                properties.and_then(|properties| properties.font_scale),
+            );
+            optional_int_attr(
+                writer,
+                "lnSpcReduction",
+                properties.and_then(|properties| properties.line_spacing_reduction),
+            );
+            writer.end_element();
+        }
+        Some("shape") => {
+            writer.start_element("a:spAutoFit").end_element();
+        }
+        _ => {}
+    }
+}
+
 fn serialize_picture_graphic(image: &Image, id: &str) -> String {
     let relationship_id = if image.relationship_id.is_empty() {
         "rId1"
@@ -615,9 +714,6 @@ fn serialize_picture_graphic(image: &Image, id: &str) -> String {
         .start_element("pic:cNvPr")
         .attribute("id", id)
         .attribute("name", &name);
-    if let Some(alt) = nonempty(image.alt.as_deref()) {
-        writer.attribute("descr", alt);
-    }
     writer
         .end_element()
         .start_element("pic:cNvPicPr")

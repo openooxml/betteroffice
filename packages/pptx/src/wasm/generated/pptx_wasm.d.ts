@@ -5,12 +5,14 @@ export class PptxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    addCommentJson(args: string): string;
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
     canRedo(): boolean;
     canUndo(): boolean;
     clearUpdateObservation(): void;
+    commentsJson(): string;
     deleteSlideJson(args: string): string;
     deleteTextJson(args: string): string;
     drainUpdateEvent(): Uint8Array;
@@ -25,12 +27,28 @@ export class PptxDocument {
     moveShapeJson(args: string): string;
     moveSlideJson(args: string): string;
     static openCollaborative(bytes: Uint8Array, client_id: number): PptxDocument;
-    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number): PptxDocument;
+    /**
+     * `source` is the file the update was seeded from; when it matches the
+     * recorded fingerprint the session keeps its part bytes and can save.
+     * Any other bytes fall back to the bare update session, whose `saveBytes`
+     * fails — joining a room must not depend on carrying the right file.
+     */
+    static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
     redoJson(): string;
+    removeCommentJson(args: string): string;
     removeShapeJson(args: string): string;
+    replyToCommentJson(args: string): string;
     resizeShapeJson(args: string): string;
+    /**
+     * Serializes the deck back to `.pptx` bytes, edits included.
+     */
+    saveBytes(): Uint8Array;
+    setCommentFlavorJson(args: string): string;
+    setCommentStatusJson(args: string): string;
+    setParagraphAlignmentJson(args: string): string;
     setShapeAdjustJson(args: string): string;
     setShapeFillJson(args: string): string;
+    setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
     snapshotJson(): string;
     startUpdateObservation(): void;
@@ -55,18 +73,6 @@ export function parsePptxJson(data: Uint8Array): string;
 
 export function rendererVersion(): string;
 
-/**
- * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
- */
-export function rezip_docx(entries: any): Uint8Array;
-
-export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
-
-/**
- * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
- */
-export function unzip_docx(data: Uint8Array): any;
-
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -80,6 +86,7 @@ export interface InitOutput {
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
+    readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -87,6 +94,7 @@ export interface InitOutput {
     readonly pptxdocument_canUndo: (a: number) => number;
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
     readonly pptxdocument_clientId: (a: number) => number;
+    readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_drainUpdateEvent: (a: number) => [number, number];
@@ -101,26 +109,30 @@ export interface InitOutput {
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
-    readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number) => [number, number, number];
+    readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
-    readonly rezip_docx: (a: any) => [number, number, number, number];
-    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly unzip_docx: (a: number, b: number) => [number, number, number];
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;

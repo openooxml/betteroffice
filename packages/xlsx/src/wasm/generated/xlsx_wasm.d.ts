@@ -27,6 +27,10 @@ export class XlsxDocument {
     cellJson(args: string): string;
     cellPositionJson(args: string): string;
     /**
+     * the chart under a viewport-local point, or `null`.
+     */
+    chartAtPointJson(args: string): string;
+    /**
      * Stop observation and discard queued events.
      */
     clearUpdateObservation(): void;
@@ -56,6 +60,10 @@ export class XlsxDocument {
     listProposalsJson(): string;
     mergedRangesJson(args: string): string;
     /**
+     * slide a chart by a pixel delta as one undo step.
+     */
+    moveChartJson(args: string): string;
+    /**
      * open a workbook from raw `.xlsx` bytes.
      */
     static open(bytes: Uint8Array): XlsxDocument;
@@ -64,6 +72,7 @@ export class XlsxDocument {
      */
     static openCollaborative(bytes: Uint8Array, client_id: number): XlsxDocument;
     patchRangeStyleJson(args: string): string;
+    printDisplayListJson(args: string): string;
     /**
      * register an agent proposal (preview only); returns the stored `Proposal` json.
      */
@@ -117,18 +126,6 @@ export class XlsxDocument {
     readonly clientId: number;
 }
 
-/**
- * Rezip from a JS object `{ [path]: Uint8Array }` into a DOCX byte array.
- */
-export function rezip_docx(entries: any): Uint8Array;
-
-export function sanitizeOoxml(data: Uint8Array, expected_format: string): Uint8Array;
-
-/**
- * Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
- */
-export function unzip_docx(data: Uint8Array): any;
-
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
@@ -142,6 +139,7 @@ export interface InitOutput {
     readonly xlsxdocument_captureFormatJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_cellPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_chartAtPointJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_clearUpdateObservation: (a: number) => void;
     readonly xlsxdocument_clientId: (a: number) => number;
     readonly xlsxdocument_displayListJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -154,9 +152,11 @@ export interface InitOutput {
     readonly xlsxdocument_historyStateJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_mergedRangesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_moveChartJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_open: (a: number, b: number) => [number, number, number];
     readonly xlsxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly xlsxdocument_patchRangeStyleJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly xlsxdocument_printDisplayListJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_rangeCellsJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly xlsxdocument_redoJson: (a: number) => [number, number, number, number];
@@ -171,14 +171,11 @@ export interface InitOutput {
     readonly xlsxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly xlsxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly xlsxdocument_version: () => [number, number];
-    readonly rezip_docx: (a: any) => [number, number, number, number];
-    readonly sanitizeOoxml: (a: number, b: number, c: number, d: number) => [number, number, number, number];
-    readonly unzip_docx: (a: number, b: number) => [number, number, number];
-    readonly __wbindgen_malloc: (a: number, b: number) => number;
-    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
+    readonly __wbindgen_malloc: (a: number, b: number) => number;
+    readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
     readonly __wbindgen_start: () => void;

@@ -1,11 +1,15 @@
 mod media;
+mod rels;
+mod scrub;
 mod xml;
 
+use std::collections::HashSet;
 use std::fmt;
 
 use thiserror::Error;
 
 use crate::media::replace_media;
+use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
 use crate::xml::redact_xml;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -90,15 +94,25 @@ pub fn redact_with_report(
         format: detected,
         ..RedactionReport::default()
     };
+    let scrubbed: HashSet<String> = parts
+        .iter()
+        .map(|(path, _)| normalize_part_name(path))
+        .filter(|name| !media::is_replaceable_part(name) && !is_xml_part(name))
+        .collect();
+    report.binary_parts = scrubbed.len();
+    let blanked = if scrubbed.is_empty() {
+        HashSet::new()
+    } else {
+        prune_scrubbed_parts(&mut parts, &scrubbed)?
+    };
     for (path, data) in &mut parts {
-        let lower = path.to_ascii_lowercase();
-        if media::is_replaceable_part(&lower) {
-            *data = replace_media(path, data, &mut report)?;
-        } else if is_xml_part(&lower) {
-            *data = redact_xml(detected, path, data, &mut report)?;
-        } else if is_sensitive_binary(&lower) {
+        let canonical = normalize_part_name(path);
+        if blanked.contains(&canonical) {
             data.clear();
-            report.binary_parts += 1;
+        } else if media::is_replaceable_part(&canonical) {
+            *data = replace_media(&canonical, data, &mut report)?;
+        } else {
+            *data = redact_xml(detected, &canonical, data, &mut report)?;
         }
     }
 
@@ -109,7 +123,7 @@ pub fn redact_with_report(
 fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
     if let Some((_, content_types)) = parts
         .iter()
-        .find(|(path, _)| path.eq_ignore_ascii_case("[Content_Types].xml"))
+        .find(|(path, _)| normalize_part_name(path) == "[content_types].xml")
     {
         let text = String::from_utf8_lossy(content_types).to_ascii_lowercase();
         if text.contains("wordprocessingml.document.main+xml")
@@ -147,13 +161,6 @@ fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
 
 fn is_xml_part(path: &str) -> bool {
     path.ends_with(".xml") || path.ends_with(".rels") || path.ends_with(".vml")
-}
-
-fn is_sensitive_binary(path: &str) -> bool {
-    path.ends_with("vbaproject.bin")
-        || path.contains("/embeddings/")
-        || path.contains("/activex/") && path.ends_with(".bin")
-        || path.contains("/printersettings/")
 }
 
 #[cfg(test)]

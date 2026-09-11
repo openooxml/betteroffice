@@ -1,11 +1,13 @@
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
+import type { ParagraphAlignment } from '@betteroffice/pptx';
 import type { TranslationKey } from '@betteroffice/pptx-i18n';
 import { useTranslation } from '../i18n';
 import { EditorToolbarContext } from './EditorToolbarContext';
 import { ColorPicker } from './ui/ColorPicker';
 import { EditableCombobox } from './ui/EditableCombobox';
 import { ToolbarIcon } from './ui/ToolbarIcon';
+import type { ToolbarIconName } from './ui/ToolbarIcon';
 import {
   ToolbarButton,
   ToolbarDropdown,
@@ -46,6 +48,7 @@ export interface SelectionFormatting {
   italic?: boolean;
   underline?: boolean;
   textColor?: string;
+  align?: ParagraphAlignment;
 }
 
 export type FormattingAction =
@@ -54,7 +57,8 @@ export type FormattingAction =
   | 'underline'
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
-  | { type: 'textColor'; value: string };
+  | { type: 'textColor'; value: string }
+  | { type: 'align'; value: ParagraphAlignment };
 
 export interface ShapeFormatting {
   geometry?: string;
@@ -85,6 +89,8 @@ export interface ToolbarProps {
   onInsertSlide?: (layoutPartPath?: string | null) => void;
   slideLayouts?: readonly SlideLayoutOption[];
   currentLayoutPartPath?: string | null;
+  onSave?: () => void;
+  onExportPng?: () => void;
   onUndo?: () => void;
   onRedo?: () => void;
   canUndo?: boolean;
@@ -118,6 +124,17 @@ const DEFAULT_FONT_FAMILIES = [
   'Verdana',
 ] as const;
 const DEFAULT_FONT_SIZES = [8, 9, 10, 11, 12, 14, 16, 18, 20, 24, 28, 36, 48, 72] as const;
+const ALIGNMENTS = [
+  { value: 'l', icon: 'alignLeft', labelKey: 'toolbar.align.left', testId: 'left' },
+  { value: 'ctr', icon: 'alignCenter', labelKey: 'toolbar.align.center', testId: 'center' },
+  { value: 'r', icon: 'alignRight', labelKey: 'toolbar.align.right', testId: 'right' },
+  { value: 'just', icon: 'alignJustify', labelKey: 'toolbar.align.justify', testId: 'justify' },
+] as const satisfies ReadonlyArray<{
+  value: ParagraphAlignment;
+  icon: ToolbarIconName;
+  labelKey: TranslationKey;
+  testId: string;
+}>;
 const BORDER_WIDTHS = [1, 2, 3, 4, 8] as const;
 const CORNER_RADIUS_OPTIONS = [0, 10, 17, 25, 33, 50] as const;
 const SHAPE_ADJUSTMENT_OPTIONS = [0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100] as const;
@@ -162,6 +179,8 @@ export function Toolbar(explicitProps: ToolbarProps) {
     onInsertSlide,
     slideLayouts = [],
     currentLayoutPartPath,
+    onSave,
+    onExportPng,
     onUndo,
     onRedo,
     canUndo = false,
@@ -223,6 +242,30 @@ export function Toolbar(explicitProps: ToolbarProps) {
   };
 
   const sections: ToolbarSection[] = [
+    {
+      key: 'file',
+      width: 72,
+      node: (
+        <ToolbarGroup label={t('toolbar.groups.file')}>
+          <ToolbarButton
+            title={t('toolbar.save')}
+            disabled={disabled || !onSave}
+            onClick={onSave}
+            testId="pptx-save"
+          >
+            <ToolbarIcon name="save" size={18} />
+          </ToolbarButton>
+          <ToolbarButton
+            title={t('toolbar.exportPng')}
+            disabled={disabled || !onExportPng}
+            onClick={onExportPng}
+            testId="pptx-export-png"
+          >
+            <ToolbarIcon name="image" size={18} />
+          </ToolbarButton>
+        </ToolbarGroup>
+      ),
+    },
     {
       key: 'new-slide',
       width: 59,
@@ -535,6 +578,29 @@ export function Toolbar(explicitProps: ToolbarProps) {
               onChange={(value) => apply({ type: 'textColor', value })}
               testId="pptx-text-color"
             />
+          </ToolbarGroup>
+        </>
+      ),
+    },
+    {
+      key: 'align',
+      width: 126,
+      node: (
+        <>
+          <ToolbarSeparator />
+          <ToolbarGroup label={t('toolbar.groups.alignment')}>
+            {ALIGNMENTS.map((alignment) => (
+              <ToolbarButton
+                key={alignment.value}
+                title={t(alignment.labelKey)}
+                active={currentFormatting.align === alignment.value}
+                disabled={!formattingEnabled}
+                onClick={() => apply({ type: 'align', value: alignment.value })}
+                testId={`pptx-align-${alignment.testId}`}
+              >
+                <ToolbarIcon name={alignment.icon} />
+              </ToolbarButton>
+            ))}
           </ToolbarGroup>
         </>
       ),

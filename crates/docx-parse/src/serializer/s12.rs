@@ -252,6 +252,7 @@ fn parse_comments_back(xml: &str, seed: &str) -> Result<Vec<Comment>, ParseError
         root,
         None,
         None,
+        None,
         &mut StoryParser {
             relationships: None,
             theme: None,
@@ -333,6 +334,7 @@ mod tests {
                 node_type: "paragraph".to_owned(),
                 para_id: None,
                 text_id: None,
+                extra_attributes: Vec::new(),
                 formatting: None,
                 property_changes: None,
                 p_pr_ins: None,

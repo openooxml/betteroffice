@@ -22,9 +22,9 @@ fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String
         ""
     };
     let workbook = format!(
-        r#"<workbook>{pr}<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+        r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">{pr}<sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
     );
-    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
     let worksheet = format!("<worksheet>{worksheet_body}</worksheet>");
 
     let mut parts = vec![
@@ -98,6 +98,123 @@ fn parses_shared_string_number_formula_bool_error() {
     assert_eq!(wb.sheets[0].col_widths.get(&1), Some(&12.5));
     assert_eq!(wb.sheets[0].col_widths.get(&2), Some(&12.5));
     assert_eq!(wb.sheets[0].row_heights.get(&0), Some(&30.0));
+}
+
+#[test]
+fn parses_absolute_and_relative_concatenation() {
+    for formula in [
+        r#"$B$6&"A"&$B$4&"B"&$D$2"#,
+        r#"B6&"A"&B4&"B"&D2"#,
+        r#"$B6&"A"&B$4&"B"&D2"#,
+    ] {
+        let body = format!(
+            r#"<sheetData><row r="1"><c r="A1" t="str"><f>{}</f><v/></c></row></sheetData>"#,
+            formula.replace('&', "&amp;")
+        );
+        let wb = parse_workbook(&package(&body, &[], false)).unwrap();
+        assert_eq!(cell_at(&wb, "A1").formula.as_deref(), Some(formula));
+    }
+}
+
+#[test]
+fn expands_shared_formulas_and_preserves_source_until_edited() {
+    let mut parts = package("", &[], false);
+    let source = include_bytes!("../tests/fixtures/shared-formulas.xml");
+    parts[2].1 = source.to_vec();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&parsed.workbook, address).formula.as_deref(),
+            Some(r#"$B$6&"A"&$B$4&"B"&$D$2"#)
+        );
+    }
+    let unchanged = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&unchanged, "xl/worksheets/sheet1.xml"), source);
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("C1").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 7.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let reopened = parse_workbook(&saved).unwrap();
+    for address in ["A1", "A2", "A3"] {
+        assert_eq!(
+            cell_at(&reopened, address).formula,
+            cell_at(&edited, address).formula
+        );
+    }
+}
+
+#[test]
+fn shared_formulas_resolve_late_masters_and_leave_unshared_cells_alone() {
+    let body = r#"<sheetData>
+        <row r="1"><c r="A1"><f t="shared" si="7">999</f><v>10</v></c></row>
+        <row r="2"><c r="A2"><f>99</f><v>99</v></c><c r="B2"><f t="shared" si="7" ref="A1:C3">A1+$A1+A$1+$A$1</f><v>20</v></c></row>
+        <row r="3"><c r="A3"><v>55</v></c><c r="C3"><f t="shared" si="7"/><v>30</v></c></row>
+    </sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(
+        cell_at(&wb, "A1").formula.as_deref(),
+        Some("#REF!+#REF!+#REF!+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "A1").value, CellValue::Number { value: 10.0 });
+    assert_eq!(
+        cell_at(&wb, "C3").formula.as_deref(),
+        Some("B2+$A2+B$1+$A$1")
+    );
+    assert_eq!(cell_at(&wb, "C3").value, CellValue::Number { value: 30.0 });
+    assert_eq!(cell_at(&wb, "A2").formula.as_deref(), Some("99"));
+    assert_eq!(cell_at(&wb, "A3").formula, None);
+    assert_eq!(wb.sheets[0].iter_cells().count(), 5);
+}
+
+#[test]
+fn shared_formula_indices_are_scoped_to_each_worksheet() {
+    let first = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:B1">C1</f></c><c r="B1"><f t="shared" si="0"/></c></row></sheetData>"#;
+    let second = first.replace(">C1</f>", ">$C$9</f>");
+    let wb = parse_workbook(&two_sheet_package(first, &second)).unwrap();
+    let address = CellRef::parse_a1("B1").unwrap();
+    assert_eq!(
+        wb.sheets[0].cell(address).unwrap().formula.as_deref(),
+        Some("D1")
+    );
+    assert_eq!(
+        wb.sheets[1].cell(address).unwrap().formula.as_deref(),
+        Some("$C$9")
+    );
+}
+
+#[test]
+fn shared_formula_ranges_do_not_allocate_implicit_cells() {
+    let body = r#"<sheetData><row r="1"><c r="A1"><f t="shared" si="0" ref="A1:XFD1048576">1</f></c></row></sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(wb.sheets[0].iter_cells().count(), 1);
+}
+
+#[test]
+fn malformed_shared_groups_fail_instead_of_losing_formulas() {
+    for cells in [
+        r#"<c r="A1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="-1" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="4294967296" ref="A1:A2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="B1:B2">1</f></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:A2">1</f></c><c r="B1"><f t="shared" si="0"/></c>"#,
+        r#"<c r="A1"><f t="shared" si="0" ref="A1:B1">1</f></c><c r="B1"><f t="shared" si="0" ref="A1:B1">2</f></c>"#,
+    ] {
+        let body = format!("<sheetData><row r=\"1\">{cells}</row></sheetData>");
+        assert!(
+            matches!(
+                parse_workbook(&package(&body, &[], false)),
+                Err(ParseError::Malformed(_))
+            ),
+            "{cells}"
+        );
+    }
 }
 
 #[test]
@@ -235,7 +352,7 @@ fn parses_and_round_trips_external_and_internal_hyperlinks() {
     parts.push((
         "xl/worksheets/_rels/sheet1.xml.rels".into(),
         br#"
-            <Relationships>
+            <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
                 <Relationship Id="rId7"
                     Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
                     Target="https://example.com/report?q=1&amp;lang=en"
@@ -906,8 +1023,8 @@ fn ambiguous_duplicate_removal_is_refused() {
 /// Two worksheets sharing one workbook, so an edit to the second can be
 /// checked against the first.
 fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8>)> {
-    let workbook = r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
-    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
     vec![
         ("xl/workbook.xml".to_owned(), workbook.as_bytes().to_vec()),
         (
@@ -1001,7 +1118,7 @@ fn keeps_worksheet_bytes_across_a_rename() {
 #[test]
 fn does_not_reattach_duplicate_defined_name_markup() {
     let workbook_xml = concat!(
-        r#"<workbook><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>"#,
+        r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets>"#,
         r#"<definedNames>"#,
         r#"<definedName name="_xlnm.Print_Area" localSheetId="0" comment="first">Sheet1!$A$1</definedName>"#,
         r#"<definedName name="_xlnm.Print_Area" localSheetId="1" comment="second">Sheet1!$B$1</definedName>"#,
@@ -1195,7 +1312,7 @@ fn overlays_hyperlinks_and_merges_the_worksheet_relationships() {
     let mut parts = package(body, &[], false);
     parts.push((
         "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://old.example" TargetMode="External"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://old.example" TargetMode="External"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#.to_vec(),
     ));
 
     let parsed = parse_workbook_with_package(&parts).unwrap();
@@ -1357,12 +1474,16 @@ fn patches_only_the_style_pool_entries_that_changed() {
     let mut workbook = parsed.workbook.clone();
     let mut format = workbook.styles.cell_format(None);
     format.font.italic = true;
-    let style = workbook.styles.intern_cell_format(&format);
+    let style = workbook
+        .styles
+        .intern_cell_format(&format)
+        .unwrap()
+        .unwrap();
     workbook.sheets[0].set_cell(
         CellRef::parse_a1("A1").unwrap(),
         Cell {
             value: CellValue::Number { value: 1.0 },
-            style,
+            style: Some(style),
             ..Cell::default()
         },
     );
@@ -1429,10 +1550,7 @@ fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
 #[test]
 fn keeps_content_types_resolved_through_default_extensions() {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
-    parts.push((
-        "[Content_Types].xml".to_owned(),
-        br#"<Types><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/vnd.ms-excel.worksheet+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>"#.to_vec(),
-    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/vnd.ms-excel.worksheet+xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.ms-excel.sheet.macroEnabled.main+xml"/></Types>"#);
 
     let parsed = parse_workbook_with_package(&parts).unwrap();
     let mut workbook = parsed.workbook.clone();
@@ -1461,7 +1579,7 @@ fn keeps_content_types_resolved_through_default_extensions() {
 #[test]
 fn allocates_distinct_sheet_ids_past_the_maximum() {
     let workbook_xml = format!(
-        r#"<workbook><sheets><sheet name="Sheet1" sheetId="{}" r:id="rId1"/></sheets></workbook>"#,
+        r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="{}" r:id="rId1"/></sheets></workbook>"#,
         u32::MAX
     );
     let mut parts = package(r#"<sheetData/>"#, &[], false);
@@ -1570,7 +1688,7 @@ fn resolves_shared_strings_through_the_workbook_relationship() {
     );
     parts[1] = (
         "xl/_rels/workbook.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="strings/custom.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="strings/custom.xml"/></Relationships>"#.to_vec(),
     );
     parts.push((
         "xl/strings/custom.xml".to_owned(),
@@ -1699,11 +1817,11 @@ fn charted_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/><drawing r:id="rIdDrawing"/>"#, &[], false);
     parts[0] = (
         "xl/workbook.xml".to_owned(),
-        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
     );
     parts[1] = (
         "xl/_rels/workbook.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
     );
     parts.extend([
         (
@@ -1721,6 +1839,7 @@ fn charted_package() -> Vec<(String, Vec<u8>)> {
         ),
         ("xl/charts/chart1.xml".to_owned(), CHART.to_vec()),
     ]);
+    set_or_push_part(&mut parts, "[Content_Types].xml", CONFORMING_TYPES);
     parts
 }
 
@@ -1728,15 +1847,66 @@ const DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.or
 
 const CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:tx><c:strRef><c:f>Data!$B$1</c:f><c:strCache><c:pt idx="0"><c:v>Series</c:v></c:pt></c:strCache></c:strRef></c:tx><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:pt idx="0"><c:v>3</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
 
+/// A two-sheet package whose sheets each anchor the same chart part through
+/// their own drawing. The package format permits it, and the chart's
+/// references are unqualified, so each sheet resolves them against itself.
+fn shared_chart_package() -> Vec<(String, Vec<u8>)> {
+    let mut parts = package(r#"<sheetData/><drawing r:id="rIdDrawing"/>"#, &[], false);
+    parts[0] = (
+        "xl/workbook.xml".to_owned(),
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="First" sheetId="1" r:id="rId1"/><sheet name="Second" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+    );
+    parts[1] = (
+        "xl/_rels/workbook.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+    );
+    let sheet_rels = |drawing: &str| {
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/{drawing}"/></Relationships>"#
+        )
+        .into_bytes()
+    };
+    parts.extend([
+        (
+            "xl/worksheets/sheet2.xml".to_owned(),
+            br#"<worksheet><sheetData/><drawing r:id="rIdDrawing"/></worksheet>"#.to_vec(),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+            sheet_rels("drawing1.xml"),
+        ),
+        (
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            sheet_rels("drawing2.xml"),
+        ),
+        ("xl/drawings/drawing1.xml".to_owned(), DRAWING.to_vec()),
+        ("xl/drawings/drawing2.xml".to_owned(), DRAWING.to_vec()),
+        (
+            "xl/drawings/_rels/drawing1.xml.rels".to_owned(),
+            SHARED_DRAWING_RELS.to_vec(),
+        ),
+        (
+            "xl/drawings/_rels/drawing2.xml.rels".to_owned(),
+            SHARED_DRAWING_RELS.to_vec(),
+        ),
+        ("xl/charts/chart1.xml".to_owned(), SHARED_CHART.to_vec()),
+    ]);
+    parts
+}
+
+const SHARED_DRAWING_RELS: &[u8] = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/></Relationships>"#;
+
+const SHARED_CHART: &[u8] = br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:val><c:numRef><c:f>$A$1:$A$2</c:f><c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+
 fn pivoted_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
     parts[0] = (
         "xl/workbook.xml".to_owned(),
-        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
     );
     parts[1] = (
         "xl/_rels/workbook.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
     );
     parts.push((
         "xl/worksheets/sheet2.xml".to_owned(),
@@ -1746,6 +1916,7 @@ fn pivoted_package() -> Vec<(String, Vec<u8>)> {
         "xl/pivotcache/pivotCacheDefinition1.xml".to_owned(),
         br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
     ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", CONFORMING_TYPES);
     parts
 }
 
@@ -1753,11 +1924,11 @@ fn unclaimed_chart_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
     parts[0] = (
         "xl/workbook.xml".to_owned(),
-        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
     );
     parts[1] = (
         "xl/_rels/workbook.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#.to_vec(),
     );
     parts.push((
         "xl/worksheets/sheet2.xml".to_owned(),
@@ -1767,6 +1938,7 @@ fn unclaimed_chart_package() -> Vec<(String, Vec<u8>)> {
         "xl/charts/chart1.xml".to_owned(),
         br#"<chartSpace><f>Data!$A$1:$A$2</f></chartSpace>"#.to_vec(),
     ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", CONFORMING_TYPES);
     parts
 }
 
@@ -1796,7 +1968,7 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     let removed = crate::serialize_workbook_with_package_and_origins_after_edits(
         &workbook,
         &parsed.package,
-        &[Some(0), None],
+        &[None, Some(1)],
         &provenance,
         SaveEdits {
             changed: true,
@@ -1805,6 +1977,18 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     )
     .unwrap_err();
     assert!(matches!(removed, ParseError::UnsupportedEdit(_)));
+
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), None],
+        &provenance,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .expect("dropping a sheet the cache does not name strands nothing");
 
     let mut renamed = workbook.clone();
     renamed.sheets[0].name = "Renamed".to_owned();
@@ -1838,6 +2022,1392 @@ fn refuses_to_strand_pivot_references_at_the_serialization_boundary() {
     assert!(
         matches!(&axis_edit, ParseError::UnsupportedEdit(message) if message.contains("pivotCacheDefinition1.xml")),
         "{axis_edit:?}"
+    );
+}
+
+/// The cache names one range on one sheet, and that is all a structural edit
+/// has to stay clear of.
+#[test]
+fn resolves_the_range_a_pivot_cache_is_built_from() {
+    let parsed = parse_workbook_with_package(&pivoted_package()).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_naming_sheet("Data").is_some());
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert!(package.reference_moved_by_cols("Data", 1).is_some());
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+    assert_eq!(package.reference_moved_by_rows("Report", 0), None);
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_moved_by_cols("Data", 2), None);
+}
+
+/// A cache source this crate does not read names every cell, so nothing
+/// structural gets through while one is preserved.
+#[test]
+fn refuses_everything_for_a_pivot_source_it_cannot_resolve() {
+    for (label, attributes, source) in [
+        (
+            "defined name",
+            "",
+            r#"<worksheetSource name="SalesRange"/>"#,
+        ),
+        ("no ref", "", r#"<worksheetSource sheet="Data"/>"#),
+        ("no sheet", "", r#"<worksheetSource ref="A1:B4"/>"#),
+        (
+            "ref and name",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4" name="SalesRange"/>"#,
+        ),
+        (
+            "another book",
+            "",
+            r#"<worksheetSource xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" sheet="Data" ref="A1:B4" r:id="rIdBook"/>"#,
+        ),
+        (
+            "another book, undeclared prefix",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4" r:id="rIdBook"/>"#,
+        ),
+        (
+            "an extension beside it",
+            "",
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/><extLst><ext uri="{F1C0A1B2}"><x14:cacheSource><xm:f>Notes!A1:B100</xm:f></x14:cacheSource></ext></extLst>"#,
+        ),
+        (
+            "external",
+            r#" type="external""#,
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "scenario",
+            r#" type="scenario""#,
+            r#"<worksheetSource sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "consolidation carrying an unmodelled child",
+            r#" type="consolidation""#,
+            r#"<consolidation><rangeSets><rangeSet sheet="Data" ref="A1:B4"/></rangeSets><extLst/></consolidation>"#,
+        ),
+        ("empty", "", ""),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                "<pivotCacheDefinition><cacheSource{attributes}>{source}</cacheSource></pivotCacheDefinition>"
+            )
+            .as_bytes(),
+        );
+        let parsed = parse_workbook_with_package(&parts).unwrap();
+        assert!(
+            parsed
+                .package
+                .reference_moved_by_rows("Report", 999)
+                .is_some(),
+            "{label} was resolved"
+        );
+    }
+}
+
+/// A veto that reasons per part must find every part, because one it never
+/// discovers gets no cover at all — worse than the unresolved it would get for
+/// a source it could not read. A cache written outside the conventional
+/// directory is still typed as one, so its `Override` finds it.
+#[test]
+fn finds_a_pivot_part_outside_the_conventional_directory() {
+    let mut parts = pivoted_package();
+    let cache = parts
+        .iter()
+        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
+        .expect("the fixture holds a cache");
+    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/pivotCacheDefinition1.xml")
+    );
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+}
+
+/// Discovery unions the conventional scan with what the typing names, so an
+/// `Override` disagreeing about a conventionally pathed part cannot take it
+/// away — only add parts beside it.
+#[test]
+fn keeps_a_conventional_pivot_part_an_override_disagrees_with() {
+    let mut parts = pivoted_package();
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/pivotcache/pivotCacheDefinition1.xml"),
+        "typing must never take away a part the conventional scan names"
+    );
+}
+
+/// Markup compatibility lets a part carry nodes a conforming consumer drops. A
+/// foreign namespace makes a node a different one that merely spells its name
+/// the same way, so the real `sheet` and `ref` are still what the cache is read
+/// from however a decoy is ordered around them.
+#[test]
+fn reads_past_a_pivot_source_decoy_to_the_real_one() {
+    for (label, worksheet_source) in [
+        (
+            "decoy first",
+            r#"<worksheetSource xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" u:sheet="Report" u:ref="A1" sheet="Data" ref="A1:B4"/>"#,
+        ),
+        (
+            "decoy last",
+            r#"<worksheetSource xmlns:u="urn:future" sheet="Data" ref="A1:B4" u:sheet="Report" u:ref="A1"/>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                "<pivotCacheDefinition><cacheSource>{worksheet_source}</cacheSource></pivotCacheDefinition>"
+            )
+            .as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: the cache stopped naming Data"
+        );
+        assert_eq!(
+            package.reference_naming_sheet("Report"),
+            None,
+            "{label}: the decoy captured Report"
+        );
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 4),
+            None,
+            "{label}: the decoy's A1 was read instead of A1:B4"
+        );
+        assert!(
+            package.reference_moved_by_rows("Data", 3).is_some(),
+            "{label}"
+        );
+    }
+}
+
+/// The same, one level deeper: a name only a foreign node answers to is a name
+/// nothing answers to. Where the source cannot be read without it, that is
+/// unresolved — never the foreign node standing in for the real one.
+#[test]
+fn refuses_a_pivot_source_only_a_foreign_node_answers_for() {
+    for (label, definition) in [
+        (
+            "foreign cacheSource",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign worksheetSource",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><u:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign sheet and ref",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource u:sheet="Report" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign ref beside a real sheet",
+            r#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource sheet="Data" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared cacheSource prefix",
+            r#"<pivotCacheDefinition><u:cacheSource><worksheetSource sheet="Report" ref="A1"/></u:cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared worksheetSource prefix",
+            r#"<pivotCacheDefinition><cacheSource><u:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared attribute prefix",
+            r#"<pivotCacheDefinition><cacheSource><worksheetSource u:sheet="Report" u:ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign root",
+            r#"<u:pivotCacheDefinition xmlns:u="urn:future"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></u:pivotCacheDefinition>"#,
+        ),
+        (
+            "undeclared root prefix",
+            r#"<u:pivotCacheDefinition><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></u:pivotCacheDefinition>"#,
+        ),
+        (
+            "foreign default namespace",
+            r#"<pivotCacheDefinition xmlns="urn:future"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "subtree that left the default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource xmlns=""><worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "source that left the default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource><worksheetSource xmlns="" sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "prefix bound to ours through an invalid qname",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:junk:worksheetSource sheet="Report" ref="A1"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "invalid qname on the attributes",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:worksheetSource x:junk:sheet="Report" x:junk:ref="A1"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "empty prefix on the source",
+            r#"<pivotCacheDefinition><cacheSource><:worksheetSource sheet="Report" ref="A1"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was resolved"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// An `mc:AlternateContent` branch can supply the very node being read, and
+/// choosing between branches is markup-compatibility processing this crate does
+/// not do. A pivot part carrying one names everything rather than reading past
+/// it into whichever branch happens to sit first.
+#[test]
+fn refuses_a_pivot_part_carrying_alternate_content() {
+    for (label, definition) in [
+        (
+            "the source only a branch supplies",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u"><u:cacheSource><u:worksheetSource u:sheet="Report" u:ref="A1"/></u:cacheSource><mc:AlternateContent><mc:Choice Requires="u"><u:extension/></mc:Choice><mc:Fallback><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></mc:Fallback></mc:AlternateContent></pivotCacheDefinition>"#,
+        ),
+        (
+            "a branch beside a source that does resolve",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource><mc:AlternateContent><mc:Choice Requires="u"><cacheSource><worksheetSource sheet="Report" ref="A1"/></cacheSource></mc:Choice></mc:AlternateContent></pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was resolved"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// A foreign decoy over an optional name reads as absent, which is what it is:
+/// the default still applies rather than the whole part going unresolved.
+#[test]
+fn defaults_optional_pivot_names_only_a_foreign_node_carries() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:u="urn:future"><cacheSource u:type="external"><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="9"/></pivotTableDefinition>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 4),
+        None,
+        "a foreign type must read as the worksheet default, not leave the cache unresolved"
+    );
+    assert!(package.reference_moved_by_cols("Report", 4).is_some());
+    assert_eq!(
+        package.reference_moved_by_cols("Report", 5),
+        None,
+        "a foreign page count must read as none, not widen the grid"
+    );
+}
+
+/// Real parts declare the spreadsheetml namespace and hand-built ones declare
+/// none. Both are ours, and narrowing to expanded names must not quietly stop
+/// resolving either.
+#[test]
+fn resolves_a_pivot_source_however_the_part_declares_its_namespace() {
+    for (label, definition) in [
+        (
+            "no namespace",
+            r#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "default namespace",
+            r#"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "prefixed namespace",
+            r#"<x:pivotCacheDefinition xmlns:x="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><x:cacheSource><x:worksheetSource sheet="Data" ref="A1:B4"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+        (
+            "strict default namespace",
+            r#"<pivotCacheDefinition xmlns="http://purl.oclc.org/ooxml/spreadsheetml/main"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        ),
+        (
+            "strict prefixed namespace",
+            r#"<x:pivotCacheDefinition xmlns:x="http://purl.oclc.org/ooxml/spreadsheetml/main"><x:cacheSource><x:worksheetSource x:sheet="Data" x:ref="A1:B4"/></x:cacheSource></x:pivotCacheDefinition>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            definition.as_bytes(),
+        );
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+        assert!(
+            package.reference_moved_by_rows("Data", 3).is_some(),
+            "{label}"
+        );
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 4),
+            None,
+            "{label} stopped resolving"
+        );
+        assert_eq!(package.reference_naming_sheet("Report"), None, "{label}");
+    }
+}
+
+/// A pivot table's own grid is reached by the same lookups, so a decoy over
+/// `location` or its `ref` must not be read in place of the real one, and a
+/// `location` only a foreign node answers for leaves the table unresolved.
+#[test]
+fn reads_past_a_pivot_location_decoy_to_the_real_one() {
+    let package = |definition: &str| {
+        let mut parts = pivoted_package();
+        parts.push((
+            "xl/pivottables/pivotTable1.xml".to_owned(),
+            definition.as_bytes().to_vec(),
+        ));
+        parts.push((
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parse_workbook_with_package(&parts).unwrap().package
+    };
+
+    for (label, definition) in [
+        (
+            "shadowed ref",
+            r#"<pivotTableDefinition xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:u="urn:future" mc:Ignorable="u" cacheId="1"><location u:ref="A1" ref="C3:E8"/></pivotTableDefinition>"#,
+        ),
+        (
+            "shadowed location",
+            r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="A1"/><location ref="C3:E8"/></pivotTableDefinition>"#,
+        ),
+        (
+            "shadowed page count",
+            r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><location ref="C3:E8" u:colPageCount="0" colPageCount="4"/></pivotTableDefinition>"#,
+        ),
+    ] {
+        let package = package(definition);
+        assert_eq!(
+            package.reference_moved_by_rows("Data", 999),
+            None,
+            "{label}: the pivot table stopped resolving"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 7).is_some(),
+            "{label}"
+        );
+    }
+
+    let only_foreign = package(
+        r#"<pivotTableDefinition xmlns:u="urn:future" cacheId="1"><u:location ref="C3:E8"/></pivotTableDefinition>"#,
+    );
+    assert!(
+        only_foreign.reference_moved_by_rows("Data", 999).is_some(),
+        "a location only a foreign node answers for must leave the table unresolved"
+    );
+}
+
+/// A consolidated cache names one range per set, and all of them resolve or
+/// none do.
+#[test]
+fn resolves_every_range_a_consolidated_cache_names() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition><cacheSource type="consolidation"><consolidation><rangeSets><rangeSet sheet="Data" ref="A1:B4"/><rangeSet sheet="Report" ref="A1:C2"/></rangeSets></consolidation></cacheSource></pivotCacheDefinition>"#,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert!(package.reference_moved_by_cols("Report", 2).is_some());
+    assert_eq!(package.reference_moved_by_cols("Report", 3), None);
+}
+
+/// A sheet the workbook does not hold exactly one of is not one a reference can
+/// be bound to: a later rename could put a different sheet under that name, so
+/// the part names everything instead.
+#[test]
+fn refuses_everything_for_a_source_sheet_the_workbook_does_not_hold() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Gone" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert!(parsed.package.reference_naming_sheet("Report").is_some());
+    assert!(parsed.package.reference_naming_sheet("Data").is_some());
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
+    );
+}
+
+/// A relationships part that will not parse costs the ownership it carried, not
+/// the open: the workbook still opens and whatever could not be followed names
+/// everything.
+#[test]
+fn opens_a_workbook_whose_pivot_relationships_do_not_parse() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        b"<Relationships><Relationship Id=".to_vec(),
+    ));
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).expect("the workbook still opens");
+    let package = &parsed.package;
+
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "a package whose relationships do not parse names everything"
+    );
+    assert!(package.reference_naming_sheet("Data").is_some());
+}
+
+/// A pivot table is laid out on the sheet whose relationships anchor it, and
+/// an edit above or left of that block moves it.
+#[test]
+fn resolves_the_grid_a_pivot_table_is_laid_out_on() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.reference_naming_sheet("Report"),
+        Some("xl/pivottables/pivotTable1.xml")
+    );
+    assert!(package.reference_moved_by_rows("Report", 7).is_some());
+    assert_eq!(package.reference_moved_by_rows("Report", 8), None);
+    assert!(package.reference_moved_by_cols("Report", 4).is_some());
+    assert_eq!(package.reference_moved_by_cols("Report", 5), None);
+}
+
+/// `ref` covers the body; the filter area sits beside it and is occupied just
+/// as much, so the page counts widen what an edit has to stay clear of.
+#[test]
+fn counts_the_filter_area_a_pivot_table_reserves() {
+    let package = |location: &str| {
+        let mut parts = pivoted_package();
+        parts.push((
+            "xl/pivottables/pivotTable1.xml".to_owned(),
+            format!(r#"<pivotTableDefinition cacheId="1">{location}</pivotTableDefinition>"#)
+                .into_bytes(),
+        ));
+        parts.push((
+            "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#.to_vec(),
+        ));
+        parse_workbook_with_package(&parts).unwrap().package
+    };
+
+    let paged = package(r#"<location ref="A10:B20" rowPageCount="1" colPageCount="4"/>"#);
+    assert!(paged.reference_moved_by_cols("Report", 2).is_some());
+    assert!(paged.reference_moved_by_cols("Report", 5).is_some());
+    assert_eq!(paged.reference_moved_by_cols("Report", 6), None);
+    assert!(paged.reference_moved_by_rows("Report", 20).is_some());
+    assert_eq!(paged.reference_moved_by_rows("Report", 21), None);
+
+    let unreadable = package(r#"<location ref="A10:B20" colPageCount="lots"/>"#);
+    assert!(unreadable.reference_moved_by_cols("Report", 999).is_some());
+}
+
+/// One pivot table part two sheets anchor is laid out on both of them, and
+/// neither may quietly lose its claim to the other.
+#[test]
+fn keeps_every_sheet_a_shared_pivot_table_is_anchored_by() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivottables/pivotTable1.xml".to_owned(),
+        br#"<pivotTableDefinition cacheId="1"><location ref="C3:E8"/></pivotTableDefinition>"#
+            .to_vec(),
+    ));
+    let anchor = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdPivot" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotTable" Target="../pivottables/pivotTable1.xml"/></Relationships>"#;
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_owned(),
+        anchor.to_vec(),
+    ));
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        anchor.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert!(package.reference_moved_by_rows("Report", 7).is_some());
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 7),
+        Some("xl/pivottables/pivotTable1.xml")
+    );
+    assert_eq!(package.reference_moved_by_rows("Data", 8), None);
+}
+
+/// Cached records hold the source range's values, so they move with the range
+/// the definition that owns them names.
+#[test]
+fn carries_a_cache_source_range_to_its_records() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords9.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdStale" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords9.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(package.unpatchable_references().len(), 3);
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 3),
+        Some("xl/pivotcache/pivotCacheDefinition1.xml")
+    );
+    assert_eq!(
+        package.reference_moved_by_rows("Data", 4),
+        Some("xl/pivotcache/pivotCacheRecords9.xml"),
+        "only the records the definition's own r:id names inherit its range"
+    );
+    assert_eq!(
+        package.reference_naming_sheet("Report"),
+        Some("xl/pivotcache/pivotCacheRecords9.xml")
+    );
+}
+
+/// Classifying a part by its first tag says nothing about whether the rest of
+/// it parses. A records part that never closes, or that carries a second root
+/// beside the first, is not one this crate has read — it inherits nothing.
+#[test]
+fn refuses_records_whose_part_does_not_parse_whole() {
+    for (label, records) in [
+        ("unclosed root", "<pivotCacheRecords>"),
+        ("a second root", "<pivotCacheRecords/><secondRoot/>"),
+        (
+            "an unclosed child",
+            "<pivotCacheRecords><r></pivotCacheRecords>",
+        ),
+        ("trailing junk", "<pivotCacheRecords/></stray>"),
+        ("trailing text", "<pivotCacheRecords/>garbage"),
+        (
+            "an attribute that does not parse",
+            "<pivotCacheRecords broken/>",
+        ),
+        (
+            "a broken attribute deeper in",
+            "<pivotCacheRecords><r broken/></pivotCacheRecords>",
+        ),
+        ("trailing cdata", "<pivotCacheRecords/><![CDATA[garbage]]>"),
+        ("leading text", "garbage<pivotCacheRecords/>"),
+        (
+            "a root that declared its way out",
+            r#"<pivotCacheRecords xmlns=""/>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            records.as_bytes().to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} inherited a narrow area"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// A definition claims its records through `r:id`, and a qname namespace
+/// resolution cannot be applied to is not that attribute however its prefix is
+/// bound. Records claimed only that way are not claimed at all.
+#[test]
+fn refuses_records_a_definition_claims_through_an_invalid_qname() {
+    for (label, id) in [
+        ("second colon", r#"r:junk:id="rIdRecords""#),
+        ("empty prefix", r#":id="rIdRecords""#),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            format!(
+                r#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" {id}><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#
+            )
+            .as_bytes(),
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            b"<pivotCacheRecords/>".to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} claimed the records"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// Relationships are read by local name by shared code this path does not own,
+/// so the pivot path checks the part before it trusts the lookup: a foreign
+/// `Id`, or two relationships answering to the same one, buys no claim.
+#[test]
+fn refuses_records_claimed_through_relationships_it_cannot_trust() {
+    for (label, relationships) in [
+        (
+            "foreign id",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship u:Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "duplicate ids",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign target the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" u:Target="pivotCacheRecords1.xml" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign id the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship u:Id="rIdRecords" Id="rIdOther" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign type the shared reader takes first",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" u:Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Type="urn:not-records" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "foreign relationship element",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><u:Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_part(
+            &mut parts,
+            "xl/pivotcache/pivotCacheDefinition1.xml",
+            br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+        );
+        parts.push((
+            "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+            b"<pivotCacheRecords/>".to_vec(),
+        ));
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            relationships.as_bytes().to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} claimed the records"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// OPC types parts by local name, so a foreign `Override` could answer for a
+/// real one and rule a pivot part out entirely. A content-type part this path
+/// cannot trust leaves the pivot part vetoing everything, never untyped.
+#[test]
+fn refuses_a_pivot_part_a_foreign_override_would_rule_out() {
+    const THEME: &str = "application/vnd.openxmlformats-officedocument.theme+xml";
+    for (label, types) in [
+        (
+            "a foreign override",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><u:Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/></Types>"#
+            ),
+        ),
+        (
+            "a foreign part name the shared reader takes first",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override u:PartName="/xl/pivotcache/pivotCacheDefinition1.xml" PartName="/xl/elsewhere.xml" ContentType="{THEME}"/></Types>"#
+            ),
+        ),
+        (
+            "a foreign content type the shared reader takes first",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" u:ContentType="{THEME}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#
+            ),
+        ),
+        (
+            "an override at the root, where the shared reader still reads it",
+            format!(
+                r#"<u:Override xmlns:u="urn:future" PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/>"#
+            ),
+        ),
+        (
+            "an override nested where only the shared reader looks",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><wrapper><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/></wrapper></Types>"#
+            ),
+        ),
+        (
+            "two overrides that disagree",
+            format!(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="{THEME}"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#
+            ),
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_or_push_part(&mut parts, "[Content_Types].xml", types.as_bytes());
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(package.unpatchable_reference_part().is_some(), "{label}");
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label}: a cache typed by a part this path cannot trust must name everything"
+        );
+    }
+}
+
+/// Narrowing the veto rests on reading the package's own metadata. When any of
+/// it is not exactly what OPC specifies, the whole workbook falls back to the
+/// blanket veto that shipped before narrowing existed, rather than this crate
+/// reconstructing trust over readers more permissive than the format.
+#[test]
+fn falls_back_to_the_blanket_veto_when_the_package_metadata_does_not_conform() {
+    const TYPES: &str = r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+    const RELS: &str = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#;
+
+    for (label, types, rels) in [
+        (
+            "a foreign name in the content types",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#,
+            RELS,
+        ),
+        (
+            "an element the content types should not hold",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><wrapper><Override PartName="/x.xml" ContentType="application/xml"/></wrapper></Types>"#,
+            RELS,
+        ),
+        (
+            "a content-type root that is not Types",
+            r#"<wrapper xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></wrapper>"#,
+            RELS,
+        ),
+        (
+            "two defaults for one extension",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="xml" ContentType="application/other"/></Types>"#,
+            RELS,
+        ),
+        (
+            "a default carrying no content type",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml"/></Types>"#,
+            RELS,
+        ),
+        (
+            "a relationships root that is not Relationships",
+            TYPES,
+            r#"<wrapper xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></wrapper>"#,
+        ),
+        (
+            "a relationship carrying no type",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#,
+        ),
+        (
+            "a foreign name on a relationship",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships" xmlns:u="urn:future"><Relationship Id="rIdRecords" u:Target="a.xml" Target="pivotCacheRecords1.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords"/></Relationships>"#,
+        ),
+        (
+            "two relationships answering to one id",
+            TYPES,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="elsewhere.xml"/></Relationships>"#,
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_or_push_part(&mut parts, "[Content_Types].xml", types.as_bytes());
+        parts.push((
+            "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+            rels.as_bytes().to_vec(),
+        ));
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.unpatchable_reference_part().is_some(),
+            "{label}: the workbook stopped being vetoed"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} narrowed on metadata it could not read"
+        );
+        assert!(
+            package.reference_naming_sheet("Data").is_some(),
+            "{label}: Data was left unprotected"
+        );
+    }
+}
+
+/// A value the metadata carries but does not fill in is metadata this path
+/// cannot read either. An empty content type makes OPC typing rule a
+/// conventional pivot out, and a target mode outside the two OPC defines makes
+/// the shared reader take an external relationship for an internal one.
+#[test]
+fn falls_back_to_the_blanket_veto_on_values_the_metadata_leaves_unusable() {
+    for (label, types, rels) in [
+        (
+            "an override with no content type",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType=""/></Types>"#,
+            None,
+        ),
+        (
+            "an override with a relative part name",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/xml"/></Types>"#,
+            None,
+        ),
+        (
+            "a default with an empty extension",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="" ContentType="application/xml"/></Types>"#,
+            None,
+        ),
+        (
+            "a relationship with an empty target",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#,
+            Some(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target=""/></Relationships>"#,
+            ),
+        ),
+        (
+            "a target mode OPC does not define",
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#,
+            Some(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml" TargetMode="bogus"/></Relationships>"#,
+            ),
+        ),
+    ] {
+        let mut parts = pivoted_package();
+        set_or_push_part(&mut parts, "[Content_Types].xml", types.as_bytes());
+        if let Some(rels) = rels {
+            parts.push((
+                "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+                rels.as_bytes().to_vec(),
+            ));
+        }
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert!(
+            package.unpatchable_reference_part().is_some(),
+            "{label}: the workbook stopped being vetoed"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} narrowed on a value it could not use"
+        );
+    }
+}
+
+/// Discovery is monotonic over the blanket veto: metadata may add parts to look
+/// at, never take one away. An out-of-directory pivot found only through its
+/// override, beside metadata that does not conform, still has to be looked at:
+/// the fallback names the whole package precisely so nothing can drop out.
+#[test]
+fn names_every_part_when_the_metadata_does_not_conform() {
+    let mut parts = pivoted_package();
+    let cache = parts
+        .iter()
+        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
+        .expect("the fixture holds a cache");
+    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/><u:Override PartName="/xl/unrelated.xml" ContentType="application/xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package
+            .unpatchable_references()
+            .iter()
+            .any(|reference| reference.part() == "xl/pivotCacheDefinition1.xml"),
+        "the pivot dropped out of a set that is supposed to be every part"
+    );
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+}
+
+/// The same invariant on the chart side: typing this path cannot read must not
+/// suppress a chart the conventional layout names.
+#[test]
+fn keeps_a_conventional_chart_an_override_disagrees_with() {
+    let mut parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml"),
+        "typing must never take away a chart the conventional layout names"
+    );
+}
+
+/// OPC has no package without a content-type stream, so a package missing one
+/// is not one this path may read typing from.
+#[test]
+fn falls_back_to_the_blanket_veto_without_a_content_type_part() {
+    let mut parts = pivoted_package();
+    parts.retain(|(path, _)| path != "[Content_Types].xml");
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.unpatchable_reference_part().is_some());
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+}
+
+/// Sheet parts come from the workbook's own relationships, so a pivot table's
+/// host is only as certain as they are. Two relationships answering to one id
+/// can swap which part a sheet resolves to, which would fence off the wrong
+/// sheet entirely.
+#[test]
+fn falls_back_to_the_blanket_veto_when_the_workbook_relationships_are_ambiguous() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/_rels/workbook.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
+    );
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.unpatchable_reference_part().is_some());
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+}
+
+/// A drawing's relationships decide which sheet claims which chart. Swapping
+/// two of them is a permutation, so both charts stay claimed exactly once and
+/// nothing looks unknown — while each unqualified reference resolves against
+/// the other sheet, and an edit passes on the sheet whose range was swapped
+/// away.
+#[test]
+fn falls_back_to_the_blanket_veto_when_a_drawing_relationship_is_ambiguous() {
+    let swapped = |ambiguous: bool| {
+        let mut parts = two_charted_sheets();
+        for (drawing, own, other) in [(1, 1, 2), (2, 2, 1)] {
+            let decoy = if ambiguous {
+                format!(r#" xmlns:u="urn:future" u:Target="../charts/chart{other}.xml""#)
+            } else {
+                String::new()
+            };
+            set_part(
+                &mut parts,
+                &format!("xl/drawings/_rels/drawing{drawing}.xml.rels"),
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart"{decoy} Target="../charts/chart{own}.xml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"/></Relationships>"#
+                )
+                .as_bytes(),
+            );
+        }
+        parse_workbook_with_package(&parts).unwrap().package
+    };
+
+    let honest = swapped(false);
+    assert_eq!(
+        honest.reference_moved_by_rows("Data", 9),
+        None,
+        "the sheet with the small range should be free below it"
+    );
+    assert_eq!(
+        honest.reference_moved_by_rows("Data", 999),
+        None,
+        "a resolved claim leaves everything past the range free"
+    );
+
+    let ambiguous = swapped(true);
+    assert!(
+        ambiguous.reference_moved_by_rows("Data", 999).is_some(),
+        "a swapped claim was read as a range instead of falling back"
+    );
+    assert!(
+        ambiguous.reference_moved_by_rows("Report", 999).is_some(),
+        "a swapped claim was read as a range instead of falling back"
+    );
+}
+
+/// Two sheets, each anchoring its own chart through its own drawing, with
+/// ranges of different heights so a swapped claim is observable.
+fn two_charted_sheets() -> Vec<(String, Vec<u8>)> {
+    let mut parts = charted_package();
+    let chart = |reference: &str| {
+        String::from_utf8(CHART.to_vec())
+            .unwrap()
+            .replace("Data!$B$2:$B$4", reference)
+            .replace("<c:f>Data!$B$1</c:f>", "<c:f>$B$1</c:f>")
+            .replace("<c:f>Data!$A$2:$A$4</c:f>", "<c:f>$A$2:$A$4</c:f>")
+            .into_bytes()
+    };
+    set_part(&mut parts, "xl/charts/chart1.xml", &chart("$A$2:$B$4"));
+    parts.push(("xl/charts/chart2.xml".to_owned(), chart("$A$2:$B$40")));
+    set_part(
+        &mut parts,
+        "xl/worksheets/sheet2.xml",
+        br#"<worksheet xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><drawing r:id="rIdDrawing"/></worksheet>"#,
+    );
+    parts.push((
+        "xl/worksheets/_rels/sheet2.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing2.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push(("xl/drawings/drawing2.xml".to_owned(), DRAWING.to_vec()));
+    parts.push((
+        "xl/drawings/_rels/drawing2.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart2.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts
+}
+
+/// The shared reader follows a relationship whose type merely ENDS IN the
+/// standard segment, so a type this path never enumerated can still steer chart
+/// ownership. A package carrying one is not one to read relationships from.
+#[test]
+fn falls_back_to_the_blanket_veto_on_a_relationship_type_only_the_reader_follows() {
+    let mut parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    set_part(
+        &mut parts,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="https://example.invalid/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+    );
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "a drawing reached by a non-standard type steered ownership unchecked"
+    );
+}
+
+/// The claim is followed by taking the first `c:chart` under an anchor, so a
+/// second one lets two anchors swap which chart each is taken to hold.
+#[test]
+fn falls_back_to_the_blanket_veto_when_a_drawing_anchor_claims_twice() {
+    let mut parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    let drawing = String::from_utf8(DRAWING.to_vec()).unwrap().replace(
+        r#"<c:chart r:id="rIdChart"/>"#,
+        r#"<c:chart r:id="rIdChart"/><c:chart r:id="rIdOther"/>"#,
+    );
+    set_part(&mut parts, "xl/drawings/drawing1.xml", drawing.as_bytes());
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "an anchor claiming twice narrowed anyway"
+    );
+}
+
+/// A sheet resolves to its part through the first attribute whose local name is
+/// `id`, so a foreign one before the real `r:id` swaps which part a sheet is —
+/// leaving every sheet claimed while a pivot table is attributed to the wrong
+/// one.
+#[test]
+fn falls_back_to_the_blanket_veto_when_a_sheet_names_its_part_ambiguously() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:u="urn:future"><sheets><sheet name="Data" sheetId="1" u:id="rId2" r:id="rId1"/><sheet name="Report" sheetId="2" u:id="rId1" r:id="rId2"/></sheets></workbook>"#,
+    );
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.unpatchable_reference_part().is_some());
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+}
+
+/// Metadata this path cannot read costs a workbook nothing when the package
+/// holds nothing a save could strand. Such a workbook is edited and saved
+/// exactly as it was before narrowing existed — the fallback is a veto over
+/// references, not a penalty for imperfect typing.
+#[test]
+fn leaves_a_package_bearing_no_references_alone() {
+    let mut parts = two_sheet_package(r#"<sheetData/>"#, r#"<sheetData/>"#);
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(parsed.package.unpatchable_reference_part(), None);
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets[0].name = "Renamed".to_owned();
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package)
+        .expect("a workbook with nothing to strand still saves a rename");
+    assert!(
+        String::from_utf8(part_bytes(&saved, "xl/workbook.xml"))
+            .unwrap()
+            .contains(r#"name="Renamed""#)
+    );
+}
+
+/// The trigger is read loosely on purpose: a decoy attribute cannot hide a
+/// reference-bearing part, because the genuine content type still answers to
+/// "any attribute anywhere".
+#[test]
+fn triggers_the_fallback_on_a_content_type_a_decoy_would_hide() {
+    let mut parts = two_sheet_package(r#"<sheetData/>"#, r#"<sheetData/>"#);
+    parts.push((
+        "custom/cache.pvt".to_owned(),
+        br#"<pivotCacheDefinition><cacheSource><worksheetSource sheet="Sheet1" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#.to_vec(),
+    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/custom/cache.pvt" u:ContentType="application/xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.unpatchable_reference_part().is_some(),
+        "a decoy content type hid the part that should have triggered the veto"
+    );
+    assert!(package.reference_moved_by_rows("Sheet2", 999).is_some());
+}
+
+/// The fallback is workbook-wide: an unmodelled chart stops narrowing too,
+/// exactly as it did before narrowing existed.
+#[test]
+fn falls_back_to_the_blanket_veto_for_charts_too() {
+    let mut parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default u:Extension="xml" Extension="xml" ContentType="application/xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.unpatchable_reference_part().is_some());
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "the chart narrowed on metadata this crate could not read"
+    );
+}
+
+/// A conforming package still narrows, which is the whole point of the change.
+#[test]
+fn still_narrows_when_the_package_metadata_conforms() {
+    let mut parts = pivoted_package();
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Override PartName="/xl/pivotcache/pivotCacheDefinition1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#);
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/pivotCacheRecords" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+}
+
+/// The typing slice is produced by a reader that keeps the first local-name
+/// `ContentType`, so a foreign one before the real one both fails conformance
+/// and misclassifies the part. Discovery must not consult that slice at all in
+/// the fallback: an unconventionally pathed pivot has to stay in the set.
+#[test]
+fn names_an_unconventionally_pathed_part_the_typing_slice_misreads() {
+    let mut parts = pivoted_package();
+    let cache = parts
+        .iter()
+        .position(|(path, _)| path == "xl/pivotcache/pivotCacheDefinition1.xml")
+        .expect("the fixture holds a cache");
+    parts[cache].0 = "xl/pivotCacheDefinition1.xml".to_owned();
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types" xmlns:u="urn:future"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/pivotCacheDefinition1.xml" u:ContentType="application/xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml"/></Types>"#);
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package
+            .unpatchable_references()
+            .iter()
+            .any(|reference| reference.part() == "xl/pivotCacheDefinition1.xml"),
+        "a part the typing slice misreads dropped out of discovery"
+    );
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+}
+
+/// The model is built by a reader that takes every local-name `sheet` wherever
+/// it sits, while the sheet-to-part mapping records only the canonical
+/// children. One more elsewhere shifts the two out of step.
+#[test]
+fn falls_back_to_the_blanket_veto_on_a_sheet_element_outside_the_canonical_list() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/workbook.xml",
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><extra><sheet name="Decoy" sheetId="9" r:id="rId1"/></extra><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Report" sheetId="2" r:id="rId2"/></sheets></workbook>"#,
+    );
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(package.reference_moved_by_rows("Report", 999).is_some());
+    assert!(package.reference_naming_sheet("Data").is_some());
+}
+
+/// The claim is followed by taking the first relationships-namespace `id` on a
+/// `c:chart`, so two of them under different prefixes both survive a count of
+/// chart elements alone.
+#[test]
+fn falls_back_to_the_blanket_veto_when_a_chart_claim_carries_two_ids() {
+    let mut parts = two_charted_sheets();
+    for drawing in [1, 2] {
+        let other = 3 - drawing;
+        set_part(
+            &mut parts,
+            &format!("xl/drawings/_rels/drawing{drawing}.xml.rels"),
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdChart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{drawing}.xml"/><Relationship Id="rIdOther" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart{other}.xml"/></Relationships>"#
+            )
+            .as_bytes(),
+        );
+        set_part(
+            &mut parts,
+            &format!("xl/drawings/drawing{drawing}.xml"),
+            String::from_utf8(DRAWING.to_vec())
+                .unwrap()
+                .replace(
+                    r#"<c:chart r:id="rIdChart"/>"#,
+                    r#"<c:chart xmlns:r2="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r2:id="rIdOther" r:id="rIdChart"/>"#,
+                )
+                .as_bytes(),
+        );
+    }
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.reference_moved_by_rows("Data", 999).is_some(),
+        "a claim carrying two ids was read as a range instead of falling back"
+    );
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "a claim carrying two ids was read as a range instead of falling back"
+    );
+}
+
+/// A relationship claims records by its type, not by pointing at them. With
+/// conforming metadata the exact type can be required, so a relationship of
+/// another kind carrying the cache's own id claims nothing.
+#[test]
+fn refuses_records_claimed_by_a_relationship_of_another_type() {
+    let mut parts = pivoted_package();
+    set_part(
+        &mut parts,
+        "xl/pivotcache/pivotCacheDefinition1.xml",
+        br#"<pivotCacheDefinition xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rIdRecords"><cacheSource><worksheetSource sheet="Data" ref="A1:B4"/></cacheSource></pivotCacheDefinition>"#,
+    );
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    parts.push((
+        "xl/pivotcache/_rels/pivotCacheDefinition1.xml.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdRecords" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="pivotCacheRecords1.xml"/></Relationships>"#.to_vec(),
+    ));
+    let package = parse_workbook_with_package(&parts).unwrap().package;
+
+    assert!(
+        package.reference_moved_by_rows("Report", 999).is_some(),
+        "an image relationship handed the records a narrow range"
+    );
+    assert!(package.reference_naming_sheet("Data").is_some());
+}
+
+/// Records the definition does not point its own `r:id` at are not its records,
+/// so they inherit nothing and name everything.
+#[test]
+fn refuses_everything_for_records_no_definition_claims() {
+    let mut parts = pivoted_package();
+    parts.push((
+        "xl/pivotcache/pivotCacheRecords1.xml".to_owned(),
+        b"<pivotCacheRecords/>".to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(parsed.package.unpatchable_references().len(), 2);
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
     );
 }
 
@@ -2003,7 +3573,10 @@ fn refuses_a_moved_reference_whose_cache_cannot_be_regenerated() {
     for (formula, reason) in [
         ("Missing!$B$2:$B$4", "sheet this workbook does not hold"),
         ("Data!$A$2:$B$4", "more than one row and column"),
-        ("(Data!$B$2:$B$4,Data!$D$2:$D$4)", "is not one area"),
+        (
+            "(Data!$B$2:$B$4,Data!$D$2:$D$4)",
+            "is not a single same-workbook area",
+        ),
         ("Data!$B$2:$B$1000000", "more points than a chart can carry"),
     ] {
         refs[2].formula = formula.to_owned();
@@ -2120,6 +3693,130 @@ fn refuses_a_chart_that_no_longer_names_its_source_anchor() {
     }
 }
 
+/// A drawing may anchor one chart part twice, so a part names no single frame.
+/// Each anchor is written back on its own, and a frame the source never held
+/// is still refused, because this crate cannot create one.
+#[test]
+fn writes_each_anchor_of_a_twice_anchored_chart_part() {
+    let mut source = charted_package();
+    set_part(&mut source, "xl/drawings/drawing1.xml", TWIN_DRAWING);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let charts = &parsed.workbook.sheets[0].charts;
+    assert_eq!(charts.len(), 2);
+    assert_eq!(charts[0].part, charts[1].part);
+    assert_eq!((charts[0].anchor_index, charts[1].anchor_index), (0, 1));
+
+    let mut workbook = parsed.workbook.clone();
+    edit_a1(&mut workbook, 1.0);
+    let xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } =
+        workbook.sheets[0].charts[1].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    workbook.sheets[0].charts[1].anchor = xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell {
+            row: from.row + 3,
+            ..from
+        },
+        to: xlsx_model::AnchorCell {
+            row: to.row + 3,
+            ..to
+        },
+        edit_as,
+    };
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap(),
+        String::from_utf8(TWIN_DRAWING.to_vec())
+            .unwrap()
+            .replace("<xdr:row>30</xdr:row>", "<xdr:row>33</xdr:row>")
+            .replace("<xdr:row>40</xdr:row>", "<xdr:row>43</xdr:row>"),
+        "the twin anchor is written back and the first one is left alone"
+    );
+
+    let mut duplicated = parsed.workbook.clone();
+    let mut extra = duplicated.sheets[0].charts[0].clone();
+    extra.anchor_index = 5;
+    duplicated.sheets[0].charts.push(extra);
+    let error = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &duplicated,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("drawing and anchor it was read from")),
+        "{error:?}"
+    );
+}
+
+/// A worksheet may reach one drawing through more than one relationship. It is
+/// still one drawing: following each relationship on its own would emit every
+/// anchor twice, and the twins would then share an ordinal and address each
+/// other. The parser is the only guard direct users of this crate get.
+#[test]
+fn follows_a_drawing_named_by_two_relationships_once() {
+    let mut source = charted_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet1.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/><Relationship Id="rIdDrawingAgain" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+    );
+    let charts = &parse_workbook_with_package(&source)
+        .unwrap()
+        .workbook
+        .sheets[0]
+        .charts;
+    assert_eq!(charts.len(), 1);
+    assert_eq!(charts[0].anchor_index, 0);
+}
+
+/// One drawing anchor cannot hold two frames, so a model carrying one source
+/// frame twice has nothing to write back: the pair would collapse into one on
+/// reopen. The save is refused instead.
+#[test]
+fn refuses_a_chart_frame_a_sheet_carries_twice() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut duplicated = parsed.workbook.clone();
+    let twin = duplicated.sheets[0].charts[0].clone();
+    duplicated.sheets[0].charts.push(twin);
+    let error = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &duplicated,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("twice")),
+        "{error:?}"
+    );
+}
+
+/// `DRAWING` with a second anchor on the same chart relationship.
+const TWIN_DRAWING: &[u8] = br#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>12700</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>19</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor><xdr:twoCellAnchor editAs="oneCell"><xdr:from><xdr:col>2</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>30</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from><xdr:to><xdr:col>8</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>40</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to><xdr:graphicFrame><a:graphic><a:graphicData><c:chart r:id="rIdChart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:twoCellAnchor></xdr:wsDr>"#;
+
 /// This crate patches chart parts in place, so it can neither create one nor
 /// delete one. A chart that appeared on a sheet, one that vanished from a
 /// retained sheet and one carried onto a sheet with no source are all refused.
@@ -2170,9 +3867,205 @@ fn refuses_chart_state_with_no_one_to_one_source() {
     );
 }
 
-/// A save writes an anchor's row and column back and nothing else, so a model
-/// that also moved its mode, offsets, extent or kind is refused rather than
-/// saved with that change dropped.
+fn save_shared(
+    parsed: &crate::ParsedWorkbook,
+    workbook: &Workbook,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    crate::serialize_workbook_with_package_and_origins_after_edits(
+        workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &vec![SharedStringCells::new(); 2],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+}
+
+/// One chart part cannot hold two sheets' references at once. A save where the
+/// sheets sharing it no longer want the same content is refused, rather than
+/// writing whichever sheet came last and silently rewriting the chart the other
+/// one shows.
+#[test]
+fn refuses_a_shared_chart_part_its_sheets_disagree_on() {
+    let parsed = parse_workbook_with_package(&shared_chart_package()).unwrap();
+    assert_eq!(
+        parsed.workbook.sheets[0].charts[0].part,
+        "xl/charts/chart1.xml"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].part,
+        "xl/charts/chart1.xml"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[0].charts[0].refs[0].formula,
+        "$A$1:$A$2"
+    );
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].refs[0].formula,
+        "$A$1:$A$2"
+    );
+
+    let mut one_sheet_moved = parsed.workbook.clone();
+    one_sheet_moved.sheets[0].charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    let error = save_shared(&parsed, &one_sheet_moved).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/charts/chart1.xml")
+                && message.contains("sheet First")
+                && message.contains("sheet Second")),
+        "{error:?}"
+    );
+
+    let mut owners_diverge = parsed.workbook.clone();
+    owners_diverge.sheets[0].set_cell(
+        CellRef::parse_a1("A2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    for sheet in &mut owners_diverge.sheets {
+        sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    }
+    let error = save_shared(&parsed, &owners_diverge).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/charts/chart1.xml")),
+        "an unqualified reference each sheet caches differently is still a disagreement: {error:?}"
+    );
+}
+
+/// Sharing a chart part between two sheets is legal, and the common case is
+/// that both want the same thing out of it. That must keep saving: untouched,
+/// byte for byte; moved on both sheets alike, patched once.
+#[test]
+fn saves_a_shared_chart_part_its_sheets_agree_on() {
+    let source = shared_chart_package();
+    let parsed = parse_workbook_with_package(&source).unwrap();
+
+    let mut untouched = parsed.workbook.clone();
+    edit_a1(&mut untouched, 1.0);
+    let saved = save_shared(&parsed, &untouched).unwrap();
+    for path in [
+        "xl/charts/chart1.xml",
+        "xl/drawings/drawing1.xml",
+        "xl/drawings/drawing2.xml",
+    ] {
+        assert_eq!(
+            part_bytes(&saved, path),
+            part_bytes(&source, path),
+            "{path} must not change when no chart did"
+        );
+    }
+
+    let mut both_moved = parsed.workbook.clone();
+    for sheet in &mut both_moved.sheets {
+        sheet.charts[0].refs[0].formula = "$A$2:$A$3".to_owned();
+    }
+    let saved = save_shared(&parsed, &both_moved).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert_eq!(
+        patched,
+        String::from_utf8(SHARED_CHART.to_vec())
+            .unwrap()
+            .replace("$A$1:$A$2", "$A$2:$A$3")
+            .replace(
+                r#"<c:numCache><c:pt idx="0"><c:v>1</c:v></c:pt></c:numCache>"#,
+                r#"<c:numCache><c:ptCount val="2"/></c:numCache>"#,
+            )
+    );
+    let reopened = parse_workbook_with_package(&saved).unwrap();
+    for sheet in &reopened.workbook.sheets {
+        assert_eq!(sheet.charts[0].refs[0].formula, "$A$2:$A$3");
+    }
+
+    let mut renamed = parsed.workbook.clone();
+    renamed.sheets[0].set_cell(
+        CellRef::parse_a1("A2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    for sheet in &mut renamed.sheets {
+        sheet.charts[0].refs[0].formula = "First!$A$1:$A$2".to_owned();
+    }
+    let saved = save_shared(&parsed, &renamed).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/charts/chart1.xml")).unwrap();
+    assert!(
+        patched.contains("<c:f>First!$A$1:$A$2</c:f>")
+            && patched
+                .contains(r#"<c:ptCount val="2"/><c:pt idx="1"><c:v>5</c:v></c:pt></c:numCache>"#),
+        "a qualified reference both sheets took resolves the same either way: {patched}"
+    );
+}
+
+/// The same aliasing reaches drawing parts: two sheets may relate to one
+/// drawing, whose anchors then belong to both. An anchor one sheet moved and
+/// the other did not is refused for the same reason a chart part is.
+#[test]
+fn refuses_a_shared_drawing_its_sheets_disagree_on() {
+    let mut source = shared_chart_package();
+    set_part(
+        &mut source,
+        "xl/worksheets/_rels/sheet2.xml.rels",
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdDrawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+    );
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    assert_eq!(
+        parsed.workbook.sheets[1].charts[0].drawing,
+        "xl/drawings/drawing1.xml"
+    );
+
+    let moved = |anchor: xlsx_model::ChartAnchor| match anchor {
+        xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } => {
+            xlsx_model::ChartAnchor::TwoCell {
+                from: xlsx_model::AnchorCell {
+                    row: from.row + 1,
+                    ..from
+                },
+                to: xlsx_model::AnchorCell {
+                    row: to.row + 1,
+                    ..to
+                },
+                edit_as,
+            }
+        }
+        other => other,
+    };
+
+    let mut one_sheet_moved = parsed.workbook.clone();
+    one_sheet_moved.sheets[0].charts[0].anchor = moved(one_sheet_moved.sheets[0].charts[0].anchor);
+    let error = save_shared(&parsed, &one_sheet_moved).unwrap_err();
+    assert!(
+        matches!(&error, ParseError::UnsupportedEdit(message)
+            if message.contains("xl/drawings/drawing1.xml")
+                && message.contains("sheet First")
+                && message.contains("sheet Second")),
+        "{error:?}"
+    );
+
+    let mut both_moved = parsed.workbook.clone();
+    for sheet in &mut both_moved.sheets {
+        sheet.charts[0].anchor = moved(sheet.charts[0].anchor);
+    }
+    let saved = save_shared(&parsed, &both_moved).unwrap();
+    let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
+    assert_eq!(
+        patched,
+        String::from_utf8(DRAWING.to_vec())
+            .unwrap()
+            .replace("<xdr:row>4</xdr:row>", "<xdr:row>5</xdr:row>")
+            .replace("<xdr:row>19</xdr:row>", "<xdr:row>20</xdr:row>"),
+        "an anchor both sheets moved alike is written once"
+    );
+}
+
+/// A save writes an anchor's grid position back and nothing else, so a model
+/// that also moved its mode, extent or kind is refused rather than saved with
+/// that change dropped.
 #[test]
 fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
@@ -2188,17 +4081,6 @@ fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
                 from,
                 to,
                 edit_as: xlsx_model::AnchorEditAs::TwoCell,
-            },
-        ),
-        (
-            "offset",
-            xlsx_model::ChartAnchor::TwoCell {
-                from: xlsx_model::AnchorCell {
-                    col_off: 4_242,
-                    ..from
-                },
-                to,
-                edit_as: xlsx_model::AnchorEditAs::OneCell,
             },
         ),
         (
@@ -2224,7 +4106,7 @@ fn refuses_an_anchor_change_the_drawing_patcher_would_drop() {
         .unwrap_err();
         assert!(
             matches!(&error, ParseError::UnsupportedEdit(message)
-                if message.contains("more than the row and column")),
+                if message.contains("more than the grid position")),
             "{label}: {error:?}"
         );
     }
@@ -2244,10 +4126,10 @@ fn a_deleted_reference_empties_its_cache() {
     );
 }
 
-/// A moved anchor is written back as `col`/`row` alone; offsets and the rest of
-/// the drawing stay as authored.
+/// A moved anchor is written back as the markers' `col`/`colOff`/`row`/`rowOff`
+/// alone; the rest of the drawing stays as authored.
 #[test]
-fn patches_only_the_moved_anchor_indices() {
+fn patches_only_the_moved_anchor_markers() {
     let parsed = parse_workbook_with_package(&charted_package()).unwrap();
     let mut workbook = parsed.workbook.clone();
     edit_a1(&mut workbook, 1.0);
@@ -2257,8 +4139,16 @@ fn patches_only_the_moved_anchor_indices() {
         panic!("two-cell anchor");
     };
     workbook.sheets[0].charts[0].anchor = xlsx_model::ChartAnchor::TwoCell {
-        from: xlsx_model::AnchorCell { row: 7, ..from },
-        to: xlsx_model::AnchorCell { row: 22, ..to },
+        from: xlsx_model::AnchorCell {
+            row: 7,
+            col_off: 4_242,
+            ..from
+        },
+        to: xlsx_model::AnchorCell {
+            row: 22,
+            row_off: 1_234,
+            ..to
+        },
         edit_as,
     };
 
@@ -2279,7 +4169,93 @@ fn patches_only_the_moved_anchor_indices() {
         patched,
         original
             .replace("<xdr:row>4</xdr:row>", "<xdr:row>7</xdr:row>")
+            .replace(
+                "<xdr:colOff>12700</xdr:colOff>",
+                "<xdr:colOff>4242</xdr:colOff>"
+            )
             .replace("<xdr:row>19</xdr:row>", "<xdr:row>22</xdr:row>")
+            .replacen(
+                "<xdr:rowOff>0</xdr:rowOff></xdr:to>",
+                "<xdr:rowOff>1234</xdr:rowOff></xdr:to>",
+                1
+            )
+    );
+}
+
+/// A drawing that never wrote `colOff`/`rowOff` reads as zero, so there is no
+/// span to splice a moved offset into. The marker is regenerated whole rather
+/// than saving an anchor that silently lost half its move — and a move that
+/// lands on a cell boundary still patches in place, leaving the omission alone.
+#[test]
+fn synthesises_anchor_offsets_a_drawing_never_wrote() {
+    let offsetless = String::from_utf8(DRAWING.to_vec())
+        .unwrap()
+        .replace("<xdr:colOff>12700</xdr:colOff>", "")
+        .replace("<xdr:colOff>0</xdr:colOff>", "")
+        .replace("<xdr:rowOff>0</xdr:rowOff>", "");
+    let mut parts = charted_package();
+    for part in &mut parts {
+        if part.0 == "xl/drawings/drawing1.xml" {
+            part.1 = offsetless.clone().into_bytes();
+        }
+    }
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let xlsx_model::ChartAnchor::TwoCell { from, to, edit_as } =
+        parsed.workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    assert_eq!((from.col_off, from.row_off), (0, 0));
+
+    let save = |anchor| {
+        let mut workbook = parsed.workbook.clone();
+        edit_a1(&mut workbook, 1.0);
+        workbook.sheets[0].charts[0].anchor = anchor;
+        crate::serialize_workbook_with_package_and_origins_after_edits(
+            &workbook,
+            &parsed.package,
+            &[Some(0), Some(1)],
+            &vec![SharedStringCells::new(); 2],
+            SaveEdits {
+                changed: true,
+                moved_references: false,
+            },
+        )
+        .unwrap()
+    };
+
+    let saved = save(xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell {
+            col_off: 161_925,
+            row_off: 85_725,
+            ..from
+        },
+        to,
+        edit_as,
+    });
+    let patched = String::from_utf8(part_bytes(&saved, "xl/drawings/drawing1.xml")).unwrap();
+    assert!(
+        patched.contains(
+            "<xdr:from><xdr:col>2</xdr:col><xdr:colOff>161925</xdr:colOff><xdr:row>4</xdr:row><xdr:rowOff>85725</xdr:rowOff></xdr:from>"
+        ),
+        "{patched}"
+    );
+    let reparsed = parse_workbook_with_package(&saved).unwrap();
+    let xlsx_model::ChartAnchor::TwoCell { from: reopened, .. } =
+        reparsed.workbook.sheets[0].charts[0].anchor
+    else {
+        panic!("two-cell anchor");
+    };
+    assert_eq!((reopened.col_off, reopened.row_off), (161_925, 85_725));
+
+    let whole_cells = save(xlsx_model::ChartAnchor::TwoCell {
+        from: xlsx_model::AnchorCell { col: 3, ..from },
+        to,
+        edit_as,
+    });
+    assert_eq!(
+        String::from_utf8(part_bytes(&whole_cells, "xl/drawings/drawing1.xml")).unwrap(),
+        offsetless.replacen("<xdr:col>2</xdr:col>", "<xdr:col>3</xdr:col>", 1)
     );
 }
 
@@ -2461,10 +4437,7 @@ fn refuses_structural_edits_while_a_chart_part_is_not_covered() {
 #[test]
 fn refuses_a_chart_typed_by_a_default_extension_mapping() {
     let mut parts = charted_package();
-    parts.push((
-        "[Content_Types].xml".to_owned(),
-        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="cxml" ContentType="application/vnd.ms-office.chartex+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
-    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="cxml" ContentType="application/vnd.ms-office.chartex+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#);
     parts.push((
         "xl/extras/plot1.cxml".to_owned(),
         br#"<cx:chartSpace xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"/>"#
@@ -2483,10 +4456,7 @@ fn refuses_a_chart_typed_by_a_default_extension_mapping() {
 #[test]
 fn still_covers_a_conventional_chart_a_default_types_as_plain_xml() {
     let mut parts = charted_package();
-    parts.push((
-        "[Content_Types].xml".to_owned(),
-        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#.to_vec(),
-    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>"#);
     parts.push((
         "xl/charts/chart2.xml".to_owned(),
         b"<c:chartSpace xmlns:c=\"http://schemas.openxmlformats.org/drawingml/2006/chart\"/>"
@@ -2497,6 +4467,162 @@ fn still_covers_a_conventional_chart_a_default_types_as_plain_xml() {
     assert_eq!(
         parsed.package.unpatchable_reference_part(),
         Some("xl/charts/chart2.xml")
+    );
+}
+
+/// `charted_package` with the plotted values widened to an area no save can
+/// rebuild a cache from, which is what leaves the chart part unmodelled while
+/// its `c:f` references stay perfectly readable.
+fn unrebuildable_chart_package(
+    mut parts: Vec<(String, Vec<u8>)>,
+    values: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let chart = String::from_utf8(CHART.to_vec())
+        .unwrap()
+        .replace("Data!$B$2:$B$4", values);
+    set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+    parts
+}
+
+/// A chart the model does not cover is still only as wide as what its `c:f`
+/// name. The sheet it plots is fenced off to the far corner of those
+/// references; every other sheet, and everything past that corner, is free.
+#[test]
+fn resolves_what_an_unmodelled_chart_references() {
+    let parts = unrebuildable_chart_package(charted_package(), "Data!$A$2:$B$4");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(package.reference_naming_sheet("Report"), None);
+    assert!(package.reference_moved_by_rows("Data", 3).is_some());
+    assert_eq!(package.reference_moved_by_rows("Data", 4), None);
+    assert!(package.reference_moved_by_cols("Data", 1).is_some());
+    assert_eq!(package.reference_moved_by_cols("Data", 2), None);
+    assert_eq!(package.reference_moved_by_rows("Report", 0), None);
+}
+
+/// The chart walk matches expanded names through shared code that resolves a
+/// prefix at the first colon and compares the local name after the last, so a
+/// qname carrying a second colon could be read as a `c:f`. A chart part holding
+/// one is not read at all.
+#[test]
+fn refuses_a_chart_holding_a_name_resolution_cannot_be_applied_to() {
+    for (label, chart) in [
+        (
+            "invalid reference element",
+            String::from_utf8(CHART.to_vec()).unwrap().replace(
+                "<c:f>Data!$B$2:$B$4</c:f>",
+                "<c:junk:f>Data!$B$2:$B$4</c:junk:f>",
+            ),
+        ),
+        (
+            "invalid attribute name",
+            String::from_utf8(CHART.to_vec())
+                .unwrap()
+                .replace(r#"<c:idx val="0"/>"#, r#"<c:idx c:junk:val="0"/>"#),
+        ),
+    ] {
+        let mut parts = charted_package();
+        set_part(&mut parts, "xl/charts/chart1.xml", chart.as_bytes());
+        let package = parse_workbook_with_package(&parts).unwrap().package;
+
+        assert_eq!(
+            package.unpatchable_reference_part(),
+            Some("xl/charts/chart1.xml"),
+            "{label}"
+        );
+        assert!(
+            package.reference_moved_by_rows("Report", 999).is_some(),
+            "{label} was read"
+        );
+    }
+}
+
+/// A `c:f` naming a sheet the workbook does not hold binds to nothing, so the
+/// chart names everything rather than a range some later rename could capture.
+#[test]
+fn refuses_everything_for_a_chart_naming_a_sheet_the_workbook_lost() {
+    let parts = unrebuildable_chart_package(charted_package(), "Gone!$A$2:$B$4");
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert!(parsed.package.reference_naming_sheet("Report").is_some());
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_rows("Report", 999)
+            .is_some()
+    );
+}
+
+/// A chart part no sheet anchors is one this crate has not read the shape of —
+/// it has no owner to resolve an unqualified reference against — so it keeps
+/// the workbook-wide veto.
+#[test]
+fn refuses_everything_for_a_chart_no_sheet_claims() {
+    let mut parts = charted_package();
+    parts.push(("xl/charts/chart2.xml".to_owned(), CHART.to_vec()));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+
+    assert_eq!(
+        parsed.package.reference_naming_sheet("Report"),
+        Some("xl/charts/chart2.xml")
+    );
+    assert!(
+        parsed
+            .package
+            .reference_moved_by_cols("Report", 999)
+            .is_some()
+    );
+}
+
+/// The chart plots `Data` but hangs off the chartsheet, so nothing it names
+/// moves when that chartsheet goes. Dropping it is allowed, and the save takes
+/// the chart's whole part graph with it rather than leaving it behind.
+#[test]
+fn allows_dropping_the_sheet_an_unmodelled_chart_hangs_off() {
+    let mut parts = unrebuildable_chart_package(chartsheet_package(), "Data!$A$2:$B$4");
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#);
+    parts.push((
+        "_rels/.rels".to_owned(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdBook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
+    ));
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let package = &parsed.package;
+
+    assert_eq!(
+        package.unpatchable_reference_part(),
+        Some("xl/charts/chart1.xml")
+    );
+    assert_eq!(package.reference_naming_sheet("Chart"), None);
+    assert_eq!(
+        package.reference_naming_sheet("Data"),
+        Some("xl/charts/chart1.xml")
+    );
+
+    let mut workbook = parsed.workbook.clone();
+    workbook.sheets.remove(1);
+    let saved = crate::serialize_workbook_with_package_and_origins_after_edits(
+        &workbook,
+        package,
+        &[Some(0)],
+        &[SharedStringCells::new()],
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .expect("dropping the anchoring sheet strands nothing the chart names");
+    assert!(
+        !saved.iter().any(|(path, _)| path == "xl/charts/chart1.xml"),
+        "the chart part must not outlive the sheet that anchored it"
     );
 }
 
@@ -2619,6 +4745,17 @@ fn encode_utf16(text: &str, big_endian: bool, bom: bool) -> Vec<u8> {
     out
 }
 
+/// The conforming package metadata the narrowing path requires before it will
+/// read a package's typing or relationships at all.
+const CONFORMING_TYPES: &[u8] = br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>"#;
+
+fn set_or_push_part(parts: &mut Vec<(String, Vec<u8>)>, path: &str, bytes: &[u8]) {
+    match parts.iter_mut().find(|(name, _)| name == path) {
+        Some(slot) => slot.1 = bytes.to_vec(),
+        None => parts.push((path.to_owned(), bytes.to_vec())),
+    }
+}
+
 fn set_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: &[u8]) {
     let slot = parts
         .iter_mut()
@@ -2632,11 +4769,11 @@ fn chartsheet_package() -> Vec<(String, Vec<u8>)> {
     let mut parts = package(r#"<sheetData/>"#, &[], false);
     parts[0] = (
         "xl/workbook.xml".to_owned(),
-        br#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Chart" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
+        br#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" sheetId="1" r:id="rId1"/><sheet name="Chart" sheetId="2" r:id="rId2"/></sheets></workbook>"#.to_vec(),
     );
     parts[1] = (
         "xl/_rels/workbook.xml.rels".to_owned(),
-        br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#.to_vec(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#.to_vec(),
     );
     parts.extend([
         (
@@ -2654,6 +4791,7 @@ fn chartsheet_package() -> Vec<(String, Vec<u8>)> {
         ),
         ("xl/charts/chart1.xml".to_owned(), CHART.to_vec()),
     ]);
+    set_or_push_part(&mut parts, "[Content_Types].xml", CONFORMING_TYPES);
     parts
 }
 
@@ -2662,10 +4800,7 @@ fn chartsheet_package() -> Vec<(String, Vec<u8>)> {
 #[test]
 fn dropping_a_charted_sheet_prunes_its_unreachable_parts() {
     let mut parts = charted_package();
-    parts.push((
-        "[Content_Types].xml".to_owned(),
-        br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#.to_vec(),
-    ));
+    set_or_push_part(&mut parts, "[Content_Types].xml", br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/charts/chart1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>"#);
     parts.push((
         "_rels/.rels".to_owned(),
         br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdBook" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_vec(),
@@ -2845,4 +4980,365 @@ fn refuses_to_patch_a_chart_part_that_no_longer_matches() {
             if message.contains("holds 3 references but the model carries 2")),
         "{error:?}"
     );
+}
+
+/// A workbook holding the cells [`CHART`] and [`imported_chart`] reference.
+fn imported_source() -> Workbook {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    for (a1, text) in [("B1", "Live name"), ("A2", "Spring"), ("A3", "Summer")] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    for (a1, value) in [("B2", 100.0), ("B3", 200.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    Workbook {
+        sheets: vec![sheet],
+        ..Workbook::default()
+    }
+}
+
+/// One imported `c:ser` whose category and value references are the caller's,
+/// with caches that disagree with the cells so a refresh is visible.
+fn imported_chart(categories: &str, values: &str) -> Vec<u8> {
+    format!(
+        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>{categories}</c:f><c:strCache><c:ptCount val="2"/><c:pt idx="0"><c:v>Stale one</c:v></c:pt><c:pt idx="1"><c:v>Stale two</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>{values}</c:f><c:numCache><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt><c:pt idx="1"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+    )
+    .into_bytes()
+}
+
+fn imported_series(part: &[u8], workbook: &Workbook) -> ooxml_drawingml::chart::ChartSeries {
+    crate::chart::preserved_chart_space(part, workbook, "Data", &workbook.styles.theme)
+        .unwrap()
+        .plot_groups[0]
+        .series[0]
+        .clone()
+}
+
+/// An imported chart replayed the cache the file was saved with, so a cell
+/// edit never reached it. Every reference this crate can resolve now comes
+/// from the grid instead.
+#[test]
+fn an_imported_chart_projects_the_cells_its_references_name() {
+    let series = imported_series(
+        &imported_chart("Data!$A$2:$A$3", "Data!$B$2:$B$3"),
+        &imported_source(),
+    );
+    assert_eq!(series.values, vec![100.0, 200.0]);
+    assert_eq!(
+        series.categories,
+        vec!["Spring".to_owned(), "Summer".to_owned()]
+    );
+}
+
+/// A series is the unit a renderer pairs values and categories within, so it
+/// is the unit a projection accepts or declines whole. Refreshing resolvable
+/// categories over authored values would draw live labels against numbers they
+/// never belonged to.
+#[test]
+fn one_unresolvable_reference_declines_its_whole_series() {
+    let series = imported_series(
+        &imported_chart("Data!$A$2:$A$3", "Revenues"),
+        &imported_source(),
+    );
+    assert_eq!(series.values, vec![1.0, 2.0]);
+    assert_eq!(
+        series.categories,
+        vec!["Stale one".to_owned(), "Stale two".to_owned()]
+    );
+}
+
+/// Every reference form this crate cannot resolve keeps the values the file
+/// was authored with, because a wrong number is worse than a stale one.
+#[test]
+fn an_imported_chart_keeps_a_cache_it_cannot_resolve() {
+    let workbook = imported_source();
+    for (values, reason) in [
+        ("(Data!$B$2,Data!$B$3)", "a union"),
+        ("Revenues", "a defined name"),
+        ("[1]Data!$B$2:$B$3", "an external book"),
+        ("Data!$A$2:$B$3", "a two-dimensional area"),
+        ("Elsewhere!$B$2:$B$3", "a sheet this workbook does not hold"),
+        ("Data!$D$2:$D$3", "cells the grid reads as empty"),
+    ] {
+        let series = imported_series(&imported_chart("Data!$A$2:$A$3", values), &workbook);
+        assert_eq!(series.values, vec![1.0, 2.0], "{reason}");
+    }
+}
+
+/// A part whose reference vocabulary is not the one this crate reads declines
+/// live projection whole: the references beside a pivot, external or filtered
+/// source do not mean what a plain `c:f` means.
+#[test]
+fn a_chart_with_a_foreign_reference_vocabulary_is_never_projected() {
+    let workbook = imported_source();
+    for (extra, reason) in [
+        (
+            r#"<c:pivotSource><c:name>P</c:name></c:pivotSource>"#,
+            "a pivot source",
+        ),
+        (
+            r#"<c:externalData xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId9"/>"#,
+            "an external data part",
+        ),
+        (
+            r#"<c:extLst><c:ext><c15:filteredSeriesTitle xmlns:c15="x"><c15:tx><c15:strRef><c15:sqref>A1</c15:sqref></c15:strRef></c15:tx></c15:filteredSeriesTitle></c:ext></c:extLst>"#,
+            "a filtered-series sqref",
+        ),
+    ] {
+        let part = String::from_utf8(imported_chart("Data!$A$2:$A$3", "Data!$B$2:$B$3"))
+            .unwrap()
+            .replace("<c:chart>", &format!("<c:chart>{extra}"));
+        let series = imported_series(part.as_bytes(), &workbook);
+        assert_eq!(series.values, vec![1.0, 2.0], "{reason}");
+        assert_eq!(
+            series.categories,
+            vec!["Stale one".to_owned(), "Stale two".to_owned()],
+            "{reason}"
+        );
+    }
+}
+
+/// Live projection is a render-time concern. The bytes a save writes back must
+/// still be the bytes that were imported.
+#[test]
+fn projecting_an_imported_chart_live_does_not_change_what_a_save_writes() {
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut model = parsed.workbook.clone();
+    for (a1, text) in [("A2", "Live"), ("B1", "Series")] {
+        model.sheets[0].set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    model.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 4242.0 },
+            ..Cell::default()
+        },
+    );
+    let space =
+        crate::chart::preserved_chart_space(CHART, &model, "Data", &model.styles.theme).unwrap();
+    assert_eq!(space.plot_groups[0].series[0].values, vec![4242.0]);
+    assert_eq!(space.plot_groups[0].series[0].categories, vec!["Live"]);
+
+    let saved = serialize_workbook_with_package(&model, &parsed.package).unwrap();
+    let written = saved
+        .iter()
+        .find(|(path, _)| path == "xl/charts/chart1.xml")
+        .map(|(_, bytes)| bytes.as_slice())
+        .unwrap();
+    assert_eq!(written, CHART);
+}
+
+/// A three-point source, so a hole can sit between two live points.
+fn holed_source(middle: CellValue) -> Workbook {
+    let mut sheet = xlsx_model::Sheet::new("Data");
+    for (a1, text) in [("A2", "Q1"), ("A3", "Q2"), ("A4", "Q3")] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Text {
+                    value: text.to_owned(),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    for (a1, value) in [("B2", 12.0), ("B4", 9.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.set_cell(
+        CellRef::parse_a1("B3").unwrap(),
+        Cell {
+            value: middle,
+            ..Cell::default()
+        },
+    );
+    Workbook {
+        sheets: vec![sheet],
+        ..Workbook::default()
+    }
+}
+
+fn three_point_chart() -> Vec<u8> {
+    br#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:cat><c:strRef><c:f>Data!$A$2:$A$4</c:f><c:strCache><c:ptCount val="3"/><c:pt idx="0"><c:v>Q1</c:v></c:pt><c:pt idx="1"><c:v>Q2</c:v></c:pt><c:pt idx="2"><c:v>Q3</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Data!$B$2:$B$4</c:f><c:numCache><c:ptCount val="3"/><c:pt idx="0"><c:v>12</c:v></c:pt><c:pt idx="1"><c:v>7</c:v></c:pt><c:pt idx="2"><c:v>9</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#.to_vec()
+}
+
+/// A hole between two live points must never be projected. The shared cache
+/// parser collects points positionally and ignores `@idx`, so a sparse cache
+/// slides every later point left: the value after the hole would be drawn in
+/// the wrong slot, under the wrong category label.
+#[test]
+fn an_interior_hole_is_never_projected() {
+    for (middle, reason) in [
+        (CellValue::Empty, "a cleared cell"),
+        (
+            CellValue::Text {
+                value: "n/a".to_owned(),
+            },
+            "text where a number was",
+        ),
+        (
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+            "an =NA() result",
+        ),
+    ] {
+        let series = imported_series(&three_point_chart(), &holed_source(middle));
+        assert_eq!(
+            series.values,
+            vec![12.0, 7.0, 9.0],
+            "{reason} must keep the authored cache rather than slide points left"
+        );
+        assert_eq!(
+            series.categories,
+            vec!["Q1".to_owned(), "Q2".to_owned(), "Q3".to_owned()],
+            "{reason}"
+        );
+    }
+}
+
+/// A hole in the categories shifts labels under values the same way, so it
+/// declines too — and it declines the whole series, not just its own cache,
+/// because live labels over authored numbers is a pairing no version of the
+/// file ever had.
+#[test]
+fn an_interior_category_hole_declines_the_whole_series() {
+    let mut workbook = holed_source(CellValue::Number { value: 7.0 });
+    workbook.sheets[0].set_cell(CellRef::parse_a1("A3").unwrap(), Cell::default());
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 4242.0 },
+            ..Cell::default()
+        },
+    );
+    let series = imported_series(&three_point_chart(), &workbook);
+    assert_eq!(series.categories, vec!["Q1", "Q2", "Q3"]);
+    assert_eq!(series.values, vec![12.0, 7.0, 9.0]);
+}
+
+/// A hole after the last live point shifts nothing, so it still projects.
+#[test]
+fn a_trailing_hole_still_projects() {
+    let mut workbook = holed_source(CellValue::Number { value: 7.0 });
+    workbook.sheets[0].set_cell(CellRef::parse_a1("B4").unwrap(), Cell::default());
+    let series = imported_series(&three_point_chart(), &workbook);
+    assert_eq!(series.values, vec![12.0, 7.0]);
+}
+
+/// The save's per-reference cache bound is its own, far larger than the bound a
+/// render projects under, and it is charged per reference rather than across
+/// the part. Narrowing either — which a shared budget would do silently — is
+/// what this pins: a range over the projection bound but under the save bound
+/// must still save, and two such references must both save.
+#[test]
+fn a_save_keeps_its_own_cache_bound_rather_than_the_projections() {
+    let over_projection = crate::MAX_PROJECTED_CACHE_POINTS + 1;
+    assert!(over_projection < crate::chart::MAX_CACHE_POINTS as usize);
+
+    let parsed = parse_workbook_with_package(&charted_package()).unwrap();
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    let wide = format!("Data!$B$2:$B${}", over_projection + 1);
+    refs[1].formula = wide.clone();
+    refs[2].formula = wide;
+    let patched = patch_refs(CHART, &refs).expect("a save carries its own, larger bound");
+    assert!(
+        String::from_utf8_lossy(&patched)
+            .contains(&format!("<c:ptCount val=\"{over_projection}\"/>"))
+    );
+
+    let mut refs = parsed.workbook.sheets[0].charts[0].refs.clone();
+    let each = 4_000;
+    assert!(each * 2 > crate::MAX_PROJECTED_CACHE_POINTS);
+    refs[1].formula = format!("Data!$A$2:$A${}", each + 1);
+    refs[2].formula = format!("Data!$B$2:$B${}", each + 1);
+    patch_refs(CHART, &refs).expect("the save bound is charged per reference, not across the part");
+}
+
+/// Sparse cell runs, height-only rows and the stream boundaries must serialize
+/// as one ascending `sheetData` pass with byte-stable output.
+#[test]
+fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
+    let mut wb = Workbook::default();
+    let mut sheet = xlsx_model::Sheet::new("Sheet1");
+    for (a1, v) in [("A1", 7.5), ("B5", 1.0), ("C100", 42.0)] {
+        sheet.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: CellValue::Number { value: v },
+                ..Cell::default()
+            },
+        );
+    }
+    sheet.row_heights.insert(0, 20.0);
+    sheet.row_heights.insert(2, 15.0);
+    sheet.row_heights.insert(119, 0.0);
+    wb.sheets.push(sheet);
+
+    let parts = serialize_workbook(&wb).unwrap();
+    let written = String::from_utf8(part_bytes(&parts, "xl/worksheets/sheet1.xml")).unwrap();
+
+    let expected = concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">"#,
+        r#"<sheetData>"#,
+        r#"<row r="1" ht="20" customHeight="1"><c r="A1"><v>7.5</v></c></row>"#,
+        r#"<row r="3" ht="15" customHeight="1"></row>"#,
+        r#"<row r="5"><c r="B5"><v>1</v></c></row>"#,
+        r#"<row r="100"><c r="C100"><v>42</v></c></row>"#,
+        r#"<row r="120" ht="0" customHeight="1" hidden="1"></row>"#,
+        r#"</sheetData></worksheet>"#,
+    );
+    assert_eq!(written, expected);
+
+    let reparsed = parse_workbook(&parts).unwrap();
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("A1").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 7.5 })
+    );
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("B5").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 1.0 })
+    );
+    assert_eq!(
+        reparsed.sheets[0]
+            .cell(CellRef::parse_a1("C100").unwrap())
+            .map(|c| c.value.clone()),
+        Some(CellValue::Number { value: 42.0 })
+    );
+    assert_eq!(reparsed.sheets[0].row_heights.get(&0), Some(&20.0));
+    assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
+    assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
 }

@@ -69,6 +69,8 @@ export type { Comment, CommentRangeStart, CommentRangeEnd } from './content/comm
 
 export type { MathEquation } from './content/math';
 
+export type { RawXml } from './content/rawXml';
+
 export type {
   TrackedChangeInfo,
   PropertyChangeInfo,

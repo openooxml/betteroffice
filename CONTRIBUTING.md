@@ -9,6 +9,8 @@ Thanks for your interest in contributing! This guide will help you get started.
 - `wasm32-unknown-unknown` (`rustup target add wasm32-unknown-unknown`)
 - [`wasm-pack`](https://rustwasm.github.io/wasm-pack/) 0.15.0
   (`cargo install wasm-pack --version 0.15.0 --locked`)
+- [`binaryen`](https://github.com/WebAssembly/binaryen) for `wasm-opt`
+  (`brew install binaryen` / `apt-get install binaryen`)
 
 ## Development Setup
 

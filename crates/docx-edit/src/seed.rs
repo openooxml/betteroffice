@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -456,20 +456,24 @@ fn any_from_value(value: Value) -> Result<Any, String> {
             .collect::<Result<Vec<_>, _>>()
             .map(Arc::from)
             .map(Any::Array),
-        Value::Object(values) => values
-            .into_iter()
-            .map(|(key, value)| Ok((key, any_from_value(value)?)))
-            .collect::<Result<HashMap<_, _>, _>>()
-            .map(Arc::new)
-            .map(Any::Map),
+        Value::Object(values) => {
+            let mut entries = values
+                .into_iter()
+                .map(|(key, value)| Ok((key, any_from_value(value)?)))
+                .collect::<Result<Vec<_>, String>>()?;
+            entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+            Ok(Any::Map(Arc::new(entries.into_iter().collect())))
+        }
     }
 }
 
 fn yrs_attrs(values: JsonObject) -> Result<Attrs, String> {
-    values
+    let mut entries = values
         .into_iter()
         .map(|(key, value)| Ok((Arc::<str>::from(key), any_from_value(value)?)))
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    entries.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries.into_iter().collect())
 }
 
 fn payload(values: JsonObject) -> Result<Vec<(String, Any)>, String> {
@@ -1213,7 +1217,7 @@ fn note_ref_unit(
         }),
         &all_marks,
         comment_id,
-        utf16_len(&js_string(id)),
+        1,
     )
 }
 
@@ -1387,6 +1391,82 @@ fn hyperlink_to_units(
             _ => {}
         }
     }
+    units
+}
+
+fn field_to_units(
+    value: &Value,
+    style_formatting: Option<&Value>,
+    styles: &StyleResolver,
+    source: &BTreeMap<String, String>,
+    projection_id: usize,
+) -> Vec<InlineUnit> {
+    let result = array(field(field(Some(value), "structuredResult"), "inline"));
+    let code = array(field(field(Some(value), "structuredCode"), "inline"));
+    let projected_children: Vec<_> = code
+        .iter()
+        .enumerate()
+        .map(|(index, child)| (-(index as isize) - 1, child))
+        .chain(
+            result
+                .iter()
+                .enumerate()
+                .map(|(index, child)| (index as isize, child)),
+        )
+        .collect();
+    if string(field(Some(value), "type")) != Some("complexField")
+        || !projected_children.iter().any(|(_, child)| {
+            matches!(
+                string(field(Some(child), "type")),
+                Some("hyperlink" | "simpleField")
+            )
+        })
+    {
+        let (payload, marks) = field_payload(value, style_formatting, source);
+        return vec![embed_unit("field", payload, &marks, None, 1)];
+    }
+    let mut units = Vec::new();
+    let mut children = Vec::new();
+    for (index, child) in projected_children {
+        let mut projected = match string(field(Some(child), "type")) {
+            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("simpleField") => {
+                let (payload, marks) = field_payload(child, style_formatting, source);
+                vec![embed_unit("field", payload, &marks, None, 1)]
+            }
+            _ => continue,
+        };
+        let items: Vec<Value> = projected.iter().map(|unit| match &unit.content {
+            UnitContent::Text(text) => json!({"kind":"text", "text":text, "attributes":unit.attrs}),
+            UnitContent::Embed {kind, payload} => json!({"kind":"embed", "embedKind":kind, "payload":payload, "attributes":unit.attrs}),
+        }).collect();
+        children.push(json!({"index":index, "items":items}));
+        for unit in &mut projected {
+            unit.attrs.insert(
+                "fieldResult".to_owned(),
+                json!({"id":projection_id, "index":index}),
+            );
+        }
+        units.extend(projected);
+    }
+    let mut visible = value.clone();
+    visible["fieldResult"] = Value::Array(
+        result
+            .iter()
+            .filter(|child| string(field(Some(child), "type")) == Some("run"))
+            .cloned()
+            .collect(),
+    );
+    let (mut payload, marks) = field_payload(&visible, style_formatting, source);
+    payload.insert(
+        "fieldData".to_owned(),
+        Value::String(source_json(value, source)),
+    );
+    payload.insert(
+        "resultProjection".to_owned(),
+        json!({"id":projection_id, "children":children}),
+    );
+    units.push(embed_unit("field", payload, &marks, None, 1));
     units
 }
 
@@ -1566,6 +1646,21 @@ fn paragraph_style_formatting(
     merge_text_formatting(style.as_ref(), extra)
 }
 
+/// Note number marks carry no story unit, so the run boundary cache is the only
+/// place a saved paragraph can learn they were there.
+fn note_ref_mark_types(run: &Value) -> Vec<Value> {
+    array(field(Some(run), "content"))
+        .iter()
+        .filter_map(
+            |content| match string(field(Some(content), "type")).unwrap_or_default() {
+                "footnoteRefMark" => Some(Value::String("footnote".to_owned())),
+                "endnoteRefMark" => Some(Value::String("endnote".to_owned())),
+                _ => None,
+            },
+        )
+        .collect()
+}
+
 fn run_boundary(
     run: &Value,
     style_formatting: Option<&Value>,
@@ -1597,8 +1692,12 @@ fn run_boundary(
                 .unwrap_or_default(),
         })
         .collect::<String>();
+    let note_marks = note_ref_mark_types(run);
     let mut boundary = Map::new();
     boundary.insert("text".to_owned(), Value::String(text));
+    if !note_marks.is_empty() {
+        boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
+    }
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
     }
@@ -1628,6 +1727,16 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
+    let direct_first =
+        field(formatting, "indentFirstLine").filter(|value| number(Some(value)) != Some(0.0));
+    let first_line = direct_first
+        .or_else(|| field(list, "indentFirstLine"))
+        .or_else(|| field(formatting, "indentFirstLine"));
+    let hanging = if direct_first.is_none() && field(list, "indentFirstLine").is_some() {
+        field(list, "hangingIndent")
+    } else {
+        field(formatting, "hangingIndent").or_else(|| field(list, "hangingIndent"))
+    };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
         "textId": nullish(field(Some(paragraph), "textId")),
@@ -1655,7 +1764,6 @@ fn paragraph_attrs(
             "spaceAfter",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
             "borders",
             "shading",
@@ -1663,6 +1771,7 @@ fn paragraph_attrs(
             "pageBreakBefore",
             "keepNext",
             "keepLines",
+            "widowControl",
             "contextualSpacing",
             "outlineLevel",
             "bidi",
@@ -1686,8 +1795,16 @@ fn paragraph_attrs(
             && field(style_ppr_ref, "numPr").is_some()
             && number(field(field(style_ppr_ref, "numPr"), "numId")) != Some(0.0);
         attrs.insert(
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(list, "indentLeft"))
+                .or_else(|| field(style_ppr_ref, "indentLeft"))
+                .cloned()
+                .unwrap_or(Value::Null),
+        );
+        attrs.insert(
             "indentFirstLine".to_owned(),
-            field(formatting, "indentFirstLine")
+            first_line
                 .or_else(|| {
                     (!numbering_removed)
                         .then(|| field(style_ppr_ref, "indentFirstLine"))
@@ -1698,7 +1815,7 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
+            hanging
                 .or_else(|| {
                     (!numbering_removed)
                         .then(|| field(style_ppr_ref, "hangingIndent"))
@@ -1735,15 +1852,14 @@ fn paragraph_attrs(
             "spaceAfter",
             "lineSpacing",
             "lineSpacingRule",
-            "indentLeft",
             "indentRight",
-            "indentFirstLine",
             "borders",
             "shading",
             "tabs",
             "pageBreakBefore",
             "keepNext",
             "keepLines",
+            "widowControl",
             "outlineLevel",
             "bidi",
         ] {
@@ -1760,10 +1876,19 @@ fn paragraph_attrs(
                 .unwrap_or(Value::Null),
         );
         attrs.insert(
-            "hangingIndent".to_owned(),
-            field(formatting, "hangingIndent")
+            "indentLeft".to_owned(),
+            field(formatting, "indentLeft")
+                .or_else(|| field(list, "indentLeft"))
                 .cloned()
-                .unwrap_or(Value::Bool(false)),
+                .unwrap_or(Value::Null),
+        );
+        attrs.insert(
+            "indentFirstLine".to_owned(),
+            first_line.cloned().unwrap_or(Value::Null),
+        );
+        attrs.insert(
+            "hangingIndent".to_owned(),
+            hanging.cloned().unwrap_or(Value::Bool(false)),
         );
         attrs.insert(
             "defaultTextFormatting".to_owned(),
@@ -1774,7 +1899,7 @@ fn paragraph_attrs(
     }
     if let Some(section) = field(Some(paragraph), "sectionProperties") {
         attrs.insert("_sectionProperties".to_owned(), section.clone());
-        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage")) =
+        if let Some(start @ ("nextPage" | "continuous" | "oddPage" | "evenPage" | "nextColumn")) =
             string(field(Some(section), "sectionStart"))
         {
             attrs.insert(
@@ -1937,8 +2062,13 @@ fn paragraph_units(
             }
             "simpleField" | "complexField" => {
                 boundaries = None;
-                let (payload, marks) = field_payload(content, style_formatting.as_ref(), source);
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.extend(field_to_units(
+                    content,
+                    style_formatting.as_ref(),
+                    styles,
+                    source,
+                    unit_counts.len(),
+                ));
             }
             "inlineSdt" => {
                 boundaries = None;
@@ -1964,7 +2094,7 @@ fn paragraph_units(
                 boundaries = None;
                 units.push(embed_unit("math", math_payload(content), &[], None, 1));
             }
-            "bookmarkStart" | "bookmarkEnd" => {}
+            "bookmarkStart" | "bookmarkEnd" | "rawXml" => {}
             _ => boundaries = None,
         }
         unit_counts.push(units.len() - start);
@@ -2183,6 +2313,22 @@ fn revision_attrs(info: &Value) -> Value {
     })
 }
 
+/// Maps each physical cell edge to the border side that feeds it: the matching
+/// outer side where the cell sits on the boundary, `insideH`/`insideV` within.
+pub(crate) fn border_side_sources(
+    first_row: bool,
+    last_row: bool,
+    first_column: bool,
+    last_column: bool,
+) -> [(&'static str, &'static str); 4] {
+    [
+        ("top", if first_row { "top" } else { "insideH" }),
+        ("bottom", if last_row { "bottom" } else { "insideH" }),
+        ("left", if first_column { "left" } else { "insideV" }),
+        ("right", if last_column { "right" } else { "insideV" }),
+    ]
+}
+
 fn cell_borders(
     formatting: Option<&Value>,
     table_borders: Option<&Value>,
@@ -2192,12 +2338,12 @@ fn cell_borders(
     last_column: bool,
 ) -> Option<Value> {
     let inherited = object(table_borders).map(|borders| {
-        json!({
-            "top": nullish(if first_row { borders.get("top") } else { borders.get("insideH") }),
-            "bottom": nullish(if last_row { borders.get("bottom") } else { borders.get("insideH") }),
-            "left": nullish(if first_column { borders.get("left") } else { borders.get("insideV") }),
-            "right": nullish(if last_column { borders.get("right") } else { borders.get("insideV") })
-        })
+        Value::Object(
+            border_side_sources(first_row, last_row, first_column, last_column)
+                .into_iter()
+                .map(|(edge, source)| (edge.to_owned(), nullish(borders.get(source))))
+                .collect(),
+        )
     });
     let direct = field(formatting, "borders");
     if inherited.is_none() && direct.is_none() {
@@ -2726,6 +2872,7 @@ fn visit_story(
                 }
                 last_kind = Some("table");
             }
+            "rawXml" => continue,
             _ => {
                 let current_sdt = sdt_index;
                 sdt_index += 1;
@@ -3059,6 +3206,156 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn complex_field_results_keep_hyperlink_units_and_style() {
+        let link = json!({"type":"hyperlink","anchor":"_Toc1","children":[{"type":"run","formatting":{"styleId":"Hyperlink"},"content":[{"type":"text","text":"Heading"}]}]});
+        let value = json!({"type":"complexField","fieldType":"TOC","instruction":"TOC", "fieldCode":[], "fieldResult":link["children"], "structuredResult":{"inline":[link, {"type":"simpleField","fieldType":"PAGE","instruction":" PAGE ","content":[{"type":"run","content":[{"type":"text","text":"1"}]}]}]}});
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"type":"character","styleId":"Hyperlink","rPr":{"color":{"rgb":"0563C1"}}}]}),
+        ));
+        let (units, _) =
+            paragraph_units(&json!({"content":[value]}), &styles, None, &BTreeMap::new());
+        assert!(matches!(&units[0].content, UnitContent::Text(text) if text == "Heading"));
+        assert_eq!(units[0].attrs["hyperlink"]["href"], json!("#_Toc1"));
+        assert_eq!(units[0].attrs["textColor"]["rgb"], json!("0563C1"));
+        let UnitContent::Embed {
+            payload: nested, ..
+        } = &units[1].content
+        else {
+            panic!("missing nested field")
+        };
+        assert_eq!(nested["fieldType"], json!("PAGE"));
+        let UnitContent::Embed { payload, .. } = &units[2].content else {
+            panic!("missing field")
+        };
+        assert_eq!(payload["displayText"], json!(""));
+        assert!(
+            payload["fieldData"]
+                .as_str()
+                .unwrap()
+                .contains("structuredResult")
+        );
+    }
+
+    #[test]
+    fn comprehensive_native_layout_accepts_authored_page_number_start() {
+        let bytes = include_bytes!(
+            "../../betteroffice-docx/tests/corpus/fixtures/wordprocessingml-comprehensive.docx"
+        );
+        let parsed =
+            docx_parse::parse_docx_s9_wire(bytes, docx_parse::S9ParseOptions::default()).unwrap();
+        let package = parsed.document.package;
+        let mut sections: Vec<Value> = package
+            .document
+            .sections
+            .unwrap()
+            .into_iter()
+            .map(|section| json!({"properties":section.properties}))
+            .collect();
+        assert!(
+            sections.iter().any(
+                |section| section["properties"]["pageNumbering"]["start"].as_f64() == Some(1.0)
+            )
+        );
+        sections.push(json!({"properties":package.document.final_section_properties}));
+        let request = json!({"bodyStory":"body", "options":{"pageGap":24}, "regions":{"sections":sections, "settings":package.settings}, "renderEnv":{}}).to_string();
+        let engine = crate::EngineSession::new(74003);
+        seed_from_docx(engine.doc(), bytes).unwrap();
+        engine.layout_font_requirements_json(&request).unwrap();
+        let layout: Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        assert!(!layout["layout"]["pages"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn raw_blocks_seed_no_content_control_or_child_story() {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            &[
+                json!({"type":"paragraph","content":[]}),
+                json!({"type":"rawXml","xml":"<x:block/>"}),
+                json!({"type":"paragraph","content":[]}),
+            ],
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: true,
+                seed_comments: true,
+            },
+        );
+        assert_eq!(context.plans.len(), 1);
+        assert_eq!(context.plans[0].units.len(), 2);
+        assert!(context.plans[0].units.iter().all(
+            |unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind == "pilcrow")
+        ));
+    }
+
+    #[test]
+    fn raw_inline_nodes_leave_run_boundaries_intact() {
+        let (_, properties) = paragraph_units(
+            &json!({"content":[
+                {"type":"run","content":[{"type":"text","text":"A"}]},
+                {"type":"rawXml","xml":"<x:mark/>"},
+                {"type":"run","content":[{"type":"text","text":"B"}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(
+            properties["_originalRunBoundaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn numbering_indents_precede_styles_and_ignore_zero_first_line() {
+        let style_data = json!({"styles":[{"styleId":"List","type":"paragraph","pPr":{"indentLeft":720,"indentFirstLine":180,"hangingIndent":false}}]});
+        for styles in [
+            StyleResolver::new(Some(&style_data)),
+            StyleResolver::new(None),
+        ] {
+            for direct in [
+                json!({}),
+                json!({"indentFirstLine":0}),
+                json!({"indentFirstLine":0,"hangingIndent":true}),
+            ] {
+                let mut formatting = direct;
+                formatting["styleId"] = json!("List");
+                let properties = paragraph_attrs(
+                    &json!({"formatting":formatting,"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                    &styles,
+                    &[],
+                    &[],
+                    None,
+                );
+                assert_eq!(properties["indentLeft"], json!(1440));
+                assert_eq!(properties["indentFirstLine"], json!(-360));
+                assert_eq!(properties["hangingIndent"], json!(true));
+            }
+            let properties = paragraph_attrs(
+                &json!({"formatting":{"styleId":"List","indentLeft":0,"indentFirstLine":240,"hangingIndent":false},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+                &styles,
+                &[],
+                &[],
+                None,
+            );
+            assert_eq!(properties["indentLeft"], json!(0));
+            assert_eq!(properties["indentFirstLine"], json!(240));
+            assert_eq!(properties["hangingIndent"], json!(false));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -3073,5 +3370,110 @@ mod tests {
             source_json(&value, &source),
             r#"{"type":"shape","z":1,"nested":{"b":2,"a":3}}"#
         );
+    }
+
+    fn widow_control_styles() -> Value {
+        // Style chains are already merged: Body carries Normal's authored off,
+        // while docDefaults sits under a style that leaves the toggle absent.
+        json!({
+            "docDefaults": { "pPr": { "widowControl": false } },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "widowControl": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "widowControl": true } }
+            ]
+        })
+    }
+
+    fn seeded_widow_control(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("widowControl")
+        .cloned()
+    }
+
+    #[test]
+    fn widow_control_is_seeded_from_doc_defaults_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&widow_control_styles()));
+
+        assert_eq!(
+            seeded_widow_control(&styles, json!({})),
+            Some(Value::Bool(false)),
+            "docDefaults reaches a paragraph whose style is silent"
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_widow_control(&styles, json!({ "styleId": "Body", "widowControl": true })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_widow_control(
+                &styles,
+                json!({ "styleId": "Quote", "widowControl": false })
+            ),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
+    }
+
+    #[test]
+    fn note_ref_marks_seed_no_story_unit_and_land_in_the_run_boundary() {
+        let styles = StyleResolver::new(None);
+        for (content_type, note_type) in [
+            ("footnoteRefMark", "footnote"),
+            ("endnoteRefMark", "endnote"),
+        ] {
+            let run = json!({
+                "type": "run",
+                "formatting": { "styleId": "FootnoteReference" },
+                "content": [{ "type": content_type }, { "type": content_type }],
+            });
+            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
+            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            assert_eq!(
+                boundary.get("noteMarks"),
+                Some(&json!([note_type, note_type]))
+            );
+            assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
+        }
+    }
+
+    #[test]
+    fn multi_digit_note_references_seed_one_position() {
+        let styles = StyleResolver::new(None);
+        let units = run_to_units(
+            &json!({
+                "type": "run",
+                "content": [{ "type": "footnoteRef", "id": 12 }],
+            }),
+            None,
+            &styles,
+            None,
+            &[],
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].pm_size, 1);
+    }
+
+    #[test]
+    fn widow_control_left_unauthored_anywhere_seeds_null() {
+        let styles = StyleResolver::new(Some(&json!({
+            "styles": [{ "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} }]
+        })));
+
+        assert_eq!(seeded_widow_control(&styles, json!({})), Some(Value::Null));
     }
 }
