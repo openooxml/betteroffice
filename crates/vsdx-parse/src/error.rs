@@ -8,8 +8,8 @@ pub enum VsdxError {
     MissingPart(String),
     #[error("unsupported VSDX document kind {0:?}")]
     UnsupportedDocumentKind(ooxml_opc::DocumentKind),
-    #[error("conflicting document kinds: {0:?}")]
-    ConflictingDocumentKinds(Vec<ooxml_opc::DocumentKind>),
+    #[error("conflicting main document relationships: {0:?}")]
+    ConflictingMainDocumentRelationships(Vec<String>),
     #[error("malformed XML in {part} at byte {offset}: {message}")]
     MalformedXml {
         part: String,
