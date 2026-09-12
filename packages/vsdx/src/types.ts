@@ -21,7 +21,7 @@ export interface PositionedLine { x: number; y: number; width: number; height: n
 interface PrimitiveBase { id: string; zOrder: number; }
 export interface ShapePrimitive extends PrimitiveBase { kind: 'shape'; path: GeometryPathCommand[]; fill?: Paint; stroke?: Stroke; transform?: Affine; }
 export interface ImagePrimitive extends PrimitiveBase { kind: 'image'; assetId: string; x: number; y: number; width: number; height: number; transform?: Affine; }
-export interface TextBoxPrimitive extends PrimitiveBase { kind: 'textBox'; x: number; y: number; width: number; height: number; paragraphs: TextParagraph[]; lines: PositionedLine[]; }
+export interface TextBoxPrimitive extends PrimitiveBase { kind: 'textBox'; x: number; y: number; width: number; height: number; paragraphs: TextParagraph[]; lines: PositionedLine[]; transform?: Affine; }
 export interface PlaceholderPrimitive extends PrimitiveBase { kind: 'placeholder'; x: number; y: number; width: number; height: number; reason: string; }
 export interface GroupPrimitive extends PrimitiveBase { kind: 'group'; primitives: PagePrimitive[]; transform?: Affine; }
 export type PagePrimitive = ShapePrimitive | ImagePrimitive | TextBoxPrimitive | PlaceholderPrimitive | GroupPrimitive;

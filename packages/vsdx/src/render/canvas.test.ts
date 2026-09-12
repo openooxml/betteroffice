@@ -54,3 +54,19 @@ test('replays positioned text runs at their line caret positions', async () => {
   await paintPage(context(log), list);
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
 });
+
+test('paints a rotated text box through its own transform', async () => {
+  const log: string[] = [];
+  const rotated = { a: 0, b: 1, c: -1, d: 0, e: 10, f: 20 };
+  const list: PageDisplayList = {
+    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
+    primitives: [{
+      kind: 'textBox', id: 'text', zOrder: 1, x: 0, y: 0, width: 50, height: 20, transform: rotated,
+      paragraphs: [{ runs: [{ text: 'turn', family: 'Arial', sizeIn: 12, bold: false, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#111', diagnostics: [] }] }],
+      lines: [{ x: 0, y: 10, width: 30, height: 12, start: 0, end: 4, caretStops: [{ position: 0, x: 0, y: 10 }, { position: 4, x: 30, y: 10 }] }],
+    }],
+  };
+  await paintPage(context(log), list);
+  expect(log).toContain('transform:0,1,-1,0,10,20');
+  expect(log).toContain('fillText:turn,0,10');
+});
