@@ -1,5 +1,25 @@
 # @betteroffice/docx-react
 
+## 0.2.0
+
+### Patch Changes
+
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+- Updated dependencies [b351bbe]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [2c658b6]
+- Updated dependencies [43fad65]
+- Updated dependencies [1d830df]
+- Updated dependencies [6f0e36d]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [1d0f41d]
+- Updated dependencies [c9b72bf]
+  - @betteroffice/docx@0.2.0
+  - @betteroffice/docx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

@@ -1,5 +1,13 @@
 # @betteroffice/python-xlsx
 
+## 0.0.3
+
+### Patch Changes
+
+- 5798031: Load Excel shared formulas with correct absolute and relative references for
+  recalculation and round-trip saves.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(...,S:V,...)`.
+
 ## 0.0.2
 
 ### Patch Changes

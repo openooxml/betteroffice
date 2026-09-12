@@ -1,5 +1,82 @@
 # @betteroffice/demo
 
+## 0.0.9
+
+### Patch Changes
+
+- Updated dependencies [b351bbe]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [2c658b6]
+- Updated dependencies [43fad65]
+- Updated dependencies [1d830df]
+- Updated dependencies [6f0e36d]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [1d0f41d]
+- Updated dependencies [fb06233]
+- Updated dependencies [cae162d]
+- Updated dependencies [6ae0b92]
+- Updated dependencies [010865c]
+- Updated dependencies [2877aba]
+- Updated dependencies [1f30ea0]
+- Updated dependencies [abb1e2c]
+- Updated dependencies [899aac5]
+- Updated dependencies [c4985a8]
+- Updated dependencies [bfc3231]
+- Updated dependencies [89a2134]
+- Updated dependencies [d2aaf9c]
+- Updated dependencies [c9b72bf]
+- Updated dependencies [d6e6e91]
+- Updated dependencies [bc34dfc]
+- Updated dependencies [0c9b52e]
+- Updated dependencies [69167fe]
+- Updated dependencies [413499c]
+- Updated dependencies [2044df7]
+- Updated dependencies [8b48e8d]
+- Updated dependencies [54fdaa0]
+- Updated dependencies [cca2618]
+- Updated dependencies [2b639b9]
+- Updated dependencies [2c90c17]
+- Updated dependencies [a61781d]
+- Updated dependencies [25c7ea3]
+- Updated dependencies [22ce4e9]
+- Updated dependencies [bf84789]
+- Updated dependencies [3d95068]
+- Updated dependencies [088d177]
+- Updated dependencies [875d556]
+- Updated dependencies [70e7394]
+- Updated dependencies [acab663]
+- Updated dependencies [0824bff]
+- Updated dependencies [069e4d6]
+- Updated dependencies [1e86217]
+- Updated dependencies [89f8f7b]
+- Updated dependencies [f5d9fd9]
+- Updated dependencies [e5c4521]
+- Updated dependencies [387f239]
+- Updated dependencies [9274a2b]
+- Updated dependencies [25d4ee4]
+- Updated dependencies [7fdc0ee]
+- Updated dependencies [60113a3]
+- Updated dependencies [253d680]
+- Updated dependencies [a139ae9]
+- Updated dependencies [051830e]
+- Updated dependencies [07d72ce]
+- Updated dependencies [1af946f]
+- Updated dependencies [a3b2acd]
+- Updated dependencies [2710a41]
+- Updated dependencies [bbd80c5]
+- Updated dependencies [5798031]
+- Updated dependencies [13016f2]
+  - @betteroffice/docx@0.2.0
+  - @betteroffice/fonts@0.2.0
+  - @betteroffice/docx-react@0.2.0
+  - @betteroffice/xlsx@0.2.0
+  - @betteroffice/pptx@0.1.0
+  - @betteroffice/pptx-react@0.1.0
+  - @betteroffice/xlsx-react@0.2.0
+  - @betteroffice/fonts-cjk@0.2.0
+
 ## 0.0.8
 
 ### Patch Changes
