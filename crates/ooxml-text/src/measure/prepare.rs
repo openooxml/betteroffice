@@ -106,10 +106,7 @@ pub(super) struct PreparedField {
     pub bidi_level: u8,
 }
 
-/// Image footprint. Inline placement fits `height` to the column and adds
-/// `width` to the line advance; own-line placement takes `height` as
-/// authored and adds no width. `dist_top`/`dist_bottom` join the footprint
-/// either way.
+/// Image dimensions and wrap distances.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreparedImage {
     pub width: f32,

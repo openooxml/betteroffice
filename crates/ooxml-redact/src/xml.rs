@@ -511,6 +511,10 @@ fn sensitive_attribute(
         }
         Format::Pptx => {
             element == "cSld" && attribute == "name"
+                || element == "sldLayout" && attribute == "matchingName"
+                || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
+                    && attribute == "name"
+                || element == "tblStyle" && attribute == "styleName"
                 || element == "cmAuthor" && matches!(attribute, "name" | "initials")
                 || element == "author" && matches!(attribute, "name" | "initials" | "userId")
                 || element == "tag" && matches!(attribute, "name" | "val")

@@ -109,7 +109,7 @@ pub fn redact_with_report(
         .filter(|name| !media::is_replaceable_part(name) && !is_xml_part(name))
         .collect();
     report.binary_parts = scrubbed.len();
-    if detected == Format::Docx {
+    if matches!(detected, Format::Docx | Format::Pptx) {
         fonts::detach_scrubbed_fonts(&mut parts, &scrubbed)?;
     }
     let blanked = if scrubbed.is_empty() {

@@ -82,8 +82,10 @@ pub fn bounds_affine(
         .map(|(x, y, width, height)| (x, y, bounds.width / width, bounds.height / height))
         .unwrap_or((0.0, 0.0, 1.0, 1.0));
     let (sin, cos) = bounds.angle.sin_cos();
-    let sx = scale_x * if bounds.flip_x { -1.0 } else { 1.0 };
-    let sy = scale_y * if bounds.flip_y { -1.0 } else { 1.0 };
+    let flip_x = if bounds.flip_x { -1.0 } else { 1.0 };
+    let flip_y = if bounds.flip_y { -1.0 } else { 1.0 };
+    let sx = scale_x * flip_x;
+    let sy = scale_y * flip_y;
     let pin_x = bounds.x + bounds.loc_pin_x;
     let pin_y = bounds.y + bounds.loc_pin_y;
     SceneAffine {
@@ -91,11 +93,11 @@ pub fn bounds_affine(
         b: sin * sx,
         c: -sin * sy,
         d: cos * sy,
-        e: pin_x - cos * sx * (bounds.loc_pin_x + origin_x)
-            + sin * sy * (bounds.loc_pin_y + origin_y),
+        e: pin_x - cos * (sx * origin_x + flip_x * bounds.loc_pin_x)
+            + sin * (sy * origin_y + flip_y * bounds.loc_pin_y),
         f: pin_y
-            - sin * sx * (bounds.loc_pin_x + origin_x)
-            - cos * sy * (bounds.loc_pin_y + origin_y),
+            - sin * (sx * origin_x + flip_x * bounds.loc_pin_x)
+            - cos * (sy * origin_y + flip_y * bounds.loc_pin_y),
     }
 }
 

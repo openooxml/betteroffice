@@ -1,4 +1,4 @@
-import { beforeAll, expect, test } from 'bun:test';
+import { afterEach, beforeAll, expect, test } from 'bun:test';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
@@ -40,12 +40,15 @@ mock.module('@betteroffice/vsdx', () => ({
 const { VsdxEditor } = await import('./VsdxEditor');
 const { useState } = await import('react');
 
+afterEach(() => { cleanup(); paintPageOverride = null; });
+
 test('does not reopen for inline fonts and a state-setting onReady callback', async () => {
   let ready: { handle: DiagramHandle } | undefined;
   opens = 0;
   disposals = 0;
-  const getContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'measureText' ? () => ({ width: 0 }) : () => {}, set: () => true }) as never;
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'measureText' ? () => ({ width: 0 }) : () => {}, set: () => true }) as never;
   function Host() {
     const [, setApi] = useState<unknown>();
     const [, setChanges] = useState(0);
@@ -58,12 +61,13 @@ test('does not reopen for inline fonts and a state-setting onReady callback', as
   expect(opens).toBe(1);
   cleanup();
   await waitFor(() => expect(disposals).toBe(1));
-  HTMLCanvasElement.prototype.getContext = getContext;
+  canvasPrototype.getContext = getContext;
 });
 
 test('a parent re-rendering with a new inline onChange does not reopen the document', async () => {
-  const getContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   opens = 0;
   disposals = 0;
   let ready: { handle: DiagramHandle } | undefined;
@@ -81,12 +85,13 @@ test('a parent re-rendering with a new inline onChange does not reopen the docum
   expect(opens).toBe(1);
   expect(disposals).toBe(0);
   cleanup();
-  HTMLCanvasElement.prototype.getContext = getContext;
+  canvasPrototype.getContext = getContext;
 });
 
 test('attaches collaboration that arrives after the file opens', async () => {
-  const getContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   let connected = false;
   let replicas = 0;
   const view = render(<VsdxEditor file={foundation} fonts={[]} />);
@@ -95,15 +100,16 @@ test('attaches collaboration that arrives after the file opens', async () => {
   await waitFor(() => expect(replicas).toBe(1));
   expect(connected).toBe(true);
   cleanup();
-  HTMLCanvasElement.prototype.getContext = getContext;
+  canvasPrototype.getContext = getContext;
 });
 
 test('attaches collaboration that arrives while initialization is pending', async () => {
-  const getContext = HTMLCanvasElement.prototype.getContext;
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
   const originalFontFace = globalThis.FontFace;
   const originalFonts = document.fonts;
   let finishFontLoad: (() => void) | undefined;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   class DeferredFontFace {
     constructor(_family: string, _source: ArrayBuffer, _descriptors: FontFaceDescriptors) {}
     load() { return new Promise<FontFace>((resolve) => { finishFontLoad = () => resolve(this as unknown as FontFace); }); }
@@ -120,17 +126,26 @@ test('attaches collaboration that arrives while initialization is pending', asyn
   cleanup();
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: originalFontFace });
   Object.defineProperty(document, 'fonts', { configurable: true, value: originalFonts });
-  HTMLCanvasElement.prototype.getContext = getContext;
+  canvasPrototype.getContext = getContext;
 });
 
 test('a stale paint does not resolve images after a newer paint has taken over', async () => {
-  const getContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   opens = 0;
   disposals = 0;
   const mediaBytesCalls: string[] = [];
   let call = 0;
   const pending: Array<{ resolve: () => void; reject: (error: Error) => void; index: number }> = [];
+  let refreshApi: (() => void) | undefined;
+  const onErrors: unknown[] = [];
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => {
+    refreshApi = api.refresh;
+    api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
+  }} onError={(error) => { onErrors.push(error); }} />);
+  await waitFor(() => expect(refreshApi).toBeDefined());
+  view.container.querySelector('canvas')!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   paintPageOverride = (_context, _list, _dpr, _scale, options) => {
     const index = call++;
     return new Promise<void>((resolve, reject) => {
@@ -141,12 +156,7 @@ test('a stale paint does not resolve images after a newer paint has taken over',
       };
     });
   };
-  let refreshApi: (() => void) | undefined;
-  const onErrors: unknown[] = [];
-  render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => {
-    refreshApi = api.refresh;
-    api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
-  }} onError={(error) => { onErrors.push(error); }} />);
+  act(() => { refreshApi!(); });
   await waitFor(() => expect(call).toBe(1));
   act(() => { refreshApi!(); });
   await waitFor(() => expect(call).toBe(2));
@@ -158,6 +168,6 @@ test('a stale paint does not resolve images after a newer paint has taken over',
   expect(onErrors).toEqual([]);
   cleanup();
   paintPageOverride = null;
-  HTMLCanvasElement.prototype.getContext = getContext;
+  canvasPrototype.getContext = getContext;
 });
 

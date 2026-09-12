@@ -1291,7 +1291,6 @@ fn inline_image_grows_the_line_box() {
         "no growth",
     );
 
-    // wrap distances join the footprint (wp:inline distT/distB)
     let v = measure(
         json!([
             { "kind": "text", "text": "0" },
@@ -1303,12 +1302,26 @@ fn inline_image_grows_the_line_box() {
     .unwrap();
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        112.0 + DESC,
-        "footprint includes dist",
+        100.0 + DESC,
+        "inline wrap distances do not affect line height",
     );
 }
 
-// 23. oversize images wrap from empty lines and reserve fitted height
+#[test]
+fn inline_wrap_distances_do_not_move_text_or_resize_image_only_lines() {
+    for mut runs in [
+        json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
+        json!([{ "kind": "image", "width": 50.0, "height": 100.0 }, { "kind": "text", "text": "0" }]),
+    ] {
+        let expected = measure(runs.clone(), 200.0).unwrap();
+        runs[0]["distTop"] = json!(24.0);
+        runs[0]["distBottom"] = json!(36.0);
+        runs[0]["distLeft"] = json!(48.0);
+        runs[0]["distRight"] = json!(60.0);
+        assert_eq!(measure(runs, 200.0).unwrap(), expected);
+    }
+}
+
 #[test]
 fn inline_image_wrapping_and_column_fit() {
     // 22 zeros fill 195.77px; the 50px image wraps to its own line
