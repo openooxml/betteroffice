@@ -77,8 +77,8 @@
 //! italic, with no caps and no letter spacing.
 //!
 //! An inline image adds its declared width to the line advance and grows the
-//! line box by its column-fitted height plus wrap distances: alone on a line
-//! it takes a descent buffer above and below, flowing with text it seats on
+//! line box by its column-fitted height, ignoring wrap distances. Alone on a line
+//! it takes a descent buffer above and below; flowing with text it seats on
 //! the baseline. A `topAndBottom` or block image takes its own line at its
 //! declared height plus wrap distances (default 6px, never column-fitted),
 //! adds no width, and opens a fresh line after it. An anchored floating
