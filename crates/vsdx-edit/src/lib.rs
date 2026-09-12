@@ -1006,6 +1006,35 @@ mod tests {
     }
 
     #[test]
+    fn remote_new_cell_on_a_locked_target_is_rejected() {
+        let session = session();
+        add_cell(&session, "LockWidth", Some("1"), None);
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_cell(&peer, "page:1:shape:1", "Width", "5");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_new_cell_carrying_a_guard_formula_is_rejected() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_cell(&peer, "page:1:shape:1", "Height", "GUARD(1)");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
     fn state_vectors_are_limited_before_decode() {
         assert!(decode_state_vector_v1(&vec![0; MAX_STATE_VECTOR_BYTES + 1]).is_err());
     }
