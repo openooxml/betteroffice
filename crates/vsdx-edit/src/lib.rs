@@ -418,6 +418,41 @@ mod tests {
         shape.insert(&mut txn, field, value);
     }
 
+    fn write_peer_new_cell(peer: &Doc, shape_id: &str, name: &str, formula: &str) {
+        let mut txn = peer.transact_mut();
+        let cells = shape_cells(&txn, shape_id);
+        let cell = cells.insert(&mut txn, name, MapPrelim::default());
+        cell.insert(&mut txn, "name", name);
+        cell.insert(&mut txn, "formula", formula);
+    }
+
+    fn write_peer_new_shape(
+        peer: &Doc,
+        shape_id: &str,
+        page_id: &str,
+        origin: &str,
+        source_id: f64,
+    ) {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = sheets.insert(&mut txn, shape_id, MapPrelim::default());
+        shape.insert(&mut txn, "id", shape_id);
+        shape.insert(&mut txn, "pageId", page_id);
+        shape.insert(&mut txn, "origin", origin);
+        shape.insert(&mut txn, "sourceId", source_id);
+        shape.insert(&mut txn, "cells", MapPrelim::default());
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, page_id) {
+            Some(yrs::Out::YMap(page)) => page,
+            _ => unreachable!(),
+        };
+        let shapes = match page.get(&txn, "shapes") {
+            Some(yrs::Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        shapes.push_back(&mut txn, shape_id);
+    }
+
     fn add_shape_cell(
         session: &DiagramSession,
         shape_id: &str,
@@ -953,6 +988,21 @@ mod tests {
                 "{field}"
             );
         }
+    }
+
+    #[test]
+    fn remote_new_shape_cannot_forge_package_provenance() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_shape(&peer, "page:1:shape:forged", "page:1", "package", 1.0);
+        write_peer_new_cell(&peer, "page:1:shape:forged", "Width", "999");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
     }
 
     #[test]

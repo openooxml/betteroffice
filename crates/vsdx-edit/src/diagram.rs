@@ -519,6 +519,13 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
             )));
         }
     }
+    for (key, (_, _, origin, _)) in &after_identities {
+        if !before_identities.contains_key(key) && origin.as_deref() != Some(SESSION_ORIGIN) {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds shape {key} without session provenance"
+            )));
+        }
+    }
     let before_baselines = baseline_formulas(before)?;
     let after_baselines = baseline_formulas(staged)?;
     for key in before_baselines.keys().chain(after_baselines.keys()) {
