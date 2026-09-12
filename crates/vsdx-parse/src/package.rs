@@ -11,7 +11,8 @@ pub fn parse_vsdx(data: &[u8]) -> Result<VsdxPackage, VsdxError> {
 }
 
 pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxPackage, VsdxError> {
-    let source_parts = ooxml_opc::unzip_parts(data).map_err(VsdxError::Container)?;
+    let source_parts = ooxml_opc::unzip_parts_with_limits(data, limits.max_expanded_bytes)
+        .map_err(VsdxError::Container)?;
     match ooxml_opc::detect_package_kind(&source_parts) {
         Ok(ooxml_opc::DocumentKind::Vsdx) => {}
         Ok(kind) => return Err(VsdxError::UnsupportedDocumentKind(kind)),
@@ -644,6 +645,28 @@ mod tests {
                 Err(VsdxError::ResourceLimit { .. })
             ));
         }
+    }
+
+    #[test]
+    fn threads_the_caller_expanded_data_ceiling_into_extraction() {
+        let mut parts = unzip_parts(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        parts.push((
+            "visio/media/filler.bin".to_owned(),
+            vec![0; 8 * 1024 * 1024],
+        ));
+        let source = rezip_parts(&parts).unwrap();
+        assert!(source.len() < 1024 * 1024, "fixture must stay compressible");
+        assert!(matches!(
+            parse_vsdx_with_limits(
+                &source,
+                &ParseLimits {
+                    max_expanded_bytes: 1024 * 1024,
+                    ..ParseLimits::default()
+                }
+            ),
+            Err(VsdxError::Container(message)) if message.contains("inflated size exceeds")
+        ));
+        assert!(parse_vsdx_with_limits(&source, &ParseLimits::default()).is_ok());
     }
 
     #[test]
