@@ -846,6 +846,70 @@ mod tests {
         }));
     }
 
+    /// Coverage for what `session_added_shapes_do_not_leak_into_cell_edits` (against the removed
+    /// `export()` API) used to pin: `semantic_cell_edits` filters to `ShapeOrigin::Original`
+    /// shapes before it ever looks at a cell, so a session-added shape's own draft cells cannot
+    /// reach the package-wide semantic-cell-edit list by construction, not by a value that could
+    /// be forgotten in a refactor.
+    #[test]
+    fn session_added_shapes_do_not_leak_into_semantic_cell_edits() {
+        let session = session();
+        add_cell(&session, "Height", Some("1"), None);
+        let receipt = session
+            .add_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                &ShapeDraft {
+                    name: Some("Added".to_owned()),
+                    cells: vec![CellSnapshot {
+                        locator: CellLocator {
+                            sheet: CellSheet::Page(1),
+                            shape_id: None,
+                            section: None,
+                            row: None,
+                            cell_name: "Width".to_owned(),
+                        },
+                        name: "Width".to_owned(),
+                        formula: Some("5".to_owned()),
+                        value: None,
+                    }],
+                },
+            )
+            .unwrap();
+        // Edited after creation so its formula diverges from its own draft baseline: with the
+        // `ShapeOrigin::Original` filter removed, this is exactly the shape this loop would
+        // otherwise still have a reason to visit.
+        session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                &receipt.shape_id,
+                "Width",
+                "9",
+            )
+            .unwrap();
+        session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Height",
+                "2",
+            )
+            .unwrap();
+        let edits = session.semantic_cell_edits().unwrap();
+        assert!(
+            edits.iter().all(|edit| edit.locator.shape_id != Some(0)),
+            "an added shape's own draft cells must never surface as package-wide semantic cell edits: {edits:?}"
+        );
+        assert!(
+            edits
+                .iter()
+                .any(|edit| edit.locator.shape_id == Some(1) && edit.locator.cell_name == "Height"),
+            "the original shape's own edit must still surface: {edits:?}"
+        );
+    }
+
     #[test]
     fn shape_draft_round_trips_through_serde() {
         let draft = ShapeDraft {
@@ -1098,6 +1162,167 @@ mod tests {
                 .is_err()
         );
         assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    fn remove_peer_cell(peer: &Doc, shape_id: &str, cell_key: &str) {
+        let mut txn = peer.transact_mut();
+        let cells = shape_cells(&txn, shape_id);
+        cells.remove(&mut txn, cell_key);
+    }
+
+    fn remove_peer_cell_field(peer: &Doc, shape_id: &str, cell_key: &str, field: &str) {
+        let mut txn = peer.transact_mut();
+        let cells = shape_cells(&txn, shape_id);
+        let cell = match cells.get(&txn, cell_key) {
+            Some(yrs::Out::YMap(cell)) => cell,
+            _ => unreachable!(),
+        };
+        cell.remove(&mut txn, field);
+    }
+
+    fn delete_peer_shape(peer: &Doc, page_id: &str, shape_id: &str) {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        sheets.remove(&mut txn, shape_id);
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, page_id) {
+            Some(yrs::Out::YMap(page)) => page,
+            _ => unreachable!(),
+        };
+        let shapes = match page.get(&txn, "shapes") {
+            Some(yrs::Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        let mut index = None;
+        for candidate in 0..shapes.len(&txn) {
+            if let Some(yrs::Out::Any(yrs::Any::String(value))) = shapes.get(&txn, candidate) {
+                if value.as_ref() == shape_id {
+                    index = Some(candidate);
+                    break;
+                }
+            }
+        }
+        if let Some(index) = index {
+            shapes.remove_range(&mut txn, index, 1);
+        }
+    }
+
+    #[test]
+    fn remote_delete_of_a_guarded_cell_is_rejected_while_its_shape_survives() {
+        let session = session();
+        add_cell(&session, "Width", Some("GUARD(1)"), None);
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        remove_peer_cell(&peer, "page:1:shape:1", "Width");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_delete_of_a_locked_cell_is_rejected_while_its_shape_survives() {
+        let session = session();
+        add_cell(&session, "LockWidth", Some("1"), None);
+        add_cell(&session, "Width", Some("5"), None);
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        remove_peer_cell(&peer, "page:1:shape:1", "Width");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_delete_of_a_baseline_formula_is_rejected_while_its_shape_survives() {
+        let session = session();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Width",
+            None,
+            None,
+            Some("2"),
+            None,
+        );
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        remove_peer_cell_field(&peer, "page:1:shape:1", "Width", "baselineFormula");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_deletion_of_a_locked_shape_is_rejected() {
+        let session = session();
+        add_cell(&session, "LockDelete", Some("1"), None);
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        delete_peer_shape(&peer, "page:1", "page:1:shape:1");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    /// `Width` never changes formula, so `validate_formula_mutations` has nothing to compare
+    /// and never looks at it; disabling `LockWidth` is itself an unprotected `CellEdit`, so
+    /// nothing refuses it either. Only comparing the protected *set* before and after (rather
+    /// than each formula in isolation) notices `Width` silently falling out of it.
+    #[test]
+    fn remote_update_that_disables_a_lock_forgets_the_cell_it_was_protecting() {
+        let session = session();
+        add_cell(&session, "LockWidth", Some("1"), None);
+        add_cell(&session, "Width", Some("5"), None);
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_cell_field(&peer, "page:1:shape:1", "LockWidth", "formula", "0");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    /// The mutation policy behind local `delete_shape` only ever inspects `LockDelete`; a
+    /// `GUARD`-protected cell elsewhere on the shape does not by itself block deletion. A
+    /// remote deletion must accept exactly what a local one would, so this is not a gap to
+    /// close but a parity case to pin.
+    #[test]
+    fn remote_deletion_of_an_unlocked_shape_with_a_guarded_cell_is_accepted() {
+        let session = session();
+        add_cell(&session, "Width", Some("GUARD(1)"), None);
+        let peer = peer_doc(&session, 9);
+        delete_peer_shape(&peer, "page:1", "page:1:shape:1");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_ok()
+        );
+        assert!(
+            session
+                .snapshot()
+                .unwrap()
+                .pages
+                .iter()
+                .find(|page| page.id == "page:1")
+                .unwrap()
+                .shapes
+                .iter()
+                .all(|shape| shape.id != "page:1:shape:1")
+        );
     }
 
     #[test]
