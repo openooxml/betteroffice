@@ -19,7 +19,6 @@ use crate::{
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
-pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 const PACKAGE_ORIGIN: &str = "package";
 const SESSION_ORIGIN: &str = "session";
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
@@ -811,9 +810,9 @@ fn validate_acyclic_parents<T: ReadTxn>(sheets: &MapRef, txn: &T) -> EditResult<
                 )));
             }
             if seen.len() > MAX_SHAPE_NESTING {
-                return Err(EditError::InvalidState(format!(
-                    "shape {shape_id} exceeds the maximum shape nesting depth"
-                )));
+                return Err(EditError::InvalidState(
+                    "shape nesting exceeds maximum depth".to_owned(),
+                ));
             }
             let Some(Out::YMap(parent_shape)) = sheets.get(txn, current.as_str()) else {
                 break;

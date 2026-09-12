@@ -1102,22 +1102,21 @@ mod tests {
     #[test]
     fn snapshot_terminates_on_a_cyclic_parent_chain_instead_of_overflowing() {
         let session = session();
-        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
+        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:1");
         add_child_shape(&session, "page:1:shape:cycle-b", "page:1:shape:cycle-a");
-        {
-            let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
-            let pages = txn.get_map(PAGES).unwrap();
-            let page = match pages.get(&txn, "page:1") {
-                Some(yrs::Out::YMap(page)) => page,
-                _ => unreachable!(),
-            };
-            let shapes = match page.get(&txn, "shapes") {
-                Some(yrs::Out::YArray(shapes)) => shapes,
-                _ => unreachable!(),
-            };
-            shapes.push_back(&mut txn, "page:1:shape:cycle-a");
-        }
-        assert!(session.snapshot().is_err());
+        write_peer_shape_field(
+            session.yrs_doc(),
+            "page:1:shape:cycle-a",
+            "parentId",
+            "page:1:shape:cycle-b",
+        );
+        assert!(
+            session
+                .snapshot()
+                .unwrap_err()
+                .to_string()
+                .contains("cyclic parent chain")
+        );
     }
 
     #[test]
