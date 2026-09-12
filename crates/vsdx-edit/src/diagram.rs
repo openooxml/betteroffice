@@ -920,6 +920,35 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     serializable_doc(staged)?;
     let before_identities = shape_identities(before)?;
     let after_identities = shape_identities(staged)?;
+    // A shape absent from `staged` did not merely lose its identity, baseline or protected
+    // cells: it is gone. That is only legitimate if deleting it locally would be, which is
+    // exactly what `delete_shape` checks (LockDelete on the shape itself; a cascade-deleted
+    // descendant is never checked on its own). So a removed shape whose immediate parent was
+    // also removed rides along on the parent's authorization; a removed shape whose parent
+    // survives (or has none) must clear that same LockDelete check itself.
+    let removed_shapes = before_identities
+        .keys()
+        .filter(|key| !after_identities.contains_key(key.as_str()))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    for shape_id in &removed_shapes {
+        let parent_also_removed = before_identities
+            .get(shape_id)
+            .and_then(|identity| identity.1.as_ref())
+            .is_some_and(|parent_id| removed_shapes.contains(parent_id));
+        if parent_also_removed {
+            continue;
+        }
+        let page_id = before_identities
+            .get(shape_id)
+            .and_then(|identity| identity.0.as_deref())
+            .ok_or_else(|| {
+                EditError::InvalidState(format!(
+                    "remote update deletes shape {shape_id} with no page to authorize its removal"
+                ))
+            })?;
+        authorize_shape_deletion(before, page_id, shape_id)?;
+    }
     for (key, identity) in &before_identities {
         if let Some(after) = after_identities.get(key) {
             if after != identity {
@@ -928,6 +957,7 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
                 )));
             }
         }
+        // A missing key was already authorized above, as part of `removed_shapes`.
     }
     for (key, (_, _, origin, _)) in &after_identities {
         if !before_identities.contains_key(key) && origin.as_deref() != Some("added") {
@@ -939,10 +969,18 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     let before_baselines = baseline_formulas(before)?;
     let after_baselines = baseline_formulas(staged)?;
     for (key, before_formula) in &before_baselines {
-        if let Some(after_formula) = after_baselines.get(key) {
-            if after_formula != before_formula {
+        match after_baselines.get(key) {
+            Some(after_formula) => {
+                if after_formula != before_formula {
+                    return Err(EditError::InvalidState(format!(
+                        "remote update changes the save baseline of {key}"
+                    )));
+                }
+            }
+            None if removed_shapes.contains(shape_id_prefix(key)) => {}
+            None => {
                 return Err(EditError::InvalidState(format!(
-                    "remote update changes the save baseline of {key}"
+                    "remote update removes the save baseline of {key} while its shape survives"
                 )));
             }
         }
@@ -950,16 +988,58 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     let before_protected = protected_formulas(before)?;
     let after_protected = protected_formulas(staged)?;
     for (key, formula) in before_protected {
-        if let Some(after_formula) = after_protected.get(&key) {
-            if after_formula != &formula {
+        match after_protected.get(&key) {
+            Some(after_formula) => {
+                if after_formula != &formula {
+                    return Err(EditError::InvalidState(format!(
+                        "remote update changes protected cell {key}"
+                    )));
+                }
+            }
+            None if removed_shapes.contains(shape_id_prefix(&key)) => {}
+            None => {
                 return Err(EditError::InvalidState(format!(
-                    "remote update changes protected cell {key}"
+                    "remote update removes protected cell {key} while its shape survives"
                 )));
             }
         }
     }
     validate_new_cells(before, staged, &before_identities)?;
     Ok(())
+}
+
+/// Splits a `baseline_formulas`/`protected_formulas` key (`"{shape_id}/{cell_key}"`) back to
+/// its owning shape id. Shape ids never contain `/`; cell keys use `\u{1f}` as a separator, so
+/// the first `/` is always the boundary.
+fn shape_id_prefix(key: &str) -> &str {
+    key.split_once('/').map_or(key, |(shape_id, _)| shape_id)
+}
+
+/// Authorizes a remote deletion the same way a local `delete_shape` would: refused if
+/// `LockDelete` is enabled or itself guarded on the shape being removed.
+fn authorize_shape_deletion(before: &Doc, page_id: &str, shape_id: &str) -> EditResult<()> {
+    let txn = before.transact();
+    let context = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+    match decide_mutation(
+        &context,
+        context.locator(CellLocator {
+            sheet: CellSheet::Page(0),
+            shape_id: None,
+            section: None,
+            row: None,
+            cell_name: "LockDelete".to_owned(),
+        }),
+        MutationGesture::Delete,
+        String::new(),
+        &ParseLimits::default(),
+    ) {
+        MutationOutcome::Allowed { .. } => Ok(()),
+        MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+            Err(EditError::InvalidState(format!(
+                "remote update deletes shape {shape_id} without authorization: {reason}"
+            )))
+        }
+    }
 }
 
 /// A cell key absent before has no local-edit equivalent unless its whole shape is also new
