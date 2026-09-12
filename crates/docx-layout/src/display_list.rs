@@ -6171,6 +6171,31 @@ fn emit_line(
                         emitted_positioned_text = true;
                     }
                 }
+                if *width > 0.0
+                    && !matches!(
+                        run.fmt
+                            .underline
+                            .as_ref()
+                            .and_then(|value| value.get("style"))
+                            .and_then(Value::as_str),
+                        Some("none" | "words")
+                    )
+                {
+                    let mut attrs = block_ref.attrs();
+                    attrs.doc_start = run.pm_start;
+                    attrs.doc_end = run.pm_end;
+                    attrs.logical_order = logical_order.or(run.fmt.logical_order);
+                    attrs.bidi_level = run.fmt.bidi_level;
+                    if let Some(decoration) = underline_decoration(
+                        &run.fmt,
+                        &attrs,
+                        pen_x,
+                        baseline_y_of(&run.fmt, baseline),
+                        *width,
+                    ) {
+                        prims.push(Primitive::Decoration(decoration));
+                    }
+                }
                 pen_x += width;
             }
             LinePaintItem::Image {
@@ -6411,6 +6436,46 @@ fn emit_tab_leader(
     }));
 }
 
+fn underline_decoration(
+    fmt: &RunFormattingIn,
+    attrs: &DocAttrs,
+    x: f64,
+    baseline: f64,
+    width: f64,
+) -> Option<DecorationPrimitive> {
+    let (color, style) = match &fmt.underline {
+        Some(Value::Bool(true)) => (run_color(fmt), DisplayBorderStyle::Solid),
+        Some(Value::Object(value)) => (
+            value
+                .get("color")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .unwrap_or_else(|| run_color(fmt)),
+            display_border_style(value.get("style").and_then(Value::as_str)),
+        ),
+        _ => return None,
+    };
+    let font_px = effective_font_px_of(fmt);
+    let mut attrs = attrs.clone();
+    attrs.style = Some(style);
+    Some(DecorationPrimitive {
+        deco: DecoKind::Underline,
+        x: px(x),
+        y: px(baseline + (font_px * 0.1875).round()),
+        w: px(width),
+        h: px((font_px / 16.0).round().max(1.0)),
+        color,
+        dashed: matches!(
+            style,
+            DisplayBorderStyle::Dashed
+                | DisplayBorderStyle::DashDot
+                | DisplayBorderStyle::DashDotDot
+        ),
+        dotted: style == DisplayBorderStyle::Dotted,
+        attrs,
+    })
+}
+
 /// one styled text slice: comment tint and highlight paint behind the glyphs,
 /// the text primitive itself, then underline/strike over it
 #[allow(clippy::too_many_arguments)]
@@ -6640,39 +6705,8 @@ fn emit_text_segment(
     // decoration thickness/offsets derived from the font size (deterministic
     // stand-ins for the browser's UA decoration metrics)
     let thickness = (font_px / 16.0).round().max(1.0);
-    let has_underline = matches!(
-        &fmt.underline,
-        Some(Value::Bool(true)) | Some(Value::Object(_))
-    );
-    if has_underline {
-        let (deco_color, underline_style) = match &fmt.underline {
-            Some(Value::Object(o)) => (
-                o.get("color")
-                    .and_then(|c| c.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| color.clone()),
-                display_border_style(o.get("style").and_then(Value::as_str)),
-            ),
-            _ => (color.clone(), DisplayBorderStyle::Solid),
-        };
-        let mut underline_attrs = attrs.clone();
-        underline_attrs.style = Some(underline_style);
-        prims.push(Primitive::Decoration(DecorationPrimitive {
-            deco: DecoKind::Underline,
-            x: px(x),
-            y: px(paint_baseline + (font_px * 0.1875).round()),
-            w: px(width),
-            h: px(thickness),
-            color: deco_color,
-            dashed: matches!(
-                underline_style,
-                DisplayBorderStyle::Dashed
-                    | DisplayBorderStyle::DashDot
-                    | DisplayBorderStyle::DashDotDot
-            ),
-            dotted: underline_style == DisplayBorderStyle::Dotted,
-            attrs: underline_attrs,
-        }));
+    if let Some(decoration) = underline_decoration(fmt, &attrs, x, paint_baseline, width) {
+        prims.push(Primitive::Decoration(decoration));
     } else if fmt.is_insertion == Some(true) {
         // Suggested insertion: a green dashed rule under the run, reusing the
         // offset and thickness of an explicit underline; the dashed flag drives
@@ -10210,6 +10244,77 @@ mod tests {
             .find(|primitive| primitive["listMarker"] == true)
             .unwrap();
         assert_eq!(marker["color"], "#FF0000");
+    }
+
+    #[test]
+    fn underlined_tabs_paint_their_resolved_advance_without_a_leader() {
+        for authoritative in [false, true] {
+            for underline in [json!(true), json!({"style": "single", "color": "#123456"})] {
+                let mut input = json!({
+                    "contractVersion": 1,
+                    "measured": [{
+                        "block": {"kind": "paragraph", "id": "form", "runs": [
+                            {"kind": "text", "text": "Name", "pmStart": 1, "pmEnd": 5},
+                            {"kind": "tab", "width": 15, "pmStart": 5, "pmEnd": 6},
+                            {"kind": "tab", "width": 85, "underline": underline, "pmStart": 6, "pmEnd": 7}
+                        ], "attrs": {"tabs": [{"pos": 2100, "leader": "none"}]}},
+                        "measure": {"kind": "paragraph", "totalHeight": 20, "lines": [{
+                            "headRun": 0, "headChar": 0, "tailRun": 2, "tailChar": 1,
+                            "width": 140, "ascent": 14, "descent": 4, "lineHeight": 20
+                        }]}
+                    }],
+                    "options": {},
+                    "layout": {"pages": [{"number": 1, "size": {"w": 300, "h": 400},
+                        "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                        "fragments": [{"kind": "paragraph", "blockId": "form", "x": 20, "y": 20,
+                            "width": 260, "height": 20, "fromLine": 0, "toLine": 1}]
+                    }]}
+                });
+                if authoritative {
+                    input["measured"][0]["measure"]["lines"][0]["runAdvances"] = json!([
+                        {"runIndex": 0, "startChar": 0, "endChar": 4, "advance": 40},
+                        {"runIndex": 1, "startChar": 0, "endChar": 1, "advance": 15},
+                        {"runIndex": 2, "startChar": 0, "endChar": 1, "advance": 85}
+                    ]);
+                }
+                let output: Value =
+                    serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                        .unwrap();
+                let decorations: Vec<_> = output["pages"][0]["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|primitive| primitive["kind"] == "decoration")
+                    .collect();
+                assert_eq!(decorations.len(), 1);
+                assert_eq!(decorations[0]["deco"], "underline");
+                assert_eq!(decorations[0]["x"], 75.0);
+                assert_eq!(decorations[0]["w"], 85.0);
+                assert_eq!(decorations[0]["docStart"], 6);
+                assert_eq!(decorations[0]["docEnd"], 7);
+                assert_eq!(
+                    decorations[0]["color"],
+                    underline.get("color").cloned().unwrap_or(json!("#000000"))
+                );
+                for suppressed in [
+                    json!(false),
+                    json!({"style": "none"}),
+                    json!({"style": "words"}),
+                ] {
+                    input["measured"][0]["block"]["runs"][2]["underline"] = suppressed;
+                    let output: Value =
+                        serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                            .unwrap();
+                    assert!(
+                        !output["pages"][0]["primitives"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .any(|primitive| primitive["kind"] == "decoration")
+                    );
+                }
+            }
+        }
     }
 
     #[test]
