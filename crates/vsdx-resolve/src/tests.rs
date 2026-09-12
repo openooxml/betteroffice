@@ -615,6 +615,44 @@ fn text_markers_fields_and_style_rows_are_merged() {
 }
 
 #[test]
+fn nested_group_members_and_nested_master_shapes_resolve() {
+    let mut package = package();
+    let member = shape(2, vec![ShapeChild::Cell(cell("PinX", "member"))]);
+    add_page(
+        &mut package,
+        shape(
+            1,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                member,
+            )])],
+        ),
+    );
+    let resolved = Resolver::new(&package).resolve_shape("page", 2).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("member", Provenance::Local));
+
+    let nested_master = shape(5, vec![ShapeChild::Cell(cell("PinY", "nested-master"))]);
+    add_master(
+        &mut package,
+        1,
+        shape(
+            1,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                nested_master,
+            )])],
+        ),
+    );
+    let mut instance = shape(3, vec![]);
+    instance.master = Some(1);
+    instance.master_shape = Some(5);
+    add_page(&mut package, instance);
+    let resolved = Resolver::new(&package).resolve_shape("page", 3).unwrap();
+    assert_eq!(
+        found(&resolved, "PinY"),
+        ("nested-master", Provenance::MasterShape)
+    );
+}
+
+#[test]
 fn corpus_shapes_resolve_without_silent_empty_results() {
     let Some(dir) = std::env::var_os("VSDX_CORPUS_DIR") else {
         eprintln!("warning: VSDX_CORPUS_DIR is unset; skipping corpus resolver test");

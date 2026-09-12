@@ -387,7 +387,16 @@ fn found(cell: &Cell, provenance: Provenance) -> Lookup {
     }
 }
 fn find_shape(sheet: &Sheet, id: u32) -> Option<&Shape> {
-    sheet.shapes().find(|s| s.id == id)
+    let mut pending: Vec<&Shape> = sheet.shapes().collect();
+    let mut index = 0;
+    while let Some(shape) = pending.get(index).copied() {
+        index += 1;
+        if shape.id == id {
+            return Some(shape);
+        }
+        pending.extend(shape.shapes());
+    }
+    None
 }
 fn based_on(sheet: &Sheet) -> Option<u32> {
     sheet
