@@ -339,7 +339,6 @@ fn evaluate_cell_with_theme(
     theme: Option<&Theme>,
 ) -> Evaluation {
     if is_event_cell(name) {
-        // Event/recalculation plumbing is outside the display evaluation profile.
         return unsupported("event cell is outside the display evaluation profile");
     }
     if name.eq_ignore_ascii_case("TheText") {
@@ -653,13 +652,11 @@ impl<R: References> Engine<'_, R> {
             return unsupported(format!("{upper} is outside the phase-4 evaluator"));
         }
         if upper == "GUARD" {
-            // Visio GUARD intercepts edits; display evaluation returns its argument. Mutation policy is phase 5.
             return args
                 .first()
                 .map_or_else(|| err("missing argument"), |arg| guard(self.expr(arg, d)));
         }
         if matches!(upper.as_str(), "THEMEGUARD" | "_XFTRIGGER") {
-            // THEMEGUARD protects theme edits and _XFTRIGGER schedules recalculation; both are display-transparent.
             return args
                 .first()
                 .map_or_else(|| err("missing argument"), |arg| self.expr(arg, d));
@@ -846,7 +843,6 @@ impl<R: References> Engine<'_, R> {
         {
             return err("RGB channels must be dimensionless");
         }
-        // Visio RGB takes 8-bit channels; out-of-range inputs are conservatively saturated.
         let channel = |value: f64| value.round().clamp(0.0, 255.0) as u8;
         result(
             Value::Color(Color {
@@ -923,7 +919,6 @@ impl<R: References> Engine<'_, R> {
                 );
             }
         };
-        // Theme values use DrawingML colour slots; unknown named Visio theme values intentionally remain unsupported.
         let color = ColorValue {
             theme_color: Some(slot.to_ascii_lowercase()),
             ..ColorValue::default()
@@ -962,7 +957,6 @@ impl<R: References> Engine<'_, R> {
             Err(error) => return error,
         };
         if matches!(name, "LUMDIFF" | "SHADE") {
-            // Visio does not document enough of these colour-model semantics to render them honestly.
             return unsupported(format!("{name} is not implemented"));
         }
         let (amount, amount_guarded) = match numeric(self.expr(second, d)) {
