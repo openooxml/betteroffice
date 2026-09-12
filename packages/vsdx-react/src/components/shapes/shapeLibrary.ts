@@ -145,6 +145,7 @@ function draftFor(id: string, path: GeometryPath, square: boolean) {
         { locator: { cellName: 'LocPinX' }, name: 'LocPinX', formula: 'Width*0.5' },
         { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: 'Height*0.5' },
         ...geometryCells(path),
+        ...Object.entries({ FillPattern: '1', FillForegnd: 'RGB(255,255,255)', LinePattern: '1', LineColor: 'RGB(23,32,51)', LineWeight: '0.01' }).map(([name, formula]) => ({ locator: { cellName: name }, name, formula })),
       ],
     };
   };

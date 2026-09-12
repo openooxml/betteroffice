@@ -3,7 +3,7 @@ import type { PageDisplayList } from '@betteroffice/vsdx';
 import { collectDiagnostics } from './VsdxEditor';
 
 const frame: PageDisplayList = {
-  contractVersion: 3,
+  contractVersion: 4,
   width: 1,
   height: 1,
   paintTransform: { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 },

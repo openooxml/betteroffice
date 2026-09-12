@@ -3,7 +3,7 @@ import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
 import { createRibbonCommands, findShapePlacement } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
-  return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { cellName: name }, name, formula: value, value })) })) }] };
+  return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
 }
 
 function handle(state: DiagramSnapshot, history = { undo: true, redo: false }) {
@@ -38,7 +38,7 @@ test('uses exact z-order bounds and ShapeSheet formulas', () => {
   const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
   commands.bringToFront.run(); commands.sendToBack.run(); commands.fillColor.run('#abcdef'); commands.lineColor.run('#fedcba'); commands.rotateRight.run(); commands.rotateRight.run(); commands.flipHorizontal.run();
   expect(diagram.reorderShape).toHaveBeenNthCalledWith(1, 'page', 'two', 2); expect(diagram.reorderShape).toHaveBeenNthCalledWith(2, 'page', 'two', 0);
-  expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FillForegnd' }, '"#abcdef"'); expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'LineColor' }, '"#fedcba"');
+  expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FillForegnd' }, 'RGB(171,205,239)'); expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'LineColor' }, 'RGB(254,220,186)');
   expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'Angle' }, String(Math.PI));
   expect(diagram.setCellFormula).toHaveBeenCalledWith('page', 'two', { cellName: 'FlipX' }, '1');
   expect(commands.fillColor.value).toBe('#112233'); expect(commands.lineColor.value).toBe('#445566'); expect(commands.lineWeight.value).toBe('0.01 in'); expect(commands.linePattern.value).toBe('4');
@@ -50,7 +50,7 @@ test('does not reorder forward past the topmost shape', () => {
 });
 
 function cellsOf(pairs: Record<string, { formula?: string; value?: string }>) {
-  return Object.entries(pairs).map(([name, entry]) => ({ locator: { cellName: name }, name, formula: entry.formula ?? null, value: entry.value ?? null }));
+  return Object.entries(pairs).map(([name, entry]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: entry.formula ?? null, value: entry.value ?? null }));
 }
 
 function groupedSnapshot(): DiagramSnapshot {

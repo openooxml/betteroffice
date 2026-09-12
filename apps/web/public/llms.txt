@@ -100,3 +100,7 @@ eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a c
 - [betteroffice-vsdx-edit](https://crates.io/crates/betteroffice-vsdx-edit)
 
 - [@betteroffice/vsdx](https://www.npmjs.com/package/@betteroffice/vsdx): WebAssembly diagram engine and Canvas renderer.
+
+- [@betteroffice/vsdx-react](https://www.npmjs.com/package/@betteroffice/vsdx-react)
+
+- [@betteroffice/vsdx-i18n](https://www.npmjs.com/package/@betteroffice/vsdx-i18n)
