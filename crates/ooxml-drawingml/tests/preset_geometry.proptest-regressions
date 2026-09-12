@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc b402cbdbb5f75d933669eac71491d898d4389dcbfbb191169dec26657632f7ee # shrinks to shape = "rightArrow", fraction = 0.7410172016994897, adj1 = 0.0, aspect = 12.813631693322714
+cc fea460e3cbfdeec11a1f93b75166edfa89b14a09688f014921a0040fef5e4c98 # shrinks to (shape, adjust) = ("rightArrow", "adj2"), a = 0.8715668024519855, b = 0.4909325381193483, aspect = 5.215890627551263
+cc 20ae59c837191dea68aed832396e1d4ce7734dcb393817b31d5f7627730a25e5 # shrinks to (shape, adjust) = ("upArrow", "adj2"), a = 0.5352039527624155, b = 0.5815137596823969, aspect = 0.03909630680590958
+cc 560fdf2eced75c7a1b6bf183a88f9cf0061bd585f07ec13eff911cc57c4bcd00 # shrinks to shape = "chevron", fraction = 0.6229955768707981, adj1 = 0.0, aspect = 1.0
+cc 5443d4d43718753065266d0281c928716c987c6f2cb1f45c8e8b9acc063df311 # shrinks to (shape, adjust) = ("chevron", "adj"), a = 0.9035138819890751, b = 0.8448316630101174, aspect = 1.0
+cc f68850c8c7cf67b472cad535880fca4705b150ec3a379d76b92f1ef569e44e76 # shrinks to shape = "rightArrow", adjustments = {"adj2": 5.080001377787961}, aspect = 1.0
