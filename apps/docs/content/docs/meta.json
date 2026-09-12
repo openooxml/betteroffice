@@ -1,3 +1,11 @@
 {
-  "pages": ["index", "packages", "javascript", "rust", "python", "collaboration"]
+  "pages": [
+    "index",
+    "packages",
+    "javascript",
+    "rust",
+    "python",
+    "collaboration",
+    "vsdx"
+  ]
 }

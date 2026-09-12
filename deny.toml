@@ -15,6 +15,11 @@ allow = [
   "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
+exceptions = [
+  # libFuzzer's vendored C++ sources are NCSA-licensed. The crate is only ever a dependency of the
+  # nightly-only fuzz/ package, never of anything built by the workspace or published.
+  { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 
 [advisories]
 version = 2

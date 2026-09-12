@@ -234,14 +234,14 @@ impl<'a> Resolver<'a> {
         let mut current_sheet = source_sheet;
         let mut seen = HashSet::new();
         for depth in 0..MAX_INHERITANCE_DEPTH {
-            let (master_id, master_shape, provenance) = match (current.master, current.master_shape)
+            let (master_id, master_shape, own_master) = match (current.master, current.master_shape)
             {
-                (Some(master_id), _) => (master_id, None, Provenance::Master),
+                (Some(master_id), master_shape) => (master_id, master_shape, true),
                 (None, Some(master_shape)) => {
                     let Some(master_id) = self.enclosing_master(current_sheet, current.id) else {
                         return Ok(out);
                     };
-                    (master_id, Some(master_shape), Provenance::MasterShape)
+                    (master_id, Some(master_shape), false)
                 }
                 (None, None) => return Ok(out),
             };
@@ -256,9 +256,17 @@ impl<'a> Resolver<'a> {
             let Some(sheet) = self.package.master_contents.get(path) else {
                 return Err(ResolveError::MissingMaster(master_id));
             };
-            let next = match master_shape {
-                Some(id) => find_shape(sheet, id),
-                None => sheet.shapes().next(),
+            let (next, provenance) = if own_master {
+                let root = sheet.shapes().next();
+                match master_shape.and_then(|id| root.and_then(|root| find_shape_in(root, id))) {
+                    Some(shape) => (Some(shape), Provenance::MasterShape),
+                    None => (root, Provenance::Master),
+                }
+            } else {
+                (
+                    master_shape.and_then(|id| find_shape(sheet, id)),
+                    Provenance::MasterShape,
+                )
             };
             let Some(next) = next else {
                 return Err(ResolveError::MissingMaster(master_id));

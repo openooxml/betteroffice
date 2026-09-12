@@ -237,8 +237,7 @@ impl DocxEditor {
             story_checksum(engine.doc(), BODY_STORY).map_err(anyhow::Error::msg)?;
         let source_fingerprint = canonical_checksum(&engine)?;
         let undo = UndoSession::new();
-        undo.track(engine.doc(), BODY_STORY)
-            .map_err(anyhow::Error::msg)?;
+        undo.track(engine.doc());
         let local_updates = Rc::new(RefCell::new(VecDeque::new()));
         let local_update_observer = if observe_local_updates {
             let observed = Rc::clone(&local_updates);

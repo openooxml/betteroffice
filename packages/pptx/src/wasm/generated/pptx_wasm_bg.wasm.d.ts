@@ -47,6 +47,7 @@ export const pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) 
 export const pptxdocument_setShapeFillJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
 export const pptxdocument_startUpdateObservation: (a: number) => [number, number];
 export const pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];

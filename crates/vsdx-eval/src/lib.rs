@@ -1185,6 +1185,26 @@ fn hls_to_rgb(hue: f64, saturation: f64, luminosity: f64) -> Color {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rounds_halfway_values_away_from_zero_and_keeps_directional_siblings() {
+        for (formula, expected) in [
+            ("ROUND(1.5)", 2.0),
+            ("ROUND(-1.5)", -2.0),
+            ("ROUND(2.5)", 3.0),
+            ("ROUND(-2.5)", -3.0),
+            ("ROUND(-0.5)", -1.0),
+            ("ROUND(-1.4)", -1.0),
+            ("ROUND(-1.6)", -2.0),
+            ("INT(-1.5)", -2.0),
+            ("FLOOR(-1.5)", -2.0),
+            ("CEILING(-1.5)", -1.0),
+            ("TRUNC(-1.5)", -1.0),
+            ("SIGN(-1.5)", -1.0),
+        ] {
+            assert_eq!(number(formula).number, expected, "{formula}");
+        }
+    }
+
     use super::*;
     use std::fs;
     use vsdx_parse::{Cell, Shape, Sheet, parse_vsdx};

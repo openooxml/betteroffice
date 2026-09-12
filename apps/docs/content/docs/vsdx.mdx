@@ -1,0 +1,23 @@
+---
+title: Visio VSDX
+description: Visio packages and their supported surfaces.
+---
+
+The VSDX engine processes Visio diagram packages. Support is under development; the crate READMEs describe the supported operations and remaining limitations.
+
+| Crate | Purpose |
+| --- | --- |
+| `betteroffice-vsdx-edit` | Transactional editing and collaboration. |
+| `betteroffice-vsdx` | Native facade |
+| `betteroffice-vsdx-parse` | Package parsing and lossless XML |
+| `betteroffice-vsdx-resolve` | ShapeSheet inheritance |
+| `betteroffice-vsdx-eval` | Formula evaluation |
+| `betteroffice-vsdx-render` | Display lists |
+
+## TypeScript package
+
+`@betteroffice/vsdx` opens, edits, renders, and saves Visio diagrams through WebAssembly.
+
+`betteroffice-vsdx-formula` provides bounded ShapeSheet formula parsing.
+
+The TypeScript package also provides a transport-independent collaboration provider.

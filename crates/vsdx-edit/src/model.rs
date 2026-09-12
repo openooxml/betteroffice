@@ -36,6 +36,8 @@ pub struct CellSnapshot {
         deserialize_with = "deserialize_cell_locator"
     )]
     pub locator: CellLocator,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_type: Option<String>,
     pub name: String,
     pub formula: Option<String>,
     #[serde(default)]

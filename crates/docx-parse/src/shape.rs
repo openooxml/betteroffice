@@ -319,6 +319,8 @@ pub struct Shape {
     pub shape_kind: String,
     pub shape_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_box: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -378,6 +380,7 @@ impl Shape {
         Self {
             shape_kind: "shape".into(),
             shape_type,
+            text_box: None,
             id: None,
             name: None,
             size,
@@ -441,6 +444,7 @@ pub fn parse_shape(node: &XmlElement) -> Shape {
             height: transform.size.height,
         },
     );
+    shape.text_box = bool_attribute(direct_child(Some(node), "cNvSpPr"), "txBox");
     if let Some(non_visual) = non_visual {
         shape.id = non_visual.attribute(None, "id").map(str::to_owned);
         shape.name = non_visual.attribute(None, "name").map(str::to_owned);

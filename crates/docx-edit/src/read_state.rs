@@ -623,7 +623,7 @@ mod tests {
     #[test]
     fn undo_and_redo_depths_track_the_stacks() {
         let doc = seed("abc");
-        let mut undo = doc.undo_scope(&["body"]).unwrap();
+        let mut undo = doc.undo_manager();
         assert_eq!((undo.undo_depth(), undo.redo_depth()), (0, 0));
 
         doc.insert_text(&local(), Position::new("body", 3), "!", FormatPolicy::Plain)

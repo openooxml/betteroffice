@@ -2000,6 +2000,57 @@ fn flatten_path(path: &[ooxml_drawingml::GeometryPathCommand]) -> Vec<(f32, f32)
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forty_five_degree_group_keeps_text_in_a_local_box_under_the_group_transform() {
+        let mut child = shape(2, 1.0, 2.0);
+        child
+            .children
+            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        let mut parent = group(1, 10.0, 20.0, vec![child]);
+        with_cell(
+            &mut parent,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let list = render(vec![parent]);
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::TextBox {
+            x,
+            y,
+            width,
+            height,
+            lines,
+            transform,
+            ..
+        } = &primitives[1]
+        else {
+            unreachable!()
+        };
+        let matrix = Affine {
+            a: std::f32::consts::FRAC_1_SQRT_2,
+            b: std::f32::consts::FRAC_1_SQRT_2,
+            c: -std::f32::consts::FRAC_1_SQRT_2,
+            d: std::f32::consts::FRAC_1_SQRT_2,
+            e: 10.707_107,
+            f: 17.878_68,
+        };
+        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
+        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
+        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
+        assert_point_close((*x, *y), (1.0, 2.0));
+        assert_point_close((*width, *height), (1.0, 1.0));
+        assert_point_close(
+            transform.apply_point(lines[0].x, lines[0].y),
+            matrix.apply_point(1.0, 2.0),
+        );
+        assert_point_close(
+            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            matrix.apply_point(1.0 + 0.166_666_67 * 0.5, 2.0),
+        );
+    }
+
     use super::*;
     use ooxml_drawingml::GeometryPathCommand;
     use vsdx_parse::{

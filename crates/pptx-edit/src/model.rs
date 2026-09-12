@@ -156,6 +156,8 @@ pub struct SlideSnapshot {
     pub source_part_path: Option<String>,
     pub layout_part_path: Option<String>,
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
     pub shapes: Vec<ShapeSnapshot>,
 }
 

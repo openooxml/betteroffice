@@ -416,18 +416,6 @@ mod tests {
 
     /// Attaches an already-created shape to its parent's child order, for wiring forward
     /// references (e.g. a mutual cycle) that `add_child_shape` could not attach at creation time.
-    fn attach_child(session: &DiagramSession, id: &str, parent_id: &str) {
-        let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
-        let sheets = txn.get_map(SHEETS).unwrap();
-        let Some(yrs::Out::YMap(parent)) = sheets.get(&txn, parent_id) else {
-            unreachable!()
-        };
-        let child_order = match parent.get(&txn, "shapes") {
-            Some(yrs::Out::YArray(child_order)) => child_order,
-            _ => parent.insert(&mut txn, "shapes", ArrayPrelim::default()),
-        };
-        child_order.push_back(&mut txn, id);
-    }
 
     fn shape_cells<T: yrs::ReadTxn>(txn: &T, shape_id: &str) -> yrs::MapRef {
         let sheets = txn.get_map(SHEETS).unwrap();
@@ -820,12 +808,14 @@ mod tests {
             name: None,
             cells: vec![
                 CellSnapshot {
+                    row_type: None,
                     locator: geometry.clone(),
                     name: "X".to_owned(),
                     formula: Some("1".to_owned()),
                     value: None,
                 },
                 CellSnapshot {
+                    row_type: None,
                     locator: CellLocator {
                         row: Some(CellRow::Index(1)),
                         ..geometry.clone()
@@ -878,6 +868,7 @@ mod tests {
                 &ShapeDraft {
                     name: Some("Added".to_owned()),
                     cells: vec![CellSnapshot {
+                        row_type: None,
                         locator: CellLocator {
                             sheet: CellSheet::Page(1),
                             shape_id: None,
@@ -931,6 +922,7 @@ mod tests {
         let draft = ShapeDraft {
             name: Some("Rectangle".to_owned()),
             cells: vec![CellSnapshot {
+                row_type: None,
                 locator: CellLocator {
                     sheet: CellSheet::Page(1),
                     shape_id: Some(42),
@@ -1201,23 +1193,21 @@ mod tests {
     #[test]
     fn snapshot_terminates_on_a_cyclic_parent_chain_instead_of_overflowing() {
         let session = session();
-        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
+        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:1");
         add_child_shape(&session, "page:1:shape:cycle-b", "page:1:shape:cycle-a");
-        attach_child(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
-        {
-            let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
-            let pages = txn.get_map(PAGES).unwrap();
-            let page = match pages.get(&txn, "page:1") {
-                Some(yrs::Out::YMap(page)) => page,
-                _ => unreachable!(),
-            };
-            let shapes = match page.get(&txn, "shapes") {
-                Some(yrs::Out::YArray(shapes)) => shapes,
-                _ => unreachable!(),
-            };
-            shapes.push_back(&mut txn, "page:1:shape:cycle-a");
-        }
-        assert!(session.snapshot().is_err());
+        write_peer_shape_field(
+            session.yrs_doc(),
+            "page:1:shape:cycle-a",
+            "parentId",
+            "page:1:shape:cycle-b",
+        );
+        assert!(
+            session
+                .snapshot()
+                .unwrap_err()
+                .to_string()
+                .contains("cyclic parent chain")
+        );
     }
 
     #[test]
@@ -1947,6 +1937,7 @@ mod tests {
         ]
         .into_iter()
         .map(|(name, formula)| CellSnapshot {
+            row_type: None,
             locator: CellLocator {
                 sheet: CellSheet::Page(1),
                 shape_id: None,

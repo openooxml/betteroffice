@@ -110,9 +110,7 @@ impl Diagram {
             .save()
             .map_err(|error| Error::Policy(error.to_string()))
     }
-    /// Applies semantic and structural edits as one all-or-nothing save request. Cell edits are
-    /// applied first so a structural deletion is authorized against the locks they leave in
-    /// effect, not the locks the diagram had before the batch started.
+    /// Applies a batch atomically, enforcing locks after preceding cell edits.
     pub fn save_edits(
         &self,
         cell_edits: &[SemanticCellEdit],
@@ -135,7 +133,7 @@ impl Diagram {
         Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
-        self.package.page_contents.keys().map(|part| Page {
+        self.package.page_part_paths.iter().map(|part| Page {
             diagram: self,
             part,
         })

@@ -1277,16 +1277,14 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -
         }
         0x0127 => player.restore(i32::from(i16_at(bytes, body)?))?,
         0x0214 => {
-            if let Some(point) = point_at(body) {
-                player.flush_pending();
-                player.move_to(point.0, point.1);
-            }
+            let point = point_at(body)?;
+            player.flush_pending();
+            player.move_to(point.0, point.1);
         }
         0x0213 => {
-            if let Some(point) = point_at(body) {
-                player.line_to(point.0, point.1);
-                player.pending_stroke = true;
-            }
+            let point = point_at(body)?;
+            player.line_to(point.0, point.1);
+            player.pending_stroke = true;
         }
         0x02FA => {
             let (Some(style), Some(width), Some(color)) = (
@@ -1404,6 +1402,48 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// POLYGON16 declaring eight points in a 40-byte record that holds three (#318).
+    const EMF_POLYGON_READS_PAST_ITS_RECORD: &[u8] =
+        include_bytes!("../tests/fixtures/metafile-decode/emf-polygon-reads-past-its-record.emf");
+    const EMF_POLYGON_COUNT_AT: usize = 0x70;
+
+    /// META_POLYGON declaring four points in a 10-word record that holds three (#318).
+    const WMF_POLYGON_READS_PAST_ITS_RECORD: &[u8] =
+        include_bytes!("../tests/fixtures/metafile-decode/wmf-polygon-reads-past-its-record.wmf");
+    const WMF_POLYGON_COUNT_AT: usize = 0x18;
+
+    fn with_count(bytes: &[u8], at: usize, count: u8) -> Vec<u8> {
+        let mut bytes = bytes.to_vec();
+        bytes[at] = count;
+        bytes
+    }
+
+    #[test]
+    fn an_emf_polygon_counting_past_its_record_yields_no_drawing() {
+        assert!(decode(EMF_POLYGON_READS_PAST_ITS_RECORD).is_none());
+        assert!(
+            decode(&with_count(
+                EMF_POLYGON_READS_PAST_ITS_RECORD,
+                EMF_POLYGON_COUNT_AT,
+                3
+            ))
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn a_wmf_polygon_counting_past_its_record_yields_no_drawing() {
+        assert!(decode(WMF_POLYGON_READS_PAST_ITS_RECORD).is_none());
+        assert!(
+            decode(&with_count(
+                WMF_POLYGON_READS_PAST_ITS_RECORD,
+                WMF_POLYGON_COUNT_AT,
+                3
+            ))
+            .is_some()
+        );
+    }
 
     fn emf_header(bounds: [i32; 4], frame_device: [i32; 2]) -> Vec<u8> {
         let mut header = vec![0u8; 88];
@@ -1623,6 +1663,27 @@ mod tests {
         let mut lying = emf_header([0, 0, 99, 99], [100, 100]);
         lying.extend(record(86, &i32s(&[0, 0, 0, 0, 100_000])));
         assert!(decode(&lying).is_none());
+    }
+
+    const WMF_LINETO_SHORTER_THAN_ITS_POINT: &[u8] = &[
+        0x01, 0x00, 0x09, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x13, 0x02, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
+        0x24, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_wmf_move_or_line_too_short_for_its_point_rejects_the_metafile() {
+        for function in [0x0213u16, 0x0214] {
+            let mut short = WMF_LINETO_SHORTER_THAN_ITS_POINT.to_vec();
+            short[22..24].copy_from_slice(&function.to_le_bytes());
+            assert!(decode(&short).is_none(), "function {function:#06x}");
+
+            let mut honest = short.clone();
+            honest[18] = 5;
+            honest.splice(26..26, [0, 0]);
+            assert!(decode(&honest).is_some(), "function {function:#06x}");
+        }
     }
 
     #[test]
