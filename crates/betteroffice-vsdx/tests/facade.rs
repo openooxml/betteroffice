@@ -739,6 +739,44 @@ fn session_added_shapes_do_not_leak_into_cell_edits() {
 }
 
 #[test]
+fn added_shape_drafts_evaluate_against_their_own_cells() {
+    let (source, diagram, _) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
+    );
+    let session = DiagramSession::open(&source, 7).unwrap();
+    let page = session.snapshot().unwrap().pages[0].id.clone();
+    session
+        .add_shape(
+            &EditCtx::local("a"),
+            &page,
+            &ShapeDraft {
+                source_id: 99,
+                name: Some("Added".to_owned()),
+                cells: vec![
+                    draft_cell("Width", "5", None, None),
+                    draft_cell("Height", "Width*2", None, None),
+                ],
+            },
+        )
+        .unwrap();
+
+    let saved = diagram.save_session(&session).unwrap();
+    let reopened = Diagram::open(&saved).unwrap();
+    let page = reopened.pages().next().unwrap();
+    let added = page
+        .shapes()
+        .find(|shape| shape.model().name.as_deref() == Some("Added"))
+        .unwrap();
+    let height = added
+        .model()
+        .cells()
+        .find(|cell| cell.name == "Height")
+        .unwrap();
+    assert_eq!(height.formula.as_deref(), Some("Width*2"));
+    assert_eq!(height.value.as_deref(), Some("10"));
+}
+
+#[test]
 fn batched_edits_cache_against_earlier_edits_in_the_batch() {
     let (_, diagram, page_id) = diagram_with_page(
         "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/><Cell N='Height' V='1'/></Shape></Shapes></PageContents>",
