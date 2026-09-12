@@ -523,63 +523,51 @@ pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
 
 fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
     let txn = doc.transact();
-    let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
     let mut protected = std::collections::BTreeMap::new();
-    for (page_id, page) in pages.iter(&txn) {
-        let Out::YMap(page) = page else { continue };
-        let order = map_array(&page, &txn, "shapes")?;
-        for index in 0..order.len(&txn) {
-            let Some(shape_id) = array_string(&order, &txn, index) else {
-                continue;
-            };
-            let shape = map_ref(&sheets, &txn, &shape_id)?;
-            let cells = map_map(&shape, &txn, "cells")?;
-            let values = cells
-                .iter(&txn)
-                .filter_map(|(name, cell)| match cell {
-                    Out::YMap(cell) => Some((
-                        name.to_string(),
-                        map_string(&cell, &txn, "formula")
-                            .or_else(|| map_string(&cell, &txn, "value")),
-                    )),
-                    _ => None,
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
-            for (name, cell) in cells.iter(&txn) {
-                let Out::YMap(cell) = cell else { continue };
-                let formula = map_string(&cell, &txn, "formula");
-                let locked = lock_target(name).is_some_and(|_| {
-                    values
-                        .get(name)
-                        .and_then(|value| value.as_deref())
-                        .is_some_and(|value| lock_is_enabled(value, &values))
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        let cells = map_map(&shape, &txn, "cells")?;
+        let values = cells
+            .iter(&txn)
+            .filter_map(|(name, cell)| match cell {
+                Out::YMap(cell) => Some((
+                    name.to_string(),
+                    map_string(&cell, &txn, "formula").or_else(|| map_string(&cell, &txn, "value")),
+                )),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (name, cell) in cells.iter(&txn) {
+            let Out::YMap(cell) = cell else { continue };
+            let formula = map_string(&cell, &txn, "formula");
+            let locked = lock_target(name).is_some_and(|_| {
+                values
+                    .get(name)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(|value| lock_is_enabled(value, &values))
+            });
+            let protected_target = lock_target(name).is_none()
+                && [
+                    "LockMoveX",
+                    "LockMoveY",
+                    "LockWidth",
+                    "LockHeight",
+                    "LockAspect",
+                    "LockTextEdit",
+                    "LockFormat",
+                    "LockDelete",
+                ]
+                .iter()
+                .any(|lock| {
+                    lock_target(lock) == Some(name)
+                        && values
+                            .get(*lock)
+                            .and_then(|value| value.as_deref())
+                            .is_some_and(|value| lock_is_enabled(value, &values))
                 });
-                let protected_target = lock_target(name).is_none()
-                    && [
-                        "LockMoveX",
-                        "LockMoveY",
-                        "LockWidth",
-                        "LockHeight",
-                        "LockAspect",
-                        "LockTextEdit",
-                        "LockFormat",
-                        "LockDelete",
-                    ]
-                    .iter()
-                    .any(|lock| {
-                        lock_target(lock) == Some(name)
-                            && values
-                                .get(*lock)
-                                .and_then(|value| value.as_deref())
-                                .is_some_and(|value| lock_is_enabled(value, &values))
-                    });
-                if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
-                    protected.insert(
-                        format!("{page_id}/{shape_id}/{name}"),
-                        formula.unwrap_or_default(),
-                    );
-                }
+            if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
+                protected.insert(format!("{shape_id}/{name}"), formula.unwrap_or_default());
             }
         }
     }
