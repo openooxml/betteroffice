@@ -24,10 +24,12 @@ struct UpdateObserver {
 
 struct PendingUpdates {
     events: VecDeque<UpdateEvent>,
+    queued_bytes: usize,
     resync_required: bool,
 }
 
 const MAX_PENDING_UPDATE_EVENTS: usize = 1024;
+const MAX_PENDING_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,7 +130,6 @@ struct FormulaShapeDraft {
 #[serde(rename_all = "camelCase")]
 struct FormulaShapeCell {
     locator: CellLocatorArgs,
-    name: String,
     formula: Option<String>,
 }
 
@@ -141,23 +142,15 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
             if cell.get("value").is_some() {
                 return Err("shape draft cells must not contain value");
             }
-            let parsed = serde_json::from_value::<CellSnapshot>(cell.clone()).or_else(|_| {
-                let cell = serde_json::from_value::<FormulaShapeCell>(cell)
-                    .map_err(|_| "invalid shape draft cell")?;
-                let locator =
-                    CellLocator::try_from(cell.locator).map_err(|_| "invalid shape draft cell")?;
-                Ok(CellSnapshot {
-                    name: cell.name,
-                    locator: CellLocator {
-                        sheet: CellSheet::Page(0),
-                        shape_id: None,
-                        ..locator
-                    },
-                    formula: cell.formula,
-                    value: None,
-                })
-            })?;
-            cells.push(parsed);
+            let cell = serde_json::from_value::<FormulaShapeCell>(cell)
+                .map_err(|_| "invalid shape draft cell")?;
+            let locator = CellLocator::try_from(cell.locator)?;
+            cells.push(CellSnapshot {
+                name: locator.cell_name.clone(),
+                locator,
+                formula: cell.formula,
+                value: None,
+            });
         }
         Ok(Self {
             name: value.name,
@@ -242,6 +235,7 @@ impl VsdxDocument {
         }
         let pending = Arc::new(Mutex::new(PendingUpdates {
             events: VecDeque::new(),
+            queued_bytes: 0,
             resync_required: false,
         }));
         let observed = Arc::clone(&pending);
@@ -251,13 +245,20 @@ impl VsdxDocument {
                 let mut pending = observed
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if pending.events.len() == MAX_PENDING_UPDATE_EVENTS {
+                if pending.resync_required {
+                    return;
+                }
+                if pending.events.len() == MAX_PENDING_UPDATE_EVENTS
+                    || pending.queued_bytes.saturating_add(event.update.len())
+                        > MAX_PENDING_UPDATE_BYTES
+                {
                     pending.events.clear();
+                    pending.queued_bytes = 0;
                     pending.resync_required = true;
+                    return;
                 }
-                if !pending.resync_required {
-                    pending.events.push_back(event);
-                }
+                pending.queued_bytes += event.update.len();
+                pending.events.push_back(event);
             })
             .map_err(js_error)?;
         self.update_observer = Some(UpdateObserver {
@@ -289,6 +290,7 @@ impl VsdxDocument {
         let Some(event) = pending.events.pop_front() else {
             return Vec::new();
         };
+        pending.queued_bytes = pending.queued_bytes.saturating_sub(event.update.len());
         let mut encoded = Vec::with_capacity(event.update.len() + 1);
         encoded.push(match event.origin {
             UpdateOrigin::Local => 0,
@@ -1056,6 +1058,38 @@ mod tests {
     }
 
     #[test]
+    fn add_shape_json_accepts_the_boundary_cell_locator_shape() {
+        let document = document();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .add_shape_json(
+                    r#"{"pageId":"page:1","draft":{"name":"Added","cells":[{"locator":{"cellName":"Width"},"formula":"1"},{"locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}]}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let shape_id = receipt["shapeId"].as_str().unwrap().to_owned();
+        let snapshot = document.session().snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)
+            .unwrap();
+        let width = shape
+            .cells
+            .iter()
+            .find(|cell| cell.name == "Width")
+            .unwrap();
+        assert_eq!(width.formula.as_deref(), Some("1"));
+        assert_eq!(width.locator.section, None);
+        assert_eq!(width.locator.row, None);
+        let x = shape.cells.iter().find(|cell| cell.name == "X").unwrap();
+        assert_eq!(x.formula.as_deref(), Some("2"));
+        assert_eq!(x.locator.section.as_deref(), Some("Geometry"));
+        assert_eq!(x.locator.row, Some(vsdx_parse::CellRow::Index(0)));
+    }
+
+    #[test]
     fn media_bytes_inner_rejects_unknown_parts() {
         assert_eq!(
             document()
@@ -1381,6 +1415,22 @@ mod tests {
             document.apply_update_json_inner(&update).unwrap_err(),
             "invalid diagram state: shape parentId does not match shape order"
         );
+    }
+
+    #[test]
+    fn wasm_update_observation_byte_overflow_requires_resync() {
+        let mut document = document();
+        document.start_update_observation().unwrap();
+        let formula = "1".repeat(1024 * 1024);
+        for index in 0..9 {
+            add_cell(
+                &document,
+                &format!("Large{index}"),
+                &format!("Large{index}"),
+                &formula,
+            );
+        }
+        assert_eq!(document.drain_update_event(), vec![2]);
     }
 
     #[test]
