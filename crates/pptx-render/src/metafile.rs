@@ -1277,16 +1277,14 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -
         }
         0x0127 => player.restore(i32::from(i16_at(bytes, body)?))?,
         0x0214 => {
-            if let Some(point) = point_at(body) {
-                player.flush_pending();
-                player.move_to(point.0, point.1);
-            }
+            let point = point_at(body)?;
+            player.flush_pending();
+            player.move_to(point.0, point.1);
         }
         0x0213 => {
-            if let Some(point) = point_at(body) {
-                player.line_to(point.0, point.1);
-                player.pending_stroke = true;
-            }
+            let point = point_at(body)?;
+            player.line_to(point.0, point.1);
+            player.pending_stroke = true;
         }
         0x02FA => {
             let (Some(style), Some(width), Some(color)) = (
@@ -1623,6 +1621,27 @@ mod tests {
         let mut lying = emf_header([0, 0, 99, 99], [100, 100]);
         lying.extend(record(86, &i32s(&[0, 0, 0, 0, 100_000])));
         assert!(decode(&lying).is_none());
+    }
+
+    const WMF_LINETO_SHORTER_THAN_ITS_POINT: &[u8] = &[
+        0x01, 0x00, 0x09, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x13, 0x02, 0x00, 0x00, 0x0a, 0x00, 0x00, 0x00,
+        0x24, 0x03, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+
+    #[test]
+    fn a_wmf_move_or_line_too_short_for_its_point_rejects_the_metafile() {
+        for function in [0x0213u16, 0x0214] {
+            let mut short = WMF_LINETO_SHORTER_THAN_ITS_POINT.to_vec();
+            short[22..24].copy_from_slice(&function.to_le_bytes());
+            assert!(decode(&short).is_none(), "function {function:#06x}");
+
+            let mut honest = short.clone();
+            honest[18] = 5;
+            honest.splice(26..26, [0, 0]);
+            assert!(decode(&honest).is_some(), "function {function:#06x}");
+        }
     }
 
     #[test]
