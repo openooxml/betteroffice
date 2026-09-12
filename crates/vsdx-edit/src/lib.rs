@@ -414,9 +414,6 @@ mod tests {
         child_order.push_back(&mut txn, id);
     }
 
-    /// Attaches an already-created shape to its parent's child order, for wiring forward
-    /// references (e.g. a mutual cycle) that `add_child_shape` could not attach at creation time.
-
     fn shape_cells<T: yrs::ReadTxn>(txn: &T, shape_id: &str) -> yrs::MapRef {
         let sheets = txn.get_map(SHEETS).unwrap();
         let shape = match sheets.get(txn, shape_id) {
