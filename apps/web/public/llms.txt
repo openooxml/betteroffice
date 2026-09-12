@@ -81,3 +81,9 @@ eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a c
 - [OpenOOXML](https://openooxml.org): the project building the engines.
 - [npm organization](https://www.npmjs.com/org/betteroffice): all published packages.
 - [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0): the license for every package and crate.
+
+## Visio support in development
+
+- [betteroffice-vsdx](https://crates.io/crates/betteroffice-vsdx)
+- [betteroffice-vsdx-parse](https://crates.io/crates/betteroffice-vsdx-parse)
+- [betteroffice-vsdx-resolve](https://crates.io/crates/betteroffice-vsdx-resolve)
