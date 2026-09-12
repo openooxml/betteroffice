@@ -895,6 +895,7 @@ impl Renderer {
                 })
                 .collect(),
             lines,
+            transform: Affine::identity(),
         });
         Ok(())
     }
@@ -1197,22 +1198,7 @@ fn bake_group_transform(primitive: &mut Primitive, matrix: Affine) {
             *transform = Affine::identity();
         }
         Primitive::Image { transform, .. } => *transform = matrix.compose(*transform),
-        Primitive::TextBox {
-            x,
-            y,
-            width,
-            height,
-            lines,
-            ..
-        } => {
-            transform_rect(x, y, width, height, matrix);
-            for line in lines {
-                (line.x, line.y) = matrix.apply_point(line.x, line.y);
-                for stop in &mut line.caret_stops {
-                    (stop.x, stop.y) = matrix.apply_point(stop.x, stop.y);
-                }
-            }
-        }
+        Primitive::TextBox { transform, .. } => *transform = matrix.compose(*transform),
         Primitive::Placeholder {
             x,
             y,
@@ -1532,9 +1518,11 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
             height,
             paragraphs,
             lines,
+            transform,
             ..
         } => {
             [*x, *y, *width, *height].into_iter().all(f32::is_finite)
+                && transform.is_finite()
                 && lines.iter().all(|line| {
                     [line.x, line.y, line.width, line.height]
                         .into_iter()
@@ -1625,19 +1613,17 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                 width,
                 height,
                 lines,
+                transform,
                 ..
-            } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
-                let line = lines
-                    .iter()
-                    .min_by(|a, b| (a.y - y).abs().total_cmp(&(b.y - y).abs()))?;
-                let stop = line
-                    .caret_stops
-                    .iter()
-                    .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))?;
-                return Some(HitTestResult::Text {
-                    shape_id: id.clone(),
-                    position: stop.position,
-                });
+            } => {
+                if let Some(position) =
+                    text_caret_at((*left, *top, *width, *height), lines, *transform, (x, y))
+                {
+                    return Some(HitTestResult::Text {
+                        shape_id: id.clone(),
+                        position,
+                    });
+                }
             }
             Primitive::Shape {
                 id,
@@ -1700,6 +1686,26 @@ fn z_order(primitive: &Primitive) -> u32 {
     }
 }
 
+/// Probes a text box in its own local space so a rotated box rejects points that only fall
+/// inside its axis-aligned bounds, and compares caret stops in the space they were laid out in.
+fn text_caret_at(
+    (left, top, width, height): (f32, f32, f32, f32),
+    lines: &[PositionedLine],
+    transform: Affine,
+    (x, y): (f32, f32),
+) -> Option<u32> {
+    let (x, y) = transform.invert()?.apply_point(x, y);
+    if x < left || x > left + width || y < top || y > top + height {
+        return None;
+    }
+    lines
+        .iter()
+        .min_by(|a, b| (a.y - y).abs().total_cmp(&(b.y - y).abs()))?
+        .caret_stops
+        .iter()
+        .min_by(|a, b| (a.x - x).abs().total_cmp(&(b.x - x).abs()))
+        .map(|stop| stop.position)
+}
 fn point_in_transformed_rect(
     left: f32,
     top: f32,
@@ -2536,7 +2542,7 @@ mod tests {
     }
 
     #[test]
-    fn forty_five_degree_group_transforms_all_text_corners_lines_and_caret_stops() {
+    fn forty_five_degree_group_keeps_text_in_a_local_box_under_the_group_transform() {
         let mut child = shape(2, 1.0, 2.0);
         child
             .children
@@ -2557,6 +2563,7 @@ mod tests {
             width,
             height,
             lines,
+            transform,
             ..
         } = &primitives[1]
         else {
@@ -2570,30 +2577,74 @@ mod tests {
             e: 10.707_107,
             f: 17.878_68,
         };
-        let corners =
-            [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| matrix.apply_point(x, y));
-        let min_x = corners
-            .iter()
-            .map(|point| point.0)
-            .fold(f32::INFINITY, f32::min);
-        let max_x = corners
-            .iter()
-            .map(|point| point.0)
-            .fold(f32::NEG_INFINITY, f32::max);
-        let min_y = corners
-            .iter()
-            .map(|point| point.1)
-            .fold(f32::INFINITY, f32::min);
-        let max_y = corners
-            .iter()
-            .map(|point| point.1)
-            .fold(f32::NEG_INFINITY, f32::max);
-        assert_point_close((*x, *y), (min_x, min_y));
-        assert_point_close((*width, *height), (max_x - min_x, max_y - min_y));
-        assert_point_close((lines[0].x, lines[0].y), matrix.apply_point(1.0, 2.0));
+        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
+        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
+        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
+        assert_point_close((*x, *y), (1.0, 2.0));
+        assert_point_close((*width, *height), (1.0, 1.0));
         assert_point_close(
-            (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            transform.apply_point(lines[0].x, lines[0].y),
+            matrix.apply_point(1.0, 2.0),
+        );
+        assert_point_close(
+            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             matrix.apply_point(1.0 + 0.166_666_67 * 0.5, 2.0),
+        );
+    }
+
+    #[test]
+    fn rotated_text_hit_testing_rejects_axis_aligned_bounds_and_follows_caret_geometry() {
+        let mut child = shape(2, 1.0, 2.0);
+        child
+            .children
+            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        let mut parent = group(1, 4.0, 4.0, vec![child]);
+        with_cell(
+            &mut parent,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let list = render(vec![parent]);
+        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+            unreachable!()
+        };
+        let Primitive::TextBox {
+            id,
+            x,
+            y,
+            width,
+            height,
+            lines,
+            transform,
+            ..
+        } = &primitives[1]
+        else {
+            unreachable!()
+        };
+        let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
+        let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
+        transform_rect(
+            &mut left,
+            &mut top,
+            &mut bounds_width,
+            &mut bounds_height,
+            *transform,
+        );
+        let outside = (left + bounds_width * 0.05, top + bounds_height * 0.05);
+        assert!(
+            outside.0 >= left
+                && outside.0 <= left + bounds_width
+                && outside.1 >= top
+                && outside.1 <= top + bounds_height
+        );
+        assert_eq!(canvas(outside), None);
+        let stop = lines[0].caret_stops[1];
+        assert_eq!(
+            canvas(transform.apply_point(stop.x, stop.y + height * 0.25)),
+            Some(HitTestResult::Text {
+                shape_id: id.clone(),
+                position: stop.position,
+            })
         );
     }
 
@@ -3326,16 +3377,28 @@ mod tests {
             width,
             height,
             lines,
+            transform,
             ..
         } = &inner[1]
         else {
             unreachable!()
         };
-        assert_point_close((*x, *y), (9.079249, 9.821818));
-        assert_point_close((*width, *height), (2.8263865, 1.4685154));
-        assert_point_close((lines[0].x, lines[0].y), (10.021151, 11.018823));
+        let (mut left, mut top, mut text_width, mut text_height) = (*x, *y, *width, *height);
+        transform_rect(
+            &mut left,
+            &mut top,
+            &mut text_width,
+            &mut text_height,
+            *transform,
+        );
+        assert_point_close((left, top), (9.079249, 9.821818));
+        assert_point_close((text_width, text_height), (2.8263865, 1.4685154));
         assert_point_close(
-            (lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            transform.apply_point(lines[0].x, lines[0].y),
+            (10.021151, 11.018823),
+        );
+        assert_point_close(
+            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             (9.942658, 10.919072),
         );
         let Primitive::Image {
@@ -3589,6 +3652,7 @@ mod tests {
                     height: 0.0,
                     paragraphs,
                     lines: Vec::new(),
+                    transform: Affine::identity(),
                 }],
             },
             expected,
