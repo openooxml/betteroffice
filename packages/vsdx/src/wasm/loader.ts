@@ -40,9 +40,16 @@ export function wasmVersion(): string { requireInitialized(); return rendererVer
 export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {}): DiagramHandle {
   requireInitialized();
   const doc = construct(() => VsdxDocument.openCollaborative(bytes, options.clientId ?? clientId()));
-  if (options.initialUpdate) construct(() => doc.applyUpdateJson(options.initialUpdate!.slice()));
-  const renderer = construct(() => new VsdxRenderer());
-  for (const face of options.fonts ?? []) construct(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes));
+  let renderer!: VsdxRenderer;
+  try {
+    if (options.initialUpdate) construct(() => doc.applyUpdateJson(options.initialUpdate!.slice()));
+    renderer = construct(() => new VsdxRenderer());
+    for (const face of options.fonts ?? []) construct(() => renderer!.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes));
+  } catch (error) {
+    try { renderer?.free(); } catch {}
+    try { doc.free(); } catch {}
+    throw error;
+  }
   const listeners = new Map<number, (update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const resyncListeners = new Map<number, (resync: CollaborationResync) => void>();
   const queued: Array<{ kind: 'update'; update: Uint8Array; origin: CollaborationUpdateOrigin } | { kind: 'resync'; update: Uint8Array }> = [];
@@ -75,7 +82,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     get clientId() { return wasm(() => doc.clientId); }, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
-    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 3) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
+    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
     hitTest: (x, y) => json<HitTestResult | null>(() => renderer.hitTestJson(x, y)), mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),

@@ -628,7 +628,7 @@ impl Renderer {
         cache: &mut LayoutCache,
     ) -> Result<(), RenderError> {
         if depth >= MAX_RECURSION_DEPTH {
-            return self.placeholder(shape, state, "group nesting depth exceeded");
+            return self.placeholder(page_part, shape, state, "group nesting depth exceeded");
         }
         state.count += 1;
         if state.count > self.limits.max_shapes {
@@ -685,7 +685,7 @@ impl Renderer {
             );
         }
         let Some(bounds) = bounds(package, references, resolved, shape.id) else {
-            return self.placeholder(shape, state, "unresolvable transform");
+            return self.placeholder(page_part, shape, state, "unresolvable transform");
         };
         let Some(transform) = transforms.get(&shape.id) else {
             return self.placeholder_at(id, z_order, bounds, state, "unresolvable transform");
@@ -849,7 +849,7 @@ impl Renderer {
         _resolver: &Resolver<'_>,
         connectivity: &vsdx_resolve::PageConnectivity,
         references: Option<&PageShapeReferences>,
-        _page_part: &str,
+        page_part: &str,
         shape: &Shape,
         id: String,
         z_order: u32,
@@ -857,7 +857,12 @@ impl Renderer {
         state: &mut State,
     ) -> Result<(), RenderError> {
         let Some(connector) = connectivity.connectors.get(&shape.id) else {
-            return self.placeholder(shape, state, "1D shape is missing connector state");
+            return self.placeholder(
+                page_part,
+                shape,
+                state,
+                "1D shape is missing connector state",
+            );
         };
         let mut begin = connector.begin;
         let mut end = connector.end;
@@ -893,6 +898,7 @@ impl Renderer {
             .all(f64::is_finite)
         {
             return self.placeholder(
+                page_part,
                 shape,
                 state,
                 "connector route cannot be computed: non-finite endpoint",
@@ -900,7 +906,7 @@ impl Renderer {
         }
         let (fill, stroke) = match paint::paint(package, references, resolved, shape.id) {
             Ok(paint) => paint,
-            Err(reason) => return self.placeholder(shape, state, &reason),
+            Err(reason) => return self.placeholder(page_part, shape, state, &reason),
         };
         state.primitives.push(Primitive::Shape {
             id,
@@ -1365,12 +1371,13 @@ impl Renderer {
     }
     fn placeholder(
         &self,
+        page_part: &str,
         shape: &Shape,
         state: &mut State,
         reason: &str,
     ) -> Result<(), RenderError> {
         self.placeholder_at(
-            format!("shape:{}", shape.id),
+            format!("{page_part}:{}", shape.id),
             state.next_z(),
             Bounds::default(),
             state,
@@ -3864,7 +3871,7 @@ mod tests {
     #[test]
     fn rejects_unknown_contract() {
         let list = VsdxDisplayList {
-            contract_version: 4,
+            contract_version: CONTRACT_VERSION + 1,
             width: 0.0,
             height: 0.0,
             paint_transform: final_paint_transform(0.0),

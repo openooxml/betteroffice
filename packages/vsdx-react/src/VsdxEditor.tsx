@@ -5,7 +5,7 @@ import type { CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResul
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, findShapePlacement } from './components/ribbon/commands';
+import { RibbonCommandsProvider, cellValue, findShapePlacement, numberValue } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -57,7 +57,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const pointerRef = useRef<{ canvas: ModelPoint; model: ModelPoint; resize: boolean } | null>(null);
+  const pointerRef = useRef<DragStart | null>(null);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -78,7 +78,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
       if (notify) { setDirty(true); onChangeRef.current?.(); }
     } catch (value) { reportError(value); }
-  }, [onChange, reportError]);
+  }, [reportError]);
 
   useEffect(() => {
     let disposed = false;
@@ -114,8 +114,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = mainCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
+    let stale = false;
+    const originHandle = handleRef.current;
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
-    void paintPage(context, frame, dpr, zoom, { resolveImage: (assetId) => resolveImage(assetId, handleRef, imageCache, t('errors.decodePageImage')) }).catch(reportError);
+    void paintPage(context, frame, dpr, zoom, {
+      resolveImage: (assetId) => stale ? Promise.resolve(null) : resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')),
+    }).catch((value) => { if (!stale) reportError(value); });
+    return () => { stale = true; };
   }, [model.frame, reportError, t, zoom]);
 
   useEffect(() => {
@@ -129,7 +134,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     const point = canvasPointerPosition(event, frame);
-    try { handle.layoutPage(model.pageIndex); const hit = handle.hitTest(point.canvas.x, point.canvas.y); setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null); pointerRef.current = hit ? { ...point, resize: event.shiftKey } : null; event.currentTarget.setPointerCapture(event.pointerId); } catch (value) { reportError(value); }
+    try {
+      handle.layoutPage(model.pageIndex);
+      const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+      setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
+      const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
+      pointerRef.current = hit && placement ? {
+        ...point,
+        resize: event.shiftKey,
+        pin: { x: numberValue(cellValue(placement.shape, 'PinX')), y: numberValue(cellValue(placement.shape, 'PinY')) },
+        size: { width: numberValue(cellValue(placement.shape, 'Width')), height: numberValue(cellValue(placement.shape, 'Height')) },
+      } : null;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
     const pointer = pointerRef.current; pointerRef.current = null;
@@ -137,9 +154,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!pointer || !handle || !selected || !frame) return;
     const point = canvasPointerPosition(event, frame);
     if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+    const geometry = resolveDragGeometry(pointer, point.model);
     try {
-      if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(Math.max(MIN_SHAPE_INCHES, Math.abs(point.model.x - pointer.model.x))), inchFormula(Math.max(MIN_SHAPE_INCHES, Math.abs(point.model.y - pointer.model.y))));
-      else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(point.model.x), inchFormula(point.model.y));
+      if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
+      else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
@@ -208,6 +226,15 @@ export function inchFormula(value: number): string {
   return String(Object.is(rounded, -0) ? 0 : rounded);
 }
 
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; }
+
+export function resolveDragGeometry(start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } {
+  const deltaX = release.x - start.model.x;
+  const deltaY = release.y - start.model.y;
+  if (start.resize) return { x: start.pin.x, y: start.pin.y, width: Math.max(MIN_SHAPE_INCHES, start.size.width + deltaX), height: Math.max(MIN_SHAPE_INCHES, start.size.height + deltaY) };
+  return { x: start.pin.x + deltaX, y: start.pin.y + deltaY, width: start.size.width, height: start.size.height };
+}
+
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
   const page = snapshot.pages[pageIndex];
   return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
@@ -219,6 +246,6 @@ function useStableFontFaces(fonts: ReadonlyArray<VsdxFontFace>): ReadonlyArray<V
 function fontFacesEqual(left: ReadonlyArray<VsdxFontFace>, right: ReadonlyArray<VsdxFontFace>): boolean { return left === right || (left.length === right.length && left.every((face, index) => fontFaceEqual(face, right[index]))); }
 function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) && (left.italic ?? false) === (right.italic ?? false) && bytesEqual(left.bytes, right.bytes); }
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
-function resolveImage(assetId: string, handleRef: { current: DiagramHandle | null }, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handleRef.current?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
+function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }
 const styles: Record<string, CSSProperties> = { root: { display: 'flex', flexDirection: 'column', width: '100%', height: '100%', minHeight: 480, color: '#172033', background: '#f3f5f8', fontFamily: 'ui-sans-serif, system-ui, sans-serif' }, titleBar: { display: 'flex', alignItems: 'center', gap: 12, minHeight: 32, padding: '0 14px', background: '#f8fafc', borderBottom: '1px solid #d8dee9', fontSize: 13 }, contentRow: { display: 'flex', flex: 1, minHeight: 0 }, workspace: { position: 'relative', display: 'flex', flex: 1, alignItems: 'center', justifyContent: 'center', overflow: 'auto' }, canvasFrame: { position: 'relative', flex: '0 0 auto' }, canvas: { display: 'block', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' }, overlay: { position: 'absolute', inset: 0, pointerEvents: 'none' }, selection: { position: 'absolute', top: 8, left: 8, padding: '4px 6px', color: '#fff', background: '#2563eb', fontSize: 12 }, integrity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 12, color: '#7f1d1d', background: '#fef2f2', border: '1px solid #fca5a5' }, fidelity: { position: 'absolute', right: 14, bottom: 14, maxWidth: 340, padding: 8, color: '#475569', background: '#fff', fontSize: 12 }, error: { position: 'absolute', left: 14, right: 14, bottom: 14, padding: 10, color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0' } };

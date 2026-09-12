@@ -16,7 +16,7 @@ export function canvasPointToModel(paintTransform: Affine, x: number, y: number,
   return { x: (paintTransform.d * px - paintTransform.c * py) / determinant, y: (paintTransform.a * py - paintTransform.b * px) / determinant };
 }
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 3) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   ctx.save();
   try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) await paintPrimitive(ctx, primitive, list.paintTransform, options, 0); }
   finally { ctx.restore(); }

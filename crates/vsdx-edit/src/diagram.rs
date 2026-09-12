@@ -849,6 +849,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
     }
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    validate_acyclic_parents(&sheets, &txn)?;
     for index in 0..order.len(&txn) {
         let page_id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -912,6 +913,34 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
     Ok(())
 }
 
+/// Rejects a cyclic or self-referential shape `parentId` chain.
+fn validate_acyclic_parents<T: ReadTxn>(sheets: &MapRef, txn: &T) -> EditResult<()> {
+    for (shape_id, _) in sheets.iter(txn) {
+        let mut current = shape_id.to_owned();
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            if !seen.insert(current.clone()) {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} has a cyclic parent chain"
+                )));
+            }
+            if seen.len() > MAX_SHAPE_NESTING {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} exceeds the maximum shape nesting depth"
+                )));
+            }
+            let Some(Out::YMap(parent_shape)) = sheets.get(txn, current.as_str()) else {
+                break;
+            };
+            match map_string(&parent_shape, txn, "parentId") {
+                Some(parent_id) => current = parent_id,
+                None => break,
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_schema(staged)?;
     validate_immutable_metadata(before, staged)?;
@@ -920,42 +949,19 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     serializable_doc(staged)?;
     let before_identities = shape_identities(before)?;
     let after_identities = shape_identities(staged)?;
-    // A shape absent from `staged` did not merely lose its identity, baseline or protected
-    // cells: it is gone. That is only legitimate if deleting it locally would be, which is
-    // exactly what `delete_shape` checks (LockDelete on the shape itself; a cascade-deleted
-    // descendant is never checked on its own). So a removed shape whose immediate parent was
-    // also removed rides along on the parent's authorization; a removed shape whose parent
-    // survives (or has none) must clear that same LockDelete check itself.
     let removed_shapes = before_identities
         .keys()
         .filter(|key| !after_identities.contains_key(key.as_str()))
         .cloned()
         .collect::<std::collections::BTreeSet<_>>();
-    for shape_id in &removed_shapes {
-        let parent_also_removed = before_identities
-            .get(shape_id)
-            .and_then(|identity| identity.1.as_ref())
-            .is_some_and(|parent_id| removed_shapes.contains(parent_id));
-        if parent_also_removed {
-            continue;
-        }
-        let page_id = before_identities
-            .get(shape_id)
-            .and_then(|identity| identity.0.as_deref())
-            .ok_or_else(|| {
-                EditError::InvalidState(format!(
-                    "remote update deletes shape {shape_id} with no page to authorize its removal"
-                ))
-            })?;
-        authorize_shape_deletion(before, page_id, shape_id)?;
-    }
+    authorize_removed_shapes(before, &before_identities, &removed_shapes)?;
     for (key, identity) in &before_identities {
-        if let Some(after) = after_identities.get(key) {
-            if after != identity {
-                return Err(EditError::InvalidState(format!(
-                    "remote update changes the identity of shape {key}"
-                )));
-            }
+        if let Some(after) = after_identities.get(key)
+            && after != identity
+        {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes the identity of shape {key}"
+            )));
         }
         // A missing key was already authorized above, as part of `removed_shapes`.
     }
@@ -1013,6 +1019,35 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
 /// the first `/` is always the boundary.
 fn shape_id_prefix(key: &str) -> &str {
     key.split_once('/').map_or(key, |(shape_id, _)| shape_id)
+}
+
+/// Authorizes every shape a remote update removed, the way `delete_shape` would: a shape whose
+/// parent was also removed rides along on the parent's authorization; a surviving-parent shape
+/// must clear its own `LockDelete` check.
+fn authorize_removed_shapes(
+    before: &Doc,
+    before_identities: &std::collections::BTreeMap<String, ShapeIdentity>,
+    removed_shapes: &std::collections::BTreeSet<String>,
+) -> EditResult<()> {
+    for shape_id in removed_shapes {
+        let parent_also_removed = before_identities
+            .get(shape_id)
+            .and_then(|identity| identity.1.as_ref())
+            .is_some_and(|parent_id| removed_shapes.contains(parent_id));
+        if parent_also_removed {
+            continue;
+        }
+        let page_id = before_identities
+            .get(shape_id)
+            .and_then(|identity| identity.0.as_deref())
+            .ok_or_else(|| {
+                EditError::InvalidState(format!(
+                    "remote update deletes shape {shape_id} with no page to authorize its removal"
+                ))
+            })?;
+        authorize_shape_deletion(before, page_id, shape_id)?;
+    }
+    Ok(())
 }
 
 /// Authorizes a remote deletion the same way a local `delete_shape` would: refused if
@@ -1539,6 +1574,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
     let mut result = Vec::new();
+    let mut ancestors = std::collections::BTreeSet::new();
     for index in 0..order.len(&txn) {
         let id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -1563,7 +1599,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
                 &source_ids,
-                1,
+                &mut ancestors,
             )?);
         }
         result.push(PageSnapshot {
@@ -1582,38 +1618,129 @@ fn snapshot_shape<T: ReadTxn>(
     shape_id: &str,
     page_id: u32,
     source_ids: &std::collections::BTreeMap<String, u32>,
-    depth: usize,
+    ancestors: &mut std::collections::BTreeSet<String>,
 ) -> EditResult<ShapeSnapshot> {
-    if depth > MAX_SHAPE_NESTING {
-        return Err(EditError::InvalidState(
-            "shape nesting exceeds maximum depth".to_owned(),
-        ));
+    if !ancestors.insert(shape_id.to_owned()) {
+        return Err(EditError::InvalidState(format!(
+            "cyclic shape parentage detected at {shape_id}"
+        )));
     }
-    let shape = map_ref(sheets, txn, shape_id)?;
-    let stored_source_id = map_number(&shape, txn, "sourceId")
-        .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-        as u32;
-    let source_id = source_ids
-        .get(shape_id)
-        .copied()
-        .unwrap_or(stored_source_id);
-    let cells = map_map(&shape, txn, "cells")?;
-    let is_added = shape_origin(&shape, txn)? == ShapeOrigin::Added;
-    let local_formulas = cells
-        .iter(txn)
-        .filter_map(|(_, value)| match value {
-            Out::YMap(cell) => {
-                let name = map_string(&cell, txn, "name")?;
-                let formula = map_string(&cell, txn, "formula")
-                    .or_else(|| map_string(&cell, txn, "value"))?;
-                Some((name, formula))
-            }
-            _ => None,
+    if ancestors.len() > MAX_SHAPE_NESTING {
+        ancestors.remove(shape_id);
+        return Err(EditError::InvalidState(format!(
+            "shape {shape_id} exceeds the maximum shape nesting depth"
+        )));
+    }
+    let result = (|| {
+        let shape = map_ref(sheets, txn, shape_id)?;
+        let stored_source_id = map_number(&shape, txn, "sourceId")
+            .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+            as u32;
+        let source_id = source_ids
+            .get(shape_id)
+            .copied()
+            .unwrap_or(stored_source_id);
+        let cells = map_map(&shape, txn, "cells")?;
+        let is_added = shape_origin(&shape, txn)? == ShapeOrigin::Added;
+        let local_formulas = cells
+            .iter(txn)
+            .filter_map(|(_, value)| match value {
+                Out::YMap(cell) => {
+                    let name = map_string(&cell, txn, "name")?;
+                    let formula = map_string(&cell, txn, "formula")
+                        .or_else(|| map_string(&cell, txn, "value"))?;
+                    Some((name, formula))
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut snapshots = Vec::new();
+        for (_key, value) in cells.iter(txn) {
+            let Out::YMap(cell) = value else {
+                return Err(EditError::InvalidState("cell is not a map".to_owned()));
+            };
+            let locator = cell_locator(&cell, txn, page_id, source_id)?;
+            let formula = map_string(&cell, txn, "formula");
+            let baseline = map_string(&cell, txn, "baselineFormula");
+            let value = snapshot_cell_value(
+                formula.as_deref(),
+                baseline.as_deref(),
+                map_string(&cell, txn, "value"),
+                is_added,
+                &local_formulas,
+            );
+            snapshots.push(CellSnapshot {
+                name: locator.cell_name.clone(),
+                locator,
+                formula,
+                value,
+            });
+        }
+        snapshots.sort_by_key(|cell| locator_key(&cell.locator));
+        let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
+            return Ok(ShapeSnapshot {
+                id: shape_id.to_owned(),
+                source_id,
+                name: map_string(&shape, txn, "name"),
+                cells: snapshots,
+                children: Vec::new(),
+            });
+        };
+        let mut children = Vec::with_capacity(child_order.len(txn) as usize);
+        for index in 0..child_order.len(txn) {
+            let child_id = array_string(&child_order, txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            children.push(snapshot_shape(
+                sheets, txn, &child_id, page_id, source_ids, ancestors,
+            )?);
+        }
+        Ok(ShapeSnapshot {
+            id: shape_id.to_owned(),
+            source_id,
+            name: map_string(&shape, txn, "name"),
+            cells: snapshots,
+            children,
         })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let evaluate_locally = |formula: &str| match evaluate(
+    })();
+    ancestors.remove(shape_id);
+    result
+}
+
+/// A cell's cached value is trustworthy only against its own baseline: unchanged (or freshly
+/// added) cells may reuse the stored cache or re-evaluate against sibling cells; a cell edited
+/// since its baseline is safe to re-evaluate the same way; a cell with no baseline at all was
+/// grafted on by an untrusted peer and never earns a computed value.
+fn snapshot_cell_value(
+    formula: Option<&str>,
+    baseline: Option<&str>,
+    cached_value: Option<String>,
+    is_added: bool,
+    local_formulas: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    if formula == baseline {
+        cached_value.or_else(|| {
+            if is_added {
+                formula.and_then(|formula| evaluate_cached_formula(formula, local_formulas))
+            } else {
+                None
+            }
+        })
+    } else if baseline.is_some() {
+        formula.and_then(|formula| evaluate_cached_formula(formula, local_formulas))
+    } else {
+        None
+    }
+}
+
+/// Evaluates `formula` against `local_formulas`, caching only numeric results.
+fn evaluate_cached_formula(
+    formula: &str,
+    local_formulas: &std::collections::BTreeMap<String, String>,
+) -> Option<String> {
+    match evaluate(
         formula.trim_start_matches('='),
-        &local_formulas,
+        local_formulas,
         &ParseLimits::default(),
     ) {
         vsdx_eval::Evaluation::Evaluated(result) => match result.value {
@@ -1621,72 +1748,7 @@ fn snapshot_shape<T: ReadTxn>(
             vsdx_eval::Value::Color(_) => None,
         },
         _ => None,
-    };
-    let mut snapshots = Vec::new();
-    for (_key, value) in cells.iter(txn) {
-        let Out::YMap(cell) = value else {
-            return Err(EditError::InvalidState("cell is not a map".to_owned()));
-        };
-        let locator = cell_locator(&cell, txn, page_id, source_id)?;
-        let formula = map_string(&cell, txn, "formula");
-        let baseline = map_string(&cell, txn, "baselineFormula");
-        // A cell whose formula still matches its baseline is either untouched since the
-        // package (or since reopening a save) or belongs to a shape freshly added this
-        // session, in which case its baseline was only ever a draft echo of the same
-        // formula and its own cells are the only trustworthy evaluation context. A cell
-        // whose formula has since diverged from a real baseline was locally edited, so
-        // re-evaluating it against its shape's own cells is safe; one with no baseline at
-        // all was grafted on by an untrusted peer and never earns a computed value.
-        let value = if formula == baseline {
-            map_string(&cell, txn, "value").or_else(|| {
-                if is_added {
-                    formula.as_deref().and_then(evaluate_locally)
-                } else {
-                    None
-                }
-            })
-        } else if baseline.is_some() {
-            formula.as_deref().and_then(evaluate_locally)
-        } else {
-            None
-        };
-        snapshots.push(CellSnapshot {
-            name: locator.cell_name.clone(),
-            locator,
-            formula,
-            value,
-        });
     }
-    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
-    let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
-        return Ok(ShapeSnapshot {
-            id: shape_id.to_owned(),
-            source_id,
-            name: map_string(&shape, txn, "name"),
-            cells: snapshots,
-            children: Vec::new(),
-        });
-    };
-    let mut children = Vec::with_capacity(child_order.len(txn) as usize);
-    for index in 0..child_order.len(txn) {
-        let child_id = array_string(&child_order, txn, index)
-            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        children.push(snapshot_shape(
-            sheets,
-            txn,
-            &child_id,
-            page_id,
-            source_ids,
-            depth + 1,
-        )?);
-    }
-    Ok(ShapeSnapshot {
-        id: shape_id.to_owned(),
-        source_id,
-        name: map_string(&shape, txn, "name"),
-        cells: snapshots,
-        children,
-    })
 }
 
 fn materialized_source_ids<T: ReadTxn>(
@@ -1761,27 +1823,11 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                     }
                     let Some(formula) = formula else { continue };
                     let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
-                    // Only a cell that already carried a trusted baseline (seeded from the
-                    // original package, or from a locally added shape's own draft) earns a
-                    // freshly computed cache; a cell an untrusted peer grafted on with no
-                    // baseline at all never gets one, however trivially its formula evaluates.
+                    // A cell with no trusted baseline was grafted on by an untrusted peer and
+                    // never earns a freshly computed cache.
                     let value = baseline
                         .is_some()
-                        .then(|| {
-                            match evaluate(
-                                formula.trim_start_matches('='),
-                                &local_formulas,
-                                &ParseLimits::default(),
-                            ) {
-                                vsdx_eval::Evaluation::Evaluated(result) => match result.value {
-                                    vsdx_eval::Value::Number(number) => {
-                                        Some(number.number.to_string())
-                                    }
-                                    vsdx_eval::Value::Color(_) => None,
-                                },
-                                _ => None,
-                            }
-                        })
+                        .then(|| evaluate_cached_formula(&formula, &local_formulas))
                         .flatten();
                     edits.push(vsdx_parse::SemanticCellEdit {
                         locator: locator.clone(),

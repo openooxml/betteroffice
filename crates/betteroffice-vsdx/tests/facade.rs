@@ -575,6 +575,37 @@ fn mixed_cell_and_structural_edits_are_atomic() {
 }
 
 #[test]
+fn structural_deletion_is_authorized_against_a_lock_the_same_batch_sets() {
+    let (source, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='LockDelete' V='0'/></Shape></Shapes></PageContents>",
+    );
+    assert!(
+        diagram
+            .save_edits(
+                &[edit(
+                    page_id,
+                    1,
+                    "LockDelete",
+                    "1",
+                    MutationGesture::CellEdit
+                )],
+                &[StructuralEdit::DeleteShape {
+                    page_id,
+                    shape_id: 1,
+                }],
+            )
+            .is_err()
+    );
+    assert_eq!(
+        diagram
+            .package()
+            .part_bytes("visio/pages/page1.xml")
+            .unwrap(),
+        parts(&source)["visio/pages/page1.xml"]
+    );
+}
+
+#[test]
 fn mixed_edits_reject_invalid_structure_without_changing_the_source() {
     let (source, diagram, page_id) = diagram_with_page(
         "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape><Shape ID='1'/></Shapes></PageContents>",

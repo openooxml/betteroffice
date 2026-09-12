@@ -1083,6 +1083,36 @@ fn style_slices_and_based_on_chains_resolve_independently() {
 }
 
 #[test]
+fn style_refs_fall_back_to_the_master_when_the_local_shape_has_none() {
+    let mut package = package();
+    package.style_sheets = vec![
+        sheet(Some(1), vec![SheetChild::Cell(cell("LineColor", "line"))]),
+        sheet(Some(2), vec![SheetChild::Cell(cell("FillForegnd", "fill"))]),
+        sheet(Some(3), vec![SheetChild::Cell(cell("Text", "text"))]),
+    ];
+    let mut master_value = shape(4, vec![]);
+    master_value.line_style = Some(1);
+    master_value.fill_style = Some(2);
+    master_value.text_style = Some(3);
+    add_master(&mut package, 4, master_value);
+
+    let mut local = shape(10, vec![]);
+    local.master = Some(4);
+    add_page(&mut package, local);
+
+    let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+    assert_eq!(
+        found(&resolved, "LineColor"),
+        ("line", Provenance::StyleLine)
+    );
+    assert_eq!(
+        found(&resolved, "FillForegnd"),
+        ("fill", Provenance::StyleFill)
+    );
+    assert_eq!(found(&resolved, "Text"), ("text", Provenance::StyleText));
+}
+
+#[test]
 fn sheet_style_attributes_resolve_style_to_style_inheritance() {
     let mut package = package();
     package.style_sheets = vec![

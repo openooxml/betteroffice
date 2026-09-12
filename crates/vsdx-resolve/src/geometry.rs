@@ -7,7 +7,11 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
     let mut out = RealizedGeometry::default();
     let mut current = (0.0, 0.0);
     let rows: Vec<_> = if section.row_order.is_empty() {
-        section.rows.values().collect()
+        let mut rows: Vec<_> = section.rows.values().collect();
+        rows.sort_by(|left, right| {
+            numeric_key_order(&left.key).cmp(&numeric_key_order(&right.key))
+        });
+        rows
     } else {
         section
             .row_order
@@ -228,6 +232,13 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
         }
     }
     out
+}
+
+/// Keys sort lexically, so `IX:10` would precede `IX:2` and displace relative rows.
+fn numeric_key_order(key: &str) -> (u32, &str) {
+    key.strip_prefix("IX:")
+        .and_then(|index| index.parse().ok())
+        .map_or((u32::MAX, key), |index| (index, ""))
 }
 
 fn emit_row(out: &mut RealizedGeometry, emit: impl FnOnce(&mut RealizedGeometry) -> bool) -> bool {
@@ -1616,5 +1627,36 @@ mod tests {
             ]
         );
         assert!(line.issues.is_empty());
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order_without_row_order() {
+        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
+            (
+                key.to_owned(),
+                ResolvedRow {
+                    key: key.into(),
+                    ..resolved_row(ty, cells)
+                },
+            )
+        };
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:10", "RelLineTo", vec![cell("X", "0"), cell("Y", "1")]),
+            ]),
+        };
+        assert_eq!(
+            realize_geometry(&section, 1.0, 1.0).commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.0 },
+            ]
+        );
     }
 }
