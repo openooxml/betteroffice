@@ -250,10 +250,8 @@ impl<'a> Resolver<'a> {
             let Some(sheet) = self.package.master_contents.get(path) else {
                 return Err(ResolveError::MissingMaster(master_id));
             };
-            // A shape's own Master identifies the master root; MasterShape on that same
-            // shape then narrows to a sub-shape of that root, never a sibling of it. A
-            // MasterShape inherited from an enclosing shape's Master instead names any
-            // shape in the master (MS-VSDX 2.2.2).
+            // MS-VSDX 2.2.2: an own MasterShape narrows within its own Master's root;
+            // an inherited one may name any shape in the master.
             let (next, provenance) = if own_master {
                 let root = sheet.shapes().next();
                 match master_shape.and_then(|id| root.and_then(|root| find_shape_in(root, id))) {
