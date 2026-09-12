@@ -7,6 +7,7 @@ mod geometry;
 mod picture;
 mod shape;
 mod style;
+mod table_grid;
 mod table_style;
 mod theme;
 
@@ -15,5 +16,6 @@ pub use geometry::*;
 pub use picture::*;
 pub use shape::*;
 pub use style::*;
+pub use table_grid::*;
 pub use table_style::*;
 pub use theme::*;

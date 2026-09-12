@@ -33,6 +33,9 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Liberation Sans');
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
     expect(resolveLastResortFace('Unknown', true, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
   test('script fallbacks prefer the sans face of the bucket', () => {

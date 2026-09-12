@@ -96,4 +96,6 @@ export type ResidentEngineWorkerResponse =
       ok: false;
       error: string;
       residentUnavailable?: boolean;
+      /** A wasm trap poisoned the worker; it refuses every later request. */
+      terminal?: boolean;
     };

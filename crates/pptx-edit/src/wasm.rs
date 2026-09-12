@@ -132,6 +132,13 @@ struct SlideArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SetSlideNotesArgs {
+    slide_id: String,
+    text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MoveSlideArgs {
     slide_id: String,
     to_index: u32,
@@ -518,6 +525,15 @@ impl PptxDocument {
                 .delete_slide(&local_context(), &args.slide_id)
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = setSlideNotesJson)]
+    pub fn set_slide_notes_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SetSlideNotesArgs = parse_args(args)?;
+        self.session
+            .set_slide_notes(&local_context(), &args.slide_id, &args.text)
+            .map_err(js_error)?;
+        json(())
     }
 
     #[wasm_bindgen(js_name = moveSlideJson)]

@@ -35,6 +35,7 @@ import type {
   PointerEvent,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
+import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
   FormattingAction,
   PptxEditorTool,
@@ -327,6 +328,7 @@ function PptxEditorContent({
   const [collaborationReplica, setCollaborationReplica] =
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
+  const [presenting, setPresenting] = useState(false);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -425,6 +427,7 @@ function PptxEditorContent({
     setResizeDelta(null);
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
+    setPresenting(false);
     pointerGestureRef.current = null;
     resizeRef.current = null;
     caretGoalRef.current = null;
@@ -1650,6 +1653,11 @@ function PptxEditorContent({
   const slideCount = model?.snapshot.slides.length ?? 0;
   const currentSlide = model?.slideIndex ?? 0;
 
+  const startPresenting = () => {
+    if (slideCount === 0) return;
+    setPresenting(true);
+  };
+
   // Export the current slide through the same canvas painter the editor draws
   // with, so the png matches what is on screen.
   const exportPng = () => {
@@ -1765,6 +1773,18 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
+        <button
+          type="button"
+          onClick={startPresenting}
+          disabled={slideCount === 0}
+          data-testid="pptx-present"
+          style={styles.presentButton}
+        >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M6 4.5v15l13-7.5Z" />
+          </svg>
+          {t('toolbar.present')}
+        </button>
       </div>
       <div style={styles.workspace}>
         <aside style={styles.slideStrip} aria-label={t('slides.panelLabel')}>
@@ -1971,6 +1991,42 @@ function PptxEditorContent({
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
       </div>
+      {activeSlide ? (
+        <NotesPanel
+          key={activeSlide.id}
+          value={activeSlide.notes ?? ''}
+          disabled={!model}
+          label={t('notes.panelLabel')}
+          placeholder={t('notes.placeholder')}
+          onCommit={(text) => {
+            const handle = handleRef.current;
+            if (!handle) return;
+            try {
+              handle.setSlideNotes(activeSlide.id, text);
+              refreshAt(undefined, true);
+            } catch (value) {
+              reportError(value);
+            }
+          }}
+        />
+      ) : null}
+      {presenting && slideCount > 0 && handleRef.current ? (
+        <PresentationOverlay
+          handle={handleRef.current}
+          slideCount={slideCount}
+          startIndex={currentSlide}
+          resolveImage={(assetId) =>
+            resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
+          }
+          counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
+          label={t('presentation.label')}
+          exitLabel={t('presentation.exit')}
+          previousLabel={t('presentation.previousSlide')}
+          nextLabel={t('presentation.nextSlide')}
+          onExit={() => setPresenting(false)}
+          onError={reportError}
+        />
+      ) : null}
     </div>
   );
 }
@@ -2033,6 +2089,35 @@ function RemoteShapeOutline({
         </span>
       ) : null}
     </span>
+  );
+}
+
+function NotesPanel({
+  value,
+  disabled,
+  label,
+  placeholder,
+  onCommit,
+}: {
+  value: string;
+  disabled: boolean;
+  label: string;
+  placeholder: string;
+  onCommit: (text: string) => void;
+}) {
+  return (
+    <div style={styles.notesPanel}>
+      <span style={styles.notesLabel}>{label}</span>
+      <textarea
+        aria-label={label}
+        style={styles.notesTextarea}
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        data-testid="pptx-notes-textarea"
+        onChange={(event) => onCommit(event.target.value)}
+      />
+    </div>
   );
 }
 
@@ -2484,8 +2569,52 @@ const styles: Record<string, CSSProperties> = {
     boxSizing: 'border-box',
     pointerEvents: 'none',
   },
+  notesPanel: {
+    flex: '0 0 auto',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '8px 14px 10px',
+    background: '#ffffff',
+    borderTop: '1px solid #e2e8f0',
+  },
+  notesLabel: {
+    fontSize: 11,
+    fontWeight: 650,
+    color: '#647087',
+    textTransform: 'uppercase',
+    letterSpacing: '0.02em',
+  },
+  notesTextarea: {
+    width: '100%',
+    height: 64,
+    resize: 'vertical',
+    border: '1px solid #d8dee9',
+    borderRadius: 6,
+    padding: '6px 8px',
+    font: '13px ui-sans-serif, system-ui, sans-serif',
+    color: '#172033',
+    boxSizing: 'border-box',
+    outline: 'none',
+  },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  presentButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: 6,
+    flex: '0 0 auto',
+    margin: '0 12px 0 4px',
+    padding: '0 14px',
+    height: 30,
+    border: 0,
+    borderRadius: 15,
+    background: '#1a73e8',
+    color: '#ffffff',
+    font: '600 13px ui-sans-serif, system-ui, sans-serif',
+    cursor: 'pointer',
+  },
+
 };
 
 function presenceInitials(name: string): string {

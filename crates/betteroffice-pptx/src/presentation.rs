@@ -131,6 +131,11 @@ impl Presentation {
         Ok(self.session.move_slide(context, slide_id, to_index)?)
     }
 
+    /// Sets a slide's speaker notes; empty text clears them.
+    pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> Result<()> {
+        Ok(self.session.set_slide_notes(context, slide_id, text)?)
+    }
+
     pub fn add_text_box(
         &self,
         context: &EditCtx,

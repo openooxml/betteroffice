@@ -1,7 +1,7 @@
 //! Map-backed embed operations.
 
 use yrs::types::text::YChange;
-use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef};
+use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot};
@@ -51,10 +51,11 @@ fn embed_has_id<T: ReadTxn>(map: &MapRef, txn: &T, embed_id: &str) -> bool {
         .any(|key| id_value_matches(map.get(txn, key), embed_id))
 }
 
-/// Finds one map-backed embed by its stable authored payload identity. New yrs
-/// inserts use `embedId`; `id` (SDTs) and `rId` (images) keep mirrored
-/// embeds addressable without rewriting their payload vocabulary.
-fn embed_map_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<MapRef> {
+/// Finds one map-backed embed, and the story holding it, by its stable authored
+/// payload identity. New yrs inserts use `embedId`; `id` (SDTs) and `rId`
+/// (images) keep mirrored embeds addressable without rewriting their payload
+/// vocabulary.
+fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)> {
     let stories = txn
         .get_map(crate::STORIES)
         .ok_or_else(|| OpError::UnknownEmbed(embed_id.to_owned()))?;
@@ -69,7 +70,7 @@ fn embed_map_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<MapRef> {
                 && !is_pilcrow(&map, txn)
                 && embed_has_id(&map, txn, embed_id)
             {
-                return Ok(map);
+                return Ok((story_id, map));
             }
         }
     }
@@ -77,6 +78,11 @@ fn embed_map_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<MapRef> {
 }
 
 impl EditingDoc {
+    /// The story holding the embed carrying `embed_id`.
+    pub fn embed_story(&self, embed_id: &str) -> OpResult<String> {
+        embed_by_id(&self.yrs_doc().transact(), embed_id).map(|(story, _)| story)
+    }
+
     /// Sets (or, with [`Any::Null`], removes) payload entries on the map-backed
     /// embed at `at` in ONE transaction — the mutation behind image geometry
     /// commits and content-control state changes. The `_kind` discriminator is
@@ -124,7 +130,7 @@ impl EditingDoc {
             }
         }
         let mut txn = self.transact_for(ctx);
-        let map = embed_map_by_id(&txn, embed_id)?;
+        let (_, map) = embed_by_id(&txn, embed_id)?;
         for (key, value) in entries {
             if value == Any::Null {
                 map.remove(&mut txn, &key);
@@ -306,10 +312,21 @@ mod tests {
     }
 
     #[test]
+    fn embed_story_names_the_story_holding_the_embed() {
+        let doc = EditingDoc::new(7);
+        seed_sdt(&doc);
+        assert_eq!(doc.embed_story("control-1").unwrap(), "body");
+        assert!(matches!(
+            doc.embed_story("missing"),
+            Err(OpError::UnknownEmbed(id)) if id == "missing"
+        ));
+    }
+
+    #[test]
     fn set_embed_attrs_is_one_undoable_step() {
         let doc = EditingDoc::new(7);
         let index = seed_sdt(&doc);
-        let mut undo = doc.undo_scope(&["body"]).unwrap();
+        let mut undo = doc.undo_manager();
         doc.set_embed_attrs(
             &ctx(),
             Position::new("body", index),

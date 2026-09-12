@@ -1113,6 +1113,11 @@ fn chart_payload(chart: &Value, source: &BTreeMap<String, String>) -> JsonObject
     }))
 }
 
+pub(crate) fn numeric_field_instruction(instruction: &str) -> bool {
+    let instruction = instruction.trim();
+    !instruction.is_empty() && instruction.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 fn field_payload(
     field_value: &Value,
     style_formatting: Option<&Value>,
@@ -1414,7 +1419,8 @@ fn field_to_units(
                 .map(|(index, child)| (index as isize, child)),
         )
         .collect();
-    if string(field(Some(value), "type")) != Some("complexField")
+    if numeric_field_instruction(string(field(Some(value), "instruction")).unwrap_or_default())
+        || string(field(Some(value), "type")) != Some("complexField")
         || !projected_children.iter().any(|(_, child)| {
             matches!(
                 string(field(Some(child), "type")),
@@ -2106,9 +2112,18 @@ fn paragraph_units(
 fn run_tokens(run: &Value, tokens: &mut Vec<&'static str>) {
     for content in array(field(Some(run), "content")) {
         if string(field(Some(content), "type")) == Some("break")
-            && string(field(Some(content), "breakType")) == Some("page")
+            && matches!(
+                string(field(Some(content), "breakType")),
+                Some("page" | "column")
+            )
         {
-            tokens.push("pageBreak");
+            tokens.push(
+                if string(field(Some(content), "breakType")) == Some("column") {
+                    "columnBreak"
+                } else {
+                    "pageBreak"
+                },
+            );
         } else if string(field(Some(content), "type")) != Some("text")
             || !string(field(Some(content), "text"))
                 .unwrap_or_default()
@@ -2161,25 +2176,40 @@ fn inline_tokens(content: &[Value], tokens: &mut Vec<&'static str>) {
 fn paragraph_starts_with_page_break(paragraph: &Value) -> bool {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    tokens.first() == Some(&"pageBreak")
+    tokens.first() == Some(&"pageBreak") && tokens.contains(&"visible")
 }
 
-fn paragraph_has_non_leading_page_break(paragraph: &Value) -> bool {
+fn paragraph_flow_breaks(paragraph: &Value) -> (Vec<&'static str>, Vec<&'static str>) {
     let mut tokens = Vec::new();
     inline_tokens(array(field(Some(paragraph), "content")), &mut tokens);
-    let mut leading = false;
+    if !tokens.contains(&"visible") {
+        let split = tokens
+            .iter()
+            .rposition(|token| *token == "columnBreak")
+            .map_or(0, |index| index + 1);
+        return (tokens[..split].to_vec(), tokens[split..].to_vec());
+    }
+    let mut leading = None;
+    let mut trailing = Vec::new();
     let mut visible = false;
     for token in tokens {
-        if token == "pageBreak" {
-            if visible || leading {
-                return true;
+        if matches!(token, "pageBreak" | "columnBreak") {
+            if visible || leading.is_some() {
+                trailing.push(token);
+            } else {
+                leading = Some(token);
             }
-            leading = true;
         } else {
             visible = true;
         }
     }
-    false
+    (
+        leading
+            .filter(|kind| *kind == "columnBreak")
+            .into_iter()
+            .collect(),
+        trailing,
+    )
 }
 
 fn modifier(value: &str) -> f64 {
@@ -2782,6 +2812,18 @@ fn visit_story(
     for block in blocks {
         match string(field(Some(&block), "type")).unwrap_or_default() {
             "paragraph" => {
+                let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(&block);
+                if options.include_page_breaks {
+                    for kind in leading_breaks {
+                        context.plans[plan_index].units.push(embed_unit(
+                            kind,
+                            JsonObject::new(),
+                            &[],
+                            None,
+                            1,
+                        ));
+                    }
+                }
                 let (units, mut ppr) =
                     paragraph_units(&block, &context.styles, None, &context.source_json);
                 let fallback = format!("{story_id}:p{paragraph_index}");
@@ -2799,14 +2841,16 @@ fn visit_story(
                     .units
                     .push(embed_unit("pilcrow", ppr, &[], None, 1));
                 paragraph_index += 1;
-                if options.include_page_breaks && paragraph_has_non_leading_page_break(&block) {
-                    context.plans[plan_index].units.push(embed_unit(
-                        "pageBreak",
-                        JsonObject::new(),
-                        &[],
-                        None,
-                        1,
-                    ));
+                if options.include_page_breaks {
+                    for kind in trailing_breaks {
+                        context.plans[plan_index].units.push(embed_unit(
+                            kind,
+                            JsonObject::new(),
+                            &[],
+                            None,
+                            1,
+                        ));
+                    }
                 }
                 last_kind = Some("paragraph");
             }
@@ -3206,6 +3250,71 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_fields_hide_cached_paragraphs_without_changing_the_story() {
+        for instruction in ["0", "TOC"] {
+            let run = |text: &str| json!({"type":"run","content":[{"type":"text","text":text}]});
+            let cached =
+                json!({"type":"paragraph","paraId":"cached","content":[run("Cached second") ]});
+            let end = json!({"type":"paragraph","paraId":"end","content":[]});
+            let field = json!({
+                "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
+                "fieldCode":[], "fieldResult":[run("Cached first")],
+                "structuredResult":{"inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],"blocks":[cached,end]}
+            });
+            let mut context = LoweringContext {
+                styles: StyleResolver::new(None),
+                theme: None,
+                source_json: Arc::new(BTreeMap::new()),
+                plans: Vec::new(),
+            };
+            visit_story(
+                &mut context,
+                "body".to_owned(),
+                &[
+                    json!({"type":"paragraph","paraId":"owner","content":[field]}),
+                    cached,
+                    end,
+                    json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+                ],
+                StoryOptions {
+                    include_page_breaks: true,
+                    append_body_tail: false,
+                    seed_comments: false,
+                },
+            );
+            let document = EditingDoc::new(74101);
+            let (story, ops, _) = seed_plan(context.plans.pop().unwrap()).unwrap();
+            document.create_empty_stories(&[story.clone()]).unwrap();
+            document
+                .apply_raw_story_batches(
+                    vec![(story, ops)],
+                    &EditCtx::local(String::new(), String::new()),
+                )
+                .unwrap();
+            let before = crate::story_checksum(&document, "body").unwrap();
+            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+                &document,
+                "body",
+                &crate::bridge::RenderEnv::default(),
+            )
+            .unwrap();
+            assert_eq!(blocks.len(), if instruction == "0" { 2 } else { 4 });
+            let output = serde_json::to_string(&blocks).unwrap();
+            assert_eq!(output.contains("Cached"), instruction != "0");
+            assert!(output.contains("After"));
+            assert_eq!(before, crate::story_checksum(&document, "body").unwrap());
+        }
+    }
+
+    #[test]
+    fn numeric_field_detection_preserves_formulas_and_named_fields() {
+        assert!(numeric_field_instruction(" 123 "));
+        for instruction in ["", "= 0", "QUOTE 0", "PAGE", "CustomField", "123abc"] {
+            assert!(!numeric_field_instruction(instruction));
+        }
+    }
+
     #[test]
     fn complex_field_results_keep_hyperlink_units_and_style() {
         let link = json!({"type":"hyperlink","anchor":"_Toc1","children":[{"type":"run","formatting":{"styleId":"Hyperlink"},"content":[{"type":"text","text":"Heading"}]}]});
