@@ -323,25 +323,60 @@ describe('PptxEditor caret painting', () => {
 describe('PptxEditor speaker notes', () => {
   it('saves immediately and follows undo, redo, and remote updates', async () => {
     let api: PptxEditorApi | undefined;
-    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} clientId={9110} onReady={(ready) => { api = ready; }} />);
-    await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
-    const input = view.getByRole('textbox', { name: 'Speaker notes' }) as HTMLTextAreaElement;
+    const view = render(
+      <PptxEditor
+        file={fixture}
+        fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        clientId={9110}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await act(async () => {
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    });
+    const input = (await view.findByRole(
+      'textbox',
+      { name: 'Speaker notes' },
+      { timeout: 15_000 }
+    )) as HTMLTextAreaElement;
     const before = input.value;
     fireEvent.change(input, { target: { value: 'Remember the demo' } });
     const { openPresentation } = await import('@betteroffice/pptx');
-    const saved = openPresentation(api!.save(), { clientId: 9111, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
-    try { expect(saved.snapshot().slides[0].notes).toBe('Remember the demo'); }
-    finally { saved.dispose(); }
-    act(() => { api!.handle.undo(); api!.refresh(); });
+    const saved = openPresentation(api!.save(), {
+      clientId: 9111,
+      fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+    });
+    try {
+      expect(saved.snapshot().slides[0].notes).toBe('Remember the demo');
+    } finally {
+      saved.dispose();
+    }
+    act(() => {
+      api!.handle.undo();
+      api!.refresh();
+    });
     expect(input.value).toBe(before);
-    act(() => { api!.handle.redo(); api!.refresh(); });
+    act(() => {
+      api!.handle.redo();
+      api!.refresh();
+    });
     expect(input.value).toBe('Remember the demo');
-    const peer = openPresentation(fixture, { clientId: 9112, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], initialUpdate: api!.handle.encodeStateAsUpdate() });
+    const peer = openPresentation(fixture, {
+      clientId: 9112,
+      fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+      initialUpdate: api!.handle.encodeStateAsUpdate(),
+    });
     try {
       const slide = peer.snapshot().slides[0];
       peer.setSlideNotes(slide.id, 'Remote speaker notes');
-      act(() => { api!.handle.applyUpdate(peer.encodeStateAsUpdate()); });
+      act(() => {
+        api!.handle.applyUpdate(peer.encodeStateAsUpdate());
+      });
       expect(input.value).toBe('Remote speaker notes');
-    } finally { peer.dispose(); }
+    } finally {
+      peer.dispose();
+    }
   }, 60_000);
 });
