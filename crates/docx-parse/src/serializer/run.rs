@@ -10,6 +10,7 @@ use crate::shape::Shape;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::xml_writer::{XmlWriter, int_attr, js_number};
 
 const VALID_HIGHLIGHT_COLORS: &[&str] = &[
@@ -338,7 +339,17 @@ fn serialize_run_content(
             }
             writer.end_element();
         }
-        RunContent::Chart { .. } | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::Chart { chart } => {
+            let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
+                ParseError::Canonical("chart run carries no drawing to replay".to_owned())
+            })?;
+            validate_raw_subtree(xml, "w", "drawing")?;
+            return Ok(xml.to_owned());
+        }
+        RunContent::OpaqueDrawing { xml, .. } => {
+            validate_replayed_fragment(xml)?;
+            return Ok(xml.clone());
+        }
     }
     Ok(writer.finish())
 }
@@ -457,7 +468,7 @@ pub fn serialize_shape_content(
     shape: &Shape,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
-    let is_text_box = shape.shape_type == "textBox";
+    let is_text_box = shape.text_box.unwrap_or(shape.shape_type == "textBox");
     let floating = shape
         .wrap
         .as_ref()
@@ -498,7 +509,7 @@ pub fn serialize_shape_content(
         .start_element("a:prstGeom")
         .attribute(
             "prst",
-            if is_text_box {
+            if shape.shape_type == "textBox" {
                 "rect"
             } else {
                 &shape.shape_type
@@ -541,7 +552,7 @@ pub fn serialize_shape_content(
         }
         write_auto_fit(&mut body_properties, shape);
         body_properties.end_element();
-        if is_text_box {
+        if is_text_box || !text_body.content.is_empty() {
             graphic
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");

@@ -6,6 +6,13 @@ mod image_effects;
 mod layout;
 mod metafile;
 
+/// Entry points for the fuzz targets in `fuzz/`; not a stable API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::metafile::decode;
+}
+
 pub use display_list::*;
 pub use image_effects::apply_image_effects;
 pub use layout::*;

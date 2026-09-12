@@ -55,6 +55,7 @@ pub(super) struct CharAdv {
     /// UTF-16 code units covered by the complete shaped cluster.
     pub utf16_len: u32,
     pub advance: f32,
+    pub is_space: bool,
     pub level: u8,
     pub logical_order: u32,
     pub font_size_pt: f32,
@@ -105,10 +106,7 @@ pub(super) struct PreparedField {
     pub bidi_level: u8,
 }
 
-/// Image footprint. Inline placement fits `height` to the column and adds
-/// `width` to the line advance; own-line placement takes `height` as
-/// authored and adds no width. `dist_top`/`dist_bottom` join the footprint
-/// either way.
+/// Image dimensions and wrap distances.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct PreparedImage {
     pub width: f32,
@@ -926,6 +924,9 @@ fn prepare_text_run(
                 utf16_offset: pc.utf16_offset,
                 utf16_len,
                 advance: advance * pc.advance_scale * scale,
+                is_space: plan[start..end]
+                    .iter()
+                    .all(|item| matches!(item.shaped, ShapedChars::One(' '))),
                 level: pc.level,
                 logical_order: pc.source_index as u32,
                 font_size_pt: pc.font_size_pt,

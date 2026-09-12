@@ -99,6 +99,33 @@ fn get_header_rows_height(measure: &TableExtent, header_row_count: usize) -> f64
     height
 }
 
+fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec<f64> {
+    let mut heights = vec![0.0_f64; measure.rows.len()];
+    for index in (0..measure.rows.len().saturating_sub(1)).rev() {
+        let keeps_next = block.rows.get(index).is_some_and(|row| {
+            row.cells.iter().any(|cell| {
+                matches!(cell.blocks.last(), Some(LayoutBlock::Paragraph(paragraph))
+                    if paragraph.attrs.as_ref().and_then(|attrs| attrs.keep_next) == Some(true))
+            })
+        });
+        if keeps_next {
+            heights[index] =
+                measure.rows[index].height + heights[index + 1].max(measure.rows[index + 1].height);
+        }
+    }
+    for index in 0..heights.len() {
+        if heights[index] == 0.0 {
+            continue;
+        }
+        let mut next = index + 1;
+        while next < heights.len() && heights[next] > 0.0 {
+            heights[next] = 0.0;
+            next += 1;
+        }
+    }
+    heights
+}
+
 /// Places an in-flow table, emitting one fragment per page or column it spans.
 ///
 /// The cursor is `(row_index, consumed)`, where `consumed` is how many pixels
@@ -127,11 +154,12 @@ pub fn layout_table(
     let header_row_count = tally_header_rows(block);
     let header_rows_height = get_header_rows_height(measure, header_row_count);
     let break_info = build_table_row_break_info(block, measure);
+    let keep_heights = row_keep_heights(block, measure);
 
     let mut row_index = 0usize;
     let mut consumed = 0.0f64; // px of rows[row_index] already placed on a previous fragment
 
-    while row_index < rows.len() {
+    'rows: while row_index < rows.len() {
         let state_idx = paginator.get_current();
         let is_first_fragment = row_index == 0 && consumed == 0.0;
         let column_capacity =
@@ -187,6 +215,19 @@ pub fn layout_table(
         let mut last_row_partial = false;
 
         while cur < rows.len() {
+            let keep_height = keep_heights[cur];
+            if (cur > start_row || consumed == 0.0)
+                && keep_height > available_height - used
+                && keep_height <= column_capacity - header_overhead
+            {
+                if cur > start_row {
+                    break;
+                }
+                if paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top {
+                    paginator.ensure_fits(keep_height + header_overhead + pending_spacing);
+                    continue 'rows;
+                }
+            }
             let row_height = rows[cur].height;
             let start_off = if cur == start_row {
                 first_row_offset

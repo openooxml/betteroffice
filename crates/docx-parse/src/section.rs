@@ -298,9 +298,6 @@ pub fn apply_section_inheritance(sections: &mut [SectionProperties]) {
             &mut sections[index].footer_references,
             previous.footer_references.as_deref(),
         );
-        if sections[index].title_pg.is_none() {
-            sections[index].title_pg = previous.title_pg;
-        }
     }
 }
 
@@ -433,7 +430,7 @@ mod tests {
         assert_eq!(first.footnote_columns, Some(2.0));
         let mut sections = vec![first, SectionProperties::default()];
         apply_section_inheritance(&mut sections);
-        assert_eq!(sections[1].title_pg, Some(true));
+        assert_eq!(sections[1].title_pg, None);
         assert_eq!(
             sections[1].header_references.as_ref().unwrap()[0].relationship_id,
             "rId1"
