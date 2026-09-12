@@ -936,7 +936,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             document.apply_update_json_inner(&update).unwrap_err(),
-            "invalid diagram state: shape nesting exceeds maximum depth"
+            format!(
+                "invalid diagram state: shape page:1:shape:deep:{} exceeds the maximum shape nesting depth",
+                MAX_SHAPE_NESTING - 1
+            )
         );
     }
 

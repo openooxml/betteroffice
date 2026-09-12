@@ -740,6 +740,7 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     }
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    validate_acyclic_parents(&sheets, &txn)?;
     for index in 0..order.len(&txn) {
         let page_id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -797,6 +798,34 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     Ok(())
 }
 
+/// Rejects a cyclic or self-referential shape `parentId` chain.
+fn validate_acyclic_parents<T: ReadTxn>(sheets: &MapRef, txn: &T) -> EditResult<()> {
+    for (shape_id, _) in sheets.iter(txn) {
+        let mut current = shape_id.to_owned();
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            if !seen.insert(current.clone()) {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} has a cyclic parent chain"
+                )));
+            }
+            if seen.len() > MAX_SHAPE_NESTING {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} exceeds the maximum shape nesting depth"
+                )));
+            }
+            let Some(Out::YMap(parent_shape)) = sheets.get(txn, current.as_str()) else {
+                break;
+            };
+            match map_string(&parent_shape, txn, "parentId") {
+                Some(parent_id) => current = parent_id,
+                None => break,
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
     validate_immutable_metadata(before, staged)?;
@@ -840,11 +869,7 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     Ok(())
 }
 
-/// A cell key absent before has no local-edit equivalent unless its whole shape is also new
-/// (`add_shape` seeds a fresh shape's cells together; `set_cell_formula_at` can only edit a key
-/// that already exists). So a new key grafted onto a shape the document already knew faces the
-/// same policy a local edit would: refused if the target is currently locked, and refused if the
-/// peer is planting a new GUARD rather than editing one the package already established.
+/// Applies the local mutation policy to cell keys a remote update adds to an existing shape.
 fn validate_new_cells(
     before: &Doc,
     staged: &Doc,
@@ -1308,6 +1333,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
     let mut result = Vec::new();
+    let mut ancestors = std::collections::BTreeSet::new();
     for index in 0..order.len(&txn) {
         let id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -1325,7 +1351,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                 id.strip_prefix("page:")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
-                1,
+                &mut ancestors,
             )?);
         }
         result.push(PageSnapshot {
@@ -1343,41 +1369,52 @@ fn snapshot_shape<T: ReadTxn>(
     txn: &T,
     shape_id: &str,
     page_id: u32,
-    depth: usize,
+    ancestors: &mut std::collections::BTreeSet<String>,
 ) -> EditResult<ShapeSnapshot> {
-    if depth > MAX_SHAPE_NESTING {
-        return Err(EditError::InvalidState(
-            "shape nesting exceeds maximum depth".to_owned(),
-        ));
+    if !ancestors.insert(shape_id.to_owned()) {
+        return Err(EditError::InvalidState(format!(
+            "cyclic shape parentage detected at {shape_id}"
+        )));
     }
-    let shape = map_ref(sheets, txn, shape_id)?;
-    let source_id = map_number(&shape, txn, "sourceId")
-        .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-        as u32;
-    let cells = map_map(&shape, txn, "cells")?;
-    let snapshots = cell_snapshots(&cells, txn, page_id, source_id)?;
-    let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
-        return Ok(ShapeSnapshot {
+    if ancestors.len() > MAX_SHAPE_NESTING {
+        ancestors.remove(shape_id);
+        return Err(EditError::InvalidState(format!(
+            "shape {shape_id} exceeds the maximum shape nesting depth"
+        )));
+    }
+    let result = (|| {
+        let shape = map_ref(sheets, txn, shape_id)?;
+        let source_id = map_number(&shape, txn, "sourceId")
+            .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+            as u32;
+        let cells = map_map(&shape, txn, "cells")?;
+        let snapshots = cell_snapshots(&cells, txn, page_id, source_id)?;
+        let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
+            return Ok(ShapeSnapshot {
+                id: shape_id.to_owned(),
+                source_id,
+                name: map_string(&shape, txn, "name"),
+                cells: snapshots,
+                children: Vec::new(),
+            });
+        };
+        let mut children = Vec::with_capacity(child_order.len(txn) as usize);
+        for index in 0..child_order.len(txn) {
+            let child_id = array_string(&child_order, txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            children.push(snapshot_shape(sheets, txn, &child_id, page_id, ancestors)?);
+        }
+        Ok(ShapeSnapshot {
             id: shape_id.to_owned(),
             source_id,
             name: map_string(&shape, txn, "name"),
             cells: snapshots,
-            children: Vec::new(),
-        });
-    };
-    let mut children = Vec::with_capacity(child_order.len(txn) as usize);
-    for index in 0..child_order.len(txn) {
-        let child_id = array_string(&child_order, txn, index)
-            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        children.push(snapshot_shape(sheets, txn, &child_id, page_id, depth + 1)?);
-    }
-    Ok(ShapeSnapshot {
-        id: shape_id.to_owned(),
-        source_id,
-        name: map_string(&shape, txn, "name"),
-        cells: snapshots,
-        children,
-    })
+            children,
+        })
+    })();
+    ancestors.remove(shape_id);
+    result
 }
 
 fn export_session(doc: &Doc) -> EditResult<SessionExport> {

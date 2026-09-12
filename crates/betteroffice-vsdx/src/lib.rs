@@ -232,9 +232,7 @@ fn added_shape_xml(package: &VsdxPackage, shape: &vsdx_edit::AddedShape) -> Vec<
     xml.into_bytes()
 }
 
-/// A synthetic resolved shape holding every cell the session drafted for an added shape, so its
-/// own formulas (e.g. `Height = Width*2`) resolve against its own sibling cells instead of the
-/// page sheet.
+/// A resolved shape built from an added shape's own drafted cells.
 fn added_shape_resolved(shape: &vsdx_edit::AddedShape) -> ResolvedShape {
     let mut resolved = ResolvedShape::default();
     for snapshot in &shape.cells {
@@ -281,9 +279,7 @@ fn added_shape_resolved(shape: &vsdx_edit::AddedShape) -> ResolvedShape {
     resolved
 }
 
-/// Caches the formula in V by evaluating it against the added shape's own resolved cells (after
-/// preceding session edits have already been folded into `package`), falling back to the drafted
-/// value when the formula cannot be evaluated this way.
+/// Serializes one added cell, including its evaluated value cache.
 fn added_cell_xml(
     resolved: &ResolvedShape,
     document: Option<&ResolvedShape>,
