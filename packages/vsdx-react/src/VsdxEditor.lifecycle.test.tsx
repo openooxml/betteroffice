@@ -22,8 +22,10 @@ beforeAll(async () => {
 
 const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 const originalOpenDiagram = vsdx.openDiagram;
+const originalPaintPage = vsdx.paintPage;
 let opens = 0;
 let disposals = 0;
+let paintPageOverride: typeof vsdx.paintPage | null = null;
 mock.module('@betteroffice/vsdx', () => ({
   ...vsdx,
   openDiagram: (...args: Parameters<typeof originalOpenDiagram>) => {
@@ -33,6 +35,7 @@ mock.module('@betteroffice/vsdx', () => ({
     handle.dispose = () => { disposals++; dispose(); };
     return handle;
   },
+  paintPage: (...args: Parameters<typeof originalPaintPage>) => (paintPageOverride ?? originalPaintPage)(...args),
 }));
 const { VsdxEditor } = await import('./VsdxEditor');
 const { useState } = await import('react');
@@ -116,6 +119,44 @@ test('attaches collaboration that arrives while initialization is pending', asyn
   cleanup();
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: originalFontFace });
   Object.defineProperty(document, 'fonts', { configurable: true, value: originalFonts });
+  HTMLCanvasElement.prototype.getContext = getContext;
+});
+
+test('a stale paint does not resolve images after a newer paint has taken over', async () => {
+  const getContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  opens = 0;
+  disposals = 0;
+  const mediaBytesCalls: string[] = [];
+  let call = 0;
+  const pending: Array<{ resolve: () => void; reject: (error: Error) => void; index: number }> = [];
+  paintPageOverride = (_context, _list, _dpr, _scale, options) => {
+    const index = call++;
+    return new Promise<void>((resolve, reject) => {
+      pending[index] = {
+        index,
+        resolve: () => { void Promise.resolve(options?.resolveImage?.(`asset-${index}`)).then(() => resolve(), () => resolve()); },
+        reject: (error) => { void Promise.resolve(options?.resolveImage?.(`asset-${index}`)).then(() => reject(error), () => reject(error)); },
+      };
+    });
+  };
+  let refreshApi: (() => void) | undefined;
+  const onErrors: unknown[] = [];
+  render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => {
+    refreshApi = api.refresh;
+    api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
+  }} onError={(error) => { onErrors.push(error); }} />);
+  await waitFor(() => expect(call).toBe(1));
+  act(() => { refreshApi!(); });
+  await waitFor(() => expect(call).toBe(2));
+  pending[1].resolve();
+  await waitFor(() => expect(mediaBytesCalls).toEqual(['asset-1']));
+  pending[0].reject(new Error('stale paint rejected late'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(mediaBytesCalls).toEqual(['asset-1']);
+  expect(onErrors).toEqual([]);
+  cleanup();
+  paintPageOverride = null;
   HTMLCanvasElement.prototype.getContext = getContext;
 });
 
