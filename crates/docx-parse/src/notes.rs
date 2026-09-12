@@ -46,7 +46,7 @@ pub fn parse_notes(
         let note_type = parse_note_type(element.attribute(Some("w"), "type"));
         let content = parser.parse_blocks(element, 0, false)?;
         let custom_root_bindings = if has_foreign_content(element) {
-            crate::document::custom_root_bindings(root)
+            note_bindings(root, element)
         } else {
             Vec::new()
         };
@@ -72,6 +72,20 @@ pub fn parse_notes(
         });
     }
     Ok(notes)
+}
+
+/// The root's custom bindings plus those a previous save placed on the note.
+fn note_bindings(root: &XmlElement, note: &XmlElement) -> Vec<crate::paragraph::RawAttribute> {
+    let mut bindings = crate::document::custom_root_bindings(root);
+    for (name, value) in &note.attributes {
+        if name.starts_with("xmlns:") && !bindings.iter().any(|binding| &binding.name == name) {
+            bindings.push(crate::paragraph::RawAttribute {
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+    }
+    bindings
 }
 
 fn has_foreign_content(element: &XmlElement) -> bool {

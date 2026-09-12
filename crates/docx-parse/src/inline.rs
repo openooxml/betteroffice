@@ -109,8 +109,9 @@ pub enum RunContent {
     Shape { shape: Box<crate::shape::Shape> },
     #[serde(rename = "chart")]
     Chart { chart: Box<crate::chart::Chart> },
+    /// A drawing the parser does not model, replayed verbatim on save.
     #[serde(rename = "opaqueDrawing")]
-    OpaqueDrawing { kind: String },
+    OpaqueDrawing { kind: String, xml: String },
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -313,10 +314,12 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
             "noBreakHyphen" => output.push(RunContent::NoBreakHyphen),
             "drawing" | "pict" | "object" => output.push(RunContent::OpaqueDrawing {
                 kind: child.local_name().to_owned(),
+                xml: child.to_raw_inline_xml(),
             }),
             "AlternateContent" if contains_drawing_owned_content(child) => {
                 output.push(RunContent::OpaqueDrawing {
                     kind: "alternateContent".to_owned(),
+                    xml: child.to_raw_inline_xml(),
                 });
             }
             "cr" => output.push(RunContent::Break {
@@ -2292,7 +2295,7 @@ mod tests {
         ));
         assert!(matches!(
             &projection.run.content[3],
-            RunContent::OpaqueDrawing { kind } if kind == "drawing"
+            RunContent::OpaqueDrawing { kind, .. } if kind == "drawing"
         ));
         assert!(matches!(
             &projection.run.content[4],

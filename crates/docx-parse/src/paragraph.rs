@@ -1020,6 +1020,7 @@ fn parse_drawing_owned(
         DrawingChart::Unread => {
             return Ok(vec![RunContent::OpaqueDrawing {
                 kind: "drawing".to_owned(),
+                xml: element.to_raw_inline_xml(),
             }]);
         }
         DrawingChart::None => {}

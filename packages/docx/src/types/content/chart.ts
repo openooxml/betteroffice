@@ -170,4 +170,9 @@ export interface Chart {
   text?: ChartTextProperties;
   /** `c:txPr` on `c:title`. */
   titleText?: ChartTextProperties;
+  /**
+   * The `w:drawing` that places the chart, replayed verbatim on save. Absent
+   * on package-level entries, which no drawing owns.
+   */
+  drawingXml?: string;
 }

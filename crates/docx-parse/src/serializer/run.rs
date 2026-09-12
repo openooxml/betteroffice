@@ -10,6 +10,7 @@ use crate::shape::Shape;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
+use super::raw::{validate_raw_subtree, validate_replayed_fragment};
 use super::xml_writer::{XmlWriter, int_attr, js_number};
 
 const VALID_HIGHLIGHT_COLORS: &[&str] = &[
@@ -338,7 +339,17 @@ fn serialize_run_content(
             }
             writer.end_element();
         }
-        RunContent::Chart { .. } | RunContent::OpaqueDrawing { .. } => {}
+        RunContent::Chart { chart } => {
+            let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
+                ParseError::Canonical("chart run carries no drawing to replay".to_owned())
+            })?;
+            validate_raw_subtree(xml, "w", "drawing")?;
+            return Ok(xml.to_owned());
+        }
+        RunContent::OpaqueDrawing { xml, .. } => {
+            validate_replayed_fragment(xml)?;
+            return Ok(xml.clone());
+        }
     }
     Ok(writer.finish())
 }
