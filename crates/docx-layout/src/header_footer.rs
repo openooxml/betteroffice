@@ -5,7 +5,7 @@ use serde::Serialize;
 use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, measure_paragraph};
 use crate::types::{
     BlockExtent, BlockId, FieldRun, ImageRun, Layout, LayoutBlock, MeasuredBlock, PageMargins,
-    ParagraphBlock, Run, RunFormatting, Size, TableBlock,
+    ParagraphBlock, Run, RunFormatting, Size,
 };
 
 const DEFAULT_HF_DISTANCE_PX: f64 = 48.0;
@@ -116,7 +116,7 @@ pub fn measure_header_footer(
     if blocks.is_empty() {
         return Ok(None);
     }
-    let mut blocks = normalize_header_footer_blocks(blocks);
+    let mut blocks = blocks;
     let measures = measure_blocks(&mut blocks, content_width, config)?;
     let height = measures.iter().map(extent_height).sum();
     let mut flow = HeaderFooterFlow::default();
@@ -245,59 +245,6 @@ fn measure_field_text(
     };
     let extent = measure_paragraph(&paragraph, 1_000_000.0, config)?;
     Ok(extent.lines.first().map_or(0.0, |line| line.width))
-}
-
-pub fn normalize_header_footer_blocks(mut blocks: Vec<LayoutBlock>) -> Vec<LayoutBlock> {
-    normalize_block_slice(&mut blocks);
-    blocks
-}
-
-fn normalize_block_slice(blocks: &mut [LayoutBlock]) {
-    let trailing_empty: Vec<usize> = (1..blocks.len())
-        .filter(|index| {
-            matches!(blocks[index - 1], LayoutBlock::Table(_))
-                && matches!(&blocks[*index], LayoutBlock::Paragraph(paragraph)
-                    if paragraph.runs.is_empty() && !has_authored_visuals(paragraph))
-        })
-        .collect();
-    for block in blocks.iter_mut() {
-        if let LayoutBlock::Table(table) = block {
-            normalize_table(table);
-        }
-    }
-    for index in trailing_empty {
-        let LayoutBlock::Paragraph(paragraph) = &mut blocks[index] else {
-            continue;
-        };
-        let attrs = paragraph.attrs.get_or_insert_with(Default::default);
-        attrs.suppress_empty_paragraph_height = Some(true);
-        if let Some(spacing) = attrs.spacing.as_mut() {
-            spacing.before = None;
-            spacing.after = None;
-        }
-    }
-}
-
-fn normalize_table(table: &mut TableBlock) {
-    for row in &mut table.rows {
-        for cell in &mut row.cells {
-            normalize_block_slice(&mut cell.blocks);
-        }
-    }
-}
-
-fn has_authored_visuals(paragraph: &crate::types::ParagraphBlock) -> bool {
-    let Some(attrs) = &paragraph.attrs else {
-        return false;
-    };
-    attrs
-        .borders
-        .as_ref()
-        .is_some_and(|borders| borders.top.is_some() || borders.bottom.is_some())
-        || attrs
-            .spacing_explicit
-            .as_ref()
-            .is_some_and(|spacing| spacing.before == Some(true) || spacing.after == Some(true))
 }
 
 pub fn contributes_to_flow(block: &LayoutBlock) -> bool {
@@ -488,27 +435,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalization_preserves_style_spacing_except_for_empty_table_tails() {
-        let blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
-            {"kind": "paragraph", "id": "heading", "runs": [{"kind":"text","text":"Heading"}], "attrs": {"spacing": {"before": 8, "after": 9}}},
-            {"kind": "table", "id": "t", "rows": []},
-            {"kind": "paragraph", "id": "p", "runs": [], "attrs": {"spacing": {"before": 8, "after": 9}}}
-        ]))
-        .unwrap();
-
-        let normalized = normalize_header_footer_blocks(blocks);
-        let LayoutBlock::Paragraph(heading) = &normalized[0] else {
-            panic!("paragraph expected");
-        };
-        let spacing = heading.attrs.as_ref().unwrap().spacing.as_ref().unwrap();
-        assert_eq!((spacing.before, spacing.after), (Some(8.0), Some(9.0)));
-        let LayoutBlock::Paragraph(paragraph) = &normalized[2] else {
-            panic!("paragraph expected");
-        };
-        let attrs = paragraph.attrs.as_ref().unwrap();
-        assert_eq!(attrs.spacing.as_ref().unwrap().before, None);
-        assert_eq!(attrs.spacing.as_ref().unwrap().after, None);
-        assert_eq!(attrs.suppress_empty_paragraph_height, Some(true));
+    fn empty_paragraph_after_table_reserves_header_footer_space() {
+        for kind in [HeaderFooterKind::Header, HeaderFooterKind::Footer] {
+            let blocks = serde_json::from_value(json!([
+                {"kind":"table","id":"table","rows":[{"id":"row","height":20,"heightRule":"exact","cells":[{"id":"cell","blocks":[]}]}]},
+                {"kind":"paragraph","id":"tail","runs":[],"attrs":{"spacing":{"before":2,"after":3,"line":12,"lineRule":"exact"}}}
+            ])).unwrap();
+            let size = Size { w: 300.0, h: 500.0 };
+            let margins = PageMargins {
+                top: 40.0,
+                right: 40.0,
+                bottom: 40.0,
+                left: 40.0,
+                header: Some(20.0),
+                footer: Some(20.0),
+            };
+            let variant = measure_header_footer(
+                "hf".to_owned(),
+                kind,
+                HeaderFooterType::Default,
+                0,
+                blocks,
+                220.0,
+                HeaderFooterMetrics {
+                    kind,
+                    page_size: &size,
+                    margins: &margins,
+                },
+                &MeasurementConfig::default(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(variant.flow_height, 37.0);
+            let BlockExtent::Paragraph(tail) = &variant.measured[1].measure else {
+                panic!("paragraph expected");
+            };
+            assert_eq!(tail.total_height, 17.0);
+            assert_eq!(tail.lines[0].line_height, 12.0);
+        }
     }
 
     #[test]

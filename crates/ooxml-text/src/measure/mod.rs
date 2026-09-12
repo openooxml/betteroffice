@@ -45,7 +45,7 @@
 //!   `size_px × usWinAscent/upem` and `size_px × usWinDescent/upem`, and the
 //!   single-line basis is their sum plus GDI external leading
 //!   ([`crate::word_metrics`]).
-//! - **Wrapping is greedy** with a half-pixel tolerance: a line takes the
+//! - **Wrapping is greedy** with a floating-point tolerance: a line takes the
 //!   last break opportunity that fits. Opportunities are UAX-14
 //!   ([`crate::line_break`]), so consecutive spaces collapse into a single
 //!   opportunity and a soft hyphen permits a break.

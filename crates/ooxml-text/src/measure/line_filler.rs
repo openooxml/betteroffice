@@ -6,9 +6,7 @@
 //! which [`TypesetRowOut`] fields come out. The rules it enforces:
 //!
 //! - Trailing spaces retain their advance but do not force a word to wrap.
-//!   A line accepts
-//!   an overshoot of up to [`WRAP_SLACK_PX`], so a sub-half-pixel rounding
-//!   artifact never forces a wrap that exact twip arithmetic would not make.
+//!   [`WRAP_SLACK_PX`] absorbs floating-point rounding at the line edge.
 //! - A word too wide for a whole line is chopped: the current line takes what
 //!   fits, then each following line takes the longest cluster prefix that
 //!   fits, with a forced minimum of one cluster so filling always terminates.
@@ -52,9 +50,8 @@ use crate::word_metrics as wm;
 
 use super::tabs;
 
-/// Half-pixel wrap tolerance: an overshoot this small must not force a wrap
-/// that exact twip arithmetic would never make.
-const WRAP_SLACK_PX: f32 = 0.5;
+/// Floating-point tolerance at the line edge.
+const WRAP_SLACK_PX: f32 = 1e-3;
 /// Empty-paragraph line height floor, as a multiple of the font size; applies
 /// under the `auto` and `atLeast` rules only.
 const WORD_SINGLE_LINE_FLOOR: f32 = 1.15;
