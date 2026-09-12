@@ -88,7 +88,7 @@ impl<'a> Resolver<'a> {
             });
         }
         let masters = self.master_chain(shape)?;
-        let styles = self.style_chains(shape)?;
+        let styles = self.style_chains(shape, &masters)?;
         let mut names = HashSet::new();
         for source in std::iter::once(shape as &dyn HasCells)
             .chain(masters.iter().map(|(_, s)| *s as &dyn HasCells))
@@ -185,11 +185,15 @@ impl<'a> Resolver<'a> {
     fn style_chains(
         &self,
         shape: &Shape,
+        masters: &[(Provenance, &'a Shape)],
     ) -> Result<Vec<(Provenance, Vec<&'a Sheet>)>, ResolveError> {
+        let inherited = |select: fn(&Shape) -> Option<u32>| {
+            select(shape).or_else(|| masters.iter().find_map(|(_, master)| select(master)))
+        };
         [
-            (shape.line_style, Provenance::StyleLine),
-            (shape.fill_style, Provenance::StyleFill),
-            (shape.text_style, Provenance::StyleText),
+            (inherited(|shape| shape.line_style), Provenance::StyleLine),
+            (inherited(|shape| shape.fill_style), Provenance::StyleFill),
+            (inherited(|shape| shape.text_style), Provenance::StyleText),
         ]
         .into_iter()
         .map(|(id, provenance)| self.style_chain(id).map(|chain| (provenance, chain)))
