@@ -1,0 +1,25 @@
+[package]
+name = "betteroffice-vsdx-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Rust-owned VSDX display-list compiler and hit testing."
+readme = "README.md"
+keywords = ["vsdx", "visio", "rendering"]
+categories = ["rendering", "graphics"]
+
+[lib]
+name = "vsdx_render"
+
+[dependencies]
+ooxml-drawingml.workspace = true
+ooxml-text.workspace = true
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+vsdx-eval.workspace = true
+vsdx-parse.workspace = true
+vsdx-resolve.workspace = true

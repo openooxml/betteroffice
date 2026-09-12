@@ -1,0 +1,17 @@
+[package]
+name = "betteroffice-vsdx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Typed native facade for inspecting VSDX diagrams."
+readme = "README.md"
+keywords = ["vsdx", "visio", "shapesheet"]
+categories = ["parser-implementations"]
+
+[dependencies]
+vsdx-parse.workspace = true
+vsdx-resolve.workspace = true
+
