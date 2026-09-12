@@ -588,10 +588,7 @@ fn based_on(sheet: &Sheet) -> Option<u32> {
         .find(|(name, _)| name == "BasedOn")
         .and_then(|(_, value)| value.parse().ok())
 }
-/// ShapeSheet style ownership follows the Line, Fill, and Text style-cell tables in
-/// Microsoft, *MS-VSDX*, section 2.2.5 (StyleSheet). Cells not listed here deliberately
-/// bypass a style slice: they resolve through local/master/page/document/default only.
-/// `Character` and `Paragraph` are TextStyle-owned sections; Geometry is never style-owned.
+/// Classifies style-owned cells per MS-VSDX 2.2.5; Geometry never inherits styles.
 fn style_owner(name: &str) -> Option<Provenance> {
     const LINE: &[&str] = &[
         "LineColor",

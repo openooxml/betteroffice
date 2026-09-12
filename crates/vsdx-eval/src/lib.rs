@@ -1,4 +1,4 @@
-//! Bounded baseline ShapeSheet evaluation. Unsupported formulas never use cached values.
+//! Bounded ShapeSheet evaluation without cached-value fallback.
 
 mod ast;
 mod colour;
@@ -53,8 +53,7 @@ pub struct Diagnostic {
     pub message: String,
 }
 
-/// A reference provider normally backed by a `vsdx_resolve::ResolvedShape` so inheritance
-/// is applied before formulas are evaluated.
+/// Supplies references after ShapeSheet inheritance.
 pub trait References {
     fn formula(&self, name: &str) -> Option<&str>;
     fn exhausted_inheritance(&self, _name: &str) -> bool {
@@ -367,8 +366,7 @@ fn is_event_cell(name: &str) -> bool {
             | "EventMultiDrop"
     )
 }
-/// Evaluates against the active theme selected for the shape/page by the caller.
-/// ThemeIndex and ColorSchemeIndex selection belongs to resolution, where the package is available.
+/// Evaluates against the caller-selected theme.
 pub fn evaluate_with_theme(
     input: &str,
     refs: &impl References,
@@ -415,8 +413,7 @@ pub fn evaluate_with_shape_themes(
     evaluate_with_theme(input, refs, limits, theme)
 }
 
-/// Evaluates with themes parsed from the VSDX package. ThemeIndex is one-based in relationship order;
-/// ColorSchemeIndex is used only when ThemeIndex is absent.
+/// Evaluates with one-based ThemeIndex, falling back to ColorSchemeIndex.
 pub fn evaluate_with_shape_package_theme(
     input: &str,
     refs: &impl References,
