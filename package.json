@@ -62,7 +62,7 @@
   "devDependencies": {
     "@changesets/cli": "^2.31.0",
     "jszip": "3.10.1",
-    "vite": "8.1.4",
-    "playwright": "1.61.1"
+    "vite": "8.2.2",
+    "playwright": "1.63.0"
   }
 }
