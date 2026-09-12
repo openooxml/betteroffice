@@ -165,7 +165,7 @@ impl<'a> Resolver<'a> {
             });
         }
         let masters = self.master_chain(shape, page)?;
-        let styles = self.style_chains(shape)?;
+        let styles = self.style_chains(shape, &masters)?;
         let mut names = HashSet::new();
         for source in std::iter::once(shape as &dyn HasCells)
             .chain(masters.iter().map(|(_, s)| *s as &dyn HasCells))
@@ -228,14 +228,14 @@ impl<'a> Resolver<'a> {
         let mut current_sheet = source_sheet;
         let mut seen = HashSet::new();
         for depth in 0..MAX_INHERITANCE_DEPTH {
-            let (master_id, master_shape, provenance) = match (current.master, current.master_shape)
+            let (master_id, master_shape, own_master) = match (current.master, current.master_shape)
             {
-                (Some(master_id), _) => (master_id, None, Provenance::Master),
+                (Some(master_id), master_shape) => (master_id, master_shape, true),
                 (None, Some(master_shape)) => {
                     let Some(master_id) = self.enclosing_master(current_sheet, current.id) else {
                         return Ok(out);
                     };
-                    (master_id, Some(master_shape), Provenance::MasterShape)
+                    (master_id, Some(master_shape), false)
                 }
                 (None, None) => return Ok(out),
             };
@@ -250,9 +250,21 @@ impl<'a> Resolver<'a> {
             let Some(sheet) = self.package.master_contents.get(path) else {
                 return Err(ResolveError::MissingMaster(master_id));
             };
-            let next = match master_shape {
-                Some(id) => find_shape(sheet, id),
-                None => sheet.shapes().next(),
+            // A shape's own Master identifies the master root; MasterShape on that same
+            // shape then narrows to a sub-shape of that root, never a sibling of it. A
+            // MasterShape inherited from an enclosing shape's Master instead names any
+            // shape in the master (MS-VSDX 2.2.2).
+            let (next, provenance) = if own_master {
+                let root = sheet.shapes().next();
+                match master_shape.and_then(|id| root.and_then(|root| find_shape_in(root, id))) {
+                    Some(shape) => (Some(shape), Provenance::MasterShape),
+                    None => (root, Provenance::Master),
+                }
+            } else {
+                (
+                    master_shape.and_then(|id| find_shape(sheet, id)),
+                    Provenance::MasterShape,
+                )
             };
             let Some(next) = next else {
                 return Err(ResolveError::MissingMaster(master_id));
@@ -281,11 +293,15 @@ impl<'a> Resolver<'a> {
     fn style_chains(
         &self,
         shape: &Shape,
+        masters: &[(Provenance, &'a Shape)],
     ) -> Result<Vec<(Provenance, Vec<&'a Sheet>)>, ResolveError> {
+        let inherited = |select: fn(&Shape) -> Option<u32>| {
+            select(shape).or_else(|| masters.iter().find_map(|(_, master)| select(master)))
+        };
         [
-            (shape.line_style, Provenance::StyleLine),
-            (shape.fill_style, Provenance::StyleFill),
-            (shape.text_style, Provenance::StyleText),
+            (inherited(|shape| shape.line_style), Provenance::StyleLine),
+            (inherited(|shape| shape.fill_style), Provenance::StyleFill),
+            (inherited(|shape| shape.text_style), Provenance::StyleText),
         ]
         .into_iter()
         .map(|(id, provenance)| self.style_chain(id).map(|chain| (provenance, chain)))

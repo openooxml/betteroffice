@@ -1163,6 +1163,86 @@ fn text_uses_effective_page_or_document_rows_and_master_stream() {
 }
 
 #[test]
+fn style_references_supplied_by_a_master_are_consulted() {
+    let mut package = package();
+    package.style_sheets = vec![
+        sheet(Some(1), vec![SheetChild::Cell(cell("LineColor", "master"))]),
+        sheet(Some(2), vec![SheetChild::Cell(cell("FillForegnd", "fill"))]),
+        sheet(Some(3), vec![SheetChild::Cell(cell("Text", "text"))]),
+        sheet(Some(4), vec![SheetChild::Cell(cell("LineColor", "local"))]),
+    ];
+    let mut master = shape(1, vec![]);
+    master.line_style = Some(1);
+    master.fill_style = Some(2);
+    master.text_style = Some(3);
+    add_master(&mut package, 1, master);
+
+    let mut instance = shape(1, vec![]);
+    instance.master = Some(1);
+    add_page(&mut package, instance);
+    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
+    assert_eq!(
+        found(&resolved, "LineColor"),
+        ("master", Provenance::StyleLine)
+    );
+    assert_eq!(
+        found(&resolved, "FillForegnd"),
+        ("fill", Provenance::StyleFill)
+    );
+    assert_eq!(found(&resolved, "Text"), ("text", Provenance::StyleText));
+
+    let mut overriding = shape(2, vec![]);
+    overriding.master = Some(1);
+    overriding.line_style = Some(4);
+    add_page(&mut package, overriding);
+    assert_eq!(
+        found(
+            &Resolver::new(&package).resolve_shape("page", 2).unwrap(),
+            "LineColor"
+        ),
+        ("local", Provenance::StyleLine)
+    );
+}
+
+#[test]
+fn nested_group_members_and_nested_master_shapes_resolve() {
+    let mut package = package();
+    let member = shape(2, vec![ShapeChild::Cell(cell("PinX", "member"))]);
+    add_page(
+        &mut package,
+        shape(
+            1,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                member,
+            )])],
+        ),
+    );
+    let resolved = Resolver::new(&package).resolve_shape("page", 2).unwrap();
+    assert_eq!(found(&resolved, "PinX"), ("member", Provenance::Local));
+
+    let nested_master = shape(5, vec![ShapeChild::Cell(cell("PinY", "nested-master"))]);
+    add_master(
+        &mut package,
+        1,
+        shape(
+            1,
+            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                nested_master,
+            )])],
+        ),
+    );
+    let mut instance = shape(3, vec![]);
+    instance.master = Some(1);
+    instance.master_shape = Some(5);
+    add_page(&mut package, instance);
+    let resolved = Resolver::new(&package).resolve_shape("page", 3).unwrap();
+    assert_eq!(
+        found(&resolved, "PinY"),
+        ("nested-master", Provenance::MasterShape)
+    );
+}
+
+#[test]
 fn section_references_use_one_based_indices_and_user_values() {
     let mut package = package();
     let scratch = row(0, vec![cell("X", "3")]);
