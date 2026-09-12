@@ -36,7 +36,7 @@ fn run_gradients_render_the_lowest_stop_without_changing_controls() {
         [
             ("RGB gradient", "#FFFFFF"),
             ("Theme gradient", "#FFFFFF"),
-            ("Modified gradient", "#90A0B0"),
+            ("Modified gradient", "#8F9FAF"),
             ("Unsorted ramp", "#00FF00"),
             ("First second", "#FFFFFF"),
             ("Solid control", "#FFFFFF"),
