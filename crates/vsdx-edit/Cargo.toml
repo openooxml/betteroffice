@@ -1,0 +1,31 @@
+[package]
+name = "betteroffice-vsdx-edit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Collaborative yrs-backed editing core for VSDX diagrams."
+readme = "README.md"
+keywords = ["vsdx", "visio", "ooxml", "collaboration"]
+categories = ["graphics", "data-structures"]
+
+[lib]
+name = "vsdx_edit"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+wasm = ["dep:js-sys", "dep:wasm-bindgen"]
+
+[dependencies]
+js-sys = { version = "0.3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+vsdx-parse.workspace = true
+vsdx-eval.workspace = true
+vsdx-resolve.workspace = true
+wasm-bindgen = { version = "0.2", optional = true }
+yrs = "0.27.3"

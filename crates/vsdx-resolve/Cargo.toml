@@ -1,0 +1,24 @@
+[package]
+name = "betteroffice-vsdx-resolve"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Resolved Visio ShapeSheet inheritance, text, and geometry."
+readme = "README.md"
+keywords = ["vsdx", "visio", "shapesheet"]
+categories = ["graphics", "parser-implementations"]
+
+[lib]
+name = "vsdx_resolve"
+
+[dependencies]
+ooxml-drawingml.workspace = true
+vsdx-parse.workspace = true
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"

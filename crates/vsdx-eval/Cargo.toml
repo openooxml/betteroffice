@@ -1,0 +1,21 @@
+[package]
+name = "betteroffice-vsdx-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Bounded baseline ShapeSheet formula evaluator for VSDX display."
+readme = "README.md"
+keywords = ["vsdx", "visio", "shapesheet"]
+categories = ["parser-implementations", "graphics"]
+
+[lib]
+name = "vsdx_eval"
+
+[dependencies]
+ooxml-drawingml.workspace = true
+thiserror = "2"
+vsdx-parse.workspace = true
+vsdx-resolve.workspace = true

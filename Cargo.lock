@@ -268,6 +268,79 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-opc",
+ "betteroffice-vsdx-edit",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+]
+
+[[package]]
+name = "betteroffice-vsdx-edit"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "wasm-bindgen",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-vsdx-eval"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-parse"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-render"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-resolve"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-parse",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.1.0"
 dependencies = [
