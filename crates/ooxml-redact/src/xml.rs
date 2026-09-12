@@ -370,7 +370,7 @@ fn sensitive_attribute(
                 || element == "tag" && matches!(attribute, "name" | "val")
                 || element == "custShow" && attribute == "name"
         }
-        Format::Vsdx => vsdx_user_data_cell && attribute == "V",
+        Format::Vsdx => vsdx_user_data_cell && matches!(attribute, "V" | "F"),
         Format::Auto => false,
     }
 }

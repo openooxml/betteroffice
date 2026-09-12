@@ -152,6 +152,35 @@ fn redacts_visio_text_runs_with_utf8_accounting() {
 }
 
 #[test]
+fn redacts_vsdx_user_data_cell_formula_alongside_value() {
+    let source = concat!(
+        r#"<PageContents><Shapes><Shape ID="1">"#,
+        r#"<Section N='User'><Row N='Notes'>"#,
+        r#"<Cell N='Value' F='&quot;VSDX_SECRET_FORMULA&quot;' V='VSDX_SECRET_VALUE'/>"#,
+        r#"</Row></Section>"#,
+        r#"</Shape></Shapes></PageContents>"#,
+    );
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/page1.xml",
+        source.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(
+        !output.contains("VSDX_SECRET_VALUE"),
+        "cached value leaked: {output}"
+    );
+    assert!(
+        !output.contains("VSDX_SECRET_FORMULA"),
+        "formula leaked: {output}"
+    );
+}
+
+#[test]
 fn rejects_macro_enabled_visio() {
     let source = package(vec![
         (
