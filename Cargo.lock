@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-eval"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-parse",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-parse"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-opc",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-render"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
@@ -312,7 +312,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-resolve"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-parse",
