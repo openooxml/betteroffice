@@ -20,7 +20,7 @@ export const ECOSYSTEMS = [
     install: "npm install @betteroffice/docx-react",
     url: NPM,
     docs: `${DOCS}/docs/javascript`,
-    desc: "React editors and framework-free cores for all three formats.",
+    desc: "React editors for documents, spreadsheets and slides, plus framework-free cores for all four formats.",
   },
   {
     name: "Rust",

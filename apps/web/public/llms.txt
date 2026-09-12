@@ -32,7 +32,7 @@ Published to crates.io, Apache-2.0. Use the four facades unless you need a singl
 - [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): typed native API for opening, editing, collaborating, and rendering PPTX presentations.
 - [betteroffice-vsdx](https://crates.io/crates/betteroffice-vsdx): typed native API for VSDX diagram parsing, resolution, rendering, round-tripping, transactional editing, and collaboration.
 - [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
-- [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all three formats.
+- [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all four formats.
 
 The per-layer crates are published for direct use when you need one stage of the pipeline rather than a whole format:
 
@@ -56,7 +56,7 @@ The per-layer crates are published for direct use when you need one stage of the
 - [betteroffice-vsdx-render](https://crates.io/crates/betteroffice-vsdx-render): VSDX display-list rendering and deterministic connector routing.
 - [betteroffice-vsdx-edit](https://crates.io/crates/betteroffice-vsdx-edit): transactional VSDX editing and the convergent Yrs diagram CRDT.
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
-- [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all three formats.
+- [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all four formats.
 
 ## Python packages
 
