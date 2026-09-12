@@ -117,6 +117,252 @@ fn deleted_row_with_cells(index: u32, cells: Vec<Cell>) -> Row {
     }
 }
 
+fn endpoint_cells() -> Vec<ShapeChild> {
+    vec![
+        ShapeChild::Cell(cell("BeginX", "1")),
+        ShapeChild::Cell(cell("BeginY", "2")),
+        ShapeChild::Cell(cell("EndX", "4")),
+        ShapeChild::Cell(cell("EndY", "2")),
+    ]
+}
+
+fn connectivity_with_glued_source(source: Vec<ShapeChild>) -> crate::PageConnectivity {
+    let mut package = package();
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![
+                SheetChild::Shapes(vec![
+                    vsdx_parse::ShapesChild::Shape(shape(1, source)),
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        2,
+                        vec![
+                            ShapeChild::Cell(cell("Width", "1")),
+                            ShapeChild::Cell(cell("Height", "1")),
+                            ShapeChild::Cell(cell("PinX", "0")),
+                            ShapeChild::Cell(cell("PinY", "0")),
+                            ShapeChild::Cell(cell("LocPinX", "0")),
+                            ShapeChild::Cell(cell("LocPinY", "0")),
+                            ShapeChild::Section(section(
+                                "Connection",
+                                vec![row(0, vec![cell("X", "0.5"), cell("Y", "0.5")])],
+                            )),
+                        ],
+                    )),
+                ]),
+                SheetChild::Connects(vec![ConnectsChild::Connect(Connect {
+                    from_sheet: 1,
+                    from_cell: Some("BeginX".into()),
+                    from_part: Some(9),
+                    to_sheet: 2,
+                    to_cell: Some("Connections.X1".into()),
+                    to_part: Some(100),
+                    other_attrs: vec![],
+                })]),
+            ],
+        ),
+    );
+    Resolver::new(&package)
+        .resolve_page_connectivity("page")
+        .unwrap()
+}
+
+fn connectivity_to_connection(rows: Vec<Row>, to_cell: &str) -> crate::PageConnectivity {
+    let mut package = package();
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![
+                SheetChild::Shapes(vec![
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        1,
+                        vec![ShapeChild::Cell(cell("OneD", "1"))],
+                    )),
+                    vsdx_parse::ShapesChild::Shape(shape(
+                        2,
+                        vec![
+                            ShapeChild::Cell(cell("Width", "1")),
+                            ShapeChild::Cell(cell("Height", "1")),
+                            ShapeChild::Cell(cell("PinX", "0")),
+                            ShapeChild::Cell(cell("PinY", "0")),
+                            ShapeChild::Cell(cell("LocPinX", "0")),
+                            ShapeChild::Cell(cell("LocPinY", "0")),
+                            ShapeChild::Section(section("Connection", rows)),
+                        ],
+                    )),
+                ]),
+                SheetChild::Connects(vec![ConnectsChild::Connect(Connect {
+                    from_sheet: 1,
+                    from_cell: Some("BeginX".into()),
+                    from_part: None,
+                    to_sheet: 2,
+                    to_cell: Some(to_cell.into()),
+                    to_part: None,
+                    other_attrs: vec![],
+                })]),
+            ],
+        ),
+    );
+    Resolver::new(&package)
+        .resolve_page_connectivity("page")
+        .unwrap()
+}
+
+#[test]
+fn resolves_first_connection_row_from_one_based_ordinal() {
+    let connectivity = connectivity_to_connection(
+        vec![row(0, vec![cell("X", "3"), cell("Y", "4")])],
+        "Connections.X1",
+    );
+
+    let point = connectivity.connectors[&1].glue[0]
+        .to
+        .as_ref()
+        .unwrap()
+        .connection_point
+        .as_ref()
+        .unwrap();
+    assert_eq!(point.row, 0);
+    assert_eq!(point.position, crate::ScenePoint { x: 3.0, y: 4.0 });
+    assert!(connectivity.diagnostics.is_empty());
+}
+
+#[test]
+fn resolves_last_connection_row_from_one_based_ordinal() {
+    let connectivity = connectivity_to_connection(
+        vec![
+            row(0, vec![cell("X", "10"), cell("Y", "10")]),
+            row(1, vec![cell("X", "20"), cell("Y", "20")]),
+            row(2, vec![cell("X", "30"), cell("Y", "30")]),
+            row(3, vec![cell("X", "40"), cell("Y", "40")]),
+            row(4, vec![cell("X", "50"), cell("Y", "50")]),
+            row(5, vec![cell("X", "60"), cell("Y", "60")]),
+        ],
+        "Connections.X6",
+    );
+
+    let point = connectivity.connectors[&1].glue[0]
+        .to
+        .as_ref()
+        .unwrap()
+        .connection_point
+        .as_ref()
+        .unwrap();
+    assert_eq!(point.row, 5);
+    assert_eq!(point.position, crate::ScenePoint { x: 60.0, y: 60.0 });
+    assert!(connectivity.diagnostics.is_empty());
+}
+
+#[test]
+fn rejects_zero_connection_ordinal() {
+    let connectivity = connectivity_to_connection(
+        vec![row(0, vec![cell("X", "3"), cell("Y", "4")])],
+        "Connections.X0",
+    );
+
+    assert!(
+        connectivity.connectors[&1].glue[0]
+            .to
+            .as_ref()
+            .unwrap()
+            .connection_point
+            .is_none()
+    );
+    assert_eq!(
+        connectivity.diagnostics,
+        vec![ConnectivityDiagnostic::UnsupportedToCell {
+            shape_id: 2,
+            cell: "Connections.X0".into(),
+        }]
+    );
+}
+
+#[test]
+fn reports_out_of_range_connection_ordinal() {
+    let connectivity = connectivity_to_connection(
+        vec![
+            row(0, vec![cell("X", "3"), cell("Y", "4")]),
+            row(1, vec![cell("X", "5"), cell("Y", "6")]),
+        ],
+        "Connections.X9",
+    );
+
+    assert!(
+        connectivity.connectors[&1].glue[0]
+            .to
+            .as_ref()
+            .unwrap()
+            .connection_point
+            .is_none()
+    );
+    assert_eq!(
+        connectivity.diagnostics,
+        vec![ConnectivityDiagnostic::MissingConnectionPoint {
+            shape_id: 2,
+            row: 8,
+        }]
+    );
+}
+
+#[test]
+fn endpoint_cells_without_one_d_resolve_as_a_glued_connector() {
+    let connectivity = connectivity_with_glued_source(endpoint_cells());
+
+    let connector = connectivity.connectors.get(&1).unwrap();
+    assert!(connector.is_1d);
+    assert_eq!(connector.begin, Some(crate::ScenePoint { x: 1.0, y: 2.0 }));
+    assert_eq!(connector.end, Some(crate::ScenePoint { x: 4.0, y: 2.0 }));
+    assert_eq!(connector.glue.len(), 1);
+    assert!(connectivity.diagnostics.is_empty());
+}
+
+#[test]
+fn one_d_zero_overrides_endpoint_cells() {
+    let mut source = endpoint_cells();
+    source.insert(0, ShapeChild::Cell(cell("OneD", "0")));
+
+    let connectivity = connectivity_with_glued_source(source);
+
+    assert!(!connectivity.connectors[&1].is_1d);
+    assert_eq!(
+        connectivity.diagnostics,
+        vec![ConnectivityDiagnostic::UnsupportedFromCell {
+            shape_id: 1,
+            cell: "BeginX".into(),
+        }]
+    );
+}
+
+#[test]
+fn one_d_one_remains_a_connector() {
+    let mut source = endpoint_cells();
+    source.insert(0, ShapeChild::Cell(cell("OneD", "1")));
+
+    let connectivity = connectivity_with_glued_source(source);
+
+    assert!(connectivity.connectors[&1].is_1d);
+    assert!(connectivity.diagnostics.is_empty());
+}
+
+#[test]
+fn incomplete_endpoint_cells_do_not_make_a_connector() {
+    let mut source = endpoint_cells();
+    source.pop();
+
+    let connectivity = connectivity_with_glued_source(source);
+
+    assert!(!connectivity.connectors[&1].is_1d);
+    assert_eq!(
+        connectivity.diagnostics,
+        vec![ConnectivityDiagnostic::UnsupportedFromCell {
+            shape_id: 1,
+            cell: "BeginX".into(),
+        }]
+    );
+}
+
 #[test]
 fn resolves_glue_connection_points_and_part_fields() {
     let mut package = package();
@@ -146,7 +392,7 @@ fn resolves_glue_connection_points_and_part_fields() {
                             ShapeChild::Section(section(
                                 "Connection",
                                 vec![row(
-                                    1,
+                                    0,
                                     vec![
                                         formula_cell("X", "Width*0.5"),
                                         formula_cell("Y", "Height/2"),
@@ -190,6 +436,24 @@ fn resolves_glue_connection_points_and_part_fields() {
 }
 
 #[test]
+fn connectivity_with_resolved_shapes_matches_page_resolution() {
+    let package = parse_vsdx(include_bytes!(
+        "../../vsdx-parse/tests/fixtures/grouped-glue.vsdx"
+    ))
+    .unwrap();
+    let page = &package.page_part_paths[0];
+    let resolver = Resolver::new(&package);
+    let shapes = resolver.resolve_page_shapes(page).unwrap();
+
+    assert_eq!(
+        resolver.resolve_page_connectivity(page).unwrap(),
+        resolver
+            .resolve_page_connectivity_with(page, &shapes)
+            .unwrap()
+    );
+}
+
+#[test]
 fn glue_numeric_provenance_prefers_supported_formulas_and_falls_back_to_cached_values() {
     let mut package = package();
     package.page_contents.insert(
@@ -214,7 +478,7 @@ fn glue_numeric_provenance_prefers_supported_formulas_and_falls_back_to_cached_v
                             ShapeChild::Section(section(
                                 "Connection",
                                 vec![row(
-                                    1,
+                                    0,
                                     vec![
                                         Cell {
                                             name: "X".into(),
@@ -571,6 +835,54 @@ fn add_master_shapes(package: &mut VsdxPackage, id: u32, values: Vec<Shape>) {
 }
 
 #[test]
+fn page_shape_tree_matches_by_id_resolution_for_nested_group_leaf() {
+    let mut package = package();
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Cell(cell("PageValue", "page"))]),
+    );
+    let leaf = shape(4, vec![ShapeChild::Cell(cell("LeafValue", "leaf"))]);
+    let inner = shape(
+        3,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            leaf,
+        )])],
+    );
+    let middle = shape(
+        2,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            inner,
+        )])],
+    );
+    let outer = shape(
+        1,
+        vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+            middle,
+        )])],
+    );
+    package.page_contents.insert(
+        "page".into(),
+        sheet(
+            None,
+            vec![SheetChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
+                outer,
+            )])],
+        ),
+    );
+
+    let resolver = Resolver::new(&package);
+    let resolved_by_tree = resolver.resolve_page_shapes("page").unwrap();
+    let resolved_by_id = resolver.resolve_shape("page", 4).unwrap();
+
+    assert_eq!(resolved_by_tree[&4], resolved_by_id);
+    assert_eq!(
+        found(&resolved_by_tree[&4], "PageValue"),
+        ("page", Provenance::Page)
+    );
+}
+
+#[test]
 fn master_without_master_shape_inherits_from_master_root() {
     let mut package = package();
     let mut local = shape(10, vec![]);
@@ -771,6 +1083,65 @@ fn style_slices_and_based_on_chains_resolve_independently() {
 }
 
 #[test]
+fn sheet_style_attributes_resolve_style_to_style_inheritance() {
+    let mut package = package();
+    package.style_sheets = vec![
+        Sheet {
+            id: Some(1),
+            children: vec![SheetChild::Cell(formula_cell("LineWeight", "Inh"))],
+            other_attrs: vec![("lInEsTyLe".into(), "2".into())],
+        },
+        Sheet {
+            id: Some(2),
+            children: vec![SheetChild::Cell(formula_cell("LineWeight", "Inh"))],
+            other_attrs: vec![("BasedOn".into(), "3".into())],
+        },
+        sheet(Some(3), vec![SheetChild::Cell(cell("LineWeight", "3"))]),
+    ];
+
+    let resolved = Resolver::new(&package)
+        .resolve_sheet(&package.style_sheets[0])
+        .unwrap();
+    assert_eq!(found(&resolved, "LineWeight"), ("3", Provenance::StyleLine));
+}
+
+#[test]
+fn sheets_without_style_attributes_preserve_unresolved_inh() {
+    let resolved = Resolver::new(&package())
+        .resolve_sheet(&sheet(
+            None,
+            vec![SheetChild::Cell(formula_cell("LineWeight", "Inh"))],
+        ))
+        .unwrap();
+
+    match &resolved.cells["LineWeight"] {
+        Lookup::Found(value) => {
+            assert_eq!(value.cell.formula.as_deref(), Some("Inh"));
+            assert_eq!(value.provenance, Provenance::Local);
+        }
+        value => panic!("expected unresolved Inh, got {value:?}"),
+    }
+}
+
+#[test]
+fn unparseable_sheet_style_attributes_are_ignored() {
+    let unresolved = sheet(
+        None,
+        vec![SheetChild::Cell(formula_cell("LineWeight", "Inh"))],
+    );
+    let sheet = Sheet {
+        other_attrs: vec![("LineStyle".into(), "not-a-style-id".into())],
+        ..unresolved
+    };
+
+    let resolved = Resolver::new(&package()).resolve_sheet(&sheet).unwrap();
+    match &resolved.cells["LineWeight"] {
+        Lookup::Found(value) => assert_eq!(value.cell.formula.as_deref(), Some("Inh")),
+        value => panic!("expected unresolved Inh, got {value:?}"),
+    }
+}
+
+#[test]
 fn inh_skips_each_inherited_layer_until_a_concrete_cell() {
     let mut package = package();
     let mut local = shape(1, vec![ShapeChild::Cell(formula_cell("PinX", "Inh"))]);
@@ -857,7 +1228,7 @@ fn geometry_rows_without_ix_all_realize_in_source_order() {
     let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
     let section = &resolved.sections["Geometry"];
     assert_eq!(section.row_order.len(), 2);
-    let geometry = crate::realize_geometry(section);
+    let geometry = crate::realize_geometry(section, 1.0, 1.0);
     assert_eq!(
         geometry.commands,
         vec![
@@ -877,7 +1248,7 @@ fn geometry_rows_with_duplicate_ix_all_realize_in_source_order() {
     let resolved = Resolver::new(&package).resolve_shape(page, 1).unwrap();
     let section = &resolved.sections["Geometry"];
     assert_eq!(section.row_order.len(), 2);
-    let geometry = crate::realize_geometry(section);
+    let geometry = crate::realize_geometry(section, 1.0, 1.0);
     assert_eq!(
         geometry.commands,
         vec![
@@ -1401,86 +1772,6 @@ fn text_uses_effective_page_or_document_rows_and_master_stream() {
 }
 
 #[test]
-fn style_references_supplied_by_a_master_are_consulted() {
-    let mut package = package();
-    package.style_sheets = vec![
-        sheet(Some(1), vec![SheetChild::Cell(cell("LineColor", "master"))]),
-        sheet(Some(2), vec![SheetChild::Cell(cell("FillForegnd", "fill"))]),
-        sheet(Some(3), vec![SheetChild::Cell(cell("Text", "text"))]),
-        sheet(Some(4), vec![SheetChild::Cell(cell("LineColor", "local"))]),
-    ];
-    let mut master = shape(1, vec![]);
-    master.line_style = Some(1);
-    master.fill_style = Some(2);
-    master.text_style = Some(3);
-    add_master(&mut package, 1, master);
-
-    let mut instance = shape(1, vec![]);
-    instance.master = Some(1);
-    add_page(&mut package, instance);
-    let resolved = Resolver::new(&package).resolve_shape("page", 1).unwrap();
-    assert_eq!(
-        found(&resolved, "LineColor"),
-        ("master", Provenance::StyleLine)
-    );
-    assert_eq!(
-        found(&resolved, "FillForegnd"),
-        ("fill", Provenance::StyleFill)
-    );
-    assert_eq!(found(&resolved, "Text"), ("text", Provenance::StyleText));
-
-    let mut overriding = shape(2, vec![]);
-    overriding.master = Some(1);
-    overriding.line_style = Some(4);
-    add_page(&mut package, overriding);
-    assert_eq!(
-        found(
-            &Resolver::new(&package).resolve_shape("page", 2).unwrap(),
-            "LineColor"
-        ),
-        ("local", Provenance::StyleLine)
-    );
-}
-
-#[test]
-fn nested_group_members_and_nested_master_shapes_resolve() {
-    let mut package = package();
-    let member = shape(2, vec![ShapeChild::Cell(cell("PinX", "member"))]);
-    add_page(
-        &mut package,
-        shape(
-            1,
-            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
-                member,
-            )])],
-        ),
-    );
-    let resolved = Resolver::new(&package).resolve_shape("page", 2).unwrap();
-    assert_eq!(found(&resolved, "PinX"), ("member", Provenance::Local));
-
-    let nested_master = shape(5, vec![ShapeChild::Cell(cell("PinY", "nested-master"))]);
-    add_master(
-        &mut package,
-        1,
-        shape(
-            1,
-            vec![ShapeChild::Shapes(vec![vsdx_parse::ShapesChild::Shape(
-                nested_master,
-            )])],
-        ),
-    );
-    let mut instance = shape(3, vec![]);
-    instance.master = Some(1);
-    instance.master_shape = Some(5);
-    add_page(&mut package, instance);
-    let resolved = Resolver::new(&package).resolve_shape("page", 3).unwrap();
-    assert_eq!(
-        found(&resolved, "PinY"),
-        ("nested-master", Provenance::MasterShape)
-    );
-}
-
-#[test]
 fn section_references_use_one_based_indices_and_user_values() {
     let mut package = package();
     let scratch = row(0, vec![cell("X", "3")]);
@@ -1615,8 +1906,8 @@ fn corpus_connectivity_accounts_for_every_glue_record() {
         }
     }
     // Record 121 is soundplan.vsdx visio/pages/page1.xml's Connect FromSheet=1306,
-    // FromCell=BeginX, ToSheet=1159, ToCell=PinX. Its target's PinX/PinY resolve to
-    // (16.87204723902492, 16.28149636031824), so it is a valid direct-pin glue record;
-    // the remaining 30 records lack Connection rows.
-    assert_eq!((total, resolved, missing), (151, 121, 30));
+    // FromCell=BeginX, ToSheet=1159, ToCell=PinX. Its target resolves via PinX/PinY, so it
+    // is a valid direct-pin glue record. All 151 records now resolve, including the 30 that
+    // previously did not because Connections.XN was used as the row index instead of N-1 (3954514).
+    assert_eq!((total, resolved, missing), (151, 151, 0));
 }

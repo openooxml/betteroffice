@@ -1,15 +1,13 @@
-use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedRow, ResolvedSection};
+use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
-pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
+/// Realizes a Geometry section in the shape's local drawing units. `Rel*` coordinates
+/// are fractions of `width` and `height`, giving absolute points in local space.
+pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
     let mut current = (0.0, 0.0);
-    let rows: Vec<&ResolvedRow> = if section.row_order.is_empty() {
-        let mut rows: Vec<&ResolvedRow> = section.rows.values().collect();
-        rows.sort_by(|left, right| {
-            numeric_row_index(&left.key).cmp(&numeric_row_index(&right.key))
-        });
-        rows
+    let rows: Vec<_> = if section.row_order.is_empty() {
+        section.rows.values().collect()
     } else {
         section
             .row_order
@@ -19,10 +17,7 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
     };
     for row in rows {
         let ty = row.row_type.as_deref().unwrap_or("");
-        if matches!(
-            ty,
-            "NURBSTo" | "PolylineTo" | "SplineStart" | "SplineKnot" | "InfiniteLine"
-        ) {
+        if matches!(ty, "NURBSTo" | "SplineStart" | "SplineKnot") {
             out.issues
                 .push(GeometryIssue::UnsupportedRowType(ty.into()));
             continue;
@@ -82,7 +77,9 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
                 }
             }
             "RelMoveTo" => {
-                let end = (current.0 + xy.0, current.1 + xy.1);
+                let Some(end) = relative_point(&mut out, xy, (width, height), ty) else {
+                    continue;
+                };
                 if push_checked(
                     &mut out,
                     GeometryPathCommand::Move { x: end.0, y: end.1 },
@@ -92,12 +89,100 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
                 }
             }
             "RelLineTo" => {
-                let end = (current.0 + xy.0, current.1 + xy.1);
+                let Some(end) = relative_point(&mut out, xy, (width, height), ty) else {
+                    continue;
+                };
                 if push_checked(
                     &mut out,
                     GeometryPathCommand::Line { x: end.0, y: end.1 },
                     ty,
                 ) {
+                    current = end;
+                }
+            }
+            "PolylineTo" => {
+                let Some(raw) = row.cells.get("A").and_then(|lookup| match lookup {
+                    Lookup::Found(value) => value.cell.value.as_deref(),
+                    Lookup::Deleted | Lookup::Absent => None,
+                }) else {
+                    out.issues.push(if row.cells.contains_key("A") {
+                        GeometryIssue::UnevaluatedCell {
+                            row_type: ty.into(),
+                            cell: "A".into(),
+                        }
+                    } else {
+                        GeometryIssue::MissingCell {
+                            row_type: ty.into(),
+                            cell: "A".into(),
+                        }
+                    });
+                    continue;
+                };
+                let Some(polyline) = parse_polyline(raw) else {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "A".into(),
+                    });
+                    continue;
+                };
+                if polyline.x_relative && !width.is_finite() {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "Width".into(),
+                    });
+                    continue;
+                }
+                if polyline.y_relative && !height.is_finite() {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "Height".into(),
+                    });
+                    continue;
+                }
+                if emit_row(&mut out, |out| {
+                    polyline_segments(out, current, xy, (width, height), &polyline, ty)
+                }) {
+                    current = xy;
+                }
+            }
+            "InfiniteLine" => {
+                let Some(values) = required(&["A", "B"]) else {
+                    continue;
+                };
+                let second = (values[0], values[1]);
+                if xy == second {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "geometry".into(),
+                    });
+                    continue;
+                }
+                if !width.is_finite() {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "Width".into(),
+                    });
+                    continue;
+                }
+                if !height.is_finite() {
+                    out.issues.push(GeometryIssue::UnevaluatedCell {
+                        row_type: ty.into(),
+                        cell: "Height".into(),
+                    });
+                    continue;
+                }
+                if let Some((start, end)) = infinite_line_segment(xy, second, (width, height))
+                    && emit_row(&mut out, |out| {
+                        push_checked(
+                            out,
+                            GeometryPathCommand::Move {
+                                x: start.0,
+                                y: start.1,
+                            },
+                            ty,
+                        ) && push_checked(out, GeometryPathCommand::Line { x: end.0, y: end.1 }, ty)
+                    })
+                {
                     current = end;
                 }
             }
@@ -145,13 +230,6 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
     out
 }
 
-/// Keys sort lexically, so `IX:10` would precede `IX:2` and displace relative rows.
-fn numeric_row_index(key: &str) -> (u32, &str) {
-    key.strip_prefix("IX:")
-        .and_then(|index| index.parse().ok())
-        .map_or((u32::MAX, key), |index| (index, ""))
-}
-
 fn emit_row(out: &mut RealizedGeometry, emit: impl FnOnce(&mut RealizedGeometry) -> bool) -> bool {
     let command_count = out.commands.len();
     if emit(out) {
@@ -160,6 +238,134 @@ fn emit_row(out: &mut RealizedGeometry, emit: impl FnOnce(&mut RealizedGeometry)
         out.commands.truncate(command_count);
         false
     }
+}
+
+struct PolylineEncoding {
+    x_relative: bool,
+    y_relative: bool,
+    points: Vec<(f64, f64)>,
+}
+
+fn parse_polyline(raw: &str) -> Option<PolylineEncoding> {
+    let inner = raw.trim().strip_prefix("POLYLINE(")?.strip_suffix(')')?;
+    let values = inner.split(',').map(str::trim).collect::<Vec<_>>();
+    if values.len() < 4 || values.len() % 2 != 0 {
+        return None;
+    }
+    let x_relative = polyline_flag(values[0])? == 0.0;
+    let y_relative = polyline_flag(values[1])? == 0.0;
+    let points = values[2..]
+        .chunks(2)
+        .map(|pair| Some((finite_coordinate(pair[0])?, finite_coordinate(pair[1])?)))
+        .collect::<Option<Vec<_>>>()?;
+    Some(PolylineEncoding {
+        x_relative,
+        y_relative,
+        points,
+    })
+}
+
+fn polyline_flag(token: &str) -> Option<f64> {
+    finite_coordinate(token).filter(|value| *value >= 0.0 && value.fract() == 0.0)
+}
+
+fn finite_coordinate(token: &str) -> Option<f64> {
+    token.parse().ok().filter(|value: &f64| value.is_finite())
+}
+
+/// Scales a normalized coordinate pair by the shape bounds into an absolute local
+/// point, reporting the first non-finite bound it would need.
+fn relative_point(
+    out: &mut RealizedGeometry,
+    point: (f64, f64),
+    bounds: (f64, f64),
+    row_type: &str,
+) -> Option<(f64, f64)> {
+    let issue = match bounds {
+        (width, _) if !width.is_finite() => Some("Width"),
+        (_, height) if !height.is_finite() => Some("Height"),
+        _ => None,
+    };
+    if let Some(cell) = issue {
+        out.issues.push(GeometryIssue::UnevaluatedCell {
+            row_type: row_type.into(),
+            cell: cell.into(),
+        });
+        return None;
+    }
+    Some((point.0 * bounds.0, point.1 * bounds.1))
+}
+
+fn polyline_segments(
+    out: &mut RealizedGeometry,
+    mut current: (f64, f64),
+    end: (f64, f64),
+    bounds: (f64, f64),
+    polyline: &PolylineEncoding,
+    row_type: &str,
+) -> bool {
+    for &(x, y) in &polyline.points {
+        current = (
+            if polyline.x_relative { x * bounds.0 } else { x },
+            if polyline.y_relative { y * bounds.1 } else { y },
+        );
+        if !push_checked(
+            out,
+            GeometryPathCommand::Line {
+                x: current.0,
+                y: current.1,
+            },
+            row_type,
+        ) {
+            return false;
+        }
+    }
+    current == end
+        || push_checked(
+            out,
+            GeometryPathCommand::Line { x: end.0, y: end.1 },
+            row_type,
+        )
+}
+
+/// Clips the line through both points to the shape bounds `[0, width] x [0, height]`;
+/// `None` means the line does not intersect the box (degenerate lines are rejected by
+/// the caller).
+fn infinite_line_segment(
+    point: (f64, f64),
+    second: (f64, f64),
+    bounds: (f64, f64),
+) -> Option<((f64, f64), (f64, f64))> {
+    let direction = (second.0 - point.0, second.1 - point.1);
+    if !(direction.0.is_finite() && direction.1.is_finite()) {
+        return None;
+    }
+    let (mut enter, mut exit) = (f64::NEG_INFINITY, f64::INFINITY);
+    for (origin, step, extent) in [
+        (point.0, direction.0, bounds.0),
+        (point.1, direction.1, bounds.1),
+    ] {
+        if step == 0.0 {
+            if !(0.0..=extent).contains(&origin) {
+                return None;
+            }
+            continue;
+        }
+        let mut near = -origin / step;
+        let mut far = (extent - origin) / step;
+        if near > far {
+            std::mem::swap(&mut near, &mut far);
+        }
+        enter = enter.max(near);
+        exit = exit.min(far);
+        if enter > exit {
+            return None;
+        }
+    }
+    Some((
+        (point.0 + direction.0 * enter, point.1 + direction.1 * enter),
+        (point.0 + direction.0 * exit, point.1 + direction.1 * exit),
+    ))
 }
 
 fn push_checked(out: &mut RealizedGeometry, command: GeometryPathCommand, row_type: &str) -> bool {
@@ -549,16 +755,22 @@ mod tests {
                     resolved_row("MoveTo", vec![cell("X", "1"), cell("Y", "2")]),
                 ),
                 ("IX:1".into(), resolved_row("NURBSTo", vec![])),
+                ("IX:2".into(), resolved_row("SplineStart", vec![])),
+                ("IX:3".into(), resolved_row("SplineKnot", vec![])),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(matches!(
             geometry.commands[0],
             GeometryPathCommand::Move { x: 1.0, y: 2.0 }
         ));
         assert_eq!(
             geometry.issues,
-            vec![GeometryIssue::UnsupportedRowType("NURBSTo".into())]
+            vec![
+                GeometryIssue::UnsupportedRowType("NURBSTo".into()),
+                GeometryIssue::UnsupportedRowType("SplineStart".into()),
+                GeometryIssue::UnsupportedRowType("SplineKnot".into()),
+            ]
         );
     }
 
@@ -574,7 +786,7 @@ mod tests {
                     resolved_row("MoveTo", vec![cell("X", value), cell("Y", "2")]),
                 )]),
             };
-            let geometry = realize_geometry(&section);
+            let geometry = realize_geometry(&section, 1.0, 1.0);
             assert!(geometry.commands.is_empty(), "{value}");
             assert_eq!(
                 geometry.issues,
@@ -604,7 +816,7 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1e308, 1.0);
         assert_eq!(
             geometry.commands,
             vec![GeometryPathCommand::Move { x: 1e308, y: 0.0 }]
@@ -616,6 +828,234 @@ mod tests {
                 cell: "geometry".into(),
             }]
         );
+    }
+
+    #[test]
+    fn rel_line_to_rows_realize_the_corpus_rectangle_from_shape_bounds() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:2".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:3".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                ),
+                (
+                    "IX:4".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "0"), cell("Y", "1")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 4.0, 3.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 3.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 3.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn rel_move_to_rows_realize_from_shape_bounds() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("RelMoveTo", vec![cell("X", "1"), cell("Y", "0.5")]),
+                ),
+                (
+                    "IX:2".into(),
+                    resolved_row("RelMoveTo", vec![cell("X", "0"), cell("Y", "1")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 4.0, 3.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Move { x: 4.0, y: 1.5 },
+                GeometryPathCommand::Move { x: 0.0, y: 3.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn rel_rows_do_not_accumulate() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:2".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 2.0, 5.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn non_finite_shape_bounds_report_issues_instead_of_nan() {
+        for (width, height, expected_cell) in
+            [(f64::INFINITY, 1.0, "Width"), (4.0, f64::NAN, "Height")]
+        {
+            let section = ResolvedSection {
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: BTreeMap::from([
+                    (
+                        "IX:0".into(),
+                        resolved_row("RelMoveTo", vec![cell("X", "0.5"), cell("Y", "0.5")]),
+                    ),
+                    (
+                        "IX:1".into(),
+                        resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "1")]),
+                    ),
+                    (
+                        "IX:2".into(),
+                        resolved_row(
+                            "PolylineTo",
+                            vec![
+                                cell("X", "1"),
+                                cell("Y", "1"),
+                                cell("A", "POLYLINE(0,0,0.5,0.5)"),
+                            ],
+                        ),
+                    ),
+                    (
+                        "IX:3".into(),
+                        resolved_row(
+                            "InfiniteLine",
+                            vec![
+                                cell("X", "0"),
+                                cell("Y", "0"),
+                                cell("A", "1"),
+                                cell("B", "1"),
+                            ],
+                        ),
+                    ),
+                ]),
+            };
+            let geometry = realize_geometry(&section, width, height);
+            assert!(geometry.commands.is_empty(), "{expected_cell}");
+            assert_eq!(
+                geometry.issues,
+                vec![
+                    GeometryIssue::UnevaluatedCell {
+                        row_type: "RelMoveTo".into(),
+                        cell: expected_cell.into(),
+                    },
+                    GeometryIssue::UnevaluatedCell {
+                        row_type: "RelLineTo".into(),
+                        cell: expected_cell.into(),
+                    },
+                    GeometryIssue::UnevaluatedCell {
+                        row_type: "PolylineTo".into(),
+                        cell: expected_cell.into(),
+                    },
+                    GeometryIssue::UnevaluatedCell {
+                        row_type: "InfiniteLine".into(),
+                        cell: expected_cell.into(),
+                    },
+                ],
+                "{expected_cell}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_shape_bounds_realize_finite_degenerate_geometry() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("RelMoveTo", vec![cell("X", "1"), cell("Y", "1")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row("RelLineTo", vec![cell("X", "1"), cell("Y", "0.5")]),
+                ),
+                (
+                    "IX:2".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![
+                            cell("X", "0"),
+                            cell("Y", "3"),
+                            cell("A", "POLYLINE(0,0,1,1)"),
+                        ],
+                    ),
+                ),
+                (
+                    "IX:3".into(),
+                    resolved_row(
+                        "InfiniteLine",
+                        vec![
+                            cell("X", "0"),
+                            cell("Y", "0"),
+                            cell("A", "0"),
+                            cell("B", "2"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 0.0, 3.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 3.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 1.5 },
+                GeometryPathCommand::Line { x: 0.0, y: 3.0 },
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 0.0, y: 3.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
     }
 
     #[test]
@@ -632,7 +1072,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
@@ -664,7 +1104,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
@@ -692,12 +1132,12 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert_eq!(
             geometry.commands,
             vec![
                 GeometryPathCommand::Move { x: 1.0, y: 2.0 },
-                GeometryPathCommand::Line { x: 4.0, y: 6.0 },
+                GeometryPathCommand::Line { x: 3.0, y: 4.0 },
             ]
         );
         assert!(geometry.issues.is_empty());
@@ -723,7 +1163,7 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(geometry.commands.iter().any(|command| matches!(
             command,
             GeometryPathCommand::Cubic { x, y, .. }
@@ -752,7 +1192,7 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(matches!(
             geometry.commands[0],
             GeometryPathCommand::Move { x: 5.0, y: 5.0 }
@@ -798,13 +1238,309 @@ mod tests {
                 ),
             )]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(geometry.commands.is_empty());
         assert_eq!(
             geometry.issues,
             vec![GeometryIssue::MissingCell {
                 row_type: "EllipticalArcTo".into(),
                 cell: "D".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn polyline_to_realizes_absolute_points_as_line_segments() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0.25"), cell("Y", "0.5")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![
+                            cell("X", "2.5"),
+                            cell("Y", "1.5"),
+                            cell("A", "POLYLINE(1,1,0.5,0,1.5,1,2.5,1.5)"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.25, y: 0.5 },
+                GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.5, y: 1.0 },
+                GeometryPathCommand::Line { x: 2.5, y: 1.5 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn polyline_to_relative_flags_are_fractions_of_the_shape_bounds() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "1"), cell("Y", "1")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![
+                            cell("X", "4"),
+                            cell("Y", "2"),
+                            cell("A", "POLYLINE(0,0,0.5,0,1,1)"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 4.0, 2.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 4.0, y: 2.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn polyline_to_extends_to_its_declared_endpoint() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![
+                            cell("X", "3"),
+                            cell("Y", "0"),
+                            cell("A", "POLYLINE(1,1,1,0,2,0)"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert_eq!(
+            geometry.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 3.0, y: 0.0 },
+            ]
+        );
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn polyline_to_reports_missing_or_malformed_a_cells() {
+        let malformed = [
+            "POLYLINE(1,1,0.5,0",
+            "POLYLINE(1,1)",
+            "POLYLINE(1,1,0.5)",
+            "POLYLINE(-1,1,0.5,0)",
+            "POLYLINE(1,1,NaN,0)",
+            "LINE(1,1,0.5,0)",
+        ];
+        for (index, value) in malformed.into_iter().enumerate() {
+            let section = ResolvedSection {
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: BTreeMap::from([(
+                    "IX:0".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![cell("X", "1"), cell("Y", "0"), cell("A", value)],
+                    ),
+                )]),
+            };
+            let geometry = realize_geometry(&section, 1.0, 1.0);
+            assert!(geometry.commands.is_empty(), "{value}");
+            assert_eq!(
+                geometry.issues,
+                vec![GeometryIssue::UnevaluatedCell {
+                    row_type: "PolylineTo".into(),
+                    cell: "A".into(),
+                }],
+                "{value} at {index}"
+            );
+        }
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row("PolylineTo", vec![cell("X", "1"), cell("Y", "0")]),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.commands.is_empty());
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::MissingCell {
+                row_type: "PolylineTo".into(),
+                cell: "A".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn polyline_to_rejects_non_finite_realized_points() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                (
+                    "IX:0".into(),
+                    resolved_row("MoveTo", vec![cell("X", "1e308"), cell("Y", "0")]),
+                ),
+                (
+                    "IX:1".into(),
+                    resolved_row(
+                        "PolylineTo",
+                        vec![
+                            cell("X", "1e308"),
+                            cell("Y", "0"),
+                            cell("A", "POLYLINE(0,1,1e308,0)"),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+        let geometry = realize_geometry(&section, 1e308, 1.0);
+        assert_eq!(
+            geometry.commands,
+            vec![GeometryPathCommand::Move { x: 1e308, y: 0.0 }]
+        );
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnevaluatedCell {
+                row_type: "PolylineTo".into(),
+                cell: "geometry".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn infinite_line_clips_to_the_shape_bounds() {
+        for (row_cells, expected) in [
+            (
+                vec![
+                    cell("X", "-1"),
+                    cell("Y", "0"),
+                    cell("A", "1"),
+                    cell("B", "0.75"),
+                ],
+                vec![
+                    GeometryPathCommand::Move { x: 0.0, y: 0.375 },
+                    GeometryPathCommand::Line { x: 2.0, y: 1.125 },
+                ],
+            ),
+            (
+                vec![
+                    cell("X", "0.5"),
+                    cell("Y", "-2"),
+                    cell("A", "0.5"),
+                    cell("B", "2"),
+                ],
+                vec![
+                    GeometryPathCommand::Move { x: 0.5, y: 0.0 },
+                    GeometryPathCommand::Line { x: 0.5, y: 3.0 },
+                ],
+            ),
+        ] {
+            let section = ResolvedSection {
+                name: "Geometry".into(),
+                deleted: false,
+                row_order: vec![],
+                rows: BTreeMap::from([("IX:0".into(), resolved_row("InfiniteLine", row_cells))]),
+            };
+            let geometry = realize_geometry(&section, 2.0, 3.0);
+            assert_eq!(geometry.commands, expected);
+            assert!(geometry.issues.is_empty());
+        }
+    }
+
+    #[test]
+    fn infinite_line_outside_the_shape_bounds_realizes_nothing() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row(
+                    "InfiniteLine",
+                    vec![
+                        cell("X", "0"),
+                        cell("Y", "2"),
+                        cell("A", "1"),
+                        cell("B", "3"),
+                    ],
+                ),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.commands.is_empty());
+        assert!(geometry.issues.is_empty());
+    }
+
+    #[test]
+    fn infinite_line_with_coincident_points_reports_an_issue() {
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([(
+                "IX:0".into(),
+                resolved_row(
+                    "InfiniteLine",
+                    vec![
+                        cell("X", "1"),
+                        cell("Y", "2"),
+                        cell("A", "1"),
+                        cell("B", "2"),
+                    ],
+                ),
+            )]),
+        };
+        let geometry = realize_geometry(&section, 1.0, 1.0);
+        assert!(geometry.commands.is_empty());
+        assert_eq!(
+            geometry.issues,
+            vec![GeometryIssue::UnevaluatedCell {
+                row_type: "InfiniteLine".into(),
+                cell: "geometry".into(),
             }]
         );
     }
@@ -836,7 +1572,7 @@ mod tests {
                 ),
             ]),
         };
-        let geometry = realize_geometry(&section);
+        let geometry = realize_geometry(&section, 1.0, 1.0);
         assert!(geometry.commands.iter().any(|command| matches!(
             command,
             GeometryPathCommand::Cubic { x, y, .. }
@@ -846,33 +1582,39 @@ mod tests {
     }
 
     #[test]
-    fn geometry_realizes_two_digit_rows_in_numeric_order() {
-        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
-            (
-                key.to_owned(),
-                ResolvedRow {
-                    key: key.into(),
-                    ..resolved_row(ty, cells)
-                },
-            )
-        };
-        let section = ResolvedSection {
-            name: "Geometry".into(),
-            deleted: false,
-            row_order: vec![],
-            rows: BTreeMap::from([
-                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
-                keyed("IX:2", "RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
-                keyed("IX:10", "RelLineTo", vec![cell("X", "0"), cell("Y", "1")]),
-            ]),
-        };
+    fn polyline_and_infinite_line_rows_realize_from_parsed_vsdx() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/geometry-polyline-and-infinite-line.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let resolver = Resolver::new(&package);
+        let polyline = realize_geometry(
+            &resolver.resolve_shape(page, 1).unwrap().sections["Geometry"],
+            1.0,
+            1.0,
+        );
         assert_eq!(
-            realize_geometry(&section).commands,
+            polyline.commands,
             vec![
                 GeometryPathCommand::Move { x: 0.0, y: 0.0 },
                 GeometryPathCommand::Line { x: 1.0, y: 0.0 },
-                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+                GeometryPathCommand::Line { x: 2.0, y: 1.0 },
             ]
         );
+        assert!(polyline.issues.is_empty());
+        let line = realize_geometry(
+            &resolver.resolve_shape(page, 2).unwrap().sections["Geometry"],
+            1.0,
+            1.0,
+        );
+        assert_eq!(
+            line.commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.375 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.75 },
+            ]
+        );
+        assert!(line.issues.is_empty());
     }
 }

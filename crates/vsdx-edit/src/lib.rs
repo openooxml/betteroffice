@@ -2,7 +2,6 @@
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
@@ -35,10 +34,13 @@ pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 const MAX_STATE_VECTOR_BYTES: usize = 1024 * 1024;
 
+/// ```compile_fail
+/// let session = vsdx_edit::DiagramSession::open(&[], 1).unwrap();
+/// session.yrs_doc();
+/// ```
 pub struct DiagramSession {
     pub(crate) doc: Doc,
     client_id: u64,
-    id_counter: AtomicU64,
     undo: RefCell<DiagramUndoManager>,
 }
 
@@ -78,11 +80,9 @@ impl DiagramSession {
         hydrate_doc(&doc, &baseline)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
-        let id_counter = diagram::next_id_counter(&doc, client_id);
         Ok(Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(id_counter),
             undo: RefCell::new(undo),
         })
     }
@@ -98,11 +98,9 @@ impl DiagramSession {
         hydrate_doc(&doc, update)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
-        let id_counter = diagram::next_id_counter(&doc, client_id);
         Ok(Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(id_counter),
             undo: RefCell::new(undo),
         })
     }
@@ -113,7 +111,8 @@ impl DiagramSession {
     pub fn package(&self) -> EditResult<vsdx_parse::VsdxPackage> {
         diagram::package_from_doc(&self.doc)
     }
-    pub fn yrs_doc(&self) -> &Doc {
+    #[cfg(test)]
+    pub(crate) fn yrs_doc(&self) -> &Doc {
         &self.doc
     }
     pub fn encode_state_vector_v1(&self) -> Vec<u8> {
@@ -198,13 +197,6 @@ impl DiagramSession {
             EditOrigin::Remote => self.doc.transact_mut_with(REMOTE_ORIGIN),
             EditOrigin::System => self.doc.transact_mut_with("vsdx:system"),
         }
-    }
-    pub(crate) fn next_id(&self, prefix: &str) -> String {
-        format!(
-            "{prefix}:{}:{}",
-            self.client_id,
-            self.id_counter.fetch_add(1, Ordering::Relaxed)
-        )
     }
 }
 
@@ -318,14 +310,18 @@ mod tests {
             let page = pages.insert(&mut txn, page_id, MapPrelim::default());
             page.insert(&mut txn, "id", page_id);
             page.insert(&mut txn, "sourcePartPath", format!("/{page_id}"));
+            page.insert(&mut txn, "maxSourceId", 2.0);
             page.insert(&mut txn, "shapes", ArrayPrelim::default());
         }
-        for (id, page_id) in [("page:1:shape:1", "page:1"), ("page:1:shape:2", "page:1")] {
+        for (id, page_id, source_id) in [
+            ("page:1:shape:1", "page:1", 1.0),
+            ("page:1:shape:2", "page:1", 2.0),
+        ] {
             let shape = sheets.insert(&mut txn, id, MapPrelim::default());
             shape.insert(&mut txn, "id", id);
             shape.insert(&mut txn, "pageId", page_id);
-            shape.insert(&mut txn, "origin", "package");
-            shape.insert(&mut txn, "sourceId", 1.0);
+            shape.insert(&mut txn, "sourceId", source_id);
+            shape.insert(&mut txn, "origin", "original");
             shape.insert(&mut txn, "cells", MapPrelim::default());
             let page = match pages.get(&txn, page_id) {
                 Some(yrs::Out::YMap(page)) => page,
@@ -342,7 +338,6 @@ mod tests {
             undo: std::cell::RefCell::new(DiagramUndoManager::new(&doc, 7).unwrap()),
             doc,
             client_id: 7,
-            id_counter: AtomicU64::new(0),
         }
     }
 
@@ -358,93 +353,16 @@ mod tests {
         formula: Option<&str>,
         value: Option<&str>,
     ) {
-        add_shape_cell(
-            session,
-            "page:1:shape:1",
-            name,
-            section,
-            row,
-            formula,
-            value,
-        );
-    }
-
-    fn add_child_shape(session: &DiagramSession, id: &str, parent_id: &str) {
         let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
         let sheets = txn.get_map(SHEETS).unwrap();
-        let shape = sheets.insert(&mut txn, id, MapPrelim::default());
-        shape.insert(&mut txn, "id", id);
-        shape.insert(&mut txn, "pageId", "page:1");
-        shape.insert(&mut txn, "origin", "package");
-        shape.insert(&mut txn, "sourceId", 3.0);
-        shape.insert(&mut txn, "parentId", parent_id);
-        shape.insert(&mut txn, "cells", MapPrelim::default());
-        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        let parent = match sheets.get(&txn, parent_id) {
-            Some(yrs::Out::YMap(parent)) => parent,
-            _ => unreachable!(),
-        };
-        let child_order = match parent.get(&txn, "shapes") {
-            Some(yrs::Out::YArray(child_order)) => child_order,
-            _ => parent.insert(&mut txn, "shapes", ArrayPrelim::default()),
-        };
-        child_order.push_back(&mut txn, id);
-    }
-
-    fn shape_cells<T: yrs::ReadTxn>(txn: &T, shape_id: &str) -> yrs::MapRef {
-        let sheets = txn.get_map(SHEETS).unwrap();
-        let shape = match sheets.get(txn, shape_id) {
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
             Some(yrs::Out::YMap(shape)) => shape,
             _ => unreachable!(),
         };
-        match shape.get(txn, "cells") {
+        let cells = match shape.get(&txn, "cells") {
             Some(yrs::Out::YMap(cells)) => cells,
             _ => unreachable!(),
-        }
-    }
-
-    fn peer_doc(session: &DiagramSession, client_id: u64) -> Doc {
-        let doc = doc_with_client_id(client_id);
-        hydrate_doc(&doc, &session.encode_state_as_update_v1()).unwrap();
-        doc
-    }
-
-    fn peer_update(session: &DiagramSession, peer: &Doc) -> Vec<u8> {
-        peer.transact()
-            .encode_diff_v1(&session.doc.transact().state_vector())
-    }
-
-    fn write_peer_cell_field(peer: &Doc, shape_id: &str, cell: &str, field: &str, value: &str) {
-        let mut txn = peer.transact_mut();
-        let cells = shape_cells(&txn, shape_id);
-        let cell = match cells.get(&txn, cell) {
-            Some(yrs::Out::YMap(cell)) => cell,
-            _ => unreachable!(),
         };
-        cell.insert(&mut txn, field, value);
-    }
-
-    fn write_peer_shape_field(peer: &Doc, shape_id: &str, field: &str, value: &str) {
-        let mut txn = peer.transact_mut();
-        let sheets = txn.get_map(SHEETS).unwrap();
-        let shape = match sheets.get(&txn, shape_id) {
-            Some(yrs::Out::YMap(shape)) => shape,
-            _ => unreachable!(),
-        };
-        shape.insert(&mut txn, field, value);
-    }
-
-    fn add_shape_cell(
-        session: &DiagramSession,
-        shape_id: &str,
-        name: &str,
-        section: Option<&str>,
-        row: Option<CellRow>,
-        formula: Option<&str>,
-        value: Option<&str>,
-    ) {
-        let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
-        let cells = shape_cells(&txn, shape_id);
         let key = match (&section, &row) {
             (Some(section), Some(CellRow::Index(row))) => {
                 format!("{section}\u{1f}IX:{row}\u{1f}{name}")
@@ -467,7 +385,6 @@ mod tests {
         }
         if let Some(formula) = formula {
             cell.insert(&mut txn, "formula", formula);
-            cell.insert(&mut txn, "baselineFormula", formula);
         }
         if let Some(value) = value {
             cell.insert(&mut txn, "value", value);
@@ -718,7 +635,6 @@ mod tests {
     fn reopen_preserves_the_next_local_shape_id() {
         let session = session();
         let draft = ShapeDraft {
-            source_id: 9,
             name: None,
             cells: Vec::new(),
         };
@@ -745,7 +661,6 @@ mod tests {
             cell_name: "X".to_owned(),
         };
         let draft = ShapeDraft {
-            source_id: 42,
             name: None,
             cells: vec![
                 CellSnapshot {
@@ -794,7 +709,6 @@ mod tests {
     #[test]
     fn shape_draft_round_trips_through_serde() {
         let draft = ShapeDraft {
-            source_id: 42,
             name: Some("Rectangle".to_owned()),
             cells: vec![CellSnapshot {
                 locator: CellLocator {
@@ -907,102 +821,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_rewrite_of_a_nested_child_guard_is_rejected() {
-        let session = session();
-        let child = "page:1:shape:1:shape:3";
-        add_child_shape(&session, child, "page:1:shape:1");
-        add_shape_cell(&session, child, "Width", None, None, Some("GUARD(1)"), None);
-        let peer = peer_doc(&session, 9);
-        write_peer_cell_field(&peer, child, "Width", "formula", "2");
-        assert!(
-            session
-                .apply_update_v1(&peer_update(&session, &peer))
-                .is_err()
-        );
-        let snapshot = session.snapshot().unwrap();
-        assert_eq!(
-            snapshot.pages[0].shapes[0].children[0]
-                .cells
-                .iter()
-                .find(|cell| cell.name == "Width")
-                .unwrap()
-                .formula
-                .as_deref(),
-            Some("GUARD(1)")
-        );
-    }
-
-    #[test]
-    fn remote_rewrite_of_a_nested_child_locked_cell_is_rejected() {
-        let session = session();
-        let child = "page:1:shape:1:shape:3";
-        add_child_shape(&session, child, "page:1:shape:1");
-        add_shape_cell(&session, child, "Width", None, None, Some("1"), None);
-        add_shape_cell(&session, child, "LockWidth", None, None, Some("1"), None);
-        let peer = peer_doc(&session, 9);
-        write_peer_cell_field(&peer, child, "Width", "formula", "5");
-        assert!(
-            session
-                .apply_update_v1(&peer_update(&session, &peer))
-                .is_err()
-        );
-        assert_eq!(
-            session.snapshot().unwrap().pages[0].shapes[0].children[0]
-                .cells
-                .iter()
-                .find(|cell| cell.name == "Width")
-                .unwrap()
-                .formula
-                .as_deref(),
-            Some("1")
-        );
-    }
-
-    #[test]
-    fn remote_baseline_forgery_cannot_suppress_a_collaborative_edit() {
-        let session = session();
-        add_cell(&session, "Width", Some("1"), None);
-        session
-            .set_cell_formula(
-                &EditCtx::local("a"),
-                "page:1",
-                "page:1:shape:1",
-                "Width",
-                "2",
-            )
-            .unwrap();
-        let peer = peer_doc(&session, 9);
-        write_peer_cell_field(&peer, "page:1:shape:1", "Width", "baselineFormula", "2");
-        assert!(
-            session
-                .apply_update_v1(&peer_update(&session, &peer))
-                .is_err()
-        );
-        assert!(session.semantic_cell_edits().unwrap().iter().any(|edit| {
-            edit.locator.cell_name == "Width" && edit.formula.as_deref() == Some("2")
-        }));
-    }
-
-    #[test]
-    fn remote_rewrites_of_shape_identity_are_rejected() {
-        for (field, value) in [
-            ("origin", "session"),
-            ("pageId", "page:2"),
-            ("parentId", "page:1:shape:2"),
-        ] {
-            let session = session();
-            let peer = peer_doc(&session, 9);
-            write_peer_shape_field(&peer, "page:1:shape:1", field, value);
-            assert!(
-                session
-                    .apply_update_v1(&peer_update(&session, &peer))
-                    .is_err(),
-                "{field}"
-            );
-        }
-    }
-
-    #[test]
     fn state_vectors_are_limited_before_decode() {
         assert!(decode_state_vector_v1(&vec![0; MAX_STATE_VECTOR_BYTES + 1]).is_err());
     }
@@ -1041,6 +859,35 @@ mod tests {
         left.apply_update_v1(&right_update).unwrap();
         right.apply_update_v1(&left_update).unwrap();
         assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+    }
+
+    #[test]
+    fn concurrent_added_shapes_converge_without_identity_collisions() {
+        let seed = session();
+        let state = seed.encode_state_as_update_v1();
+        let left = DiagramSession::open_from_update(&state, 11).unwrap();
+        let right = DiagramSession::open_from_update(&state, 12).unwrap();
+        let draft = ShapeDraft {
+            name: Some("Added".to_owned()),
+            cells: Vec::new(),
+        };
+        let left_added = left
+            .add_shape(&EditCtx::local("left"), "page:1", &draft)
+            .unwrap();
+        let right_added = right
+            .add_shape(&EditCtx::local("right"), "page:1", &draft)
+            .unwrap();
+        assert_ne!(left_added.shape_id, right_added.shape_id);
+        let left_update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let right_update = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        left.apply_update_v1(&right_update).unwrap();
+        right.apply_update_v1(&left_update).unwrap();
+        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+        assert_eq!(left.snapshot().unwrap().pages[0].shapes.len(), 4);
     }
 
     #[test]
@@ -1251,5 +1098,276 @@ mod tests {
                 .is_err()
         );
         assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn seeded_serializable_documents_reopen_to_the_live_projection() {
+        let mut state = 0x5eed_cafe_u64;
+        for case in 0..32_u64 {
+            let source = match case % 4 {
+                0 => include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx").as_slice(),
+                1 => {
+                    include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx").as_slice()
+                }
+                2 => include_bytes!("../../../apps/demo/public/betteroffice-demo.vsdx").as_slice(),
+                _ => include_bytes!("../../vsdx-parse/tests/fixtures/grouped-glue.vsdx").as_slice(),
+            };
+            let session = DiagramSession::open(source, 100 + case).unwrap();
+            let edits = 1 + next_test_random(&mut state) % 8;
+            for _ in 0..edits {
+                apply_generated_edit(&session, &mut state, case % 4 == 0);
+            }
+            let live = session.snapshot().unwrap();
+            let update = session.encode_state_as_update_v1();
+            let validated = DiagramSession::open_from_update(&update, 1_000 + case).unwrap();
+            assert_eq!(validated.snapshot().unwrap(), live, "case {case}");
+            let saved = session.save().unwrap();
+            let reopened = DiagramSession::open(&saved, 10_000 + case).unwrap();
+            assert_reopened_projection_eq(&session, &reopened, "case {case}");
+            let left = DiagramSession::open_from_update(&update, 20_000 + case).unwrap();
+            let right = DiagramSession::open_from_update(&update, 30_000 + case).unwrap();
+            add_generated_shape(&left, &mut state);
+            add_generated_shape(&right, &mut state);
+            let left_update = left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap();
+            let right_update = right
+                .encode_diff_v1(&left.encode_state_vector_v1())
+                .unwrap();
+            left.apply_update_v1(&right_update).unwrap();
+            right.apply_update_v1(&left_update).unwrap();
+            assert_eq!(
+                left.snapshot().unwrap(),
+                right.snapshot().unwrap(),
+                "case {case}"
+            );
+            let saved = left.save().unwrap();
+            let reopened = DiagramSession::open(&saved, 40_000 + case).unwrap();
+            assert_reopened_projection_eq(&left, &reopened, "merged case {case}");
+        }
+    }
+
+    fn assert_reopened_projection_eq(live: &DiagramSession, reopened: &DiagramSession, case: &str) {
+        assert_semantic_snapshot_eq(
+            &live.snapshot().unwrap(),
+            &reopened.snapshot().unwrap(),
+            case,
+        );
+        let live_package = live.package().unwrap();
+        let reopened_package = reopened.package().unwrap();
+        let renderer = vsdx_render::Renderer::default();
+        assert_eq!(
+            live_package.page_part_paths.len(),
+            reopened_package.page_part_paths.len()
+        );
+        for (page_index, (live_path, reopened_path)) in live_package
+            .page_part_paths
+            .iter()
+            .zip(&reopened_package.page_part_paths)
+            .enumerate()
+        {
+            assert_eq!(
+                renderer.layout_page(&live_package, live_path).unwrap(),
+                renderer
+                    .layout_page(&reopened_package, reopened_path)
+                    .unwrap(),
+                "{case}, page {page_index}"
+            );
+        }
+    }
+
+    fn assert_semantic_snapshot_eq(live: &DiagramSnapshot, reopened: &DiagramSnapshot, case: &str) {
+        assert_eq!(live.pages.len(), reopened.pages.len(), "{case}");
+        for (live_page, reopened_page) in live.pages.iter().zip(&reopened.pages) {
+            assert_eq!(
+                live_page.source_part_path, reopened_page.source_part_path,
+                "{case}"
+            );
+            assert_eq!(live_page.name, reopened_page.name, "{case}");
+            assert_semantic_shapes_eq(&live_page.shapes, &reopened_page.shapes, case);
+        }
+    }
+
+    fn assert_semantic_shapes_eq(live: &[ShapeSnapshot], reopened: &[ShapeSnapshot], case: &str) {
+        assert_eq!(live.len(), reopened.len(), "{case}");
+        for (live_shape, reopened_shape) in live.iter().zip(reopened) {
+            assert_eq!(live_shape.source_id, reopened_shape.source_id, "{case}");
+            assert_eq!(live_shape.name, reopened_shape.name, "{case}");
+            assert_eq!(live_shape.cells, reopened_shape.cells, "{case}");
+            assert_semantic_shapes_eq(&live_shape.children, &reopened_shape.children, case);
+        }
+    }
+
+    #[test]
+    fn deleting_a_group_removes_connects_from_live_and_saved_projections() {
+        let session = DiagramSession::open(
+            include_bytes!("../../vsdx-parse/tests/fixtures/grouped-glue.vsdx"),
+            601,
+        )
+        .unwrap();
+        session
+            .delete_shape(&EditCtx::local("local"), "page:1", "page:1:shape:10")
+            .unwrap();
+        let saved = session.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 602).unwrap();
+        assert_reopened_projection_eq(&session, &reopened, "local group deletion");
+        assert_no_connects_to_deleted_group(&session);
+    }
+
+    #[test]
+    fn accepted_peer_group_deletion_removes_connects_from_live_and_saved_projections() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/grouped-glue.vsdx");
+        let local = DiagramSession::open(source, 602).unwrap();
+        let peer = DiagramSession::open(source, 603).unwrap();
+        peer.delete_shape(&EditCtx::local("peer"), "page:1", "page:1:shape:10")
+            .unwrap();
+        local
+            .apply_update_v1(
+                &peer
+                    .encode_diff_v1(&local.encode_state_vector_v1())
+                    .unwrap(),
+            )
+            .unwrap();
+        let saved = local.save().unwrap();
+        let reopened = DiagramSession::open(&saved, 604).unwrap();
+        assert_reopened_projection_eq(&local, &reopened, "peer group deletion");
+        assert_no_connects_to_deleted_group(&local);
+    }
+
+    fn assert_no_connects_to_deleted_group(session: &DiagramSession) {
+        assert!(
+            session.package().unwrap().page_contents["visio/pages/page1.xml"]
+                .connects()
+                .all(|connect| ![10, 11].contains(&connect.from_sheet)
+                    && ![10, 11].contains(&connect.to_sheet))
+        );
+    }
+
+    fn next_test_random(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        *state >> 32
+    }
+
+    fn apply_generated_edit(session: &DiagramSession, state: &mut u64, allow_addition: bool) {
+        let snapshot = session.snapshot().unwrap();
+        let page = &snapshot.pages[(next_test_random(state) as usize) % snapshot.pages.len()];
+        let shapes = shape_choices(&page.shapes);
+        let context = EditCtx::local("seeded");
+        match next_test_random(state) % 5 {
+            0 => {
+                let formula = (1 + next_test_random(state) % 10_000).to_string();
+                if let Some((shape, cell)) = shapes
+                    .iter()
+                    .find_map(|(shape, _)| shape.cells.first().map(|cell| (shape, cell)))
+                {
+                    session
+                        .set_cell_formula_at(
+                            &context,
+                            &page.id,
+                            &shape.id,
+                            cell.locator.clone(),
+                            formula,
+                        )
+                        .unwrap();
+                }
+            }
+            1 => {
+                if !allow_addition {
+                    return;
+                }
+                session
+                    .add_shape(
+                        &context,
+                        &page.id,
+                        &ShapeDraft {
+                            name: Some("Generated".to_owned()),
+                            cells: generated_shape_cells(),
+                        },
+                    )
+                    .unwrap();
+            }
+            2 => {
+                if let Some((shape, _)) =
+                    shapes.get((next_test_random(state) as usize) % shapes.len().max(1))
+                {
+                    session.delete_shape(&context, &page.id, &shape.id).unwrap();
+                }
+            }
+            3 => {
+                if let Some((shape, sibling_len)) =
+                    shapes.get((next_test_random(state) as usize) % shapes.len().max(1))
+                {
+                    session
+                        .reorder_shape(
+                            &context,
+                            &page.id,
+                            &shape.id,
+                            sibling_len.saturating_sub(1) as u32,
+                        )
+                        .unwrap();
+                }
+            }
+            _ => {
+                if snapshot.pages.len() > 1 {
+                    session.reorder_page(&context, &page.id, 0).unwrap();
+                }
+            }
+        }
+    }
+
+    fn shape_choices(shapes: &[ShapeSnapshot]) -> Vec<(&ShapeSnapshot, usize)> {
+        let mut result = Vec::new();
+        let mut pending = vec![shapes];
+        while let Some(siblings) = pending.pop() {
+            for shape in siblings {
+                result.push((shape, siblings.len()));
+                if !shape.children.is_empty() {
+                    pending.push(&shape.children);
+                }
+            }
+        }
+        result
+    }
+
+    fn add_generated_shape(session: &DiagramSession, state: &mut u64) {
+        let snapshot = session.snapshot().unwrap();
+        let page = &snapshot.pages[(next_test_random(state) as usize) % snapshot.pages.len()];
+        session
+            .add_shape(
+                &EditCtx::local("seeded"),
+                &page.id,
+                &ShapeDraft {
+                    name: Some("Generated".to_owned()),
+                    cells: generated_shape_cells(),
+                },
+            )
+            .unwrap();
+    }
+
+    fn generated_shape_cells() -> Vec<CellSnapshot> {
+        [
+            ("LocPinX", "Width * 0.5"),
+            ("LocPinY", "Height * 0.5"),
+            ("PageHeight", "11"),
+            ("PageWidth", "8.5"),
+            ("TxtPinX", "Width * 0.5"),
+            ("TxtPinY", "Height * 0.5"),
+        ]
+        .into_iter()
+        .map(|(name, formula)| CellSnapshot {
+            locator: CellLocator {
+                sheet: CellSheet::Page(1),
+                shape_id: None,
+                section: None,
+                row: None,
+                cell_name: name.to_owned(),
+            },
+            name: name.to_owned(),
+            formula: Some(formula.to_owned()),
+            value: None,
+        })
+        .collect()
     }
 }

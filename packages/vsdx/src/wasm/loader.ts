@@ -3,7 +3,7 @@ import type { InitInput } from './generated/vsdx_wasm.js';
 import type { CellFormulaReceipt, CollaborationUpdateOrigin, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
-export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; }
+export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
 export interface CollaborationResync { update: Uint8Array; }
 export interface DiagramHandle {
   readonly clientId: number;
@@ -18,6 +18,8 @@ export interface DiagramHandle {
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
+  deleteShape(pageId: string, shapeId: string): ShapeReceipt;
+  save(): Uint8Array;
   canUndo(): boolean; canRedo(): boolean; undo(): HistoryResult; redo(): HistoryResult;
   encodeStateVector(): Uint8Array; encodeStateAsUpdate(): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): DiagramSnapshot;
@@ -38,6 +40,7 @@ export function wasmVersion(): string { requireInitialized(); return rendererVer
 export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {}): DiagramHandle {
   requireInitialized();
   const doc = construct(() => VsdxDocument.openCollaborative(bytes, options.clientId ?? clientId()));
+  if (options.initialUpdate) construct(() => doc.applyUpdateJson(options.initialUpdate!.slice()));
   const renderer = construct(() => new VsdxRenderer());
   for (const face of options.fonts ?? []) construct(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes));
   const listeners = new Map<number, (update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
@@ -72,7 +75,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     get clientId() { return wasm(() => doc.clientId); }, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
-    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
+    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 3) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
     hitTest: (x, y) => json<HitTestResult | null>(() => renderer.hitTestJson(x, y)), mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
@@ -80,6 +83,8 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
+    deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
+    save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
     encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: () => wasm(() => doc.encodeStateAsUpdate().slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),
     onUpdate(listener) { assertAlive(); if (typeof listener !== 'function') throw new TypeError('update listener must be a function'); const id = nextListener++; listeners.set(id, listener); if (!observing) { wasm(() => doc.startUpdateObservation()); observing = true; } return () => { listeners.delete(id); if (!listeners.size && !resyncListeners.size && observing && !disposed) { queued.length = 0; wasm(() => doc.clearUpdateObservation()); observing = false; } }; },

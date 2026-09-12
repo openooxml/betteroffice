@@ -284,6 +284,7 @@ version = "0.1.0"
 dependencies = [
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
  "betteroffice-vsdx-resolve",
  "js-sys",
  "serde",

@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
+use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
-    Shape, ShapeChild, ShapesChild, SheetChild,
+    Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
 };
 use vsdx_resolve::{Lookup, Resolver};
 use yrs::{
@@ -13,15 +13,14 @@ use yrs::{
 };
 
 use crate::{
-    AddedShape, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
-    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, SessionExport,
-    ShapeDraft, ShapeReceipt, ShapeSnapshot,
+    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
+    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt,
+    ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
-const PACKAGE_ORIGIN: &str = "package";
-const SESSION_ORIGIN: &str = "session";
+type SectionRows<'a> = Vec<(String, Vec<(Option<CellRow>, Vec<&'a CellSnapshot>)>)>;
 
 pub(crate) fn seed_doc(
     doc: &Doc,
@@ -61,6 +60,15 @@ pub(crate) fn seed_doc(
         let page = pages.insert(&mut txn, id.as_str(), MapPrelim::default());
         page.insert(&mut txn, "id", id.as_str());
         page.insert(&mut txn, "sourcePartPath", path.as_str());
+        page.insert(
+            &mut txn,
+            "maxSourceId",
+            package
+                .page_contents
+                .get(path)
+                .map(largest_shape_id)
+                .unwrap_or_default() as f64,
+        );
         let shape_order = page.insert(&mut txn, "shapes", ArrayPrelim::default());
         if let Some(sheet) = package.page_contents.get(path) {
             let resolver = Resolver::new(package);
@@ -81,6 +89,14 @@ pub(crate) fn seed_doc(
 }
 
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
+    let mut package = original_package_from_doc(doc)?;
+    let snapshot = snapshot_doc(doc)?;
+    materialize_snapshot(&mut package, &snapshot, &original_shape_ids(doc)?)?;
+    package.page_part_paths = page_part_paths_for_snapshot(&package, &snapshot)?;
+    Ok(package)
+}
+
+fn original_package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
@@ -88,53 +104,84 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<vsdx_parse::VsdxPackage>
             "unsupported diagram schema version".to_owned(),
         ));
     }
-    let mut package = match meta.get(&txn, "packageBytes") {
+    match meta.get(&txn, "packageBytes") {
         Some(Out::Any(Any::Buffer(bytes))) => vsdx_parse::parse_vsdx(&bytes)
-            .map_err(|error| EditError::InvalidState(error.to_string()))?,
+            .map_err(|error| EditError::InvalidState(error.to_string())),
         _ => {
             let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
                 return Err(EditError::InvalidState("missing package data".to_owned()));
             };
-            serde_json::from_slice(&bytes)
-                .map_err(|error| EditError::InvalidState(error.to_string()))?
+            serde_json::from_slice::<vsdx_parse::VsdxPackage>(&bytes)
+                .map_err(|error| EditError::InvalidState(error.to_string()))
         }
-    };
-    materialize_snapshot(&mut package, &snapshot_doc(doc)?)?;
-    Ok(package)
+    }
+}
+
+fn original_shape_ids(doc: &Doc) -> EditResult<HashSet<String>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut ids = HashSet::new();
+    for (id, value) in sheets.iter(&txn) {
+        let Out::YMap(shape) = value else { continue };
+        if shape_origin(&shape, &txn)? == ShapeOrigin::Original {
+            ids.insert(id.to_owned());
+        }
+    }
+    Ok(ids)
 }
 
 fn materialize_snapshot(
     package: &mut vsdx_parse::VsdxPackage,
     snapshot: &DiagramSnapshot,
+    original_shape_ids: &HashSet<String>,
 ) -> EditResult<()> {
     for page in &snapshot.pages {
         let Some(sheet) = package.page_contents.get_mut(&page.source_part_path) else {
             continue;
         };
-        materialize_page_shapes(sheet, page)?;
+        let original_source_shape_ids = sheet_shape_ids(sheet);
+        materialize_page_shapes(sheet, page, original_shape_ids)?;
+        let projected_shape_ids = sheet_shape_ids(sheet);
+        let deleted = original_source_shape_ids
+            .difference(&projected_shape_ids)
+            .copied()
+            .collect();
+        vsdx_parse::remove_connects_referencing_shapes(sheet, &deleted);
     }
     Ok(())
 }
 
-fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) -> EditResult<()> {
+fn sheet_shape_ids(sheet: &vsdx_parse::Sheet) -> HashSet<u32> {
+    let mut ids = HashSet::new();
+    let mut pending = sheet.shapes().collect::<Vec<_>>();
+    while let Some(shape) = pending.pop() {
+        ids.insert(shape.id);
+        pending.extend(shape.shapes());
+    }
+    ids
+}
+
+fn materialize_page_shapes(
+    sheet: &mut vsdx_parse::Sheet,
+    page: &PageSnapshot,
+    original_shape_ids: &HashSet<String>,
+) -> EditResult<()> {
     let originals = sheet
         .shapes()
         .cloned()
         .map(|shape| (shape.id, shape))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut next_id = largest_shape_id(sheet);
     let mut shapes = Vec::with_capacity(page.shapes.len());
     for snapshot in &page.shapes {
-        let canonical_id = format!("{}:shape:{}", page.id, snapshot.source_id);
-        let mut shape = if snapshot.id == canonical_id {
+        let mut shape = if original_shape_ids.contains(&snapshot.id) {
             originals
                 .get(&snapshot.source_id)
                 .cloned()
-                .unwrap_or_else(|| shape_from_snapshot(snapshot, &mut next_id))
+                .unwrap_or_else(|| shape_from_snapshot(snapshot))
         } else {
-            shape_from_snapshot(snapshot, &mut next_id)
+            shape_from_snapshot(snapshot)
         };
-        materialize_shape(&mut shape, snapshot, 1)?;
+        materialize_shape(&mut shape, snapshot, original_shape_ids, 1)?;
         shapes.push(ShapesChild::Shape(shape));
     }
     if let Some(SheetChild::Shapes(existing)) = sheet
@@ -149,20 +196,9 @@ fn materialize_page_shapes(sheet: &mut vsdx_parse::Sheet, page: &PageSnapshot) -
     Ok(())
 }
 
-fn largest_shape_id(sheet: &vsdx_parse::Sheet) -> u32 {
-    let mut largest = 0;
-    let mut pending = sheet.shapes().collect::<Vec<_>>();
-    while let Some(shape) = pending.pop() {
-        largest = largest.max(shape.id);
-        pending.extend(shape.shapes());
-    }
-    largest
-}
-
-fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
-    *next_id = next_id.saturating_add(1);
+fn shape_from_snapshot(snapshot: &ShapeSnapshot) -> Shape {
     Shape {
-        id: *next_id,
+        id: snapshot.source_id,
         name: snapshot.name.clone(),
         name_u: None,
         shape_type: Some("Shape".to_owned()),
@@ -177,35 +213,46 @@ fn shape_from_snapshot(snapshot: &ShapeSnapshot, next_id: &mut u32) -> Shape {
     }
 }
 
-fn materialize_shape(shape: &mut Shape, snapshot: &ShapeSnapshot, depth: usize) -> EditResult<()> {
+fn largest_shape_id(sheet: &vsdx_parse::Sheet) -> u32 {
+    let mut largest = 0;
+    let mut pending = sheet.shapes().collect::<Vec<_>>();
+    while let Some(shape) = pending.pop() {
+        largest = largest.max(shape.id);
+        pending.extend(shape.shapes());
+    }
+    largest
+}
+
+fn materialize_shape(
+    shape: &mut Shape,
+    snapshot: &ShapeSnapshot,
+    original_shape_ids: &HashSet<String>,
+    depth: usize,
+) -> EditResult<()> {
     if depth > MAX_SHAPE_NESTING {
         return Err(EditError::InvalidState(
             "shape nesting exceeds maximum depth".to_owned(),
         ));
     }
-    if shape.id == snapshot.source_id {
-        for cell in &snapshot.cells {
-            materialize_cell(shape, cell);
-        }
+    for cell in &snapshot.cells {
+        materialize_cell(shape, cell);
     }
     let originals = shape
         .shapes()
         .cloned()
         .map(|child| (child.id, child))
         .collect::<std::collections::BTreeMap<_, _>>();
-    let mut next_id = shape.id;
-    let mut pending = shape.shapes().collect::<Vec<_>>();
-    while let Some(child) = pending.pop() {
-        next_id = next_id.max(child.id);
-        pending.extend(child.shapes());
-    }
     let mut children = Vec::with_capacity(snapshot.children.len());
     for child_snapshot in &snapshot.children {
-        let mut child = originals
-            .get(&child_snapshot.source_id)
-            .cloned()
-            .unwrap_or_else(|| shape_from_snapshot(child_snapshot, &mut next_id));
-        materialize_shape(&mut child, child_snapshot, depth + 1)?;
+        let mut child = if original_shape_ids.contains(&child_snapshot.id) {
+            originals
+                .get(&child_snapshot.source_id)
+                .cloned()
+                .unwrap_or_else(|| shape_from_snapshot(child_snapshot))
+        } else {
+            shape_from_snapshot(child_snapshot)
+        };
+        materialize_shape(&mut child, child_snapshot, original_shape_ids, depth + 1)?;
         children.push(ShapesChild::Shape(child));
     }
     if let Some(ShapeChild::Shapes(existing)) = shape
@@ -254,6 +301,7 @@ fn materialize_cell(shape: &mut Shape, snapshot: &CellSnapshot) {
     };
     if let Some(cell) = target {
         cell.formula = snapshot.formula.clone();
+        cell.value = snapshot.value.clone();
     } else if locator.section.is_none() {
         shape.children.push(ShapeChild::Cell(Cell {
             name: locator.cell_name.clone(),
@@ -353,8 +401,8 @@ fn seed_shape(
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
     map.insert(txn, "pageId", page_id);
-    map.insert(txn, "origin", PACKAGE_ORIGIN);
     map.insert(txn, "sourceId", shape.id as f64);
+    map.insert(txn, "origin", "original");
     if let Some(parent_id) = parent_id {
         map.insert(txn, "parentId", parent_id);
     }
@@ -443,7 +491,6 @@ fn seed_shape(
     Ok(())
 }
 
-/// Writes a cell that the package supplied, recording its formula as the save baseline.
 fn seed_cell(
     cells: &MapRef,
     txn: &mut TransactionMut<'_>,
@@ -451,20 +498,6 @@ fn seed_cell(
     formula: Option<&str>,
     value: Option<&str>,
 ) {
-    let cell = draft_cell(cells, txn, locator, formula, value);
-    if let Some(formula) = formula {
-        cell.insert(txn, "baselineFormula", formula);
-    }
-}
-
-/// Writes a cell that has no package counterpart, so it carries no save baseline.
-fn draft_cell(
-    cells: &MapRef,
-    txn: &mut TransactionMut<'_>,
-    locator: &CellLocator,
-    formula: Option<&str>,
-    value: Option<&str>,
-) -> MapRef {
     let key = locator_key(locator);
     let cell = cells.insert(txn, key.as_str(), MapPrelim::default());
     cell.insert(txn, "name", locator.cell_name.as_str());
@@ -483,11 +516,11 @@ fn draft_cell(
     }
     if let Some(formula) = formula {
         cell.insert(txn, "formula", formula);
+        cell.insert(txn, "baselineFormula", formula);
     }
     if let Some(value) = value {
         cell.insert(txn, "value", value);
     }
-    cell
 }
 
 impl DiagramSession {
@@ -496,12 +529,11 @@ impl DiagramSession {
     }
 
     pub fn semantic_cell_edits(&self) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
-        Ok(export_session(&self.doc)?.cell_edits)
+        semantic_cell_edits(&self.doc)
     }
 
-    /// Partitions the session into the cell edits and the shape additions a save must carry.
-    pub fn export(&self) -> EditResult<SessionExport> {
-        export_session(&self.doc)
+    pub fn save(&self) -> EditResult<Vec<u8>> {
+        serialize_doc(&self.doc)
     }
 
     pub fn set_cell_formula(
@@ -631,22 +663,32 @@ impl DiagramSession {
         let page = map_ref(&pages, &txn, page_id)?;
         let order = map_array(&page, &txn, "shapes")?;
         let index = order.len(&txn);
-        let id = self.next_id(&format!("{page_id}:shape"));
         let sheets = txn
             .get_map(SHEETS)
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let id_prefix = format!("{page_id}:shape:added:{}:", self.client_id);
+        let sequence = sheets
+            .iter(&txn)
+            .filter_map(|(id, _)| id.strip_prefix(&id_prefix)?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| {
+                EditError::InvalidState("cannot allocate an added shape identity".to_owned())
+            })?;
+        let id = format!("{id_prefix}{sequence}");
         let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", id.as_str());
         shape.insert(&mut txn, "pageId", page_id);
-        shape.insert(&mut txn, "origin", SESSION_ORIGIN);
-        shape.insert(&mut txn, "sourceId", draft.source_id as f64);
+        shape.insert(&mut txn, "sourceId", 0.0);
+        shape.insert(&mut txn, "origin", "added");
         if let Some(name) = &draft.name {
             shape.insert(&mut txn, "name", name.as_str());
         }
         let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
         shape.insert(&mut txn, "shapes", ArrayPrelim::default());
         for cell in &draft.cells {
-            draft_cell(
+            seed_cell(
                 &cells,
                 &mut txn,
                 &cell.locator,
@@ -660,6 +702,68 @@ impl DiagramSession {
             shape_id: id,
             from_index: None,
             to_index: Some(index),
+        })
+    }
+
+    pub fn delete_shape(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+    ) -> EditResult<ShapeReceipt> {
+        let mut txn = self.transact_for(context);
+        let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        match decide_mutation(
+            &context_for_policy,
+            context_for_policy.locator(CellLocator {
+                sheet: CellSheet::Page(0),
+                shape_id: None,
+                section: None,
+                row: None,
+                cell_name: "LockDelete".to_owned(),
+            }),
+            MutationGesture::Delete,
+            String::new(),
+            &ParseLimits::default(),
+        ) {
+            MutationOutcome::Allowed { .. } => {}
+            MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                return Err(EditError::InvalidState(reason));
+            }
+        }
+        let pages = txn
+            .get_map(PAGES)
+            .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
+        let page = map_ref(&pages, &txn, page_id)?;
+        let root_order = map_array(&page, &txn, "shapes")?;
+        let sheets = txn
+            .get_map(SHEETS)
+            .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+        let entries = shape_tree_entries(&sheets, &txn, &root_order)?;
+        let target = entries
+            .iter()
+            .position(|entry| entry.id == shape_id)
+            .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+        let order = entries[target].order.clone();
+        let from = entries[target].index;
+        let depth = entries[target].depth;
+        let removed = entries
+            .iter()
+            .skip(target)
+            .enumerate()
+            .take_while(|(offset, entry)| *offset == 0 || entry.depth > depth)
+            .map(|(_, entry)| entry)
+            .map(|entry| entry.id.clone())
+            .collect::<Vec<_>>();
+        order.remove_range(&mut txn, from, 1);
+        for id in removed {
+            sheets.remove(&mut txn, id.as_str());
+        }
+        Ok(ShapeReceipt {
+            page_id: page_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            from_index: Some(from),
+            to_index: None,
         })
     }
 
@@ -720,6 +824,11 @@ impl DiagramSession {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
+    validate_schema(doc)?;
+    serializable_doc(doc)
+}
+
+fn validate_schema(doc: &Doc) -> EditResult<()> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
     if map_number(&meta, &txn, "schemaVersion") != Some(SCHEMA_VERSION) {
@@ -746,12 +855,18 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
         let page = map_ref(&pages, &txn, &page_id)?;
         required_string(&page, &txn, "id")?;
         required_string(&page, &txn, "sourcePartPath")?;
+        if map_number(&page, &txn, "maxSourceId").is_none() {
+            return Err(EditError::InvalidState(
+                "missing page source ID bound".to_owned(),
+            ));
+        }
         for shape_id in reachable_shape_ids(&sheets, &txn, &page)? {
             let shape = map_ref(&sheets, &txn, &shape_id)?;
             required_string(&shape, &txn, "id")?;
             if map_number(&shape, &txn, "sourceId").is_none() {
                 return Err(EditError::InvalidState("missing source ID".to_owned()));
             }
+            shape_origin(&shape, &txn)?;
             let cells = map_map(&shape, &txn, "cells")?;
             for (key, cell) in cells.iter(&txn) {
                 let Out::YMap(cell) = cell else {
@@ -798,38 +913,11 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 }
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
-    validate_doc(staged)?;
+    validate_schema(staged)?;
     validate_immutable_metadata(before, staged)?;
     validate_session_topology(before, staged)?;
     validate_formula_mutations(before, staged)?;
-    let before_identities = shape_identities(before)?;
-    let after_identities = shape_identities(staged)?;
-    for (key, identity) in &before_identities {
-        if after_identities.get(key) != Some(identity) {
-            return Err(EditError::InvalidState(format!(
-                "remote update changes the identity of shape {key}"
-            )));
-        }
-    }
-    let before_baselines = baseline_formulas(before)?;
-    let after_baselines = baseline_formulas(staged)?;
-    for key in before_baselines.keys().chain(after_baselines.keys()) {
-        if before_baselines.get(key) != after_baselines.get(key) {
-            return Err(EditError::InvalidState(format!(
-                "remote update changes the save baseline of {key}"
-            )));
-        }
-    }
-    let before_protected = protected_formulas(before)?;
-    let after_protected = protected_formulas(staged)?;
-    for (key, formula) in before_protected {
-        if after_protected.get(&key) != Some(&formula) {
-            return Err(EditError::InvalidState(format!(
-                "remote update changes protected cell {key}"
-            )));
-        }
-    }
-    Ok(())
+    serializable_doc(staged)
 }
 
 fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
@@ -854,7 +942,7 @@ fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
             return Err(EditError::InvalidState("page is not a map".to_owned()));
         };
         let staged_page = map_ref(&staged_pages, &staged_txn, page_id)?;
-        for key in ["id", "sourcePartPath"] {
+        for key in ["id", "sourcePartPath", "maxSourceId"] {
             if before_page.get(&before_txn, key) != staged_page.get(&staged_txn, key) {
                 return Err(EditError::InvalidState(format!(
                     "remote update changes immutable page {key}"
@@ -864,15 +952,32 @@ fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
     }
     let before_sheets = required_map(&before_txn, SHEETS)?;
     let staged_sheets = required_map(&staged_txn, SHEETS)?;
+    for (shape_id, staged_shape) in staged_sheets.iter(&staged_txn) {
+        if before_sheets.get(&before_txn, shape_id).is_some() {
+            continue;
+        }
+        let Out::YMap(staged_shape) = staged_shape else {
+            return Err(EditError::InvalidState("shape is not a map".to_owned()));
+        };
+        if shape_origin(&staged_shape, &staged_txn)? != ShapeOrigin::Added {
+            return Err(EditError::InvalidState(
+                "remote update adds a shape with original identity".to_owned(),
+            ));
+        }
+    }
     for (shape_id, before_shape) in before_sheets.iter(&before_txn) {
         let Out::YMap(before_shape) = before_shape else {
             continue;
         };
-        let staged_shape = map_ref(&staged_sheets, &staged_txn, shape_id)?;
-        if before_shape.get(&before_txn, "parentId") != staged_shape.get(&staged_txn, "parentId") {
-            return Err(EditError::InvalidState(
-                "remote update changes immutable shape parentId".to_owned(),
-            ));
+        let Some(Out::YMap(staged_shape)) = staged_sheets.get(&staged_txn, shape_id) else {
+            continue;
+        };
+        for key in ["id", "pageId", "sourceId", "origin", "parentId"] {
+            if before_shape.get(&before_txn, key) != staged_shape.get(&staged_txn, key) {
+                return Err(EditError::InvalidState(format!(
+                    "remote update changes immutable shape {key}"
+                )));
+            }
         }
         if before_shape.get(&before_txn, "shapes").is_some()
             && !matches!(
@@ -896,73 +1001,16 @@ fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
                     "remote update changes untrusted cached cell value".to_owned(),
                 ));
             }
-        }
-    }
-    Ok(())
-}
-
-type ShapeIdentity = (Option<String>, Option<String>, Option<String>, Option<f64>);
-
-/// The save path routes a sheet by this metadata, so only the seed and a local add may write it.
-fn shape_identities(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, ShapeIdentity>> {
-    let txn = doc.transact();
-    let sheets = required_map(&txn, SHEETS)?;
-    let mut identities = std::collections::BTreeMap::new();
-    for (shape_id, shape) in sheets.iter(&txn) {
-        let Out::YMap(shape) = shape else { continue };
-        identities.insert(
-            shape_id.to_owned(),
-            (
-                map_string(&shape, &txn, "pageId"),
-                map_string(&shape, &txn, "parentId"),
-                map_string(&shape, &txn, "origin"),
-                map_number(&shape, &txn, "sourceId"),
-            ),
-        );
-    }
-    Ok(identities)
-}
-
-/// Baselines come from the package seed alone; a peer that could write one could hide an edit.
-fn baseline_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
-    let txn = doc.transact();
-    let sheets = required_map(&txn, SHEETS)?;
-    let mut baselines = std::collections::BTreeMap::new();
-    for (shape_id, shape) in sheets.iter(&txn) {
-        let Out::YMap(shape) = shape else { continue };
-        let cells = map_map(&shape, &txn, "cells")?;
-        for (key, cell) in cells.iter(&txn) {
-            let Out::YMap(cell) = cell else { continue };
-            if let Some(baseline) = map_string(&cell, &txn, "baselineFormula") {
-                baselines.insert(format!("{shape_id}/{key}"), baseline);
+            if before_cell.get(&before_txn, "baselineFormula")
+                != staged_cell.get(&staged_txn, "baselineFormula")
+            {
+                return Err(EditError::InvalidState(
+                    "remote update changes immutable cell baseline formula".to_owned(),
+                ));
             }
         }
     }
-    Ok(baselines)
-}
-
-pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
-    let txn = doc.transact();
-    let Some(sheets) = txn.get_map(SHEETS) else {
-        return 0;
-    };
-    sheets
-        .iter(&txn)
-        .filter_map(|(_, value)| match value {
-            Out::YMap(shape) => map_string(&shape, &txn, "id"),
-            _ => None,
-        })
-        .filter_map(|id| {
-            id.rsplit_once(':').and_then(|(prefix, counter)| {
-                prefix
-                    .ends_with(&format!(":{client_id}"))
-                    .then(|| counter.parse::<u64>().ok())
-                    .flatten()
-            })
-        })
-        .max()
-        .and_then(|counter| counter.checked_add(1))
-        .unwrap_or(0)
+    Ok(())
 }
 
 fn validate_immutable_metadata(before: &Doc, staged: &Doc) -> EditResult<()> {
@@ -992,7 +1040,9 @@ fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
             let shape = map_ref(&sheets, &before_txn, &shape_id)?;
             let cells = map_map(&shape, &before_txn, "cells")?;
             let context = CrdtMutationContext::new(&before_txn, page_id, &shape_id)?;
-            let staged_shape = map_ref(&staged_sheets, &staged_txn, &shape_id)?;
+            let Some(Out::YMap(staged_shape)) = staged_sheets.get(&staged_txn, &shape_id) else {
+                continue;
+            };
             let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
             for (key, cell) in cells.iter(&before_txn) {
                 let Out::YMap(cell) = cell else { continue };
@@ -1065,101 +1115,6 @@ fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
     Ok(())
 }
 
-fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
-    let txn = doc.transact();
-    let sheets = required_map(&txn, SHEETS)?;
-    let mut protected = std::collections::BTreeMap::new();
-    for (shape_id, shape) in sheets.iter(&txn) {
-        let Out::YMap(shape) = shape else { continue };
-        let cells = map_map(&shape, &txn, "cells")?;
-        let values = cells
-            .iter(&txn)
-            .filter_map(|(name, cell)| match cell {
-                Out::YMap(cell) => Some((
-                    name.to_string(),
-                    map_string(&cell, &txn, "formula").or_else(|| map_string(&cell, &txn, "value")),
-                )),
-                _ => None,
-            })
-            .collect::<std::collections::BTreeMap<_, _>>();
-        for (name, cell) in cells.iter(&txn) {
-            let Out::YMap(cell) = cell else { continue };
-            let formula = map_string(&cell, &txn, "formula");
-            let locked = lock_target(name).is_some_and(|_| {
-                values
-                    .get(name)
-                    .and_then(|value| value.as_deref())
-                    .is_some_and(|value| lock_is_enabled(value, &values))
-            });
-            let protected_target = lock_target(name).is_none()
-                && [
-                    "LockMoveX",
-                    "LockMoveY",
-                    "LockWidth",
-                    "LockHeight",
-                    "LockAspect",
-                    "LockTextEdit",
-                    "LockFormat",
-                    "LockDelete",
-                ]
-                .iter()
-                .any(|lock| {
-                    lock_target(lock) == Some(name)
-                        && values
-                            .get(*lock)
-                            .and_then(|value| value.as_deref())
-                            .is_some_and(|value| lock_is_enabled(value, &values))
-                });
-            if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
-                protected.insert(format!("{shape_id}/{name}"), formula.unwrap_or_default());
-            }
-        }
-    }
-    Ok(protected)
-}
-
-fn lock_is_enabled(
-    value: &str,
-    formulas: &std::collections::BTreeMap<String, Option<String>>,
-) -> bool {
-    let formulas = formulas
-        .iter()
-        .filter_map(|(name, formula)| {
-            formula
-                .as_ref()
-                .map(|formula| (name.clone(), formula.clone()))
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    matches!(
-        evaluate(value.trim_start_matches('='), &formulas, &ParseLimits::default()),
-        vsdx_eval::Evaluation::Evaluated(result)
-            if matches!(result.value, vsdx_eval::Value::Number(number) if number.number == 1.0)
-    )
-}
-
-fn lock_target(lock: &str) -> Option<&str> {
-    match lock {
-        "LockMoveX" => Some("PinX"),
-        "LockMoveY" => Some("PinY"),
-        "LockWidth" => Some("Width"),
-        "LockHeight" => Some("Height"),
-        "LockAspect" => Some("Width"),
-        "LockTextEdit" => Some("Text"),
-        "LockFormat" | "LockDelete" => None,
-        _ => None,
-    }
-}
-
-fn is_guarded(formula: &str) -> bool {
-    vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
-        .map(|expression| {
-            format!("{expression:?}")
-                .to_ascii_uppercase()
-                .contains("GUARD")
-        })
-        .unwrap_or(false)
-}
-
 fn reachable_shape_ids<T: ReadTxn>(
     sheets: &MapRef,
     txn: &T,
@@ -1167,33 +1122,18 @@ fn reachable_shape_ids<T: ReadTxn>(
 ) -> EditResult<Vec<String>> {
     let roots = map_array(page, txn, "shapes")?;
     let page_id = required_string(page, txn, "id")?;
-    let mut result = Vec::new();
-    let mut seen = HashSet::new();
-    let mut pending = Vec::new();
-    for index in (0..roots.len(txn)).rev() {
-        let shape_id = array_string(&roots, txn, index)
-            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        pending.push((shape_id, None, 1));
-    }
-    while let Some((shape_id, parent_id, depth)) = pending.pop() {
-        if depth > MAX_SHAPE_NESTING {
-            return Err(EditError::InvalidState(
-                "shape nesting exceeds maximum depth".to_owned(),
-            ));
-        }
-        if !seen.insert(shape_id.clone()) {
-            return Err(EditError::InvalidState(
-                "shape order contains a duplicate or cycle".to_owned(),
-            ));
-        }
-        let shape = map_ref(sheets, txn, &shape_id)?;
+    let entries = shape_tree_entries(sheets, txn, &roots)?;
+    for entry in &entries {
+        let shape_id = &entry.id;
+        let parent_id = entry.parent_id.as_deref();
+        let shape = map_ref(sheets, txn, shape_id)?;
         let stored_parent_id = shape.get(txn, "parentId");
         if stored_parent_id.is_some() && map_string(&shape, txn, "parentId").is_none() {
             return Err(EditError::InvalidState(
                 "shape parentId is not a string".to_owned(),
             ));
         }
-        if map_string(&shape, txn, "parentId").as_deref() != parent_id.as_deref() {
+        if map_string(&shape, txn, "parentId").as_deref() != parent_id {
             return Err(EditError::InvalidState(
                 "shape parentId does not match shape order".to_owned(),
             ));
@@ -1205,15 +1145,57 @@ fn reachable_shape_ids<T: ReadTxn>(
                 "shape pageId does not match page shape order".to_owned(),
             ));
         }
-        result.push(shape_id.clone());
-        if let Some(Out::YArray(children)) = shape.get(txn, "shapes") {
-            for index in (0..children.len(txn)).rev() {
-                let child_id = array_string(&children, txn, index).ok_or_else(|| {
-                    EditError::InvalidState("shape order contains non-string".to_owned())
-                })?;
-                pending.push((child_id, Some(shape_id.clone()), depth + 1));
-            }
+    }
+    Ok(entries.into_iter().map(|entry| entry.id).collect())
+}
+
+struct ShapeTreeEntry {
+    id: String,
+    parent_id: Option<String>,
+    order: ArrayRef,
+    index: u32,
+    depth: usize,
+}
+
+fn shape_tree_entries<T: ReadTxn>(
+    sheets: &MapRef,
+    txn: &T,
+    roots: &ArrayRef,
+) -> EditResult<Vec<ShapeTreeEntry>> {
+    let mut result = Vec::new();
+    let mut seen = HashSet::new();
+    let mut pending = (0..roots.len(txn))
+        .rev()
+        .map(|index| (roots.clone(), index, None, 1))
+        .collect::<Vec<_>>();
+    while let Some((order, index, parent_id, depth)) = pending.pop() {
+        if depth > MAX_SHAPE_NESTING {
+            return Err(EditError::InvalidState(
+                "shape nesting exceeds maximum depth".to_owned(),
+            ));
         }
+        let id = array_string(&order, txn, index)
+            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
+        if !seen.insert(id.clone()) {
+            return Err(EditError::InvalidState(
+                "shape order contains a duplicate or cycle".to_owned(),
+            ));
+        }
+        let shape = map_ref(sheets, txn, &id)?;
+        if let Some(Out::YArray(children)) = shape.get(txn, "shapes") {
+            pending.extend(
+                (0..children.len(txn)).rev().map(|child_index| {
+                    (children.clone(), child_index, Some(id.clone()), depth + 1)
+                }),
+            );
+        }
+        result.push(ShapeTreeEntry {
+            id,
+            parent_id,
+            order,
+            index,
+            depth,
+        });
     }
     Ok(result)
 }
@@ -1229,6 +1211,12 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
         let page = map_ref(&pages, &txn, &id)?;
         let shape_order = map_array(&page, &txn, "shapes")?;
+        let source_ids = materialized_source_ids(
+            &sheets,
+            &txn,
+            &shape_order,
+            map_number(&page, &txn, "maxSourceId").unwrap_or_default() as u32,
+        )?;
         let mut shapes = Vec::new();
         for shape_index in 0..shape_order.len(&txn) {
             let shape_id = array_string(&shape_order, &txn, shape_index).ok_or_else(|| {
@@ -1241,6 +1229,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                 id.strip_prefix("page:")
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
+                &source_ids,
                 1,
             )?);
         }
@@ -1259,6 +1248,7 @@ fn snapshot_shape<T: ReadTxn>(
     txn: &T,
     shape_id: &str,
     page_id: u32,
+    source_ids: &std::collections::BTreeMap<String, u32>,
     depth: usize,
 ) -> EditResult<ShapeSnapshot> {
     if depth > MAX_SHAPE_NESTING {
@@ -1267,11 +1257,35 @@ fn snapshot_shape<T: ReadTxn>(
         ));
     }
     let shape = map_ref(sheets, txn, shape_id)?;
-    let source_id = map_number(&shape, txn, "sourceId")
+    let stored_source_id = map_number(&shape, txn, "sourceId")
         .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
         as u32;
+    let source_id = source_ids
+        .get(shape_id)
+        .copied()
+        .unwrap_or(stored_source_id);
     let cells = map_map(&shape, txn, "cells")?;
-    let snapshots = cell_snapshots(&cells, txn, page_id, source_id)?;
+    let mut snapshots = Vec::new();
+    for (_key, value) in cells.iter(txn) {
+        let Out::YMap(cell) = value else {
+            return Err(EditError::InvalidState("cell is not a map".to_owned()));
+        };
+        let locator = cell_locator(&cell, txn, page_id, source_id)?;
+        let formula = map_string(&cell, txn, "formula");
+        let baseline = map_string(&cell, txn, "baselineFormula");
+        let value = if formula == baseline {
+            map_string(&cell, txn, "value")
+        } else {
+            None
+        };
+        snapshots.push(CellSnapshot {
+            name: locator.cell_name.clone(),
+            locator,
+            formula,
+            value,
+        });
+    }
+    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
     let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
         return Ok(ShapeSnapshot {
             id: shape_id.to_owned(),
@@ -1285,7 +1299,14 @@ fn snapshot_shape<T: ReadTxn>(
     for index in 0..child_order.len(txn) {
         let child_id = array_string(&child_order, txn, index)
             .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        children.push(snapshot_shape(sheets, txn, &child_id, page_id, depth + 1)?);
+        children.push(snapshot_shape(
+            sheets,
+            txn,
+            &child_id,
+            page_id,
+            source_ids,
+            depth + 1,
+        )?);
     }
     Ok(ShapeSnapshot {
         id: shape_id.to_owned(),
@@ -1296,84 +1317,487 @@ fn snapshot_shape<T: ReadTxn>(
     })
 }
 
-fn export_session(doc: &Doc) -> EditResult<SessionExport> {
+fn materialized_source_ids<T: ReadTxn>(
+    sheets: &MapRef,
+    txn: &T,
+    roots: &ArrayRef,
+    mut largest: u32,
+) -> EditResult<std::collections::BTreeMap<String, u32>> {
+    let entries = shape_tree_entries(sheets, txn, roots)?;
+    let mut added = Vec::new();
+    for entry in entries {
+        let shape = map_ref(sheets, txn, &entry.id)?;
+        let source_id = map_number(&shape, txn, "sourceId")
+            .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+            as u32;
+        if shape_origin(&shape, txn)? == ShapeOrigin::Original {
+            largest = largest.max(source_id);
+        } else {
+            added.push(entry.id);
+        }
+    }
+    added.sort();
+    let mut result = std::collections::BTreeMap::new();
+    for id in added {
+        largest = largest.checked_add(1).ok_or_else(|| {
+            EditError::InvalidState("cannot allocate a materialized source ID".to_owned())
+        })?;
+        result.insert(id, largest);
+    }
+    Ok(result)
+}
+
+fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
     let txn = doc.transact();
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
-    let mut cell_edits = Vec::new();
-    let mut added_shapes = Vec::new();
+    let mut edits = Vec::new();
     for (page_id, page) in pages.iter(&txn) {
         let Out::YMap(_page) = page else { continue };
         let source_page_id = page_id
             .strip_prefix("page:")
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| EditError::InvalidState("invalid page ID".to_owned()))?;
-        for (shape_id, shape) in sheets.iter(&txn) {
+        for (_shape_id, shape) in sheets.iter(&txn) {
             let Out::YMap(shape) = shape else { continue };
-            if map_string(&shape, &txn, "pageId").as_deref() != Some(page_id) {
-                continue;
-            }
-            let source_id = map_number(&shape, &txn, "sourceId")
-                .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-                as u32;
-            let cells = map_map(&shape, &txn, "cells")?;
-            if map_string(&shape, &txn, "origin").as_deref() == Some(SESSION_ORIGIN) {
-                added_shapes.push(AddedShape {
-                    page_id: page_id.to_owned(),
-                    source_page_id,
-                    shape_id: shape_id.to_owned(),
-                    name: map_string(&shape, &txn, "name"),
-                    cells: cell_snapshots(&cells, &txn, source_page_id, source_id)?,
-                });
-                continue;
-            }
-            for (_key, value) in cells.iter(&txn) {
-                let Out::YMap(cell) = value else { continue };
-                let formula = map_string(&cell, &txn, "formula");
-                if formula == map_string(&cell, &txn, "baselineFormula") {
+            if map_string(&shape, &txn, "pageId").as_deref() == Some(page_id) {
+                let source_id = map_number(&shape, &txn, "sourceId")
+                    .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+                    as u32;
+                if shape_origin(&shape, &txn)? != ShapeOrigin::Original {
                     continue;
                 }
-                let Some(formula) = formula else { continue };
-                let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
-                cell_edits.push(vsdx_parse::SemanticCellEdit {
-                    locator: locator.clone(),
-                    gesture: gesture_for_cell(&locator.cell_name),
-                    formula: Some(formula),
-                    value: None,
-                });
+                let cells = map_map(&shape, &txn, "cells")?;
+                for (_key, value) in cells.iter(&txn) {
+                    let Out::YMap(cell) = value else { continue };
+                    let formula = map_string(&cell, &txn, "formula");
+                    let baseline = map_string(&cell, &txn, "baselineFormula");
+                    if formula == baseline {
+                        continue;
+                    }
+                    let Some(formula) = formula else { continue };
+                    let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
+                    edits.push(vsdx_parse::SemanticCellEdit {
+                        locator: locator.clone(),
+                        gesture: gesture_for_cell(&locator.cell_name),
+                        formula: Some(formula),
+                        value: None,
+                    });
+                }
             }
         }
     }
-    added_shapes.sort_by(|left, right| {
-        (&left.page_id, &left.shape_id).cmp(&(&right.page_id, &right.shape_id))
-    });
-    Ok(SessionExport {
-        cell_edits,
-        added_shapes,
-    })
+    Ok(edits)
 }
 
-fn cell_snapshots<T: ReadTxn>(
-    cells: &MapRef,
-    txn: &T,
-    page_id: u32,
-    shape_id: u32,
-) -> EditResult<Vec<CellSnapshot>> {
-    let mut snapshots = Vec::new();
-    for (_key, value) in cells.iter(txn) {
-        let Out::YMap(cell) = value else {
-            return Err(EditError::InvalidState("cell is not a map".to_owned()));
-        };
-        let locator = cell_locator(&cell, txn, page_id, shape_id)?;
-        snapshots.push(CellSnapshot {
-            name: locator.cell_name.clone(),
-            locator,
-            formula: map_string(&cell, txn, "formula"),
-            value: map_string(&cell, txn, "value"),
+fn serialize_doc(doc: &Doc) -> EditResult<Vec<u8>> {
+    let package = original_package_from_doc(doc)?;
+    let snapshot = snapshot_doc(doc)?;
+    let structural = structural_edits(&package, doc, &snapshot)?;
+    let bytes = if structural.is_empty() {
+        return vsdx_parse::save_semantic_cell_edits(&package, &semantic_cell_edits(doc)?)
+            .map_err(|error| EditError::Parse(error.to_string()));
+    } else {
+        vsdx_parse::save_structural_edits(&package, &structural)
+            .map_err(|error| EditError::Parse(error.to_string()))?
+    };
+    let package =
+        vsdx_parse::parse_vsdx(&bytes).map_err(|error| EditError::Parse(error.to_string()))?;
+    vsdx_parse::save_semantic_cell_edits(&package, &semantic_cell_edits(doc)?)
+        .map_err(|error| EditError::Parse(error.to_string()))
+}
+
+fn serializable_doc(doc: &Doc) -> EditResult<()> {
+    #[cfg(test)]
+    {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        if meta.get(&txn, "packageBytes").is_none()
+            && matches!(meta.get(&txn, "packageJson"), Some(Out::Any(Any::Buffer(bytes))) if bytes.is_empty())
+        {
+            return Ok(());
+        }
+    }
+    serialize_doc(doc).map(|_| ())
+}
+
+fn structural_edits(
+    package: &vsdx_parse::VsdxPackage,
+    doc: &Doc,
+    snapshot: &DiagramSnapshot,
+) -> EditResult<Vec<StructuralEdit>> {
+    let txn = doc.transact();
+    let pages = required_map(&txn, PAGES)?;
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut edits = Vec::new();
+    let desired_page_ids =
+        page_part_paths_for_snapshot(package, snapshot)?
+            .iter()
+            .map(|path| {
+                package.page_part_ids.get(path).copied().ok_or_else(|| {
+                    EditError::InvalidState("page is missing a source ID".to_owned())
+                })
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+    let original_page_ids =
+        package
+            .page_part_paths
+            .iter()
+            .map(|path| {
+                package.page_part_ids.get(path).copied().ok_or_else(|| {
+                    EditError::InvalidState("page is missing a source ID".to_owned())
+                })
+            })
+            .collect::<EditResult<Vec<_>>>()?;
+    if desired_page_ids != original_page_ids {
+        edits.push(StructuralEdit::ReorderPages {
+            page_ids: desired_page_ids,
         });
     }
-    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
-    Ok(snapshots)
+    for path in &package.page_part_paths {
+        let Some(page_id) = package.page_part_ids.get(path) else {
+            continue;
+        };
+        let Some(sheet) = package.page_contents.get(path) else {
+            continue;
+        };
+        let Some(page) = snapshot
+            .pages
+            .iter()
+            .find(|page| page.source_part_path == *path)
+        else {
+            continue;
+        };
+        let session_page = map_ref(&pages, &txn, &page.id)?;
+        let roots = map_array(&session_page, &txn, "shapes")?;
+        let snapshots = snapshot_shapes(page);
+        let desired = structural_shape_entries(&sheets, &txn, &roots, &snapshots)?;
+        let originals = original_shape_containers(sheet);
+        let mut original_identities = HashSet::new();
+        for shape in desired.iter().filter(|shape| shape.is_original) {
+            let parent = shape.parent_id.as_ref().and_then(|parent_id| {
+                desired
+                    .iter()
+                    .find(|candidate| candidate.id == *parent_id)
+                    .filter(|parent| parent.is_original)
+                    .map(|parent| parent.source_id)
+            });
+            if !originals
+                .get(&parent)
+                .is_some_and(|ids| ids.contains(&shape.source_id))
+                || !original_identities.insert((parent, shape.source_id))
+            {
+                return Err(EditError::InvalidState(
+                    "original shape identity does not match the source package".to_owned(),
+                ));
+            }
+        }
+        let mut added = std::collections::BTreeMap::new();
+        for shape in desired.iter().filter(|shape| !shape.is_original) {
+            if shape.parent_id.is_some() {
+                return Err(EditError::InvalidState(
+                    "added shapes cannot have a parent".to_owned(),
+                ));
+            }
+            let snapshot = snapshots.get(shape.id.as_str()).ok_or_else(|| {
+                EditError::InvalidState(format!(
+                    "added shape {:?} is missing from snapshot",
+                    shape.id
+                ))
+            })?;
+            added.insert(shape.id.as_str(), shape.source_id);
+            edits.push(StructuralEdit::AddShape {
+                page_id: *page_id,
+                shape_xml: shape_xml(snapshot).into_bytes(),
+            });
+        }
+        let by_id = desired
+            .iter()
+            .map(|shape| (shape.id.as_str(), shape))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let originals_by_source = desired
+            .iter()
+            .filter(|shape| shape.is_original)
+            .map(|shape| (shape.source_id, shape))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (parent, original_order) in &originals {
+            if let Some(parent) = parent {
+                let parent = originals_by_source.get(parent);
+                if !parent.is_some_and(|shape| shape.is_original) {
+                    continue;
+                }
+            }
+            let desired = desired
+                .iter()
+                .filter(|shape| match (&shape.parent_id, parent) {
+                    (None, None) => true,
+                    (Some(session_parent), Some(original_parent)) => {
+                        by_id.get(session_parent.as_str()).is_some_and(|parent| {
+                            parent.is_original && parent.source_id == *original_parent
+                        })
+                    }
+                    _ => false,
+                })
+                .collect::<Vec<_>>();
+            structural_container_edits(*page_id, original_order, &desired, &added, &mut edits)?;
+        }
+    }
+    Ok(edits)
+}
+
+struct StructuralShapeEntry {
+    id: String,
+    parent_id: Option<String>,
+    source_id: u32,
+    is_original: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ShapeOrigin {
+    Original,
+    Added,
+}
+
+fn shape_origin<T: ReadTxn>(shape: &MapRef, txn: &T) -> EditResult<ShapeOrigin> {
+    match required_string(shape, txn, "origin")?.as_str() {
+        "original" => Ok(ShapeOrigin::Original),
+        "added" => Ok(ShapeOrigin::Added),
+        _ => Err(EditError::InvalidState("invalid shape origin".to_owned())),
+    }
+}
+
+fn page_part_paths_for_snapshot(
+    package: &vsdx_parse::VsdxPackage,
+    snapshot: &DiagramSnapshot,
+) -> EditResult<Vec<String>> {
+    let paths = snapshot
+        .pages
+        .iter()
+        .map(|page| page.source_part_path.clone())
+        .collect::<Vec<_>>();
+    let expected = package.page_part_paths.iter().collect::<HashSet<_>>();
+    if paths.len() != expected.len()
+        || paths.iter().collect::<HashSet<_>>().len() != paths.len()
+        || !paths.iter().all(|path| expected.contains(path))
+    {
+        return Err(EditError::InvalidState(
+            "page order does not match the original package".to_owned(),
+        ));
+    }
+    Ok(paths)
+}
+
+fn structural_shape_entries<T: ReadTxn>(
+    sheets: &MapRef,
+    txn: &T,
+    roots: &ArrayRef,
+    snapshots: &std::collections::BTreeMap<&str, &ShapeSnapshot>,
+) -> EditResult<Vec<StructuralShapeEntry>> {
+    shape_tree_entries(sheets, txn, roots)?
+        .into_iter()
+        .map(|entry| {
+            let shape = map_ref(sheets, txn, &entry.id)?;
+            let source_id = snapshots
+                .get(entry.id.as_str())
+                .ok_or_else(|| {
+                    EditError::InvalidState("shape is missing from snapshot".to_owned())
+                })?
+                .source_id;
+            let is_original = shape_origin(&shape, txn)? == ShapeOrigin::Original;
+            Ok(StructuralShapeEntry {
+                id: entry.id,
+                parent_id: entry.parent_id,
+                source_id,
+                is_original,
+            })
+        })
+        .collect()
+}
+
+fn original_shape_containers(
+    sheet: &vsdx_parse::Sheet,
+) -> std::collections::BTreeMap<Option<u32>, Vec<u32>> {
+    let mut containers = std::collections::BTreeMap::new();
+    let mut pending = vec![(None, sheet.shapes().collect::<Vec<_>>())];
+    while let Some((parent, shapes)) = pending.pop() {
+        let ids = shapes.iter().map(|shape| shape.id).collect::<Vec<_>>();
+        containers.insert(parent, ids);
+        for shape in shapes.into_iter().rev() {
+            pending.push((Some(shape.id), shape.shapes().collect()));
+        }
+    }
+    containers
+}
+
+fn snapshot_shapes(page: &PageSnapshot) -> std::collections::BTreeMap<&str, &ShapeSnapshot> {
+    let mut result = std::collections::BTreeMap::new();
+    let mut pending = page.shapes.iter().collect::<Vec<_>>();
+    while let Some(shape) = pending.pop() {
+        result.insert(shape.id.as_str(), shape);
+        pending.extend(shape.children.iter());
+    }
+    result
+}
+
+fn structural_container_edits(
+    page_id: u32,
+    originals: &[u32],
+    desired: &[&StructuralShapeEntry],
+    added: &std::collections::BTreeMap<&str, u32>,
+    edits: &mut Vec<StructuralEdit>,
+) -> EditResult<()> {
+    let present = desired
+        .iter()
+        .filter(|shape| shape.is_original && originals.contains(&shape.source_id))
+        .map(|shape| shape.source_id)
+        .collect::<HashSet<_>>();
+    for shape_id in originals {
+        if !present.contains(shape_id) {
+            edits.push(StructuralEdit::DeleteShape {
+                page_id,
+                shape_id: *shape_id,
+            });
+        }
+    }
+    let mut order = originals
+        .iter()
+        .filter(|shape| present.contains(shape))
+        .copied()
+        .collect::<Vec<_>>();
+    for shape in desired.iter().filter(|shape| !shape.is_original) {
+        order.push(*added.get(shape.id.as_str()).ok_or_else(|| {
+            EditError::InvalidState(format!(
+                "added shape {:?} is missing its allocated source ID",
+                shape.id
+            ))
+        })?);
+    }
+    let desired_ids = desired
+        .iter()
+        .map(|shape| {
+            if shape.is_original {
+                Ok(shape.source_id)
+            } else {
+                added.get(shape.id.as_str()).copied().ok_or_else(|| {
+                    EditError::InvalidState(format!(
+                        "added shape {:?} is missing its allocated source ID",
+                        shape.id
+                    ))
+                })
+            }
+        })
+        .collect::<EditResult<Vec<_>>>()?;
+    for (index, shape_id) in desired_ids.iter().enumerate() {
+        if order.get(index) == Some(shape_id) {
+            continue;
+        }
+        let before_shape_id = order.get(index).copied();
+        edits.push(StructuralEdit::ReorderShape {
+            page_id,
+            shape_id: *shape_id,
+            before_shape_id,
+        });
+        let from = order.iter().position(|id| id == shape_id).ok_or_else(|| {
+            EditError::InvalidState(format!(
+                "shape {shape_id} is requested in order but is absent from its container"
+            ))
+        })?;
+        order.remove(from);
+        order.insert(index, *shape_id);
+    }
+    Ok(())
+}
+
+fn shape_xml(shape: &ShapeSnapshot) -> String {
+    let mut output = format!("<Shape Type=\"Shape\" ID=\"{}\"", shape.source_id);
+    if let Some(name) = &shape.name {
+        output.push_str(" Name=\"");
+        xml_escape(&mut output, name);
+        output.push('\"');
+    }
+    output.push('>');
+    for cell in &shape.cells {
+        if cell.locator.section.is_none() {
+            cell_xml(&mut output, cell);
+        }
+    }
+    let mut sections: SectionRows<'_> = Vec::new();
+    for cell in &shape.cells {
+        let Some(section) = &cell.locator.section else {
+            continue;
+        };
+        let section_index = sections
+            .iter()
+            .position(|(name, _)| name == section)
+            .unwrap_or_else(|| {
+                sections.push((section.clone(), Vec::new()));
+                sections.len() - 1
+            });
+        let rows = &mut sections[section_index].1;
+        let row_index = rows
+            .iter()
+            .position(|(row, _)| row == &cell.locator.row)
+            .unwrap_or_else(|| {
+                rows.push((cell.locator.row.clone(), Vec::new()));
+                rows.len() - 1
+            });
+        rows[row_index].1.push(cell);
+    }
+    for (section, rows) in sections {
+        output.push_str("<Section N=\"");
+        xml_escape(&mut output, &section);
+        output.push_str("\">");
+        for (row, cells) in rows {
+            output.push_str("<Row");
+            match row {
+                Some(CellRow::Index(index)) => output.push_str(&format!(" IX=\"{index}\"")),
+                Some(CellRow::Name(name)) => {
+                    output.push_str(" N=\"");
+                    xml_escape(&mut output, &name);
+                    output.push('\"');
+                }
+                None => {}
+            }
+            output.push('>');
+            for cell in cells {
+                cell_xml(&mut output, cell);
+            }
+            output.push_str("</Row>");
+        }
+        output.push_str("</Section>");
+    }
+    output.push_str("</Shape>");
+    output
+}
+
+fn cell_xml(output: &mut String, cell: &CellSnapshot) {
+    output.push_str("<Cell N=\"");
+    xml_escape(output, &cell.name);
+    output.push('\"');
+    if let Some(formula) = &cell.formula {
+        output.push_str(" F=\"");
+        xml_escape(output, formula);
+        output.push('\"');
+    }
+    if let Some(value) = &cell.value {
+        output.push_str(" V=\"");
+        xml_escape(output, value);
+        output.push('\"');
+    }
+    output.push_str("/>");
+}
+
+fn xml_escape(output: &mut String, value: &str) {
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '\"' => output.push_str("&quot;"),
+            '\'' => output.push_str("&apos;"),
+            _ => output.push(character),
+        }
+    }
 }
 
 fn cell_map(
@@ -1415,14 +1839,21 @@ fn reorder(
         .get_map(PAGES)
         .ok_or_else(|| EditError::InvalidState("missing pages map".to_owned()))?;
     let page = map_ref(&pages, &txn, page_id)?;
-    let order = map_array(&page, &txn, "shapes")?;
+    let root_order = map_array(&page, &txn, "shapes")?;
+    let sheets = txn
+        .get_map(SHEETS)
+        .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
+    let entries = shape_tree_entries(&sheets, &txn, &root_order)?;
+    let target = entries
+        .iter()
+        .find(|entry| entry.id == shape_id)
+        .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+    let order = target.order.clone();
     let length = order.len(&txn);
     if to >= length {
         return Err(EditError::OutOfBounds { index: to, length });
     }
-    let from = (0..length)
-        .find(|index| array_string(&order, &txn, *index).as_deref() == Some(shape_id))
-        .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+    let from = target.index;
     order.remove_range(&mut txn, from, 1);
     order.insert(&mut txn, to, shape_id);
     Ok(ShapeReceipt {

@@ -1,7 +1,5 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
-use std::collections::BTreeMap;
-
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
 };
@@ -48,96 +46,21 @@ impl Diagram {
     pub fn package(&self) -> &VsdxPackage {
         &self.package
     }
-    /// Writes formulas to Cell@F and their evaluated numeric cache to Cell@V.
+    /// Writes formulas to Cell@F, with a cache freshly evaluated from each formula
+    /// in Cell@V; formulas the display evaluator cannot evaluate drop the cache.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
-        Ok(self.apply_cell_edits(edits)?.0)
+        let resolved = self.resolve_cell_edits(edits)?;
+        Ok(vsdx_parse::save_semantic_cell_edits(
+            &self.package,
+            &resolved,
+        )?)
     }
-    /// Saves the formula changes and the shape additions accumulated by a collaborative session.
+    /// Saves the formula changes accumulated by a collaborative session.
     pub fn save_session(&self, session: &vsdx_edit::DiagramSession) -> Result<Vec<u8>> {
-        let export = session
-            .export()
+        let edits = session
+            .semantic_cell_edits()
             .map_err(|error| Error::Policy(error.to_string()))?;
-        let additions = export
-            .added_shapes
-            .iter()
-            .map(|shape| StructuralEdit::AddShape {
-                page_id: shape.source_page_id,
-                shape_xml: self.added_shape_xml(shape),
-            })
-            .collect::<Vec<_>>();
-        self.save_edits(&export.cell_edits, &additions)
-    }
-
-    /// Serializes an added shape; `save_structural_edits` rewrites its ID to the next free one.
-    fn added_shape_xml(&self, shape: &vsdx_edit::AddedShape) -> Vec<u8> {
-        let mut xml = String::from("<Shape");
-        if let Some(name) = &shape.name {
-            xml.push_str(&format!(" Name='{}'", escape_attribute(name)));
-        }
-        xml.push('>');
-        let mut sections: BTreeMap<&str, BTreeMap<RowKey, Vec<&vsdx_edit::CellSnapshot>>> =
-            BTreeMap::new();
-        for cell in &shape.cells {
-            match (&cell.locator.section, &cell.locator.row) {
-                (Some(section), Some(row)) => sections
-                    .entry(section)
-                    .or_default()
-                    .entry(RowKey::from(row))
-                    .or_default()
-                    .push(cell),
-                _ => xml.push_str(&self.added_cell_xml(shape.source_page_id, cell)),
-            }
-        }
-        for (section, rows) in sections {
-            xml.push_str(&format!("<Section N='{}'>", escape_attribute(section)));
-            for (row, cells) in rows {
-                xml.push_str(&match row {
-                    RowKey::Index(index) => format!("<Row IX='{index}'>"),
-                    RowKey::Name(name) => format!("<Row N='{}'>", escape_attribute(&name)),
-                });
-                for cell in cells {
-                    xml.push_str(&self.added_cell_xml(shape.source_page_id, cell));
-                }
-                xml.push_str("</Row>");
-            }
-            xml.push_str("</Section>");
-        }
-        xml.push_str("</Shape>");
-        xml.into_bytes()
-    }
-
-    /// Caches the formula in V where the page can evaluate it, falling back to the drafted value.
-    fn added_cell_xml(&self, page_id: u32, cell: &vsdx_edit::CellSnapshot) -> String {
-        let mut xml = format!("<Cell N='{}'", escape_attribute(&cell.name));
-        if let Some(formula) = &cell.formula {
-            xml.push_str(&format!(" F='{}'", escape_attribute(formula)));
-        }
-        let context = PackageMutationContext {
-            package: &self.package,
-        };
-        let value = cell
-            .formula
-            .as_deref()
-            .and_then(|formula| {
-                context
-                    .evaluate_formula(
-                        &CellLocator {
-                            sheet: CellSheet::Page(page_id),
-                            shape_id: None,
-                            section: None,
-                            row: None,
-                            cell_name: cell.name.clone(),
-                        },
-                        formula,
-                    )
-                    .ok()
-            })
-            .or_else(|| cell.value.clone());
-        if let Some(value) = value {
-            xml.push_str(&format!(" V='{}'", escape_attribute(&value)));
-        }
-        xml.push_str("/>");
-        xml
+        self.save_cell_edits(&edits)
     }
     /// Applies semantic and structural edits as one all-or-nothing save request.
     pub fn save_edits(
@@ -145,111 +68,96 @@ impl Diagram {
         cell_edits: &[SemanticCellEdit],
         structural_edits: &[StructuralEdit],
     ) -> Result<Vec<u8>> {
-        let (bytes, package) = self.apply_cell_edits(cell_edits)?;
-        authorize_structural_edits(&package, structural_edits)?;
-        if structural_edits.is_empty() {
-            return Ok(bytes);
-        }
+        let resolved = self.resolve_cell_edits(cell_edits)?;
+        self.authorize_structural_edits(structural_edits)?;
+        let cell_saved = vsdx_parse::save_semantic_cell_edits(&self.package, &resolved)?;
+        let updated = vsdx_parse::parse_vsdx(&cell_saved)?;
         Ok(vsdx_parse::save_structural_edits(
-            &package,
+            &updated,
             structural_edits,
         )?)
     }
 
-    /// Authorizes and evaluates each edit against the package the preceding edits produced.
-    fn apply_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<(Vec<u8>, VsdxPackage)> {
-        let mut package = self.package.clone();
-        let mut bytes = None;
+    fn resolve_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<SemanticCellEdit>> {
+        let context = PackageMutationContext {
+            package: &self.package,
+        };
+        let mut resolved = Vec::with_capacity(edits.len());
         for edit in edits {
-            let resolved = resolve_cell_edit(&package, edit)?;
-            let saved =
-                vsdx_parse::save_semantic_cell_edits(&package, std::slice::from_ref(&resolved))?;
-            package = vsdx_parse::parse_vsdx(&saved)?;
-            bytes = Some(saved);
+            if edit.value.is_some() {
+                return Err(Error::Policy(
+                    "semantic edits write formulas; raw Cell@V edits are not allowed".to_owned(),
+                ));
+            }
+            let formula = edit
+                .formula
+                .clone()
+                .ok_or_else(|| Error::Policy("semantic edits require a formula".to_owned()))?;
+            match decide_mutation(
+                &context,
+                edit.locator.clone(),
+                edit.gesture,
+                formula,
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, formula } => {
+                    let value = context.evaluate_cache(&target, &formula)?;
+                    resolved.push(SemanticCellEdit {
+                        locator: target,
+                        gesture: edit.gesture,
+                        formula: Some(formula),
+                        value,
+                    });
+                }
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(Error::Policy(reason));
+                }
+            }
         }
-        match bytes {
-            Some(bytes) => Ok((bytes, package)),
-            None => Ok((
-                vsdx_parse::save_semantic_cell_edits(&package, &[])?,
-                package,
-            )),
-        }
+        Ok(resolved)
     }
-
     /// Deletes shapes after enforcing their effective LockDelete cells.
     pub fn save_structural_edits(&self, edits: &[StructuralEdit]) -> Result<Vec<u8>> {
-        authorize_structural_edits(&self.package, edits)?;
+        self.authorize_structural_edits(edits)?;
         Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
     }
 
+    fn authorize_structural_edits(&self, edits: &[StructuralEdit]) -> Result<()> {
+        let context = PackageMutationContext {
+            package: &self.package,
+        };
+        for edit in edits {
+            let StructuralEdit::DeleteShape { page_id, shape_id } = edit else {
+                continue;
+            };
+            let locator = CellLocator {
+                sheet: CellSheet::Page(*page_id),
+                shape_id: Some(*shape_id),
+                section: None,
+                row: None,
+                cell_name: "LockDelete".to_owned(),
+            };
+            match decide_mutation(
+                &context,
+                locator,
+                MutationGesture::Delete,
+                "0".to_owned(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { .. } => {}
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(Error::Policy(reason));
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {
             diagram: self,
             part,
         })
     }
-}
-
-fn resolve_cell_edit(package: &VsdxPackage, edit: &SemanticCellEdit) -> Result<SemanticCellEdit> {
-    if edit.value.is_some() {
-        return Err(Error::Policy(
-            "semantic edits write formulas; raw Cell@V edits are not allowed".to_owned(),
-        ));
-    }
-    let formula = edit
-        .formula
-        .clone()
-        .ok_or_else(|| Error::Policy("semantic edits require a formula".to_owned()))?;
-    let context = PackageMutationContext { package };
-    match decide_mutation(
-        &context,
-        edit.locator.clone(),
-        edit.gesture,
-        formula,
-        &ParseLimits::default(),
-    ) {
-        MutationOutcome::Allowed { target, formula } => {
-            let value = context.evaluate_formula(&target, &formula)?;
-            Ok(SemanticCellEdit {
-                locator: target,
-                gesture: edit.gesture,
-                formula: Some(formula),
-                value: Some(value),
-            })
-        }
-        MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
-            Err(Error::Policy(reason))
-        }
-    }
-}
-
-fn authorize_structural_edits(package: &VsdxPackage, edits: &[StructuralEdit]) -> Result<()> {
-    let context = PackageMutationContext { package };
-    for edit in edits {
-        let StructuralEdit::DeleteShape { page_id, shape_id } = edit else {
-            continue;
-        };
-        let locator = CellLocator {
-            sheet: CellSheet::Page(*page_id),
-            shape_id: Some(*shape_id),
-            section: None,
-            row: None,
-            cell_name: "LockDelete".to_owned(),
-        };
-        match decide_mutation(
-            &context,
-            locator,
-            MutationGesture::Delete,
-            "0".to_owned(),
-            &ParseLimits::default(),
-        ) {
-            MutationOutcome::Allowed { .. } => {}
-            MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
-                return Err(Error::Policy(reason));
-            }
-        }
-    }
-    Ok(())
 }
 
 struct PackageMutationContext<'a> {
@@ -290,7 +198,12 @@ impl PackageMutationContext<'_> {
         }))
     }
 
-    fn evaluate_formula(&self, locator: &CellLocator, formula: &str) -> Result<String> {
+    /// Evaluates the cache a formula should carry after it is written.
+    ///
+    /// Returns `None` for formulas outside the display evaluation profile; a
+    /// formula edit without an evaluable cache drops the existing value instead
+    /// of preserving a cache that no longer matches the formula.
+    fn evaluate_cache(&self, locator: &CellLocator, formula: &str) -> Result<Option<String>> {
         let resolver = Resolver::new(self.package);
         let evaluation = match (&locator.sheet, locator.shape_id) {
             (CellSheet::Page(_), Some(shape_id)) => {
@@ -344,18 +257,10 @@ impl PackageMutationContext<'_> {
         };
         match evaluation {
             Evaluation::Evaluated(value) => match value.value {
-                Value::Number(number) => Ok(number.number.to_string()),
-                Value::Color(_) => Err(Error::Policy(
-                    "formula cache update does not support colour values".to_owned(),
-                )),
+                Value::Number(number) => Ok(Some(number.number.to_string())),
+                Value::Color(_) => Ok(None),
             },
-            Evaluation::Unsupported(reason) => Err(Error::Policy(format!(
-                "formula cache update is unsupported: {reason}"
-            ))),
-            Evaluation::Error(error) => Err(Error::Policy(format!(
-                "formula cache update failed: {}",
-                error.message
-            ))),
+            Evaluation::Unsupported(_) | Evaluation::Error(_) => Ok(None),
         }
     }
 }
@@ -428,7 +333,7 @@ impl MutationContext for PackageMutationContext<'_> {
                 format!("cannot evaluate {lock}: it has neither a formula nor a value")
             })?;
         let value = self
-            .evaluate_formula(
+            .evaluate_cache(
                 &CellLocator {
                     sheet: locator.sheet.clone(),
                     shape_id: locator.shape_id,
@@ -442,6 +347,9 @@ impl MutationContext for PackageMutationContext<'_> {
                 Error::Policy(reason) => format!("cannot evaluate {lock}: {reason}"),
                 Error::Parse(error) => error.to_string(),
                 Error::Resolve(error) => error.to_string(),
+            })?
+            .ok_or_else(|| {
+                format!("cannot evaluate {lock}: it is outside the display evaluation profile")
             })?;
         match value.as_str() {
             "0" => Ok(false),
@@ -449,30 +357,6 @@ impl MutationContext for PackageMutationContext<'_> {
             _ => Err(format!("cannot evaluate {lock} as a boolean")),
         }
     }
-}
-
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum RowKey {
-    Index(u32),
-    Name(String),
-}
-
-impl From<&CellRow> for RowKey {
-    fn from(row: &CellRow) -> Self {
-        match row {
-            CellRow::Index(index) => Self::Index(*index),
-            CellRow::Name(name) => Self::Name(name.clone()),
-        }
-    }
-}
-
-fn escape_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('\'', "&apos;")
-        .replace('"', "&quot;")
 }
 
 fn sheet_path(package: &VsdxPackage, sheet: &CellSheet) -> std::result::Result<String, String> {

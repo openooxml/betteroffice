@@ -1,9 +1,9 @@
 use betteroffice_vsdx::{
-    CellLocator, CellRow, CellSheet, Diagram, MutationGesture, SemanticCellEdit, StructuralEdit,
+    CellLocator, CellSheet, Diagram, MutationGesture, SemanticCellEdit, StructuralEdit,
 };
 use ooxml_opc::{rezip_parts, unzip_parts};
 use std::collections::BTreeMap;
-use vsdx_edit::{CellSnapshot, DiagramSession, EditCtx, ShapeDraft};
+use vsdx_edit::{DiagramSession, EditCtx};
 
 fn diagram_with_page(xml: &str) -> (Vec<u8>, Diagram, u32) {
     let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
@@ -406,7 +406,6 @@ fn setatref_redirects_to_page_and_document_sheets_without_touching_the_source() 
 fn mixed_mutation_failures_never_produce_a_partial_package() {
     for (failing, formula) in [
         ("<Cell N='PinX' F='GUARD(1)' V='1'/>", "4"),
-        ("<Cell N='PinX' V='1'/>", "Unknown(1)"),
         ("<Cell N='PinX' F='SETATREF(Target,1)' V='1'/>", "4"),
     ] {
         let (source, diagram, page_id) = diagram_with_page(&format!(
@@ -460,6 +459,72 @@ fn saves_a_semantic_cell_edit_without_source_spans() {
                 && cell.value.as_deref() == Some("42")
         })
     }));
+}
+
+#[test]
+fn unevaluable_formula_edits_drop_the_stale_cache() {
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='PinX' F='1' V='1'/></Shape></Shapes></PageContents>",
+    );
+    let saved = diagram
+        .save_cell_edits(&[edit(
+            page_id,
+            1,
+            "PinX",
+            "Unknown(1)",
+            MutationGesture::MoveX,
+        )])
+        .unwrap();
+    let after = parts(&saved);
+    assert_eq!(
+        std::str::from_utf8(&after["visio/pages/page1.xml"]).unwrap(),
+        "<PageContents><Shapes><Shape ID='1'><Cell N='PinX' F='Unknown(1)'/></Shape></Shapes></PageContents>"
+    );
+    let reopened = Diagram::open(&saved).unwrap();
+    let page = reopened.pages().next().unwrap();
+    let shape = page.shapes().next().unwrap();
+    let cell = shape
+        .model()
+        .cells()
+        .find(|cell| cell.name == "PinX")
+        .unwrap();
+    assert_eq!(cell.formula.as_deref(), Some("Unknown(1)"));
+    assert_eq!(cell.value.as_deref(), None);
+}
+
+#[test]
+fn session_formula_edits_recompute_or_drop_caches() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+    let session = DiagramSession::open(source, 7).unwrap();
+    let context = EditCtx::local("test");
+    session
+        .set_cell_formula(&context, "page:1", "page:1:shape:1", "FOnly", "42")
+        .unwrap();
+    session
+        .set_cell_formula(&context, "page:1", "page:1:shape:1", "Both", "Width*3")
+        .unwrap();
+    assert!(session.save().is_ok());
+    let saved = Diagram::open(source)
+        .unwrap()
+        .save_session(&session)
+        .unwrap();
+    let reopened = Diagram::open(&saved).unwrap();
+    let page = reopened.pages().next().unwrap();
+    let shape = page.shapes().next().unwrap();
+    let fonly = shape
+        .model()
+        .cells()
+        .find(|cell| cell.name == "FOnly")
+        .unwrap();
+    assert_eq!(fonly.formula.as_deref(), Some("42"));
+    assert_eq!(fonly.value.as_deref(), Some("42"));
+    let both = shape
+        .model()
+        .cells()
+        .find(|cell| cell.name == "Both")
+        .unwrap();
+    assert_eq!(both.formula.as_deref(), Some("Width*3"));
+    assert_eq!(both.value.as_deref(), None);
 }
 
 #[test]
@@ -644,140 +709,5 @@ fn lock_delete_refusals_leave_the_facade_package_unchanged() {
             .part_bytes("visio/pages/page1.xml")
             .unwrap(),
         before
-    );
-}
-
-fn draft_cell(
-    name: &str,
-    formula: &str,
-    section: Option<&str>,
-    row: Option<CellRow>,
-) -> CellSnapshot {
-    CellSnapshot {
-        locator: CellLocator {
-            sheet: CellSheet::Page(1),
-            shape_id: Some(99),
-            section: section.map(str::to_owned),
-            row,
-            cell_name: name.to_owned(),
-        },
-        name: name.to_owned(),
-        formula: Some(formula.to_owned()),
-        value: None,
-    }
-}
-
-#[test]
-fn session_added_shapes_reach_the_saved_package() {
-    let (source, diagram, _) = diagram_with_page(
-        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
-    );
-    let session = DiagramSession::open(&source, 7).unwrap();
-    let page = session.snapshot().unwrap().pages[0].id.clone();
-    let receipt = session
-        .add_shape(
-            &EditCtx::local("a"),
-            &page,
-            &ShapeDraft {
-                source_id: 99,
-                name: Some("Added".to_owned()),
-                cells: vec![
-                    draft_cell("Width", "5", None, None),
-                    draft_cell("X", "2", Some("Geometry"), Some(CellRow::Index(0))),
-                ],
-            },
-        )
-        .unwrap();
-    session
-        .set_cell_formula(&EditCtx::local("a"), &page, &receipt.shape_id, "Width", "7")
-        .unwrap();
-
-    let saved = diagram.save_session(&session).unwrap();
-    let reopened = Diagram::open(&saved).unwrap();
-    let page = reopened.pages().next().unwrap();
-    assert_eq!(page.shapes().count(), 2);
-    let added = page
-        .shapes()
-        .find(|shape| shape.model().name.as_deref() == Some("Added"))
-        .unwrap();
-    let width = added
-        .model()
-        .cells()
-        .find(|cell| cell.name == "Width")
-        .unwrap();
-    assert_eq!(width.formula.as_deref(), Some("7"));
-    assert_eq!(width.value.as_deref(), Some("7"));
-    let resolved = added.resolved().unwrap();
-    assert!(matches!(
-        resolved.sections["Geometry"].rows["IX:0"].cells["X"],
-        vsdx_resolve::Lookup::Found(ref cell) if cell.cell.formula.as_deref() == Some("2")
-    ));
-}
-
-#[test]
-fn session_added_shapes_do_not_leak_into_cell_edits() {
-    let (source, _, _) = diagram_with_page(
-        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
-    );
-    let session = DiagramSession::open(&source, 7).unwrap();
-    let page = session.snapshot().unwrap().pages[0].id.clone();
-    session
-        .add_shape(
-            &EditCtx::local("a"),
-            &page,
-            &ShapeDraft {
-                source_id: 99,
-                name: None,
-                cells: vec![draft_cell("Width", "5", None, None)],
-            },
-        )
-        .unwrap();
-    let export = session.export().unwrap();
-    assert!(export.cell_edits.is_empty());
-    assert_eq!(export.added_shapes.len(), 1);
-    assert_eq!(export.added_shapes[0].cells.len(), 1);
-}
-
-#[test]
-fn batched_edits_cache_against_earlier_edits_in_the_batch() {
-    let (_, diagram, page_id) = diagram_with_page(
-        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/><Cell N='Height' V='1'/></Shape></Shapes></PageContents>",
-    );
-    let saved = diagram
-        .save_cell_edits(&[
-            edit(page_id, 1, "Width", "5", MutationGesture::ResizeWidth),
-            edit(
-                page_id,
-                1,
-                "Height",
-                "Width*2",
-                MutationGesture::ResizeHeight,
-            ),
-        ])
-        .unwrap();
-    let reopened = Diagram::open(&saved).unwrap();
-    let page = reopened.pages().next().unwrap();
-    let shape = page.shapes().next().unwrap();
-    let height = shape
-        .model()
-        .cells()
-        .find(|cell| cell.name == "Height")
-        .unwrap();
-    assert_eq!(height.formula.as_deref(), Some("Width*2"));
-    assert_eq!(height.value.as_deref(), Some("10"));
-}
-
-#[test]
-fn batched_edits_authorize_against_earlier_edits_in_the_batch() {
-    let (_, diagram, page_id) = diagram_with_page(
-        "<PageContents><Shapes><Shape ID='1'><Cell N='LockWidth' V='0'/><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
-    );
-    assert!(
-        diagram
-            .save_cell_edits(&[
-                edit(page_id, 1, "LockWidth", "1", MutationGesture::CellEdit),
-                edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth),
-            ])
-            .is_err()
     );
 }

@@ -22,6 +22,7 @@ impl SourceSpan {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttributeSpan {
+    pub name: SourceSpan,
     pub value: SourceSpan,
     pub quote: u8,
 }
@@ -333,7 +334,8 @@ fn opening_tag(
         while index < end && !source[index].is_ascii_whitespace() && source[index] != b'=' {
             index += 1;
         }
-        let key = String::from_utf8(source[key_start..index].to_vec()).ok()?;
+        let name_end = index;
+        let key = String::from_utf8(source[key_start..name_end].to_vec()).ok()?;
         skip_space(source, &mut index, end);
         if index >= end || source[index] != b'=' {
             return None;
@@ -355,6 +357,10 @@ fn opening_tag(
         attributes.insert(
             key,
             AttributeSpan {
+                name: SourceSpan {
+                    offset: key_start,
+                    length: name_end - key_start,
+                },
                 value: SourceSpan {
                     offset: value_start,
                     length: index - value_start,

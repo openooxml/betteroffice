@@ -1,6 +1,6 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
-use vsdx_parse::{CellLocator, CellRow, CellSheet, SemanticCellEdit};
+use vsdx_parse::{CellLocator, CellRow, CellSheet};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +38,7 @@ pub struct CellSnapshot {
     pub locator: CellLocator,
     pub name: String,
     pub formula: Option<String>,
+    #[serde(default)]
     pub value: Option<String>,
 }
 
@@ -85,28 +86,9 @@ pub struct ShapeReceipt {
     pub to_index: Option<u32>,
 }
 
-/// A shape that exists only in the session, so a save must insert it into the package.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AddedShape {
-    pub page_id: String,
-    pub source_page_id: u32,
-    pub shape_id: String,
-    pub name: Option<String>,
-    pub cells: Vec<CellSnapshot>,
-}
-
-/// The whole of a session's divergence from its package, partitioned by how a save applies it.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SessionExport {
-    pub cell_edits: Vec<SemanticCellEdit>,
-    pub added_shapes: Vec<AddedShape>,
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeDraft {
-    pub source_id: u32,
     pub name: Option<String>,
     pub cells: Vec<CellSnapshot>,
 }

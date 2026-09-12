@@ -12,8 +12,8 @@ pub use error::VsdxError;
 pub use model::*;
 pub use package::{
     CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit, StructuralEdit, parse_vsdx,
-    parse_vsdx_with_limits, save_semantic_cell_edits, save_structural_edits, validate_structure,
-    write_vsdx,
+    parse_vsdx_with_limits, remove_connects_referencing_shapes, save_semantic_cell_edits,
+    save_structural_edits, validate_structure, write_vsdx,
 };
 pub use patch::{
     CellAttribute, CellEdit, ElementSpan, MAX_PATCH_BYTES, MAX_PATCH_EDITS, SourceSpan, SpanEdit,

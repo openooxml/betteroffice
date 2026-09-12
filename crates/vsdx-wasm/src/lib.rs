@@ -106,23 +106,6 @@ fn js_error(error: impl std::fmt::Display) -> JsValue {
 mod tests {
     use super::{VsdxDocument, VsdxRenderer, parse_vsdx_json};
     use vsdx_edit::EditCtx;
-    use yrs::{Array, Map, MapPrelim, Out, ReadTxn, Transact};
-
-    fn add_formula(document: &VsdxDocument, name: &str, formula: &str) {
-        let mut txn = document.session().yrs_doc().transact_mut();
-        let sheets = txn.get_map("vsdx:sheets").unwrap();
-        let shape = match sheets.get(&txn, "page:1:shape:1") {
-            Some(Out::YMap(shape)) => shape,
-            _ => unreachable!(),
-        };
-        let cells = match shape.get(&txn, "cells") {
-            Some(Out::YMap(cells)) => cells,
-            _ => unreachable!(),
-        };
-        let cell = cells.insert(&mut txn, name, MapPrelim::default());
-        cell.insert(&mut txn, "name", name);
-        cell.insert(&mut txn, "formula", formula);
-    }
 
     fn nested_document() -> VsdxDocument {
         VsdxDocument::open_collaborative(
@@ -133,10 +116,14 @@ mod tests {
     }
 
     fn shape_cell(name: &str, formula: &str) -> serde_json::Value {
-        serde_json::json!({ "locator": { "cellName": name }, "formula": formula })
+        serde_json::json!({
+            "name": name,
+            "formula": formula,
+            "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": null, "row": null, "cellName": name }
+        })
     }
 
-    fn added_shape_json(source_id: u32) -> String {
+    fn added_shape_json() -> String {
         let mut cells = vec![
             shape_cell("Width", "1"),
             shape_cell("Height", "1"),
@@ -147,19 +134,23 @@ mod tests {
         ];
         for (index, x, y) in [(0, "0", "0"), (1, "1", "0"), (2, "1", "1"), (3, "0", "1")] {
             cells.push(serde_json::json!({
-                "locator": { "section": "Geometry", "rowIndex": index, "cellName": "X" },
-                "formula": x
+                "name": "X",
+                "formula": x,
+                "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": index }, "cellName": "X" }
             }));
             cells.push(serde_json::json!({
-                "locator": { "section": "Geometry", "rowIndex": index, "cellName": "Y" },
-                "formula": y
+                "name": "Y",
+                "formula": y,
+                "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": index }, "cellName": "Y" }
             }));
         }
         cells.push(serde_json::json!({
-            "locator": { "section": "Geometry", "rowIndex": 4, "cellName": "NoShow" },
-            "formula": "0"
+            "name": "NoShow",
+            "formula": "0",
+            "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": 4 }, "cellName": "NoShow" }
         }));
-        serde_json::json!({ "pageId": "page:1", "draft": { "sourceId": source_id, "name": "Added", "cells": cells } }).to_string()
+        serde_json::json!({ "pageId": "page:1", "draft": { "name": "Added", "cells": cells } })
+            .to_string()
     }
 
     fn primitive_ids(value: &serde_json::Value) -> Vec<String> {
@@ -188,21 +179,14 @@ mod tests {
             1.0,
         )
         .unwrap();
-        add_formula(&document, "PinX", "1");
-        add_formula(&document, "PinY", "1");
-        add_formula(&document, "Width", "1");
-        add_formula(&document, "Height", "1");
+        let receipt: serde_json::Value =
+            serde_json::from_str(&document.add_shape_json(&added_shape_json()).unwrap()).unwrap();
+        let shape_id = receipt["shapeId"].as_str().unwrap();
         let mut renderer = VsdxRenderer::new();
         let before = renderer.layout_page_json(&document, 0).unwrap();
         document
             .session()
-            .set_cell_formula(
-                &EditCtx::local("test"),
-                "page:1",
-                "page:1:shape:1",
-                "Width",
-                "10",
-            )
+            .set_cell_formula(&EditCtx::local("test"), "page:1", shape_id, "Width", "10")
             .unwrap();
         let after = renderer.layout_page_json(&document, 0).unwrap();
         assert_ne!(before, after);
@@ -215,7 +199,7 @@ mod tests {
         let before: serde_json::Value =
             serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
         let receipt: serde_json::Value =
-            serde_json::from_str(&document.add_shape_json(&added_shape_json(1)).unwrap()).unwrap();
+            serde_json::from_str(&document.add_shape_json(&added_shape_json()).unwrap()).unwrap();
         let added_id = receipt["shapeId"].as_str().unwrap();
         let after_add: serde_json::Value =
             serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
@@ -232,26 +216,43 @@ mod tests {
         let after_reorder: serde_json::Value =
             serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
         assert_ne!(before_reorder, primitive_ids(&after_reorder));
-        let mut txn = document.session().yrs_doc().transact_mut();
-        let pages = txn.get_map("vsdx:pages").unwrap();
-        let page = match pages.get(&txn, "page:1") {
-            Some(Out::YMap(page)) => page,
-            _ => unreachable!(),
-        };
-        let order = match page.get(&txn, "shapes") {
-            Some(Out::YArray(order)) => order,
-            _ => unreachable!(),
-        };
-        let index = (0..order.len(&txn))
-            .find(|index| matches!(order.get(&txn, *index), Some(Out::Any(yrs::Any::String(value))) if value.as_ref() == added_id))
-            .unwrap();
-        order.remove_range(&mut txn, index, 1);
-        drop(txn);
+        let delete = serde_json::json!({ "pageId": "page:1", "shapeId": added_id }).to_string();
+        document.delete_shape_json(&delete).unwrap();
         let after_delete: serde_json::Value =
             serde_json::from_str(&renderer.layout_page_json(&document, 0).unwrap()).unwrap();
         assert_eq!(
             primitive_ids(&after_delete).len(),
             primitive_ids(&after_reorder).len() - 1
+        );
+    }
+
+    #[test]
+    fn layout_of_reordered_added_shapes_matches_the_saved_document() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        document.add_shape_json(&added_shape_json()).unwrap();
+        let second: serde_json::Value =
+            serde_json::from_str(&document.add_shape_json(&added_shape_json()).unwrap()).unwrap();
+        document
+            .reorder_shape_json(
+                &serde_json::json!({
+                    "pageId": "page:1",
+                    "shapeId": second["shapeId"],
+                    "toIndex": 0,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        let mut live_renderer = VsdxRenderer::new();
+        let live = live_renderer.layout_page_json(&document, 0).unwrap();
+        let reopened = VsdxDocument::open_collaborative(&document.save().unwrap(), 2.0).unwrap();
+        let mut reopened_renderer = VsdxRenderer::new();
+        assert_eq!(
+            live,
+            reopened_renderer.layout_page_json(&reopened, 0).unwrap()
         );
     }
 }

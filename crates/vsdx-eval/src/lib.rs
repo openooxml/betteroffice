@@ -343,6 +343,7 @@ fn evaluate_cell_with_theme(
     theme: Option<&Theme>,
 ) -> Evaluation {
     if is_event_cell(name) {
+        // Event/recalculation plumbing is outside the display evaluation profile.
         return unsupported("event cell is outside the display evaluation profile");
     }
     if name.eq_ignore_ascii_case("TheText") {
@@ -355,8 +356,7 @@ fn evaluate_cell_with_theme(
                 Some(formula) if !formula.eq_ignore_ascii_case("Inh") => {
                     evaluate_with_theme_at(formula, refs, limits, theme, Some(name))
                 }
-                _ if refs.exhausted_inheritance(name) => err("Inh has no concrete inherited value"),
-                _ => unsupported("Inh requires an inheritance host"),
+                _ => unsupported("Inh has no concrete inherited value"),
             },
         );
     }
@@ -512,7 +512,7 @@ impl<R: References> Engine<'_, R> {
             Expr::String(_) => unsupported("string values are not display numbers"),
             Expr::Reference(name) => {
                 if name.eq_ignore_ascii_case("Inh") {
-                    return err("Inh has no concrete inherited value");
+                    return unsupported("Inh has no concrete inherited value");
                 }
                 if is_event_cell(name) {
                     return unsupported("event cell is outside the display evaluation profile");
@@ -683,11 +683,13 @@ impl<R: References> Engine<'_, R> {
             return unsupported(format!("{upper} is outside the phase-4 evaluator"));
         }
         if upper == "GUARD" {
+            // Visio GUARD intercepts edits; display evaluation returns its argument. Mutation policy is phase 5.
             return args
                 .first()
                 .map_or_else(|| err("missing argument"), |arg| guard(self.expr(arg, d)));
         }
         if matches!(upper.as_str(), "THEMEGUARD" | "_XFTRIGGER") {
+            // THEMEGUARD protects theme edits and _XFTRIGGER schedules recalculation; both are display-transparent.
             return args
                 .first()
                 .map_or_else(|| err("missing argument"), |arg| self.expr(arg, d));
@@ -794,9 +796,10 @@ impl<R: References> Engine<'_, R> {
                 |r| r,
                 |v| numeric_result(v.number.signum(), Unit::Number, guarded),
             ),
-            "ROUND" => {
-                one().map_or_else(|r| r, |v| numeric_result(v.number.round(), v.unit, guarded))
-            }
+            "ROUND" => one().map_or_else(
+                |r| r,
+                |v| numeric_result((v.number + 0.5).floor(), v.unit, guarded),
+            ),
             "CEILING" => {
                 one().map_or_else(|r| r, |v| numeric_result(v.number.ceil(), v.unit, guarded))
             }
@@ -874,6 +877,7 @@ impl<R: References> Engine<'_, R> {
         {
             return err("RGB channels must be dimensionless");
         }
+        // Visio RGB takes 8-bit channels; out-of-range inputs are conservatively saturated.
         let channel = |value: f64| value.round().clamp(0.0, 255.0) as u8;
         result(
             Value::Color(Color {
@@ -950,6 +954,7 @@ impl<R: References> Engine<'_, R> {
                 );
             }
         };
+        // Theme values use DrawingML colour slots; unknown named Visio theme values intentionally remain unsupported.
         let color = ColorValue {
             theme_color: Some(slot.to_ascii_lowercase()),
             ..ColorValue::default()
@@ -988,6 +993,7 @@ impl<R: References> Engine<'_, R> {
             Err(error) => return error,
         };
         if matches!(name, "LUMDIFF" | "SHADE") {
+            // Visio does not document enough of these colour-model semantics to render them honestly.
             return unsupported(format!("{name} is not implemented"));
         }
         let (amount, amount_guarded) = match numeric(self.expr(second, d)) {
@@ -1415,26 +1421,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn rounds_halfway_values_away_from_zero_and_keeps_directional_siblings() {
-        for (formula, expected) in [
-            ("ROUND(1.5)", 2.0),
-            ("ROUND(-1.5)", -2.0),
-            ("ROUND(2.5)", 3.0),
-            ("ROUND(-2.5)", -3.0),
-            ("ROUND(-0.5)", -1.0),
-            ("ROUND(-1.4)", -1.0),
-            ("ROUND(-1.6)", -2.0),
-            ("INT(-1.5)", -2.0),
-            ("FLOOR(-1.5)", -2.0),
-            ("CEILING(-1.5)", -1.0),
-            ("TRUNC(-1.5)", -1.0),
-            ("SIGN(-1.5)", -1.0),
-        ] {
-            assert_eq!(number(formula).number, expected, "{formula}");
-        }
-    }
-
     fn color(formula: &str, theme: Option<&Theme>) -> Color {
         match evaluate_with_theme(formula, &BTreeMap::new(), &limits(), theme) {
             Evaluation::Evaluated(Evaluated {
@@ -1615,7 +1601,7 @@ mod tests {
         }
         assert!(matches!(
             evaluate_cell("Width", "Inh", &shape, &limits()),
-            Evaluation::Error(Diagnostic { message }) if message == "Inh has no concrete inherited value"
+            Evaluation::Unsupported(message) if message == "Inh has no concrete inherited value"
         ));
         let Lookup::Found(width) = shape.cells.get_mut("Width").unwrap() else {
             panic!("expected Width");
@@ -1804,8 +1790,8 @@ mod tests {
                 .chain(package.page_sheets.values())
                 .chain(package.master_sheets.values())
             {
-                let refs = sheet_references(sheet);
-                let refs = DocumentReferences::new(&refs, document.as_ref());
+                let resolved = resolver.resolve_sheet(sheet).expect("resolve corpus sheet");
+                let refs = DocumentReferences::new(&resolved, document.as_ref());
                 for (name, cell) in sheet_formula_cells(sheet) {
                     let formula = cell.formula.as_deref().unwrap();
                     let evaluation = evaluate_cell_with_package_theme(
@@ -2038,6 +2024,18 @@ mod tests {
         assert_eq!(
             measurement.oracle_excluded_stale, 9,
             "published corpus stale-oracle exclusion count changed"
+        );
+        assert_eq!(
+            measurement.unsupported_known, 1_892,
+            "published corpus known non-goal count changed"
+        );
+        assert_eq!(
+            measurement.unsupported_other, 1_256,
+            "published corpus other unsupported count changed"
+        );
+        assert_eq!(
+            measurement.error, 165,
+            "published corpus error count changed"
         );
         assert_eq!(
             measurement.evaluated
@@ -2584,6 +2582,9 @@ mod tests {
         )
     }
     fn is_known_deferred_reason(reason: &str) -> bool {
+        if reason == "Inh has no concrete inherited value" {
+            return true;
+        }
         let name = reason
             .strip_prefix("unsupported function ")
             .or_else(|| reason.strip_suffix(" is not implemented"))

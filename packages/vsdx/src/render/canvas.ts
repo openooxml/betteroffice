@@ -7,8 +7,16 @@ export function sizeCanvasForPage(canvas: PageCanvasLike, list: Pick<PageDisplay
   canvas.width = Math.round(list.width * scale * dpr); canvas.height = Math.round(list.height * scale * dpr);
   canvas.style.width = `${list.width * scale}px`; canvas.style.height = `${list.height * scale}px`;
 }
+export interface ModelPoint { x: number; y: number; }
+export function canvasPointToModel(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {
+  const determinant = paintTransform.a * paintTransform.d - paintTransform.b * paintTransform.c;
+  if (!Number.isFinite(determinant) || determinant === 0) throw new Error('VSDX paint transform is not invertible');
+  if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX canvas scale must be a positive number');
+  const px = x / scale - paintTransform.e, py = y / scale - paintTransform.f;
+  return { x: (paintTransform.d * px - paintTransform.c * py) / determinant, y: (paintTransform.a * py - paintTransform.b * px) / determinant };
+}
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 3) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   ctx.save();
   try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) await paintPrimitive(ctx, primitive, list.paintTransform, options, 0); }
   finally { ctx.restore(); }

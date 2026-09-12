@@ -29,3 +29,6 @@ vsdx-eval.workspace = true
 vsdx-resolve.workspace = true
 wasm-bindgen = { version = "0.2", optional = true }
 yrs = "0.27.3"
+
+[dev-dependencies]
+vsdx-render.workspace = true

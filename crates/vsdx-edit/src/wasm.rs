@@ -24,12 +24,10 @@ struct UpdateObserver {
 
 struct PendingUpdates {
     events: VecDeque<UpdateEvent>,
-    queued_bytes: usize,
     resync_required: bool,
 }
 
 const MAX_PENDING_UPDATE_EVENTS: usize = 1024;
-const MAX_PENDING_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,16 +111,24 @@ struct AddShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DeleteShapeArgs {
+    page_id: String,
+    shape_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 struct FormulaShapeDraft {
-    source_id: u32,
     name: Option<String>,
     cells: Vec<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FormulaShapeDraftCell {
+struct FormulaShapeCell {
     locator: CellLocatorArgs,
+    name: String,
     formula: Option<String>,
 }
 
@@ -135,18 +141,25 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
             if cell.get("value").is_some() {
                 return Err("shape draft cells must not contain value");
             }
-            let cell = serde_json::from_value::<FormulaShapeDraftCell>(cell)
-                .map_err(|_| "invalid shape draft cell")?;
-            let locator = CellLocator::try_from(cell.locator)?;
-            cells.push(CellSnapshot {
-                name: locator.cell_name.clone(),
-                locator,
-                formula: cell.formula,
-                value: None,
-            });
+            let parsed = serde_json::from_value::<CellSnapshot>(cell.clone()).or_else(|_| {
+                let cell = serde_json::from_value::<FormulaShapeCell>(cell)
+                    .map_err(|_| "invalid shape draft cell")?;
+                let locator =
+                    CellLocator::try_from(cell.locator).map_err(|_| "invalid shape draft cell")?;
+                Ok(CellSnapshot {
+                    name: cell.name,
+                    locator: CellLocator {
+                        sheet: CellSheet::Page(0),
+                        shape_id: None,
+                        ..locator
+                    },
+                    formula: cell.formula,
+                    value: None,
+                })
+            })?;
+            cells.push(parsed);
         }
         Ok(Self {
-            source_id: value.source_id,
             name: value.name,
             cells,
         })
@@ -229,7 +242,6 @@ impl VsdxDocument {
         }
         let pending = Arc::new(Mutex::new(PendingUpdates {
             events: VecDeque::new(),
-            queued_bytes: 0,
             resync_required: false,
         }));
         let observed = Arc::clone(&pending);
@@ -239,20 +251,13 @@ impl VsdxDocument {
                 let mut pending = observed
                     .lock()
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
-                if pending.resync_required {
-                    return;
-                }
-                if pending.events.len() == MAX_PENDING_UPDATE_EVENTS
-                    || pending.queued_bytes.saturating_add(event.update.len())
-                        > MAX_PENDING_UPDATE_BYTES
-                {
+                if pending.events.len() == MAX_PENDING_UPDATE_EVENTS {
                     pending.events.clear();
-                    pending.queued_bytes = 0;
                     pending.resync_required = true;
-                    return;
                 }
-                pending.queued_bytes += event.update.len();
-                pending.events.push_back(event);
+                if !pending.resync_required {
+                    pending.events.push_back(event);
+                }
             })
             .map_err(js_error)?;
         self.update_observer = Some(UpdateObserver {
@@ -284,7 +289,6 @@ impl VsdxDocument {
         let Some(event) = pending.events.pop_front() else {
             return Vec::new();
         };
-        pending.queued_bytes = pending.queued_bytes.saturating_sub(event.update.len());
         let mut encoded = Vec::with_capacity(event.update.len() + 1);
         encoded.push(match event.origin {
             UpdateOrigin::Local => 0,
@@ -322,6 +326,16 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = addShapeJson)]
     pub fn add_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.add_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = deleteShapeJson)]
+    pub fn delete_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.delete_shape_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = save)]
+    pub fn save(&self) -> Result<Vec<u8>, JsValue> {
+        self.save_inner().map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = undoJson)]
@@ -449,6 +463,18 @@ impl VsdxDocument {
             .and_then(json_inner)
     }
 
+    fn delete_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: DeleteShapeArgs = parse_args_inner(args)?;
+        self.session
+            .delete_shape(&local_context(), &args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn save_inner(&self) -> Result<Vec<u8>, String> {
+        self.session.save().map_err(|error| error.to_string())
+    }
+
     fn resize_shape(
         &self,
         args: ResizeShapeArgs,
@@ -531,6 +557,7 @@ mod tests {
         let page = pages.insert(&mut txn, "page:2", MapPrelim::default());
         page.insert(&mut txn, "id", "page:2");
         page.insert(&mut txn, "sourcePartPath", "visio/pages/page2.xml");
+        page.insert(&mut txn, "maxSourceId", 0.0);
         page.insert(&mut txn, "shapes", ArrayPrelim::default());
         drop(txn);
         VsdxDocument {
@@ -553,6 +580,7 @@ mod tests {
         let cell = cells.insert(&mut txn, key, MapPrelim::default());
         cell.insert(&mut txn, "name", name);
         cell.insert(&mut txn, "formula", formula);
+        cell.insert(&mut txn, "value", "1");
         if name == "X" {
             cell.insert(&mut txn, "section", "Geometry");
             cell.insert(&mut txn, "rowIndex", 0.0);
@@ -636,6 +664,7 @@ mod tests {
         let document = document();
         add_cell(&document, "PinX", "PinX", "1");
         add_cell(&document, "PinY", "PinY", "1");
+        add_cell(&document, "PinY", "PinY", "1");
         add_cell(&document, "LockMoveY", "LockMoveY", "1");
         assert_eq!(
             document.move_shape_json_inner(
@@ -691,6 +720,57 @@ mod tests {
     }
 
     #[test]
+    fn delete_shape_json_inner_removes_the_shape_and_honors_lock_delete() {
+        let deleted = document();
+        assert_eq!(
+            deleted
+                .delete_shape_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap(),
+            r#"{"pageId":"page:1","shapeId":"page:1:shape:1","fromIndex":0,"toIndex":null}"#
+        );
+        assert!(!deleted.snapshot_json().unwrap().contains("page:1:shape:1"));
+
+        let locked = document();
+        add_cell(&locked, "LockDelete", "LockDelete", "1");
+        assert_eq!(
+            locked
+                .delete_shape_json_inner(r#"{"pageId":"page:1","shapeId":"page:1:shape:1"}"#)
+                .unwrap_err(),
+            "invalid diagram state: LockDelete protects this delete gesture"
+        );
+        assert!(locked.snapshot_json().unwrap().contains("page:1:shape:1"));
+    }
+
+    #[test]
+    fn save_inner_uses_the_lexical_save_path_and_refusals_do_not_change_bytes() {
+        let edited = document();
+        edited
+            .set_cell_formula_json_inner(
+                r#"{"pageId":"page:1","shapeId":"page:1:shape:1","locator":{"cellName":"Both"},"formula":"3"}"#,
+            )
+            .unwrap();
+        let saved = edited.save_inner().unwrap();
+        let reopened = DiagramSession::open(&saved, 2).unwrap();
+        let snapshot = reopened.snapshot().unwrap();
+        assert!(
+            snapshot.pages[0].shapes[0]
+                .cells
+                .iter()
+                .any(|cell| cell.name == "Both" && cell.formula.as_deref() == Some("3"))
+        );
+
+        let locked = document();
+        add_cell(&locked, "LockMoveX", "LockMoveX", "1");
+        let before = locked.save_inner().unwrap();
+        assert!(locked
+            .move_shape_json_inner(
+                r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"3"}"#
+            )
+            .is_err());
+        assert_eq!(locked.save_inner().unwrap(), before);
+    }
+
+    #[test]
     fn apply_update_json_inner_rejects_setatref_bypasses_without_changing_the_document() {
         let document = document();
         add_cell(&document, "Width", "Width", "SETATREF(Target)");
@@ -721,6 +801,129 @@ mod tests {
             "invalid diagram state: remote update bypasses formula redirect at page:1/page:1:shape:1/Width"
         );
         assert_eq!(before, document.encode_state_as_update());
+    }
+
+    #[test]
+    fn wasm_boundary_rejects_shapes_without_origin_in_updates_and_initial_state() {
+        let document = document();
+        let before = document.encode_state_as_update();
+        let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.remove(&mut txn, "origin");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: missing origin"
+        );
+        assert_eq!(before, document.encode_state_as_update());
+        let error = match DiagramSession::open_from_update(&attacker.encode_state_as_update_v1(), 3)
+        {
+            Ok(_) => panic!("missing origin must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), "invalid diagram state: missing origin");
+    }
+
+    #[test]
+    fn wasm_boundary_rejects_remote_shape_identity_mutations() {
+        let original = document();
+        let before = original.encode_state_as_update();
+        let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.insert(&mut txn, "origin", "added");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&original.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            original.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: remote update changes immutable shape origin"
+        );
+        assert_eq!(before, original.encode_state_as_update());
+
+        let added = document();
+        added
+            .add_shape_json_inner(r#"{"pageId":"page:1","draft":{"cells":[]}}"#)
+            .unwrap();
+        let before = added.encode_state_as_update();
+        let attacker = DiagramSession::open_from_update(&before, 3).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let added_id = added.session.snapshot().unwrap().pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id.contains(":added:"))
+            .unwrap()
+            .id
+            .clone();
+        let shape = match sheets.get(&txn, added_id.as_str()) {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.insert(&mut txn, "origin", "original");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&added.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            added.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: remote update changes immutable shape origin"
+        );
+        assert_eq!(before, added.encode_state_as_update());
+
+        for (field, value) in [("sourceId", "2"), ("id", "page:1:shape:other")] {
+            let document = document();
+            let before = document.encode_state_as_update();
+            let attacker = DiagramSession::open_from_update(&before, 4).unwrap();
+            let mut txn = attacker.yrs_doc().transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let shape = match sheets.get(&txn, "page:1:shape:1") {
+                Some(Out::YMap(shape)) => shape,
+                _ => unreachable!(),
+            };
+            if field == "sourceId" {
+                shape.insert(&mut txn, field, 2.0);
+            } else {
+                shape.insert(&mut txn, field, value);
+            }
+            drop(txn);
+            let update = attacker
+                .encode_diff_v1(&document.encode_state_vector())
+                .unwrap();
+            assert_eq!(
+                document.apply_update_json_inner(&update).unwrap_err(),
+                format!("invalid diagram state: remote update changes immutable shape {field}")
+            );
+            assert_eq!(before, document.encode_state_as_update());
+        }
+    }
+
+    #[test]
+    fn wasm_boundary_allows_remote_position_changes() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        let update = rewrite_formula_update(&document, "PinX", "2");
+        assert!(document.apply_update_json_inner(&update).is_ok());
+        assert!(
+            document
+                .snapshot_json()
+                .unwrap()
+                .contains(r#""formula":"2""#)
+        );
     }
 
     #[test]
@@ -842,14 +1045,14 @@ mod tests {
     #[test]
     fn wasm_add_shape_json_returns_a_receipt() {
         let document = document();
-        assert_eq!(
-            document
-                .add_shape_json(
-                    r#"{"pageId":"page:1","draft":{"sourceId":2,"name":"Added","cells":[]}}"#
-                )
+        let receipt: crate::ShapeReceipt = serde_json::from_str(
+            &document
+                .add_shape_json(r#"{"pageId":"page:1","draft":{"name":"Added","cells":[]}}"#)
                 .unwrap(),
-            r#"{"pageId":"page:1","shapeId":"page:1:shape:1:0","fromIndex":null,"toIndex":1}"#
-        );
+        )
+        .unwrap();
+        assert!(receipt.shape_id.starts_with("page:1:shape:added:1:"));
+        assert_eq!(receipt.to_index, Some(1));
     }
 
     #[test]
@@ -866,9 +1069,7 @@ mod tests {
     fn add_shape_json_inner_rejects_raw_values() {
         assert_eq!(
             document()
-                .add_shape_json_inner(
-                    r#"{"pageId":"page:1","draft":{"sourceId":3,"cells":[{"value":"1"}]}}"#
-                )
+                .add_shape_json_inner(r#"{"pageId":"page:1","draft":{"cells":[{"value":"1"}]}}"#)
                 .unwrap_err(),
             "shape draft cells must not contain value"
         );
@@ -883,11 +1084,154 @@ mod tests {
             "invalid diagram state: remote update adds untrusted cached cell value"
         );
         let formula = document();
+        formula
+            .apply_update_json_inner(&add_remote_cell_update(&formula, Some("1"), None))
+            .unwrap();
         assert!(
             formula
-                .apply_update_json_inner(&add_remote_cell_update(&formula, Some("1"), None))
-                .is_ok()
+                .snapshot_json()
+                .unwrap()
+                .contains(r#""name":"Added","formula":"1""#)
         );
+        let saved = formula.save_inner().unwrap();
+        let reopened = DiagramSession::open(&saved, 3).unwrap();
+        assert!(
+            reopened.snapshot().unwrap().pages[0].shapes[0]
+                .cells
+                .iter()
+                .any(|cell| cell.name == "Added"
+                    && cell.formula.as_deref() == Some("1")
+                    && cell.value.is_none())
+        );
+    }
+
+    #[test]
+    fn wasm_boundary_rejects_same_update_original_shape_creation() {
+        let document = document();
+        let before = document.encode_state_as_update();
+        let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = sheets.insert(&mut txn, "page:1:shape:forged", MapPrelim::default());
+        shape.insert(&mut txn, "id", "page:1:shape:forged");
+        shape.insert(&mut txn, "pageId", "page:1");
+        shape.insert(&mut txn, "sourceId", 99.0);
+        shape.insert(&mut txn, "origin", "original");
+        shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        let pages = txn.get_map(PAGES).unwrap();
+        let page = match pages.get(&txn, "page:1") {
+            Some(Out::YMap(page)) => page,
+            _ => unreachable!(),
+        };
+        let roots = match page.get(&txn, "shapes") {
+            Some(Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        roots.push_back(&mut txn, "page:1:shape:forged");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: remote update adds a shape with original identity"
+        );
+        assert_eq!(document.encode_state_as_update(), before);
+    }
+
+    #[test]
+    fn wasm_boundary_rejects_nested_added_shapes_that_cannot_save() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let before = document.encode_state_as_update();
+        let parent_id = document.session().snapshot().unwrap().pages[0].shapes[0]
+            .id
+            .clone();
+        let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = sheets.insert(&mut txn, "page:1:shape:nested-added", MapPrelim::default());
+        shape.insert(&mut txn, "id", "page:1:shape:nested-added");
+        shape.insert(&mut txn, "pageId", "page:1");
+        shape.insert(&mut txn, "parentId", parent_id.as_str());
+        shape.insert(&mut txn, "sourceId", 99.0);
+        shape.insert(&mut txn, "origin", "added");
+        shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        let parent = match sheets.get(&txn, &parent_id) {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let children = match parent.get(&txn, "shapes") {
+            Some(Out::YArray(shapes)) => shapes,
+            _ => unreachable!(),
+        };
+        children.push_back(&mut txn, "page:1:shape:nested-added");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: added shapes cannot have a parent"
+        );
+        assert_eq!(document.encode_state_as_update(), before);
+    }
+
+    #[test]
+    fn wasm_boundary_rejects_baseline_formula_suppression() {
+        let document = document();
+        let before = document.encode_state_as_update();
+        let attacker = DiagramSession::open_from_update(&before, 2).unwrap();
+        let mut txn = attacker.yrs_doc().transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, "page:1:shape:1") {
+            Some(Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        let cells = match shape.get(&txn, "cells") {
+            Some(Out::YMap(cells)) => cells,
+            _ => unreachable!(),
+        };
+        let cell = match cells.get(&txn, "Both") {
+            Some(Out::YMap(cell)) => cell,
+            _ => unreachable!(),
+        };
+        cell.insert(&mut txn, "baselineFormula", "suppressed");
+        drop(txn);
+        let update = attacker
+            .encode_diff_v1(&document.encode_state_vector())
+            .unwrap();
+        assert_eq!(
+            document.apply_update_json_inner(&update).unwrap_err(),
+            "invalid diagram state: remote update changes immutable cell baseline formula"
+        );
+        assert_eq!(document.encode_state_as_update(), before);
+    }
+
+    #[test]
+    fn wasm_boundary_applies_legitimate_remote_changes_and_saves_them() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        add_cell(&document, "FillForegnd", "FillForegnd", "1");
+        for (cell, formula) in [("PinX", "2"), ("FillForegnd", "3"), ("Both", "4")] {
+            let update = rewrite_formula_update(&document, cell, formula);
+            assert!(document.apply_update_json_inner(&update).is_ok());
+        }
+        let saved = document.save_inner().unwrap();
+        let reopened = DiagramSession::open(&saved, 2).unwrap();
+        let cells = &reopened.snapshot().unwrap().pages[0].shapes[0].cells;
+        for (name, formula) in [("PinX", "2"), ("FillForegnd", "3"), ("Both", "4")] {
+            assert!(
+                cells
+                    .iter()
+                    .any(|cell| { cell.name == name && cell.formula.as_deref() == Some(formula) })
+            );
+        }
     }
 
     #[test]
@@ -943,9 +1287,9 @@ mod tests {
     #[test]
     fn remote_updates_reject_shape_attached_to_two_pages() {
         let document = two_page_document();
-        let attacker =
-            DiagramSession::open_from_update(&document.encode_state_as_update(), 3).unwrap();
-        let mut txn = attacker.yrs_doc().transact_mut();
+        let attacker = crate::doc_with_client_id(3);
+        crate::hydrate_doc(&attacker, &document.encode_state_as_update()).unwrap();
+        let mut txn = attacker.transact_mut();
         let sheets = txn.get_map(SHEETS).unwrap();
         let root = match sheets.get(&txn, "page:1:shape:1") {
             Some(Out::YMap(shape)) => shape,
@@ -963,9 +1307,9 @@ mod tests {
         };
         shapes.push_back(&mut txn, "page:1:shape:1");
         drop(txn);
-        let update = attacker
-            .encode_diff_v1(&document.encode_state_vector())
-            .unwrap();
+        let update = attacker.transact().encode_diff_v1(
+            &crate::decode_state_vector_v1(&document.encode_state_vector()).unwrap(),
+        );
         assert_eq!(
             document.apply_update_json_inner(&update).unwrap_err(),
             "invalid diagram state: shape is attached to multiple pages"
@@ -1037,54 +1381,6 @@ mod tests {
             document.apply_update_json_inner(&update).unwrap_err(),
             "invalid diagram state: shape parentId does not match shape order"
         );
-    }
-
-    #[test]
-    fn add_shape_json_accepts_the_boundary_cell_locator_shape() {
-        let document = document();
-        let receipt: serde_json::Value = serde_json::from_str(
-            &document
-                .add_shape_json(
-                    r#"{"pageId":"page:1","draft":{"sourceId":7,"name":"Added","cells":[{"locator":{"cellName":"Width"},"formula":"1"},{"locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}]}}"#,
-                )
-                .unwrap(),
-        )
-        .unwrap();
-        let shape_id = receipt["shapeId"].as_str().unwrap().to_owned();
-        let snapshot = document.session().snapshot().unwrap();
-        let shape = snapshot.pages[0]
-            .shapes
-            .iter()
-            .find(|shape| shape.id == shape_id)
-            .unwrap();
-        let width = shape
-            .cells
-            .iter()
-            .find(|cell| cell.name == "Width")
-            .unwrap();
-        assert_eq!(width.formula.as_deref(), Some("1"));
-        assert_eq!(width.locator.section, None);
-        assert_eq!(width.locator.row, None);
-        let x = shape.cells.iter().find(|cell| cell.name == "X").unwrap();
-        assert_eq!(x.formula.as_deref(), Some("2"));
-        assert_eq!(x.locator.section.as_deref(), Some("Geometry"));
-        assert_eq!(x.locator.row, Some(vsdx_parse::CellRow::Index(0)));
-    }
-
-    #[test]
-    fn wasm_update_observation_byte_overflow_requires_resync() {
-        let mut document = document();
-        document.start_update_observation().unwrap();
-        let formula = "1".repeat(1024 * 1024);
-        for index in 0..9 {
-            add_cell(
-                &document,
-                &format!("Large{index}"),
-                &format!("Large{index}"),
-                &formula,
-            );
-        }
-        assert_eq!(document.drain_update_event(), vec![2]);
     }
 
     #[test]

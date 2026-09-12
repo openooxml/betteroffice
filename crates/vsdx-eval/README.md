@@ -19,10 +19,10 @@ theme are present.
 The following residual categories are intentionally outside this profile:
 
 - Event cells (937): event and recalculation plumbing is not display evaluation.
-- `Inh` in raw catalog sheets (500): catalog sheets have no inheritance graph, so
-  resolving these values would manufacture results.
-- Missing `DocLangID` (325): locale-sensitive evaluation is not attempted without
-  the required document language context.
+- `Inh` has no concrete inherited value (825): catalog sheets have no inheritance
+  graph, so resolving these values would manufacture results, and inheritance chains
+  that exhaust before reaching a concrete value — including the `DocLangID` locale
+  cells — have nothing to return.
 - `THEMEVAL` without host context or a theme (306): theme values require both to be
   meaningful.
 - `SHADE` and `LUMDIFF`: their Visio semantics are undocumented, so they remain

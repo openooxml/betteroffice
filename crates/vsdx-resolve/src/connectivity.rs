@@ -161,20 +161,32 @@ pub struct PageConnectivity {
 }
 
 impl<'a> Resolver<'a> {
-    /// Resolves page glue. A shape is 1D when its effective `OneD` ShapeSheet cell is nonzero,
-    /// as defined by MS-VSDX's Shape element/OneD cell semantics.
+    /// Resolves page glue. A shape is 1D when `OneD` is nonzero or its endpoints resolve.
     pub fn resolve_page_connectivity(
         &self,
         page_part: &str,
+    ) -> Result<PageConnectivity, crate::ResolveError> {
+        self.package()
+            .page_contents
+            .get(page_part)
+            .ok_or_else(|| crate::ResolveError::MissingPage(page_part.into()))?;
+        let shapes = self.resolve_page_shapes(page_part)?;
+        self.resolve_page_connectivity_with(page_part, &shapes)
+    }
+
+    /// Resolves page glue using already-resolved page shapes.
+    pub fn resolve_page_connectivity_with(
+        &self,
+        page_part: &str,
+        shapes: &BTreeMap<u32, ResolvedShape>,
     ) -> Result<PageConnectivity, crate::ResolveError> {
         let page = self
             .package()
             .page_contents
             .get(page_part)
             .ok_or_else(|| crate::ResolveError::MissingPage(page_part.into()))?;
-        let shapes = self.resolve_page_shapes(page_part)?;
         let mut out = PageConnectivity::default();
-        for (id, shape) in &shapes {
+        for (id, shape) in shapes {
             if is_one_d(shape) {
                 out.connectors.insert(
                     *id,
@@ -188,9 +200,9 @@ impl<'a> Resolver<'a> {
                 );
             }
         }
-        let transforms = scene_transforms(page, &shapes, |_, shape, name| number(shape, name));
+        let transforms = scene_transforms(page, shapes, |_, shape, name| number(shape, name));
         for connect in page.connects() {
-            self.add_connectivity_record(connect, &shapes, &transforms, &mut out);
+            self.add_connectivity_record(connect, shapes, &transforms, &mut out);
         }
         Ok(out)
     }
@@ -305,7 +317,12 @@ impl<'a> Resolver<'a> {
 }
 
 fn is_one_d(shape: &ResolvedShape) -> bool {
-    number(shape, "OneD").is_some_and(|value| value != 0.0)
+    match number(shape, "OneD") {
+        Some(value) => value != 0.0,
+        None => ["BeginX", "BeginY", "EndX", "EndY"]
+            .into_iter()
+            .all(|name| number(shape, name).is_some()),
+    }
 }
 fn endpoint(shape: &ResolvedShape, x: &str, y: &str) -> Option<ScenePoint> {
     Some(ScenePoint {
@@ -375,7 +392,10 @@ fn endpoint_name(name: &str) -> Option<ConnectorEndpoint> {
     }
 }
 fn connection_row(name: &str) -> Option<u32> {
-    name.strip_prefix("Connections.X")?.parse().ok()
+    name.strip_prefix("Connections.X")?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)
 }
 fn connection_point(
     shape: &ResolvedShape,

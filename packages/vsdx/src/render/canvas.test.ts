@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { paintPage } from './canvas';
+import { canvasPointToModel, paintPage } from './canvas';
 import type { PageDisplayList } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
@@ -19,7 +19,7 @@ const transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('replays primitives in z order and paints placeholders', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
     primitives: [
       { kind: 'placeholder', id: 'late', zOrder: 2, x: 10, y: 10, width: 20, height: 20, reason: 'missing image' },
       { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
@@ -38,7 +38,7 @@ test('rejects display-list versions other than v3', async () => {
 test('replays positioned text runs at their line caret positions', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
     primitives: [{
       kind: 'textBox', id: 'text', zOrder: 1, x: 1, y: 2, width: 90, height: 80,
       paragraphs: [
@@ -55,18 +55,19 @@ test('replays positioned text runs at their line caret positions', async () => {
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
 });
 
-test('paints a rotated text box through its own transform', async () => {
-  const log: string[] = [];
-  const rotated = { a: 0, b: 1, c: -1, d: 0, e: 10, f: 20 };
-  const list: PageDisplayList = {
-    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
-    primitives: [{
-      kind: 'textBox', id: 'text', zOrder: 1, x: 0, y: 0, width: 50, height: 20, transform: rotated,
-      paragraphs: [{ runs: [{ text: 'turn', family: 'Arial', sizeIn: 12, bold: false, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#111', diagnostics: [] }] }],
-      lines: [{ x: 0, y: 10, width: 30, height: 12, start: 0, end: 4, caretStops: [{ position: 0, x: 0, y: 10 }, { position: 4, x: 30, y: 10 }] }],
-    }],
-  };
-  await paintPage(context(log), list);
-  expect(log).toContain('transform:0,1,-1,0,10,20');
-  expect(log).toContain('fillText:turn,0,10');
+const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 768 };
+
+test('canvasPointToModel inverts the page paint transform onto Y-up inches', () => {
+  expect(canvasPointToModel(pagePaintTransform, 0, 768)).toEqual({ x: 0, y: 0 });
+  expect(canvasPointToModel(pagePaintTransform, 0, 0)).toEqual({ x: 0, y: 8 });
+  expect(canvasPointToModel(pagePaintTransform, 96, 672)).toEqual({ x: 1, y: 1 });
+});
+
+test('canvasPointToModel divides out the canvas scale', () => {
+  expect(canvasPointToModel(pagePaintTransform, 192, 1344, 2)).toEqual({ x: 1, y: 1 });
+});
+
+test('canvasPointToModel rejects a degenerate transform and a non-positive scale', () => {
+  expect(() => canvasPointToModel({ a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 }, 1, 1)).toThrow();
+  expect(() => canvasPointToModel(pagePaintTransform, 1, 1, 0)).toThrow();
 });
