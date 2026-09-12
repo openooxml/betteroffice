@@ -3,9 +3,9 @@ import type { YrsSession } from '@betteroffice/docx/yrs';
 import { performYrsHistoryAction } from './yrsCommands';
 
 describe('performYrsHistoryAction', () => {
-  test('reports the mutated history story instead of the active selection story', () => {
+  test('reports the story the undo changed instead of the active selection story', () => {
     const session = {
-      historyStory: () => 'body',
+      historyStories: () => ['body'],
       selection: () => ({
         anchor: { story: 'fn:2', paraId: 'note', offset: 0 },
         head: { story: 'fn:2', paraId: 'note', offset: 0 },
@@ -18,7 +18,6 @@ describe('performYrsHistoryAction', () => {
 
   test('does not report a dirty story when history is unchanged', () => {
     const session = {
-      historyStory: () => 'body',
       selection: () => null,
       redo: () => false,
     } as unknown as YrsSession;

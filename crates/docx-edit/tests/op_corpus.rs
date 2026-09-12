@@ -1073,7 +1073,7 @@ fn dedupe_para_ids_first_occurrence_keeps_its_id() {
 #[test]
 fn undo_tracks_local_only_with_barriers() {
     let (doc, _) = doc_with("base");
-    let mut undo = doc.undo_scope(&["body"]).unwrap();
+    let mut undo = doc.undo_manager();
     assert!(!undo.can_undo());
 
     // Agent and system edits are untracked.

@@ -66,8 +66,8 @@ export async function rasterizeDisplayPageToBackBuffer(
   const ctx = canvas.getContext('2d') as PageCanvasContext | null;
   if (!ctx) throw new Error('Canvas 2D context is unavailable');
   const scale = devicePixelRatio * zoom;
-  const width = page.width * scale;
-  const height = page.height * scale;
+  const width = Math.ceil(page.width * scale);
+  const height = Math.ceil(page.height * scale);
   if (canvas.width !== width) canvas.width = width;
   if (canvas.height !== height) canvas.height = height;
   ctx.resetTransform();
@@ -161,8 +161,8 @@ export function sizeCanvasForPage(
   zoom: number = 1
 ): void {
   const backingScale = devicePixelRatio * zoom;
-  canvas.width = page.width * backingScale;
-  canvas.height = page.height * backingScale;
+  canvas.width = Math.ceil(page.width * backingScale);
+  canvas.height = Math.ceil(page.height * backingScale);
   canvas.style.width = `${page.width * zoom}px`;
   canvas.style.height = `${page.height * zoom}px`;
   ctx.scale(backingScale, backingScale);

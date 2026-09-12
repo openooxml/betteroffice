@@ -343,7 +343,7 @@ fn authored_header_footer_refs(properties: &AuthoredSectionProperties) -> Option
 }
 
 fn twips_to_pixels(twips: f64) -> f64 {
-    (twips / 1440.0 * 96.0).round()
+    twips / 15.0
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -854,6 +854,22 @@ mod tests {
         assert_eq!(effective.header_default.as_deref(), Some("header-a"));
         assert_eq!(effective.header_even.as_deref(), Some("header-even-b"));
         assert_eq!(effective.footer_default.as_deref(), Some("footer-a"));
+    }
+
+    #[test]
+    fn section_geometry_retains_subpixel_page_and_margin_sizes() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "bodyStory":"body","regions":{"sections":[{"sectionId":"main","properties":{
+                "pageWidth":11900,"pageHeight":16840,"marginTop":1871,"headerDistance":709
+            }}]},"renderEnv":{}
+        }))
+        .unwrap();
+        let (_, regions, _, _, _, _) = request.split();
+        let section = &regions.sections[0];
+        assert_eq!(section.page_size.as_ref().unwrap().w, 11900.0 / 15.0);
+        assert_eq!(section.page_size.as_ref().unwrap().h, 16840.0 / 15.0);
+        assert_eq!(section.margins.as_ref().unwrap().top, 1871.0 / 15.0);
+        assert_eq!(section.header_distance, Some(709.0 / 15.0));
     }
 
     #[test]
