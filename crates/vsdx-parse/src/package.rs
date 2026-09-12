@@ -100,17 +100,19 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     let page_part_ids = catalog_part_ids(
         xml_parts.get(pages_part_path.as_deref().unwrap_or("")),
         "Page",
+        pages_part_path.as_deref().unwrap_or(""),
         relationships
             .get(pages_part_path.as_deref().unwrap_or(""))
             .map(Vec::as_slice),
-    );
+    )?;
     let master_part_ids = catalog_part_ids(
         xml_parts.get(masters_part_path.as_deref().unwrap_or("")),
         "Master",
+        masters_part_path.as_deref().unwrap_or(""),
         relationships
             .get(masters_part_path.as_deref().unwrap_or(""))
             .map(Vec::as_slice),
-    );
+    )?;
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
     Ok(VsdxPackage {
@@ -142,26 +144,40 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
 fn catalog_part_ids(
     root: Option<&XmlElement>,
     item: &str,
+    part: &str,
     relationships: Option<&[Relationship]>,
-) -> BTreeMap<String, u32> {
-    root.into_iter()
-        .flat_map(|root| root.children_named(item))
-        .filter_map(|element| {
-            let id = element.attribute("ID")?.parse().ok()?;
-            let relationship_id = element
-                .attributes
-                .iter()
-                .find(|(name, _)| name == "r:id" || name == "id")?
-                .1
-                .as_str();
-            let path = relationships?
-                .iter()
-                .find(|relationship| relationship.id == relationship_id)?
-                .resolved_target
-                .clone()?;
-            Some((path, id))
-        })
-        .collect()
+) -> Result<BTreeMap<String, u32>, VsdxError> {
+    let mut ids = BTreeMap::new();
+    for element in root.into_iter().flat_map(|root| root.children_named(item)) {
+        let Some(id) = element.attribute("ID").and_then(|value| value.parse().ok()) else {
+            continue;
+        };
+        let Some(relationship_id) = element
+            .attributes
+            .iter()
+            .find(|(name, _)| name == "r:id" || name == "id")
+            .map(|(_, value)| value.as_str())
+        else {
+            continue;
+        };
+        let resolved = relationships
+            .into_iter()
+            .flatten()
+            .find(|relationship| relationship.id == relationship_id)
+            .and_then(|relationship| relationship.resolved_target.clone());
+        match resolved {
+            Some(path) => {
+                ids.insert(path, id);
+            }
+            None => {
+                return Err(VsdxError::InvalidRelationship {
+                    source_part: part.to_owned(),
+                    target: relationship_id.to_owned(),
+                });
+            }
+        }
+    }
+    Ok(ids)
 }
 
 fn parse_part_sheets(
@@ -770,6 +786,36 @@ mod tests {
             Some("visio/pages/pages.xml")
         );
         assert!(parsed.page_part_paths.is_empty());
+    }
+
+    #[test]
+    fn rejects_page_catalog_entries_that_cannot_resolve() {
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec()),
+            ("visio/pages/pages.xml".to_owned(), br#"<Pages><Page ID='1' r:id='rId1'/></Pages>"#.to_vec()),
+        ]).unwrap();
+        assert!(matches!(
+            parse_vsdx(&package),
+            Err(VsdxError::InvalidRelationship { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_master_catalog_entries_that_cannot_resolve() {
+        let package = rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec()),
+            ("visio/document.xml".to_owned(), b"<VisioDocument/>".to_vec()),
+            ("visio/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/masters' Target='masters/masters.xml'/></Relationships>"#.to_vec()),
+            ("visio/masters/masters.xml".to_owned(), br#"<Masters><Master ID='1' r:id='rId1'/></Masters>"#.to_vec()),
+        ]).unwrap();
+        assert!(matches!(
+            parse_vsdx(&package),
+            Err(VsdxError::InvalidRelationship { .. })
+        ));
     }
 
     #[test]
