@@ -317,6 +317,7 @@ mod tests {
         for (id, page_id) in [("page:1:shape:1", "page:1"), ("page:1:shape:2", "page:1")] {
             let shape = sheets.insert(&mut txn, id, MapPrelim::default());
             shape.insert(&mut txn, "id", id);
+            shape.insert(&mut txn, "pageId", page_id);
             shape.insert(&mut txn, "sourceId", 1.0);
             shape.insert(&mut txn, "cells", MapPrelim::default());
             let page = match pages.get(&txn, page_id) {
@@ -366,6 +367,7 @@ mod tests {
         let sheets = txn.get_map(SHEETS).unwrap();
         let shape = sheets.insert(&mut txn, id, MapPrelim::default());
         shape.insert(&mut txn, "id", id);
+        shape.insert(&mut txn, "pageId", "page:1");
         shape.insert(&mut txn, "sourceId", 3.0);
         shape.insert(&mut txn, "parentId", parent_id);
         shape.insert(&mut txn, "cells", MapPrelim::default());
@@ -437,6 +439,7 @@ mod tests {
         }
         if let Some(formula) = formula {
             cell.insert(&mut txn, "formula", formula);
+            cell.insert(&mut txn, "baselineFormula", formula);
         }
         if let Some(value) = value {
             cell.insert(&mut txn, "value", value);
@@ -894,6 +897,31 @@ mod tests {
                 .as_deref(),
             Some("1")
         );
+    }
+
+    #[test]
+    fn remote_baseline_forgery_cannot_suppress_a_collaborative_edit() {
+        let session = session();
+        add_cell(&session, "Width", Some("1"), None);
+        session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "2",
+            )
+            .unwrap();
+        let peer = peer_doc(&session, 9);
+        write_peer_cell_field(&peer, "page:1:shape:1", "Width", "baselineFormula", "2");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert!(session.semantic_cell_edits().unwrap().iter().any(|edit| {
+            edit.locator.cell_name == "Width" && edit.formula.as_deref() == Some("2")
+        }));
     }
 
     #[test]

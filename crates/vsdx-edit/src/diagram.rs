@@ -169,6 +169,7 @@ fn seed_shape(
     Ok(())
 }
 
+/// Writes a cell that the package supplied, recording its formula as the save baseline.
 fn seed_cell(
     cells: &MapRef,
     txn: &mut TransactionMut<'_>,
@@ -176,6 +177,20 @@ fn seed_cell(
     formula: Option<&str>,
     value: Option<&str>,
 ) {
+    let cell = draft_cell(cells, txn, locator, formula, value);
+    if let Some(formula) = formula {
+        cell.insert(txn, "baselineFormula", formula);
+    }
+}
+
+/// Writes a cell that has no package counterpart, so it carries no save baseline.
+fn draft_cell(
+    cells: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    locator: &CellLocator,
+    formula: Option<&str>,
+    value: Option<&str>,
+) -> MapRef {
     let key = locator_key(locator);
     let cell = cells.insert(txn, key.as_str(), MapPrelim::default());
     cell.insert(txn, "name", locator.cell_name.as_str());
@@ -194,11 +209,11 @@ fn seed_cell(
     }
     if let Some(formula) = formula {
         cell.insert(txn, "formula", formula);
-        cell.insert(txn, "baselineFormula", formula);
     }
     if let Some(value) = value {
         cell.insert(txn, "value", value);
     }
+    cell
 }
 
 impl DiagramSession {
@@ -349,7 +364,7 @@ impl DiagramSession {
         }
         let cells = shape.insert(&mut txn, "cells", MapPrelim::default());
         for cell in &draft.cells {
-            seed_cell(
+            draft_cell(
                 &cells,
                 &mut txn,
                 &cell.locator,
@@ -485,6 +500,15 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
+    let before_baselines = baseline_formulas(before)?;
+    let after_baselines = baseline_formulas(staged)?;
+    for key in before_baselines.keys().chain(after_baselines.keys()) {
+        if before_baselines.get(key) != after_baselines.get(key) {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes the save baseline of {key}"
+            )));
+        }
+    }
     let before = protected_formulas(before)?;
     let after = protected_formulas(staged)?;
     for (key, formula) in before {
@@ -495,6 +519,24 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     Ok(())
+}
+
+/// Baselines come from the package seed alone; a peer that could write one could hide an edit.
+fn baseline_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut baselines = std::collections::BTreeMap::new();
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        let cells = map_map(&shape, &txn, "cells")?;
+        for (key, cell) in cells.iter(&txn) {
+            let Out::YMap(cell) = cell else { continue };
+            if let Some(baseline) = map_string(&cell, &txn, "baselineFormula") {
+                baselines.insert(format!("{shape_id}/{key}"), baseline);
+            }
+        }
+    }
+    Ok(baselines)
 }
 
 pub(crate) fn next_id_counter(doc: &Doc, client_id: u64) -> u64 {
