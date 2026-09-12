@@ -1,11 +1,15 @@
-use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedSection};
+use crate::{GeometryIssue, Lookup, RealizedGeometry, ResolvedRow, ResolvedSection};
 use ooxml_drawingml::GeometryPathCommand;
 
 pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
     let mut current = (0.0, 0.0);
-    let rows: Vec<_> = if section.row_order.is_empty() {
-        section.rows.values().collect()
+    let rows: Vec<&ResolvedRow> = if section.row_order.is_empty() {
+        let mut rows: Vec<&ResolvedRow> = section.rows.values().collect();
+        rows.sort_by(|left, right| {
+            numeric_row_index(&left.key).cmp(&numeric_row_index(&right.key))
+        });
+        rows
     } else {
         section
             .row_order
@@ -139,6 +143,13 @@ pub fn realize_geometry(section: &ResolvedSection) -> RealizedGeometry {
         }
     }
     out
+}
+
+/// Keys sort lexically, so `IX:10` would precede `IX:2` and displace relative rows.
+fn numeric_row_index(key: &str) -> (u32, &str) {
+    key.strip_prefix("IX:")
+        .and_then(|index| index.parse().ok())
+        .map_or((u32::MAX, key), |index| (index, ""))
 }
 
 fn emit_row(out: &mut RealizedGeometry, emit: impl FnOnce(&mut RealizedGeometry) -> bool) -> bool {
@@ -832,5 +843,36 @@ mod tests {
                 if (x - std::f64::consts::SQRT_2).abs() < 1e-12
                     && (y - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12
         )));
+    }
+
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order() {
+        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
+            (
+                key.to_owned(),
+                ResolvedRow {
+                    key: key.into(),
+                    ..resolved_row(ty, cells)
+                },
+            )
+        };
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "RelLineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:10", "RelLineTo", vec![cell("X", "0"), cell("Y", "1")]),
+            ]),
+        };
+        assert_eq!(
+            realize_geometry(&section).commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
     }
 }
