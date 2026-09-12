@@ -311,6 +311,36 @@ fn multi_run_line_takes_max_font_basis() {
     approx(line["lineHeight"].as_f64().unwrap(), 2.0 * LH, "24pt line");
 }
 
+#[test]
+fn a_shorter_font_does_not_add_leading_below_a_taller_font() {
+    let mut store = store();
+    store.register(NOTO_NASKH_ARABIC.to_vec()).unwrap();
+    let latin = json!({"kind": "text", "text": "x", "fontFamily": "Liberation Sans"});
+    let arabic = json!({"kind": "text", "text": "ا", "fontFamily": "Noto Naskh Arabic"});
+    for runs in [
+        json!([arabic, latin]),
+        json!([latin, arabic]),
+        json!([arabic, latin, arabic]),
+    ] {
+        let input = json!({
+            "block": {"kind": "paragraph", "runs": runs},
+            "maxWidth": 500,
+            "fontChains": {"liberation sans|0|0": [0], "noto naskh arabic|0|0": [1]},
+            "defaults": {"fontSize": 12, "fontFamily": "Liberation Sans"}
+        });
+        let out = measure_paragraph_json(&store, &input.to_string()).unwrap();
+        let result: Value = serde_json::from_str(&out).unwrap();
+        let line = &result["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 16.0 * 1.405, "ascent");
+        approx(line["descent"].as_f64().unwrap(), 16.0 * 0.634, "descent");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            16.0 * 2.039,
+            "line height",
+        );
+    }
+}
+
 // 6. line rules preserve typography metrics
 #[test]
 fn line_rules_match_typography_semantics() {
