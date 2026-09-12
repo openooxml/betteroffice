@@ -3257,7 +3257,7 @@ mod tests {
     #[test]
     fn rejects_unknown_contract() {
         let list = VsdxDisplayList {
-            contract_version: 4,
+            contract_version: CONTRACT_VERSION + 1,
             width: 0.0,
             height: 0.0,
             paint_transform: final_paint_transform(0.0),
@@ -3268,8 +3268,18 @@ mod tests {
 
     #[test]
     fn display_list_decode_rejects_unsupported_contract() {
-        let payload = r#"{"contractVersion":2,"width":0.0,"height":0.0,"paintTransform":{"a":1.0,"b":0.0,"c":0.0,"d":1.0,"e":0.0,"f":0.0},"primitives":[]}"#;
-        assert!(serde_json::from_str::<VsdxDisplayList>(payload).is_err());
+        for version in [2, CONTRACT_VERSION - 1] {
+            let payload = format!(
+                r#"{{"contractVersion":{version},"width":0.0,"height":0.0,"paintTransform":{{"a":1.0,"b":0.0,"c":0.0,"d":1.0,"e":0.0,"f":0.0}},"primitives":[]}}"#
+            );
+            let error = serde_json::from_str::<VsdxDisplayList>(&payload).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!(
+                    "unsupported VSDX display-list contract version {version}"
+                )),
+                "{error}"
+            );
+        }
     }
 
     #[test]
