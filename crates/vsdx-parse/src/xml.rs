@@ -7,6 +7,8 @@ use crate::VsdxError;
 
 #[derive(Clone, Debug)]
 pub struct ParseLimits {
+    /// Total inflated archive bytes; the default matches the container's own ceiling.
+    pub max_expanded_bytes: u64,
     pub max_xml_bytes: usize,
     pub max_xml_events: usize,
     pub max_xml_text_bytes: usize,
@@ -31,6 +33,7 @@ pub struct ParseLimits {
 impl Default for ParseLimits {
     fn default() -> Self {
         Self {
+            max_expanded_bytes: 512 * 1024 * 1024,
             max_xml_bytes: 128 * 1024 * 1024,
             max_xml_events: 4_000_000,
             max_xml_text_bytes: 128 * 1024 * 1024,

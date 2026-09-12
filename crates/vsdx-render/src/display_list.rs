@@ -1,7 +1,7 @@
 use ooxml_drawingml::GeometryPathCommand;
 use serde::{Deserialize, Serialize};
 
-pub const CONTRACT_VERSION: u32 = 3;
+pub const CONTRACT_VERSION: u32 = 4;
 
 /// Replay primitives in ascending `z_order` (back-to-front); hit test in descending order.
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -195,6 +195,10 @@ pub enum Primitive {
         height: f32,
         paragraphs: Vec<TextParagraph>,
         lines: Vec<PositionedLine>,
+        /// Maps this local text rectangle, its lines and its caret stops into scene
+        /// coordinates before the final paint transform.
+        #[serde(default, skip_serializing_if = "Affine::is_identity")]
+        transform: Affine,
     },
     Placeholder {
         id: String,

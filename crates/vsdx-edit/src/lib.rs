@@ -323,6 +323,8 @@ mod tests {
         for (id, page_id) in [("page:1:shape:1", "page:1"), ("page:1:shape:2", "page:1")] {
             let shape = sheets.insert(&mut txn, id, MapPrelim::default());
             shape.insert(&mut txn, "id", id);
+            shape.insert(&mut txn, "pageId", page_id);
+            shape.insert(&mut txn, "origin", "package");
             shape.insert(&mut txn, "sourceId", 1.0);
             shape.insert(&mut txn, "cells", MapPrelim::default());
             let page = match pages.get(&txn, page_id) {
@@ -356,16 +358,93 @@ mod tests {
         formula: Option<&str>,
         value: Option<&str>,
     ) {
+        add_shape_cell(
+            session,
+            "page:1:shape:1",
+            name,
+            section,
+            row,
+            formula,
+            value,
+        );
+    }
+
+    fn add_child_shape(session: &DiagramSession, id: &str, parent_id: &str) {
         let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
         let sheets = txn.get_map(SHEETS).unwrap();
-        let shape = match sheets.get(&txn, "page:1:shape:1") {
+        let shape = sheets.insert(&mut txn, id, MapPrelim::default());
+        shape.insert(&mut txn, "id", id);
+        shape.insert(&mut txn, "pageId", "page:1");
+        shape.insert(&mut txn, "origin", "package");
+        shape.insert(&mut txn, "sourceId", 3.0);
+        shape.insert(&mut txn, "parentId", parent_id);
+        shape.insert(&mut txn, "cells", MapPrelim::default());
+        shape.insert(&mut txn, "shapes", ArrayPrelim::default());
+        let parent = match sheets.get(&txn, parent_id) {
+            Some(yrs::Out::YMap(parent)) => parent,
+            _ => unreachable!(),
+        };
+        let child_order = match parent.get(&txn, "shapes") {
+            Some(yrs::Out::YArray(child_order)) => child_order,
+            _ => parent.insert(&mut txn, "shapes", ArrayPrelim::default()),
+        };
+        child_order.push_back(&mut txn, id);
+    }
+
+    fn shape_cells<T: yrs::ReadTxn>(txn: &T, shape_id: &str) -> yrs::MapRef {
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(txn, shape_id) {
             Some(yrs::Out::YMap(shape)) => shape,
             _ => unreachable!(),
         };
-        let cells = match shape.get(&txn, "cells") {
+        match shape.get(txn, "cells") {
             Some(yrs::Out::YMap(cells)) => cells,
             _ => unreachable!(),
+        }
+    }
+
+    fn peer_doc(session: &DiagramSession, client_id: u64) -> Doc {
+        let doc = doc_with_client_id(client_id);
+        hydrate_doc(&doc, &session.encode_state_as_update_v1()).unwrap();
+        doc
+    }
+
+    fn peer_update(session: &DiagramSession, peer: &Doc) -> Vec<u8> {
+        peer.transact()
+            .encode_diff_v1(&session.doc.transact().state_vector())
+    }
+
+    fn write_peer_cell_field(peer: &Doc, shape_id: &str, cell: &str, field: &str, value: &str) {
+        let mut txn = peer.transact_mut();
+        let cells = shape_cells(&txn, shape_id);
+        let cell = match cells.get(&txn, cell) {
+            Some(yrs::Out::YMap(cell)) => cell,
+            _ => unreachable!(),
         };
+        cell.insert(&mut txn, field, value);
+    }
+
+    fn write_peer_shape_field(peer: &Doc, shape_id: &str, field: &str, value: &str) {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, shape_id) {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.insert(&mut txn, field, value);
+    }
+
+    fn add_shape_cell(
+        session: &DiagramSession,
+        shape_id: &str,
+        name: &str,
+        section: Option<&str>,
+        row: Option<CellRow>,
+        formula: Option<&str>,
+        value: Option<&str>,
+    ) {
+        let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let cells = shape_cells(&txn, shape_id);
         let key = match (&section, &row) {
             (Some(section), Some(CellRow::Index(row))) => {
                 format!("{section}\u{1f}IX:{row}\u{1f}{name}")
@@ -388,6 +467,7 @@ mod tests {
         }
         if let Some(formula) = formula {
             cell.insert(&mut txn, "formula", formula);
+            cell.insert(&mut txn, "baselineFormula", formula);
         }
         if let Some(value) = value {
             cell.insert(&mut txn, "value", value);
@@ -824,6 +904,102 @@ mod tests {
             .encode_diff_v1(&session.doc.transact().state_vector());
         assert!(session.apply_update_v1(&update).is_err());
         assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_rewrite_of_a_nested_child_guard_is_rejected() {
+        let session = session();
+        let child = "page:1:shape:1:shape:3";
+        add_child_shape(&session, child, "page:1:shape:1");
+        add_shape_cell(&session, child, "Width", None, None, Some("GUARD(1)"), None);
+        let peer = peer_doc(&session, 9);
+        write_peer_cell_field(&peer, child, "Width", "formula", "2");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(
+            snapshot.pages[0].shapes[0].children[0]
+                .cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("GUARD(1)")
+        );
+    }
+
+    #[test]
+    fn remote_rewrite_of_a_nested_child_locked_cell_is_rejected() {
+        let session = session();
+        let child = "page:1:shape:1:shape:3";
+        add_child_shape(&session, child, "page:1:shape:1");
+        add_shape_cell(&session, child, "Width", None, None, Some("1"), None);
+        add_shape_cell(&session, child, "LockWidth", None, None, Some("1"), None);
+        let peer = peer_doc(&session, 9);
+        write_peer_cell_field(&peer, child, "Width", "formula", "5");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(
+            session.snapshot().unwrap().pages[0].shapes[0].children[0]
+                .cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn remote_baseline_forgery_cannot_suppress_a_collaborative_edit() {
+        let session = session();
+        add_cell(&session, "Width", Some("1"), None);
+        session
+            .set_cell_formula(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "2",
+            )
+            .unwrap();
+        let peer = peer_doc(&session, 9);
+        write_peer_cell_field(&peer, "page:1:shape:1", "Width", "baselineFormula", "2");
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert!(session.semantic_cell_edits().unwrap().iter().any(|edit| {
+            edit.locator.cell_name == "Width" && edit.formula.as_deref() == Some("2")
+        }));
+    }
+
+    #[test]
+    fn remote_rewrites_of_shape_identity_are_rejected() {
+        for (field, value) in [
+            ("origin", "session"),
+            ("pageId", "page:2"),
+            ("parentId", "page:1:shape:2"),
+        ] {
+            let session = session();
+            let peer = peer_doc(&session, 9);
+            write_peer_shape_field(&peer, "page:1:shape:1", field, value);
+            assert!(
+                session
+                    .apply_update_v1(&peer_update(&session, &peer))
+                    .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]
