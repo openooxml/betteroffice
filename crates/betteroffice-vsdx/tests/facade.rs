@@ -737,3 +737,47 @@ fn session_added_shapes_do_not_leak_into_cell_edits() {
     assert_eq!(export.added_shapes.len(), 1);
     assert_eq!(export.added_shapes[0].cells.len(), 1);
 }
+
+#[test]
+fn batched_edits_cache_against_earlier_edits_in_the_batch() {
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='Width' V='1'/><Cell N='Height' V='1'/></Shape></Shapes></PageContents>",
+    );
+    let saved = diagram
+        .save_cell_edits(&[
+            edit(page_id, 1, "Width", "5", MutationGesture::ResizeWidth),
+            edit(
+                page_id,
+                1,
+                "Height",
+                "Width*2",
+                MutationGesture::ResizeHeight,
+            ),
+        ])
+        .unwrap();
+    let reopened = Diagram::open(&saved).unwrap();
+    let page = reopened.pages().next().unwrap();
+    let shape = page.shapes().next().unwrap();
+    let height = shape
+        .model()
+        .cells()
+        .find(|cell| cell.name == "Height")
+        .unwrap();
+    assert_eq!(height.formula.as_deref(), Some("Width*2"));
+    assert_eq!(height.value.as_deref(), Some("10"));
+}
+
+#[test]
+fn batched_edits_authorize_against_earlier_edits_in_the_batch() {
+    let (_, diagram, page_id) = diagram_with_page(
+        "<PageContents><Shapes><Shape ID='1'><Cell N='LockWidth' V='0'/><Cell N='Width' V='1'/></Shape></Shapes></PageContents>",
+    );
+    assert!(
+        diagram
+            .save_cell_edits(&[
+                edit(page_id, 1, "LockWidth", "1", MutationGesture::CellEdit),
+                edit(page_id, 1, "Width", "2", MutationGesture::ResizeWidth),
+            ])
+            .is_err()
+    );
+}
