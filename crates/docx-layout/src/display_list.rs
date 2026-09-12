@@ -5823,7 +5823,8 @@ fn emit_line(
     let left_offset = line.left_offset.unwrap_or(0.0);
     let right_offset = line.right_offset.unwrap_or(0.0);
     let usable_width =
-        (geom.frag_width - pad_left - geom.indent_right - left_offset - right_offset).max(0.0);
+        (geom.frag_width - pad_left - text_indent - geom.indent_right - left_offset - right_offset)
+            .max(0.0);
 
     // distribute the measured line width over runs whose advance we don't know
     // individually: fixed-width runs (tabs, inline images) subtract first, the
@@ -10348,6 +10349,38 @@ mod tests {
         assert_eq!(image["flipH"], true);
         assert_eq!(image["w"], 44.641);
         assert_eq!(image["contentFrame"]["w"], 40);
+    }
+
+    #[test]
+    fn centered_and_right_aligned_first_lines_use_the_indented_width() {
+        for (alignment, first_line, hanging, expected_x) in [
+            ("center", 20, 0, 130.0),
+            ("center", 0, 20, 110.0),
+            ("right", 20, 0, 190.0),
+            ("right", 0, 20, 190.0),
+        ] {
+            let input = json!({
+                "measured":[{
+                    "block":{"kind":"paragraph","id":"p","runs":[{"kind":"text","text":"X"}],"attrs":{"alignment":alignment,"indent":{"left":40,"firstLine":first_line,"hanging":hanging}}},
+                    "measure":{"kind":"paragraph","totalHeight":20,"lines":[{"headRun":0,"headChar":0,"tailRun":0,"tailChar":1,"width":20,"ascent":11,"descent":3,"lineHeight":20}]}
+                }],
+                "options":{},
+                "layout":{"pages":[{"number":1,"size":{"w":300,"h":500},"margins":{"top":20,"right":20,"bottom":20,"left":20},"fragments":[{"kind":"paragraph","blockId":"p","x":10,"y":20,"width":200,"height":20,"fromLine":0,"toLine":1}]}]}
+            });
+            let output: Value =
+                serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap())
+                    .unwrap();
+            let text = output["pages"][0]["primitives"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|primitive| primitive["text"] == "X")
+                .unwrap();
+            assert_eq!(
+                text["x"], expected_x,
+                "{alignment}, first {first_line}, hanging {hanging}"
+            );
+        }
     }
 
     #[test]
