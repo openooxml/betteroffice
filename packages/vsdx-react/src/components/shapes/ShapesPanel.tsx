@@ -25,7 +25,7 @@ const styles: Record<string, CSSProperties> = {
   row: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 5 },
   cell: { display: 'flex', minWidth: 0 },
   tile: { appearance: 'none', flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 0, minHeight: 92, padding: '7px 3px 5px', border: '1px solid transparent', borderRadius: 3, background: 'transparent', color: '#242424', cursor: 'pointer', font: '400 11px ui-sans-serif, system-ui, sans-serif', textAlign: 'center' },
-  preview: { width: 54, height: 46, marginBottom: 5, overflow: 'visible', fill: '#fff', stroke: '#424242', strokeWidth: 1.5, vectorEffect: 'non-scaling-stroke' },
+  preview: { width: 54, height: 46, marginBottom: 5, overflow: 'visible', fill: '#fff', stroke: '#424242', strokeWidth: 0.03 },
   empty: { margin: '20px 12px', color: '#616161', textAlign: 'center' },
 };
 

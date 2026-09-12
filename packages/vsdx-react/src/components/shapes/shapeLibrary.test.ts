@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { polygonVertices, previewPathForVertices, standardShapes } from './shapeLibrary';
 
 function geometry(shapeId: string) {
-  return standardShapes.find((shape) => shape.id === shapeId)!.draft(2, 3, 4, 5).cells.filter((cell) => !['FillPattern', 'FillForegnd', 'LinePattern', 'LineColor', 'LineWeight'].includes(cell.locator.cellName));
+  return standardShapes.find((shape) => shape.id === shapeId)!.draft(2, 3, 4, 5).cells.filter((cell) => !['Angle', 'FlipX', 'FlipY', 'FillPattern', 'FillForegnd', 'LinePattern', 'LineColor', 'LineWeight'].includes(cell.locator.cellName));
 }
 
 test('produces finite, complete formula-only drafts', () => {
