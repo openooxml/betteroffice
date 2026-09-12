@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation};
+use vsdx_eval::{MutationContext, MutationOutcome, decide_mutation, evaluate};
 use vsdx_parse::{
     Cell, CellLocator, CellRow, CellSheet, MutationGesture, ParseLimits, RowChild, SectionChild,
     Shape, ShapeChild, ShapesChild, SheetChild, StructuralEdit,
@@ -917,7 +917,125 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     validate_immutable_metadata(before, staged)?;
     validate_session_topology(before, staged)?;
     validate_formula_mutations(before, staged)?;
-    serializable_doc(staged)
+    serializable_doc(staged)?;
+    let before_identities = shape_identities(before)?;
+    let after_identities = shape_identities(staged)?;
+    for (key, identity) in &before_identities {
+        if let Some(after) = after_identities.get(key) {
+            if after != identity {
+                return Err(EditError::InvalidState(format!(
+                    "remote update changes the identity of shape {key}"
+                )));
+            }
+        }
+    }
+    for (key, (_, _, origin, _)) in &after_identities {
+        if !before_identities.contains_key(key) && origin.as_deref() != Some("added") {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds shape {key} without session provenance"
+            )));
+        }
+    }
+    let before_baselines = baseline_formulas(before)?;
+    let after_baselines = baseline_formulas(staged)?;
+    for (key, before_formula) in &before_baselines {
+        if let Some(after_formula) = after_baselines.get(key) {
+            if after_formula != before_formula {
+                return Err(EditError::InvalidState(format!(
+                    "remote update changes the save baseline of {key}"
+                )));
+            }
+        }
+    }
+    let before_protected = protected_formulas(before)?;
+    let after_protected = protected_formulas(staged)?;
+    for (key, formula) in before_protected {
+        if let Some(after_formula) = after_protected.get(&key) {
+            if after_formula != &formula {
+                return Err(EditError::InvalidState(format!(
+                    "remote update changes protected cell {key}"
+                )));
+            }
+        }
+    }
+    validate_new_cells(before, staged, &before_identities)?;
+    Ok(())
+}
+
+/// A cell key absent before has no local-edit equivalent unless its whole shape is also new
+/// (`add_shape` seeds a fresh shape's cells together; `set_cell_formula_at` can only edit a key
+/// that already exists). So a new key grafted onto a shape the document already knew faces the
+/// same policy a local edit would: refused if the target is currently locked, and refused if the
+/// peer is planting a new GUARD rather than editing one the package already established.
+fn validate_new_cells(
+    before: &Doc,
+    staged: &Doc,
+    before_identities: &std::collections::BTreeMap<String, ShapeIdentity>,
+) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_sheets = required_map(&before_txn, SHEETS)?;
+    let staged_sheets = required_map(&staged_txn, SHEETS)?;
+    for shape_id in before_identities.keys() {
+        let Some(Out::YMap(before_shape)) = before_sheets.get(&before_txn, shape_id) else {
+            continue;
+        };
+        let Some(Out::YMap(staged_shape)) = staged_sheets.get(&staged_txn, shape_id) else {
+            continue;
+        };
+        let before_cells = map_map(&before_shape, &before_txn, "cells")?;
+        let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
+        let before_values = before_cells
+            .iter(&before_txn)
+            .filter_map(|(name, cell)| match cell {
+                Out::YMap(cell) => Some((
+                    name.to_owned(),
+                    map_string(&cell, &before_txn, "formula")
+                        .or_else(|| map_string(&cell, &before_txn, "value")),
+                )),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (key, cell) in staged_cells.iter(&staged_txn) {
+            if before_cells.get(&before_txn, key).is_some() {
+                continue;
+            }
+            let Out::YMap(cell) = cell else { continue };
+            let Some(formula) = map_string(&cell, &staged_txn, "formula") else {
+                continue;
+            };
+            let name = map_string(&cell, &staged_txn, "name").unwrap_or_default();
+            let locked = [
+                "LockMoveX",
+                "LockMoveY",
+                "LockWidth",
+                "LockHeight",
+                "LockAspect",
+                "LockTextEdit",
+                "LockFormat",
+                "LockDelete",
+            ]
+            .iter()
+            .any(|lock| {
+                lock_target(lock) == Some(name.as_str())
+                    && before_values
+                        .get(*lock)
+                        .and_then(|value| value.as_deref())
+                        .is_some_and(|value| lock_is_enabled(value, &before_values))
+            });
+            if locked {
+                return Err(EditError::InvalidState(format!(
+                    "remote update adds a lock-protected cell {shape_id}/{key}"
+                )));
+            }
+            if is_guarded(&formula) {
+                return Err(EditError::InvalidState(format!(
+                    "remote update adds a guarded cell {shape_id}/{key}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_session_topology(before: &Doc, staged: &Doc) -> EditResult<()> {
@@ -1115,6 +1233,141 @@ fn validate_formula_mutations(before: &Doc, staged: &Doc) -> EditResult<()> {
     Ok(())
 }
 
+type ShapeIdentity = (Option<String>, Option<String>, Option<String>, Option<f64>);
+
+/// The save path routes a sheet by this metadata, so only the seed and a local add may write it.
+fn shape_identities(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, ShapeIdentity>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut identities = std::collections::BTreeMap::new();
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        identities.insert(
+            shape_id.to_owned(),
+            (
+                map_string(&shape, &txn, "pageId"),
+                map_string(&shape, &txn, "parentId"),
+                map_string(&shape, &txn, "origin"),
+                map_number(&shape, &txn, "sourceId"),
+            ),
+        );
+    }
+    Ok(identities)
+}
+
+/// Baselines come from the package seed alone; a peer that could write one could hide an edit.
+fn baseline_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut baselines = std::collections::BTreeMap::new();
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        let cells = map_map(&shape, &txn, "cells")?;
+        for (key, cell) in cells.iter(&txn) {
+            let Out::YMap(cell) = cell else { continue };
+            if let Some(baseline) = map_string(&cell, &txn, "baselineFormula") {
+                baselines.insert(format!("{shape_id}/{key}"), baseline);
+            }
+        }
+    }
+    Ok(baselines)
+}
+
+fn protected_formulas(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, String>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut protected = std::collections::BTreeMap::new();
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        let cells = map_map(&shape, &txn, "cells")?;
+        let values = cells
+            .iter(&txn)
+            .filter_map(|(name, cell)| match cell {
+                Out::YMap(cell) => Some((
+                    name.to_string(),
+                    map_string(&cell, &txn, "formula").or_else(|| map_string(&cell, &txn, "value")),
+                )),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (name, cell) in cells.iter(&txn) {
+            let Out::YMap(cell) = cell else { continue };
+            let formula = map_string(&cell, &txn, "formula");
+            let locked = lock_target(name).is_some_and(|_| {
+                values
+                    .get(name)
+                    .and_then(|value| value.as_deref())
+                    .is_some_and(|value| lock_is_enabled(value, &values))
+            });
+            let protected_target = lock_target(name).is_none()
+                && [
+                    "LockMoveX",
+                    "LockMoveY",
+                    "LockWidth",
+                    "LockHeight",
+                    "LockAspect",
+                    "LockTextEdit",
+                    "LockFormat",
+                    "LockDelete",
+                ]
+                .iter()
+                .any(|lock| {
+                    lock_target(lock) == Some(name)
+                        && values
+                            .get(*lock)
+                            .and_then(|value| value.as_deref())
+                            .is_some_and(|value| lock_is_enabled(value, &values))
+                });
+            if locked || protected_target || formula.as_deref().is_some_and(is_guarded) {
+                protected.insert(format!("{shape_id}/{name}"), formula.unwrap_or_default());
+            }
+        }
+    }
+    Ok(protected)
+}
+
+fn lock_is_enabled(
+    value: &str,
+    formulas: &std::collections::BTreeMap<String, Option<String>>,
+) -> bool {
+    let formulas = formulas
+        .iter()
+        .filter_map(|(name, formula)| {
+            formula
+                .as_ref()
+                .map(|formula| (name.clone(), formula.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    matches!(
+        evaluate(value.trim_start_matches('='), &formulas, &ParseLimits::default()),
+        vsdx_eval::Evaluation::Evaluated(result)
+            if matches!(result.value, vsdx_eval::Value::Number(number) if number.number == 1.0)
+    )
+}
+
+fn lock_target(lock: &str) -> Option<&str> {
+    match lock {
+        "LockMoveX" => Some("PinX"),
+        "LockMoveY" => Some("PinY"),
+        "LockWidth" => Some("Width"),
+        "LockHeight" => Some("Height"),
+        "LockAspect" => Some("Width"),
+        "LockTextEdit" => Some("Text"),
+        "LockFormat" | "LockDelete" => None,
+        _ => None,
+    }
+}
+
+fn is_guarded(formula: &str) -> bool {
+    vsdx_eval::parse(formula.trim_start_matches('='), &ParseLimits::default())
+        .map(|expression| {
+            format!("{expression:?}")
+                .to_ascii_uppercase()
+                .contains("GUARD")
+        })
+        .unwrap_or(false)
+}
+
 fn reachable_shape_ids<T: ReadTxn>(
     sheets: &MapRef,
     txn: &T,
@@ -1265,6 +1518,30 @@ fn snapshot_shape<T: ReadTxn>(
         .copied()
         .unwrap_or(stored_source_id);
     let cells = map_map(&shape, txn, "cells")?;
+    let is_added = shape_origin(&shape, txn)? == ShapeOrigin::Added;
+    let local_formulas = cells
+        .iter(txn)
+        .filter_map(|(_, value)| match value {
+            Out::YMap(cell) => {
+                let name = map_string(&cell, txn, "name")?;
+                let formula = map_string(&cell, txn, "formula")
+                    .or_else(|| map_string(&cell, txn, "value"))?;
+                Some((name, formula))
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let evaluate_locally = |formula: &str| match evaluate(
+        formula.trim_start_matches('='),
+        &local_formulas,
+        &ParseLimits::default(),
+    ) {
+        vsdx_eval::Evaluation::Evaluated(result) => match result.value {
+            vsdx_eval::Value::Number(number) => Some(number.number.to_string()),
+            vsdx_eval::Value::Color(_) => None,
+        },
+        _ => None,
+    };
     let mut snapshots = Vec::new();
     for (_key, value) in cells.iter(txn) {
         let Out::YMap(cell) = value else {
@@ -1273,8 +1550,23 @@ fn snapshot_shape<T: ReadTxn>(
         let locator = cell_locator(&cell, txn, page_id, source_id)?;
         let formula = map_string(&cell, txn, "formula");
         let baseline = map_string(&cell, txn, "baselineFormula");
+        // A cell whose formula still matches its baseline is either untouched since the
+        // package (or since reopening a save) or belongs to a shape freshly added this
+        // session, in which case its baseline was only ever a draft echo of the same
+        // formula and its own cells are the only trustworthy evaluation context. A cell
+        // whose formula has since diverged from a real baseline was locally edited, so
+        // re-evaluating it against its shape's own cells is safe; one with no baseline at
+        // all was grafted on by an untrusted peer and never earns a computed value.
         let value = if formula == baseline {
-            map_string(&cell, txn, "value")
+            map_string(&cell, txn, "value").or_else(|| {
+                if is_added {
+                    formula.as_deref().and_then(evaluate_locally)
+                } else {
+                    None
+                }
+            })
+        } else if baseline.is_some() {
+            formula.as_deref().and_then(evaluate_locally)
         } else {
             None
         };
@@ -1368,6 +1660,18 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                     continue;
                 }
                 let cells = map_map(&shape, &txn, "cells")?;
+                let local_formulas = cells
+                    .iter(&txn)
+                    .filter_map(|(_, value)| match value {
+                        Out::YMap(cell) => {
+                            let name = map_string(&cell, &txn, "name")?;
+                            let formula = map_string(&cell, &txn, "formula")
+                                .or_else(|| map_string(&cell, &txn, "value"))?;
+                            Some((name, formula))
+                        }
+                        _ => None,
+                    })
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 for (_key, value) in cells.iter(&txn) {
                     let Out::YMap(cell) = value else { continue };
                     let formula = map_string(&cell, &txn, "formula");
@@ -1377,11 +1681,33 @@ fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit
                     }
                     let Some(formula) = formula else { continue };
                     let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
+                    // Only a cell that already carried a trusted baseline (seeded from the
+                    // original package, or from a locally added shape's own draft) earns a
+                    // freshly computed cache; a cell an untrusted peer grafted on with no
+                    // baseline at all never gets one, however trivially its formula evaluates.
+                    let value = baseline
+                        .is_some()
+                        .then(|| {
+                            match evaluate(
+                                formula.trim_start_matches('='),
+                                &local_formulas,
+                                &ParseLimits::default(),
+                            ) {
+                                vsdx_eval::Evaluation::Evaluated(result) => match result.value {
+                                    vsdx_eval::Value::Number(number) => {
+                                        Some(number.number.to_string())
+                                    }
+                                    vsdx_eval::Value::Color(_) => None,
+                                },
+                                _ => None,
+                            }
+                        })
+                        .flatten();
                     edits.push(vsdx_parse::SemanticCellEdit {
                         locator: locator.clone(),
                         gesture: gesture_for_cell(&locator.cell_name),
                         formula: Some(formula),
-                        value: None,
+                        value,
                     });
                 }
             }
