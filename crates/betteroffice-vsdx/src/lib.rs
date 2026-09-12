@@ -48,19 +48,67 @@ impl Diagram {
     }
     /// Writes formulas to Cell@F, with a cache freshly evaluated from each formula
     /// in Cell@V; formulas the display evaluator cannot evaluate drop the cache.
+    /// Edits are applied and re-parsed one at a time, so a later edit in the batch is
+    /// authorized and evaluated against every earlier edit already in effect.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
-        let resolved = self.resolve_cell_edits(edits)?;
-        Ok(vsdx_parse::save_semantic_cell_edits(
-            &self.package,
-            &resolved,
-        )?)
+        let (bytes, _package) = self.apply_cell_edits(edits)?;
+        Ok(bytes)
     }
-    /// Saves the formula changes accumulated by a collaborative session.
+
+    fn apply_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<(Vec<u8>, VsdxPackage)> {
+        let mut package = self.package.clone();
+        let mut bytes = None;
+        for edit in edits {
+            let context = PackageMutationContext { package: &package };
+            if edit.value.is_some() {
+                return Err(Error::Policy(
+                    "semantic edits write formulas; raw Cell@V edits are not allowed".to_owned(),
+                ));
+            }
+            let formula = edit
+                .formula
+                .clone()
+                .ok_or_else(|| Error::Policy("semantic edits require a formula".to_owned()))?;
+            let resolved = match decide_mutation(
+                &context,
+                edit.locator.clone(),
+                edit.gesture,
+                formula,
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, formula } => {
+                    let value = context.evaluate_cache(&target, &formula)?;
+                    SemanticCellEdit {
+                        locator: target,
+                        gesture: edit.gesture,
+                        formula: Some(formula),
+                        value,
+                    }
+                }
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    return Err(Error::Policy(reason));
+                }
+            };
+            let saved =
+                vsdx_parse::save_semantic_cell_edits(&package, std::slice::from_ref(&resolved))?;
+            package = vsdx_parse::parse_vsdx(&saved)?;
+            bytes = Some(saved);
+        }
+        match bytes {
+            Some(bytes) => Ok((bytes, package)),
+            None => Ok((
+                vsdx_parse::save_semantic_cell_edits(&package, &[])?,
+                package,
+            )),
+        }
+    }
+    /// Saves the formula changes and structural edits (e.g. added shapes) accumulated by a
+    /// collaborative session. The session's own doc carries the original package, so this does
+    /// not need `self.package` at all.
     pub fn save_session(&self, session: &vsdx_edit::DiagramSession) -> Result<Vec<u8>> {
-        let edits = session
-            .semantic_cell_edits()
-            .map_err(|error| Error::Policy(error.to_string()))?;
-        self.save_cell_edits(&edits)
+        session
+            .save()
+            .map_err(|error| Error::Policy(error.to_string()))
     }
     /// Applies semantic and structural edits as one all-or-nothing save request.
     pub fn save_edits(
