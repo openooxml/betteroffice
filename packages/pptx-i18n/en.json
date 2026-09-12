@@ -98,6 +98,7 @@
     "defaultTextBoxName": "Text Box"
   },
   "presentation": {
+    "label": "Slide presentation",
     "exit": "Exit presentation (Esc)",
     "slideCounter": "{current} / {total}",
     "previousSlide": "Previous slide",

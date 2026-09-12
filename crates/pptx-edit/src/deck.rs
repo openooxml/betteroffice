@@ -317,14 +317,11 @@ impl DeckSession {
     }
 
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
+        crate::model::validate_xml_text(text)?;
         self.add_undo_barrier();
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
-        if text.is_empty() {
-            slide.remove(&mut txn, "notes");
-        } else {
-            slide.insert(&mut txn, "notes", text);
-        }
+        slide.insert(&mut txn, "notes", text);
         drop(txn);
         self.add_undo_barrier();
         Ok(())
@@ -812,6 +809,17 @@ pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> Edit
             .find(|source| source.part_path == chart.part_path)
         {
             changed |= merge_source_chart_properties(&mut chart.chart, &source.chart);
+        }
+    }
+    for slide in &mut package.slides {
+        if let Some(source) = source
+            .slides
+            .iter()
+            .find(|source| source.part_path == slide.part_path)
+            && slide.notes != source.notes
+        {
+            slide.notes.clone_from(&source.notes);
+            changed = true;
         }
     }
     if package.table_styles != source.table_styles {
@@ -1353,12 +1361,20 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
                 )?);
             }
         }
+        let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {
+            package
+                .slides
+                .iter()
+                .find(|source| Some(&source.part_path) == source_part_path.as_ref())
+                .map(|source| source.notes.clone())
+                .unwrap_or_default()
+        });
         slide_snapshots.push(SlideSnapshot {
             id: slide_id,
             source_part_path,
             layout_part_path,
             name: map_string(&slide, &txn, "name"),
-            notes: map_string(&slide, &txn, "notes").unwrap_or_default(),
+            notes,
             shapes: shape_snapshots,
         });
     }

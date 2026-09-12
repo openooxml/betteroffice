@@ -35,6 +35,7 @@ import type {
   PointerEvent,
 } from 'react';
 import { EditorToolbar } from './components/EditorToolbar';
+import { PresentationOverlay } from './components/PresentationOverlay';
 import type {
   FormattingAction,
   PptxEditorTool,
@@ -426,6 +427,7 @@ function PptxEditorContent({
     setResizeDelta(null);
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
+    setPresenting(false);
     pointerGestureRef.current = null;
     resizeRef.current = null;
     caretGoalRef.current = null;
@@ -2008,7 +2010,7 @@ function PptxEditorContent({
           }}
         />
       ) : null}
-      {presenting && handleRef.current ? (
+      {presenting && slideCount > 0 && handleRef.current ? (
         <PresentationOverlay
           handle={handleRef.current}
           slideCount={slideCount}
@@ -2017,178 +2019,14 @@ function PptxEditorContent({
             resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)
           }
           counterLabel={(current, total) => t('presentation.slideCounter', { current, total })}
+          label={t('presentation.label')}
           exitLabel={t('presentation.exit')}
           previousLabel={t('presentation.previousSlide')}
           nextLabel={t('presentation.nextSlide')}
           onExit={() => setPresenting(false)}
+          onError={reportError}
         />
       ) : null}
-    </div>
-  );
-}
-
-function PresentationOverlay({
-  handle,
-  slideCount,
-  startIndex,
-  resolveImage,
-  counterLabel,
-  exitLabel,
-  previousLabel,
-  nextLabel,
-  onExit,
-}: {
-  handle: PresentationHandle;
-  slideCount: number;
-  startIndex: number;
-  resolveImage: CanvasImageResolver;
-  counterLabel: (current: number, total: number) => string;
-  exitLabel: string;
-  previousLabel: string;
-  nextLabel: string;
-  onExit: () => void;
-}) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const onExitRef = useRef(onExit);
-  onExitRef.current = onExit;
-  const [index, setIndex] = useState(clampSlideIndex(startIndex, slideCount));
-  const [viewport, setViewport] = useState({
-    width: typeof window === 'undefined' ? 0 : window.innerWidth,
-    height: typeof window === 'undefined' ? 0 : window.innerHeight,
-  });
-
-  const step = useCallback(
-    (delta: number) => {
-      setIndex((current) => clampSlideIndex(current + delta, slideCount));
-    },
-    [slideCount]
-  );
-
-  useEffect(() => {
-    const container = containerRef.current;
-    if (container?.requestFullscreen) {
-      void container.requestFullscreen().catch(() => undefined);
-    }
-    const onFullscreenChange = () => {
-      if (!document.fullscreenElement) onExitRef.current();
-    };
-    document.addEventListener('fullscreenchange', onFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', onFullscreenChange);
-      if (document.fullscreenElement === container) {
-        void document.exitFullscreen().catch(() => undefined);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
-    const onResize = () => setViewport({ width: window.innerWidth, height: window.innerHeight });
-    onResize();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (
-        event.key === 'ArrowRight' ||
-        event.key === 'ArrowDown' ||
-        event.key === ' ' ||
-        event.key === 'PageDown'
-      ) {
-        event.preventDefault();
-        step(1);
-      } else if (
-        event.key === 'ArrowLeft' ||
-        event.key === 'ArrowUp' ||
-        event.key === 'PageUp'
-      ) {
-        event.preventDefault();
-        step(-1);
-      } else if (event.key === 'Home') {
-        event.preventDefault();
-        setIndex(0);
-      } else if (event.key === 'End') {
-        event.preventDefault();
-        setIndex(Math.max(0, slideCount - 1));
-      } else if (event.key === 'Escape') {
-        event.preventDefault();
-        onExitRef.current();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [slideCount, step]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || viewport.width <= 0 || viewport.height <= 0) return;
-    let cancelled = false;
-    try {
-      const frame = handle.layoutSlide(index);
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      const scale = Math.min(viewport.width / frame.width, viewport.height / frame.height);
-      const dpr = window.devicePixelRatio || 1;
-      sizeCanvasForSlide(canvas, frame, dpr, scale);
-      void paintSlide(ctx, frame, dpr, scale, {
-        resolveImage,
-        isCancelled: () => cancelled,
-      }).catch(() => undefined);
-    } catch {
-      // slide count may have changed underneath the presentation; ignore.
-    }
-    return () => {
-      cancelled = true;
-    };
-  }, [handle, index, resolveImage, viewport]);
-
-  return (
-    <div
-      ref={containerRef}
-      style={styles.presentationOverlay}
-      onClick={(event) => {
-        if (event.target === containerRef.current) step(1);
-      }}
-    >
-      <canvas ref={canvasRef} style={styles.presentationCanvas} />
-      <button
-        type="button"
-        onClick={onExit}
-        aria-label={exitLabel}
-        title={exitLabel}
-        style={styles.presentationExit}
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-          <path d="M6 6 18 18M18 6 6 18" />
-        </svg>
-      </button>
-      <div style={styles.presentationControls}>
-        <button
-          type="button"
-          onClick={() => step(-1)}
-          disabled={index === 0}
-          aria-label={previousLabel}
-          style={styles.presentationNavButton}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="m15 6-6 6 6 6" />
-          </svg>
-        </button>
-        <span style={styles.presentationCounter}>{counterLabel(index + 1, slideCount)}</span>
-        <button
-          type="button"
-          onClick={() => step(1)}
-          disabled={index >= slideCount - 1}
-          aria-label={nextLabel}
-          style={styles.presentationNavButton}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <path d="m9 6 6 6-6 6" />
-          </svg>
-        </button>
-      </div>
     </div>
   );
 }
@@ -2267,45 +2105,17 @@ function NotesPanel({
   placeholder: string;
   onCommit: (text: string) => void;
 }) {
-  const [text, setText] = useState(value);
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const committedRef = useRef(value);
-
-  useEffect(
-    () => () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    },
-    []
-  );
-
-  const commit = (next: string) => {
-    if (next === committedRef.current) return;
-    committedRef.current = next;
-    onCommit(next);
-  };
-
   return (
     <div style={styles.notesPanel}>
       <span style={styles.notesLabel}>{label}</span>
       <textarea
+        aria-label={label}
         style={styles.notesTextarea}
-        value={text}
+        value={value}
         disabled={disabled}
         placeholder={placeholder}
         data-testid="pptx-notes-textarea"
-        onChange={(event) => {
-          const next = event.target.value;
-          setText(next);
-          if (timerRef.current) clearTimeout(timerRef.current);
-          timerRef.current = setTimeout(() => commit(next), 300);
-        }}
-        onBlur={() => {
-          if (timerRef.current) {
-            clearTimeout(timerRef.current);
-            timerRef.current = null;
-          }
-          commit(text);
-        }}
+        onChange={(event) => onCommit(event.target.value)}
       />
     </div>
   );
@@ -2804,63 +2614,7 @@ const styles: Record<string, CSSProperties> = {
     font: '600 13px ui-sans-serif, system-ui, sans-serif',
     cursor: 'pointer',
   },
-  presentationOverlay: {
-    position: 'fixed',
-    inset: 0,
-    zIndex: 2147483000,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    background: '#000000',
-    cursor: 'pointer',
-  },
-  presentationCanvas: { display: 'block', pointerEvents: 'none' },
-  presentationExit: {
-    position: 'absolute',
-    top: 16,
-    right: 16,
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 36,
-    height: 36,
-    border: 0,
-    borderRadius: 999,
-    background: 'rgba(255, 255, 255, 0.14)',
-    color: '#ffffff',
-    cursor: 'pointer',
-  },
-  presentationControls: {
-    position: 'absolute',
-    bottom: 20,
-    left: '50%',
-    transform: 'translateX(-50%)',
-    display: 'flex',
-    alignItems: 'center',
-    gap: 12,
-    padding: '6px 14px',
-    borderRadius: 999,
-    background: 'rgba(255, 255, 255, 0.12)',
-  },
-  presentationNavButton: {
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 28,
-    height: 28,
-    border: 0,
-    borderRadius: 999,
-    background: 'rgba(255, 255, 255, 0.14)',
-    color: '#ffffff',
-    cursor: 'pointer',
-  },
-  presentationCounter: {
-    minWidth: 64,
-    color: '#ffffff',
-    fontSize: 12,
-    fontWeight: 600,
-    textAlign: 'center',
-  },
+
 };
 
 function presenceInitials(name: string): string {

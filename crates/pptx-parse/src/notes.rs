@@ -1,6 +1,4 @@
-//! Speaker notes: reads the notes body placeholder's plain text out of a
-//! `notesSlide` part, and mints or patches that part on write. Everything
-//! else in the part (slide image, slide number, master link) is left as is.
+//! Speaker notes parsing and write-back.
 
 use crate::PptxError;
 use crate::relationships::{Relationship, relationship_types};
@@ -19,8 +17,7 @@ pub(crate) fn slide_notes_part(relationships: &[Relationship]) -> Option<String>
         .and_then(|relationship| relationship.resolved_target.clone())
 }
 
-/// The notes body placeholder's plain text, paragraphs joined by `\n`.
-/// Empty when the part has no body placeholder.
+/// Reads speaker notes as plain text.
 pub(crate) fn parse_notes_text(
     bytes: &[u8],
     part: &str,
@@ -35,7 +32,25 @@ pub(crate) fn parse_notes_text(
     };
     Ok(body
         .children_named("p")
-        .map(|paragraph| paragraph.text_content())
+        .map(|paragraph| {
+            paragraph
+                .children
+                .iter()
+                .filter_map(|node| match node {
+                    XmlNode::Element(element) => match element.local_name() {
+                        "r" | "fld" => Some(
+                            element
+                                .children_named("t")
+                                .map(XmlElement::text_content)
+                                .collect::<String>(),
+                        ),
+                        "br" => Some("\n".to_owned()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect::<String>()
+        })
         .collect::<Vec<_>>()
         .join("\n"))
 }
@@ -52,10 +67,7 @@ fn is_notes_body(shape: &XmlElement) -> bool {
         .is_some_and(|ph| ph.attribute("type") == Some("body"))
 }
 
-/// Replaces the notes body placeholder's paragraphs in an existing part,
-/// inserting a fresh body placeholder shape if the part does not have one
-/// yet (a notes part can exist with only a slide-image placeholder, or none
-/// at all).
+/// Replaces notes text while preserving other notes-page content.
 pub(crate) fn patch_notes_xml(
     bytes: &[u8],
     part: &str,
@@ -68,8 +80,14 @@ pub(crate) fn patch_notes_xml(
         .and_then(|common| common.child_mut("spTree"))
     {
         Some(tree) => tree,
-        None => return Ok(serialize_xml(&root)),
+        None => {
+            return Err(PptxError::Write {
+                part: part.to_owned(),
+                message: "notes slide has no shape tree".to_owned(),
+            });
+        }
     };
+    let shape_id = next_shape_id(tree);
     let existing = tree.children.iter_mut().find_map(|child| match child {
         XmlNode::Element(element) if element.local_name() == "sp" && is_notes_body(element) => {
             Some(element)
@@ -81,9 +99,7 @@ pub(crate) fn patch_notes_xml(
             let body = match shape.child_mut("txBody") {
                 Some(body) => body,
                 None => {
-                    shape
-                        .children
-                        .push(XmlNode::Element(XmlElement::new("p:txBody")));
+                    shape.children.push(XmlNode::Element(notes_text_body("")));
                     shape.child_mut("txBody").expect("just inserted")
                 }
             };
@@ -96,13 +112,12 @@ pub(crate) fn patch_notes_xml(
         }
         None => tree
             .children
-            .push(XmlNode::Element(notes_body_shape_xml(text))),
+            .push(XmlNode::Element(notes_body_shape_xml(text, shape_id))),
     }
     Ok(serialize_xml(&root))
 }
 
-/// Mints a minimal `notesSlide` part for a slide that has none yet: a single
-/// body placeholder, no slide image or slide number placeholder.
+/// Mints a minimal notes slide.
 pub(crate) fn notes_slide_xml(text: &str) -> Vec<u8> {
     let tree = XmlElement::new("p:spTree")
         .with_child(
@@ -116,7 +131,7 @@ pub(crate) fn notes_slide_xml(text: &str) -> Vec<u8> {
                 .with_child(XmlElement::new("p:nvPr")),
         )
         .with_child(XmlElement::new("p:grpSpPr"))
-        .with_child(notes_body_shape_xml(text));
+        .with_child(notes_body_shape_xml(text, 2));
     let root = XmlElement::new("p:notes")
         .with_attribute("xmlns:a", NS_A)
         .with_attribute("xmlns:p", NS_P)
@@ -125,19 +140,15 @@ pub(crate) fn notes_slide_xml(text: &str) -> Vec<u8> {
 }
 
 /// A `<p:sp>` body placeholder shape carrying `text` as its paragraphs.
-fn notes_body_shape_xml(text: &str) -> XmlElement {
-    let mut body = XmlElement::new("p:txBody")
-        .with_child(XmlElement::new("a:bodyPr"))
-        .with_child(XmlElement::new("a:lstStyle"));
-    for line in text.split('\n') {
-        body = body.with_child(notes_paragraph(line));
-    }
+fn notes_body_shape_xml(text: &str, id: u64) -> XmlElement {
     XmlElement::new("p:sp")
+        .with_attribute("xmlns:p", NS_P)
+        .with_attribute("xmlns:a", NS_A)
         .with_child(
             XmlElement::new("p:nvSpPr")
                 .with_child(
                     XmlElement::new("p:cNvPr")
-                        .with_attribute("id", "2")
+                        .with_attribute("id", id.to_string())
                         .with_attribute("name", "Notes Placeholder"),
                 )
                 .with_child(
@@ -167,13 +178,49 @@ fn notes_body_shape_xml(text: &str) -> XmlElement {
                     ),
             ),
         )
-        .with_child(body)
+        .with_child(notes_text_body(text))
+}
+
+fn next_shape_id(element: &XmlElement) -> u64 {
+    element
+        .children
+        .iter()
+        .filter_map(|node| match node {
+            XmlNode::Element(child) => Some(next_shape_id(child)),
+            _ => None,
+        })
+        .chain(
+            (element.local_name() == "cNvPr")
+                .then(|| {
+                    element
+                        .attribute("id")
+                        .and_then(|id| id.parse::<u32>().ok())
+                        .map(|id| u64::from(id) + 1)
+                })
+                .flatten(),
+        )
+        .max()
+        .unwrap_or(1)
+}
+
+fn notes_text_body(text: &str) -> XmlElement {
+    let mut body = XmlElement::new("p:txBody")
+        .with_attribute("xmlns:p", NS_P)
+        .with_attribute("xmlns:a", NS_A)
+        .with_child(XmlElement::new("a:bodyPr"))
+        .with_child(XmlElement::new("a:lstStyle"));
+    for line in text.split('\n') {
+        body = body.with_child(notes_paragraph(line));
+    }
+    body
 }
 
 fn notes_paragraph(text: &str) -> XmlElement {
-    XmlElement::new("a:p").with_child(
-        XmlElement::new("a:r").with_child(XmlElement::new("a:t").with_text(text.to_owned())),
-    )
+    XmlElement::new("a:p")
+        .with_attribute("xmlns:a", NS_A)
+        .with_child(
+            XmlElement::new("a:r").with_child(XmlElement::new("a:t").with_text(text.to_owned())),
+        )
 }
 
 #[cfg(test)]
@@ -228,17 +275,13 @@ mod tests {
             &mut budget,
         )
         .expect("patch");
-        let mut budget = budget_unused(&limits);
+        let mut budget = ParseBudget::new(&limits);
         let text = parse_notes_text(&patched, "ppt/notesSlides/notesSlide1.xml", &mut budget)
             .expect("parse patched");
         assert_eq!(text, "New line one\nNew line two");
         let patched_str = String::from_utf8(patched).expect("utf8");
         assert!(patched_str.contains("Slide Image Placeholder"));
         assert!(!patched_str.contains("Old line"));
-    }
-
-    fn budget_unused(limits: &ParseLimits) -> ParseBudget<'_> {
-        ParseBudget::new(limits)
     }
 
     #[test]
@@ -253,7 +296,7 @@ mod tests {
             &mut budget,
         )
         .expect("patch");
-        let mut budget = budget_unused(&limits);
+        let mut budget = ParseBudget::new(&limits);
         let text = parse_notes_text(&patched, "ppt/notesSlides/notesSlide1.xml", &mut budget)
             .expect("parse patched");
         assert_eq!(text, "Fresh text");
@@ -267,5 +310,76 @@ mod tests {
         let text = parse_notes_text(&bytes, "ppt/notesSlides/notesSlide1.xml", &mut budget)
             .expect("parse minted");
         assert_eq!(text, "Fresh notes");
+    }
+    #[test]
+    fn reads_soft_breaks_and_fields_without_extension_text() {
+        let xml = String::from_utf8(EXISTING.to_vec()).unwrap().replace(
+            "<a:r><a:t>Old line</a:t></a:r>",
+            "<a:r><a:t>First</a:t></a:r><a:br/><a:fld id=\"field\"><a:t>Second</a:t></a:fld><a:extLst><a:ext>Hidden</a:ext></a:extLst>",
+        );
+        let limits = ParseLimits::default();
+        assert_eq!(
+            parse_notes_text(xml.as_bytes(), "notes.xml", &mut budget(&limits)).unwrap(),
+            "First\nSecond"
+        );
+    }
+
+    #[test]
+    fn inserting_notes_avoids_shape_id_collisions_and_declares_namespaces() {
+        let xml = String::from_utf8(EXISTING.to_vec())
+            .unwrap()
+            .replace("type=\"body\"", "type=\"sldNum\"")
+            .replace("xmlns:p=", "xmlns:ppt=")
+            .replace("p:", "ppt:")
+            .replace("xmlns:a=", "xmlns:d=")
+            .replace("a:", "d:");
+        let limits = ParseLimits::default();
+        let patched = patch_notes_xml(
+            xml.as_bytes(),
+            "notes.xml",
+            "New notes",
+            &mut budget(&limits),
+        )
+        .unwrap();
+        let root = parse_xml(&patched, "notes.xml", &mut budget(&limits)).unwrap();
+        let tree = root.child("cSld").unwrap().child("spTree").unwrap();
+        let body = notes_body_shape(tree).unwrap();
+        assert_eq!(body.attribute("xmlns:p"), Some(NS_P));
+        assert_eq!(body.attribute("xmlns:a"), Some(NS_A));
+        assert_eq!(
+            body.child("nvSpPr")
+                .unwrap()
+                .child("cNvPr")
+                .unwrap()
+                .attribute("id"),
+            Some("4")
+        );
+        assert_eq!(
+            parse_notes_text(&patched, "notes.xml", &mut budget(&limits)).unwrap(),
+            "New notes"
+        );
+    }
+
+    #[test]
+    fn patching_a_placeholder_without_text_adds_required_body_properties() {
+        let xml = String::from_utf8(EXISTING.to_vec()).unwrap();
+        let start = xml.find("<p:txBody>").unwrap();
+        let end = xml.find("</p:txBody>").unwrap() + "</p:txBody>".len();
+        let xml = format!("{}{}", &xml[..start], &xml[end..]);
+        let limits = ParseLimits::default();
+        let patched = patch_notes_xml(
+            xml.as_bytes(),
+            "notes.xml",
+            "New notes",
+            &mut budget(&limits),
+        )
+        .unwrap();
+        let root = parse_xml(&patched, "notes.xml", &mut budget(&limits)).unwrap();
+        let body = notes_body_shape(root.child("cSld").unwrap().child("spTree").unwrap())
+            .unwrap()
+            .child("txBody")
+            .unwrap();
+        assert!(body.child("bodyPr").is_some());
+        assert_eq!(body.children_named("p").count(), 1);
     }
 }

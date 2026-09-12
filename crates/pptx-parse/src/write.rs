@@ -35,8 +35,7 @@ pub struct DeckWrite {
     pub notes: Option<NotesWrite>,
 }
 
-/// Speaker notes text per slide that changed since the baseline. Empty text
-/// removes the slide's notes part; non-empty text mints or patches it.
+/// Changed speaker notes; empty text clears the body placeholder.
 pub struct NotesWrite {
     pub per_slide: Vec<(CommentSlide, String)>,
 }
@@ -747,18 +746,7 @@ fn patch_notes_parts(
         let relationships_path = slide_relationships_path(&slide_part_path);
         let existing = existing_notes_part(package, &slide_part_path);
 
-        if text.is_empty() {
-            if let Some(part_path) = existing {
-                removed_paths.insert(part_path.clone());
-                sink.forget(&part_path);
-                remove_content_type_override(&mut sink, &part_path, budget)?;
-                remove_relationship(
-                    &mut sink,
-                    &relationships_path,
-                    NOTES_SLIDE_RELATIONSHIP_TYPE,
-                    budget,
-                )?;
-            }
+        if text.is_empty() && existing.is_none() {
             continue;
         }
 
@@ -782,6 +770,30 @@ fn patch_notes_parts(
                 &relative_target(&slide_part_path, &part_path),
                 budget,
             )?;
+            let notes_relationships = slide_relationships_path(&part_path);
+            set_relationship(
+                &mut sink,
+                &notes_relationships,
+                SLIDE_RELATIONSHIP_TYPE,
+                &relative_target(&part_path, &slide_part_path),
+                budget,
+            )?;
+            if let Some(master) = package
+                .relationships
+                .get(&package.presentation.part_path)
+                .into_iter()
+                .flatten()
+                .find(|relationship| relationship.has_type("/notesMaster"))
+                .and_then(|relationship| relationship.resolved_target.as_deref())
+            {
+                set_relationship(
+                    &mut sink,
+                    &notes_relationships,
+                    &format!("{OFFICE_RELATIONSHIPS_NS}/notesMaster"),
+                    &relative_target(&part_path, master),
+                    budget,
+                )?;
+            }
         }
     }
     Ok(())
