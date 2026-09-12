@@ -1,0 +1,23 @@
+{
+  "name": "@betteroffice/vsdx-i18n",
+  "version": "0.0.1",
+  "description": "Shared UI locale strings and types for the @betteroffice/vsdx React editor.",
+  "sideEffects": false,
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": { "types": "./dist/index.d.mts", "import": "./dist/index.mjs" },
+    "./en": { "types": "./dist/en.d.mts", "import": "./dist/en.mjs" },
+    "./package.json": "./package.json"
+  },
+  "files": ["dist", "README.md"],
+  "scripts": { "build": "tsup", "typecheck": "tsc --noEmit" },
+  "devDependencies": { "@types/bun": "^1.3.14", "tsup": "^8.5.1", "typescript": "^6.0.3" },
+  "keywords": ["vsdx", "visio", "editor", "i18n", "locales", "translations"],
+  "author": "OpenOOXML",
+  "license": "Apache-2.0",
+  "homepage": "https://betteroffice.dev/",
+  "repository": { "type": "git", "url": "https://github.com/openooxml/betteroffice.git", "directory": "packages/vsdx-i18n" },
+  "publishConfig": { "access": "public" }
+}

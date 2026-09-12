@@ -1,0 +1,61 @@
+{
+  "_lang": "en",
+  "editor": { "appLabel": "Visio diagram editor", "opening": "Opening diagram…", "noPages": "No pages", "openPrompt": "Open a VSDX file", "toolbarLabel": "Diagram editing tools", "addShape": "Add shape", "deleteShape": "Delete selected", "fillColor": "Fill", "lineColor": "Line", "save": "Download" },
+  "pages": { "panelLabel": "Pages", "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}" },
+  "statusBar": { "pageList": "Page list", "previousPage": "Previous page", "nextPage": "Next page", "pageTabs": "Page tabs", "addPage": "Add page", "zoomControls": "Zoom controls", "zoomOut": "Zoom out", "zoomIn": "Zoom in", "zoomSlider": "Zoom level", "zoomPercentage": "{zoom}%", "resetZoom": "Reset zoom to 100%", "fitToWindow": "Fit to window" },
+  "shapes": { "selected": "Selected: {name}" },
+  "diagnostics": {
+    "heading": "Document notices",
+    "integrityHeading": "Content could not be preserved",
+    "fidelityHeading": "Rendered with differences",
+    "integrity": { "missing-media": "An image could not be recovered.", "unsupported-shape": "An unsupported shape was omitted.", "truncated-content": "Some content was truncated." },
+    "fidelity": { "font-substituted": "A font was substituted.", "unsupported-effect": "An effect was rendered differently.", "unsupported-geometry": "A shape was approximated." },
+    "unknown": "{category} notice: {code}"
+  },
+  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram" },
+  "ribbon": {
+    "label": "Diagram ribbon",
+    "tabsLabel": "Ribbon tabs",
+    "documentName": "Diagram",
+    "saved": "Saved",
+    "dirty": "Unsaved changes",
+    "tabs": { "file": "File", "home": "Home", "insert": "Insert", "design": "Design", "review": "Review", "view": "View", "help": "Help" },
+    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange" },
+    "commands": {
+      "undo": "Undo", "redo": "Redo", "delete": "Delete selected", "fillColor": "Fill color", "lineColor": "Line color", "lineWeight": "Line weight", "linePattern": "Line pattern",
+      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
+    }
+  },
+  "shapesPanel": {
+    "title": "Shapes",
+    "collapse": "Collapse Shapes",
+    "expand": "Expand Shapes",
+    "searchLabel": "Search shapes",
+    "searchPlaceholder": "Search shapes",
+    "categoriesLabel": "Shape categories",
+    "standardShapes": "Standard Shapes",
+    "empty": "No shapes found",
+    "shape": {
+      "rectangle": "Rectangle",
+      "square": "Square",
+      "circle": "Circle",
+      "ellipse": "Ellipse",
+      "rightTriangle": "Right Triangle",
+      "triangle": "Triangle",
+      "pentagon": "Pentagon",
+      "hexagon": "Hexagon",
+      "heptagon": "Heptagon",
+      "octagon": "Octagon",
+      "decagon": "Decagon",
+      "diamond": "Diamond",
+      "cross": "Cross",
+      "chevron": "Chevron",
+      "parallelogram": "Parallelogram",
+      "trapezoid": "Trapezoid",
+      "cylinder": "Cylinder",
+      "cube": "Cube",
+      "arc": "Arc",
+      "teardrop": "Teardrop"
+    }
+  }
+}

@@ -21,6 +21,11 @@
     [
       "@betteroffice/fonts",
       "@betteroffice/fonts-cjk"
+    ],
+    [
+      "@betteroffice/vsdx",
+      "@betteroffice/vsdx-react",
+      "@betteroffice/vsdx-i18n"
     ]
   ],
   "linked": [],
