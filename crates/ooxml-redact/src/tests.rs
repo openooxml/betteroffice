@@ -175,6 +175,152 @@ fn font_cleanup_preserves_other_consumers_of_the_same_relationship() {
 }
 
 #[test]
+fn unrelated_attribute_values_do_not_keep_detached_font_parts() {
+    let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, false)).unwrap();
+    let (_, fonts) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/custom/fontList.xml")
+        .unwrap();
+    *fonts = String::from_utf8(fonts.clone())
+        .unwrap()
+        .replace("d:name=\"Arial\"", "d:name=\"font0\" other:value=\"font1\"")
+        .into_bytes();
+    let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(!parts.iter().any(|(name, _)| name == "word/fonts/font.ttf"));
+    assert!(
+        !String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+            .contains("Target=")
+    );
+}
+
+#[test]
+fn font_cleanup_preserves_relationship_embed_and_link_consumers() {
+    for attribute in ["embed", "link"] {
+        let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, true)).unwrap();
+        let (_, fonts) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/custom/fontList.xml")
+            .unwrap();
+        *fonts = String::from_utf8(fonts.clone())
+            .unwrap()
+            .replace(
+                "other:preserved link:id=",
+                &format!("other:preserved link:{attribute}="),
+            )
+            .into_bytes();
+        let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(part(&parts, "word/fonts/font.ttf").is_empty());
+        assert!(
+            String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+                .contains("Id=\"font0\"")
+        );
+    }
+}
+
+fn pptx_embedded_font_fixture(strict: bool, shared: bool) -> Vec<u8> {
+    let source = embedded_font_fixture(strict, shared);
+    let parts = ooxml_opc::unzip_parts(&source).unwrap();
+    let parts = parts
+        .into_iter()
+        .map(|(path, bytes)| {
+            let path = path
+                .replace("word/document.xml", "ppt/presentation.xml")
+                .replace("word/", "ppt/");
+            let bytes = if path.ends_with(".xml") || path.ends_with(".rels") {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("wordprocessingml", "presentationml")
+                    .replace("d:document", "d:presentation")
+                    .replace("d:fonts", "d:embeddedFontLst")
+                    .replace(
+                        "<d:font d:name=\"Arial\">",
+                        "<d:embeddedFont><d:font typeface=\"Arial\"/>",
+                    )
+                    .replace("</d:font>", "</d:embeddedFont>")
+                    .replace("embedRegular", "regular")
+                    .replace("embedBoldItalic", "boldItalic")
+                    .replace("embedBold", "bold")
+                    .replace("embedItalic", "italic")
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn pptx_font_variants_are_detached_before_scrubbing_payloads() {
+    for strict in [false, true] {
+        let source = pptx_embedded_font_fixture(strict, false);
+        let (output, report) = redact_with_report(&source, Format::Pptx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert_eq!(report.binary_parts, 1);
+        assert!(!parts.iter().any(|(path, _)| path == "ppt/fonts/font.ttf"));
+        let fonts = String::from_utf8_lossy(part(&parts, "ppt/custom/fontList.xml"));
+        assert!(fonts.contains("typeface=\"Arial\""));
+        for variant in ["regular", "bold", "italic", "boldItalic"] {
+            assert!(!fonts.contains(&format!("<d:{variant}")));
+        }
+        assert!(
+            !String::from_utf8_lossy(part(&parts, "ppt/custom/_rels/fontList.xml.rels"))
+                .contains("Target=")
+        );
+        assert!(!String::from_utf8_lossy(part(&parts, "[Content_Types].xml")).contains("ttf"));
+    }
+}
+
+#[test]
+fn pptx_font_cleanup_preserves_foreign_and_shared_consumers() {
+    for strict in [false, true] {
+        let mut parts = ooxml_opc::unzip_parts(&pptx_embedded_font_fixture(strict, true)).unwrap();
+        let (_, fonts) = parts
+            .iter_mut()
+            .find(|(path, _)| path == "ppt/custom/fontList.xml")
+            .unwrap();
+        *fonts = String::from_utf8(fonts.clone())
+            .unwrap()
+            .replace("other:preserved", "other:regular")
+            .replace(
+                "</d:embeddedFont>",
+                "<d:bold other:id=\"font1\"/></d:embeddedFont>",
+            )
+            .into_bytes();
+        let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Pptx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(part(&parts, "ppt/fonts/font.ttf").is_empty());
+        let fonts = String::from_utf8_lossy(part(&parts, "ppt/custom/fontList.xml"));
+        assert!(fonts.contains("other:regular link:id=\"font0\""));
+        assert!(fonts.contains("<d:bold other:id=\"font1\"/>"));
+        assert!(!fonts.contains("<d:regular"));
+        let rels = String::from_utf8_lossy(part(&parts, "ppt/custom/_rels/fontList.xml.rels"));
+        assert!(rels.contains("Id=\"font0\""));
+        assert!(!rels.contains("Id=\"font1\""));
+    }
+}
+
+#[test]
+fn pptx_redacts_editable_design_names_but_preserves_font_and_style_ids() {
+    let input = br#"<root><theme name="PRIVATE_THEME"><clrScheme name="PRIVATE_COLORS"/><fontScheme name="PRIVATE_FONTS"><latin typeface="Arial"/></fontScheme><fmtScheme name="PRIVATE_FORMAT"/></theme><sldLayout matchingName="PRIVATE_LAYOUT" type="title"/><tblStyle styleName="PRIVATE_TABLE" styleId="{STYLE-ID}"/></root>"#;
+    let output = xml::redact_xml(
+        Format::Pptx,
+        "ppt/theme/theme1.xml",
+        input,
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(!output.contains("PRIVATE_"));
+    assert!(output.contains("typeface=\"Arial\""));
+    assert!(output.contains("type=\"title\""));
+    assert!(output.contains("styleId=\"{STYLE-ID}\""));
+}
+
+#[test]
 fn redacts_docx_without_changing_structure() {
     let source = docx_fixture();
     let (output, report) = redact_with_report(&source, Format::Auto).unwrap();
