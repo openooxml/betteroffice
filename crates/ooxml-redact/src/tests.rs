@@ -175,6 +175,51 @@ fn font_cleanup_preserves_other_consumers_of_the_same_relationship() {
 }
 
 #[test]
+fn unrelated_attribute_values_do_not_keep_detached_font_parts() {
+    let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, false)).unwrap();
+    let (_, fonts) = parts
+        .iter_mut()
+        .find(|(name, _)| name == "word/custom/fontList.xml")
+        .unwrap();
+    *fonts = String::from_utf8(fonts.clone())
+        .unwrap()
+        .replace("d:name=\"Arial\"", "d:name=\"font0\" other:value=\"font1\"")
+        .into_bytes();
+    let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    assert!(!parts.iter().any(|(name, _)| name == "word/fonts/font.ttf"));
+    assert!(
+        !String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+            .contains("Target=")
+    );
+}
+
+#[test]
+fn font_cleanup_preserves_relationship_embed_and_link_consumers() {
+    for attribute in ["embed", "link"] {
+        let mut parts = ooxml_opc::unzip_parts(&embedded_font_fixture(false, true)).unwrap();
+        let (_, fonts) = parts
+            .iter_mut()
+            .find(|(name, _)| name == "word/custom/fontList.xml")
+            .unwrap();
+        *fonts = String::from_utf8(fonts.clone())
+            .unwrap()
+            .replace(
+                "other:preserved link:id=",
+                &format!("other:preserved link:{attribute}="),
+            )
+            .into_bytes();
+        let output = redact(&ooxml_opc::rezip_parts(&parts).unwrap(), Format::Docx).unwrap();
+        let parts = ooxml_opc::unzip_parts(&output).unwrap();
+        assert!(part(&parts, "word/fonts/font.ttf").is_empty());
+        assert!(
+            String::from_utf8_lossy(part(&parts, "word/custom/_rels/fontList.xml.rels"))
+                .contains("Id=\"font0\"")
+        );
+    }
+}
+
+#[test]
 fn redacts_docx_without_changing_structure() {
     let source = docx_fixture();
     let (output, report) = redact_with_report(&source, Format::Auto).unwrap();

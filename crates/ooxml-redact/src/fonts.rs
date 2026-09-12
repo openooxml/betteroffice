@@ -69,8 +69,10 @@ pub(crate) fn detach_scrubbed_fonts(
             Ok(false)
         })?;
         filter_xml(&parts[owner_index].1, &owner, |reader, start| {
-            for (_, id) in attributes(reader, start, &owner)? {
-                ids.remove(&id);
+            for (key, id) in attributes(reader, start, &owner)? {
+                if relationship_attribute(reader, &key) {
+                    ids.remove(&id);
+                }
             }
             Ok(false)
         })?;
@@ -99,13 +101,17 @@ fn relationship_ids(
         .into_iter()
         .filter(|(key, _)| {
             QName(key.as_bytes()).local_name().as_ref() == b"id"
-                && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
-                    ResolveResult::Bound(ns) if matches!(ns.as_ref(),
-                        b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-                            | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
+                && relationship_attribute(reader, key)
         })
         .map(|(_, value)| value)
         .collect())
+}
+
+fn relationship_attribute(reader: &NsReader<&[u8]>, key: &str) -> bool {
+    matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+        ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+            b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
 }
 
 fn attributes(
