@@ -119,6 +119,13 @@ struct FormulaShapeDraft {
     cells: Vec<serde_json::Value>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FormulaShapeDraftCell {
+    locator: CellLocatorArgs,
+    formula: Option<String>,
+}
+
 impl TryFrom<FormulaShapeDraft> for ShapeDraft {
     type Error = &'static str;
 
@@ -128,10 +135,15 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
             if cell.get("value").is_some() {
                 return Err("shape draft cells must not contain value");
             }
-            cells.push(
-                serde_json::from_value::<CellSnapshot>(cell)
-                    .map_err(|_| "invalid shape draft cell")?,
-            );
+            let cell = serde_json::from_value::<FormulaShapeDraftCell>(cell)
+                .map_err(|_| "invalid shape draft cell")?;
+            let locator = CellLocator::try_from(cell.locator)?;
+            cells.push(CellSnapshot {
+                name: locator.cell_name.clone(),
+                locator,
+                formula: cell.formula,
+                value: None,
+            });
         }
         Ok(Self {
             source_id: value.source_id,
@@ -1025,6 +1037,38 @@ mod tests {
             document.apply_update_json_inner(&update).unwrap_err(),
             "invalid diagram state: shape parentId does not match shape order"
         );
+    }
+
+    #[test]
+    fn add_shape_json_accepts_the_boundary_cell_locator_shape() {
+        let document = document();
+        let receipt: serde_json::Value = serde_json::from_str(
+            &document
+                .add_shape_json(
+                    r#"{"pageId":"page:1","draft":{"sourceId":7,"name":"Added","cells":[{"locator":{"cellName":"Width"},"formula":"1"},{"locator":{"section":"Geometry","rowIndex":0,"cellName":"X"},"formula":"2"}]}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let shape_id = receipt["shapeId"].as_str().unwrap().to_owned();
+        let snapshot = document.session().snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.id == shape_id)
+            .unwrap();
+        let width = shape
+            .cells
+            .iter()
+            .find(|cell| cell.name == "Width")
+            .unwrap();
+        assert_eq!(width.formula.as_deref(), Some("1"));
+        assert_eq!(width.locator.section, None);
+        assert_eq!(width.locator.row, None);
+        let x = shape.cells.iter().find(|cell| cell.name == "X").unwrap();
+        assert_eq!(x.formula.as_deref(), Some("2"));
+        assert_eq!(x.locator.section.as_deref(), Some("Geometry"));
+        assert_eq!(x.locator.row, Some(vsdx_parse::CellRow::Index(0)));
     }
 
     #[test]

@@ -129,8 +129,27 @@ describe('VSDX wasm boundary', () => {
     const draft: FormulaShapeDraft = { sourceId: 2, cells: [] };
     expect(draft.sourceId).toBe(2);
     // @ts-expect-error Shape cells accept formulas, never cached values.
-    const invalid: FormulaShapeDraft = { sourceId: 2, cells: [{ locator: {}, name: 'Width', value: '1' }] };
+    const invalid: FormulaShapeDraft = { sourceId: 2, cells: [{ locator: { cellName: 'Width' }, formula: '1', value: '1' }] };
     expect(invalid).toBeDefined();
+  });
+
+  test('adds a shape from the declared cell locator shape', () => {
+    const diagram = openDiagram(foundation, { clientId: 9012 });
+    const draft: FormulaShapeDraft = {
+      sourceId: 7,
+      name: 'Added',
+      cells: [
+        { locator: { cellName: 'Width' }, formula: '1' },
+        { locator: { section: 'Geometry', rowIndex: 0, cellName: 'X' }, formula: '2' },
+      ],
+    };
+    const receipt = diagram.addShape('page:1', draft);
+    const added = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId);
+    expect(added?.cells.find(cell => cell.name === 'Width')?.formula).toBe('1');
+    const x = added?.cells.find(cell => cell.name === 'X');
+    expect(x?.formula).toBe('2');
+    expect(x?.locator).toEqual({ sheet: { page: 1 }, shapeId: 7, section: 'Geometry', row: { index: 0 }, cellName: 'X' });
+    diagram.dispose();
   });
 
   test('does not reenter update listeners before the outer call unwinds', () => {

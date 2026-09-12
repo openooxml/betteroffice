@@ -133,11 +133,7 @@ mod tests {
     }
 
     fn shape_cell(name: &str, formula: &str) -> serde_json::Value {
-        serde_json::json!({
-            "name": name,
-            "formula": formula,
-            "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": null, "row": null, "cellName": name }
-        })
+        serde_json::json!({ "locator": { "cellName": name }, "formula": formula })
     }
 
     fn added_shape_json(source_id: u32) -> String {
@@ -151,20 +147,17 @@ mod tests {
         ];
         for (index, x, y) in [(0, "0", "0"), (1, "1", "0"), (2, "1", "1"), (3, "0", "1")] {
             cells.push(serde_json::json!({
-                "name": "X",
-                "formula": x,
-                "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": index }, "cellName": "X" }
+                "locator": { "section": "Geometry", "rowIndex": index, "cellName": "X" },
+                "formula": x
             }));
             cells.push(serde_json::json!({
-                "name": "Y",
-                "formula": y,
-                "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": index }, "cellName": "Y" }
+                "locator": { "section": "Geometry", "rowIndex": index, "cellName": "Y" },
+                "formula": y
             }));
         }
         cells.push(serde_json::json!({
-            "name": "NoShow",
-            "formula": "0",
-            "locator": { "sheet": { "page": 0 }, "shapeId": null, "section": "Geometry", "row": { "index": 4 }, "cellName": "NoShow" }
+            "locator": { "section": "Geometry", "rowIndex": 4, "cellName": "NoShow" },
+            "formula": "0"
         }));
         serde_json::json!({ "pageId": "page:1", "draft": { "sourceId": source_id, "name": "Added", "cells": cells } }).to_string()
     }

@@ -1,12 +1,15 @@
 export interface Affine { a: number; b: number; c: number; d: number; e: number; f: number; }
 export interface CellLocator { section?: string; rowIndex?: number; rowName?: string; cellName: string; }
-export interface CellSnapshot { locator: CellLocator; name: string; formula: string | null; value: string | null; }
+export type SnapshotCellSheet = 'document' | { page: number } | { master: number };
+export type SnapshotCellRow = { index: number } | { name: string };
+export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; row: SnapshotCellRow | null; cellName: string; }
+export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
-export interface FormulaShapeDraft { sourceId: number; name?: string; cells: Array<{ locator: unknown; name: string; formula?: string }> }
+export interface FormulaShapeDraft { sourceId: number; name?: string; cells: Array<{ locator: CellLocator; formula?: string }> }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
 export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };
 export interface Stroke { color: string; width: number; dashed?: boolean; }
