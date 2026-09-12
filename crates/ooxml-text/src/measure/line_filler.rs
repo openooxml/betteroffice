@@ -325,11 +325,7 @@ impl Filler<'_> {
         self.finalize_line()
     }
 
-    /// Places an inline image: its declared width joins the line advance and
-    /// its *column-fitted* height plus wrap distances competes for the line
-    /// box. An image wider than the whole line wraps off an empty line too,
-    /// emitting an empty row. Images carry no font, so line metrics are
-    /// untouched.
+    /// Place an inline image using its fitted height.
     fn fill_inline_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
         if self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
@@ -339,7 +335,7 @@ impl Filler<'_> {
         } else {
             1.0
         };
-        let footprint = img.height * fit_scale + img.dist_top + img.dist_bottom;
+        let footprint = img.height * fit_scale;
         if footprint > self.cur.max_image_height_px {
             self.cur.max_image_height_px = footprint;
         }

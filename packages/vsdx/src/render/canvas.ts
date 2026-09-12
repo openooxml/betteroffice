@@ -56,6 +56,7 @@ function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void 
 function paintStyle(ctx: CanvasRenderingContext2D, paint: Paint): string | CanvasGradient { if (paint.kind === 'solid') return paint.color; const gradient = ctx.createLinearGradient(0, 0, 1, 1); for (const stop of paint.stops) gradient.addColorStop(Math.max(0, Math.min(1, stop.position)), stop.color); return gradient; }
 function stroke(ctx: CanvasRenderingContext2D, value: Stroke): void { ctx.strokeStyle = value.color; ctx.lineWidth = value.width; ctx.setLineDash(value.dashed ? [Math.max(3, value.width * 2), Math.max(2, value.width)] : []); ctx.stroke(); }
 function paintTextBox(ctx: CanvasRenderingContext2D, text: TextBoxPrimitive): void {
+  ctx.translate(0, 2 * text.y + text.height); ctx.scale(1, -1); ctx.textBaseline = 'top';
   ctx.beginPath(); ctx.rect(text.x, text.y, text.width, text.height); ctx.clip();
   let offset = 0;
   const runs = text.paragraphs.flatMap(paragraph => paragraph.runs.map(run => {

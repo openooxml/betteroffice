@@ -2873,6 +2873,34 @@ mod tests {
     }
 
     #[test]
+    fn renders_indexed_shape_fill_and_stroke_colours() {
+        let mut indexed = shape(1, 1.0, 1.0);
+        for child in &mut indexed.children {
+            if let ShapeChild::Cell(value) = child
+                && matches!(value.name.as_str(), "FillForegnd" | "LineColor")
+            {
+                *value = cell(&value.name, "3");
+            }
+        }
+        let mut package = package(vec![indexed]);
+        package.colors = serde_json::from_value(serde_json::json!([
+            {"name":"ColorEntry","attributes":[["IX","3"],["RGB","010203"]],"children":[]}
+        ]))
+        .unwrap();
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        let Primitive::Shape { fill, stroke, .. } = &list.primitives[0] else {
+            panic!("indexed shape did not render");
+        };
+        assert_eq!(
+            fill,
+            &Some(Paint::Solid {
+                color: "#010203".into()
+            })
+        );
+        assert_eq!(stroke.as_ref().unwrap().color, "#010203");
+    }
+
+    #[test]
     fn palette_colours_and_unknown_codes_fail_safe() {
         let mut package = package(Vec::new());
         package.colors = serde_json::from_value(serde_json::json!([
@@ -2894,8 +2922,8 @@ mod tests {
                 y: 20.0,
                 width: 8.0,
                 height: 12.0,
-                loc_pin_x: 0.0,
-                loc_pin_y: 0.0,
+                loc_pin_x: 4.0,
+                loc_pin_y: 6.0,
                 angle: 0.0,
                 flip_x: false,
                 flip_y: false,
@@ -4072,10 +4100,10 @@ mod tests {
             unreachable!()
         };
         // These values were calculated by hand from the composed outer and inner affine,
-        // M = [[-0.94190204, 1.8844845, 10.021151], [-1.1970047, 0.27151108, 11.018823]].
+        // M = [[-0.94190204, 1.8844845, 9.487798], [-1.1970047, 0.27151108, 10.472947]].
         // Each expected AABB is min/max(M(corner)) for the original source rectangle;
         // the image corners and text caret are direct substitutions into that same affine.
-        assert_point_close((x as f32, y as f32), (10.021151, 11.018823));
+        assert_point_close((x as f32, y as f32), (9.487798, 10.472947));
         let Primitive::TextBox {
             x,
             y,
@@ -4095,14 +4123,14 @@ mod tests {
         assert_point_close((*width, *height), (1.0, 1.0));
         assert_point_close((transform.a, transform.b), (-0.94190204, -1.1970047));
         assert_point_close((transform.c, transform.d), (1.8844845, 0.27151108));
-        assert_point_close((transform.e, transform.f), (10.021151, 11.018823));
+        assert_point_close((transform.e, transform.f), (9.487798, 10.472947));
         assert_point_close(
             transform.apply_point(lines[0].x, lines[0].y),
-            (10.021151, 11.018823),
+            (9.487798, 10.472947),
         );
         assert_point_close(
             transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (9.942658, 10.919072),
+            (9.409306, 10.373197),
         );
         let Primitive::Image {
             x,
@@ -4121,10 +4149,10 @@ mod tests {
             transform.apply_point(*x, *y + *height),
             transform.apply_point(*x + *width, *y + *height),
         ];
-        assert_point_close(corners[0], (10.0218315, 8.896324));
-        assert_point_close(corners[1], (9.079929, 7.6993194));
-        assert_point_close(corners[2], (13.7908, 9.439346));
-        assert_point_close(corners[3], (12.848899, 8.242341));
+        assert_point_close(corners[0], (9.488478, 8.350449));
+        assert_point_close(corners[1], (8.546576, 7.153444));
+        assert_point_close(corners[2], (13.257447, 8.893471));
+        assert_point_close(corners[3], (12.315545, 7.696466));
         let Primitive::Placeholder {
             x,
             y,
@@ -4135,12 +4163,12 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_point_close((*x, *y), (13.7908, 9.439346));
+        assert_point_close((*x, *y), (13.257447, 8.893471));
         assert_point_close((*width, *height), (2.8263874, 1.4685163));
         let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
         assert_eq!(z_orders, vec![2, 3, 4, 5]);
         assert_eq!(
-            hit_test(&list, 10.021151 * 96.0, (11.0 - 11.018823) * 96.0),
+            hit_test(&list, 9.487798 * 96.0, (11.0 - 10.472947) * 96.0),
             Some(HitTestResult::Text {
                 shape_id: "visio/pages/page1.xml:3".into(),
                 position: 0,

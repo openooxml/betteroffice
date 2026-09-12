@@ -54,14 +54,7 @@ pub(crate) fn detach_scrubbed_fonts(
             continue;
         }
         parts[owner_index].1 = filter_xml(&parts[owner_index].1, &owner, |reader, start| {
-            if matches!(
-                start.local_name().as_ref(),
-                b"embedRegular" | b"embedBold" | b"embedItalic" | b"embedBoldItalic"
-            ) && matches!(reader.resolver().resolve_element(start.name()).0,
-                    ResolveResult::Bound(ns) if matches!(ns.as_ref(),
-                        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                            | b"http://purl.oclc.org/ooxml/wordprocessingml/main"))
-            {
+            if embedded_font_reference(reader, start) {
                 return Ok(relationship_ids(reader, start, &owner)?
                     .iter()
                     .any(|id| ids.contains(id)));
@@ -69,8 +62,10 @@ pub(crate) fn detach_scrubbed_fonts(
             Ok(false)
         })?;
         filter_xml(&parts[owner_index].1, &owner, |reader, start| {
-            for (_, id) in attributes(reader, start, &owner)? {
-                ids.remove(&id);
+            for (key, id) in attributes(reader, start, &owner)? {
+                if relationship_attribute(reader, &key) {
+                    ids.remove(&id);
+                }
             }
             Ok(false)
         })?;
@@ -81,6 +76,25 @@ pub(crate) fn detach_scrubbed_fonts(
         })?;
     }
     Ok(())
+}
+
+fn embedded_font_reference(reader: &NsReader<&[u8]>, start: &BytesStart<'_>) -> bool {
+    let ResolveResult::Bound(namespace) = reader.resolver().resolve_element(start.name()).0 else {
+        return false;
+    };
+    match namespace.as_ref() {
+        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        | b"http://purl.oclc.org/ooxml/wordprocessingml/main" => matches!(
+            start.local_name().as_ref(),
+            b"embedRegular" | b"embedBold" | b"embedItalic" | b"embedBoldItalic"
+        ),
+        b"http://schemas.openxmlformats.org/presentationml/2006/main"
+        | b"http://purl.oclc.org/ooxml/presentationml/main" => matches!(
+            start.local_name().as_ref(),
+            b"regular" | b"bold" | b"italic" | b"boldItalic"
+        ),
+        _ => false,
+    }
 }
 
 fn relationship(reader: &NsReader<&[u8]>, start: &BytesStart<'_>) -> bool {
@@ -99,13 +113,17 @@ fn relationship_ids(
         .into_iter()
         .filter(|(key, _)| {
             QName(key.as_bytes()).local_name().as_ref() == b"id"
-                && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
-                    ResolveResult::Bound(ns) if matches!(ns.as_ref(),
-                        b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-                            | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
+                && relationship_attribute(reader, key)
         })
         .map(|(_, value)| value)
         .collect())
+}
+
+fn relationship_attribute(reader: &NsReader<&[u8]>, key: &str) -> bool {
+    matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+        ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+            b"http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                | b"http://purl.oclc.org/ooxml/officeDocument/relationships"))
 }
 
 fn attributes(
