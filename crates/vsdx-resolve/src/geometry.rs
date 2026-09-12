@@ -9,7 +9,7 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
     let rows: Vec<_> = if section.row_order.is_empty() {
         let mut rows: Vec<_> = section.rows.values().collect();
         rows.sort_by(|left, right| {
-            numeric_key_order(&left.key).cmp(&numeric_key_order(&right.key))
+            numeric_row_index(&left.key).cmp(&numeric_row_index(&right.key))
         });
         rows
     } else {
@@ -234,8 +234,7 @@ pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> R
     out
 }
 
-/// Keys sort lexically, so `IX:10` would precede `IX:2` and displace relative rows.
-fn numeric_key_order(key: &str) -> (u32, &str) {
+fn numeric_row_index(key: &str) -> (u32, &str) {
     key.strip_prefix("IX:")
         .and_then(|index| index.parse().ok())
         .map_or((u32::MAX, key), |index| (index, ""))
@@ -718,6 +717,36 @@ fn cubic_arc_segment(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn geometry_realizes_two_digit_rows_in_numeric_order() {
+        let keyed = |key: &str, ty: &str, cells: Vec<Cell>| {
+            (
+                key.to_owned(),
+                ResolvedRow {
+                    key: key.into(),
+                    ..resolved_row(ty, cells)
+                },
+            )
+        };
+        let section = ResolvedSection {
+            name: "Geometry".into(),
+            deleted: false,
+            row_order: vec![],
+            rows: BTreeMap::from([
+                keyed("IX:1", "MoveTo", vec![cell("X", "0"), cell("Y", "0")]),
+                keyed("IX:2", "LineTo", vec![cell("X", "1"), cell("Y", "0")]),
+                keyed("IX:10", "LineTo", vec![cell("X", "1"), cell("Y", "1")]),
+            ]),
+        };
+        assert_eq!(
+            realize_geometry(&section, 1.0, 1.0).commands,
+            vec![
+                GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 0.0 },
+                GeometryPathCommand::Line { x: 1.0, y: 1.0 },
+            ]
+        );
+    }
     use crate::*;
     use ooxml_drawingml::GeometryPathCommand;
     use std::collections::BTreeMap;

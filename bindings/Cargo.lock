@@ -301,7 +301,6 @@ dependencies = [
 name = "betteroffice-vsdx-python"
 version = "0.0.1"
 dependencies = [
- "betteroffice-opc",
  "betteroffice-python-common",
  "betteroffice-vsdx",
  "betteroffice-vsdx-parse",

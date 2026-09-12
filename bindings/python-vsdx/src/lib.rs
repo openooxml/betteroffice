@@ -162,9 +162,9 @@ impl PyPage {
 #[pymethods]
 impl PyDiagram {
     #[staticmethod]
-    fn open(data: &[u8]) -> PyResult<Self> {
+    fn open(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
         Ok(Self {
-            diagram: CoreDiagram::open(data).map_err(map_error)?,
+            diagram: py.detach(|| CoreDiagram::open(data)).map_err(map_error)?,
         })
     }
 
@@ -172,8 +172,8 @@ impl PyDiagram {
     fn open_path(py: Python<'_>, path: PathBuf) -> PyResult<Self> {
         let data = py
             .detach(|| fs::read(&path))
-            .map_err(|error| VsdxError::new_err(format!("{}: {error}", path.display())))?;
-        Self::open(&data)
+            .map_err(|error| python_common::map_io_error(&error, &path))?;
+        Self::open(py, &data)
     }
 
     #[getter]
@@ -182,15 +182,10 @@ impl PyDiagram {
         package
             .page_part_paths
             .iter()
-            .filter_map(|path| {
-                let sheet = package.page_contents.get(path)?;
+            .filter_map(|path| package.page_contents.get(path).map(|sheet| (path, sheet)))
+            .map(|(path, sheet)| {
                 let id = *package.page_part_ids.get(path).unwrap_or(&0);
-                Some(PyPage::from_core(
-                    id,
-                    path,
-                    sheet,
-                    catalogued_page_name(package, id),
-                ))
+                PyPage::from_core(id, path, sheet, package.page_names.get(&id).cloned())
             })
             .collect()
     }
@@ -201,231 +196,6 @@ impl PyDiagram {
 
     fn __repr__(&self) -> String {
         format!("Diagram(pages={})", self.__len__())
-    }
-}
-
-fn catalogued_page_name(package: &vsdx_parse::VsdxPackage, page_id: u32) -> Option<String> {
-    let pages = package.part_bytes(package.pages_part_path.as_deref()?)?;
-    catalogued_page_name_in_pages(pages, page_id)
-}
-
-fn catalogued_page_name_in_pages(pages: &[u8], page_id: u32) -> Option<String> {
-    let mut offset = 0;
-    while let Some(index) = pages[offset..].windows(5).position(|window| window == b"<Page") {
-        let start = offset + index;
-        let next = pages.get(start + 5)?;
-        if !next.is_ascii_whitespace() && *next != b'>' {
-            offset = start + 5;
-            continue;
-        }
-        let end = tag_end(pages, start + 5)?;
-        let attributes = &pages[start + 5..end];
-        if attribute(attributes, b"ID").and_then(|value| value.parse::<u32>().ok()) == Some(page_id) {
-            return attribute(attributes, b"Name")
-                .or_else(|| attribute(attributes, b"NameU"))
-                .map(|value| unescape_xml(&value));
-        }
-        offset = end + 1;
-    }
-    None
-}
-
-fn tag_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let mut quote = None;
-    for (index, byte) in bytes.iter().enumerate().skip(start) {
-        if let Some(current) = quote {
-            if *byte == current {
-                quote = None;
-            }
-        } else if matches!(*byte, b'\'' | b'"') {
-            quote = Some(*byte);
-        } else if *byte == b'>' {
-            return Some(index);
-        }
-    }
-    None
-}
-
-fn attribute(bytes: &[u8], name: &[u8]) -> Option<String> {
-    let mut offset = 0;
-    while offset < bytes.len() {
-        while bytes.get(offset).is_some_and(u8::is_ascii_whitespace) {
-            offset += 1;
-        }
-        let key_start = offset;
-        while bytes.get(offset).is_some_and(|byte| !byte.is_ascii_whitespace() && *byte != b'=') {
-            offset += 1;
-        }
-        let key = &bytes[key_start..offset];
-        while bytes.get(offset).is_some_and(u8::is_ascii_whitespace) {
-            offset += 1;
-        }
-        if bytes.get(offset) != Some(&b'=') {
-            offset += 1;
-            continue;
-        }
-        offset += 1;
-        while bytes.get(offset).is_some_and(u8::is_ascii_whitespace) {
-            offset += 1;
-        }
-        let quote = *bytes.get(offset)?;
-        if !matches!(quote, b'\'' | b'"') {
-            return None;
-        }
-        offset += 1;
-        let value_start = offset;
-        while bytes.get(offset).is_some_and(|byte| *byte != quote) {
-            offset += 1;
-        }
-        if bytes.get(offset) != Some(&quote) {
-            return None;
-        }
-        if key == name {
-            return Some(String::from_utf8_lossy(&bytes[value_start..offset]).into_owned());
-        }
-        offset += 1;
-    }
-    None
-}
-
-fn unescape_xml(value: &str) -> String {
-    let mut result = String::with_capacity(value.len());
-    let mut remaining = value;
-    while let Some(start) = remaining.find('&') {
-        result.push_str(&remaining[..start]);
-        let entity = &remaining[start + 1..];
-        let Some(end) = entity.find(';') else {
-            result.push_str(&remaining[start..]);
-            break;
-        };
-        let name = &entity[..end];
-        if let Some(decoded) = decode_xml_entity(name) {
-            result.push(decoded);
-        } else {
-            result.push('&');
-            result.push_str(name);
-            result.push(';');
-        }
-        remaining = &entity[end + 1..];
-    }
-    if !remaining.is_empty() {
-        result.push_str(remaining);
-    }
-    result
-}
-
-fn decode_xml_entity(entity: &str) -> Option<char> {
-    match entity {
-        "quot" => Some('"'),
-        "apos" => Some('\''),
-        "lt" => Some('<'),
-        "gt" => Some('>'),
-        "amp" => Some('&'),
-        _ => entity
-            .strip_prefix("#x")
-            .or_else(|| entity.strip_prefix("#X"))
-            .and_then(|value| u32::from_str_radix(value, 16).ok())
-            .or_else(|| entity.strip_prefix('#').and_then(|value| value.parse().ok()))
-            .and_then(char::from_u32),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{PyDiagram, catalogued_page_name_in_pages};
-
-    #[test]
-    fn page_name_uses_catalogue_name() {
-        assert_eq!(
-            catalogued_page_name_in_pages(
-                br#"<Pages><Page ID='1' NameU='Universal' Name='Display &amp; name'/></Pages>"#,
-                1,
-            ),
-            Some("Display & name".to_owned())
-        );
-    }
-
-    #[test]
-    fn page_name_falls_back_to_catalogue_name_u() {
-        assert_eq!(
-            catalogued_page_name_in_pages(br#"<Pages><Page ID='1' NameU='Universal'/></Pages>"#, 1),
-            Some("Universal".to_owned())
-        );
-    }
-
-    #[test]
-    fn page_name_decodes_numeric_character_references() {
-        assert_eq!(
-            catalogued_page_name_in_pages(
-                br#"<Pages><Page ID='1' Name='A&#x20;B'/><Page ID='2' Name='C&#32;D'/></Pages>"#,
-                1,
-            ),
-            Some("A B".to_owned())
-        );
-        assert_eq!(
-            catalogued_page_name_in_pages(
-                br#"<Pages><Page ID='1' Name='A&#x20;B'/><Page ID='2' Name='C&#32;D'/></Pages>"#,
-                2,
-            ),
-            Some("C D".to_owned())
-        );
-    }
-
-    #[test]
-    fn page_name_is_none_without_catalogue_name() {
-        assert_eq!(
-            catalogued_page_name_in_pages(br#"<Pages><Page ID='1'/></Pages>"#, 1),
-            None
-        );
-    }
-
-    #[test]
-    fn pages_follow_document_order_not_lexical_path_order() {
-        let content_types = br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec();
-        let root_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec();
-        let document = b"<VisioDocument/>".to_vec();
-        let document_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec();
-        let pages_catalog = b"<Pages/>".to_vec();
-        // Relationship order is the document order: page1, page2, page10.
-        // Lexical path order would sort them page1, page10, page2 instead.
-        let pages_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='r2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/><Relationship Id='r3' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page10.xml'/></Relationships>"#.to_vec();
-
-        let source = ooxml_opc::rezip_parts(&[
-            ("[Content_Types].xml".to_owned(), content_types),
-            ("_rels/.rels".to_owned(), root_rels),
-            ("visio/document.xml".to_owned(), document),
-            ("visio/_rels/document.xml.rels".to_owned(), document_rels),
-            ("visio/pages/pages.xml".to_owned(), pages_catalog),
-            ("visio/pages/_rels/pages.xml.rels".to_owned(), pages_rels),
-            (
-                "visio/pages/page1.xml".to_owned(),
-                b"<PageContents/>".to_vec(),
-            ),
-            (
-                "visio/pages/page2.xml".to_owned(),
-                b"<PageContents/>".to_vec(),
-            ),
-            (
-                "visio/pages/page10.xml".to_owned(),
-                b"<PageContents/>".to_vec(),
-            ),
-        ])
-        .unwrap();
-
-        let diagram = PyDiagram::open(&source).unwrap();
-        let paths: Vec<String> = diagram
-            .pages()
-            .into_iter()
-            .map(|page| page.source_part_path)
-            .collect();
-        assert_eq!(
-            paths,
-            [
-                "visio/pages/page1.xml",
-                "visio/pages/page2.xml",
-                "visio/pages/page10.xml",
-            ]
-        );
     }
 }
 

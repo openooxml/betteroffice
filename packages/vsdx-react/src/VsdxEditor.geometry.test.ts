@@ -4,7 +4,7 @@ import type { PointerEvent } from 'react';
 import { canvasPointerPosition, inchFormula, resolveDragGeometry, stillSelectable } from './VsdxEditor';
 
 const frame: PageDisplayList = {
-  contractVersion: 3,
+  contractVersion: 4,
   width: 816,
   height: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
@@ -68,4 +68,15 @@ test('drops a selection whose shape a peer removed from the page', () => {
   expect(stillSelectable(withChild, 0, selection)).toBe(true);
   expect(stillSelectable(withoutChild, 0, selection)).toBe(false);
   expect(stillSelectable(withChild, 1, selection)).toBe(false);
+});
+
+test('moves within a rotated and scaled group using the parent coordinates', () => {
+  const geometry = resolveDragGeometry({ canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] }, { x: 8, y: 24 });
+  expect(geometry).toEqual({ x: 4, y: 4, width: 4, height: 5 });
+});
+
+test('resizes along the rotated shape axes', () => {
+  const geometry = resolveDragGeometry({ canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: true, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, angle: Math.PI / 2 }, { x: -2, y: 3 });
+  expect(geometry.width).toBeCloseTo(7);
+  expect(geometry.height).toBeCloseTo(7);
 });

@@ -1,66 +1,122 @@
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
-use quick_xml::{Reader, Writer, XmlVersion};
+use quick_xml::name::{QName, ResolveResult};
+use quick_xml::{NsReader, Writer, XmlVersion};
 
 use crate::rels::{self, attribute_local, is_unqualified};
+use crate::schema;
+use crate::styles::StyleMap;
 use crate::{Format, RedactError, RedactionReport};
 
+#[cfg(test)]
 pub(crate) fn redact_xml(
     format: Format,
     path: &str,
     bytes: &[u8],
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
-    let mut reader = Reader::from_reader(bytes);
+    redact_xml_with_styles(format, path, bytes, report, &StyleMap::default())
+}
+
+pub(crate) fn redact_xml_with_styles(
+    format: Format,
+    path: &str,
+    bytes: &[u8],
+    report: &mut RedactionReport,
+    styles: &StyleMap,
+) -> Result<Vec<u8>, RedactError> {
+    let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::with_capacity(bytes.len()));
-    let mut context = XmlContext {
-        stack: Vec::new(),
+    let mut stack = Vec::new();
+    let mut state = RewriteState {
+        format,
+        path,
+        report,
+        styles,
+        current_style: None,
         cell_type: None,
+        custom_property: 0,
+        sections: Vec::new(),
     };
+    let mut skipped_depth = 0;
 
     loop {
         let event = reader
             .read_event()
             .map_err(|error| xml_error(path, error))?;
+        if matches!(event, Event::DocType(_)) {
+            return Err(xml_error(path, "DTD/entity declarations are forbidden"));
+        }
+        if skipped_depth > 0 {
+            match event {
+                Event::Start(_) => skipped_depth += 1,
+                Event::End(_) => skipped_depth -= 1,
+                Event::Text(text) => {
+                    let decoded = text.decode().map_err(|error| xml_error(path, error))?;
+                    charge_text(state.report, &decoded);
+                }
+                Event::CData(text) => {
+                    let decoded = text.decode().map_err(|error| xml_error(path, error))?;
+                    charge_text(state.report, &decoded);
+                }
+                Event::Comment(_) | Event::PI(_) => state.report.xml_comments += 1,
+                Event::Eof => return Err(xml_error(path, "unterminated schema element")),
+                _ => {}
+            }
+            continue;
+        }
         match event {
             Event::Start(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let (rewritten, section_name) =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut context)?;
-                context.stack.push(ElementContext {
-                    name: local,
-                    section_name,
-                });
+                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                    skipped_depth = 1;
+                    continue;
+                }
+                let (rewritten, section) = rewrite_start(&reader, start, &local, &mut state)?;
+                state.sections.push(section);
+                stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::Empty(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let (rewritten, _) =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut context)?;
+                if schema_node(path, &reader, start.name()) && schema::drop_element(&local) {
+                    continue;
+                }
+                let empty_style = local == "style" && word_node(&reader, start.name());
+                let (rewritten, _) = rewrite_start(&reader, start, &local, &mut state)?;
+                if empty_style {
+                    state.current_style = None;
+                }
                 writer
                     .write_event(Event::Empty(rewritten))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::End(end) => {
-                if context.stack.last().is_some_and(|entry| entry.name == "c") {
-                    context.cell_type = None;
+                if stack.last().is_some_and(|name| name == "c") {
+                    state.cell_type = None;
                 }
-                context.stack.pop();
+                if stack.last().is_some_and(|name| name == "style")
+                    && word_node(&reader, end.name())
+                {
+                    state.current_style = None;
+                }
+                stack.pop();
+                state.sections.pop();
                 writer
                     .write_event(Event::End(end))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::Text(text) => {
                 if let Some(kind) =
-                    replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
                 {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     let unescaped = quick_xml::escape::unescape(&decoded)
                         .map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&unescaped, kind);
-                    charge_text(report, &unescaped);
+                    let replacement = replace_text(&unescaped, kind, &stack);
+                    charge_text(state.report, &unescaped);
                     writer
                         .write_event(Event::Text(BytesText::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
@@ -72,11 +128,11 @@ pub(crate) fn redact_xml(
             }
             Event::CData(text) => {
                 if let Some(kind) =
-                    replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
                 {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&decoded, kind);
-                    charge_text(report, &decoded);
+                    let replacement = replace_text(&decoded, kind, &stack);
+                    charge_text(state.report, &decoded);
                     writer
                         .write_event(Event::CData(BytesCData::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
@@ -87,11 +143,9 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::GeneralRef(reference) => {
-                if replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
-                    .is_some()
-                {
-                    report.text_nodes += 1;
-                    report.characters += 1;
+                if replacement_kind(format, path, &stack, state.cell_type.as_deref()).is_some() {
+                    state.report.text_nodes += 1;
+                    state.report.characters += 1;
                     writer
                         .write_event(Event::Text(BytesText::new("x")))
                         .map_err(|error| xml_error(path, error))?;
@@ -102,13 +156,7 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::Comment(_) | Event::PI(_) => {
-                report.xml_comments += 1;
-            }
-            Event::DocType(_) => {
-                return Err(RedactError::Xml {
-                    part: path.to_owned(),
-                    message: "DTD/entity declarations are forbidden".to_owned(),
-                });
+                state.report.xml_comments += 1;
             }
             Event::Eof => break,
             other => writer
@@ -120,25 +168,41 @@ pub(crate) fn redact_xml(
     Ok(writer.into_inner())
 }
 
-struct ElementContext {
-    name: String,
-    section_name: Option<String>,
-}
-
-struct XmlContext {
-    stack: Vec<ElementContext>,
+struct RewriteState<'a> {
+    format: Format,
+    path: &'a str,
+    report: &'a mut RedactionReport,
+    styles: &'a StyleMap,
+    current_style: Option<String>,
     cell_type: Option<String>,
+    custom_property: usize,
+    sections: Vec<Option<String>>,
 }
 
 fn rewrite_start(
-    format: Format,
-    path: &str,
-    reader: &Reader<&[u8]>,
+    reader: &NsReader<&[u8]>,
     start: BytesStart<'_>,
     element: &str,
-    report: &mut RedactionReport,
-    context: &mut XmlContext,
+    state: &mut RewriteState<'_>,
 ) -> Result<(BytesStart<'static>, Option<String>), RedactError> {
+    let format = state.format;
+    let path = state.path;
+    let schema = schema_node(path, reader, start.name());
+    let word = format == Format::Docx && word_node(reader, start.name());
+    let custom_property = path == "docprops/custom.xml"
+        && element == "property"
+        && matches!(reader.resolver().resolve_element(start.name()).0,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties"
+                | b"http://purl.oclc.org/ooxml/officeDocument/customProperties"));
+    if custom_property {
+        state.custom_property += 1;
+    }
+    let modern_comment = format == Format::Docx
+        && element == "commentExtensible"
+        && matches!(reader.resolver().resolve_element(start.name()).0,
+            ResolveResult::Bound(ns) if ns.as_ref()
+                == b"http://schemas.microsoft.com/office/word/2018/wordml/cex");
     let mut attributes = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|error| xml_error(path, error))?;
@@ -149,34 +213,60 @@ fn rewrite_start(
             .into_owned();
         attributes.push((key, value));
     }
+    if word && element == "style" {
+        state.current_style = attributes
+            .iter()
+            .find(|(key, _)| attribute_local(key) == "styleId" && word_attribute(reader, key))
+            .map(|(_, value)| value.clone());
+    }
 
-    let section_name = (element == "Section")
+    let section = (format == Format::Vsdx && element == "Section")
         .then(|| {
             attributes
                 .iter()
-                .find(|(key, _)| attribute_local(key) == "N")
+                .find(|(key, _)| key == "N")
                 .map(|(_, value)| value.clone())
         })
         .flatten();
     let vsdx_user_data_cell = format == Format::Vsdx
         && element == "Cell"
-        && context
-            .stack
+        && state
+            .sections
             .iter()
-            .any(|context| matches!(context.section_name.as_deref(), Some("Property" | "User")))
+            .any(|section| matches!(section.as_deref(), Some("Property" | "User")))
         && attributes.iter().any(|(key, value)| {
-            attribute_local(key) == "N" && matches!(value.as_str(), "Value" | "Prompt" | "Label")
+            key == "N" && matches!(value.as_str(), "Value" | "Prompt" | "Label")
         });
-
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
-        context.cell_type = None;
+        state.cell_type = None;
     }
     let mut output = start.into_owned();
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
+        if vsdx_user_data_cell && key == "F" {
+            state.report.attributes += 1;
+            continue;
+        }
+        let instance = path.starts_with("customxml/")
+            && schema::is_instance_namespace(
+                &reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+            );
+        if local.eq_ignore_ascii_case("gfxdata")
+            && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                ResolveResult::Bound(namespace) if namespace.as_ref() == b"urn:schemas-microsoft-com:office:office")
+            || schema && is_unqualified(&key) && schema::drop_attribute(element, local)
+            || instance
+                && matches!(
+                    local,
+                    "type" | "schemaLocation" | "noNamespaceSchemaLocation"
+                )
+        {
+            state.report.attributes += 1;
+            continue;
+        }
         if relationship && is_unqualified(&key) && local.eq_ignore_ascii_case("TargetMode") {
             if !external {
                 output.push_attribute((key.as_str(), value.as_str()));
@@ -186,10 +276,40 @@ fn rewrite_start(
             wrote_target_mode = true;
             continue;
         }
+        let style_replacement = if word && word_attribute(reader, &key) {
+            state
+                .styles
+                .replacement(element, local, &value, state.current_style.as_deref())
+        } else {
+            None
+        };
         let replacement =
             if external && is_unqualified(&key) && local.eq_ignore_ascii_case("Target") {
                 Some("https://example.com".to_owned())
+            } else if custom_property && key == "name" {
+                Some(format!("RedactedProperty{}", state.custom_property))
+            } else if word && local == "date" && word_attribute(reader, &key)
+                || modern_comment
+                    && local == "dateUtc"
+                    && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+                        ResolveResult::Bound(ns) if ns.as_ref()
+                            == b"http://schemas.microsoft.com/office/word/2018/wordml/cex")
+            {
+                Some("1970-01-01T00:00:00Z".to_owned())
+            } else if style_replacement.is_some() {
+                style_replacement
+            } else if instance && local == "nil" {
+                let value = value.trim_matches([' ', '\t', '\r', '\n']);
+                Some(
+                    if matches!(value, "true" | "false" | "1" | "0") {
+                        value
+                    } else {
+                        "false"
+                    }
+                    .to_owned(),
+                )
             } else if !key.starts_with("xmlns")
+                && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
                 && sensitive_attribute(format, path, element, local, &value, vsdx_user_data_cell)
             {
                 Some(placeholder(&value))
@@ -198,20 +318,44 @@ fn rewrite_start(
             };
         if let Some(replacement) = replacement {
             if replacement != value {
-                report.attributes += 1;
+                state.report.attributes += 1;
             }
             output.push_attribute((key.as_str(), replacement.as_str()));
         } else {
             output.push_attribute((key.as_str(), value.as_str()));
         }
         if format == Format::Xlsx && element == "c" && local == "t" {
-            context.cell_type = Some(value);
+            state.cell_type = Some(value);
         }
     }
     if relationship && external && !wrote_target_mode {
         output.push_attribute(("TargetMode", "External"));
     }
-    Ok((output, section_name))
+    Ok((output, section))
+}
+
+fn schema_node(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    path.starts_with("customxml/")
+        && schema::is_schema_namespace(&reader.resolver().resolve_element(name).0)
+}
+
+fn word_namespace(namespace: ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            | b"http://purl.oclc.org/ooxml/wordprocessingml/main"))
+}
+
+fn word_node(reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    word_namespace(reader.resolver().resolve_element(name).0)
+}
+
+fn word_attribute(reader: &NsReader<&[u8]>, name: &str) -> bool {
+    word_namespace(
+        reader
+            .resolver()
+            .resolve_attribute(QName(name.as_bytes()))
+            .0,
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -227,11 +371,14 @@ enum Replacement {
 fn replacement_kind(
     format: Format,
     path: &str,
-    stack: &[ElementContext],
+    stack: &[String],
     cell_type: Option<&str>,
 ) -> Option<Replacement> {
-    let element = stack.last().map(|context| context.name.as_str())?;
+    let element = stack.last().map(String::as_str)?;
     let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".rels") {
+        return None;
+    }
     if lower == "docprops/core.xml" {
         return match element {
             "created" | "modified" | "lastPrinted" => Some(Replacement::Date),
@@ -271,10 +418,7 @@ fn replacement_kind(
     if lower.contains("/charts/") {
         return match element {
             "f" => Some(Replacement::Formula),
-            "v" if stack
-                .iter()
-                .any(|context| context.name == "strCache" || context.name == "tx") =>
-            {
+            "v" if stack.iter().any(|name| name == "strCache" || name == "tx") => {
                 Some(Replacement::Text)
             }
             "v" => Some(Replacement::Number),
@@ -303,13 +447,13 @@ fn replacement_kind(
         },
         Format::Vsdx => stack
             .iter()
-            .any(|context| context.name == "Text")
+            .any(|name| name == "Text")
             .then_some(Replacement::Text),
         Format::Auto => None,
     }
 }
 
-fn replace_text(text: &str, kind: Replacement) -> String {
+fn replace_text(text: &str, kind: Replacement, _stack: &[String]) -> String {
     if text.trim().is_empty() {
         return text.to_owned();
     }
@@ -332,6 +476,9 @@ fn sensitive_attribute(
     vsdx_user_data_cell: bool,
 ) -> bool {
     let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".rels") {
+        return false;
+    }
     if lower == "docprops/custom.xml" && attribute == "name" {
         return true;
     }
@@ -351,7 +498,6 @@ fn sensitive_attribute(
                 || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
                 || matches!(element, "alias" | "tag" | "docVar")
                     && matches!(attribute, "name" | "val")
-                || lower == "word/styles.xml" && element == "name" && attribute == "val"
         }
         Format::Xlsx => {
             element == "sheet" && attribute == "name"

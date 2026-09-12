@@ -50,6 +50,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     try { doc.free(); } catch {}
     throw error;
   }
+  const hitIds = new Map<string, string>();
   const listeners = new Map<number, (update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const resyncListeners = new Map<number, (resync: CollaborationResync) => void>();
   const queued: Array<{ kind: 'update'; update: Uint8Array; origin: CollaborationUpdateOrigin } | { kind: 'resync'; update: Uint8Array }> = [];
@@ -82,8 +83,20 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     get clientId() { return wasm(() => doc.clientId); }, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
-    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
-    hitTest: (x, y) => json<HitTestResult | null>(() => renderer.hitTestJson(x, y)), mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
+    layoutPage: pageIndex => {
+      hitIds.clear();
+      const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex));
+      if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+      const page = json<DiagramSnapshot>(() => doc.snapshotJson()).pages[pageIndex];
+      const shapes = [...page.shapes];
+      while (shapes.length) { const shape = shapes.pop()!; hitIds.set(`${page.sourcePartPath}:${shape.sourceId}`, shape.id); shapes.push(...shape.children); }
+      return list;
+    },
+    hitTest: (x, y) => {
+      const hit = json<HitTestResult | null>(() => renderer.hitTestJson(x, y));
+      const shapeId = hit && hitIds.get(hit.shapeId);
+      return hit && shapeId ? { ...hit, shapeId } : null;
+    }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),

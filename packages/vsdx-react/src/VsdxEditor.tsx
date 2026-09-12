@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -114,13 +114,14 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = mainCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    let stale = false;
+    const controller = new AbortController();
     const originHandle = handleRef.current;
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
     void paintPage(context, frame, dpr, zoom, {
-      resolveImage: (assetId) => stale ? Promise.resolve(null) : resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')),
-    }).catch((value) => { if (!stale) reportError(value); });
-    return () => { stale = true; };
+      signal: controller.signal,
+      resolveImage: (assetId) => controller.signal.aborted ? null : resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')),
+    }).catch((value) => { if (!controller.signal.aborted) reportError(value); });
+    return () => controller.abort();
   }, [model.frame, reportError, t, zoom]);
 
   useEffect(() => {
@@ -141,6 +142,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
       pointerRef.current = hit && placement ? {
         ...point,
+        parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${placement.shape.sourceId}`) ?? [],
+        angle: numberValue(cellValue(placement.shape, 'Angle')),
+        flipX: numberValue(cellValue(placement.shape, 'FlipX')) === 1,
+        flipY: numberValue(cellValue(placement.shape, 'FlipY')) === 1,
         resize: event.shiftKey,
         pin: { x: numberValue(cellValue(placement.shape, 'PinX')), y: numberValue(cellValue(placement.shape, 'PinY')) },
         size: { width: numberValue(cellValue(placement.shape, 'Width')), height: numberValue(cellValue(placement.shape, 'Height')) },
@@ -195,7 +200,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {loading && <span>{t('editor.opening')}</span>}
       {!loading && !model.frame && <span>{file ? t('editor.noPages') : t('editor.openPrompt')}</span>}
       <div style={styles.canvasFrame}>
-        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
+        <canvas ref={mainCanvasRef} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerCancel={() => { pointerRef.current = null; }} aria-label={selection ? t('pages.canvasLabelWithSelection', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0, name: selection.shapeId }) : t('pages.canvasLabel', { current: model.pageIndex + 1, total: model.snapshot?.pages.length ?? 0 })} style={styles.canvas} />
         <canvas ref={overlayCanvasRef} aria-hidden="true" style={styles.overlay} />
         {selection && <output style={styles.selection}>{t('shapes.selected', { name: selection.shapeId })}</output>}
       </div>
@@ -226,13 +231,33 @@ export function inchFormula(value: number): string {
   return String(Object.is(rounded, -0) ? 0 : rounded);
 }
 
-export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; }
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; parentTransforms?: readonly Affine[]; angle?: number; flipX?: boolean; flipY?: boolean; }
 
 export function resolveDragGeometry(start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } {
-  const deltaX = release.x - start.model.x;
-  const deltaY = release.y - start.model.y;
-  if (start.resize) return { x: start.pin.x, y: start.pin.y, width: Math.max(MIN_SHAPE_INCHES, start.size.width + deltaX), height: Math.max(MIN_SHAPE_INCHES, start.size.height + deltaY) };
+  const toParent = (point: ModelPoint) => (start.parentTransforms ?? []).reduce((local, transform) => canvasPointToModel(transform, local.x, local.y), point);
+  const origin = toParent(start.model);
+  const end = toParent(release);
+  const deltaX = end.x - origin.x;
+  const deltaY = end.y - origin.y;
+  if (start.resize) {
+    const cos = Math.cos(start.angle ?? 0), sin = Math.sin(start.angle ?? 0);
+    const widthDelta = (cos * deltaX + sin * deltaY) * (start.flipX ? -1 : 1);
+    const heightDelta = (-sin * deltaX + cos * deltaY) * (start.flipY ? -1 : 1);
+    return { x: start.pin.x, y: start.pin.y, width: Math.max(MIN_SHAPE_INCHES, start.size.width + widthDelta), height: Math.max(MIN_SHAPE_INCHES, start.size.height + heightDelta) };
+  }
   return { x: start.pin.x + deltaX, y: start.pin.y + deltaY, width: start.size.width, height: start.size.height };
+}
+
+export function shapeParentTransforms(primitives: readonly PagePrimitive[], id: string, depth = 0): Affine[] | null {
+  if (depth >= 256) return null;
+  for (const primitive of primitives) {
+    if (primitive.id === id) return [];
+    if (primitive.kind === 'group') {
+      const nested = shapeParentTransforms(primitive.primitives, id, depth + 1);
+      if (nested) return primitive.transform ? [primitive.transform, ...nested] : nested;
+    }
+  }
+  return null;
 }
 
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {

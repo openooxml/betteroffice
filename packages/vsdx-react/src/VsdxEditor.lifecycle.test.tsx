@@ -42,18 +42,19 @@ const { useState } = await import('react');
 
 test('does not reopen for inline fonts and a state-setting onReady callback', async () => {
   let ready: { handle: DiagramHandle } | undefined;
-  let paints = 0;
   opens = 0;
   disposals = 0;
   const getContext = HTMLCanvasElement.prototype.getContext;
-  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'measureText' ? () => ({ width: 0 }) : () => { paints++; }, set: () => true }) as never;
+  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'measureText' ? () => ({ width: 0 }) : () => {}, set: () => true }) as never;
   function Host() {
     const [, setApi] = useState<unknown>();
-    return <VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; setApi(api); }} />;
+    const [, setChanges] = useState(0);
+    return <VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; setApi(api); }} onChange={() => setChanges((count) => count + 1)} />;
   }
   render(<Host />);
   await waitFor(() => expect(ready).toBeDefined());
-  await waitFor(() => expect(paints).toBeGreaterThan(0));
+  await act(async () => { ready!.handle.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '17'); });
+  await waitFor(() => expect(ready!.handle.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('17'));
   expect(opens).toBe(1);
   cleanup();
   await waitFor(() => expect(disposals).toBe(1));
@@ -109,7 +110,7 @@ test('attaches collaboration that arrives while initialization is pending', asyn
   }
   Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: DeferredFontFace });
   Object.defineProperty(document, 'fonts', { configurable: true, value: { add: () => {} } });
-  const fonts = [{ family: 'Deferred', bytes: await readFile('C:/Windows/Fonts/arial.ttf') }];
+  const fonts = [{ family: 'Deferred', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) }];
   let replicas = 0;
   const view = render(<VsdxEditor file={foundation} fonts={fonts} />);
   await waitFor(() => expect(finishFontLoad).toBeDefined());

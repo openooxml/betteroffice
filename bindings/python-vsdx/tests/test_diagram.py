@@ -23,3 +23,20 @@ def test_parse_errors_are_vsdx_errors():
         Diagram.open(b"not a VSDX")
 
     assert isinstance(error.value, VsdxError)
+
+
+def test_page_order_and_names_follow_the_catalog(foundation_path):
+    import io
+    import zipfile
+
+    with zipfile.ZipFile(foundation_path) as archive:
+        parts = {name: archive.read(name) for name in archive.namelist()}
+    parts["visio/pages/page2.xml"] = parts["visio/pages/page1.xml"]
+    parts["visio/pages/pages.xml"] = b"""<v:Pages xmlns:v="http://schemas.microsoft.com/office/visio/2012/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><!-- <Page ID='2' Name='Wrong'/> --><v:Page ID='2' Name='First &amp; correct'><v:Rel r:id='second'/></v:Page><v:Page ID='1' Name='Last'><v:Rel r:id='first'/></v:Page></v:Pages>"""
+    parts["visio/pages/_rels/pages.xml.rels"] = b"""<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id='first' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='second' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/></Relationships>"""
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w") as archive:
+        for name, content in parts.items():
+            archive.writestr(name, content)
+    diagram = Diagram.open(data.getvalue())
+    assert [(page.id, page.name) for page in diagram.pages] == [(2, "First & correct"), (1, "Last")]

@@ -77,6 +77,10 @@ pub struct Chart {
     pub decorative: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relative_height: Option<f64>,
+    /// The `w:drawing` that places the chart, replayed verbatim on save.
+    /// Absent on package-level entries, which no drawing owns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drawing_xml: Option<String>,
 }
 
 pub fn parse_chart_xml(
@@ -109,6 +113,7 @@ pub fn parse_chart_xml(
         description: None,
         decorative: None,
         relative_height: None,
+        drawing_xml: None,
     }))
 }
 
@@ -235,6 +240,7 @@ pub fn parse_chart_from_drawing(
     chart.relationship_id = Some(relationship_id.to_owned());
     chart.path = Some(path);
     chart.size = parse_drawing_extent(drawing).or(chart.size);
+    chart.drawing_xml = Some(drawing.to_raw_inline_xml());
     Ok(DrawingChart::Chart(Box::new(chart)))
 }
 

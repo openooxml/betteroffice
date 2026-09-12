@@ -15,7 +15,7 @@ classifiers = ["Development Status :: 3 - Alpha", "License :: OSI Approved :: Ap
 
 [project.urls]
 Homepage = "https://betteroffice.dev"
-Documentation = "https://docs.betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev/docs/vsdx"
 Source = "https://github.com/openooxml/betteroffice"
 
 [tool.maturin]

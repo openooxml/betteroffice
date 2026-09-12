@@ -3,7 +3,8 @@
 import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { CollaborationProvider, type CollaborationUser } from "@betteroffice/vsdx";
+import { CollaborationProvider, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
+import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import { CollaborationControls, COLLAB_RELAY_ORIGIN, useCollabRoom, useDemoRoom, type CollaborationReplica, type CollaborationTransport } from "../collab";
 
@@ -18,36 +19,24 @@ const SHOWCASE = {
 };
 
 export function VsdxDemoClient() {
-  const [file, setFile] = useState<Uint8Array | null>(null);
+  const [assets, setAssets] = useState<{ file: Uint8Array; seed: Uint8Array; fonts: VsdxFontFace[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [seed, setSeed] = useState<Uint8Array | null>(null);
   const room = useDemoRoom();
   const createProvider = useCallback((replica: CollaborationReplica, transport: CollaborationTransport) => new CollaborationProvider(replica, transport, { user: { name: presenceName() } }), []);
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
 
   useEffect(() => {
     let cancelled = false;
-    void fetch(SHOWCASE.url).then(
-      async (response) => {
-        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        if (!cancelled) setFile(bytes);
-      },
-      (value: unknown) => {
-        if (!cancelled) setError(value instanceof Error ? value.message : String(value));
-      },
-    ).catch((value: unknown) => {
-      if (!cancelled) setError(value instanceof Error ? value.message : String(value));
-    });
-    void loadCollaborationSeed().then(setSeed, (value: unknown) => {
-      if (!cancelled) setError(value instanceof Error ? value.message : String(value));
-    });
+    void Promise.all([loadDiagram(), loadCollaborationSeed(), loadDiagramFonts()]).then(
+      ([file, seed, fonts]) => { if (!cancelled) setAssets({ file, seed, fonts }); },
+      (value: unknown) => { if (!cancelled) setError(value instanceof Error ? value.message : String(value)); },
+    );
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const collaboration = useMemo(() => room && seed && collab.clientId ? { clientId: collab.clientId, initialUpdate: seed, onReplica: collab.onReplica, presence: collab.provider ?? undefined } : undefined, [collab.clientId, collab.onReplica, collab.provider, room, seed]);
+  const collaboration = useMemo(() => room && assets && collab.clientId ? { clientId: collab.clientId, initialUpdate: assets.seed, onReplica: collab.onReplica, presence: collab.provider ?? undefined } : undefined, [collab.clientId, collab.onReplica, collab.provider, room, assets]);
 
   return (
     <div className="fixed inset-0 z-20 flex flex-col bg-surface text-fg">
@@ -60,7 +49,7 @@ export function VsdxDemoClient() {
           <span className="overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">In-browser Visio diagram editor</span>
         </div>
         <div className="flex-1" />
-        {file && <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">{SHOWCASE.name}</span>}
+        {assets && <span className="max-w-[180px] overflow-hidden text-[12.5px] text-ellipsis whitespace-nowrap text-mute">{SHOWCASE.name}</span>}
         <div className="flex flex-none items-center gap-2">
           <CollaborationControls status={collab.status} synced={collab.synced} peerCount={collab.peerCount} error={collab.error} />
           <a className="inline-flex size-8 items-center justify-center rounded-[5px] text-mute transition-colors duration-[140ms] ease-[ease] hover:bg-surface hover:text-fg" href="https://github.com/openooxml/betteroffice" target="_blank" rel="noreferrer" aria-label="View on GitHub" title="View on GitHub">
@@ -69,7 +58,7 @@ export function VsdxDemoClient() {
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1" data-testid="vsdx-demo-stage">
-        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : file ? <VsdxEditor file={file} fonts={[]} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : assets && collaboration ? <VsdxEditor file={assets.file} fonts={assets.fonts} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
       </main>
     </div>
   );
@@ -83,4 +72,33 @@ async function loadCollaborationSeed(): Promise<Uint8Array> {
   const response = await fetch("/seeds/vsdx.bin");
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+async function loadDiagram(): Promise<Uint8Array> {
+  const response = await fetch(SHOWCASE.url);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function loadDiagramFonts(): Promise<VsdxFontFace[]> {
+  const styles = [
+    { bold: false, italic: false },
+    { bold: true, italic: false },
+    { bold: false, italic: true },
+    { bold: true, italic: true },
+  ];
+  return Promise.all(
+    styles.map(async ({ bold, italic }) => {
+      const face =
+        resolveMetricCompatFace("Arial", bold, italic) ??
+        resolveLastResortFace("Arial", bold, italic);
+      const bytes = await loadBundledFontBytes(face);
+      return {
+        family: "Arial",
+        bold,
+        italic,
+        bytes: new Uint8Array(bytes.slice(0)),
+      };
+    }),
+  );
 }
