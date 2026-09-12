@@ -849,6 +849,7 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
     }
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
+    validate_acyclic_parents(&sheets, &txn)?;
     for index in 0..order.len(&txn) {
         let page_id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -908,6 +909,34 @@ fn validate_schema(doc: &Doc) -> EditResult<()> {
         return Err(EditError::InvalidState(
             "shape is not reachable from a page shape order".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Rejects a cyclic or self-referential shape `parentId` chain.
+fn validate_acyclic_parents<T: ReadTxn>(sheets: &MapRef, txn: &T) -> EditResult<()> {
+    for (shape_id, _) in sheets.iter(txn) {
+        let mut current = shape_id.to_owned();
+        let mut seen = std::collections::BTreeSet::new();
+        loop {
+            if !seen.insert(current.clone()) {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} has a cyclic parent chain"
+                )));
+            }
+            if seen.len() > MAX_SHAPE_NESTING {
+                return Err(EditError::InvalidState(format!(
+                    "shape {shape_id} exceeds the maximum shape nesting depth"
+                )));
+            }
+            let Some(Out::YMap(parent_shape)) = sheets.get(txn, current.as_str()) else {
+                break;
+            };
+            match map_string(&parent_shape, txn, "parentId") {
+                Some(parent_id) => current = parent_id,
+                None => break,
+            }
+        }
     }
     Ok(())
 }
@@ -1545,6 +1574,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
     let mut result = Vec::new();
+    let mut ancestors = std::collections::BTreeSet::new();
     for index in 0..order.len(&txn) {
         let id = array_string(&order, &txn, index)
             .ok_or_else(|| EditError::InvalidState("page order contains non-string".to_owned()))?;
@@ -1569,7 +1599,7 @@ fn snapshot_doc(doc: &Doc) -> EditResult<DiagramSnapshot> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_default(),
                 &source_ids,
-                1,
+                &mut ancestors,
             )?);
         }
         result.push(PageSnapshot {
@@ -1588,87 +1618,93 @@ fn snapshot_shape<T: ReadTxn>(
     shape_id: &str,
     page_id: u32,
     source_ids: &std::collections::BTreeMap<String, u32>,
-    depth: usize,
+    ancestors: &mut std::collections::BTreeSet<String>,
 ) -> EditResult<ShapeSnapshot> {
-    if depth > MAX_SHAPE_NESTING {
-        return Err(EditError::InvalidState(
-            "shape nesting exceeds maximum depth".to_owned(),
-        ));
+    if !ancestors.insert(shape_id.to_owned()) {
+        return Err(EditError::InvalidState(format!(
+            "cyclic shape parentage detected at {shape_id}"
+        )));
     }
-    let shape = map_ref(sheets, txn, shape_id)?;
-    let stored_source_id = map_number(&shape, txn, "sourceId")
-        .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-        as u32;
-    let source_id = source_ids
-        .get(shape_id)
-        .copied()
-        .unwrap_or(stored_source_id);
-    let cells = map_map(&shape, txn, "cells")?;
-    let is_added = shape_origin(&shape, txn)? == ShapeOrigin::Added;
-    let local_formulas = cells
-        .iter(txn)
-        .filter_map(|(_, value)| match value {
-            Out::YMap(cell) => {
-                let name = map_string(&cell, txn, "name")?;
-                let formula = map_string(&cell, txn, "formula")
-                    .or_else(|| map_string(&cell, txn, "value"))?;
-                Some((name, formula))
-            }
-            _ => None,
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    let mut snapshots = Vec::new();
-    for (_key, value) in cells.iter(txn) {
-        let Out::YMap(cell) = value else {
-            return Err(EditError::InvalidState("cell is not a map".to_owned()));
+    if ancestors.len() > MAX_SHAPE_NESTING {
+        ancestors.remove(shape_id);
+        return Err(EditError::InvalidState(format!(
+            "shape {shape_id} exceeds the maximum shape nesting depth"
+        )));
+    }
+    let result = (|| {
+        let shape = map_ref(sheets, txn, shape_id)?;
+        let stored_source_id = map_number(&shape, txn, "sourceId")
+            .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+            as u32;
+        let source_id = source_ids
+            .get(shape_id)
+            .copied()
+            .unwrap_or(stored_source_id);
+        let cells = map_map(&shape, txn, "cells")?;
+        let is_added = shape_origin(&shape, txn)? == ShapeOrigin::Added;
+        let local_formulas = cells
+            .iter(txn)
+            .filter_map(|(_, value)| match value {
+                Out::YMap(cell) => {
+                    let name = map_string(&cell, txn, "name")?;
+                    let formula = map_string(&cell, txn, "formula")
+                        .or_else(|| map_string(&cell, txn, "value"))?;
+                    Some((name, formula))
+                }
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut snapshots = Vec::new();
+        for (_key, value) in cells.iter(txn) {
+            let Out::YMap(cell) = value else {
+                return Err(EditError::InvalidState("cell is not a map".to_owned()));
+            };
+            let locator = cell_locator(&cell, txn, page_id, source_id)?;
+            let formula = map_string(&cell, txn, "formula");
+            let baseline = map_string(&cell, txn, "baselineFormula");
+            let value = snapshot_cell_value(
+                formula.as_deref(),
+                baseline.as_deref(),
+                map_string(&cell, txn, "value"),
+                is_added,
+                &local_formulas,
+            );
+            snapshots.push(CellSnapshot {
+                name: locator.cell_name.clone(),
+                locator,
+                formula,
+                value,
+            });
+        }
+        snapshots.sort_by_key(|cell| locator_key(&cell.locator));
+        let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
+            return Ok(ShapeSnapshot {
+                id: shape_id.to_owned(),
+                source_id,
+                name: map_string(&shape, txn, "name"),
+                cells: snapshots,
+                children: Vec::new(),
+            });
         };
-        let locator = cell_locator(&cell, txn, page_id, source_id)?;
-        let formula = map_string(&cell, txn, "formula");
-        let baseline = map_string(&cell, txn, "baselineFormula");
-        let value = snapshot_cell_value(
-            formula.as_deref(),
-            baseline.as_deref(),
-            map_string(&cell, txn, "value"),
-            is_added,
-            &local_formulas,
-        );
-        snapshots.push(CellSnapshot {
-            name: locator.cell_name.clone(),
-            locator,
-            formula,
-            value,
-        });
-    }
-    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
-    let Some(Out::YArray(child_order)) = shape.get(txn, "shapes") else {
-        return Ok(ShapeSnapshot {
+        let mut children = Vec::with_capacity(child_order.len(txn) as usize);
+        for index in 0..child_order.len(txn) {
+            let child_id = array_string(&child_order, txn, index).ok_or_else(|| {
+                EditError::InvalidState("shape order contains non-string".to_owned())
+            })?;
+            children.push(snapshot_shape(
+                sheets, txn, &child_id, page_id, source_ids, ancestors,
+            )?);
+        }
+        Ok(ShapeSnapshot {
             id: shape_id.to_owned(),
             source_id,
             name: map_string(&shape, txn, "name"),
             cells: snapshots,
-            children: Vec::new(),
-        });
-    };
-    let mut children = Vec::with_capacity(child_order.len(txn) as usize);
-    for index in 0..child_order.len(txn) {
-        let child_id = array_string(&child_order, txn, index)
-            .ok_or_else(|| EditError::InvalidState("shape order contains non-string".to_owned()))?;
-        children.push(snapshot_shape(
-            sheets,
-            txn,
-            &child_id,
-            page_id,
-            source_ids,
-            depth + 1,
-        )?);
-    }
-    Ok(ShapeSnapshot {
-        id: shape_id.to_owned(),
-        source_id,
-        name: map_string(&shape, txn, "name"),
-        cells: snapshots,
-        children,
-    })
+            children,
+        })
+    })();
+    ancestors.remove(shape_id);
+    result
 }
 
 /// A cell's cached value is trustworthy only against its own baseline: unchanged (or freshly

@@ -402,9 +402,25 @@ mod tests {
         shape.insert(&mut txn, "parentId", parent_id);
         shape.insert(&mut txn, "cells", MapPrelim::default());
         shape.insert(&mut txn, "shapes", ArrayPrelim::default());
-        let parent = match sheets.get(&txn, parent_id) {
-            Some(yrs::Out::YMap(parent)) => parent,
-            _ => unreachable!(),
+        // The parent may not exist yet (a forward reference, as when a test wires up a mutual
+        // cycle); attaching to its child order then happens once it does, via `attach_child`.
+        let Some(yrs::Out::YMap(parent)) = sheets.get(&txn, parent_id) else {
+            return;
+        };
+        let child_order = match parent.get(&txn, "shapes") {
+            Some(yrs::Out::YArray(child_order)) => child_order,
+            _ => parent.insert(&mut txn, "shapes", ArrayPrelim::default()),
+        };
+        child_order.push_back(&mut txn, id);
+    }
+
+    /// Attaches an already-created shape to its parent's child order, for wiring forward
+    /// references (e.g. a mutual cycle) that `add_child_shape` could not attach at creation time.
+    fn attach_child(session: &DiagramSession, id: &str, parent_id: &str) {
+        let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let Some(yrs::Out::YMap(parent)) = sheets.get(&txn, parent_id) else {
+            unreachable!()
         };
         let child_order = match parent.get(&txn, "shapes") {
             Some(yrs::Out::YArray(child_order)) => child_order,
@@ -1133,6 +1149,75 @@ mod tests {
                 .is_err()
         );
         assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_new_shape_with_a_self_parent_cycle_is_rejected() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_shape(&peer, "page:1:shape:forged", "page:1", "session", 1.0);
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged",
+            "parentId",
+            "page:1:shape:forged",
+        );
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_new_shapes_with_a_two_shape_parent_cycle_are_rejected() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_shape(&peer, "page:1:shape:forged-a", "page:1", "session", 1.0);
+        write_peer_new_shape(&peer, "page:1:shape:forged-b", "page:1", "session", 1.0);
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged-a",
+            "parentId",
+            "page:1:shape:forged-b",
+        );
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged-b",
+            "parentId",
+            "page:1:shape:forged-a",
+        );
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn snapshot_terminates_on_a_cyclic_parent_chain_instead_of_overflowing() {
+        let session = session();
+        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
+        add_child_shape(&session, "page:1:shape:cycle-b", "page:1:shape:cycle-a");
+        attach_child(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
+        {
+            let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
+            let pages = txn.get_map(PAGES).unwrap();
+            let page = match pages.get(&txn, "page:1") {
+                Some(yrs::Out::YMap(page)) => page,
+                _ => unreachable!(),
+            };
+            let shapes = match page.get(&txn, "shapes") {
+                Some(yrs::Out::YArray(shapes)) => shapes,
+                _ => unreachable!(),
+            };
+            shapes.push_back(&mut txn, "page:1:shape:cycle-a");
+        }
+        assert!(session.snapshot().is_err());
     }
 
     #[test]
