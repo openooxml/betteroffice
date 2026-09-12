@@ -54,14 +54,7 @@ pub(crate) fn detach_scrubbed_fonts(
             continue;
         }
         parts[owner_index].1 = filter_xml(&parts[owner_index].1, &owner, |reader, start| {
-            if matches!(
-                start.local_name().as_ref(),
-                b"embedRegular" | b"embedBold" | b"embedItalic" | b"embedBoldItalic"
-            ) && matches!(reader.resolver().resolve_element(start.name()).0,
-                    ResolveResult::Bound(ns) if matches!(ns.as_ref(),
-                        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                            | b"http://purl.oclc.org/ooxml/wordprocessingml/main"))
-            {
+            if embedded_font_reference(reader, start) {
                 return Ok(relationship_ids(reader, start, &owner)?
                     .iter()
                     .any(|id| ids.contains(id)));
@@ -83,6 +76,25 @@ pub(crate) fn detach_scrubbed_fonts(
         })?;
     }
     Ok(())
+}
+
+fn embedded_font_reference(reader: &NsReader<&[u8]>, start: &BytesStart<'_>) -> bool {
+    let ResolveResult::Bound(namespace) = reader.resolver().resolve_element(start.name()).0 else {
+        return false;
+    };
+    match namespace.as_ref() {
+        b"http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        | b"http://purl.oclc.org/ooxml/wordprocessingml/main" => matches!(
+            start.local_name().as_ref(),
+            b"embedRegular" | b"embedBold" | b"embedItalic" | b"embedBoldItalic"
+        ),
+        b"http://schemas.openxmlformats.org/presentationml/2006/main"
+        | b"http://purl.oclc.org/ooxml/presentationml/main" => matches!(
+            start.local_name().as_ref(),
+            b"regular" | b"bold" | b"italic" | b"boldItalic"
+        ),
+        _ => false,
+    }
 }
 
 fn relationship(reader: &NsReader<&[u8]>, start: &BytesStart<'_>) -> bool {
