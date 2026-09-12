@@ -397,8 +397,14 @@ mod tests {
             ("visio/_rels/document.xml.rels".to_owned(), document_rels),
             ("visio/pages/pages.xml".to_owned(), pages_catalog),
             ("visio/pages/_rels/pages.xml.rels".to_owned(), pages_rels),
-            ("visio/pages/page1.xml".to_owned(), b"<PageContents/>".to_vec()),
-            ("visio/pages/page2.xml".to_owned(), b"<PageContents/>".to_vec()),
+            (
+                "visio/pages/page1.xml".to_owned(),
+                b"<PageContents/>".to_vec(),
+            ),
+            (
+                "visio/pages/page2.xml".to_owned(),
+                b"<PageContents/>".to_vec(),
+            ),
             (
                 "visio/pages/page10.xml".to_owned(),
                 b"<PageContents/>".to_vec(),
