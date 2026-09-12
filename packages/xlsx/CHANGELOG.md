@@ -1,5 +1,18 @@
 # @betteroffice/xlsx
 
+## 0.2.0
+
+### Minor Changes
+
+- fb06233: Add font-aware range printing with device-specific grid geometry and optional print gridlines. Paint cell and preview fonts at their declared point size, with consistent text alignment across canvas and raster rendering.
+
+### Patch Changes
+
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+- 5798031: Load Excel shared formulas with correct absolute and relative references for
+  recalculation and round-trip saves.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(...,S:V,...)`.
+
 ## 0.1.0
 
 ### Minor Changes

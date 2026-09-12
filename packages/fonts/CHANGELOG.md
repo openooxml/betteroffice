@@ -1,5 +1,15 @@
 # @betteroffice/fonts
 
+## 0.2.0
+
+### Minor Changes
+
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+
+### Patch Changes
+
+- 2c658b6: Improve DOCX pagination, list formatting, justified text, header and footer spacing, anchored shapes, content-control text, and table geometry to better match Word. Use Carlito as the related fallback for Calibri Light.
+
 ## 0.1.0
 
 ### Minor Changes
