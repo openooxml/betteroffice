@@ -1,9 +1,14 @@
 use quick_xml::name::ResolveResult;
 
 const XSD_NAMESPACE: &[u8] = b"http://www.w3.org/2001/XMLSchema";
+const XSI_NAMESPACE: &[u8] = b"http://www.w3.org/2001/XMLSchema-instance";
 
 pub(crate) fn is_schema_namespace(namespace: &ResolveResult<'_>) -> bool {
     matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == XSD_NAMESPACE)
+}
+
+pub(crate) fn is_instance_namespace(namespace: &ResolveResult<'_>) -> bool {
+    matches!(namespace, ResolveResult::Bound(uri) if uri.as_ref() == XSI_NAMESPACE)
 }
 
 pub(crate) fn preserve_attribute(element: &str, attribute: &str) -> bool {

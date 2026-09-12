@@ -209,10 +209,15 @@ fn rewrite_start(
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
+        let instance = path.starts_with("customxml/")
+            && schema::is_instance_namespace(
+                &reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+            );
         if local.eq_ignore_ascii_case("gfxdata")
             && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
                 ResolveResult::Bound(namespace) if namespace.as_ref() == b"urn:schemas-microsoft-com:office:office")
             || schema && is_unqualified(&key) && schema::drop_attribute(element, local)
+            || instance && matches!(local, "schemaLocation" | "noNamespaceSchemaLocation")
         {
             state.report.attributes += 1;
             continue;
@@ -240,6 +245,7 @@ fn rewrite_start(
                 style_replacement
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
+                && !(instance && matches!(local, "nil" | "type"))
                 && sensitive_attribute(format, path, element, local, &value)
             {
                 Some(placeholder(&value))
