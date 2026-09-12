@@ -304,7 +304,7 @@ fn custom_xml_instance_metadata_remains_valid() {
     let output = parts(&redact(FIXTURE, Format::Docx).unwrap());
     let xml = &output["customXml/item4.xml"];
     assert_eq!(elements(xml, "missing")[0]["nil"], "true");
-    assert_eq!(elements(xml, "typed")[0]["type"], "xs:string");
+    assert!(!elements(xml, "typed")[0].contains_key("type"));
     assert!(!elements(xml, "data")[0].contains_key("schemaLocation"));
     let text = String::from_utf8_lossy(xml);
     assert!(!text.contains("SECRET_"));
@@ -322,11 +322,59 @@ fn instance_metadata_uses_resolved_namespaces() {
         let output = parts(&redact(&source, Format::Docx).unwrap());
         let xml = String::from_utf8_lossy(&output["customXml/item4.xml"]);
         assert!(xml.contains(&format!(r#"i:nil="{nil}""#)));
-        assert!(xml.contains(r#"i:type="t:Value""#));
+        assert!(!xml.contains("t:Value"));
         assert!(xml.contains(r#"xmlns:t="urn:synthetic:types""#));
         assert!(!xml.contains("SECRET_"));
         assert!(!xml.contains("secret.example"));
         assert!(!xml.contains("noNamespaceSchemaLocation="));
+    }
+}
+
+#[test]
+fn instance_metadata_redacts_private_and_invalid_values() {
+    for (nil, expected) in [
+        ("SECRET_ACCOUNT", "false"),
+        ("true SECRET_ACCOUNT", "false"),
+        ("TRUE", "false"),
+        ("", "false"),
+        ("\u{a0}true", "false"),
+        ("true", "true"),
+        ("false", "false"),
+        ("1", "1"),
+        ("0", "0"),
+    ] {
+        for type_name in [
+            "private:SECRET_CUSTOMER_TYPE",
+            "SECRET_UNPREFIXED_TYPE",
+            "xs:SECRET_VENDOR_TYPE",
+            "unbound:SECRET_TYPE",
+        ] {
+            let xml = format!(
+                r#"<data xmlns:i="http://www.w3.org/2001/XMLSchema-instance" xmlns:private="urn:synthetic:types" xmlns:xs="http://www.w3.org/2001/XMLSchema"><value i:nil="{nil}" i:type="{type_name}">SECRET_TEXT</value></data>"#
+            );
+            let source = updated_fixture(&[("customXml/item4.xml", xml)]);
+            let output = parts(&redact(&source, Format::Docx).unwrap());
+            let xml = &output["customXml/item4.xml"];
+            let value = &elements(xml, "value")[0];
+            assert_eq!(value["nil"], expected);
+            assert!(!value.contains_key("type"));
+            assert!(!String::from_utf8_lossy(xml).contains("SECRET_"));
+        }
+    }
+}
+
+#[test]
+fn instance_nil_normalizes_xml_whitespace() {
+    for nil in ["true", "false", "1", "0"] {
+        let xml = format!(
+            r#"<data xmlns:i="http://www.w3.org/2001/XMLSchema-instance"><value i:nil=" &#x9;{nil}&#xA;&#xD; "/></data>"#
+        );
+        let source = updated_fixture(&[("customXml/item4.xml", xml)]);
+        let output = parts(&redact(&source, Format::Docx).unwrap());
+        assert_eq!(
+            elements(&output["customXml/item4.xml"], "value")[0]["nil"],
+            nil
+        );
     }
 }
 

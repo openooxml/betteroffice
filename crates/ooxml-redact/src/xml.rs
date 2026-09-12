@@ -217,7 +217,11 @@ fn rewrite_start(
             && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
                 ResolveResult::Bound(namespace) if namespace.as_ref() == b"urn:schemas-microsoft-com:office:office")
             || schema && is_unqualified(&key) && schema::drop_attribute(element, local)
-            || instance && matches!(local, "schemaLocation" | "noNamespaceSchemaLocation")
+            || instance
+                && matches!(
+                    local,
+                    "type" | "schemaLocation" | "noNamespaceSchemaLocation"
+                )
         {
             state.report.attributes += 1;
             continue;
@@ -243,9 +247,18 @@ fn rewrite_start(
                 Some("https://example.com".to_owned())
             } else if style_replacement.is_some() {
                 style_replacement
+            } else if instance && local == "nil" {
+                let value = value.trim_matches([' ', '\t', '\r', '\n']);
+                Some(
+                    if matches!(value, "true" | "false" | "1" | "0") {
+                        value
+                    } else {
+                        "false"
+                    }
+                    .to_owned(),
+                )
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && !(instance && matches!(local, "nil" | "type"))
                 && sensitive_attribute(format, path, element, local, &value)
             {
                 Some(placeholder(&value))
