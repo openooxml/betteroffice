@@ -607,7 +607,7 @@ impl Renderer {
         let geometry = resolved.sections.get("Geometry").map(realize_geometry);
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
-            let group_transform = bounds_affine(
+            let transform = group_transform(
                 bounds,
                 child_coordinate_extent(
                     package,
@@ -635,7 +635,7 @@ impl Renderer {
                 id,
                 z_order,
                 primitives: children,
-                transform: group_transform,
+                transform,
             });
             return Ok(());
         }
@@ -669,7 +669,7 @@ impl Renderer {
                     y: 0.0,
                     width: bounds.width as f32,
                     height: bounds.height as f32,
-                    transform: bounds_affine(bounds, None),
+                    transform: bounds_affine(bounds, (0.0, 0.0), (1.0, 1.0)),
                 });
                 return Ok(());
             }
@@ -895,7 +895,7 @@ impl Renderer {
                 })
                 .collect(),
             lines,
-            transform: Affine::identity(),
+            transform: shape_transform(bounds),
         });
         Ok(())
     }
@@ -1244,7 +1244,7 @@ fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, m
     *height = max_y - min_y;
 }
 fn transform_command(command: &mut ooxml_drawingml::GeometryPathCommand, bounds: Bounds) {
-    transform_affine(command, bounds_affine(bounds, None));
+    transform_affine(command, bounds_affine(bounds, (0.0, 0.0), (1.0, 1.0)));
 }
 fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: Affine) {
     use ooxml_drawingml::GeometryPathCommand::*;
@@ -1273,24 +1273,14 @@ fn transform_affine(command: &mut ooxml_drawingml::GeometryPathCommand, matrix: 
         Close => {}
     }
 }
-fn bounds_affine(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> Affine {
+fn bounds_affine(group: Bounds, origin: (f64, f64), scale: (f64, f64)) -> Affine {
     let loc_x = group.loc_pin_x;
     let loc_y = group.loc_pin_y;
     let pin_x = group.x + group.loc_pin_x;
     let pin_y = group.y + group.loc_pin_y;
     let (sin, cos) = group.angle.sin_cos();
-    // Visio documents the lower-left local origin, but not how to derive a group child scale.
-    // Use the conservative selection-extent ratio and translate that documented origin.
-    let (origin_x, origin_y, scale_x, scale_y) = child_extent
-        .map(|extent| {
-            (
-                extent.x,
-                extent.y,
-                group.width / extent.width,
-                group.height / extent.height,
-            )
-        })
-        .unwrap_or((0.0, 0.0, 1.0, 1.0));
+    let (origin_x, origin_y) = origin;
+    let (scale_x, scale_y) = scale;
     let sx = scale_x * if group.flip_x { -1.0 } else { 1.0 };
     let sy = scale_y * if group.flip_y { -1.0 } else { 1.0 };
     Affine {
@@ -1301,6 +1291,24 @@ fn bounds_affine(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> 
         e: (pin_x - cos * sx * (loc_x + origin_x) + sin * sy * (loc_y + origin_y)) as f32,
         f: (pin_y - sin * sx * (loc_x + origin_x) - cos * sy * (loc_y + origin_y)) as f32,
     }
+}
+/// Visio documents the lower-left local origin, but not how to derive a group child scale.
+/// Use the conservative selection-extent ratio and translate that documented origin.
+fn group_transform(group: Bounds, child_extent: Option<ChildCoordinateExtent>) -> Affine {
+    let (origin, scale) = child_extent
+        .map(|extent| {
+            (
+                (extent.x, extent.y),
+                (group.width / extent.width, group.height / extent.height),
+            )
+        })
+        .unwrap_or(((0.0, 0.0), (1.0, 1.0)));
+    bounds_affine(group, origin, scale)
+}
+/// Maps a shape's own absolute, pre-rotation bounds into its rotated position, the same
+/// transform already baked into its geometry path, so geometry and text agree.
+fn shape_transform(bounds: Bounds) -> Affine {
+    bounds_affine(bounds, (bounds.x, bounds.y), (1.0, 1.0))
 }
 struct ChildCoordinateExtent {
     x: f64,
@@ -2450,7 +2458,7 @@ mod tests {
 
     #[test]
     fn group_child_extent_origin_maps_to_the_group_lower_left_corner() {
-        let matrix = bounds_affine(
+        let matrix = group_transform(
             Bounds {
                 x: 10.0,
                 y: 20.0,
@@ -2621,6 +2629,76 @@ mod tests {
         else {
             unreachable!()
         };
+        let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
+        let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
+        transform_rect(
+            &mut left,
+            &mut top,
+            &mut bounds_width,
+            &mut bounds_height,
+            *transform,
+        );
+        let outside = (left + bounds_width * 0.05, top + bounds_height * 0.05);
+        assert!(
+            outside.0 >= left
+                && outside.0 <= left + bounds_width
+                && outside.1 >= top
+                && outside.1 <= top + bounds_height
+        );
+        assert_eq!(canvas(outside), None);
+        let stop = lines[0].caret_stops[1];
+        assert_eq!(
+            canvas(transform.apply_point(stop.x, stop.y + height * 0.25)),
+            Some(HitTestResult::Text {
+                shape_id: id.clone(),
+                position: stop.position,
+            })
+        );
+    }
+
+    #[test]
+    fn standalone_rotated_shape_rotates_its_text_with_its_own_transform() {
+        let mut rotated = shape(1, 4.0, 4.0);
+        rotated
+            .children
+            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        with_cell(
+            &mut rotated,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let list = render(vec![rotated]);
+        let Primitive::TextBox {
+            id,
+            x,
+            y,
+            width,
+            height,
+            lines,
+            transform,
+            ..
+        } = text_box(&list)
+        else {
+            unreachable!()
+        };
+        let matrix = Affine {
+            a: std::f32::consts::FRAC_1_SQRT_2,
+            b: std::f32::consts::FRAC_1_SQRT_2,
+            c: -std::f32::consts::FRAC_1_SQRT_2,
+            d: std::f32::consts::FRAC_1_SQRT_2,
+            e: 4.0,
+            f: 4.0 - 4.0 * std::f32::consts::SQRT_2,
+        };
+        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
+        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
+        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
+        assert_point_close((*x, *y), (4.0, 4.0));
+        assert_point_close((*width, *height), (1.0, 1.0));
+        assert_point_close(
+            transform.apply_point(lines[0].x, lines[0].y),
+            matrix.apply_point(4.0, 4.0),
+        );
+
         let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
         let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
         transform_rect(
