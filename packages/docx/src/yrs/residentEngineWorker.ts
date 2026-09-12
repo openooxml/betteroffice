@@ -53,11 +53,25 @@ let paintedCaretPageId: string | null = null;
 let paintedCaretKey: string | null = null;
 let caretStage: OffscreenCanvas | null = null;
 const intactBackBuffers = new Set<string>();
+let trap: WebAssembly.RuntimeError | null = null;
 
 scope.onmessage = (event: MessageEvent<ResidentEngineWorkerRequest>) => {
   operations = operations
-    .then(() => handle(event.data))
+    .then(() => {
+      if (trap) throw trap;
+      return handle(event.data);
+    })
     .catch((error) => {
+      if (error instanceof WebAssembly.RuntimeError) {
+        trap = error;
+        reply({
+          id: event.data.id,
+          ok: false,
+          error: `Resident engine worker trapped: ${error.message}`,
+          terminal: true,
+        });
+        return;
+      }
       reply({
         id: event.data.id,
         ok: false,
@@ -201,6 +215,7 @@ async function handle(request: ResidentEngineWorkerRequest): Promise<void> {
       request.paintCaret
     );
   } catch (error) {
+    if (error instanceof WebAssembly.RuntimeError) throw error;
     const message = error instanceof Error ? error.message : String(error);
     reply({
       id: request.id,

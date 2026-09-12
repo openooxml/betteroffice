@@ -38,46 +38,71 @@ export interface ResidentEngineWorkerApplyResult extends ResidentEngineWorkerFra
 type PendingRequest = {
   resolve(response: ResidentEngineWorkerResponse & { ok: true }): void;
   reject(error: Error): void;
-  timeout: ReturnType<typeof setTimeout> | null;
+  timeout: ReturnType<typeof setTimeout>;
 };
 
-const RESIDENT_ENGINE_WORKER_STARTUP_TIMEOUT_MS = 15_000;
+type AwaitedRequest = Exclude<
+  ResidentEngineWorkerRequestWithoutId,
+  { type: 'applyUpdate' | 'eraseCaret' | 'destroy' }
+>;
+
+/** attachCanvases queues behind a sync, so it shares that budget. */
+const REQUEST_TIMEOUT_MS: Record<AwaitedRequest['type'], number> = {
+  bootstrap: 15_000,
+  sync: 15_000,
+  attachCanvases: 15_000,
+  buildFrame: 5_000,
+  applyInput: 5_000,
+  applyDelete: 5_000,
+};
+
+export interface ResidentEngineWorkerPort {
+  onmessage: ((event: MessageEvent<ResidentEngineWorkerResponse>) => void) | null;
+  onerror: ((event: ErrorEvent) => void) | null;
+  onmessageerror: ((event: MessageEvent) => void) | null;
+  postMessage(message: ResidentEngineWorkerRequest, transfer?: Transferable[]): void;
+  terminate(): void;
+}
+
+function spawnResidentEngineWorker(): ResidentEngineWorkerPort {
+  return new Worker(new URL('./residentEngineWorker.mjs', import.meta.url), {
+    type: 'module',
+    name: 'openooxml-resident-engine',
+  });
+}
 
 /** Dedicated-worker owner for resident input, pagination, and FrameDelta output. */
 export class ResidentEngineWorkerClient {
-  private readonly worker: Worker;
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
-  private destroyed = false;
+  private terminalError: Error | null = null;
   private ready = false;
   private revision = 0;
   private remoteVector: Uint8Array | null = null;
   private appliedFontsRevision: number | null = null;
 
-  constructor() {
-    this.worker = new Worker(new URL('./residentEngineWorker.mjs', import.meta.url), {
-      type: 'module',
-      name: 'openooxml-resident-engine',
-    });
-    this.worker.onmessage = (event: MessageEvent<ResidentEngineWorkerResponse>) => {
+  constructor(private readonly worker: ResidentEngineWorkerPort = spawnResidentEngineWorker()) {
+    this.worker.onmessage = (event) => {
       const response = event.data;
       if (response.ok && response.stateVector) {
         this.remoteVector = new Uint8Array(response.stateVector);
       }
+      if (!response.ok && response.terminal) {
+        this.fail(new ResidentWorkerUnavailableError(response.error));
+        return;
+      }
       const pending = this.pending.get(response.id);
       if (!pending) return;
       this.pending.delete(response.id);
-      if (pending.timeout) clearTimeout(pending.timeout);
+      clearTimeout(pending.timeout);
       if (response.ok) pending.resolve(response);
       else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
     };
     this.worker.onerror = (event) => {
-      this.failAll(new Error(`Resident engine worker failed: ${event.message}`));
-      this.ready = false;
+      this.fail(new Error(`Resident engine worker failed: ${event.message}`));
     };
     this.worker.onmessageerror = () => {
-      this.failAll(new Error('Resident engine worker returned an unreadable message'));
-      this.ready = false;
+      this.fail(new Error('Resident engine worker returned an unreadable message'));
     };
   }
 
@@ -105,14 +130,8 @@ export class ResidentEngineWorkerClient {
   ): Promise<ResidentEngineWorkerFrame> {
     const fontsRevision = snapshot.fontsRevision;
     const response = await this.request(
-      {
-        type: 'bootstrap',
-        snapshot,
-        extras,
-        expectedFrameEpoch: 0,
-      },
-      snapshotTransfers(snapshot),
-      RESIDENT_ENGINE_WORKER_STARTUP_TIMEOUT_MS
+      { type: 'bootstrap', snapshot, extras, expectedFrameEpoch: 0 },
+      snapshotTransfers(snapshot)
     );
     const result = frameResult(response);
     this.recordSync(response, fontsRevision);
@@ -205,14 +224,14 @@ export class ResidentEngineWorkerClient {
   /** Drop the worker-painted caret line by re-presenting the caret page's
    * retained raster. Fire-and-forget and idempotent. */
   eraseCaret(): void {
-    if (this.destroyed) return;
+    if (this.terminalError) return;
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'eraseCaret' };
     this.worker.postMessage(message);
   }
 
   invalidate(update: Uint8Array, selection: YrsSelection | null): void {
-    if (this.destroyed) return;
+    if (this.terminalError) return;
     this.ready = false;
     const owned = update.slice();
     const id = this.nextId++;
@@ -240,39 +259,26 @@ export class ResidentEngineWorkerClient {
   }
 
   destroy(): void {
-    if (this.destroyed) return;
-    this.destroyed = true;
+    if (this.terminalError) return;
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.worker.terminate();
-    this.failAll(new Error('Resident engine worker was destroyed'));
-    this.ready = false;
+    this.fail(new Error('Resident engine worker was destroyed'));
   }
 
   private request(
-    request: ResidentEngineWorkerRequestWithoutId,
-    transfer: Transferable[] = [],
-    timeoutMs?: number
+    request: AwaitedRequest,
+    transfer: Transferable[] = []
   ): Promise<ResidentEngineWorkerResponse & { ok: true }> {
-    if (this.destroyed) return Promise.reject(new Error('Resident engine worker was destroyed'));
+    if (this.terminalError) return Promise.reject(this.terminalError);
     const id = this.nextId++;
+    const timeoutMs = REQUEST_TIMEOUT_MS[request.type];
     return new Promise((resolve, reject) => {
-      const timeout = timeoutMs
-        ? setTimeout(() => {
-            const pending = this.pending.get(id);
-            if (!pending) return;
-            this.pending.delete(id);
-            const error = new Error(
-              `Resident engine worker did not acknowledge ${request.type} within ${timeoutMs}ms`
-            );
-            pending.reject(error);
-            this.failAll(error);
-            this.ready = false;
-            this.destroyed = true;
-            this.worker.terminate();
-          }, timeoutMs)
-        : null;
+      const timeout = setTimeout(() => {
+        this.fail(
+          new Error(`Resident engine worker did not answer ${request.type} within ${timeoutMs}ms`)
+        );
+      }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
       this.worker.postMessage({ ...request, id } as ResidentEngineWorkerRequest, transfer);
     });
@@ -287,9 +293,12 @@ export class ResidentEngineWorkerClient {
     this.appliedFontsRevision = fontsRevision;
   }
 
-  private failAll(error: Error): void {
+  private fail(error: Error): void {
+    this.terminalError = error;
+    this.ready = false;
+    this.worker.terminate();
     for (const pending of this.pending.values()) {
-      if (pending.timeout) clearTimeout(pending.timeout);
+      clearTimeout(pending.timeout);
       pending.reject(error);
     }
     this.pending.clear();
