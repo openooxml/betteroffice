@@ -21,3 +21,6 @@ chart = []
 [dependencies]
 indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+proptest = "1"
