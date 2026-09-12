@@ -52,6 +52,9 @@ test('replays positioned text runs at their line caret positions', async () => {
     }],
   };
   await paintPage(context(log), list);
+  expect(log).toContain('translate:0,84');
+  expect(log).toContain('scale:1,-1');
+  expect(log).toContain('textBaseline=top');
   expect(log.filter(entry => entry.startsWith('fillText:'))).toEqual(['fillText:left,30,20', 'fillText:right,60,45']);
 });
 

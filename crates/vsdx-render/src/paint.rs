@@ -74,7 +74,8 @@ fn colour(
                 "#{:02X}{:02X}{:02X}",
                 color.red, color.green, color.blue
             )),
-            _ => Err(format!("colour cell {name} evaluated to a number")),
+            Value::Number(value) => crate::palette_colour(package, value.number)
+                .ok_or_else(|| format!("colour cell {name} has an unknown palette index")),
         },
         Evaluation::Unsupported(reason) => Err(reason),
         Evaluation::Error(error) => Err(error.message),
