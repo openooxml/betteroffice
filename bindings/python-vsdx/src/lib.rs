@@ -180,11 +180,17 @@ impl PyDiagram {
     fn pages(&self) -> Vec<PyPage> {
         let package = self.diagram.package();
         package
-            .page_contents
+            .page_part_paths
             .iter()
-            .map(|(path, sheet)| {
+            .filter_map(|path| {
+                let sheet = package.page_contents.get(path)?;
                 let id = *package.page_part_ids.get(path).unwrap_or(&0);
-                PyPage::from_core(id, path, sheet, catalogued_page_name(package, id))
+                Some(PyPage::from_core(
+                    id,
+                    path,
+                    sheet,
+                    catalogued_page_name(package, id),
+                ))
             })
             .collect()
     }
@@ -326,7 +332,7 @@ fn decode_xml_entity(entity: &str) -> Option<char> {
 
 #[cfg(test)]
 mod tests {
-    use super::catalogued_page_name_in_pages;
+    use super::{PyDiagram, catalogued_page_name_in_pages};
 
     #[test]
     fn page_name_uses_catalogue_name() {
@@ -370,6 +376,49 @@ mod tests {
         assert_eq!(
             catalogued_page_name_in_pages(br#"<Pages><Page ID='1'/></Pages>"#, 1),
             None
+        );
+    }
+
+    #[test]
+    fn pages_follow_document_order_not_lexical_path_order() {
+        let content_types = br#"<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'><Override PartName='/visio/document.xml' ContentType='application/vnd.ms-visio.drawing.main+xml'/></Types>"#.to_vec();
+        let root_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/document' Target='visio/document.xml'/></Relationships>"#.to_vec();
+        let document = b"<VisioDocument/>".to_vec();
+        let document_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/pages' Target='pages/pages.xml'/></Relationships>"#.to_vec();
+        let pages_catalog = b"<Pages/>".to_vec();
+        // Relationship order is the document order: page1, page2, page10.
+        // Lexical path order would sort them page1, page10, page2 instead.
+        let pages_rels = br#"<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='r1' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page1.xml'/><Relationship Id='r2' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page2.xml'/><Relationship Id='r3' Type='http://schemas.microsoft.com/visio/2010/relationships/page' Target='page10.xml'/></Relationships>"#.to_vec();
+
+        let source = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), content_types),
+            ("_rels/.rels".to_owned(), root_rels),
+            ("visio/document.xml".to_owned(), document),
+            ("visio/_rels/document.xml.rels".to_owned(), document_rels),
+            ("visio/pages/pages.xml".to_owned(), pages_catalog),
+            ("visio/pages/_rels/pages.xml.rels".to_owned(), pages_rels),
+            ("visio/pages/page1.xml".to_owned(), b"<PageContents/>".to_vec()),
+            ("visio/pages/page2.xml".to_owned(), b"<PageContents/>".to_vec()),
+            (
+                "visio/pages/page10.xml".to_owned(),
+                b"<PageContents/>".to_vec(),
+            ),
+        ])
+        .unwrap();
+
+        let diagram = PyDiagram::open(&source).unwrap();
+        let paths: Vec<String> = diagram
+            .pages()
+            .into_iter()
+            .map(|page| page.source_part_path)
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "visio/pages/page1.xml",
+                "visio/pages/page2.xml",
+                "visio/pages/page10.xml",
+            ]
         );
     }
 }
