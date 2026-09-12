@@ -20,7 +20,7 @@ beforeAll(async () => {
   foundation = fixture;
 });
 
-const { cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, render, waitFor } = await import('@testing-library/react');
 const originalOpenDiagram = vsdx.openDiagram;
 let opens = 0;
 let disposals = 0;
@@ -54,6 +54,29 @@ test('does not reopen for inline fonts and a state-setting onReady callback', as
   expect(opens).toBe(1);
   cleanup();
   await waitFor(() => expect(disposals).toBe(1));
+  HTMLCanvasElement.prototype.getContext = getContext;
+});
+
+test('a parent re-rendering with a new inline onChange does not reopen the document', async () => {
+  const getContext = HTMLCanvasElement.prototype.getContext;
+  HTMLCanvasElement.prototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  opens = 0;
+  disposals = 0;
+  let ready: { handle: DiagramHandle } | undefined;
+  let forceRerender: (() => void) | undefined;
+  function Host() {
+    const [, setTick] = useState(0);
+    forceRerender = () => setTick((value) => value + 1);
+    return <VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} onChange={() => {}} />;
+  }
+  render(<Host />);
+  await waitFor(() => expect(ready).toBeDefined());
+  expect(opens).toBe(1);
+  act(() => { forceRerender!(); });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(opens).toBe(1);
+  expect(disposals).toBe(0);
+  cleanup();
   HTMLCanvasElement.prototype.getContext = getContext;
 });
 

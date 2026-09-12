@@ -78,7 +78,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
       if (notify) { setDirty(true); onChangeRef.current?.(); }
     } catch (value) { reportError(value); }
-  }, [onChange, reportError]);
+  }, [reportError]);
 
   useEffect(() => {
     let disposed = false;
