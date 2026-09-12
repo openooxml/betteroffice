@@ -2702,9 +2702,7 @@ fn lower_paragraph_attrs(
     result.borders = lower_paragraph_borders(values, env);
     result.shading = values
         .get("shading")
-        .and_then(any_map)
-        .and_then(|shading| shading.get("fill"))
-        .and_then(|fill| resolve_color(fill, env));
+        .and_then(|shading| resolve_paragraph_shading(shading, env));
 
     if let Some(Any::Map(num_pr)) = values.get("numPr") {
         result.num_pr = Some(ListNumPr {
@@ -3083,6 +3081,31 @@ fn paragraph_revision_value(value: &Any, env: &RenderEnv) -> Option<Value> {
     Some(Value::Object(object))
 }
 
+fn resolve_paragraph_shading(value: &Any, env: &RenderEnv) -> Option<String> {
+    let shading = any_map(value)?;
+    if map_string(shading, "pattern").as_deref() == Some("nil") {
+        return None;
+    }
+    let fill = shading.get("fill")?;
+    match fill {
+        Any::String(value) if value.as_ref() == "auto" => None,
+        Any::Map(map) => {
+            if map_string(map, "themeColor").is_some() {
+                let mut themed = map.as_ref().clone();
+                themed.remove("auto");
+                resolve_color(&Any::Map(themed.into()), env)
+            } else if map_bool(map, "auto") == Some(true)
+                || map_string(map, "rgb").as_deref() == Some("auto")
+            {
+                None
+            } else {
+                resolve_color(fill, env)
+            }
+        }
+        _ => resolve_color(fill, env),
+    }
+}
+
 fn resolve_color(value: &Any, env: &RenderEnv) -> Option<String> {
     match value {
         Any::String(value) => Some(css_hex(value)),
@@ -3390,6 +3413,34 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn paragraph_shading_distinguishes_automatic_background_from_text() {
+        let env = RenderEnv::default();
+        for (shading, expected) in [
+            (json!({"pattern": "clear", "fill": {"auto": true}}), None),
+            (json!({"fill": {"rgb": "auto"}}), None),
+            (json!({"fill": "auto"}), None),
+            (json!({"pattern": "nil", "fill": {"rgb": "123456"}}), None),
+            (json!({"fill": {"rgb": "123456"}}), Some("#123456")),
+            (json!({"fill": {"rgb": "000000"}}), Some("#000000")),
+            (
+                json!({"fill": {"auto": true, "themeColor": "accent1", "themeTint": "80"}}),
+                Some("#A1B8E1"),
+            ),
+        ] {
+            let values = BTreeMap::from([(
+                "shading".to_owned(),
+                Any::from_json(&shading.to_string()).unwrap(),
+            )]);
+            let attrs = lower_paragraph_attrs(&values, None, &env, &mut ListState::default());
+            assert_eq!(attrs.shading.as_deref(), expected, "{shading}");
+        }
+        assert_eq!(
+            resolve_color(&any_map([("auto", Any::Bool(true))]), &env).as_deref(),
+            Some("#000000")
+        );
     }
 
     #[test]
