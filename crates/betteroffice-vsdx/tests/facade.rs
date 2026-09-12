@@ -750,6 +750,7 @@ fn draft_cell(
     row: Option<CellRow>,
 ) -> CellSnapshot {
     CellSnapshot {
+        row_type: None,
         locator: CellLocator {
             sheet: CellSheet::Page(1),
             shape_id: Some(99),

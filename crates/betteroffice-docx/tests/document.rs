@@ -241,8 +241,8 @@ fn saved_part(parts: &[(String, Vec<u8>)], path: &str) -> String {
 
 /// A drawing whose chart part the parser has no chart for must stay opaque:
 /// reading it as a picture would invent a `<a:blip r:embed="rId1"/>`, and in a
-/// Word-shaped package `rId1` is the styles part. A full save drops the
-/// drawing, exactly as it drops a chart it did read.
+/// Word-shaped package `rId1` is the styles part. A full save replays the
+/// drawing verbatim, exactly as it replays a chart it did read.
 fn assert_no_stray_picture(chart_part: Option<&[u8]>) {
     let bytes = charted_story_docx(chart_part);
     let mut document = Document::open(&bytes).unwrap();
@@ -268,6 +268,7 @@ fn assert_no_stray_picture(chart_part: Option<&[u8]>) {
         "word/footnotes.xml",
     ] {
         let xml = saved_part(&parts, path);
+        assert!(xml.contains(CHART_DRAWING), "{path} lost its drawing");
         assert!(!xml.contains("pic:pic"), "{path} gained a picture");
         assert!(!xml.contains("a:blip"), "{path} gained a picture");
         assert!(
@@ -286,7 +287,7 @@ fn assert_no_stray_picture(chart_part: Option<&[u8]>) {
 
     let reopened = Document::open(&saved).unwrap();
     assert_eq!(reopened.structure(), document.structure());
-    assert_eq!(opaque_drawings(&reopened.model().body.content), 0);
+    assert_eq!(opaque_drawings(&reopened.model().body.content), 1);
     assert_eq!(
         get_paragraph_text(reopened.paragraph("11111111").unwrap()),
         "Edited natively"
@@ -301,6 +302,90 @@ fn an_unreadable_chart_part_writes_no_picture_in_any_story() {
 #[test]
 fn an_absent_chart_part_writes_no_picture_in_any_story() {
     assert_no_stray_picture(None);
+}
+
+const BAR_CHART: &[u8] = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:v>Sales</c:v></c:tx><c:cat><c:strRef><c:strCache><c:pt idx="0"><c:v>Q1</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:pt idx="0"><c:v>2</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:scaling/><c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:scaling/><c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#;
+
+/// The charted runs in `content`.
+fn chart_runs(content: &[BlockContent]) -> usize {
+    content
+        .iter()
+        .filter_map(|block| match block {
+            BlockContent::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+        .flat_map(|paragraph| &paragraph.content)
+        .filter_map(|item| match item {
+            ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+            _ => None,
+        })
+        .flat_map(|run| &run.content)
+        .filter(|item| matches!(item, RunContent::Chart { .. }))
+        .count()
+}
+
+fn stories(document: &Document) -> [Vec<BlockContent>; 3] {
+    [
+        document.model().body.content.clone(),
+        document.headers()[0].1.content.clone(),
+        document.model().footnotes[0].content.clone(),
+    ]
+}
+
+/// A chart the parser did read is placed by its `w:drawing`, which a save
+/// replays verbatim: the chart part, its relationship and the drawing all
+/// come back on reopen, in the body, a header and a footnote alike. The one
+/// finding is the note writer moving the root's chart binding onto the
+/// `w:footnote` element, as it does for any foreign markup in a note.
+#[test]
+fn a_chart_survives_a_save_in_every_story() {
+    let bytes = charted_story_docx(Some(BAR_CHART));
+    let document = Document::open(&bytes).unwrap();
+    assert!(!document.model().charts.is_empty());
+    for story in stories(&document) {
+        assert_eq!(chart_runs(&story), 1);
+    }
+
+    let saved = document.save().unwrap();
+    let before = ooxml_opc::unzip_parts(&bytes).unwrap();
+    let after = ooxml_opc::unzip_parts(&saved).unwrap();
+    assert_eq!(
+        ooxml_fidelity::roundtrip_findings(&before, &after).unwrap(),
+        vec!["fingerprint differs: word/footnotes.xml"]
+    );
+    for path in [
+        "word/document.xml",
+        "word/header1.xml",
+        "word/footnotes.xml",
+    ] {
+        assert!(
+            saved_part(&after, path).contains(CHART_DRAWING),
+            "{path} lost its chart drawing"
+        );
+    }
+
+    let mut reopened = Document::open(&saved).unwrap();
+    assert_eq!(reopened.structure(), document.structure());
+    for story in stories(&reopened) {
+        assert_eq!(chart_runs(&story), 1);
+    }
+
+    reopened
+        .replace_paragraph_text("11111111", "Edited natively")
+        .unwrap();
+    let edited = ooxml_opc::unzip_parts(&reopened.save().unwrap()).unwrap();
+    assert_eq!(
+        ooxml_fidelity::losses(
+            &ooxml_fidelity::element_census(&before).unwrap(),
+            &ooxml_fidelity::element_census(&edited).unwrap()
+        ),
+        vec![]
+    );
+    assert!(saved_part(&edited, "word/document.xml").contains("Edited natively"));
+    assert_eq!(
+        saved_part(&edited, "word/charts/chart1.xml").as_bytes(),
+        BAR_CHART
+    );
 }
 
 const TEXT_BOX_NAMESPACES: &str = concat!(

@@ -128,6 +128,8 @@ fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
         list_marker_hidden: attrs.list_marker_hidden.unwrap_or(false),
         list_marker_font_family: attrs.list_marker_font_family.clone(),
         list_marker_font_size: attrs.list_marker_font_size.and_then(finite),
+        list_marker_bold: attrs.list_marker_bold.unwrap_or(false),
+        list_marker_italic: attrs.list_marker_italic.unwrap_or(false),
         list_marker_suffix: attrs.list_marker_suffix.clone(),
         default_tab_stop_twips: attrs.default_tab_stop_twips.and_then(finite),
     })

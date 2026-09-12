@@ -737,7 +737,6 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   const history = useDocumentHistory<Document | null>(initialDocument || null, {
     maxEntries: 100,
     groupingInterval: 500,
-    enableKeyboardShortcuts: true,
   });
   const [yrsHistoryState, setYrsHistoryState] = useState({ canUndo: false, canRedo: false });
   const handleYrsHistoryChange = useCallback((canUndo: boolean, canRedo: boolean) => {

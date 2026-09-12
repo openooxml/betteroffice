@@ -222,7 +222,7 @@ fn survivor_targets(
 }
 
 /// The package part a `*_rels/*.rels` path belongs to, if well-formed.
-fn owner_of_rels_path(path: &str) -> Option<String> {
+pub(crate) fn owner_of_rels_path(path: &str) -> Option<String> {
     if let Some((directory, file)) = path.rsplit_once("/_rels/") {
         let file = file.strip_suffix(".rels")?;
         if directory.is_empty() || file.is_empty() {
@@ -389,7 +389,7 @@ fn removes_target(
 /// Resolves a relationship target against the source part's directory,
 /// handling absolute, relative, and `..` targets while preserving literal
 /// percent escapes.
-fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<String> {
+pub(crate) fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<String> {
     resolve_target_path(relationship_path, target)
 }
 

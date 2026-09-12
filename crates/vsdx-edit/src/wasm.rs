@@ -37,6 +37,7 @@ struct CellLocatorArgs {
     section: Option<String>,
     row_index: Option<u32>,
     row_name: Option<String>,
+    row_type: Option<String>,
     cell_name: String,
 }
 
@@ -144,8 +145,10 @@ impl TryFrom<FormulaShapeDraft> for ShapeDraft {
             }
             let cell = serde_json::from_value::<FormulaShapeCell>(cell)
                 .map_err(|_| "invalid shape draft cell")?;
+            let row_type = cell.locator.row_type.clone();
             let locator = CellLocator::try_from(cell.locator)?;
             cells.push(CellSnapshot {
+                row_type,
                 name: locator.cell_name.clone(),
                 locator,
                 formula: cell.formula,
@@ -1314,10 +1317,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             document.apply_update_json_inner(&update).unwrap_err(),
-            format!(
-                "invalid diagram state: shape page:1:shape:deep:{} exceeds the maximum shape nesting depth",
-                MAX_SHAPE_NESTING - 1
-            )
+            "invalid diagram state: shape nesting exceeds maximum depth"
         );
     }
 

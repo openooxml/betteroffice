@@ -1,8 +1,8 @@
 import type { DocumentBody, SectionProperties } from '../types/document';
 
 /**
- * The last section as the engine lays it out, with references and `titlePg`
- * inherited forward; `finalSectionProperties` is the body sectPr as authored.
+ * The last section with inherited references; `finalSectionProperties`
+ * is the body sectPr as authored.
  */
 export function resolvedFinalSectionProperties(
   body: DocumentBody | null | undefined

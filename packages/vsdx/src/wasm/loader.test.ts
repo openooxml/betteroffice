@@ -555,3 +555,17 @@ function flattenShapes<T extends { children: T[] }>(shapes: T[]): T[] {
 function findGroupWithSiblings<T extends { children: T[] }>(shapes: T[]): T | undefined {
   return flattenShapes(shapes).find(shape => shape.children.length > 1);
 }
+
+test('hit testing returns a shape ID accepted by editing commands', () => {
+  const diagram = openDiagram(demo, { clientId: 9080 });
+  try {
+    const page = diagram.snapshot().pages[0];
+    const frame = diagram.layoutPage(0);
+    let hit = null as ReturnType<typeof diagram.hitTest>;
+    for (let y = 12; y < frame.height && !hit; y += 24) for (let x = 12; x < frame.width && !hit; x += 24) hit = diagram.hitTest(x, y);
+    expect(hit).not.toBeNull();
+    expect(flattenShapes(page.shapes).some(shape => shape.id === hit!.shapeId)).toBe(true);
+    diagram.setCellFormula(page.id, hit!.shapeId, { cellName: 'PinX' }, '0.25');
+    expect(flattenShapes(diagram.snapshot().pages[0].shapes).find(shape => shape.id === hit!.shapeId)?.cells.find(cell => cell.name === 'PinX')?.formula).toBe('0.25');
+  } finally { diagram.dispose(); }
+});

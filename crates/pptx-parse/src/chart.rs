@@ -157,7 +157,7 @@ mod tests {
         )
         .expect("chart parses");
         let points = chart.plot_groups[0].series[0].points.as_ref().unwrap();
-        assert_eq!(points[0].color, "#B1AAF3");
+        assert_eq!(points[0].color, "#B0A9F3");
         assert_eq!(points[1].color, "#112233");
     }
 

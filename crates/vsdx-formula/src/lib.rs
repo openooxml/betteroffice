@@ -156,12 +156,17 @@ impl<'a> Parser<'a> {
                     Tok::Op(Op::Gt)
                 }
             }
-            '"' => Tok::String(
-                self.chars
-                    .by_ref()
-                    .take_while(|value| *value != '"')
-                    .collect(),
-            ),
+            '"' => {
+                let mut value = String::new();
+                loop {
+                    match self.chars.next() {
+                        Some('"') if self.chars.next_if_eq(&'"').is_some() => value.push('"'),
+                        Some('"') => break Tok::String(value),
+                        Some(character) => value.push(character),
+                        None => break Tok::Invalid("unterminated formula string".into()),
+                    }
+                }
+            }
             value if value.is_ascii_digit() || value == '.' => self.number(value),
             value => {
                 let mut ident = value.to_string();
@@ -359,6 +364,7 @@ struct NumberEngine<'a, F> {
     limits: Limits,
     resolve: &'a mut F,
     active: HashSet<String>,
+    remaining_steps: usize,
 }
 
 impl<'a, F: FnMut(&str) -> Option<String>> NumberEngine<'a, F> {
@@ -367,6 +373,7 @@ impl<'a, F: FnMut(&str) -> Option<String>> NumberEngine<'a, F> {
             limits,
             resolve,
             active: HashSet::new(),
+            remaining_steps: limits.max_nodes,
         }
     }
 
@@ -375,6 +382,7 @@ impl<'a, F: FnMut(&str) -> Option<String>> NumberEngine<'a, F> {
     }
 
     fn evaluate_at(&mut self, expr: &Expr, depth: usize) -> Option<f64> {
+        self.remaining_steps = self.remaining_steps.checked_sub(1)?;
         if depth > self.limits.max_depth {
             return None;
         }
@@ -406,5 +414,43 @@ impl<'a, F: FnMut(&str) -> Option<String>> NumberEngine<'a, F> {
             _ => None,
         }
         .filter(|value| value.is_finite())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn limits() -> Limits {
+        Limits {
+            max_depth: 256,
+            max_nodes: 8192,
+            max_tokens: 16384,
+        }
+    }
+
+    #[test]
+    fn strings_require_a_closing_quote_and_decode_escaped_quotes() {
+        assert!(parse("\"unterminated", limits()).is_err());
+        assert_eq!(
+            parse("\"a\"\"b\"", limits()).unwrap(),
+            Expr::String("a\"b".into())
+        );
+    }
+
+    #[test]
+    fn repeated_references_share_an_evaluation_budget() {
+        let mut calls = 0;
+        let result = evaluate_number("N0", limits(), &mut |name| {
+            calls += 1;
+            let index: usize = name.strip_prefix('N')?.parse().ok()?;
+            Some(if index == 30 {
+                "1".into()
+            } else {
+                format!("N{0}+N{0}", index + 1)
+            })
+        });
+        assert_eq!(result, None);
+        assert!(calls < limits().max_nodes);
     }
 }

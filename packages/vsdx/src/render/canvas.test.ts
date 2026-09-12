@@ -31,7 +31,7 @@ test('replays primitives in z order and paints placeholders', async () => {
   expect(log.some(entry => entry.startsWith('fillText:missing image'))).toBe(true);
 });
 
-test('rejects display-list versions other than v3', async () => {
+test('rejects display-list versions other than v4', async () => {
   await expect(paintPage(context([]), { contractVersion: 2, width: 1, height: 1, paintTransform: transform, primitives: [] } as unknown as PageDisplayList)).rejects.toThrow('unsupported VSDX display-list contract version 2');
 });
 
@@ -70,4 +70,26 @@ test('canvasPointToModel divides out the canvas scale', () => {
 test('canvasPointToModel rejects a degenerate transform and a non-positive scale', () => {
   expect(() => canvasPointToModel({ a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 }, 1, 1)).toThrow();
   expect(() => canvasPointToModel(pagePaintTransform, 1, 1, 0)).toThrow();
+});
+
+test('a delayed image cannot overwrite a newer page or disturb its canvas state', async () => {
+  const log: string[] = [];
+  const ctx = context(log);
+  let finish: (image: CanvasImageSource) => void = () => {};
+  const oldPage: PageDisplayList = { contractVersion: 4, width: 100, height: 100, paintTransform: transform, primitives: [{ kind: 'image', id: 'old', zOrder: 0, assetId: 'slow', x: 0, y: 0, width: 1, height: 1 }] };
+  const oldPaint = paintPage(ctx, oldPage, 1, 1, { resolveImage: () => new Promise(resolve => { finish = resolve; }) });
+  expect(log).toEqual([]);
+  await paintPage(ctx, { ...oldPage, primitives: [] });
+  const current = [...log];
+  finish({} as CanvasImageSource);
+  await oldPaint;
+  expect(log).toEqual(current);
+});
+
+test('an aborted page never touches the canvas after its images load', async () => {
+  const log: string[] = [];
+  const controller = new AbortController();
+  controller.abort();
+  await paintPage(context(log), { contractVersion: 4, width: 1, height: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
+  expect(log).toEqual([]);
 });

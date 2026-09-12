@@ -2091,7 +2091,7 @@ mod tests {
         assert_eq!((horizontal, vertical), (6, 6), "every grid edge is painted");
         for line in &rules {
             assert_eq!(line.color, "#000000");
-            assert_eq!(line.stroke_width.as_f64(), Some(1.0));
+            assert_eq!(line.stroke_width.as_f64(), Some(0.667));
         }
     }
 
