@@ -767,7 +767,23 @@ impl Renderer {
             transform: Affine::identity(),
         });
         self.text(
-            package, resolver, references, page_part, shape, &resolved, id, bounds, state,
+            package,
+            resolver,
+            references,
+            page_part,
+            shape,
+            &resolved,
+            id,
+            bounds,
+            affine(transform.local).compose(Affine {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                e: -bounds.x as f32,
+                f: -bounds.y as f32,
+            }),
+            state,
         )?;
         Ok(())
     }
@@ -852,6 +868,7 @@ impl Renderer {
         resolved: &ResolvedShape,
         id: String,
         bounds: Bounds,
+        transform: Affine,
         state: &mut State,
     ) -> Result<(), RenderError> {
         if matches!(resolved.cell("Char.Size"), Some(Lookup::Found(cell)) if cell.cell.value.as_deref().and_then(|value| value.parse::<f32>().ok()).is_some_and(|value| !value.is_finite()))
@@ -1004,7 +1021,7 @@ impl Renderer {
                 })
                 .collect(),
             lines,
-            transform: Affine::identity(),
+            transform,
         });
         Ok(())
     }
@@ -2685,6 +2702,76 @@ mod tests {
         else {
             unreachable!()
         };
+        let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
+        let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
+        transform_rect(
+            &mut left,
+            &mut top,
+            &mut bounds_width,
+            &mut bounds_height,
+            *transform,
+        );
+        let outside = (left + bounds_width * 0.05, top + bounds_height * 0.05);
+        assert!(
+            outside.0 >= left
+                && outside.0 <= left + bounds_width
+                && outside.1 >= top
+                && outside.1 <= top + bounds_height
+        );
+        assert_eq!(canvas(outside), None);
+        let stop = lines[0].caret_stops[1];
+        assert_eq!(
+            canvas(transform.apply_point(stop.x, stop.y + height * 0.25)),
+            Some(HitTestResult::Text {
+                shape_id: id.clone(),
+                position: stop.position,
+            })
+        );
+    }
+
+    #[test]
+    fn standalone_rotated_shape_rotates_its_text_with_its_own_transform() {
+        let mut rotated = shape(1, 4.0, 4.0);
+        rotated
+            .children
+            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
+        with_cell(
+            &mut rotated,
+            "Angle",
+            &std::f64::consts::FRAC_PI_4.to_string(),
+        );
+        let list = render(vec![rotated]);
+        let Primitive::TextBox {
+            id,
+            x,
+            y,
+            width,
+            height,
+            lines,
+            transform,
+            ..
+        } = text_box(&list)
+        else {
+            unreachable!()
+        };
+        let matrix = Affine {
+            a: std::f32::consts::FRAC_1_SQRT_2,
+            b: std::f32::consts::FRAC_1_SQRT_2,
+            c: -std::f32::consts::FRAC_1_SQRT_2,
+            d: std::f32::consts::FRAC_1_SQRT_2,
+            e: 4.0,
+            f: 4.0 - 4.0 * std::f32::consts::SQRT_2,
+        };
+        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
+        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
+        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
+        assert_point_close((*x, *y), (4.0, 4.0));
+        assert_point_close((*width, *height), (1.0, 1.0));
+        assert_point_close(
+            transform.apply_point(lines[0].x, lines[0].y),
+            matrix.apply_point(4.0, 4.0),
+        );
+
         let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
         let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
         transform_rect(

@@ -4,11 +4,15 @@ use std::collections::BTreeMap;
 
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
+    evaluate,
 };
 pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
-use vsdx_resolve::{PageConnectivity, ResolveError, ResolvedShape, Resolver};
+use vsdx_resolve::{
+    Lookup, PageConnectivity, Provenance, ResolveError, ResolvedCell, ResolvedRow, ResolvedSection,
+    ResolvedShape, Resolver,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -57,87 +61,20 @@ impl Diagram {
         let export = session
             .export()
             .map_err(|error| Error::Policy(error.to_string()))?;
+        let (bytes, package) = self.apply_cell_edits(&export.cell_edits)?;
         let additions = export
             .added_shapes
             .iter()
             .map(|shape| StructuralEdit::AddShape {
                 page_id: shape.source_page_id,
-                shape_xml: self.added_shape_xml(shape),
+                shape_xml: added_shape_xml(&package, shape),
             })
             .collect::<Vec<_>>();
-        self.save_edits(&export.cell_edits, &additions)
-    }
-
-    /// Serializes an added shape; `save_structural_edits` rewrites its ID to the next free one.
-    fn added_shape_xml(&self, shape: &vsdx_edit::AddedShape) -> Vec<u8> {
-        let mut xml = String::from("<Shape");
-        if let Some(name) = &shape.name {
-            xml.push_str(&format!(" Name='{}'", escape_attribute(name)));
+        authorize_structural_edits(&package, &additions)?;
+        if additions.is_empty() {
+            return Ok(bytes);
         }
-        xml.push('>');
-        let mut sections: BTreeMap<&str, BTreeMap<RowKey, Vec<&vsdx_edit::CellSnapshot>>> =
-            BTreeMap::new();
-        for cell in &shape.cells {
-            match (&cell.locator.section, &cell.locator.row) {
-                (Some(section), Some(row)) => sections
-                    .entry(section)
-                    .or_default()
-                    .entry(RowKey::from(row))
-                    .or_default()
-                    .push(cell),
-                _ => xml.push_str(&self.added_cell_xml(shape.source_page_id, cell)),
-            }
-        }
-        for (section, rows) in sections {
-            xml.push_str(&format!("<Section N='{}'>", escape_attribute(section)));
-            for (row, cells) in rows {
-                xml.push_str(&match row {
-                    RowKey::Index(index) => format!("<Row IX='{index}'>"),
-                    RowKey::Name(name) => format!("<Row N='{}'>", escape_attribute(&name)),
-                });
-                for cell in cells {
-                    xml.push_str(&self.added_cell_xml(shape.source_page_id, cell));
-                }
-                xml.push_str("</Row>");
-            }
-            xml.push_str("</Section>");
-        }
-        xml.push_str("</Shape>");
-        xml.into_bytes()
-    }
-
-    /// Caches the formula in V where the page can evaluate it, falling back to the drafted value.
-    fn added_cell_xml(&self, page_id: u32, cell: &vsdx_edit::CellSnapshot) -> String {
-        let mut xml = format!("<Cell N='{}'", escape_attribute(&cell.name));
-        if let Some(formula) = &cell.formula {
-            xml.push_str(&format!(" F='{}'", escape_attribute(formula)));
-        }
-        let context = PackageMutationContext {
-            package: &self.package,
-        };
-        let value = cell
-            .formula
-            .as_deref()
-            .and_then(|formula| {
-                context
-                    .evaluate_formula(
-                        &CellLocator {
-                            sheet: CellSheet::Page(page_id),
-                            shape_id: None,
-                            section: None,
-                            row: None,
-                            cell_name: cell.name.clone(),
-                        },
-                        formula,
-                    )
-                    .ok()
-            })
-            .or_else(|| cell.value.clone());
-        if let Some(value) = value {
-            xml.push_str(&format!(" V='{}'", escape_attribute(&value)));
-        }
-        xml.push_str("/>");
-        xml
+        Ok(vsdx_parse::save_structural_edits(&package, &additions)?)
     }
     /// Applies semantic and structural edits as one all-or-nothing save request.
     pub fn save_edits(
@@ -250,6 +187,134 @@ fn authorize_structural_edits(package: &VsdxPackage, edits: &[StructuralEdit]) -
         }
     }
     Ok(())
+}
+
+/// Serializes an added shape; `save_structural_edits` rewrites its ID to the next free one.
+fn added_shape_xml(package: &VsdxPackage, shape: &vsdx_edit::AddedShape) -> Vec<u8> {
+    let mut xml = String::from("<Shape");
+    if let Some(name) = &shape.name {
+        xml.push_str(&format!(" Name='{}'", escape_attribute(name)));
+    }
+    xml.push('>');
+    let resolved = added_shape_resolved(shape);
+    let document = package
+        .document_sheet
+        .as_ref()
+        .and_then(|sheet| Resolver::new(package).resolve_sheet(sheet).ok());
+    let mut sections: BTreeMap<&str, BTreeMap<RowKey, Vec<&vsdx_edit::CellSnapshot>>> =
+        BTreeMap::new();
+    for cell in &shape.cells {
+        match (&cell.locator.section, &cell.locator.row) {
+            (Some(section), Some(row)) => sections
+                .entry(section)
+                .or_default()
+                .entry(RowKey::from(row))
+                .or_default()
+                .push(cell),
+            _ => xml.push_str(&added_cell_xml(&resolved, document.as_ref(), cell)),
+        }
+    }
+    for (section, rows) in sections {
+        xml.push_str(&format!("<Section N='{}'>", escape_attribute(section)));
+        for (row, cells) in rows {
+            xml.push_str(&match row {
+                RowKey::Index(index) => format!("<Row IX='{index}'>"),
+                RowKey::Name(name) => format!("<Row N='{}'>", escape_attribute(&name)),
+            });
+            for cell in cells {
+                xml.push_str(&added_cell_xml(&resolved, document.as_ref(), cell));
+            }
+            xml.push_str("</Row>");
+        }
+        xml.push_str("</Section>");
+    }
+    xml.push_str("</Shape>");
+    xml.into_bytes()
+}
+
+/// A synthetic resolved shape holding every cell the session drafted for an added shape, so its
+/// own formulas (e.g. `Height = Width*2`) resolve against its own sibling cells instead of the
+/// page sheet.
+fn added_shape_resolved(shape: &vsdx_edit::AddedShape) -> ResolvedShape {
+    let mut resolved = ResolvedShape::default();
+    for snapshot in &shape.cells {
+        let cell = Cell {
+            name: snapshot.name.clone(),
+            formula: snapshot.formula.clone(),
+            value: snapshot.value.clone(),
+            unit: None,
+            del: false,
+            other_attrs: Vec::new(),
+        };
+        let lookup = Lookup::Found(ResolvedCell {
+            cell,
+            provenance: Provenance::Local,
+        });
+        match (&snapshot.locator.section, &snapshot.locator.row) {
+            (Some(section), Some(row)) => {
+                let row_key = match row {
+                    CellRow::Index(index) => format!("IX:{index}"),
+                    CellRow::Name(name) => format!("N:{name}"),
+                };
+                let section_entry =
+                    resolved
+                        .sections
+                        .entry(section.clone())
+                        .or_insert_with(|| ResolvedSection {
+                            name: section.clone(),
+                            ..Default::default()
+                        });
+                let row_entry = section_entry
+                    .rows
+                    .entry(row_key.clone())
+                    .or_insert_with(|| ResolvedRow {
+                        key: row_key.clone(),
+                        ..Default::default()
+                    });
+                row_entry.cells.insert(snapshot.name.clone(), lookup);
+            }
+            _ => {
+                resolved.cells.insert(snapshot.name.clone(), lookup);
+            }
+        }
+    }
+    resolved
+}
+
+/// Caches the formula in V by evaluating it against the added shape's own resolved cells (after
+/// preceding session edits have already been folded into `package`), falling back to the drafted
+/// value when the formula cannot be evaluated this way.
+fn added_cell_xml(
+    resolved: &ResolvedShape,
+    document: Option<&ResolvedShape>,
+    cell: &vsdx_edit::CellSnapshot,
+) -> String {
+    let mut xml = format!("<Cell N='{}'", escape_attribute(&cell.name));
+    if let Some(formula) = &cell.formula {
+        xml.push_str(&format!(" F='{}'", escape_attribute(formula)));
+    }
+    let value = cell
+        .formula
+        .as_deref()
+        .and_then(|formula| {
+            match evaluate(
+                formula.trim_start_matches('='),
+                &DocumentReferences::new(resolved, document),
+                &ParseLimits::default(),
+            ) {
+                Evaluation::Evaluated(evaluated) => match evaluated.value {
+                    Value::Number(number) => Some(number.number.to_string()),
+                    Value::Color(_) => None,
+                },
+                Evaluation::Unsupported(_) | Evaluation::Error(_) => None,
+            }
+        })
+        .or_else(|| cell.value.clone());
+    if let Some(value) = value {
+        xml.push_str(&format!(" V='{}'", escape_attribute(&value)));
+    }
+    xml.push_str("/>");
+    xml
 }
 
 struct PackageMutationContext<'a> {

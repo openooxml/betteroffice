@@ -811,6 +811,13 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
             )));
         }
     }
+    for (key, (_, _, origin, _)) in &after_identities {
+        if !before_identities.contains_key(key) && origin.as_deref() != Some(SESSION_ORIGIN) {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds shape {key} without session provenance"
+            )));
+        }
+    }
     let before_baselines = baseline_formulas(before)?;
     let after_baselines = baseline_formulas(staged)?;
     for key in before_baselines.keys().chain(after_baselines.keys()) {
@@ -827,6 +834,83 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
             return Err(EditError::InvalidState(format!(
                 "remote update changes protected cell {key}"
             )));
+        }
+    }
+    validate_new_cells(before, staged, &before_identities)?;
+    Ok(())
+}
+
+/// A cell key absent before has no local-edit equivalent unless its whole shape is also new
+/// (`add_shape` seeds a fresh shape's cells together; `set_cell_formula_at` can only edit a key
+/// that already exists). So a new key grafted onto a shape the document already knew faces the
+/// same policy a local edit would: refused if the target is currently locked, and refused if the
+/// peer is planting a new GUARD rather than editing one the package already established.
+fn validate_new_cells(
+    before: &Doc,
+    staged: &Doc,
+    before_identities: &std::collections::BTreeMap<String, ShapeIdentity>,
+) -> EditResult<()> {
+    let before_txn = before.transact();
+    let staged_txn = staged.transact();
+    let before_sheets = required_map(&before_txn, SHEETS)?;
+    let staged_sheets = required_map(&staged_txn, SHEETS)?;
+    for shape_id in before_identities.keys() {
+        let Some(Out::YMap(before_shape)) = before_sheets.get(&before_txn, shape_id) else {
+            continue;
+        };
+        let Some(Out::YMap(staged_shape)) = staged_sheets.get(&staged_txn, shape_id) else {
+            continue;
+        };
+        let before_cells = map_map(&before_shape, &before_txn, "cells")?;
+        let staged_cells = map_map(&staged_shape, &staged_txn, "cells")?;
+        let before_values = before_cells
+            .iter(&before_txn)
+            .filter_map(|(name, cell)| match cell {
+                Out::YMap(cell) => Some((
+                    name.to_owned(),
+                    map_string(&cell, &before_txn, "formula")
+                        .or_else(|| map_string(&cell, &before_txn, "value")),
+                )),
+                _ => None,
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for (key, cell) in staged_cells.iter(&staged_txn) {
+            if before_cells.get(&before_txn, key).is_some() {
+                continue;
+            }
+            let Out::YMap(cell) = cell else { continue };
+            let Some(formula) = map_string(&cell, &staged_txn, "formula") else {
+                continue;
+            };
+            let name = map_string(&cell, &staged_txn, "name").unwrap_or_default();
+            let locked = [
+                "LockMoveX",
+                "LockMoveY",
+                "LockWidth",
+                "LockHeight",
+                "LockAspect",
+                "LockTextEdit",
+                "LockFormat",
+                "LockDelete",
+            ]
+            .iter()
+            .any(|lock| {
+                lock_target(lock) == Some(name.as_str())
+                    && before_values
+                        .get(*lock)
+                        .and_then(|value| value.as_deref())
+                        .is_some_and(|value| lock_is_enabled(value, &before_values))
+            });
+            if locked {
+                return Err(EditError::InvalidState(format!(
+                    "remote update adds a lock-protected cell {shape_id}/{key}"
+                )));
+            }
+            if is_guarded(&formula) {
+                return Err(EditError::InvalidState(format!(
+                    "remote update adds a guarded cell {shape_id}/{key}"
+                )));
+            }
         }
     }
     Ok(())
