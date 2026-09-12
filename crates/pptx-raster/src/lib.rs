@@ -355,6 +355,14 @@ impl Painter<'_, '_> {
                 h,
                 primitives,
                 ..
+            }
+            | Primitive::Table {
+                x,
+                y,
+                w,
+                h,
+                primitives,
+                ..
             } => {
                 let Some(inner) = self.clipped(clip, *x, *y, *w, *h, transform)? else {
                     return Ok(());
@@ -856,6 +864,14 @@ fn local_transform(primitive: &Primitive) -> Transform {
             ..
         }
         | Primitive::Chart {
+            x,
+            y,
+            w,
+            h,
+            transform,
+            ..
+        }
+        | Primitive::Table {
             x,
             y,
             w,

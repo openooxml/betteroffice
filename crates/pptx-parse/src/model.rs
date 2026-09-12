@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, Theme,
+    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, TableStyleList, Theme,
     ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
@@ -47,6 +47,9 @@ pub struct PptxPackage {
     #[serde(default)]
     pub charts: Vec<ChartPart>,
     pub media: Vec<MediaPart>,
+    /// Absent from packages serialized before table styles were parsed.
+    #[serde(default, skip_serializing_if = "TableStyleList::is_empty")]
+    pub table_styles: TableStyleList,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub comment_authors: Vec<CommentAuthor>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -396,9 +399,7 @@ pub struct GraphicFrame {
     rename_all_fields = "camelCase"
 )]
 pub enum GraphicFrameData {
-    Table {
-        rows: Vec<Vec<TextBody>>,
-    },
+    Table(Table),
     Chart {
         relationship_id: String,
         part_path: Option<String>,
@@ -419,6 +420,179 @@ pub struct GroupShape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub children: Vec<ShapeNode>,
+}
+
+/// An `a:tbl`: its column grid, table-wide properties and rows.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Table {
+    /// `a:gridCol/@w`, in EMU.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub grid: Vec<i64>,
+    #[serde(default, skip_serializing_if = "TableProperties::is_default")]
+    pub properties: TableProperties,
+    #[serde(
+        default,
+        serialize_with = "serialize_table_rows",
+        deserialize_with = "deserialize_table_rows"
+    )]
+    pub rows: Vec<TableRow>,
+}
+
+/// `a:tblPr`: which style parts apply, and the style they come from.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TableProperties {
+    pub first_row: bool,
+    pub last_row: bool,
+    pub first_col: bool,
+    pub last_col: bool,
+    pub band_row: bool,
+    pub band_col: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_id: Option<String>,
+}
+
+impl TableProperties {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableRow {
+    /// `a:tr/@h`, in EMU, a minimum rather than a fixed height.
+    #[serde(default)]
+    pub height: i64,
+    pub cells: Vec<TableCell>,
+}
+
+impl TableRow {
+    fn is_text_only(&self) -> bool {
+        self.height == 0 && self.cells.iter().all(TableCell::is_text_only)
+    }
+}
+
+/// An `a:tc`, with its `a:tcPr` anchoring and margins folded into `text`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TableCell {
+    pub text: TextBody,
+    #[serde(default = "unit_span", skip_serializing_if = "is_unit_span")]
+    pub grid_span: u32,
+    #[serde(default = "unit_span", skip_serializing_if = "is_unit_span")]
+    pub row_span: u32,
+    /// An `hMerge`/`vMerge` continuation: covered by an earlier origin cell.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub merged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "TableCellBorders::is_empty")]
+    pub borders: TableCellBorders,
+}
+
+impl TableCell {
+    pub fn from_text(text: TextBody) -> Self {
+        Self {
+            text,
+            ..Self::default()
+        }
+    }
+
+    /// Compared against a cell built from this text alone, so a field added
+    /// later cannot be silently dropped by the released encoding.
+    fn is_text_only(&self) -> bool {
+        *self == Self::from_text(self.text.clone())
+    }
+}
+
+impl Default for TableCell {
+    fn default() -> Self {
+        Self {
+            text: TextBody::default(),
+            grid_span: 1,
+            row_span: 1,
+            merged: false,
+            fill: None,
+            borders: TableCellBorders::default(),
+        }
+    }
+}
+
+/// `a:tcPr/a:lnL`, `a:lnT`, `a:lnR` and `a:lnB`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct TableCellBorders {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub left: Option<ShapeOutline>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top: Option<ShapeOutline>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub right: Option<ShapeOutline>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bottom: Option<ShapeOutline>,
+}
+
+impl TableCellBorders {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+fn unit_span() -> u32 {
+    1
+}
+
+fn is_unit_span(span: &u32) -> bool {
+    *span == 1
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// Writes rows that hold nothing but cell text in the released encoding, so a
+/// stored package keeps its bytes until a table gains geometry.
+fn serialize_table_rows<S>(rows: &[TableRow], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeSeq;
+
+    if !rows.iter().all(TableRow::is_text_only) {
+        return rows.serialize(serializer);
+    }
+    let mut sequence = serializer.serialize_seq(Some(rows.len()))?;
+    for row in rows {
+        let cells: Vec<_> = row.cells.iter().map(|cell| &cell.text).collect();
+        sequence.serialize_element(&cells)?;
+    }
+    sequence.end()
+}
+
+/// Also accepts the released encoding's rows, which were bare `a:txBody` lists.
+fn deserialize_table_rows<'de, D>(deserializer: D) -> Result<Vec<TableRow>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Row {
+        Modern(TableRow),
+        Legacy(Vec<TextBody>),
+    }
+
+    Ok(Vec::<Row>::deserialize(deserializer)?
+        .into_iter()
+        .map(|row| match row {
+            Row::Modern(row) => row,
+            Row::Legacy(cells) => TableRow {
+                height: 0,
+                cells: cells.into_iter().map(TableCell::from_text).collect(),
+            },
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -477,7 +651,7 @@ pub struct TextParagraph {
     pub end_properties: Option<RunProperties>,
 }
 
-/// Paragraph line pitch.
+/// A spacing height, as a share of the text size or in points.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -501,6 +675,10 @@ pub struct ParagraphProperties {
     pub bullet: Option<Bullet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_before: Option<LineSpacing>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_after: Option<LineSpacing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_font: Option<BulletFont>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

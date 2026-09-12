@@ -1,6 +1,8 @@
 mod media;
 mod rels;
+mod schema;
 mod scrub;
+mod styles;
 mod xml;
 
 use std::collections::HashSet;
@@ -10,7 +12,8 @@ use thiserror::Error;
 
 use crate::media::replace_media;
 use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
-use crate::xml::redact_xml;
+use crate::styles::StyleMap;
+use crate::xml::redact_xml_with_styles;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Format {
@@ -105,6 +108,16 @@ pub fn redact_with_report(
     } else {
         prune_scrubbed_parts(&mut parts, &scrubbed)?
     };
+    let collect_styles = |name: &str| {
+        parts
+            .iter()
+            .find(|(path, _)| detected == Format::Docx && normalize_part_name(path) == name)
+            .map(|(_, bytes)| StyleMap::collect(name, bytes))
+            .transpose()
+            .map(Option::unwrap_or_default)
+    };
+    let main_styles = collect_styles("word/styles.xml")?;
+    let glossary_styles = collect_styles("word/glossary/styles.xml")?;
     for (path, data) in &mut parts {
         let canonical = normalize_part_name(path);
         if blanked.contains(&canonical) {
@@ -112,7 +125,12 @@ pub fn redact_with_report(
         } else if media::is_replaceable_part(&canonical) {
             *data = replace_media(&canonical, data, &mut report)?;
         } else {
-            *data = redact_xml(detected, &canonical, data, &mut report)?;
+            let styles = if canonical.starts_with("word/glossary/") {
+                &glossary_styles
+            } else {
+                &main_styles
+            };
+            *data = redact_xml_with_styles(detected, &canonical, data, &mut report, styles)?;
         }
     }
 

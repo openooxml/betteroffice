@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test';
-import type { GeometryPathCommand, ImageEffect, ShapePrimitive, SlideDisplayList, TextBoxPrimitive } from '../types';
+import type {
+  GeometryPathCommand,
+  ImageEffect,
+  ShapePrimitive,
+  SlideDisplayList,
+  SlidePrimitive,
+  TablePrimitive,
+  TextBoxPrimitive,
+} from '../types';
 import { applyImageEffects, paintSlide } from './canvas';
 
 describe('PPTX canvas replay', () => {
@@ -1451,3 +1459,205 @@ test('clips metafile paths before filling their even-odd holes', async () => {
     await paintSlide(ctx, list, 1);
     expect(calls).toEqual(['text:Á@10', 'text: @28', 'text:B@49']);
   });
+
+describe('PPTX table container', () => {
+  const RECT: GeometryPathCommand[] = [
+    { type: 'move', x: 0, y: 0 },
+    { type: 'line', x: 1, y: 0 },
+    { type: 'line', x: 1, y: 1 },
+    { type: 'line', x: 0, y: 1 },
+    { type: 'close' },
+  ];
+
+  const CELLS: Array<[number, number, string]> = [
+    [20, 20, '#1f3864'],
+    [90, 20, '#1f3864'],
+    [20, 60, '#e8eef7'],
+    [90, 60, '#ffffff'],
+  ];
+
+  const LABELS: Array<[number, number, string]> = [
+    [26, 26, 'Q1'],
+    [96, 26, 'Q2'],
+    [26, 66, '12'],
+    [96, 66, '34'],
+  ];
+
+  function cell(x: number, y: number, color: string): SlidePrimitive {
+    return {
+      kind: 'shape',
+      objectId: 1,
+      name: 'rect',
+      x,
+      y,
+      w: 70,
+      h: 40,
+      geometry: 'rect',
+      path: RECT,
+      fill: { kind: 'solid', color },
+    } as SlidePrimitive;
+  }
+
+  function border(x: number, y: number): SlidePrimitive {
+    return {
+      kind: 'shape',
+      objectId: 1,
+      name: 'rect',
+      x,
+      y,
+      w: 70,
+      h: 40,
+      geometry: 'rect',
+      path: RECT,
+      stroke: { color: '#9aa7bd', width: 1 },
+    } as SlidePrimitive;
+  }
+
+  function label(x: number, y: number, text: string): SlidePrimitive {
+    return {
+      kind: 'textBox',
+      objectId: 2,
+      x,
+      y,
+      w: 60,
+      h: 24,
+      anchor: 'top',
+      paragraphs: [],
+      lines: [
+        {
+          x,
+          y,
+          width: 40,
+          height: 14,
+          baseline: y + 12,
+          start: 0,
+          end: text.length,
+          caretStops: [],
+          runs: [
+            {
+              text,
+              start: 0,
+              end: text.length,
+              x,
+              width: 40,
+              fontId: 1,
+              fontFamily: 'Carlito',
+              fontSizePx: 12,
+              bold: false,
+              italic: false,
+              underline: false,
+              color: '#1b2733',
+              glyphs: [],
+            },
+          ],
+        },
+      ],
+    } as SlidePrimitive;
+  }
+
+  /** Must stay in step with `table_children` in crates/pptx-raster/tests/golden.rs. */
+  function children(): SlidePrimitive[] {
+    return [
+      ...CELLS.map(([x, y, color]) => cell(x, y, color)),
+      ...CELLS.map(([x, y]) => border(x, y)),
+      ...LABELS.map(([x, y, text]) => label(x, y, text)),
+      {
+        kind: 'shape',
+        objectId: 1,
+        name: 'rect',
+        x: 130,
+        y: 90,
+        w: 90,
+        h: 40,
+        geometry: 'rect',
+        path: RECT,
+        fill: { kind: 'solid', color: '#ef4444' },
+      } as SlidePrimitive,
+    ];
+  }
+
+  function table(primitives: SlidePrimitive[]): TablePrimitive {
+    return {
+      kind: 'table',
+      objectId: 6,
+      shapeId: 'table-1',
+      name: 'table',
+      x: 20,
+      y: 20,
+      w: 140,
+      h: 80,
+      label: 'Table, 2 rows, 2 columns',
+      primitives,
+    };
+  }
+
+  function harness(): { calls: string[]; ctx: CanvasRenderingContext2D } {
+    const calls: string[] = [];
+    const ctx = new Proxy(
+      {
+        save: () => calls.push('save'),
+        restore: () => calls.push('restore'),
+        rect: (x: number, y: number, w: number, h: number) => calls.push(`rect:${x},${y},${w},${h}`),
+        clip: () => calls.push('clip'),
+        fill: () => calls.push('fill'),
+        stroke: () => calls.push('stroke'),
+        fillText: (text: string) => calls.push(`text:${text}`),
+        fillRect: () => calls.push('fillRect'),
+        createLinearGradient: () => ({ addColorStop: () => undefined }),
+        createRadialGradient: () => ({ addColorStop: () => undefined }),
+      } as Record<string, unknown>,
+      {
+        get(target, property) {
+          if (property in target) return target[property as string];
+          return () => undefined;
+        },
+        set(target, property, value) {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    return { calls, ctx };
+  }
+
+  function slide(primitive: SlidePrimitive): SlideDisplayList {
+    return { contractVersion: 2, width: 240, height: 135, primitives: [primitive] };
+  }
+
+  test('clips its cells to the table rectangle and paints fills, borders and text', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, slide(table(children())), 1);
+    expect(calls).toContain('rect:20,20,140,80');
+    expect(calls.indexOf('clip')).toBeLessThan(calls.indexOf('fill'));
+    expect(calls.filter((call) => call === 'fill')).toHaveLength(5);
+    expect(calls.filter((call) => call === 'stroke')).toHaveLength(4);
+    expect(calls).toContain('text:Q1');
+    expect(calls).toContain('text:34');
+  });
+
+  test('paints a table exactly as it paints the same children under a chart', async () => {
+    const primitives = children();
+    const asTable = harness();
+    await paintSlide(asTable.ctx, slide(table(primitives)), 1);
+    const asChart = harness();
+    const { kind: _kind, ...rest } = table(primitives);
+    await paintSlide(asChart.ctx, slide({ kind: 'chart', ...rest } as SlidePrimitive), 1);
+    expect(asTable.calls).toEqual(asChart.calls);
+  });
+
+  test('paints nothing for a table with no cells', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, slide(table([])), 1);
+    expect(calls.filter((call) => call.startsWith('text:'))).toHaveLength(0);
+    expect(calls).not.toContain('fill');
+    expect(calls).not.toContain('stroke');
+  });
+
+  test('restores every clip it pushes', async () => {
+    const { calls, ctx } = harness();
+    await paintSlide(ctx, slide(table(children())), 1);
+    expect(calls.filter((call) => call === 'save')).toHaveLength(
+      calls.filter((call) => call === 'restore').length
+    );
+  });
+});

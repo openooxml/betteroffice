@@ -347,9 +347,24 @@ impl Translator<'_> {
             primitives,
             transform,
             ..
+        }
+        | Primitive::Table {
+            x,
+            y,
+            w,
+            h,
+            primitives,
+            transform,
+            ..
         } = primitive
         {
-            self.translate_chart(Frame::new(*x, *y, *w, *h), primitives, *transform, parent);
+            self.translate_container(
+                primitive_kind(primitive),
+                Frame::new(*x, *y, *w, *h),
+                primitives,
+                *transform,
+                parent,
+            );
             return;
         }
         let kind = primitive_kind(primitive);
@@ -432,7 +447,7 @@ impl Translator<'_> {
                 "placeholder primitive is not translated: {}",
                 label.as_deref().unwrap_or(name)
             )),
-            Primitive::Chart { .. } => unreachable!(),
+            Primitive::Chart { .. } | Primitive::Table { .. } => unreachable!(),
         };
         match result {
             Ok(()) => self.summary.translated(kind),
@@ -440,14 +455,15 @@ impl Translator<'_> {
         }
     }
 
-    fn translate_chart(
+    /// Clips a container's children to its rectangle: charts and tables both.
+    fn translate_container(
         &mut self,
+        kind: &'static str,
         frame: Result<Frame, String>,
         primitives: &[Primitive],
         transform: Transform,
         parent: Affine,
     ) {
-        let kind = "chart";
         self.summary.seen(kind);
         let placeholder = frame.as_ref().ok().map(|frame| frame.rect);
         let prepared = frame.and_then(|frame| {
@@ -461,7 +477,11 @@ impl Translator<'_> {
                 self.skipped.record(kind, reason.clone());
                 draw_transformed_placeholder(&mut self.scene, placeholder, parent);
                 for primitive in primitives {
-                    self.skip_subtree(primitive, parent, format!("parent chart skipped: {reason}"));
+                    self.skip_subtree(
+                        primitive,
+                        parent,
+                        format!("parent {kind} skipped: {reason}"),
+                    );
                 }
                 return;
             }
@@ -737,7 +757,8 @@ impl Translator<'_> {
         self.skipped.record(kind, reason.clone());
         let (bounds, transform) = placeholder_frame(primitive, parent);
         draw_transformed_placeholder(&mut self.scene, bounds, transform);
-        if let Primitive::Chart { primitives, .. } = primitive {
+        if let Primitive::Chart { primitives, .. } | Primitive::Table { primitives, .. } = primitive
+        {
             for child in primitives {
                 self.skip_subtree(child, transform, reason.clone());
             }
@@ -1035,6 +1056,14 @@ fn primitive_frame(primitive: &Primitive) -> (f32, f32, f32, f32, Transform) {
             h,
             transform,
             ..
+        }
+        | Primitive::Table {
+            x,
+            y,
+            w,
+            h,
+            transform,
+            ..
         } => (*x, *y, *w, *h, *transform),
     }
 }
@@ -1046,6 +1075,7 @@ fn primitive_kind(primitive: &Primitive) -> &'static str {
         Primitive::TextBox { .. } => "textBox",
         Primitive::Placeholder { .. } => "placeholder",
         Primitive::Chart { .. } => "chart",
+        Primitive::Table { .. } => "table",
     }
 }
 
@@ -1250,6 +1280,104 @@ mod tests {
     }
 
     #[test]
+    fn a_table_clips_its_cells_exactly_as_a_chart_clips_its_parts() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-overflow.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let source = presentation.render_slide(0).unwrap().display_list;
+        let text = source
+            .primitives
+            .iter()
+            .find(|primitive| matches!(primitive, Primitive::TextBox { object_id: 2, .. }))
+            .unwrap()
+            .clone();
+        let container = |table: bool| {
+            let (object_id, shape_id, name) = (101, None, "Cells".to_owned());
+            let (x, y, w, h) = (20.0, 20.0, 200.0, 80.0);
+            let label = String::new();
+            let primitives = vec![text.clone()];
+            let transform = Transform::default();
+            if table {
+                Primitive::Table {
+                    object_id,
+                    shape_id,
+                    name,
+                    x,
+                    y,
+                    w,
+                    h,
+                    label,
+                    primitives,
+                    transform,
+                }
+            } else {
+                Primitive::Chart {
+                    object_id,
+                    shape_id,
+                    name,
+                    x,
+                    y,
+                    w,
+                    h,
+                    label,
+                    primitives,
+                    transform,
+                }
+            }
+        };
+        let render = |primitive| {
+            let list = SurfaceDisplayList {
+                primitives: vec![primitive],
+                ..source.clone()
+            };
+            let (page, summary) = resources.translate(&list, 8192).unwrap();
+            let structured = summary.structured(&page.skipped);
+            (
+                page.scene.encoding().n_clips,
+                page.scene.encoding().n_open_clips,
+                structured["totals"].clone(),
+            )
+        };
+        let (clips, open, totals) = render(container(true));
+        assert_eq!(open, 0);
+        assert!(clips > 0);
+        assert_eq!(totals["skipped"], 0);
+        assert_eq!((clips, open, totals), render(container(false)));
+    }
+
+    #[test]
+    fn a_table_is_counted_under_its_own_primitive_kind() {
+        let mut presentation = Presentation::open(include_bytes!(
+            "../../../crates/pptx-render/tests/fixtures/text-overflow.pptx"
+        ))
+        .unwrap();
+        let resources = PptxSceneResources::new(&mut presentation).unwrap();
+        let source = presentation.render_slide(0).unwrap().display_list;
+        let list = SurfaceDisplayList {
+            primitives: vec![Primitive::Table {
+                object_id: 102,
+                shape_id: None,
+                name: "Empty".to_owned(),
+                x: 20.0,
+                y: 20.0,
+                w: 200.0,
+                h: 80.0,
+                label: String::new(),
+                primitives: Vec::new(),
+                transform: Transform::default(),
+            }],
+            ..source
+        };
+        let (page, summary) = resources.translate(&list, 8192).unwrap();
+        let structured = summary.structured(&page.skipped);
+        assert_eq!(structured["primitives"]["table"]["translated"], 1);
+        assert_eq!(structured["totals"]["skipped"], 0);
+        assert_eq!(page.scene.encoding().n_open_clips, 0);
+    }
+
+    #[test]
     fn a_cropped_picture_maps_its_kept_source_onto_the_frame() {
         let frame = Frame::new(100.0, 50.0, 200.0, 100.0).unwrap();
         let crop = ImageCrop {
@@ -1352,6 +1480,7 @@ mod tests {
                     head_end: None,
                     tail_end: None,
                 }),
+                shadow: None,
                 transform: Transform::default(),
             }],
         };

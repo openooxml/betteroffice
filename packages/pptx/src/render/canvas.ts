@@ -12,6 +12,7 @@ import type {
   SlidePrimitive,
   Stroke,
   StrokeEnd,
+  TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
 
@@ -103,7 +104,8 @@ async function paintPrimitive(
         paintPlaceholder(ctx, primitive);
         break;
       case 'chart':
-        await paintChart(ctx, primitive, options, deviceScale, shadowBudget);
+      case 'table':
+        await paintContainer(ctx, primitive, options, deviceScale, shadowBudget);
         break;
     }
   } finally {
@@ -111,17 +113,17 @@ async function paintPrimitive(
   }
 }
 
-async function paintChart(
+async function paintContainer(
   ctx: CanvasRenderingContext2D,
-  chart: ChartPrimitive,
+  container: ChartPrimitive | TablePrimitive,
   options: PaintSlideOptions,
   deviceScale: number,
   shadowBudget: ShadowBudget
 ): Promise<void> {
   ctx.beginPath();
-  ctx.rect(chart.x, chart.y, chart.w, chart.h);
+  ctx.rect(container.x, container.y, container.w, container.h);
   ctx.clip();
-  for (const primitive of chart.primitives)
+  for (const primitive of container.primitives)
     await paintPrimitive(ctx, primitive, options, deviceScale, shadowBudget);
 }
 

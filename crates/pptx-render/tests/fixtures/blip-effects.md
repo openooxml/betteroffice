@@ -26,15 +26,3 @@ white edges intact. See [MS-OI29500, §2.1.1287](https://officeprotocoldoc.z19.w
 `blip-effects.before.png` was rendered on main `2c90c17f`; the after image uses
 this implementation. The display-list comparison has eight images, seven with
 effects added and one unchanged control. No other primitive fields change.
-
-`crates/pptx-edit/tests/fixtures/blip-effects-main-v9.update.bin` was seeded from
-this file by main `2c90c17f` with client ID 312. It covers schema v17 migration,
-source attachment, save fidelity, and preservation of edits.
-
-`blip-effects-main-v10.update.bin` was seeded by main `069e4d66`, and
-`blip-effects-main-v16.update.bin` by main `49ecafba` with PR #295
-(`dsaad68/pr/pptx-text-overflow` at `394052a4`, schema 16). The blip migration
-is schema 17 because main took v10 through v16 for run baselines, numbering,
-line spacing, picture fills, gradient outlines, chart properties and text
-overflow. All three updates are tested with source attachment and an existing
-edit.

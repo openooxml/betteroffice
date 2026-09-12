@@ -561,7 +561,7 @@ fn place(
         let fragments_before = paginator.page_fragment_counts();
         // pageBreakBefore forces a fresh page before the block is placed
         if hooks::breaks_before_block(&mb.block)? {
-            paginator.force_page_break();
+            paginator.force_authored_page_break();
         }
 
         // at the head of a keep-with-next group, move to a fresh page when the
@@ -581,7 +581,7 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_page_break();
+                paginator.force_authored_page_break();
             }
         }
 
@@ -646,7 +646,7 @@ fn place(
             }
 
             LayoutBlock::PageBreak(_) => {
-                paginator.force_page_break();
+                paginator.force_authored_page_break();
             }
 
             LayoutBlock::ColumnBreak(_) => {
@@ -834,7 +834,7 @@ fn layout_paragraph(
     if lines.is_empty() {
         // no measured lines: a zero-height fragment still advances the pen by
         // its spacing
-        let space_before = get_spacing_before(block);
+        let space_before = paginator.leading_spacing(get_spacing_before(block));
         let space_after = get_spacing_after(block);
         let state_idx = paginator.get_current();
         let column_index = paginator.state(state_idx).column_index;
@@ -880,7 +880,10 @@ fn layout_paragraph(
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
         let capacity = state.content_limit - state.content_top;
-        let required = space_before.max(state.deferred_spacing) + paragraph_height;
+        let required = paginator
+            .leading_spacing(space_before)
+            .max(state.deferred_spacing)
+            + paragraph_height;
         if required <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
@@ -895,7 +898,9 @@ fn layout_paragraph(
 
         // Reserve leading space before fitting the first fragment.
         let reserved_before = if current_line_index == 0 {
-            space_before.max(deferred_spacing)
+            paginator
+                .leading_spacing(space_before)
+                .max(deferred_spacing)
         } else {
             0.0
         };
@@ -928,7 +933,7 @@ fn layout_paragraph(
                     sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
                 });
                 if reserved_before + first_two_height <= capacity {
-                    paginator.force_column_break();
+                    paginator.advance_for_overflow();
                     continue;
                 }
             }
@@ -1018,22 +1023,20 @@ fn layout_image(block: &ImageBlock, measure: &ImageExtent, paginator: &mut Pagin
     paginator.add_fragment(fragment, measure.height, 0.0, 0.0);
 }
 
-/// Places non-wrapping anchored shapes at page coordinates.
+/// Places anchored shapes at page coordinates.
 fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Paginator) {
-    if block.position.is_some()
-        && !matches!(
-            block.wrap_type.as_deref(),
-            Some("square" | "tight" | "through" | "topAndBottom")
-        )
-    {
+    if block.position.is_some() {
         let (x, y) = resolve_object_position(
             block.position.as_ref(),
             measure.width,
             measure.height,
             paginator,
         );
+        let state_idx = paginator.get_current();
+        let column_x = paginator.get_column_x(paginator.state(state_idx).column_index);
         paginator.push_fragment_direct(Fragment::Shape(ShapeFragment {
             block_id: block.id.clone(),
+            wrap_offset_x: Some(x - column_x),
             x,
             y,
             width: measure.width,
@@ -1055,6 +1058,7 @@ fn layout_shape(block: &ShapeBlock, measure: &ShapeExtent, paginator: &mut Pagin
     let column_index = paginator.state(state_idx).column_index;
     let fragment = Fragment::Shape(ShapeFragment {
         block_id: block.id.clone(),
+        wrap_offset_x: None,
         x: paginator.get_column_x(column_index),
         y: 0.0,
         width: measure.width,
@@ -1295,14 +1299,68 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn manual_page_break_suppresses_leading_spacing_but_column_break_preserves_it() {
+        let mut value = input(vec![
+            paragraph(1, 1, 10.0, json!({})),
+            json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}}),
+            paragraph(2, 1, 10.0, json!({"spacing":{"before":20}})),
+            json!({"block":{"kind":"columnBreak","id":"column"},"measure":{"kind":"columnBreak"}}),
+            paragraph(3, 1, 10.0, json!({"spacing":{"before":20}})),
+        ]);
+        let result = layout_document(&mut value).unwrap();
+        assert_eq!(result.pages.len(), 3);
+        let Fragment::Paragraph(after_page) = &result.pages[1].fragments[0] else {
+            panic!()
+        };
+        let Fragment::Paragraph(after_column) = &result.pages[2].fragments[0] else {
+            panic!()
+        };
+        assert_eq!(after_page.y, 10.0);
+        assert_eq!(after_column.y, 30.0);
+        let recorded = layout_document_checkpointed(&mut value).unwrap();
+        let checkpoint = recorded
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.page_index == 1)
+            .unwrap();
+        assert!(checkpoint.flow.suppress_leading_spacing);
+    }
+
+    #[test]
+    fn automatic_and_paragraph_page_breaks_discard_leading_spacing() {
+        for attrs in [
+            json!({"spacing":{"before":20}}),
+            json!({"spacing":{"before":20},"keepNext":true}),
+            json!({"spacing":{"before":20},"keepLines":true}),
+            json!({"spacing":{"before":20},"pageBreakBefore":true}),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 85.0, json!({"spacing":{"after":30}})),
+                paragraph(2, 1, 20.0, attrs),
+                paragraph(3, 1, 20.0, json!({})),
+            ]);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(heading) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            let Fragment::Paragraph(body) = &result.pages[1].fragments[1] else {
+                panic!()
+            };
+            assert_eq!(heading.y, 10.0);
+            assert_eq!(body.y, 30.0);
+        }
+    }
+
+    #[test]
     fn anchored_shape_does_not_advance_body_flow() {
         for (anchored, wrap, overlay) in [
             (false, "none", false),
             (true, "none", true),
-            (true, "square", false),
-            (true, "tight", false),
-            (true, "through", false),
-            (true, "topAndBottom", false),
+            (true, "square", true),
+            (true, "tight", true),
+            (true, "through", true),
+            (true, "topAndBottom", true),
         ] {
             let mut shape = json!({
                 "kind": "shape", "id": "shape", "shapeType": "rect",

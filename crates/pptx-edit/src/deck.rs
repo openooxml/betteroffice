@@ -21,31 +21,9 @@ use crate::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 21.0;
+const SCHEMA_VERSION: f64 = 2.1;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 21] = [
-    1.0,
-    2.0,
-    3.0,
-    4.0,
-    5.0,
-    6.0,
-    7.0,
-    8.0,
-    9.0,
-    10.0,
-    11.0,
-    12.0,
-    13.0,
-    14.0,
-    15.0,
-    16.0,
-    17.0,
-    18.0,
-    19.0,
-    20.0,
-    SCHEMA_VERSION,
-];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 3] = [1.0, 2.0, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -185,11 +163,11 @@ fn seed_shape(
             shape_map.insert(txn, "kind", "graphicFrame");
             shape_map.insert(txn, "geometry", "rect");
             insert_json(&shape_map, txn, "graphicJson", Some(&frame.data))?;
-            if let pptx_parse::GraphicFrameData::Table { rows } = &frame.data {
-                for (row_index, row) in rows.iter().enumerate() {
-                    for (cell_index, body) in row.iter().enumerate() {
+            if let pptx_parse::GraphicFrameData::Table(table) = &frame.data {
+                for (row_index, row) in table.rows.iter().enumerate() {
+                    for (cell_index, cell) in row.cells.iter().enumerate() {
                         let story_id = format!("story:{shape_id}:table:{row_index}:{cell_index}");
-                        seed_story(stories, txn, &story_id, body, theme)?;
+                        seed_story(stories, txn, &story_id, &cell.text, theme)?;
                         text_story_ids.push(story_id);
                     }
                 }
@@ -836,6 +814,10 @@ pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> Edit
             changed |= merge_source_chart_properties(&mut chart.chart, &source.chart);
         }
     }
+    if package.table_styles != source.table_styles {
+        package.table_styles.clone_from(&source.table_styles);
+        changed = true;
+    }
     if !changed {
         return Ok(());
     }
@@ -844,6 +826,7 @@ pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> Edit
     let meta = required_map(&txn, META)?;
     meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
     backfill_blip_effects(&mut txn, &package)?;
+    backfill_tables(&mut txn, &package)?;
     Ok(())
 }
 
@@ -888,15 +871,11 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
                     changed = true;
                 }
                 if let (
-                    pptx_parse::GraphicFrameData::Table { rows: target },
-                    pptx_parse::GraphicFrameData::Table { rows: source },
+                    pptx_parse::GraphicFrameData::Table(target),
+                    pptx_parse::GraphicFrameData::Table(source),
                 ) = (&mut target.data, &source.data)
                 {
-                    for (target, source) in target.iter_mut().zip(source) {
-                        for (target, source) in target.iter_mut().zip(source) {
-                            changed |= merge_source_text_body(target, source);
-                        }
-                    }
+                    changed |= merge_source_table(target, source);
                 }
             }
             _ => {}
@@ -905,11 +884,18 @@ fn merge_source_render_shapes(target: &mut [ShapeNode], source: &[ShapeNode]) ->
     changed
 }
 
-/// Copies the chart-space fill, axis lines and series lines a source chart part
-/// declares.
+/// Copies the chart-space fill, axis lines, series lines and text properties a
+/// source chart part declares.
 fn merge_source_chart_properties(target: &mut ChartSpace, source: &ChartSpace) -> bool {
     let mut changed = target.fill != source.fill;
     target.fill.clone_from(&source.fill);
+    changed |= target.text != source.text || target.title_text != source.title_text;
+    target.text.clone_from(&source.text);
+    target.title_text.clone_from(&source.title_text);
+    if let (Some(target), Some(source)) = (&mut target.legend, &source.legend) {
+        changed |= target.text != source.text;
+        target.text.clone_from(&source.text);
+    }
     for (target, source) in target.plot_groups.iter_mut().zip(&source.plot_groups) {
         for (target, source) in target.series.iter_mut().zip(&source.series) {
             changed |= target.line != source.line;
@@ -918,8 +904,9 @@ fn merge_source_chart_properties(target: &mut ChartSpace, source: &ChartSpace) -
     }
     let mut merge_axis = |target: Option<&mut ChartAxis>, source: Option<&ChartAxis>| {
         if let (Some(target), Some(source)) = (target, source) {
-            changed |= target.line != source.line;
+            changed |= target.line != source.line || target.text != source.text;
             target.line.clone_from(&source.line);
+            target.text.clone_from(&source.text);
         }
     };
     if let (Some(target), Some(source)) = (&mut target.axes, &source.axes) {
@@ -929,6 +916,81 @@ fn merge_source_chart_properties(target: &mut ChartSpace, source: &ChartSpace) -
     if let (Some(target), Some(source)) = (&mut target.axis_list, &source.axis_list) {
         for (target, source) in target.iter_mut().zip(source) {
             merge_axis(Some(target), Some(source));
+        }
+    }
+    changed
+}
+
+fn backfill_tables(txn: &mut TransactionMut<'_>, package: &PptxPackage) -> EditResult<()> {
+    let shapes = required_map(txn, SHAPES)?;
+    for (index, (slide, reference)) in package
+        .slides
+        .iter()
+        .zip(&package.presentation.slides)
+        .enumerate()
+    {
+        let slide_id = seeded_slide_id(index, reference.id);
+        for (index, node) in slide.shapes.iter().enumerate() {
+            backfill_table(txn, &shapes, &slide_id, &index.to_string(), node)?;
+        }
+    }
+    Ok(())
+}
+
+fn backfill_table(
+    txn: &mut TransactionMut<'_>,
+    shapes: &MapRef,
+    slide_id: &str,
+    path: &str,
+    node: &ShapeNode,
+) -> EditResult<()> {
+    if let ShapeNode::GraphicFrame(frame) = node
+        && let pptx_parse::GraphicFrameData::Table(table) = &frame.data
+        && !table.grid.is_empty()
+        && let Some(shape) = shapes
+            .get(txn, &seeded_shape_id(slide_id, path))
+            .and_then(|value| value.cast::<MapRef>().ok())
+        && matches!(
+            optional_json::<pptx_parse::GraphicFrameData, _>(&shape, txn, "graphicJson")?,
+            Some(pptx_parse::GraphicFrameData::Table(stored)) if stored.grid.is_empty()
+        )
+    {
+        insert_json(&shape, txn, "graphicJson", Some(&frame.data))?;
+    }
+    if let ShapeNode::Group(group) = node {
+        for (index, child) in group.children.iter().enumerate() {
+            backfill_table(
+                txn,
+                shapes,
+                slide_id,
+                &seeded_child_path(path, index),
+                child,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// Restores the grid, spans and cell formatting a stored package dropped.
+fn merge_source_table(target: &mut pptx_parse::Table, source: &pptx_parse::Table) -> bool {
+    let mut changed = target.grid != source.grid || target.properties != source.properties;
+    target.grid.clone_from(&source.grid);
+    target.properties.clone_from(&source.properties);
+    for (target, source) in target.rows.iter_mut().zip(&source.rows) {
+        changed |= target.height != source.height;
+        target.height = source.height;
+        for (target, source) in target.cells.iter_mut().zip(&source.cells) {
+            changed |= target.grid_span != source.grid_span
+                || target.row_span != source.row_span
+                || target.merged != source.merged
+                || target.fill != source.fill
+                || target.borders != source.borders;
+            target.grid_span = source.grid_span;
+            target.row_span = source.row_span;
+            target.merged = source.merged;
+            target.fill.clone_from(&source.fill);
+            target.borders.clone_from(&source.borders);
+            changed |= merge_source_text_body(&mut target.text, &source.text);
         }
     }
     changed
@@ -964,9 +1026,13 @@ fn merge_source_paragraph_properties(
         || target.bullet_color != source.bullet_color
         || target.bullet_size != source.bullet_size
         || target.line_spacing != source.line_spacing
-        || target.margin_right != source.margin_right;
+        || target.margin_right != source.margin_right
+        || target.space_before != source.space_before
+        || target.space_after != source.space_after;
     target.line_spacing = source.line_spacing;
     target.margin_right = source.margin_right;
+    target.space_before = source.space_before;
+    target.space_after = source.space_after;
     if let (
         Some(pptx_parse::Bullet::AutoNumber {
             restart: target, ..
@@ -992,324 +1058,71 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
-/// Applies schema migrations in version order.
+/// Carries a released 1.0 or 2.0 document forward to the current schema.
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     let version = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
         schema_version(&meta, &txn)?
     };
-    if version < 3.0 {
-        migrate_doc_to_v3(doc)?;
-    }
-    if version < 4.0 {
-        migrate_doc_to_v4(doc)?;
-    }
-    if version < 5.0 {
-        migrate_doc_to_v5(doc)?;
-    }
-    if version < 6.0 {
-        migrate_doc_to_v6(doc)?;
-    }
-    if version < 7.0 {
-        migrate_doc_to_v7(doc)?;
-    }
-    if version < 8.0 {
-        migrate_doc_to_v8(doc)?;
-    }
-    if version < 9.0 {
-        migrate_doc_to_v9(doc)?;
-    }
-    if version < 10.0 {
-        migrate_doc_to_v10(doc)?;
-    }
-    if version < 11.0 {
-        migrate_doc_to_v11(doc)?;
-    }
-    if version < 12.0 {
-        migrate_doc_to_v12(doc)?;
-    }
-    if version < 13.0 {
-        migrate_doc_to_v13(doc)?;
-    }
-    if version < 14.0 {
-        migrate_doc_to_v14(doc)?;
-    }
-    if version < 15.0 {
-        migrate_doc_to_v15(doc)?;
-    }
-    if version < 16.0 {
-        migrate_doc_to_v16(doc)?;
-    }
-    if version < 17.0 {
-        migrate_doc_to_v17(doc)?;
-    }
-    if version < 18.0 {
-        migrate_doc_to_v18(doc)?;
-    }
-    if version < 19.0 {
-        migrate_doc_to_v19(doc)?;
-    }
-    if version < 20.0 {
-        migrate_doc_to_v20(doc)?;
-    }
-    if version < 21.0 {
-        migrate_doc_to_v21(doc)?;
+    if version < SCHEMA_VERSION {
+        migrate_doc_to_v2_1(doc)?;
     }
     Ok(())
 }
 
-/// Upgrades metadata while preserving legacy source ordinals.
-fn migrate_doc_to_v3(doc: &Doc) -> EditResult<()> {
-    let package = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        if schema_version(&meta, &txn)? >= 3.0 {
-            return Ok(());
-        }
-        package_from_meta(&meta, &txn)?
-    };
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+/// Applies every schema change made since 2.0 in one transaction: the package is
+/// rewritten through the current model, hidden flags and bitmap effects are
+/// backfilled, the comment flavour is recorded, and everything a stored package
+/// cannot carry -- baselines, outline gradients, character spacing, OLE picture
+/// previews, chart and paragraph properties, table geometry -- is deferred to
+/// [`import_source_render_data`] until the source is reattached.
+fn migrate_doc_to_v2_1(doc: &Doc) -> EditResult<()> {
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
     meta.insert(
         &mut txn,
         "packageJson",
         Any::Buffer(Arc::from(package_json)),
     );
-    meta.insert(&mut txn, "schemaVersion", 3.0);
-    Ok(())
-}
-
-/// Persists slide numbering in schema 4.
-fn migrate_doc_to_v4(doc: &Doc) -> EditResult<()> {
-    let package = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        package_from_meta(&meta, &txn)?
-    };
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 4.0);
-    Ok(())
-}
-
-/// Persists theme formatting in schema 5.
-fn migrate_doc_to_v5(doc: &Doc) -> EditResult<()> {
-    let package = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        package_from_meta(&meta, &txn)?
-    };
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 5.0);
-    Ok(())
-}
-
-/// Backfills hidden flags in schema 6.
-fn migrate_doc_to_v6(doc: &Doc) -> EditResult<()> {
-    let package = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        package_from_meta(&meta, &txn)?
-    };
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
     backfill_hidden(&mut txn, &package)?;
-    meta.insert(&mut txn, "schemaVersion", 6.0);
-    Ok(())
-}
-
-/// Persists custom geometry in schema 7.
-fn migrate_doc_to_v7(doc: &Doc) -> EditResult<()> {
-    let package = {
-        let txn = doc.transact();
-        let meta = required_map(&txn, META)?;
-        package_from_meta(&meta, &txn)?
-    };
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 7.0);
-    Ok(())
-}
-
-/// Records the comment flavour and any pending source import in schema 8.
-fn migrate_doc_to_v8(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    meta.insert(&mut txn, "schemaVersion", 8.0);
-    if !meta.contains_key(&txn, "commentFlavor") {
-        if !package.comments.is_empty()
-            || package
-                .relationships
-                .values()
-                .flatten()
-                .any(|relationship| {
-                    relationship.is_type(pptx_parse::relationship_types::COMMENTS)
-                        || relationship.is_type(pptx_parse::relationship_types::MODERN_COMMENTS)
-                })
-        {
-            meta.insert(&mut txn, "commentsPendingSource", true);
-        }
-        meta.insert(
-            &mut txn,
-            "commentFlavor",
-            flavor_key(package.comment_flavor.unwrap_or_default()),
-        );
-    }
-    Ok(())
-}
-
-/// Persists list styles in schema 9.
-fn migrate_doc_to_v9(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 9.0);
-    Ok(())
-}
-
-fn migrate_doc_to_v10(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
+    record_comment_flavor(&mut txn, &meta, &package);
     meta.insert(&mut txn, "baselinesPendingSource", true);
-    meta.insert(&mut txn, "schemaVersion", 10.0);
-    Ok(())
-}
-
-/// Records explicit numbering restarts in schema 11.
-fn migrate_doc_to_v11(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(&mut txn, "schemaVersion", 11.0);
-    Ok(())
-}
-
-/// Persists line spacing in schema 12.
-fn migrate_doc_to_v12(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 12.0);
-    Ok(())
-}
-
-/// Persists picture fills in schema 13.
-fn migrate_doc_to_v13(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 13.0);
-    Ok(())
-}
-
-/// Defers gradient-outline recovery to source attachment in schema 14.
-fn migrate_doc_to_v14(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
     meta.insert(&mut txn, "outlineGradientsPendingSource", true);
-    meta.insert(&mut txn, "schemaVersion", 14.0);
-    Ok(())
-}
-
-/// Persists chart shape properties in schema 15.
-fn migrate_doc_to_v15(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 15.0);
-    Ok(())
-}
-
-fn migrate_doc_to_v16(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let package_json =
-        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-    meta.insert(
-        &mut txn,
-        "packageJson",
-        Any::Buffer(Arc::from(package_json)),
-    );
-    meta.insert(&mut txn, "schemaVersion", 16.0);
-    Ok(())
-}
-
-/// Backfills bitmap effects in schema 17.
-fn migrate_doc_to_v17(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
     backfill_blip_effects(&mut txn, &package)?;
-    meta.insert(&mut txn, "schemaVersion", 17.0);
-    Ok(())
-}
-
-fn migrate_doc_to_v18(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    required_map(&txn, META)?.insert(&mut txn, "schemaVersion", 18.0);
-    Ok(())
-}
-
-fn migrate_doc_to_v19(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
+    backfill_tables(&mut txn, &package)?;
     meta.insert(&mut txn, "spacingPendingSource", true);
-    meta.insert(&mut txn, "schemaVersion", 19.0);
+    if package_needs_ole_source(&package) {
+        meta.insert(&mut txn, "olePicturesPendingSource", true);
+    }
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
+}
+
+fn record_comment_flavor(txn: &mut TransactionMut<'_>, meta: &MapRef, package: &PptxPackage) {
+    if meta.contains_key(txn, "commentFlavor") {
+        return;
+    }
+    if !package.comments.is_empty()
+        || package
+            .relationships
+            .values()
+            .flatten()
+            .any(|relationship| {
+                relationship.is_type(pptx_parse::relationship_types::COMMENTS)
+                    || relationship.is_type(pptx_parse::relationship_types::MODERN_COMMENTS)
+            })
+    {
+        meta.insert(txn, "commentsPendingSource", true);
+    }
+    meta.insert(
+        txn,
+        "commentFlavor",
+        flavor_key(package.comment_flavor.unwrap_or_default()),
+    );
 }
 
 fn backfill_blip_effects(txn: &mut TransactionMut<'_>, package: &PptxPackage) -> EditResult<()> {
@@ -1362,11 +1175,8 @@ fn backfill_picture_effects(
     Ok(())
 }
 
-fn migrate_doc_to_v20(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    let package = package_from_meta(&meta, &txn)?;
-    let needs_source = package
+fn package_needs_ole_source(package: &PptxPackage) -> bool {
+    package
         .slides
         .iter()
         .any(|part| needs_ole_source(&part.shapes))
@@ -1377,22 +1187,7 @@ fn migrate_doc_to_v20(doc: &Doc) -> EditResult<()> {
         || package
             .masters
             .iter()
-            .any(|part| needs_ole_source(&part.shapes));
-    if needs_source {
-        meta.insert(&mut txn, "olePicturesPendingSource", true);
-    }
-    meta.insert(&mut txn, "schemaVersion", 20.0);
-    Ok(())
-}
-
-/// Carries this batch's model additions, each step before the stamp. A v20
-/// package has neither `c:ser/c:spPr/a:ln` nor `a:pPr/@marR`;
-/// [`import_source_render_data`] restores both once the source is reattached.
-fn migrate_doc_to_v21(doc: &Doc) -> EditResult<()> {
-    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(&mut txn, "schemaVersion", 21.0);
-    Ok(())
+            .any(|part| needs_ole_source(&part.shapes))
 }
 
 fn needs_ole_source(nodes: &[ShapeNode]) -> bool {
@@ -2021,6 +1816,59 @@ mod tests {
     }
 
     #[test]
+    fn a_reattached_source_restores_the_paragraph_spacing_a_stored_package_lacks() {
+        let source = pptx_parse::ParagraphProperties {
+            space_before: Some(pptx_parse::LineSpacing::Points { value: 10.0 }),
+            space_after: Some(pptx_parse::LineSpacing::Percent { value: 0.2 }),
+            ..pptx_parse::ParagraphProperties::default()
+        };
+        let mut target = pptx_parse::ParagraphProperties::default();
+
+        assert!(merge_source_paragraph_properties(&mut target, &source));
+        assert_eq!(target.space_before, source.space_before);
+        assert_eq!(target.space_after, source.space_after);
+        assert!(!merge_source_paragraph_properties(&mut target, &source));
+    }
+
+    #[test]
+    fn attaching_a_source_refreshes_chart_text_a_stored_package_never_carried() {
+        use ooxml_drawingml::chart::{ChartLegend, ChartTextProperties};
+
+        let styled = ChartTextProperties {
+            spacing_pt: Some(3.0),
+            ..ChartTextProperties::default()
+        };
+        let source = ChartSpace {
+            text: Some(styled.clone()),
+            title_text: Some(styled.clone()),
+            legend: Some(ChartLegend {
+                visible: true,
+                text: Some(styled.clone()),
+                ..ChartLegend::default()
+            }),
+            axis_list: Some(vec![ChartAxis {
+                text: Some(styled.clone()),
+                ..ChartAxis::default()
+            }]),
+            ..ChartSpace::default()
+        };
+        let mut target = ChartSpace {
+            legend: Some(ChartLegend {
+                visible: true,
+                ..ChartLegend::default()
+            }),
+            axis_list: Some(vec![ChartAxis::default()]),
+            ..ChartSpace::default()
+        };
+        assert!(merge_source_chart_properties(&mut target, &source));
+        assert_eq!(target.text.as_ref(), Some(&styled));
+        assert_eq!(target.title_text.as_ref(), Some(&styled));
+        assert_eq!(target.legend.unwrap().text.as_ref(), Some(&styled));
+        assert_eq!(target.axis_list.unwrap()[0].text.as_ref(), Some(&styled));
+        assert!(!merge_source_chart_properties(&mut source.clone(), &source));
+    }
+
+    #[test]
     fn an_unmigratable_schema_version_is_reported_before_package_json() {
         let session = DeckSession::open(FIXTURE, 100).unwrap();
         {
@@ -2047,56 +1895,6 @@ mod tests {
     }
 
     #[test]
-    fn v19_ole_pictures_recover_from_source_and_survive_update_only_loading() {
-        const SOURCE: &[u8] =
-            include_bytes!("../../pptx-render/tests/fixtures/metafile-pictures.pptx");
-        for update in [
-            include_bytes!("../tests/fixtures/metafile-pictures-v12.update.bin").as_slice(),
-            include_bytes!("../tests/fixtures/metafile-pictures-v18.update.bin").as_slice(),
-            include_bytes!("../tests/fixtures/metafile-pictures-v19.update.bin").as_slice(),
-        ] {
-            let session = DeckSession::open_from_update(update, 31801).unwrap();
-            {
-                let txn = session.doc.transact();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(21.0));
-                assert_eq!(
-                    map_bool(&meta, &txn, "olePicturesPendingSource"),
-                    Some(true)
-                );
-            }
-            let session = DeckSession::open_from_update_with_source(update, SOURCE, 31802).unwrap();
-            let snapshot = session.snapshot().unwrap();
-            let graphic = snapshot.slides[0].shapes[2].graphic.as_ref().unwrap();
-            assert!(matches!(
-                graphic,
-                pptx_parse::GraphicFrameData::Unknown {
-                    picture: Some(_),
-                    ..
-                }
-            ));
-            let restored =
-                DeckSession::open_from_update(&session.encode_state_as_update_v1(), 31803).unwrap();
-            assert_eq!(restored.snapshot().unwrap(), snapshot);
-            assert_eq!(
-                serde_json::to_value(restored.package()).unwrap(),
-                serde_json::to_value(session.package()).unwrap()
-            );
-            assert_eq!(
-                map_bool(
-                    &required_map(&session.doc.transact(), META).unwrap(),
-                    &session.doc.transact(),
-                    "olePicturesPendingSource"
-                ),
-                None
-            );
-            let bytes = session.encode_state_as_update_v1();
-            migrate_doc(&session.doc).unwrap();
-            assert_eq!(session.encode_state_as_update_v1(), bytes);
-        }
-    }
-
-    #[test]
     fn migration_leaves_a_current_document_untouched() {
         let session = DeckSession::open(FIXTURE, 102).unwrap();
         let before = session.encode_state_as_update_v1();
@@ -2105,612 +1903,12 @@ mod tests {
     }
 
     #[test]
-    fn ole_migration_follows_tracking_for_every_older_version() {
+    fn legacy_migrations_commit_once_and_normalise_the_package() {
         use std::sync::Mutex;
-
-        const V18: &[u8] = include_bytes!("../tests/fixtures/metafile-tracking-v18.update.bin");
-        const V19: &[u8] = include_bytes!("../tests/fixtures/metafile-tracking-v19.update.bin");
-        const SOURCE: &[u8] = include_bytes!("../tests/fixtures/metafile-tracking.pptx");
-        for version in 1..=19 {
-            let doc = crate::doc_with_client_id(31820);
-            let (update, seeded_version) = if version == 19 {
-                (V19, 19.0)
-            } else {
-                (V18, 18.0)
-            };
-            crate::hydrate_doc(&doc, update).unwrap();
-            {
-                let mut txn = doc.transact_mut();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(
-                    map_number(&meta, &txn, "schemaVersion"),
-                    Some(seeded_version)
-                );
-                assert_eq!(map_bool(&meta, &txn, "olePicturesPendingSource"), None);
-                assert_eq!(map_bool(&meta, &txn, "spacingPendingSource"), None);
-                if f64::from(version) != seeded_version {
-                    meta.insert(&mut txn, "schemaVersion", f64::from(version));
-                }
-            }
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    events.lock().unwrap().push((
-                        map_number(&meta, txn, "schemaVersion").unwrap() as u32,
-                        map_bool(&meta, txn, "spacingPendingSource"),
-                        map_bool(&meta, txn, "olePicturesPendingSource"),
-                    ));
-                })
-                .unwrap();
-            migrate_doc(&doc).unwrap();
-            let expected: Vec<_> = ((version + 1).max(3)..=21)
-                .map(|step| {
-                    (
-                        step,
-                        (version < 19 && step >= 19).then_some(true),
-                        (step >= 20).then_some(true),
-                    )
-                })
-                .collect();
-            assert_eq!(*observed.lock().unwrap(), expected, "starting at {version}");
-            migrate_doc(&doc).unwrap();
-            assert_eq!(*observed.lock().unwrap(), expected);
-            let update = doc
-                .transact()
-                .encode_state_as_update_v1(&Default::default());
-            let attached =
-                DeckSession::open_from_update_with_source(&update, SOURCE, 31821).unwrap();
-            let fresh = DeckSession::open(SOURCE, 31822).unwrap();
-            let snapshot = attached.snapshot().unwrap();
-            assert_eq!(snapshot, fresh.snapshot().unwrap());
-            assert_eq!(
-                snapshot.slides[0].shapes[4].text_stories[0].paragraphs[0].runs[0]
-                    .style
-                    .spacing_pt,
-                Some(6.0)
-            );
-            assert!(matches!(
-                snapshot.slides[0].shapes[2].graphic,
-                Some(pptx_parse::GraphicFrameData::Unknown {
-                    picture: Some(_),
-                    ..
-                })
-            ));
-            assert_eq!(attached.package(), fresh.package());
-            let current = attached.encode_state_as_update_v1();
-            let reopened = DeckSession::open_from_update(&current, 31823).unwrap();
-            assert_eq!(reopened.snapshot().unwrap(), snapshot);
-            assert_eq!(reopened.encode_state_as_update_v1(), current);
-            let reattached =
-                DeckSession::open_from_update_with_source(&current, SOURCE, 31824).unwrap();
-            assert_eq!(reattached.encode_state_as_update_v1(), current);
-            let txn = attached.doc.transact();
-            let meta = required_map(&txn, META).unwrap();
-            assert_eq!(map_bool(&meta, &txn, "spacingPendingSource"), None);
-            assert_eq!(map_bool(&meta, &txn, "olePicturesPendingSource"), None);
-        }
-    }
-
-    #[test]
-    fn tracking_migration_follows_shadow_schema_for_every_older_version() {
-        use std::sync::Mutex;
-
-        const V17: &[u8] =
-            include_bytes!("../tests/fixtures/run-spacing-shadow-main-v17.update.bin");
-        const V18: &[u8] =
-            include_bytes!("../tests/fixtures/run-spacing-shadow-main-v18.update.bin");
-        const SOURCE: &[u8] = include_bytes!("../tests/fixtures/run-spacing-shadow.pptx");
-        for version in 1..=18 {
-            let doc = crate::doc_with_client_id(32520);
-            let (update, seeded_version) = if version == 18 {
-                (V18, 18.0)
-            } else {
-                (V17, 17.0)
-            };
-            crate::hydrate_doc(&doc, update).unwrap();
-            {
-                let mut txn = doc.transact_mut();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(
-                    map_number(&meta, &txn, "schemaVersion"),
-                    Some(seeded_version)
-                );
-                assert!(map_bool(&meta, &txn, "spacingPendingSource").is_none());
-                if f64::from(version) != seeded_version {
-                    meta.insert(&mut txn, "schemaVersion", f64::from(version));
-                }
-            }
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    events.lock().unwrap().push((
-                        map_number(&meta, txn, "schemaVersion").unwrap() as u32,
-                        map_bool(&meta, txn, "spacingPendingSource"),
-                    ));
-                })
-                .unwrap();
-            migrate_doc(&doc).unwrap();
-            let expected: Vec<_> = ((version + 1).max(3)..=21)
-                .map(|step| (step, (step >= 19).then_some(true)))
-                .collect();
-            assert_eq!(*observed.lock().unwrap(), expected, "starting at {version}");
-            migrate_doc(&doc).unwrap();
-            assert_eq!(*observed.lock().unwrap(), expected);
-            let update = doc
-                .transact()
-                .encode_state_as_update_v1(&Default::default());
-            let attached =
-                DeckSession::open_from_update_with_source(&update, SOURCE, 32521).unwrap();
-            let fresh = DeckSession::open(SOURCE, 32522).unwrap();
-            assert_eq!(attached.package(), fresh.package());
-            assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
-            let json = serde_json::to_string(attached.package()).unwrap();
-            assert!(json.contains("outerShadow"));
-            assert!(json.contains("spacingPt"));
-            let current = attached.encode_state_as_update_v1();
-            let reopened = DeckSession::open_from_update(&current, 32523).unwrap();
-            assert_eq!(reopened.snapshot().unwrap(), fresh.snapshot().unwrap());
-            assert_eq!(reopened.encode_state_as_update_v1(), current);
-            let reattached =
-                DeckSession::open_from_update_with_source(&current, SOURCE, 32524).unwrap();
-            assert_eq!(reattached.encode_state_as_update_v1(), current);
-        }
-    }
-
-    #[test]
-    fn bitmap_migration_commits_before_shadow_schema_for_every_older_version() {
-        use std::sync::Mutex;
-
-        const UPDATE: &[u8] = include_bytes!("../tests/fixtures/blip-shadow-main-v17.update.bin");
-        const SOURCE: &[u8] = include_bytes!("../tests/fixtures/blip-shadow.pptx");
-        for version in 1..=17 {
-            let doc = crate::doc_with_client_id(33420);
-            crate::hydrate_doc(&doc, UPDATE).unwrap();
-            {
-                let mut txn = doc.transact_mut();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(17.0));
-                meta.insert(&mut txn, "schemaVersion", f64::from(version));
-                if version < 17 {
-                    let shapes = required_map(&txn, SHAPES).unwrap();
-                    for shape in shapes
-                        .iter(&txn)
-                        .map(|(_, shape)| shape)
-                        .collect::<Vec<_>>()
-                    {
-                        let Out::YMap(shape) = shape else { panic!() };
-                        shape.remove(&mut txn, "blipEffectsJson");
-                    }
-                }
-            }
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    let version = map_number(&meta, txn, "schemaVersion").unwrap();
-                    let shapes = required_map(txn, SHAPES).unwrap();
-                    let effects = shapes.iter(txn).filter(|(_, shape)| {
-                    matches!(shape, Out::YMap(shape) if shape.contains_key(txn, "blipEffectsJson"))
-                }).count();
-                    events.lock().unwrap().push((version as u32, effects));
-                })
-                .unwrap();
-            migrate_doc(&doc).unwrap();
-            let expected: Vec<_> = ((version + 1).max(3)..=21)
-                .map(|step| (step, if step >= 17 { 5 } else { 0 }))
-                .collect();
-            assert_eq!(*observed.lock().unwrap(), expected, "starting at {version}");
-            migrate_doc(&doc).unwrap();
-            assert_eq!(*observed.lock().unwrap(), expected);
-            let update = doc
-                .transact()
-                .encode_state_as_update_v1(&Default::default());
-            let attached =
-                DeckSession::open_from_update_with_source(&update, SOURCE, 33421).unwrap();
-            let fresh = DeckSession::open(SOURCE, 33422).unwrap();
-            assert_eq!(attached.package(), fresh.package());
-            assert_eq!(attached.snapshot().unwrap(), fresh.snapshot().unwrap());
-        }
-    }
-
-    #[test]
-    fn baseline_through_chart_property_migrations_preserve_main_state() {
-        use std::sync::Mutex;
-
-        const V8: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v8-list-style.update.bin");
-        const V9: &[u8] = include_bytes!("../tests/fixtures/run-baseline-main-v9.update.bin");
-        const V10_BASELINE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v10-baseline.update.bin");
-        const V10_NUMBERING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v10-autonumber.update.bin");
-        const V11_BASELINE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v11-baseline.update.bin");
-        const V11_NUMBERING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v11-autonumber.update.bin");
-        const V11_SPACING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v11-line-spacing.update.bin");
-        const V12_BASELINE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v12-baseline.update.bin");
-        const V12_NUMBERING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v12-autonumber.update.bin");
-        const V12_SPACING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v12-line-spacing.update.bin");
-        const V12_PICTURE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v12-picture-fill.update.bin");
-        const V13_GRADIENT: &[u8] =
-            include_bytes!("../tests/fixtures/gradient-outline-main-v13.update.bin");
-        const V13_BASELINE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v13-baseline.update.bin");
-        const V13_NUMBERING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v13-autonumber.update.bin");
-        const V13_SPACING: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v13-line-spacing.update.bin");
-        const V13_PICTURE: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v13-picture-fill.update.bin");
-        const V13_CHART: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v13-chart-space-fill.update.bin");
-        const V14_COMBINED: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v14-chart-text-overflow.update.bin");
-        const V15_COMBINED: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v15-chart-text-overflow.update.bin");
-        for (update, version, expected) in [
-            (
-                V14_COMBINED,
-                14.0,
-                vec![
-                    (15.0, None, None),
-                    (16.0, None, None),
-                    (17.0, None, None),
-                    (18.0, None, None),
-                    (19.0, None, None),
-                    (20.0, None, None),
-                    (21.0, None, None),
-                ],
-            ),
-            (
-                V15_COMBINED,
-                15.0,
-                vec![
-                    (16.0, None, None),
-                    (17.0, None, None),
-                    (18.0, None, None),
-                    (19.0, None, None),
-                    (20.0, None, None),
-                    (21.0, None, None),
-                ],
-            ),
-            (
-                V8,
-                8.0,
-                vec![
-                    (9.0, None, None),
-                    (10.0, Some(true), None),
-                    (11.0, Some(true), None),
-                    (12.0, Some(true), None),
-                    (13.0, Some(true), None),
-                    (14.0, Some(true), Some(true)),
-                    (15.0, Some(true), Some(true)),
-                    (16.0, Some(true), Some(true)),
-                    (17.0, Some(true), Some(true)),
-                    (18.0, Some(true), Some(true)),
-                    (19.0, Some(true), Some(true)),
-                    (20.0, Some(true), Some(true)),
-                    (21.0, Some(true), Some(true)),
-                ],
-            ),
-            (
-                V9,
-                9.0,
-                vec![
-                    (10.0, Some(true), None),
-                    (11.0, Some(true), None),
-                    (12.0, Some(true), None),
-                    (13.0, Some(true), None),
-                    (14.0, Some(true), Some(true)),
-                    (15.0, Some(true), Some(true)),
-                    (16.0, Some(true), Some(true)),
-                    (17.0, Some(true), Some(true)),
-                    (18.0, Some(true), Some(true)),
-                    (19.0, Some(true), Some(true)),
-                    (20.0, Some(true), Some(true)),
-                    (21.0, Some(true), Some(true)),
-                ],
-            ),
-            (
-                V10_BASELINE,
-                10.0,
-                vec![
-                    (11.0, None, None),
-                    (12.0, None, None),
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V10_NUMBERING,
-                10.0,
-                vec![
-                    (11.0, None, None),
-                    (12.0, None, None),
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V11_BASELINE,
-                11.0,
-                vec![
-                    (12.0, None, None),
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V11_NUMBERING,
-                11.0,
-                vec![
-                    (12.0, None, None),
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V11_SPACING,
-                11.0,
-                vec![
-                    (12.0, None, None),
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V12_BASELINE,
-                12.0,
-                vec![
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V12_NUMBERING,
-                12.0,
-                vec![
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V12_SPACING,
-                12.0,
-                vec![
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V12_PICTURE,
-                12.0,
-                vec![
-                    (13.0, None, None),
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_GRADIENT,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_BASELINE,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_NUMBERING,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_SPACING,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_PICTURE,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-            (
-                V13_CHART,
-                13.0,
-                vec![
-                    (14.0, None, Some(true)),
-                    (15.0, None, Some(true)),
-                    (16.0, None, Some(true)),
-                    (17.0, None, Some(true)),
-                    (18.0, None, Some(true)),
-                    (19.0, None, Some(true)),
-                    (20.0, None, Some(true)),
-                    (21.0, None, Some(true)),
-                ],
-            ),
-        ] {
-            let doc = crate::doc_with_client_id(30020);
-            crate::hydrate_doc(&doc, update).unwrap();
-            let before = {
-                let txn = doc.transact();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(version));
-                assert_eq!(map_bool(&meta, &txn, "baselinesPendingSource"), None);
-                assert_eq!(map_bool(&meta, &txn, "outlineGradientsPendingSource"), None);
-                meta.get(&txn, "packageJson").unwrap()
-            };
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    assert_eq!(meta.get(txn, "packageJson"), Some(before.clone()));
-                    events.lock().unwrap().push((
-                        map_number(&meta, txn, "schemaVersion").unwrap(),
-                        map_bool(&meta, txn, "baselinesPendingSource"),
-                        map_bool(&meta, txn, "outlineGradientsPendingSource"),
-                    ));
-                })
-                .unwrap();
-            migrate_doc(&doc).unwrap();
-            assert_eq!(*observed.lock().unwrap(), expected);
-            migrate_doc(&doc).unwrap();
-            assert_eq!(*observed.lock().unwrap(), expected);
-        }
-    }
-
-    #[test]
-    fn legacy_migrations_commit_each_version_through_v21() {
-        use std::sync::Mutex;
-        use yrs::Update;
-        use yrs::updates::decoder::Decode;
 
         const V1: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v1.update.bin");
         const V2: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v2-connectors.update.bin");
-        const V3: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v3-legacy-connectors.update.bin");
-        for (update, expected_versions) in [
-            (
-                V1,
-                vec![
-                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-                    17.0, 18.0, 19.0, 20.0, 21.0,
-                ],
-            ),
-            (
-                V2,
-                vec![
-                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-                    17.0, 18.0, 19.0, 20.0, 21.0,
-                ],
-            ),
-            (
-                V3,
-                vec![
-                    4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0,
-                    18.0, 19.0, 20.0, 21.0,
-                ],
-            ),
-        ] {
+        for update in [V1, V2] {
             let doc = crate::doc_with_client_id(920);
             crate::hydrate_doc(&doc, update).unwrap();
             let before = snapshot_doc(&doc, &package_from_doc(&doc).unwrap()).unwrap();
@@ -2737,7 +1935,7 @@ mod tests {
                     .iter()
                     .map(|(version, _)| *version)
                     .collect::<Vec<_>>(),
-                expected_versions
+                [SCHEMA_VERSION]
             );
             for (_, package) in events.iter() {
                 let json: serde_json::Value = serde_json::from_slice(package).unwrap();
@@ -2749,201 +1947,64 @@ mod tests {
             assert_eq!(snapshot_doc(&doc, &package).unwrap(), before);
             assert!(!package.models_connectors());
             assert_eq!(package.presentation.first_slide_num, 1);
-            if update == V2 {
-                let main = Doc::new();
-                main.transact_mut()
-                    .apply_update(Update::decode_v1(V3).unwrap())
-                    .unwrap();
-                let txn = main.transact();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(
-                    meta.get(&txn, "packageJson"),
-                    Some(Out::Any(Any::Buffer(events[0].1.clone())))
-                );
-            }
         }
     }
 
     #[test]
-    fn main_generated_snapshots_commit_each_migration_in_order() {
-        use std::sync::Mutex;
-        use yrs::Update;
-        use yrs::updates::decoder::Decode;
-
-        const V2: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v2.update.bin");
-        const V4_LEGACY: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v4-legacy-styles.update.bin");
-        const V4_STYLES: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v4-styles.update.bin");
-        const V4_NUMBERED: &[u8] =
-            include_bytes!("../tests/fixtures/deck-schema-v4-slide-number-fields.update.bin");
-
-        for (update, oracle, versions, first_slide_num) in [
-            (
-                V2,
-                V4_LEGACY,
-                vec![
-                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-                    17.0, 18.0, 19.0, 20.0, 21.0,
-                ],
-                1,
-            ),
-            (
-                V4_STYLES,
-                V4_STYLES,
-                vec![
-                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
-                    19.0, 20.0, 21.0,
-                ],
-                1,
-            ),
-            (
-                V4_NUMBERED,
-                V4_NUMBERED,
-                vec![
-                    5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0,
-                    19.0, 20.0, 21.0,
-                ],
-                10,
-            ),
-        ] {
-            let doc = crate::doc_with_client_id(9340);
-            crate::hydrate_doc(&doc, update).unwrap();
-            let main = crate::doc_with_client_id(9341);
-            main.transact_mut()
-                .apply_update(Update::decode_v1(oracle).unwrap())
-                .unwrap();
-            let expected = {
-                let txn = main.transact();
-                let meta = required_map(&txn, META).unwrap();
-                assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(4.0));
-                meta.get(&txn, "packageJson").unwrap()
-            };
-            let before = snapshot_doc(&doc, &package_from_doc(&doc).unwrap()).unwrap();
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    events.lock().unwrap().push((
-                        map_number(&meta, txn, "schemaVersion").unwrap(),
-                        meta.get(txn, "packageJson").unwrap(),
-                    ));
-                })
-                .unwrap();
-
-            migrate_doc(&doc).unwrap();
-
-            let events = observed.lock().unwrap();
-            assert_eq!(
-                events
-                    .iter()
-                    .map(|(version, _)| *version)
-                    .collect::<Vec<_>>(),
-                versions
-            );
-            for (_, package) in events.iter() {
-                assert_eq!(package, &expected);
-            }
-            let package = package_from_doc(&doc).unwrap();
-            assert_eq!(package.presentation.first_slide_num, first_slide_num);
-            assert_eq!(snapshot_doc(&doc, &package).unwrap(), before);
-            assert!(
-                package
-                    .themes
-                    .iter()
-                    .all(|theme| theme.format_scheme.is_empty())
-            );
-        }
-    }
-
-    #[test]
-    fn custom_geometry_follows_main_hidden_migration() {
+    fn a_v2_hidden_snapshot_backfills_flags_without_rewriting_the_package() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
 
         const V2: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v2-hidden.update.bin");
-        const V5: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v5-hidden.update.bin");
-        const V6: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v6-hidden.update.bin");
-        for (update, versions) in [
-            (
-                V2,
-                vec![
-                    3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0,
-                    17.0, 18.0, 19.0, 20.0, 21.0,
-                ],
-            ),
-            (
-                V5,
-                vec![
-                    6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0,
-                    20.0, 21.0,
-                ],
-            ),
-            (
-                V6,
-                vec![
-                    7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0,
-                    20.0, 21.0,
-                ],
-            ),
-        ] {
-            let doc = crate::doc_with_client_id(9430);
-            doc.transact_mut()
-                .apply_update(Update::decode_v1(update).unwrap())
-                .unwrap();
-            let before = package_from_doc(&doc).unwrap();
-            let observed = Arc::new(Mutex::new(Vec::new()));
-            let events = observed.clone();
-            let _subscription = doc
-                .observe_update_v1(move |txn, _| {
-                    let meta = required_map(txn, META).unwrap();
-                    let shapes = required_map(txn, SHAPES).unwrap();
-                    let mut hidden: Vec<String> = shapes
-                        .iter(txn)
-                        .filter_map(|(id, value)| {
-                            value.cast::<MapRef>().ok().map(|shape| (id, shape))
-                        })
-                        .filter(|(_, shape)| map_bool(shape, txn, "hidden").unwrap_or(false))
-                        .map(|(id, _)| id.to_owned())
-                        .collect();
-                    hidden.sort();
-                    events.lock().unwrap().push((
-                        map_number(&meta, txn, "schemaVersion").unwrap(),
-                        package_from_meta(&meta, txn).unwrap(),
-                        hidden,
-                    ));
-                })
-                .unwrap();
-            migrate_doc(&doc).unwrap();
-            let events = observed.lock().unwrap();
+        let doc = crate::doc_with_client_id(9430);
+        doc.transact_mut()
+            .apply_update(Update::decode_v1(V2).unwrap())
+            .unwrap();
+        let before = package_from_doc(&doc).unwrap();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let events = observed.clone();
+        let _subscription = doc
+            .observe_update_v1(move |txn, _| {
+                let meta = required_map(txn, META).unwrap();
+                let shapes = required_map(txn, SHAPES).unwrap();
+                let mut hidden: Vec<String> = shapes
+                    .iter(txn)
+                    .filter_map(|(id, value)| value.cast::<MapRef>().ok().map(|shape| (id, shape)))
+                    .filter(|(_, shape)| map_bool(shape, txn, "hidden").unwrap_or(false))
+                    .map(|(id, _)| id.to_owned())
+                    .collect();
+                hidden.sort();
+                events.lock().unwrap().push((
+                    map_number(&meta, txn, "schemaVersion").unwrap(),
+                    package_from_meta(&meta, txn).unwrap(),
+                    hidden,
+                ));
+            })
+            .unwrap();
+        migrate_doc(&doc).unwrap();
+        let events = observed.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|(version, _, _)| *version)
+                .collect::<Vec<_>>(),
+            [SCHEMA_VERSION]
+        );
+        for (_, package, hidden) in events.iter() {
             assert_eq!(
-                events
-                    .iter()
-                    .map(|(version, _, _)| *version)
-                    .collect::<Vec<_>>(),
-                versions
+                serde_json::to_vec(package).unwrap(),
+                serde_json::to_vec(&before).unwrap()
             );
-            for (version, package, hidden) in events.iter() {
-                assert_eq!(
-                    serde_json::to_vec(package).unwrap(),
-                    serde_json::to_vec(&before).unwrap()
-                );
-                if *version < 6.0 {
-                    assert!(hidden.is_empty());
-                } else {
-                    assert_eq!(
-                        hidden,
-                        &[
-                            "slide:0:256:shape:0",
-                            "slide:0:256:shape:8",
-                            "slide:0:256:shape:8.13",
-                            "slide:1:257:shape:16",
-                        ]
-                    );
-                }
-            }
+            assert_eq!(
+                hidden,
+                &[
+                    "slide:0:256:shape:0",
+                    "slide:0:256:shape:8",
+                    "slide:0:256:shape:8.13",
+                    "slide:1:257:shape:16",
+                ]
+            );
         }
     }
 
@@ -2972,13 +2033,7 @@ mod tests {
     }
 
     #[test]
-    fn a_snapshot_written_without_hidden_keys_still_loads() {
-        let old_json = include_str!("../tests/fixtures/deck-schema-v5.snapshot.json");
-        let old_snapshot: DeckSnapshot = serde_json::from_str(old_json).unwrap();
-        let demo = DeckSession::open(FIXTURE, 105).unwrap().snapshot().unwrap();
-        assert_eq!(old_snapshot, demo);
-        assert_eq!(serde_json::to_string(&demo).unwrap(), old_json);
-
+    fn hidden_flags_serialise_sparsely_and_round_trip() {
         let snapshot = DeckSession::open(HIDDEN_FIXTURE, 106)
             .unwrap()
             .snapshot()
@@ -3091,22 +2146,22 @@ mod tests {
     }
 
     #[test]
-    fn a_main_v7_snapshot_migrates_comments_before_list_styles() {
+    fn a_v2_comment_snapshot_records_its_flavour_while_deferring_the_import() {
         use std::sync::Mutex;
         use yrs::Update;
         use yrs::updates::decoder::Decode;
 
-        const V7: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v7-comments.update.bin");
+        const V2: &[u8] = include_bytes!("../tests/fixtures/deck-schema-v2-comments.update.bin");
         let doc = crate::doc_with_client_id(9620);
         doc.transact_mut()
-            .apply_update(Update::decode_v1(V7).unwrap())
+            .apply_update(Update::decode_v1(V2).unwrap())
             .unwrap();
         let before = {
             let txn = doc.transact();
             let meta = required_map(&txn, META).unwrap();
-            assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(7.0));
+            assert_eq!(map_number(&meta, &txn, "schemaVersion"), Some(2.0));
             assert!(meta.get(&txn, "commentFlavor").is_none());
-            meta.get(&txn, "packageJson").unwrap()
+            package_from_meta(&meta, &txn).unwrap()
         };
         let observed = Arc::new(Mutex::new(Vec::new()));
         let events = observed.clone();
@@ -3115,7 +2170,7 @@ mod tests {
                 let meta = required_map(txn, META).unwrap();
                 events.lock().unwrap().push((
                     map_number(&meta, txn, "schemaVersion").unwrap(),
-                    meta.get(txn, "packageJson").unwrap(),
+                    package_from_meta(&meta, txn).unwrap(),
                     map_string(&meta, txn, "commentFlavor"),
                     map_bool(&meta, txn, "commentsPendingSource"),
                 ));
@@ -3125,22 +2180,12 @@ mod tests {
         let events = observed.lock().unwrap();
         assert_eq!(
             *events,
-            [
-                (8.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (9.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (10.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (11.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (12.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (13.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (14.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (15.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (16.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (17.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (18.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (19.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (20.0, before.clone(), Some("legacy".to_owned()), Some(true)),
-                (21.0, before, Some("legacy".to_owned()), Some(true))
-            ]
+            [(
+                SCHEMA_VERSION,
+                before,
+                Some("legacy".to_owned()),
+                Some(true)
+            )]
         );
     }
 }

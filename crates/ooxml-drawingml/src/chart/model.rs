@@ -84,11 +84,26 @@ pub struct ChartTextProperties {
     pub italic: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// `a:defRPr/@spc`, in points: tracking added after every cluster.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spacing_pt: Option<f64>,
 }
 
 impl ChartTextProperties {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
+    }
+
+    /// `self` over `base`, field by field.
+    pub fn over(self, base: &Self) -> Self {
+        Self {
+            font: self.font.or_else(|| base.font.clone()),
+            size_pt: self.size_pt.or(base.size_pt),
+            bold: self.bold.or(base.bold),
+            italic: self.italic.or(base.italic),
+            color: self.color.or_else(|| base.color.clone()),
+            spacing_pt: self.spacing_pt.or(base.spacing_pt),
+        }
     }
 }
 

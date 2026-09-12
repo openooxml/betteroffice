@@ -18,13 +18,12 @@ The quarter ellipse uses radii `(80,30)` in a `200 × 100` path space and a 90-d
 ![After](../../../pptx-render/tests/fixtures/custom-geometry-after.png)
 
 The before image was generated using `origin/main` at `387f2392`.
-The version-2 and version-6 update fixtures were regenerated with current
-`origin/main` at `54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4`, using client ID 285.
-They are stored at `crates/pptx-edit/tests/fixtures/deck-custom-schema-v2.update.bin`
-and `deck-custom-schema-v6.update.bin`. The fixture generator uses main’s legacy
-parser and defaults before stamping v2; its normal writer produces v6.
-Both contain the parsed model without custom paths and exercise migration to
-schema 7. Restoring an old update without source bytes retains its historical
+The version-2 update fixture was regenerated with current `origin/main` at
+`54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4`, using client ID 285. It is stored at
+`crates/pptx-edit/tests/fixtures/deck-custom-schema-v2.update.bin`. The fixture
+generator uses main’s legacy parser and defaults before stamping v2. It contains
+the parsed model without custom paths and exercises migration to the current
+schema. Restoring an old update without source bytes retains its historical
 fallback geometry; attaching the original deck reparses the custom paths.
 See the [generator and compatibility details](../../../pptx-edit/tests/fixtures/README.md).
 

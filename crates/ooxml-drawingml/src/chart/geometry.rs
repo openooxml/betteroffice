@@ -31,6 +31,7 @@ pub fn chart_label_font() -> PlotFont {
         size_px: CHART_LABEL_SIZE_PX,
         family: CHART_FONT_FAMILY.to_owned(),
         italic: false,
+        letter_spacing_px: 0.0,
     }
 }
 
@@ -41,6 +42,7 @@ pub fn chart_title_font() -> PlotFont {
         size_px: CHART_TITLE_SIZE_PX,
         family: CHART_FONT_FAMILY.to_owned(),
         italic: false,
+        letter_spacing_px: 0.0,
     }
 }
 
@@ -84,6 +86,8 @@ pub struct PlotFont {
     pub size_px: f64,
     pub family: String,
     pub italic: bool,
+    /// `a:defRPr/@spc` in pixels, added after every cluster.
+    pub letter_spacing_px: f64,
 }
 
 impl PlotFont {
@@ -102,6 +106,7 @@ pub struct PlotTextStyle<'a> {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub color: Option<&'a str>,
+    pub spacing_pt: Option<f64>,
 }
 
 impl<'a> PlotTextStyle<'a> {
@@ -113,6 +118,7 @@ impl<'a> PlotTextStyle<'a> {
             bold: self.bold.or(base.bold),
             italic: self.italic.or(base.italic),
             color: self.color.or(base.color),
+            spacing_pt: self.spacing_pt.or(base.spacing_pt),
         }
     }
 
@@ -136,6 +142,11 @@ impl<'a> PlotTextStyle<'a> {
                     .map(str::to_owned)
                     .unwrap_or_else(|| CHART_FONT_FAMILY.to_owned()),
                 italic: self.italic.unwrap_or(false),
+                letter_spacing_px: self
+                    .spacing_pt
+                    .filter(|spacing| spacing.is_finite())
+                    .map(|spacing| (spacing * 4.0 / 3.0).clamp(-400.0, 400.0))
+                    .unwrap_or(0.0),
             },
             color: self
                 .color
@@ -596,6 +607,7 @@ fn plot_text_from_model(text: Option<&super::model::ChartTextProperties>) -> Plo
         bold: text.bold,
         italic: text.italic,
         color: text.color.as_deref(),
+        spacing_pt: text.spacing_pt,
     })
     .unwrap_or_default()
 }
@@ -1723,7 +1735,14 @@ fn legend_text_width<S: PlotSink + ?Sized>(
     ops.sink
         .measure_text(label, &style.font)
         .filter(|width| width.is_finite() && *width >= 0.0)
-        .unwrap_or_else(|| label.chars().count() as f64 * style.font.size_px * 0.5)
+        .unwrap_or_else(|| fallback_label_width(label, &style.font))
+}
+
+/// A label's width when the sink cannot measure text: n - 1 tracked gaps, as a
+/// measured line has, and never below zero.
+fn fallback_label_width(label: &str, font: &PlotFont) -> f64 {
+    let count = label.chars().count() as f64;
+    (count * font.size_px * 0.5 + (count - 1.0).max(0.0) * font.letter_spacing_px).max(0.0)
 }
 
 fn wrap_legend_label<S: PlotSink + ?Sized>(
@@ -3892,6 +3911,21 @@ mod tests {
         ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
     };
 
+    #[test]
+    fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
+        let font = |spacing: f64| PlotFont {
+            weight: 400,
+            size_px: 12.0,
+            family: "Arial".to_owned(),
+            italic: false,
+            letter_spacing_px: spacing,
+        };
+        assert!(fallback_label_width("Series", &font(-40.0)) >= 0.0);
+        let loose = fallback_label_width("Series", &font(2.0));
+        let plain = fallback_label_width("Series", &font(0.0));
+        assert!((loose - plain - 10.0).abs() < 1e-9, "{loose} vs {plain}");
+    }
+
     struct Source {
         categories: Vec<String>,
         values: Vec<f64>,
@@ -4007,6 +4041,7 @@ mod tests {
                 bold: Some(true),
                 italic: Some(true),
                 color: Some("FF0000"),
+                spacing_pt: None,
             }
             .resolve(CHART_LABEL_SIZE_PX, 400)
             .font
@@ -6419,6 +6454,30 @@ mod tests {
         let labels = texts(&plot_chart(&PlotChart::from(&space), rect()));
         assert!(labels.contains(&"3".to_owned()));
         assert!(!labels.contains(&"1".to_owned()));
+    }
+
+    #[test]
+    fn chart_scope_tracking_reaches_every_text_op_and_a_scope_overrides_it() {
+        let mut space = model_space("column", None, vec![model_series("North", &[3.0, 1.0])]);
+        space.title = Some("Revenue".to_owned());
+        space.text = Some(ChartTextProperties {
+            spacing_pt: Some(1.5),
+            ..ChartTextProperties::default()
+        });
+        space.title_text = Some(ChartTextProperties {
+            spacing_pt: Some(-0.75),
+            ..ChartTextProperties::default()
+        });
+        let ops = plot_chart(&PlotChart::from(&space), rect());
+        let spacing = |label: &str| {
+            ops.iter().find_map(|op| match op {
+                PlotOp::Text { text, font, .. } if text == label => Some(font.letter_spacing_px),
+                _ => None,
+            })
+        };
+        assert_eq!(spacing("Revenue"), Some(-1.0));
+        assert_eq!(spacing("Q1"), Some(2.0));
+        assert_eq!(chart_label_font().letter_spacing_px, 0.0);
     }
 
     #[test]

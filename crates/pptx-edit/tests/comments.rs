@@ -237,8 +237,8 @@ fn v2_source_migration_imports_comments_once_and_keeps_peer_edits() {
 }
 
 #[test]
-fn v7_source_migration_imports_comments_once_and_saves_every_part_unchanged() {
-    let update = include_bytes!("fixtures/deck-schema-v7-comments.update.bin");
+fn a_migrated_import_saves_every_part_but_the_edited_comment_part() {
+    let update = include_bytes!("fixtures/deck-schema-v2-comments.update.bin");
     let session = DeckSession::open_from_update_with_source(update, MODERN, 741).unwrap();
     assert_eq!(session.comments().unwrap().len(), 5);
     assert_eq!(session.comment_flavor().unwrap(), CommentFlavor::Modern);

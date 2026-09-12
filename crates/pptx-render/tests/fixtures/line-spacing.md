@@ -16,6 +16,4 @@ Expanded spacing leaves the first baseline at the font's natural ascent; compres
 
 `line-spacing.before.png` is rendered on main `2c90c17f`; `line-spacing.after.png` uses this branch. The comparison checks every display-list field: only line y, height, baseline and glyph y-offsets change; the control shape is identical.
 
-The companion `crates/pptx-edit/tests/fixtures/deck-schema-v9-line-spacing.update.bin` was emitted by main `2c90c17f` after inserting `Edited ` into the first story. It proves schema-10 migration preserves edits and source attachment restores omitted spacing permanently, including after reopening without the source.
-
 The valid spacing ranges follow the [Open XML SDK DrawingML schema](https://github.com/dotnet/Open-XML-SDK/blob/main/data/schemas/schemas_openxmlformats_org_drawingml_2006_main.json). Point units are documented in [SpacingPoints](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.spacingpoints).

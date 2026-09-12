@@ -416,12 +416,22 @@ export interface ChartPrimitive extends PrimitiveBase {
   primitives: SlidePrimitive[];
 }
 
+/** A laid-out table. Its cells paint clipped to the table rectangle, and
+ *  `label` is the screen-reader summary of the whole table. */
+export interface TablePrimitive extends PrimitiveBase {
+  kind: 'table';
+  name: string;
+  label: string;
+  primitives: SlidePrimitive[];
+}
+
 export type SlidePrimitive =
   | ShapePrimitive
   | ImagePrimitive
   | TextBoxPrimitive
   | PlaceholderPrimitive
-  | ChartPrimitive;
+  | ChartPrimitive
+  | TablePrimitive;
 
 export interface SlideDisplayList {
   contractVersion: number;

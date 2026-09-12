@@ -6,6 +6,13 @@ mod image_effects;
 mod layout;
 mod metafile;
 
+/// Entry points for the fuzz targets in `fuzz/`; not a stable API.
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing {
+    pub use crate::metafile::decode;
+}
+
 pub use display_list::*;
 pub use image_effects::apply_image_effects;
 pub use layout::*;
@@ -292,7 +299,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
         },
         transform: transform(&base),
     };
-    let plotted = chart_primitive(frame, chart, MAX_CHART_PRIMITIVES, &mut |text| {
+    let plotted = chart_primitive(frame, chart, "", MAX_CHART_PRIMITIVES, &mut |text| {
         Ok(Primitive::TextBox {
             object_id: text.object_id,
             shape_id: None,
@@ -313,7 +320,7 @@ fn composed_chart(base: ShapeBase, chart: &ChartSpace) -> Primitive {
                     font_family: text.font.family.to_owned(),
                     font_size_pt: (text.font.size_px * 72.0 / 96.0) as f32,
                     bold: text.font.weight >= 600,
-                    italic: false,
+                    italic: text.font.italic,
                     underline: false,
                     color: text.color.to_owned(),
                 }],

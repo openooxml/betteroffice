@@ -29,14 +29,19 @@ pub(crate) struct ChartText<'a> {
     pub align: PlotTextAlign,
 }
 
-/// The chart primitive for `space`, with at most `budget` parts.
-pub(crate) fn chart_primitive(
+/// The chart primitive for `space`, with at most `budget` parts. Chart text
+/// naming no typeface inherits `default_font`.
+pub(crate) fn chart_primitive<'a>(
     frame: ChartFrame<'_>,
-    space: &ChartSpace,
+    space: &'a ChartSpace,
+    default_font: &'a str,
     budget: usize,
     text: &mut dyn FnMut(ChartText<'_>) -> Result<Primitive, RenderError>,
 ) -> Result<Primitive, RenderError> {
-    let chart = plot_model(space);
+    let mut chart = plot_model(space);
+    if !default_font.is_empty() {
+        chart.text.chart.font.get_or_insert(default_font);
+    }
     let mut primitives = Vec::new();
     let mut sink = ChartSink {
         primitives: &mut primitives,
@@ -422,7 +427,7 @@ mod tests {
 
     /// Plots `space` with a text callback that needs no fonts.
     fn plot(space: &ChartSpace) -> Primitive {
-        chart_primitive(frame("Chart 1"), space, 100_000, &mut |text| {
+        chart_primitive(frame("Chart 1"), space, "", 100_000, &mut |text| {
             Ok(Primitive::TextBox {
                 object_id: text.object_id,
                 shape_id: None,
@@ -679,6 +684,7 @@ mod tests {
         let chart = chart_primitive(
             frame("Wide"),
             &space("line", vec![group]),
+            "",
             512,
             &mut |text| {
                 Ok(Primitive::Placeholder {
@@ -754,7 +760,7 @@ mod tests {
             vec![group("line", vec![series("Wide", &values, "#112233")])],
         );
         assert_eq!(parts(&plot(&space)).len(), 100_000);
-        let chart = chart_primitive(frame("Wide"), &space, 64, &mut |text| {
+        let chart = chart_primitive(frame("Wide"), &space, "", 64, &mut |text| {
             Ok(Primitive::Placeholder {
                 object_id: text.object_id,
                 shape_id: None,
@@ -801,6 +807,7 @@ mod tests {
                     ..frame("Degenerate")
                 },
                 &space,
+                "",
                 100_000,
                 &mut |_| {
                     Ok(Primitive::Placeholder {

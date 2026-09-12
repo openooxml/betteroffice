@@ -279,20 +279,7 @@ fn parse_graphic_frame(
         .child("graphic")
         .and_then(|value| value.child("graphicData"));
     let frame_data = if let Some(table) = data.and_then(|value| value.child("tbl")) {
-        let mut rows = Vec::new();
-        for row in table.children_named("tr") {
-            let mut cells = Vec::new();
-            for cell in row.children_named("tc") {
-                cells.push(
-                    cell.child("txBody")
-                        .map(|body| parse_text_body(body, part, budget))
-                        .transpose()?
-                        .unwrap_or_default(),
-                );
-            }
-            rows.push(cells);
-        }
-        GraphicFrameData::Table { rows }
+        GraphicFrameData::Table(parse_table(table, part, budget)?)
     } else if let Some(chart) =
         data.and_then(|value| value.descendants_named("chart").first().copied())
     {
@@ -339,6 +326,122 @@ fn parse_graphic_frame(
         base: parse_base(element.child("nvGraphicFramePr"), element.child("xfrm")),
         data: frame_data,
     })
+}
+
+fn parse_table(
+    table: &XmlElement,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Table, PptxError> {
+    let mut rows = Vec::new();
+    for row in table.children_named("tr") {
+        let mut cells = Vec::new();
+        for cell in row.children_named("tc") {
+            cells.push(parse_table_cell(cell, part, budget)?);
+        }
+        rows.push(TableRow {
+            height: numeric_attribute(Some(row), "h").unwrap_or_default().max(0),
+            cells,
+        });
+    }
+    Ok(Table {
+        grid: table
+            .child("tblGrid")
+            .into_iter()
+            .flat_map(|grid| grid.children_named("gridCol"))
+            .map(|column| {
+                numeric_attribute(Some(column), "w")
+                    .unwrap_or_default()
+                    .max(0)
+            })
+            .collect(),
+        properties: parse_table_properties(table.child("tblPr")),
+        rows,
+    })
+}
+
+fn parse_table_properties(properties: Option<&XmlElement>) -> TableProperties {
+    let flag = |name: &str| {
+        properties
+            .and_then(|value| value.attribute(name))
+            .is_some_and(parse_bool)
+    };
+    TableProperties {
+        first_row: flag("firstRow"),
+        last_row: flag("lastRow"),
+        first_col: flag("firstCol"),
+        last_col: flag("lastCol"),
+        band_row: flag("bandRow"),
+        band_col: flag("bandCol"),
+        style_id: properties
+            .and_then(|value| value.child("tableStyleId"))
+            .map(|value| value.text_content())
+            .filter(|value| !value.is_empty()),
+    }
+}
+
+fn parse_table_cell(
+    cell: &XmlElement,
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<TableCell, PptxError> {
+    let properties = cell.child("tcPr");
+    let mut text = cell
+        .child("txBody")
+        .map(|body| parse_text_body(body, part, budget))
+        .transpose()?
+        .unwrap_or_default();
+    apply_cell_text_properties(&mut text, properties);
+    let merged = ["hMerge", "vMerge"]
+        .iter()
+        .any(|name| cell.attribute(name).is_some_and(parse_bool));
+    Ok(TableCell {
+        text,
+        grid_span: span_attribute(cell, "gridSpan"),
+        row_span: span_attribute(cell, "rowSpan"),
+        merged,
+        fill: properties.and_then(parse_fill),
+        borders: parse_cell_borders(properties),
+    })
+}
+
+/// `a:tcPr` outranks the cell's own `a:bodyPr`, which PowerPoint ignores.
+fn apply_cell_text_properties(text: &mut TextBody, properties: Option<&XmlElement>) {
+    let Some(properties) = properties else {
+        return;
+    };
+    if let Some(anchor) = properties.attribute("anchor") {
+        text.anchor = Some(anchor.to_owned());
+    }
+    if let Some(vertical) = properties.attribute("vert") {
+        text.vertical = Some(vertical.to_owned());
+    }
+    text.inset_left = numeric_attribute(Some(properties), "marL").or(text.inset_left);
+    text.inset_top = numeric_attribute(Some(properties), "marT").or(text.inset_top);
+    text.inset_right = numeric_attribute(Some(properties), "marR").or(text.inset_right);
+    text.inset_bottom = numeric_attribute(Some(properties), "marB").or(text.inset_bottom);
+}
+
+fn parse_cell_borders(properties: Option<&XmlElement>) -> TableCellBorders {
+    let border = |name: &str| {
+        properties
+            .and_then(|value| value.child(name))
+            .and_then(parse_line_element)
+    };
+    TableCellBorders {
+        left: border("lnL"),
+        top: border("lnT"),
+        right: border("lnR"),
+        bottom: border("lnB"),
+    }
+}
+
+fn span_attribute(element: &XmlElement, name: &str) -> u32 {
+    element
+        .attribute(name)
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(1)
 }
 
 fn parse_group(
@@ -844,6 +947,11 @@ pub(crate) fn parse_outline_element(line: &XmlElement) -> Option<ShapeOutline> {
     if line.local_name() != "ln" {
         return None;
     }
+    parse_line_element(line)
+}
+
+/// Reads a line whatever it is named, for `a:lnL`-style table cell borders.
+fn parse_line_element(line: &XmlElement) -> Option<ShapeOutline> {
     if line.child("noFill").is_some() {
         return Some(ShapeOutline::default());
     }
@@ -1172,7 +1280,9 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
         margin_right: numeric_attribute(Some(element), "marR"),
         indent: numeric_attribute(Some(element), "indent"),
         bullet,
-        line_spacing: element.child("lnSpc").and_then(parse_line_spacing),
+        line_spacing: element.child("lnSpc").and_then(parse_text_spacing),
+        space_before: element.child("spcBef").and_then(parse_text_spacing),
+        space_after: element.child("spcAft").and_then(parse_text_spacing),
         bullet_font: if element.child("buFontTx").is_some() {
             Some(BulletFont::FollowText)
         } else {
@@ -1206,7 +1316,7 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
     }
 }
 
-fn parse_line_spacing(element: &XmlElement) -> Option<LineSpacing> {
+fn parse_text_spacing(element: &XmlElement) -> Option<LineSpacing> {
     if let Some(percent) = element.child("spcPct") {
         let raw = percent.attribute("val")?;
         let (raw, divisor) = raw
@@ -1867,6 +1977,58 @@ mod tests {
             None
         );
         assert_eq!(spacing(""), None);
+    }
+
+    #[test]
+    fn reads_the_space_before_and_after_a_paragraph() {
+        let properties = |body: &str| {
+            let limits = ParseLimits::default();
+            let mut budget = ParseBudget::new(&limits);
+            let xml = format!("<a:pPr>{body}</a:pPr>");
+            let root = parse_xml(
+                xml.as_bytes(),
+                "ppt/slideMasters/slideMaster1.xml",
+                &mut budget,
+            )
+            .unwrap();
+            parse_paragraph_properties(Some(&root))
+        };
+
+        let both = properties(
+            r#"<a:spcBef><a:spcPts val="1000"/></a:spcBef><a:spcAft><a:spcPct val="20000"/></a:spcAft>"#,
+        );
+        assert_eq!(both.space_before, Some(LineSpacing::Points { value: 10.0 }));
+        assert_eq!(both.space_after, Some(LineSpacing::Percent { value: 0.2 }));
+
+        let reset = properties(r#"<a:spcBef><a:spcPct val="0"/></a:spcBef>"#);
+        assert_eq!(
+            reset.space_before,
+            Some(LineSpacing::Percent { value: 0.0 })
+        );
+        assert_eq!(reset.space_after, None);
+
+        let contradictory =
+            properties(r#"<a:spcBef><a:spcPct val="50000"/><a:spcPts val="1200"/></a:spcBef>"#);
+        assert_eq!(
+            contradictory.space_before,
+            Some(LineSpacing::Percent { value: 0.5 })
+        );
+
+        assert_eq!(
+            properties(r#"<a:spcAft><a:spcPts val="158401"/></a:spcAft>"#).space_after,
+            None
+        );
+        assert_eq!(properties("").space_before, None);
+
+        let json = serde_json::to_value(&both).unwrap();
+        assert_eq!(json["spaceBefore"]["type"], "points");
+        assert_eq!(json["spaceAfter"]["value"], 0.2);
+        assert!(
+            serde_json::to_value(properties(""))
+                .unwrap()
+                .get("spaceBefore")
+                .is_none()
+        );
     }
 
     #[test]

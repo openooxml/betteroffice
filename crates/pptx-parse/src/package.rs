@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::Theme;
+use ooxml_drawingml::{TableStyleList, Theme};
 
 use crate::chart::parse_chart_part;
 use crate::comments::{
@@ -10,6 +10,7 @@ use crate::comments::{
 use crate::drawing::{common_slide_data, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
+use crate::table_style::parse_table_styles;
 use crate::theme::{parse_format_scheme, parse_theme};
 use crate::xml::{ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
@@ -193,6 +194,8 @@ fn parse_package(
         });
     }
 
+    let table_styles = parse_table_style_part(&parts, presentation_relationships, &mut budget)?;
+
     let charts = parse_chart_parts(
         &parts,
         &ChartSources {
@@ -235,6 +238,7 @@ fn parse_package(
         themes,
         charts,
         media,
+        table_styles,
         comment_authors: deck_comments.authors,
         comments: deck_comments.comments,
         comment_flavor: deck_comments.flavor,
@@ -357,6 +361,19 @@ fn parse_part(
         .get(path)
         .ok_or_else(|| PptxError::MissingPart(path.to_owned()))?;
     parse_xml(bytes, path, budget)
+}
+
+fn parse_table_style_part(
+    parts: &HashMap<&str, &[u8]>,
+    presentation_relationships: &[Relationship],
+    budget: &mut ParseBudget<'_>,
+) -> Result<TableStyleList, PptxError> {
+    let path = relationship_by_type(presentation_relationships, relationship_types::TABLE_STYLES)
+        .unwrap_or_else(|| "ppt/tableStyles.xml".to_owned());
+    let Some(bytes) = parts.get(path.as_str()) else {
+        return Ok(TableStyleList::default());
+    };
+    Ok(parse_table_styles(&parse_xml(bytes, &path, budget)?))
 }
 
 fn parse_presentation(

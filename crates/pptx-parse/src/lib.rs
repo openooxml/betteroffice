@@ -10,6 +10,7 @@ mod model;
 mod notes;
 mod package;
 mod relationships;
+mod table_style;
 mod theme;
 mod write;
 mod xml;
