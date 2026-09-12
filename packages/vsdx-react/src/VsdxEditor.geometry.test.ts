@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, inchFormula, stillSelectable } from './VsdxEditor';
+import { canvasPointerPosition, inchFormula, resolveDragGeometry, stillSelectable } from './VsdxEditor';
 
 const frame: PageDisplayList = {
   contractVersion: 3,
@@ -40,6 +40,21 @@ test('formats inch formulas without exponent noise or negative zero', () => {
   expect(inchFormula(-1.5)).toBe('-1.5');
   expect(inchFormula(1 / 3)).toBe('0.333333');
   expect(inchFormula(Number.NaN)).toBe('0');
+});
+
+test('moves a shape by the pointer delta instead of teleporting its pin to release position', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 3, y: 3 }, resize: false, pin: { x: 5, y: 2 }, size: { width: 2, height: 1 } };
+  const grabbedAwayFromPin = resolveDragGeometry(start, { x: 4, y: 4 });
+  expect(grabbedAwayFromPin).toEqual({ x: 6, y: 3, width: 2, height: 1 });
+});
+
+test('resizes by adjusting existing dimensions with the pointer delta, not the raw pointer distance', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 3, y: 3 }, resize: true, pin: { x: 5, y: 2 }, size: { width: 2, height: 1 } };
+  const grown = resolveDragGeometry(start, { x: 4, y: 5 });
+  expect(grown).toEqual({ x: 5, y: 2, width: 3, height: 3 });
+  const shrunkBelowMinimum = resolveDragGeometry(start, { x: -50, y: -50 });
+  expect(shrunkBelowMinimum.width).toBeCloseTo(0.01, 5);
+  expect(shrunkBelowMinimum.height).toBeCloseTo(0.01, 5);
 });
 
 test('drops a selection whose shape a peer removed from the page', () => {

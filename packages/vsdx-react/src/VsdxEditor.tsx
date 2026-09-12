@@ -5,7 +5,7 @@ import type { CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResul
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, findShapePlacement } from './components/ribbon/commands';
+import { RibbonCommandsProvider, cellValue, findShapePlacement, numberValue } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -57,7 +57,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const pointerRef = useRef<{ canvas: ModelPoint; model: ModelPoint; resize: boolean } | null>(null);
+  const pointerRef = useRef<DragStart | null>(null);
   const [loading, setLoading] = useState(Boolean(file));
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -134,7 +134,19 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
     const point = canvasPointerPosition(event, frame);
-    try { handle.layoutPage(model.pageIndex); const hit = handle.hitTest(point.canvas.x, point.canvas.y); setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null); pointerRef.current = hit ? { ...point, resize: event.shiftKey } : null; event.currentTarget.setPointerCapture(event.pointerId); } catch (value) { reportError(value); }
+    try {
+      handle.layoutPage(model.pageIndex);
+      const hit = handle.hitTest(point.canvas.x, point.canvas.y);
+      setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
+      const placement = hit ? findShapePlacement(page.shapes, hit.shapeId) : null;
+      pointerRef.current = hit && placement ? {
+        ...point,
+        resize: event.shiftKey,
+        pin: { x: numberValue(cellValue(placement.shape, 'PinX')), y: numberValue(cellValue(placement.shape, 'PinY')) },
+        size: { width: numberValue(cellValue(placement.shape, 'Width')), height: numberValue(cellValue(placement.shape, 'Height')) },
+      } : null;
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch (value) { reportError(value); }
   };
   const onPointerUp = (event: PointerEvent<HTMLCanvasElement>) => {
     const pointer = pointerRef.current; pointerRef.current = null;
@@ -142,9 +154,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!pointer || !handle || !selected || !frame) return;
     const point = canvasPointerPosition(event, frame);
     if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+    const geometry = resolveDragGeometry(pointer, point.model);
     try {
-      if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(Math.max(MIN_SHAPE_INCHES, Math.abs(point.model.x - pointer.model.x))), inchFormula(Math.max(MIN_SHAPE_INCHES, Math.abs(point.model.y - pointer.model.y))));
-      else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(point.model.x), inchFormula(point.model.y));
+      if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
+      else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
     } catch (value) { reportError(value); }
   };
@@ -211,6 +224,15 @@ export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement>, fr
 export function inchFormula(value: number): string {
   const rounded = Number.isFinite(value) ? Number(value.toFixed(6)) : 0;
   return String(Object.is(rounded, -0) ? 0 : rounded);
+}
+
+export interface DragStart { canvas: ModelPoint; model: ModelPoint; resize: boolean; pin: ModelPoint; size: { width: number; height: number }; }
+
+export function resolveDragGeometry(start: DragStart, release: ModelPoint): { x: number; y: number; width: number; height: number } {
+  const deltaX = release.x - start.model.x;
+  const deltaY = release.y - start.model.y;
+  if (start.resize) return { x: start.pin.x, y: start.pin.y, width: Math.max(MIN_SHAPE_INCHES, start.size.width + deltaX), height: Math.max(MIN_SHAPE_INCHES, start.size.height + deltaY) };
+  return { x: start.pin.x + deltaX, y: start.pin.y + deltaY, width: start.size.width, height: start.size.height };
 }
 
 export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {

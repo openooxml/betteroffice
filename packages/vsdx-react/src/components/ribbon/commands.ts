@@ -52,7 +52,7 @@ function findCell(shape: ShapeSnapshot | null, name: string) {
   return shape?.cells.find((item) => item.locator.cellName === name || item.name === name);
 }
 
-function cellValue(shape: ShapeSnapshot | null, name: string): string | undefined {
+export function cellValue(shape: ShapeSnapshot | null, name: string): string | undefined {
   const current = findCell(shape, name);
   return current?.value ?? current?.formula ?? undefined;
 }
@@ -66,7 +66,7 @@ function color(value: string | undefined, fallback: string): string {
   return value?.match(/#[0-9a-f]{6}/i)?.[0] ?? fallback;
 }
 
-function numberValue(value: string | undefined): number {
+export function numberValue(value: string | undefined): number {
   const result = Number.parseFloat(value ?? '0');
   return Number.isFinite(result) ? result : 0;
 }
