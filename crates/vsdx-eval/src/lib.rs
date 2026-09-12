@@ -766,10 +766,9 @@ impl<R: References> Engine<'_, R> {
                 |r| r,
                 |v| numeric_result(v.number.signum(), Unit::Number, guarded),
             ),
-            "ROUND" => one().map_or_else(
-                |r| r,
-                |v| numeric_result((v.number + 0.5).floor(), v.unit, guarded),
-            ),
+            "ROUND" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.round(), v.unit, guarded))
+            }
             "CEILING" => {
                 one().map_or_else(|r| r, |v| numeric_result(v.number.ceil(), v.unit, guarded))
             }
@@ -1628,6 +1627,26 @@ mod tests {
             evaluate("GUARD(1)", &BTreeMap::new(), &limits()),
             Evaluation::Evaluated(Evaluated { guarded: true, .. })
         ));
+    }
+
+    #[test]
+    fn rounds_halfway_values_away_from_zero_and_keeps_directional_siblings() {
+        for (formula, expected) in [
+            ("ROUND(1.5)", 2.0),
+            ("ROUND(-1.5)", -2.0),
+            ("ROUND(2.5)", 3.0),
+            ("ROUND(-2.5)", -3.0),
+            ("ROUND(-0.5)", -1.0),
+            ("ROUND(-1.4)", -1.0),
+            ("ROUND(-1.6)", -2.0),
+            ("INT(-1.5)", -2.0),
+            ("FLOOR(-1.5)", -2.0),
+            ("CEILING(-1.5)", -1.0),
+            ("TRUNC(-1.5)", -1.0),
+            ("SIGN(-1.5)", -1.0),
+        ] {
+            assert_eq!(number(formula).number, expected, "{formula}");
+        }
     }
 
     fn color(formula: &str, theme: Option<&Theme>) -> Color {
