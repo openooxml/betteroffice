@@ -1944,6 +1944,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the private VSDX_CORPUS_DIR corpus"]
     fn corpus_formulas_report_honest_evaluation() {
         let directory = std::env::var("VSDX_CORPUS_DIR")
             .expect("VSDX_CORPUS_DIR must name the required VSDX corpus directory");
