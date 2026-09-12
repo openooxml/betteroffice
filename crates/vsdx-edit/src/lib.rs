@@ -1195,11 +1195,11 @@ mod tests {
         };
         let mut index = None;
         for candidate in 0..shapes.len(&txn) {
-            if let Some(yrs::Out::Any(yrs::Any::String(value))) = shapes.get(&txn, candidate) {
-                if value.as_ref() == shape_id {
-                    index = Some(candidate);
-                    break;
-                }
+            if let Some(yrs::Out::Any(yrs::Any::String(value))) = shapes.get(&txn, candidate)
+                && value.as_ref() == shape_id
+            {
+                index = Some(candidate);
+                break;
             }
         }
         if let Some(index) = index {
