@@ -14,6 +14,9 @@ categories = ["rendering", "graphics"]
 [lib]
 name = "pptx_render"
 
+[features]
+fuzzing = []
+
 [dependencies]
 ooxml-drawingml.workspace = true
 ooxml-text.workspace = true
@@ -24,4 +27,6 @@ serde_json = "1"
 thiserror = "2"
 
 [dev-dependencies]
+proptest = "1"
 ooxml-opc.workspace = true
+betteroffice-pptx-render = { path = ".", features = ["fuzzing"] }
