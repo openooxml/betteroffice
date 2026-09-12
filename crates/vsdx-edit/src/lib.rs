@@ -318,6 +318,7 @@ mod tests {
             let shape = sheets.insert(&mut txn, id, MapPrelim::default());
             shape.insert(&mut txn, "id", id);
             shape.insert(&mut txn, "pageId", page_id);
+            shape.insert(&mut txn, "origin", "package");
             shape.insert(&mut txn, "sourceId", 1.0);
             shape.insert(&mut txn, "cells", MapPrelim::default());
             let page = match pages.get(&txn, page_id) {
@@ -368,6 +369,7 @@ mod tests {
         let shape = sheets.insert(&mut txn, id, MapPrelim::default());
         shape.insert(&mut txn, "id", id);
         shape.insert(&mut txn, "pageId", "page:1");
+        shape.insert(&mut txn, "origin", "package");
         shape.insert(&mut txn, "sourceId", 3.0);
         shape.insert(&mut txn, "parentId", parent_id);
         shape.insert(&mut txn, "cells", MapPrelim::default());
@@ -404,6 +406,16 @@ mod tests {
             _ => unreachable!(),
         };
         cell.insert(&mut txn, field, value);
+    }
+
+    fn write_peer_shape_field(peer: &Doc, shape_id: &str, field: &str, value: &str) {
+        let mut txn = peer.transact_mut();
+        let sheets = txn.get_map(SHEETS).unwrap();
+        let shape = match sheets.get(&txn, shape_id) {
+            Some(yrs::Out::YMap(shape)) => shape,
+            _ => unreachable!(),
+        };
+        shape.insert(&mut txn, field, value);
     }
 
     fn add_shape_cell(
@@ -922,6 +934,25 @@ mod tests {
         assert!(session.semantic_cell_edits().unwrap().iter().any(|edit| {
             edit.locator.cell_name == "Width" && edit.formula.as_deref() == Some("2")
         }));
+    }
+
+    #[test]
+    fn remote_rewrites_of_shape_identity_are_rejected() {
+        for (field, value) in [
+            ("origin", "session"),
+            ("pageId", "page:2"),
+            ("parentId", "page:1:shape:2"),
+        ] {
+            let session = session();
+            let peer = peer_doc(&session, 9);
+            write_peer_shape_field(&peer, "page:1:shape:1", field, value);
+            assert!(
+                session
+                    .apply_update_v1(&peer_update(&session, &peer))
+                    .is_err(),
+                "{field}"
+            );
+        }
     }
 
     #[test]

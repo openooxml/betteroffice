@@ -510,6 +510,15 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
 
 pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<()> {
     validate_doc(staged)?;
+    let before_identities = shape_identities(before)?;
+    let after_identities = shape_identities(staged)?;
+    for (key, identity) in &before_identities {
+        if after_identities.get(key) != Some(identity) {
+            return Err(EditError::InvalidState(format!(
+                "remote update changes the identity of shape {key}"
+            )));
+        }
+    }
     let before_baselines = baseline_formulas(before)?;
     let after_baselines = baseline_formulas(staged)?;
     for key in before_baselines.keys().chain(after_baselines.keys()) {
@@ -529,6 +538,28 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
         }
     }
     Ok(())
+}
+
+type ShapeIdentity = (Option<String>, Option<String>, Option<String>, Option<f64>);
+
+/// The save path routes a sheet by this metadata, so only the seed and a local add may write it.
+fn shape_identities(doc: &Doc) -> EditResult<std::collections::BTreeMap<String, ShapeIdentity>> {
+    let txn = doc.transact();
+    let sheets = required_map(&txn, SHEETS)?;
+    let mut identities = std::collections::BTreeMap::new();
+    for (shape_id, shape) in sheets.iter(&txn) {
+        let Out::YMap(shape) = shape else { continue };
+        identities.insert(
+            shape_id.to_owned(),
+            (
+                map_string(&shape, &txn, "pageId"),
+                map_string(&shape, &txn, "parentId"),
+                map_string(&shape, &txn, "origin"),
+                map_number(&shape, &txn, "sourceId"),
+            ),
+        );
+    }
+    Ok(identities)
 }
 
 /// Baselines come from the package seed alone; a peer that could write one could hide an edit.
