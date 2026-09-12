@@ -38,9 +38,9 @@ describe('VSDX wasm boundary', () => {
     expect(() => diagram.snapshot()).toThrow('diagram handle is disposed');
   });
 
-  test('accepts only v3 display lists', () => {
+  test('accepts only v4 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(3);
+    expect(diagram.layoutPage(0).contractVersion).toBe(4);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });
@@ -49,6 +49,39 @@ describe('VSDX wasm boundary', () => {
     } finally {
       VsdxRenderer.prototype.layoutPageJson = layoutPageJson;
       diagram.dispose();
+    }
+  });
+
+  test('frees the document when applying the initial update fails', () => {
+    const applyUpdateJson = VsdxDocument.prototype.applyUpdateJson;
+    const docFree = VsdxDocument.prototype.free;
+    const freed: string[] = [];
+    VsdxDocument.prototype.applyUpdateJson = () => { throw new Error('boom'); };
+    VsdxDocument.prototype.free = function (...args) { freed.push('doc'); return docFree.apply(this, args); };
+    try {
+      expect(() => openDiagram(foundation, { clientId: 9050, initialUpdate: new Uint8Array([1]) })).toThrow('boom');
+      expect(freed).toEqual(['doc']);
+    } finally {
+      VsdxDocument.prototype.applyUpdateJson = applyUpdateJson;
+      VsdxDocument.prototype.free = docFree;
+    }
+  });
+
+  test('frees the document and renderer when font registration fails', () => {
+    const registerFont = VsdxRenderer.prototype.registerFont;
+    const rendererFree = VsdxRenderer.prototype.free;
+    const docFree = VsdxDocument.prototype.free;
+    const freed: string[] = [];
+    VsdxRenderer.prototype.registerFont = () => { throw new Error('font boom'); };
+    VsdxRenderer.prototype.free = function (...args) { freed.push('renderer'); return rendererFree.apply(this, args); };
+    VsdxDocument.prototype.free = function (...args) { freed.push('doc'); return docFree.apply(this, args); };
+    try {
+      expect(() => openDiagram(foundation, { clientId: 9051, fonts: [{ family: 'Test', bytes: new Uint8Array([0]) }] })).toThrow('font boom');
+      expect(freed).toEqual(['renderer', 'doc']);
+    } finally {
+      VsdxRenderer.prototype.registerFont = registerFont;
+      VsdxRenderer.prototype.free = rendererFree;
+      VsdxDocument.prototype.free = docFree;
     }
   });
 
@@ -154,9 +187,9 @@ describe('VSDX wasm boundary', () => {
     const editedPart = 'visio/pages/page1.xml';
     const diagram = openDiagram(foundation, { clientId: 9016 });
     const receipt = diagram.addShape(pageId, { name: 'Added rectangle', cells: [
-      { locator: { cellName: 'PinX' }, name: 'PinX', formula: '7' },
-      { locator: { cellName: 'Width' }, name: 'Width', formula: '2' },
-      { locator: { section: 'User', rowIndex: 0, cellName: 'Value' }, name: 'Value', formula: '3' },
+      { locator: { cellName: 'PinX' }, formula: '7' },
+      { locator: { cellName: 'Width' }, formula: '2' },
+      { locator: { section: 'User', rowIndex: 0, cellName: 'Value' }, formula: '3' },
     ] });
     const live = diagram.snapshot();
     expect(live.pages[0].shapes.find(shape => shape.id === receipt.shapeId)).toEqual(expect.objectContaining({ sourceId: 2 }));
@@ -251,16 +284,16 @@ describe('VSDX wasm boundary', () => {
   test('keeps added-shape cells in the live render projection', () => {
     const diagram = openDiagram(foundation, { clientId: 9046 });
     diagram.addShape('page:1', { cells: [
-      { locator: { cellName: 'PinX' }, name: 'PinX', formula: '2' },
-      { locator: { cellName: 'PinY' }, name: 'PinY', formula: '2' },
-      { locator: { cellName: 'Width' }, name: 'Width', formula: '1' },
-      { locator: { cellName: 'Height' }, name: 'Height', formula: '1' },
-      { locator: { cellName: 'LocPinX' }, name: 'LocPinX', formula: '0' },
-      { locator: { cellName: 'LocPinY' }, name: 'LocPinY', formula: '0' },
-      { locator: { section: 'Geometry', rowIndex: 0, cellName: 'X' }, name: 'X', formula: '0' },
-      { locator: { section: 'Geometry', rowIndex: 0, cellName: 'Y' }, name: 'Y', formula: '0' },
-      { locator: { section: 'Geometry', rowIndex: 1, cellName: 'X' }, name: 'X', formula: '1' },
-      { locator: { section: 'Geometry', rowIndex: 1, cellName: 'Y' }, name: 'Y', formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: '2' },
+      { locator: { cellName: 'PinY' }, formula: '2' },
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+      { locator: { section: 'Geometry', rowIndex: 0, cellName: 'X' }, formula: '0' },
+      { locator: { section: 'Geometry', rowIndex: 0, cellName: 'Y' }, formula: '0' },
+      { locator: { section: 'Geometry', rowIndex: 1, cellName: 'X' }, formula: '1' },
+      { locator: { section: 'Geometry', rowIndex: 1, cellName: 'Y' }, formula: '1' },
     ] });
     expect(diagram.layoutPage(0).primitives).toContainEqual(expect.objectContaining({
       id: 'visio/pages/page1.xml:2',
@@ -362,7 +395,7 @@ describe('VSDX wasm boundary', () => {
     const pageId = 'page:1';
     const editedPart = 'visio/pages/page1.xml';
     const diagram = openDiagram(foundation, { clientId: 9024 });
-    const added = diagram.addShape(pageId, { cells: [{ locator: { cellName: 'Width' }, name: 'Width', formula: '2' }] }).shapeId;
+    const added = diagram.addShape(pageId, { cells: [{ locator: { cellName: 'Width' }, formula: '2' }] }).shapeId;
     diagram.setCellFormula(pageId, added, { cellName: 'Width' }, '3');
     const saved = diagram.save();
     diagram.dispose();
@@ -430,7 +463,7 @@ describe('VSDX wasm boundary', () => {
   test('preserves a LockDelete shape through a save round trip', async () => {
     const editedPart = 'visio/pages/page1.xml';
     const diagram = openDiagram(foundation, { clientId: 9032 });
-    diagram.addShape('page:1', { cells: [{ locator: { cellName: 'LockDelete' }, name: 'LockDelete', formula: '1' }] });
+    diagram.addShape('page:1', { cells: [{ locator: { cellName: 'LockDelete' }, formula: '1' }] });
     const saved = diagram.save();
     diagram.dispose();
     const reopened = openDiagram(saved, { clientId: 9033 });
@@ -465,8 +498,26 @@ describe('VSDX wasm boundary', () => {
     const draft: FormulaShapeDraft = { cells: [] };
     expect(draft.cells).toEqual([]);
     // @ts-expect-error Shape cells accept formulas, never cached values.
-    const invalid: FormulaShapeDraft = { cells: [{ locator: {}, name: 'Width', value: '1' }] };
+    const invalid: FormulaShapeDraft = { cells: [{ locator: { cellName: 'Width' }, formula: '1', value: '1' }] };
     expect(invalid).toBeDefined();
+  });
+
+  test('adds a shape from the declared cell locator shape', () => {
+    const diagram = openDiagram(foundation, { clientId: 9012 });
+    const draft: FormulaShapeDraft = {
+      name: 'Added',
+      cells: [
+        { locator: { cellName: 'Width' }, formula: '1' },
+        { locator: { section: 'Geometry', rowIndex: 0, cellName: 'X' }, formula: '2' },
+      ],
+    };
+    const receipt = diagram.addShape('page:1', draft);
+    const added = diagram.snapshot().pages[0].shapes.find(shape => shape.id === receipt.shapeId);
+    expect(added?.cells.find(cell => cell.name === 'Width')?.formula).toBe('1');
+    const x = added?.cells.find(cell => cell.name === 'X');
+    expect(x?.formula).toBe('2');
+    expect(x?.locator).toEqual(expect.objectContaining({ section: 'Geometry', row: { index: 0 }, cellName: 'X' }));
+    diagram.dispose();
   });
 
   test('does not reenter update listeners before the outer call unwinds', () => {

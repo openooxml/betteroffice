@@ -796,10 +796,9 @@ impl<R: References> Engine<'_, R> {
                 |r| r,
                 |v| numeric_result(v.number.signum(), Unit::Number, guarded),
             ),
-            "ROUND" => one().map_or_else(
-                |r| r,
-                |v| numeric_result((v.number + 0.5).floor(), v.unit, guarded),
-            ),
+            "ROUND" => {
+                one().map_or_else(|r| r, |v| numeric_result(v.number.round(), v.unit, guarded))
+            }
             "CEILING" => {
                 one().map_or_else(|r| r, |v| numeric_result(v.number.ceil(), v.unit, guarded))
             }
@@ -1419,6 +1418,32 @@ mod tests {
             evaluate("GUARD(1)", &BTreeMap::new(), &limits()),
             Evaluation::Evaluated(Evaluated { guarded: true, .. })
         ));
+    }
+
+    #[test]
+    fn round_rounds_half_away_from_zero_including_negatives() {
+        assert_eq!(number("ROUND(1.5)").number, 2.0);
+        assert_eq!(number("ROUND(2.5)").number, 3.0);
+        assert_eq!(number("ROUND(0.4)").number, 0.0);
+        assert_eq!(number("ROUND(-0.4)").number, 0.0);
+        assert_eq!(number("ROUND(-1.5)").number, -2.0);
+        assert_eq!(number("ROUND(-2.5)").number, -3.0);
+    }
+
+    /// Pins each directional rounding function's own behaviour so a later change to `ROUND`
+    /// cannot accidentally collapse it onto `INT`, `TRUNC`, `FLOOR`, `CEILING`, or `SIGN`.
+    #[test]
+    fn directional_rounding_siblings_keep_their_own_behaviour() {
+        assert_eq!(number("INT(1.9)").number, 1.0);
+        assert_eq!(number("INT(-1.1)").number, -2.0);
+        assert_eq!(number("TRUNC(1.9)").number, 1.0);
+        assert_eq!(number("TRUNC(-1.9)").number, -1.0);
+        assert_eq!(number("FLOOR(1.9)").number, 1.0);
+        assert_eq!(number("FLOOR(-1.1)").number, -2.0);
+        assert_eq!(number("CEILING(1.1)").number, 2.0);
+        assert_eq!(number("CEILING(-1.9)").number, -1.0);
+        assert_eq!(number("SIGN(5)").number, 1.0);
+        assert_eq!(number("SIGN(-5)").number, -1.0);
     }
 
     fn color(formula: &str, theme: Option<&Theme>) -> Color {

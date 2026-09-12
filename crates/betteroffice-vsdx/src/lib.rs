@@ -110,95 +110,29 @@ impl Diagram {
             .save()
             .map_err(|error| Error::Policy(error.to_string()))
     }
-    /// Applies semantic and structural edits as one all-or-nothing save request.
+    /// Applies semantic and structural edits as one all-or-nothing save request. Cell edits are
+    /// applied first so a structural deletion is authorized against the locks they leave in
+    /// effect, not the locks the diagram had before the batch started.
     pub fn save_edits(
         &self,
         cell_edits: &[SemanticCellEdit],
         structural_edits: &[StructuralEdit],
     ) -> Result<Vec<u8>> {
-        let resolved = self.resolve_cell_edits(cell_edits)?;
-        self.authorize_structural_edits(structural_edits)?;
-        let cell_saved = vsdx_parse::save_semantic_cell_edits(&self.package, &resolved)?;
-        let updated = vsdx_parse::parse_vsdx(&cell_saved)?;
+        let (bytes, package) = self.apply_cell_edits(cell_edits)?;
+        authorize_structural_edits(&package, structural_edits)?;
+        if structural_edits.is_empty() {
+            return Ok(bytes);
+        }
         Ok(vsdx_parse::save_structural_edits(
-            &updated,
+            &package,
             structural_edits,
         )?)
     }
 
-    fn resolve_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<SemanticCellEdit>> {
-        let context = PackageMutationContext {
-            package: &self.package,
-        };
-        let mut resolved = Vec::with_capacity(edits.len());
-        for edit in edits {
-            if edit.value.is_some() {
-                return Err(Error::Policy(
-                    "semantic edits write formulas; raw Cell@V edits are not allowed".to_owned(),
-                ));
-            }
-            let formula = edit
-                .formula
-                .clone()
-                .ok_or_else(|| Error::Policy("semantic edits require a formula".to_owned()))?;
-            match decide_mutation(
-                &context,
-                edit.locator.clone(),
-                edit.gesture,
-                formula,
-                &ParseLimits::default(),
-            ) {
-                MutationOutcome::Allowed { target, formula } => {
-                    let value = context.evaluate_cache(&target, &formula)?;
-                    resolved.push(SemanticCellEdit {
-                        locator: target,
-                        gesture: edit.gesture,
-                        formula: Some(formula),
-                        value,
-                    });
-                }
-                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
-                    return Err(Error::Policy(reason));
-                }
-            }
-        }
-        Ok(resolved)
-    }
     /// Deletes shapes after enforcing their effective LockDelete cells.
     pub fn save_structural_edits(&self, edits: &[StructuralEdit]) -> Result<Vec<u8>> {
-        self.authorize_structural_edits(edits)?;
+        authorize_structural_edits(&self.package, edits)?;
         Ok(vsdx_parse::save_structural_edits(&self.package, edits)?)
-    }
-
-    fn authorize_structural_edits(&self, edits: &[StructuralEdit]) -> Result<()> {
-        let context = PackageMutationContext {
-            package: &self.package,
-        };
-        for edit in edits {
-            let StructuralEdit::DeleteShape { page_id, shape_id } = edit else {
-                continue;
-            };
-            let locator = CellLocator {
-                sheet: CellSheet::Page(*page_id),
-                shape_id: Some(*shape_id),
-                section: None,
-                row: None,
-                cell_name: "LockDelete".to_owned(),
-            };
-            match decide_mutation(
-                &context,
-                locator,
-                MutationGesture::Delete,
-                "0".to_owned(),
-                &ParseLimits::default(),
-            ) {
-                MutationOutcome::Allowed { .. } => {}
-                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
-                    return Err(Error::Policy(reason));
-                }
-            }
-        }
-        Ok(())
     }
     pub fn pages(&self) -> impl Iterator<Item = Page<'_>> {
         self.package.page_contents.keys().map(|part| Page {
@@ -206,6 +140,35 @@ impl Diagram {
             part,
         })
     }
+}
+
+fn authorize_structural_edits(package: &VsdxPackage, edits: &[StructuralEdit]) -> Result<()> {
+    let context = PackageMutationContext { package };
+    for edit in edits {
+        let StructuralEdit::DeleteShape { page_id, shape_id } = edit else {
+            continue;
+        };
+        let locator = CellLocator {
+            sheet: CellSheet::Page(*page_id),
+            shape_id: Some(*shape_id),
+            section: None,
+            row: None,
+            cell_name: "LockDelete".to_owned(),
+        };
+        match decide_mutation(
+            &context,
+            locator,
+            MutationGesture::Delete,
+            "0".to_owned(),
+            &ParseLimits::default(),
+        ) {
+            MutationOutcome::Allowed { .. } => {}
+            MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                return Err(Error::Policy(reason));
+            }
+        }
+    }
+    Ok(())
 }
 
 struct PackageMutationContext<'a> {
