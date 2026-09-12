@@ -109,7 +109,7 @@ impl StoryParser<'_, '_> {
         let mut records: Vec<FieldRecord> = Vec::new();
         let mut open_fields: Vec<OpenField> = Vec::new();
 
-        for child in parent.child_elements() {
+        for child in transparent_children(parent, false) {
             let recognized = matches!(
                 child.local_name(),
                 "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
@@ -245,7 +245,10 @@ impl StoryParser<'_, '_> {
             column_widths: parse_table_grid(element.child("w", "tblGrid")),
             rows: Vec::new(),
         };
-        for row in element.children_named("w", "tr") {
+        for row in transparent_children(element, true)
+            .into_iter()
+            .filter(|row| row.matches_name("w", "tr"))
+        {
             self.budget.charge_table_row(self.part)?;
             table
                 .rows
@@ -270,7 +273,10 @@ impl StoryParser<'_, '_> {
             formatting,
             cells: Vec::new(),
         };
-        for cell in element.children_named("w", "tc") {
+        for cell in transparent_children(element, true)
+            .into_iter()
+            .filter(|cell| cell.matches_name("w", "tc"))
+        {
             self.budget.charge_table_cell(self.part)?;
             row.cells
                 .push(self.parse_table_cell(cell, depth, in_header_footer)?);
@@ -313,8 +319,8 @@ impl StoryParser<'_, '_> {
             return Ok(());
         }
         let mut run_index = 0usize;
-        for run in source
-            .child_elements()
+        for run in transparent_children(source, false)
+            .into_iter()
             .filter(|child| child.local_name() == "r")
         {
             for child in run.child_elements() {
@@ -416,6 +422,32 @@ impl StoryParser<'_, '_> {
             });
         }
         Ok(())
+    }
+}
+
+/// `parent`'s children in document order, descending through `w:customXml`
+/// and `w:smartTag` wrappers, and through `w:sdt`/`w:sdtContent` when `through_sdt`.
+pub(crate) fn transparent_children(parent: &XmlElement, through_sdt: bool) -> Vec<&XmlElement> {
+    let mut children = Vec::new();
+    collect_transparent_children(parent, through_sdt, &mut children);
+    children
+}
+
+fn collect_transparent_children<'a>(
+    parent: &'a XmlElement,
+    through_sdt: bool,
+    children: &mut Vec<&'a XmlElement>,
+) {
+    for child in parent.child_elements() {
+        if child.matches_name("w", "customXml") || child.matches_name("w", "smartTag") {
+            collect_transparent_children(child, through_sdt, children);
+        } else if through_sdt && child.matches_name("w", "sdt") {
+            if let Some(content) = child.child("w", "sdtContent") {
+                collect_transparent_children(content, through_sdt, children);
+            }
+        } else {
+            children.push(child);
+        }
     }
 }
 
@@ -834,6 +866,36 @@ mod tests {
     }
 
     #[test]
+    fn text_boxes_inside_wrapped_runs_are_enriched() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w" xmlns:wp="wp" xmlns:a="a" xmlns:wps="wps"><w:p>
+              <w:r><w:t>lead</w:t></w:r>
+              <w:smartTag w:element="place"><w:r><w:drawing>
+                <wp:inline><wp:extent cx="914400" cy="457200"/><a:graphic><a:graphicData><wps:wsp>
+                  <wps:txbx><w:txbxContent><w:p><w:r><w:t>boxed</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                </wps:wsp></a:graphicData></a:graphic></wp:inline>
+              </w:drawing></w:r></w:smartTag>
+            </w:p></w:body>"#,
+        );
+        let BlockContent::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[1] else {
+            panic!("wrapped run")
+        };
+        let shape = run
+            .content
+            .iter()
+            .find_map(|content| match content {
+                RunContent::Shape { shape } => Some(shape.as_ref()),
+                _ => None,
+            })
+            .expect("text box shape");
+        let content = &shape.text_body.as_ref().expect("text body").content;
+        assert_eq!(content[0]["content"][0]["content"][0]["text"], "boxed");
+    }
+
+    #[test]
     fn cell_story_keeps_block_field_ownership_and_order() {
         let blocks = parse(
             r#"<w:body xmlns:w="w"><w:tbl><w:tr><w:tc>
@@ -871,6 +933,58 @@ mod tests {
                 .len(),
             3
         );
+    }
+
+    #[test]
+    fn body_and_cell_level_custom_xml_wrappers_are_transparent() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w">
+              <w:customXml w:uri="urn:x" w:element="section">
+                <w:customXmlPr><w:placeholder w:val="p"/></w:customXmlPr>
+                <w:p><w:r><w:t>wrapped</w:t></w:r></w:p>
+                <w:tbl><w:tr><w:tc>
+                  <w:customXml w:element="cell"><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:customXml>
+                </w:tc></w:tr></w:tbl>
+              </w:customXml>
+            </w:body>"#,
+        );
+        assert_eq!(blocks.len(), 2);
+        let BlockContent::Paragraph(paragraph) = &blocks[0] else {
+            panic!("paragraph")
+        };
+        let ParagraphContent::Inline(InlineNode::Run(run)) = &paragraph.content[0] else {
+            panic!("run")
+        };
+        assert!(matches!(
+            &run.content[0],
+            RunContent::Text { text, .. } if text == "wrapped"
+        ));
+        let BlockContent::Table(table) = &blocks[1] else {
+            panic!("table")
+        };
+        assert_eq!(crate::table::get_table_text(table), "cell");
+    }
+
+    #[test]
+    fn sdt_and_custom_xml_wrapped_rows_and_cells_are_flattened() {
+        let blocks = parse(
+            r#"<w:body xmlns:w="w"><w:tbl>
+              <w:sdt><w:sdtPr><w:alias w:val="row"/></w:sdtPr><w:sdtContent>
+                <w:tr>
+                  <w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>
+                  <w:sdt><w:sdtContent><w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc></w:sdtContent></w:sdt>
+                  <w:customXml w:element="cell"><w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:customXml>
+                </w:tr>
+              </w:sdtContent></w:sdt>
+              <w:customXml w:element="row"><w:tr><w:tc><w:p><w:r><w:t>d</w:t></w:r></w:p></w:tc></w:tr></w:customXml>
+            </w:tbl></w:body>"#,
+        );
+        let BlockContent::Table(table) = &blocks[0] else {
+            panic!("table")
+        };
+        assert_eq!(table.rows.len(), 2);
+        assert_eq!(table.rows[0].cells.len(), 3);
+        assert_eq!(crate::table::get_table_text(table), "a\tb\tc\nd");
     }
 
     #[test]

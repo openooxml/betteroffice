@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::block::transparent_children;
 use crate::chart::{ChartPartsMap, DrawingChart, parse_chart_from_drawing};
 use crate::formatting::{
     ParagraphFormatting, ParagraphFrame, SpacingExplicit, parse_paragraph_properties,
@@ -442,7 +443,7 @@ fn parse_paragraph_contents(
     };
     let mut output = Vec::new();
     let mut fields: Vec<OpenComplexField> = Vec::new();
-    for child in element.child_elements() {
+    for child in transparent_children(element, false) {
         match child.local_name() {
             "r" => {
                 let normalized;
@@ -615,7 +616,7 @@ fn parse_paragraph_contents(
                 parse_math(child),
             ))),
             // Paragraph properties are handled by the orchestrator.
-            "pPr" | "proofErr" | "permStart" | "permEnd" | "customXml" | "smartTag" => {}
+            "pPr" | "proofErr" | "permStart" | "permEnd" => {}
             _ => {
                 if let Some(node) = crate::inline::raw_foreign_inline(child) {
                     output.push(ParagraphContent::Inline(node));
@@ -1597,6 +1598,54 @@ mod tests {
             panic!("bookmark end")
         };
         assert_eq!(end.position.as_ref().unwrap().offset, Some(5.0));
+    }
+
+    fn run_texts(paragraph: &Paragraph) -> Vec<&str> {
+        paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => {
+                    run.content.iter().find_map(|content| match content {
+                        RunContent::Text { text, .. } => Some(text.as_str()),
+                        _ => None,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn smart_tag_wrapped_runs_keep_their_text() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>in </w:t></w:r>
+              <w:smartTag w:uri="urn:schemas-microsoft-com:office:smarttags" w:element="place">
+                <w:smartTagPr><w:attr w:name="k" w:val="v"/></w:smartTagPr>
+                <w:r><w:t>Paris</w:t></w:r>
+              </w:smartTag>
+            </w:p>"#,
+        );
+        assert_eq!(run_texts(&paragraph), ["in ", "Paris"]);
+        assert_eq!(paragraph.content.len(), 2);
+    }
+
+    #[test]
+    fn custom_xml_wrapped_runs_and_nested_smart_tags_keep_document_order() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w">
+              <w:r><w:t>a</w:t></w:r>
+              <w:customXml w:uri="urn:x" w:element="e">
+                <w:customXmlPr><w:placeholder w:val="p"/></w:customXmlPr>
+                <w:r><w:t>b</w:t></w:r>
+                <w:smartTag w:element="date"><w:r><w:t>c</w:t></w:r></w:smartTag>
+              </w:customXml>
+              <w:r><w:t>d</w:t></w:r>
+            </w:p>"#,
+        );
+        assert_eq!(run_texts(&paragraph), ["a", "b", "c", "d"]);
+        assert_eq!(paragraph.content.len(), 4);
     }
 
     #[test]

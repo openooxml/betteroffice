@@ -211,3 +211,49 @@ fn unmodelled_xml_bytes_survive_without_requiring_oracle_parsing() {
         assert!(roundtrip_report(&parts, &after).is_empty());
     }
 }
+
+fn block_texts(parts: &Parts) -> Vec<String> {
+    semantic_digest(parts)
+        .unwrap()
+        .stories
+        .into_iter()
+        .flat_map(|story| story.blocks)
+        .map(|block| block.text)
+        .collect()
+}
+
+#[test]
+fn transparent_wrappers_lose_only_themselves_on_the_round_trip() {
+    let original = with_document_xml(&sample_docx(), |xml| {
+        xml.replace(
+            "<w:r><w:t>DOCX</w:t></w:r>",
+            r#"<w:smartTag w:element="place"><w:r><w:t>DOCX</w:t></w:r></w:smartTag>"#,
+        )
+        .replace(
+            "<w:tbl>",
+            r#"<w:customXml w:element="block"><w:p><w:r><w:t>Custom</w:t></w:r></w:p></w:customXml><w:tbl>"#,
+        )
+        .replace(
+            "<w:tr><w:tc>",
+            "<w:sdt><w:sdtContent><w:tr><w:sdt><w:sdtContent><w:tc>",
+        )
+        .replace(
+            "</w:tc></w:tr>",
+            "</w:tc></w:sdtContent></w:sdt></w:tr></w:sdtContent></w:sdt>",
+        )
+    });
+    let saved = save_unedited(&original);
+    let before = parts_of(&original);
+    let after = parts_of(&saved);
+    let wrappers = ["smartTag", "customXml", "sdt", "sdtContent"];
+    let lost = losses(
+        &element_census(&before).unwrap(),
+        &element_census(&after).unwrap(),
+    );
+    assert!(
+        lost.iter()
+            .all(|loss| wrappers.contains(&loss.local.as_str())),
+        "{lost:?}"
+    );
+    assert_eq!(block_texts(&before), block_texts(&after));
+}
