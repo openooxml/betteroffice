@@ -1,0 +1,21 @@
+[package]
+name = "betteroffice-vsdx-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Bounded Visio XML parsing and part-preserving VSDX package serialization."
+readme = "README.md"
+keywords = ["vsdx", "visio", "ooxml"]
+categories = ["parser-implementations", "encoding"]
+
+[lib]
+name = "vsdx_parse"
+
+[dependencies]
+ooxml-opc.workspace = true
+quick-xml = { version = "0.41", features = ["encoding"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
