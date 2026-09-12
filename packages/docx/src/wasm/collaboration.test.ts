@@ -232,7 +232,7 @@ describe('docx wasm collaboration', () => {
     const [left, right] = await seededPair();
     const connection = connectPair(left, right);
     try {
-      left.beginUndoCapture('body');
+      left.beginUndoCapture();
       const rightPara = right.paragraphs('body')[0];
       right.insertText({ story: 'body', paraId: rightPara.paraId, offset: 0 }, 'REMOTE ');
       const leftPara = left.paragraphs('body')[0];

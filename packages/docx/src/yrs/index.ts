@@ -708,7 +708,7 @@ export interface YrsSession extends CollaborationReplica {
   /** Applies a remote/incremental yrs v1 update. */
   applyUpdate(update: Uint8Array): CollaborationTextInsertion | null;
   /** Apply a same-user worker update under the local undo origin. @internal */
-  applyLocalUpdate(update: Uint8Array, story: string): void;
+  applyLocalUpdate(update: Uint8Array): void;
   /**
    * Subscribes to every committed transaction's v1 update (local AND
    * applied-remote). Returns an unsubscribe function.
@@ -735,20 +735,15 @@ export interface YrsSession extends CollaborationReplica {
   setCellSelection(range: YrsTableRange): void;
   /** Resolve the current sticky cell selection, or null before initialization. */
   cellSelection(): YrsTableRange | null;
-  /** Lazily begin local-origin undo capture after import/seeding has completed. */
-  beginUndoCapture(story: string, includeTableStories?: boolean): void;
-  /** Story owned by the current undo/redo scope, or null before the first local edit. */
-  historyStory(): string | null;
-  /** Coalesce the stack entries added since `startDepth` into one host undo intent. */
-  markUndoGroup(startDepth: number): void;
+  /** Begin local-origin undo capture once import/seeding has completed. */
+  beginUndoCapture(): void;
+  /** Stories changed by the latest undo or redo, sorted. */
+  historyStories(): string[];
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
   undo(): boolean;
   redo(): boolean;
   canUndo(): boolean;
   canRedo(): boolean;
-  /** Current local undo/redo stack sizes (zero before tracking starts). */
-  undoDepth(): number;
-  redoDepth(): number;
 
   /** Adds a story with one paragraph; the receipt carries its paraId. */
   createStory(
@@ -994,11 +989,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let nextListenerId = 0;
   let wasmCallDepth = 0;
   let flushingUpdates = false;
-  let undoStory: string | null = null;
+  let undoTracked = false;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
-  const undoGroups = new Map<number, number>();
-  const redoGroups = new Map<number, number>();
   const residentFonts: Uint8Array[] = [];
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
@@ -1054,43 +1047,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         }
       : null;
 
-  const ensureUndo = (story: string): void => {
-    if (undoStory === story) return;
-    session.track_undo(story);
-    undoStory = story;
-  };
-
-  const ensureTableUndo = (story: string): void => {
-    const scope = `table:${story}`;
-    if (undoStory === scope) return;
-    session.track_table_undo(story);
-    undoStory = scope;
-  };
-
-  const storyForEmbedId = (embedId: string): string | null => {
-    const matches = (value: unknown): boolean =>
-      (typeof value === 'string' && value === embedId) ||
-      (typeof value === 'number' && Number.isFinite(value) && String(value) === embedId);
-    for (const story of session.story_ids()) {
-      const segments = JSON.parse(session.story_segments(story)) as YrsStorySegment[];
-      if (
-        segments.some(
-          (segment) =>
-            segment.kind === 'embed' &&
-            (matches(segment.payload.embedId) ||
-              matches(segment.payload.id) ||
-              matches(segment.payload.rId))
-        )
-      ) {
-        return story;
-      }
+  const ensureUndo = (targetStory?: string): void => {
+    if (!undoTracked) {
+      session.track_undo();
+      undoTracked = true;
     }
-    return null;
-  };
-
-  const ensureEmbedUndo = (embedId: string): void => {
-    const story = storyForEmbedId(embedId);
-    if (story) ensureUndo(story);
+    if (targetStory !== undefined) session.select_story(targetStory);
   };
 
   const ensureObserver = () => {
@@ -1186,25 +1148,21 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     residentCaretSnapshot: () =>
       JSON.parse(session.resident_caret_snapshot_json()) as YrsResidentCaretSnapshot,
     applyInput: (text, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
       return mutate(() => session.apply_input(text, expectedFrameEpoch));
     },
     applyDelete: (direction, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
       return mutate(() => session.apply_delete(direction, expectedFrameEpoch));
     },
     applyInputProfiled: (text, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
       const frame = mutate(() => session.apply_input_profiled(text, expectedFrameEpoch));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
     },
     applyDeleteProfiled: (direction, expectedFrameEpoch) => {
-      const story = cachedSelection?.head.story ?? 'body';
-      ensureUndo(story);
+      ensureUndo();
       const frame = mutate(() => session.apply_delete_profiled(direction, expectedFrameEpoch));
       const profile = JSON.parse(session.apply_input_profile_json()) as YrsEngineApplyProfile;
       return { frame, profile };
@@ -1278,8 +1236,8 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
             session.apply_update_with_inference(update)
           ) as CollaborationTextInsertion | null
       ),
-    applyLocalUpdate: (update, story) => {
-      ensureUndo(story);
+    applyLocalUpdate: (update) => {
+      ensureUndo();
       mutate(() => session.apply_local_update(update));
     },
     onUpdate: (listener) => {
@@ -1348,44 +1306,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     },
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
-    beginUndoCapture: (story, includeTableStories = false) =>
-      includeTableStories ? ensureTableUndo(story) : ensureUndo(story),
-    historyStory: () =>
-      undoStory?.startsWith('table:') ? undoStory.slice('table:'.length) : undoStory,
-    markUndoGroup: (startDepth) => {
-      const endDepth = session.undo_depth();
-      const size = Math.max(0, endDepth - startDepth);
-      if (size > 1) undoGroups.set(endDepth, size);
-      redoGroups.clear();
-    },
-    undo: () =>
-      mutate(() => {
-        const depth = session.undo_depth();
-        const count = undoGroups.get(depth) ?? 1;
-        let changed = false;
-        for (let index = 0; index < count; index += 1) changed = session.undo() || changed;
-        if (changed && count > 1) {
-          undoGroups.delete(depth);
-          redoGroups.set(session.redo_depth(), count);
-        }
-        return changed;
-      }),
-    redo: () =>
-      mutate(() => {
-        const depth = session.redo_depth();
-        const count = redoGroups.get(depth) ?? 1;
-        let changed = false;
-        for (let index = 0; index < count; index += 1) changed = session.redo() || changed;
-        if (changed && count > 1) {
-          redoGroups.delete(depth);
-          undoGroups.set(session.undo_depth(), count);
-        }
-        return changed;
-      }),
+    beginUndoCapture: ensureUndo,
+    historyStories: () => session.history_stories(),
+    undo: () => mutate(() => session.undo()),
+    redo: () => mutate(() => session.redo()),
     canUndo: () => session.can_undo(),
     canRedo: () => session.can_redo(),
-    undoDepth: () => session.undo_depth(),
-    redoDepth: () => session.redo_depth(),
 
     createStory: (storyId, initialText, pStyle = 'Normal', alignment = 'left') =>
       mutate(
@@ -1396,7 +1322,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       ),
     deleteStory: (storyId) => mutate(() => session.delete_story(storyId)),
     insertTable: (at, rows, columns, suggesting) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1413,7 +1339,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     insertRow: (at, side, suggesting) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1427,14 +1353,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     insertColumn: (at, side) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
           JSON.parse(session.insert_column(JSON.stringify(at), side === 'right')) as YrsTableReceipt
       );
     },
     deleteRow: (range, suggesting) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1443,31 +1369,31 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     deleteColumn: (range) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () => JSON.parse(session.delete_column(JSON.stringify(range))) as YrsTableReceipt
       );
     },
     deleteTable: (table) => {
-      ensureTableUndo(table.story);
+      ensureUndo(table.story);
       return mutate(
         () => JSON.parse(session.delete_table(JSON.stringify(table))) as YrsTableReceipt
       );
     },
     mergeCells: (range) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () => JSON.parse(session.merge_cells(JSON.stringify(range))) as YrsTableReceipt
       );
     },
     splitCell: (at, rows, columns) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () => JSON.parse(session.split_cell(JSON.stringify(at), rows, columns)) as YrsTableReceipt
       );
     },
     setCellShading: (range, color) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1476,7 +1402,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     setCellTextFormat: (range, patch) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1485,7 +1411,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     setCellBorders: (range, borders) => {
-      ensureTableUndo(range.anchor.story);
+      ensureUndo(range.anchor.story);
       return mutate(
         () =>
           JSON.parse(
@@ -1494,14 +1420,14 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     setColumnWidth: (at, widthTwips) => {
-      ensureTableUndo(at.story);
+      ensureUndo(at.story);
       return mutate(
         () =>
           JSON.parse(session.set_column_width(JSON.stringify(at), widthTwips)) as YrsTableReceipt
       );
     },
     setTableWidth: (table, widthTwips) => {
-      ensureTableUndo(table.story);
+      ensureUndo(table.story);
       return mutate(
         () =>
           JSON.parse(session.set_table_width(JSON.stringify(table), widthTwips)) as YrsTableReceipt
@@ -1680,7 +1606,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     setContentControlValue: (embedId, value) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
       mutate(() => session.set_content_control_value(embedId, JSON.stringify(value)));
     },
     setContentControlValueAt: (at, value) => {
@@ -1690,11 +1616,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       );
     },
     clearContentControlValue: (embedId) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
       mutate(() => session.clear_content_control_value(embedId));
     },
     setImageGeometry: (embedId, geometry) => {
-      ensureEmbedUndo(embedId);
+      ensureUndo();
       mutate(() => session.set_image_geometry(embedId, JSON.stringify(geometry)));
     },
     insertPageBreak: (at) => {

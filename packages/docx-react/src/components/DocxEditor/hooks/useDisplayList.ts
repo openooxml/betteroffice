@@ -400,7 +400,7 @@ export function useRustDisplayList(
         const delta = decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
         try {
-          for (const update of result.updates) worker.engine.applyLocalUpdate(update, 'body');
+          for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }

@@ -581,14 +581,14 @@ export function performYrsHistoryAction(
   session: YrsSession,
   redo: boolean
 ): YrsHistoryActionResult {
-  const story = session.historyStory();
   const before = session.selection();
   const cell = before ? yrsCellLocFromStory(before.head.story) : null;
   const nearby = cell ? yrsSelectionNearTable(session, cell) : null;
   if (nearby) session.setSelection(nearby);
 
   const changed = redo ? session.redo() : session.undo();
-  if (!changed || !before || !nearby) return { changed, story: changed ? story : null };
+  const story = changed ? (session.historyStories()[0] ?? null) : null;
+  if (!changed || !before || !nearby) return { changed, story };
 
   const restoredCell = yrsCellLocFromStory(before.head.story);
   const cellIsLive =

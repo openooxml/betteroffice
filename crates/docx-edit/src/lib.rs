@@ -515,17 +515,6 @@ impl EditingDoc {
             .collect()
     }
 
-    /// Builds a local-origin undo manager scoped to one story.
-    ///
-    /// Routed through the WASM-safe constructor in `crate::undo` — `UndoManager::new` and
-    /// `Options::default()` do not exist on `wasm32-unknown-unknown`.
-    pub fn undo_manager(&self, story_id: &str) -> EditResult<yrs::undo::UndoManager<()>> {
-        let txn = self.doc.transact();
-        let story = story_ref(&txn, story_id)?;
-        drop(txn);
-        Ok(undo::build_manager(self, &[story], undo::default_clock()))
-    }
-
     pub fn story_len(&self, story_id: &str) -> EditResult<u32> {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
@@ -876,7 +865,7 @@ mod tests {
         worker
             .apply_update_v1(&main.encode_state_as_update_v1())
             .unwrap();
-        let mut undo = main.undo_scope(&["body"]).unwrap();
+        let mut undo = main.undo_manager();
 
         worker
             .insert_text(
@@ -1049,7 +1038,7 @@ mod tests {
         let before_delete = resolved(&a, &comment_id);
         assert_eq!((before_delete.start, before_delete.end), (6, 24));
 
-        let mut undo = a.undo_manager("body").unwrap();
+        let mut undo = a.undo_manager();
         // Delete strictly inside the annotation, leaving both boundary identities alive. yrs can
         // follow ordinary redone chains, but does not promise the exact original side when the
         // boundary item itself is deleted and recreated (and cannot recover it after GC).
@@ -1058,10 +1047,10 @@ mod tests {
         let after_delete = resolved(&a, &comment_id);
         assert_eq!((after_delete.start, after_delete.end), (6, 18));
 
-        assert!(undo.undo_blocking());
+        assert!(undo.undo());
         let after_undo = resolved(&a, &comment_id);
         assert_eq!((after_undo.start, after_undo.end), (6, 24));
-        assert!(undo.redo_blocking());
+        assert!(undo.redo());
         let after_redo = resolved(&a, &comment_id);
         assert_eq!((after_redo.start, after_redo.end), (6, 18));
     }
