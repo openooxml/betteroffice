@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import Link from "next/link";
 import { Logo } from "./components/Logo";
-import { formats } from "../lib/formats";
+import { liveFormats } from "../lib/formats";
 import "./globals.css";
 
 const SITE = "https://demo.betteroffice.dev";
@@ -46,7 +46,7 @@ export default function RootLayout({
               aria-label="Demo formats"
               className="flex items-center gap-5 max-[44rem]:w-full max-[44rem]:justify-between"
             >
-              {formats.map((format) => (
+              {liveFormats.map((format) => (
                 <Link
                   key={format.id}
                   href={`/${format.id}`}

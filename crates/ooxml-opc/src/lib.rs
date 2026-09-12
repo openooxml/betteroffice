@@ -64,6 +64,16 @@ fn normalized_security_path(name: &str) -> Option<String> {
 /// decompression budget and path-traversal guard. Reading is bounded by the
 /// remaining byte budget so a lying size header cannot force unbounded output.
 pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    unzip_parts_with_limits(data, MAX_TOTAL_UNCOMPRESSED_BYTES)
+}
+
+/// As [`unzip_parts`], with a caller-supplied expanded-data budget. The budget only
+/// tightens: it is capped at the container ceiling, never raised above it.
+pub fn unzip_parts_with_limits(
+    data: &[u8],
+    max_expanded_bytes: u64,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let budget = max_expanded_bytes.min(MAX_TOTAL_UNCOMPRESSED_BYTES);
     let mut archive =
         zip::ZipArchive::new(Cursor::new(data)).map_err(|e| format!("bad zip: {e}"))?;
 
@@ -91,7 +101,7 @@ pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         }
 
         // read at most (budget - total) + 1 bytes: one over the limit proves a bomb
-        let remaining = MAX_TOTAL_UNCOMPRESSED_BYTES - total;
+        let remaining = budget - total;
         let mut buf = Vec::new();
         entry
             .by_ref()
@@ -99,9 +109,7 @@ pub fn unzip_parts(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
             .read_to_end(&mut buf)
             .map_err(|e| format!("read failed for {name}: {e}"))?;
         if buf.len() as u64 > remaining {
-            return Err(format!(
-                "inflated size exceeds {MAX_TOTAL_UNCOMPRESSED_BYTES} bytes"
-            ));
+            return Err(format!("inflated size exceeds {budget} bytes"));
         }
         total += buf.len() as u64;
         parts.push((name, buf));
@@ -265,5 +273,24 @@ mod tests {
                 .unwrap_err()
                 .contains("duplicate")
         );
+    }
+
+    #[test]
+    fn caller_budget_only_tightens_the_expanded_data_ceiling() {
+        let mut entries = sample();
+        entries.push(("word/media/filler.bin".into(), vec![0; 4 * 1024 * 1024]));
+        let zipped = rezip_parts(&entries).expect("rezip");
+        assert!(zipped.len() < 64 * 1024, "fixture must stay compressible");
+
+        assert!(
+            unzip_parts_with_limits(&zipped, 1024 * 1024)
+                .unwrap_err()
+                .contains("inflated size exceeds")
+        );
+        assert_eq!(
+            unzip_parts_with_limits(&zipped, MAX_TOTAL_UNCOMPRESSED_BYTES).unwrap(),
+            entries
+        );
+        assert_eq!(unzip_parts_with_limits(&zipped, u64::MAX).unwrap(), entries);
     }
 }

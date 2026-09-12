@@ -61,7 +61,7 @@ const JSON_LD = {
   applicationCategory: "BusinessApplication",
   operatingSystem: "Web",
   description:
-    "The open-source office suite by the OpenOOXML project. DOCX, XLSX and PPTX editors and viewers for React and JavaScript with real-time collaboration, on native OOXML engines written in Rust.",
+    "The open-source office suite by the OpenOOXML project. DOCX, XLSX and PPTX editors and viewers for React and JavaScript, plus VSDX diagram support in development, on native OOXML engines written in Rust.",
   offers: {
     "@type": "Offer",
     price: "0",
@@ -151,7 +151,7 @@ export default function Home() {
                           : "bg-faint"
                       }`}
                     />
-                    {editor.live ? "available" : "coming"}
+                    {editor.live ? "available" : "in development"}
                   </span>
                 </span>
                 <span className="text-[0.8125rem] text-ink">{editor.desc}</span>
@@ -159,12 +159,14 @@ export default function Home() {
                   <span className="rounded border border-line-soft bg-surface px-1.5 py-0.5 font-mono text-[0.7rem] whitespace-nowrap">
                     .{editor.format}
                   </span>
-                  <a
-                    href={`${DEMO}/${editor.format}`}
-                    className={demoLink}
-                  >
-                    demo <ArrowUpRight size={11} strokeWidth={2} />
-                  </a>
+                  {editor.live && (
+                    <a
+                      href={`${DEMO}/${editor.format}`}
+                      className={demoLink}
+                    >
+                      demo <ArrowUpRight size={11} strokeWidth={2} />
+                    </a>
+                  )}
                 </span>
               </article>
             ))}

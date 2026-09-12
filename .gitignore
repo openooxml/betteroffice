@@ -17,6 +17,8 @@ packages/xlsx/src/wasm/generated/*.wasm
 packages/xlsx/src/wasm/generated/*.js
 packages/pptx/src/wasm/generated/*.wasm
 packages/pptx/src/wasm/generated/*.js
+packages/vsdx/src/wasm/generated/*.wasm
+packages/vsdx/src/wasm/generated/*.js
 next-env.d.ts
 cloudflare-env.d.ts
 .DS_Store

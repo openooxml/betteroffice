@@ -6,7 +6,7 @@ NO inline comments unless the code is not understandable without them. Docstring
 
 ## Titles
 
-PR and commit titles use scoped conventional commits: `type(scope): summary`. Scope is the affected area — a format (`docx`, `xlsx`, `pptx`), a shared crate (`opc`, `text`), or an area (`ci`, `deps`, `web`, `agents`). Keep the summary concise and imperative.
+PR and commit titles use scoped conventional commits: `type(scope): summary`. Scope is the affected area — a format (`docx`, `xlsx`, `pptx`, `vsdx`), a shared crate (`opc`, `text`), or an area (`ci`, `deps`, `web`, `agents`). Keep the summary concise and imperative.
 
 Examples: `feat(docx): layout engine`, `fix(xlsx): formula precedence`, `ci(deps): bump actions/checkout`.
 

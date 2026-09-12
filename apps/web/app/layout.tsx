@@ -18,7 +18,7 @@ export const metadata: Metadata = {
     template: "%s — BetterOffice",
   },
   description:
-    "Apache-2.0 DOCX, XLSX and PPTX editors and viewers for React and plain JavaScript, by the OpenOOXML project. Native OOXML engines written in Rust, compiled to WebAssembly, with real-time collaboration in the engine.",
+    "Apache-2.0 DOCX, XLSX and PPTX editors and viewers for React and plain JavaScript, plus VSDX diagram support in development, by the OpenOOXML project. Native OOXML engines written in Rust and compiled to WebAssembly.",
   keywords: [
     "BetterOffice",
     "open-source office suite",
@@ -36,6 +36,8 @@ export const metadata: Metadata = {
     "javascript spreadsheet library",
     "PPTX editor",
     "react pptx viewer",
+    "VSDX diagram engine",
+    "VSDX parser",
     "Word-compatible editor",
     "Excel-compatible spreadsheet",
     "OOXML",

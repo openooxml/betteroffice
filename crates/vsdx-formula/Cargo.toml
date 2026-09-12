@@ -1,0 +1,15 @@
+[package]
+name = "betteroffice-vsdx-formula"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+publish = ["crates-io"]
+description = "Dependency-leaf ShapeSheet formula parser and numeric evaluator."
+readme = "README.md"
+keywords = ["vsdx", "visio", "shapesheet"]
+categories = ["parser-implementations", "graphics"]
+
+[lib]
+name = "vsdx_formula"

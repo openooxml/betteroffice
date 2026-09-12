@@ -1,7 +1,7 @@
 export type FormatStatus = "live" | "soon";
 
 export interface Format {
-  id: "docx" | "xlsx" | "pptx";
+  id: "docx" | "xlsx" | "pptx" | "vsdx";
   name: string;
   kind: string;
   tagline: string;
@@ -30,8 +30,17 @@ export const formats: Format[] = [
     tagline: "Collaborative slides, shaped and rendered by a native Rust engine.",
     status: "live",
   },
+  {
+    id: "vsdx",
+    name: "Vsdx",
+    kind: ".vsdx diagrams",
+    tagline: "VSDX support is in development.",
+    status: "soon",
+  },
 ];
 
+export const liveFormats = formats.filter((format) => format.status === "live");
+
 export function getFormat(id: string): Format | undefined {
-  return formats.find((f) => f.id === id);
+  return liveFormats.find((format) => format.id === id);
 }
