@@ -1,0 +1,23 @@
+[package]
+name = "betteroffice-fuzz"
+version = "0.0.0"
+publish = false
+license = "Apache-2.0"
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pptx-render = { package = "betteroffice-pptx-render", version = "0.1.0", path = "../crates/pptx-render", features = ["fuzzing"] }
+
+[[bin]]
+name = "metafile-decode"
+path = "fuzz_targets/metafile-decode.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

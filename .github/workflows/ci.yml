@@ -134,6 +134,14 @@ jobs:
           cargo fmt --check --all --manifest-path bindings/Cargo.toml
           cargo clippy --locked --manifest-path bindings/Cargo.toml --workspace --all-targets -- -D warnings
 
+      # fuzz/ is a cargo-fuzz package with its own workspace, so nothing above compiles it or reads its
+      # lockfile. Running it needs nightly; checking it still builds and meets the policy does not.
+      - name: Lint the standalone fuzz package
+        if: steps.ws.outputs.present == 'true'
+        run: |
+          cargo fmt --check --all --manifest-path fuzz/Cargo.toml
+          cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+
       - name: Test
         if: steps.ws.outputs.present == 'true'
         run: cargo test
@@ -155,6 +163,14 @@ jobs:
         if: steps.ws.outputs.present == 'true'
         uses: EmbarkStudios/cargo-deny-action@v2.0.20
         with:
+          command: check bans licenses advisories sources
+
+      - name: License and advisory gate for the fuzz package
+        if: steps.ws.outputs.present == 'true'
+        uses: EmbarkStudios/cargo-deny-action@v2.0.20
+        with:
+          manifest-path: fuzz/Cargo.toml
+          arguments: --all-features --config deny.toml
           command: check bans licenses advisories sources
 
   python:
