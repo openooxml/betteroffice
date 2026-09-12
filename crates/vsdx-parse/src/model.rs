@@ -24,9 +24,7 @@ pub struct VsdxPackage {
     pub face_names: Vec<XmlRecord>,
     pub page_sheets: BTreeMap<u32, Sheet>,
     pub master_sheets: BTreeMap<u32, Sheet>,
-    /// Catalogued Page ID for each page-content part.
     pub page_part_ids: BTreeMap<String, u32>,
-    /// Catalogued Master ID for each master-content part.
     pub master_part_ids: BTreeMap<String, u32>,
     pub page_contents: BTreeMap<String, Sheet>,
     pub master_contents: BTreeMap<String, Sheet>,
