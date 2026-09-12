@@ -237,16 +237,15 @@ describe('typing into a note through the editor path', () => {
       const body = session.paragraphs('body')[0];
       session.setSelection({ story: 'body', paraId: body.paraId, offset: 9 });
       session.insertText(session.selection()!.head, '!');
-      expect(session.historyStory()).toBe('body');
       const afterBodyEdit = yrsToDocument(session, parsed, {
         storyIds: new Set(['body']),
       });
       const note = session.paragraphs('fn:2')[0];
       session.setSelection({ story: 'fn:2', paraId: note.paraId, offset: 0 });
 
-      expect(session.historyStory()).toBe('body');
       expect(session.undo()).toBe(true);
       expect(session.paragraphs('body')[0].text).toBe('Body text');
+      expect(session.historyStories()).toEqual(['body']);
 
       const misattributed = yrsToDocument(session, afterBodyEdit, {
         storyIds: new Set(['fn:2']),
@@ -254,10 +253,8 @@ describe('typing into a note through the editor path', () => {
       const misattributedParts = readDocxContainer(await repackDocx(misattributed));
       expect(rawNoteText(misattributedParts.text('word/document.xml') ?? '')).toBe('Body text!');
 
-      const historyStory = session.historyStory();
-      expect(historyStory).toBe('body');
       const saved = yrsToDocument(session, afterBodyEdit, {
-        storyIds: new Set([historyStory!]),
+        storyIds: new Set(session.historyStories()),
       });
       const savedParts = readDocxContainer(await repackDocx(saved));
       expect(rawNoteText(savedParts.text('word/document.xml') ?? '')).toBe('Body text');

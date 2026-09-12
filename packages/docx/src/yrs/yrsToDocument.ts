@@ -39,6 +39,7 @@ import type {
   MathEquation,
   Image,
   Shape,
+  Chart,
   InlineSdt,
   SdtProperties,
   Comment,
@@ -694,6 +695,18 @@ function storedShape(value: unknown): Shape | undefined {
   }
 }
 
+function chartRunFromPayload(payload: Attrs): Run | null {
+  const json = asString(payload.chartJson);
+  if (!json) return null;
+  try {
+    const chart = JSON.parse(json) as Chart;
+    if (chart?.type !== 'chart' || typeof chart.chartType !== 'string') return null;
+    return { type: 'run', content: [{ type: 'chart', chart }] };
+  } catch {
+    return null;
+  }
+}
+
 function shapeRunFromPayload(payload: Attrs): Run {
   const shape: Shape = storedShape(payload.shapeJson) ?? {
     type: 'shape',
@@ -869,6 +882,8 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
       return imageRunFromPayload(item.payload);
     case 'shape':
       return shapeRunFromPayload(item.payload);
+    case 'chart':
+      return chartRunFromPayload(item.payload);
     case 'field':
       return (
         commentReferenceFromPayload(item.payload) ?? fieldFromPayload(item.payload, item.attributes)
@@ -899,6 +914,8 @@ function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): Parag
   if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     run = shapeRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'chart')
+    run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
   else if (item.kind === 'text') {
     const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
     run = {

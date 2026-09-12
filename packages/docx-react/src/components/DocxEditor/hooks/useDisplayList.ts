@@ -400,7 +400,7 @@ export function useRustDisplayList(
         const delta = decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
         try {
-          for (const update of result.updates) worker.engine.applyLocalUpdate(update, 'body');
+          for (const update of result.updates) worker.engine.applyLocalUpdate(update);
         } finally {
           suppressWorkerInvalidationRef.current -= 1;
         }
@@ -592,7 +592,18 @@ export function useRustDisplayList(
           '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
           nextError
         );
-        workerFallbackEngineRef.current = hostEngine;
+        if (workerFallbackEngineRef.current !== hostEngine) {
+          queryEpochGate.clear();
+          const fallbackSnapshot = {
+            ...snapshotRef.current,
+            frame: null,
+            queries: null,
+            caret: null,
+          };
+          snapshotRef.current = fallbackSnapshot;
+          setSnapshot(fallbackSnapshot);
+          workerFallbackEngineRef.current = hostEngine;
+        }
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;

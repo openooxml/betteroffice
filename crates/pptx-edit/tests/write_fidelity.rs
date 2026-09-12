@@ -1243,3 +1243,238 @@ fn a_minted_comment_part_never_overwrites_another_slides() {
     assert!(texts.contains(&"First slide, new comment."));
     assert_relationships_resolve(&parts(&saved));
 }
+
+#[test]
+fn notes_read_from_an_existing_part_default_to_empty() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    assert_eq!(snapshot.slides[1].notes, "");
+}
+
+#[test]
+fn setting_notes_patches_an_existing_notes_part_in_place() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Remember the demo flow.")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let notes_xml = part_text(&parts(&saved), "ppt/notesSlides/notesSlide1.xml");
+    assert!(notes_xml.contains("Remember the demo flow."));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[1].notes, "Remember the demo flow.");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn setting_notes_mints_a_new_part_for_a_slide_that_has_none() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Line one\nLine two")
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    let notes_xml = part_text(&saved_parts, "ppt/notesSlides/notesSlide2.xml");
+    assert!(notes_xml.contains("Line one"));
+    assert!(notes_xml.contains("Line two"));
+    let slide1_rels = part_text(&saved_parts, "ppt/slides/_rels/slide1.xml.rels");
+    assert!(slide1_rels.contains("relationships/notesSlide"));
+    let content_types = part_text(&saved_parts, "[Content_Types].xml");
+    assert!(content_types.contains("notesSlide2.xml"));
+    let notes_rels = part_text(&saved_parts, "ppt/notesSlides/_rels/notesSlide2.xml.rels");
+    assert!(notes_rels.contains("relationships/slide\""));
+    assert!(notes_rels.contains("Target=\"../slides/slide1.xml\""));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "Line one\nLine two");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn reverting_notes_does_not_mint_a_part() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Temporary note.")
+        .unwrap();
+    session.set_slide_notes(&context(), &slide_id, "").unwrap();
+
+    let saved = session.save().unwrap();
+    let saved_parts = parts(&saved);
+    assert!(!saved_parts.contains_key("ppt/notesSlides/notesSlide2.xml"));
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "");
+    assert_relationships_resolve(&parts(&saved));
+}
+
+#[test]
+fn invalid_notes_leave_state_and_history_unchanged() {
+    let session = open();
+    let before = session.snapshot().unwrap();
+    for text in ["bad\0note", "bad\u{b}note", "bad\u{ffff}note"] {
+        assert!(matches!(
+            session.set_slide_notes(&context(), &before.slides[0].id, text),
+            Err(EditError::InvalidText(_))
+        ));
+        assert_eq!(session.snapshot().unwrap(), before);
+        assert!(!session.can_undo());
+    }
+    assert!(matches!(
+        session.set_slide_notes(&context(), "missing-slide", "notes"),
+        Err(EditError::SlideNotFound(_))
+    ));
+}
+
+#[test]
+fn notes_roundtrip_xml_sensitive_text_and_support_history() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let text = "  <&> \"notes\"\t\r\nSecond line 😀\n";
+    session
+        .set_slide_notes(&context(), &slide_id, text)
+        .unwrap();
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(reopened.snapshot().unwrap().slides[0].notes, text);
+    assert_eq!(
+        parts(&saved)["ppt/slides/slide1.xml"],
+        parts(&fixture(256))["ppt/slides/slide1.xml"]
+    );
+    assert!(session.undo());
+    assert!(session.snapshot().unwrap().slides[0].notes.is_empty());
+    assert!(session.redo());
+    assert_eq!(session.snapshot().unwrap().slides[0].notes, text);
+}
+
+#[test]
+fn clearing_saved_notes_preserves_the_notes_page_and_relationships() {
+    let session = open();
+    let slide_id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &slide_id, "Temporary notes")
+        .unwrap();
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let id = reopened.snapshot().unwrap().slides[1].id.clone();
+    reopened.set_slide_notes(&context(), &id, "").unwrap();
+    let cleared = reopened.save().unwrap();
+    let saved_parts = parts(&saved);
+    let cleared_parts = parts(&cleared);
+    assert_eq!(
+        saved_parts.keys().collect::<Vec<_>>(),
+        cleared_parts.keys().collect::<Vec<_>>()
+    );
+    for (path, bytes) in &saved_parts {
+        if path != "ppt/notesSlides/notesSlide1.xml" {
+            assert_eq!(&cleared_parts[path], bytes, "{path}");
+        }
+    }
+    assert!(
+        DeckSession::open(&cleared, 13)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .slides[1]
+            .notes
+            .is_empty()
+    );
+    assert_relationships_resolve(&cleared_parts);
+}
+
+#[test]
+fn notes_follow_inserted_and_reordered_slides_and_are_deleted_with_them() {
+    let session = open();
+    session.insert_slide(&context(), 1, None).unwrap();
+    let id = session.snapshot().unwrap().slides[1].id.clone();
+    session
+        .set_slide_notes(&context(), &id, "New slide notes")
+        .unwrap();
+    session.move_slide(&context(), &id, 0).unwrap();
+    let saved = session.save().unwrap();
+    assert_relationships_resolve(&parts(&saved));
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    let snapshot = reopened.snapshot().unwrap();
+    assert_eq!(snapshot.slides[0].notes, "New slide notes");
+    assert!(snapshot.slides[1].notes.is_empty());
+    reopened
+        .delete_slide(&context(), &snapshot.slides[0].id)
+        .unwrap();
+    let deleted = reopened.save().unwrap();
+    assert_relationships_resolve(&parts(&deleted));
+    assert!(
+        !parts(&deleted)
+            .values()
+            .any(|bytes| String::from_utf8_lossy(bytes).contains("New slide notes"))
+    );
+}
+
+#[test]
+fn an_older_collaboration_document_recovers_notes_without_resurrecting_cleared_text() {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Any, Doc, Map, Out, ReadTxn, Transact, Update};
+
+    let initial = open();
+    let id = initial.snapshot().unwrap().slides[0].id.clone();
+    initial
+        .set_slide_notes(&context(), &id, "Source notes")
+        .unwrap();
+    let source = initial.save().unwrap();
+    let session = DeckSession::open(&source, 24).unwrap();
+    let id = session.snapshot().unwrap().slides[0].id.clone();
+    let doc = Doc::new();
+    let mut txn = doc.transact_mut();
+    txn.apply_update(Update::decode_v1(&session.encode_state_as_update_v1()).unwrap())
+        .unwrap();
+    let slides = txn.get_map("pptx:slides").unwrap();
+    let slide = slides
+        .get(&txn, &id)
+        .unwrap()
+        .cast::<yrs::MapRef>()
+        .unwrap();
+    slide.remove(&mut txn, "notes");
+    let meta = txn.get_map("pptx:meta").unwrap();
+    let Some(Out::Any(Any::Buffer(bytes))) = meta.get(&txn, "packageJson") else {
+        panic!("package")
+    };
+    let mut package: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    for slide in package["slides"].as_array_mut().unwrap() {
+        slide.as_object_mut().unwrap().remove("notes");
+    }
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(std::sync::Arc::from(serde_json::to_vec(&package).unwrap())),
+    );
+    let update = txn.encode_state_as_update_v1(&Default::default());
+    drop(txn);
+    let restored = DeckSession::open_from_update_with_source(&update, &source, 25).unwrap();
+    assert_eq!(restored.snapshot().unwrap().slides[0].notes, "Source notes");
+    let detached =
+        DeckSession::open_from_update(&restored.encode_state_as_update_v1(), 26).unwrap();
+    assert_eq!(detached.snapshot().unwrap().slides[0].notes, "Source notes");
+    restored.set_slide_notes(&context(), &id, "").unwrap();
+    let cleared = DeckSession::open_from_update_with_source(
+        &restored.encode_state_as_update_v1(),
+        &source,
+        27,
+    )
+    .unwrap();
+    assert!(cleared.snapshot().unwrap().slides[0].notes.is_empty());
+    assert!(
+        DeckSession::open(&cleared.save().unwrap(), 28)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .slides[0]
+            .notes
+            .is_empty()
+    );
+}

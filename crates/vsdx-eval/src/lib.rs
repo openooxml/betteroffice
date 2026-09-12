@@ -1772,6 +1772,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires the private VSDX_CORPUS_DIR corpus"]
     fn corpus_formulas_report_honest_evaluation() {
         let Some(directory) = std::env::var_os("VSDX_CORPUS_DIR") else {
             eprintln!("SKIPPED CORPUS FORMULA REGRESSION: VSDX_CORPUS_DIR is unset");
