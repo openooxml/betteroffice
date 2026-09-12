@@ -33,7 +33,7 @@ describe('VSDX wasm boundary', () => {
 
   test('accepts only v3 display lists', () => {
     const diagram = openDiagram(foundation, { clientId: 9002 });
-    expect(diagram.layoutPage(0).contractVersion).toBe(3);
+    expect(diagram.layoutPage(0).contractVersion).toBe(4);
 
     const layoutPageJson = VsdxRenderer.prototype.layoutPageJson;
     VsdxRenderer.prototype.layoutPageJson = () => JSON.stringify({ contractVersion: 2 });

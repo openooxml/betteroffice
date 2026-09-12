@@ -72,7 +72,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     get clientId() { return wasm(() => doc.clientId); }, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
-    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 3) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
+    layoutPage: pageIndex => { const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex)); if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`); return list; },
     hitTest: (x, y) => json<HitTestResult | null>(() => renderer.hitTestJson(x, y)), mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),

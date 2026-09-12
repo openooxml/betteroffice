@@ -19,7 +19,7 @@ const transform = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('replays primitives in z order and paints placeholders', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
     primitives: [
       { kind: 'placeholder', id: 'late', zOrder: 2, x: 10, y: 10, width: 20, height: 20, reason: 'missing image' },
       { kind: 'shape', id: 'early', zOrder: 1, path: [{ type: 'move', x: 0, y: 0 }, { type: 'line', x: 1, y: 1 }], fill: { kind: 'solid', color: '#000' } },
@@ -38,7 +38,7 @@ test('rejects display-list versions other than v3', async () => {
 test('replays positioned text runs at their line caret positions', async () => {
   const log: string[] = [];
   const list: PageDisplayList = {
-    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
     primitives: [{
       kind: 'textBox', id: 'text', zOrder: 1, x: 1, y: 2, width: 90, height: 80,
       paragraphs: [
@@ -59,7 +59,7 @@ test('paints a rotated text box through its own transform', async () => {
   const log: string[] = [];
   const rotated = { a: 0, b: 1, c: -1, d: 0, e: 10, f: 20 };
   const list: PageDisplayList = {
-    contractVersion: 3, width: 100, height: 100, paintTransform: transform,
+    contractVersion: 4, width: 100, height: 100, paintTransform: transform,
     primitives: [{
       kind: 'textBox', id: 'text', zOrder: 1, x: 0, y: 0, width: 50, height: 20, transform: rotated,
       paragraphs: [{ runs: [{ text: 'turn', family: 'Arial', sizeIn: 12, bold: false, italic: false, underline: false, smallCaps: false, superscript: false, subscript: false, letterSpacing: 0, color: '#111', diagnostics: [] }] }],
