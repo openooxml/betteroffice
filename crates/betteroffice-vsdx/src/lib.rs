@@ -1,5 +1,7 @@
 //! Typed native facade for inspecting VSDX diagrams.
 
+use std::collections::BTreeMap;
+
 use vsdx_eval::{
     DocumentReferences, Evaluation, MutationContext, MutationOutcome, Value, decide_mutation,
     evaluate,
@@ -55,12 +57,92 @@ impl Diagram {
             &resolved,
         )?)
     }
-    /// Saves the formula changes accumulated by a collaborative session.
+    /// Saves the formula changes and the shape additions accumulated by a collaborative session.
     pub fn save_session(&self, session: &vsdx_edit::DiagramSession) -> Result<Vec<u8>> {
-        let edits = session
-            .semantic_cell_edits()
+        let export = session
+            .export()
             .map_err(|error| Error::Policy(error.to_string()))?;
-        self.save_cell_edits(&edits)
+        let additions = export
+            .added_shapes
+            .iter()
+            .map(|shape| StructuralEdit::AddShape {
+                page_id: shape.source_page_id,
+                shape_xml: self.added_shape_xml(shape),
+            })
+            .collect::<Vec<_>>();
+        self.save_edits(&export.cell_edits, &additions)
+    }
+
+    /// Serializes an added shape; `save_structural_edits` rewrites its ID to the next free one.
+    fn added_shape_xml(&self, shape: &vsdx_edit::AddedShape) -> Vec<u8> {
+        let mut xml = String::from("<Shape");
+        if let Some(name) = &shape.name {
+            xml.push_str(&format!(" Name='{}'", escape_attribute(name)));
+        }
+        xml.push('>');
+        let mut sections: BTreeMap<&str, BTreeMap<RowKey, Vec<&vsdx_edit::CellSnapshot>>> =
+            BTreeMap::new();
+        for cell in &shape.cells {
+            match (&cell.locator.section, &cell.locator.row) {
+                (Some(section), Some(row)) => sections
+                    .entry(section)
+                    .or_default()
+                    .entry(RowKey::from(row))
+                    .or_default()
+                    .push(cell),
+                _ => xml.push_str(&self.added_cell_xml(shape.source_page_id, cell)),
+            }
+        }
+        for (section, rows) in sections {
+            xml.push_str(&format!("<Section N='{}'>", escape_attribute(section)));
+            for (row, cells) in rows {
+                xml.push_str(&match row {
+                    RowKey::Index(index) => format!("<Row IX='{index}'>"),
+                    RowKey::Name(name) => format!("<Row N='{}'>", escape_attribute(&name)),
+                });
+                for cell in cells {
+                    xml.push_str(&self.added_cell_xml(shape.source_page_id, cell));
+                }
+                xml.push_str("</Row>");
+            }
+            xml.push_str("</Section>");
+        }
+        xml.push_str("</Shape>");
+        xml.into_bytes()
+    }
+
+    /// Caches the formula in V where the page can evaluate it, falling back to the drafted value.
+    fn added_cell_xml(&self, page_id: u32, cell: &vsdx_edit::CellSnapshot) -> String {
+        let mut xml = format!("<Cell N='{}'", escape_attribute(&cell.name));
+        if let Some(formula) = &cell.formula {
+            xml.push_str(&format!(" F='{}'", escape_attribute(formula)));
+        }
+        let context = PackageMutationContext {
+            package: &self.package,
+        };
+        let value = cell
+            .formula
+            .as_deref()
+            .and_then(|formula| {
+                context
+                    .evaluate_formula(
+                        &CellLocator {
+                            sheet: CellSheet::Page(page_id),
+                            shape_id: None,
+                            section: None,
+                            row: None,
+                            cell_name: cell.name.clone(),
+                        },
+                        formula,
+                    )
+                    .ok()
+            })
+            .or_else(|| cell.value.clone());
+        if let Some(value) = value {
+            xml.push_str(&format!(" V='{}'", escape_attribute(&value)));
+        }
+        xml.push_str("/>");
+        xml
     }
     /// Applies semantic and structural edits as one all-or-nothing save request.
     pub fn save_edits(
@@ -354,6 +436,30 @@ impl MutationContext for PackageMutationContext<'_> {
             _ => Err(format!("cannot evaluate {lock} as a boolean")),
         }
     }
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum RowKey {
+    Index(u32),
+    Name(String),
+}
+
+impl From<&CellRow> for RowKey {
+    fn from(row: &CellRow) -> Self {
+        match row {
+            CellRow::Index(index) => Self::Index(*index),
+            CellRow::Name(name) => Self::Name(name.clone()),
+        }
+    }
+}
+
+fn escape_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\'', "&apos;")
+        .replace('"', "&quot;")
 }
 
 fn sheet_path(package: &VsdxPackage, sheet: &CellSheet) -> std::result::Result<String, String> {

@@ -9,12 +9,14 @@ use yrs::{
 };
 
 use crate::{
-    CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, EditError,
-    EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDraft, ShapeReceipt,
-    ShapeSnapshot,
+    AddedShape, CellFormulaReceipt, CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx,
+    EditError, EditResult, META, PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, SessionExport,
+    ShapeDraft, ShapeReceipt, ShapeSnapshot,
 };
 
 const SCHEMA_VERSION: f64 = 1.0;
+const PACKAGE_ORIGIN: &str = "package";
+const SESSION_ORIGIN: &str = "session";
 
 pub(crate) fn seed_doc(
     doc: &Doc,
@@ -83,6 +85,7 @@ fn seed_shape(
     let map = sheets.insert(txn, id, MapPrelim::default());
     map.insert(txn, "id", id);
     map.insert(txn, "pageId", page_id);
+    map.insert(txn, "origin", PACKAGE_ORIGIN);
     map.insert(txn, "sourceId", shape.id as f64);
     if let Some(parent_id) = parent_id {
         map.insert(txn, "parentId", parent_id);
@@ -222,7 +225,12 @@ impl DiagramSession {
     }
 
     pub fn semantic_cell_edits(&self) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
-        semantic_cell_edits(&self.doc)
+        Ok(export_session(&self.doc)?.cell_edits)
+    }
+
+    /// Partitions the session into the cell edits and the shape additions a save must carry.
+    pub fn export(&self) -> EditResult<SessionExport> {
+        export_session(&self.doc)
     }
 
     pub fn set_cell_formula(
@@ -358,6 +366,8 @@ impl DiagramSession {
             .ok_or_else(|| EditError::InvalidState("missing sheets map".to_owned()))?;
         let shape = sheets.insert(&mut txn, id.as_str(), MapPrelim::default());
         shape.insert(&mut txn, "id", id.as_str());
+        shape.insert(&mut txn, "pageId", page_id);
+        shape.insert(&mut txn, "origin", SESSION_ORIGIN);
         shape.insert(&mut txn, "sourceId", draft.source_id as f64);
         if let Some(name) = &draft.name {
             shape.insert(&mut txn, "name", name.as_str());
@@ -704,20 +714,7 @@ fn snapshot_shape<T: ReadTxn>(
         .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
         as u32;
     let cells = map_map(&shape, txn, "cells")?;
-    let mut snapshots = Vec::new();
-    for (_key, value) in cells.iter(txn) {
-        let Out::YMap(cell) = value else {
-            return Err(EditError::InvalidState("cell is not a map".to_owned()));
-        };
-        let locator = cell_locator(&cell, txn, page_id, source_id)?;
-        snapshots.push(CellSnapshot {
-            name: locator.cell_name.clone(),
-            locator,
-            formula: map_string(&cell, txn, "formula"),
-            value: map_string(&cell, txn, "value"),
-        });
-    }
-    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
+    let snapshots = cell_snapshots(&cells, txn, page_id, source_id)?;
     let mut children = sheets
         .iter(txn)
         .filter_map(|(id, value)| match value {
@@ -740,43 +737,84 @@ fn snapshot_shape<T: ReadTxn>(
     })
 }
 
-fn semantic_cell_edits(doc: &Doc) -> EditResult<Vec<vsdx_parse::SemanticCellEdit>> {
+fn export_session(doc: &Doc) -> EditResult<SessionExport> {
     let txn = doc.transact();
     let pages = required_map(&txn, PAGES)?;
     let sheets = required_map(&txn, SHEETS)?;
-    let mut edits = Vec::new();
+    let mut cell_edits = Vec::new();
+    let mut added_shapes = Vec::new();
     for (page_id, page) in pages.iter(&txn) {
         let Out::YMap(_page) = page else { continue };
         let source_page_id = page_id
             .strip_prefix("page:")
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| EditError::InvalidState("invalid page ID".to_owned()))?;
-        for (_shape_id, shape) in sheets.iter(&txn) {
+        for (shape_id, shape) in sheets.iter(&txn) {
             let Out::YMap(shape) = shape else { continue };
-            if map_string(&shape, &txn, "pageId").as_deref() == Some(page_id) {
-                let source_id = map_number(&shape, &txn, "sourceId")
-                    .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
-                    as u32;
-                let cells = map_map(&shape, &txn, "cells")?;
-                for (_key, value) in cells.iter(&txn) {
-                    let Out::YMap(cell) = value else { continue };
-                    let formula = map_string(&cell, &txn, "formula");
-                    if formula == map_string(&cell, &txn, "baselineFormula") {
-                        continue;
-                    }
-                    let Some(formula) = formula else { continue };
-                    let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
-                    edits.push(vsdx_parse::SemanticCellEdit {
-                        locator: locator.clone(),
-                        gesture: gesture_for_cell(&locator.cell_name),
-                        formula: Some(formula),
-                        value: None,
-                    });
+            if map_string(&shape, &txn, "pageId").as_deref() != Some(page_id) {
+                continue;
+            }
+            let source_id = map_number(&shape, &txn, "sourceId")
+                .ok_or_else(|| EditError::InvalidState("missing source ID".to_owned()))?
+                as u32;
+            let cells = map_map(&shape, &txn, "cells")?;
+            if map_string(&shape, &txn, "origin").as_deref() == Some(SESSION_ORIGIN) {
+                added_shapes.push(AddedShape {
+                    page_id: page_id.to_owned(),
+                    source_page_id,
+                    shape_id: shape_id.to_owned(),
+                    name: map_string(&shape, &txn, "name"),
+                    cells: cell_snapshots(&cells, &txn, source_page_id, source_id)?,
+                });
+                continue;
+            }
+            for (_key, value) in cells.iter(&txn) {
+                let Out::YMap(cell) = value else { continue };
+                let formula = map_string(&cell, &txn, "formula");
+                if formula == map_string(&cell, &txn, "baselineFormula") {
+                    continue;
                 }
+                let Some(formula) = formula else { continue };
+                let locator = cell_locator(&cell, &txn, source_page_id, source_id)?;
+                cell_edits.push(vsdx_parse::SemanticCellEdit {
+                    locator: locator.clone(),
+                    gesture: gesture_for_cell(&locator.cell_name),
+                    formula: Some(formula),
+                    value: None,
+                });
             }
         }
     }
-    Ok(edits)
+    added_shapes.sort_by(|left, right| {
+        (&left.page_id, &left.shape_id).cmp(&(&right.page_id, &right.shape_id))
+    });
+    Ok(SessionExport {
+        cell_edits,
+        added_shapes,
+    })
+}
+
+fn cell_snapshots<T: ReadTxn>(
+    cells: &MapRef,
+    txn: &T,
+    page_id: u32,
+    shape_id: u32,
+) -> EditResult<Vec<CellSnapshot>> {
+    let mut snapshots = Vec::new();
+    for (_key, value) in cells.iter(txn) {
+        let Out::YMap(cell) = value else {
+            return Err(EditError::InvalidState("cell is not a map".to_owned()));
+        };
+        let locator = cell_locator(&cell, txn, page_id, shape_id)?;
+        snapshots.push(CellSnapshot {
+            name: locator.cell_name.clone(),
+            locator,
+            formula: map_string(&cell, txn, "formula"),
+            value: map_string(&cell, txn, "value"),
+        });
+    }
+    snapshots.sort_by_key(|cell| locator_key(&cell.locator));
+    Ok(snapshots)
 }
 
 fn cell_map(
