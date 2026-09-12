@@ -32,10 +32,10 @@ export const formats: Format[] = [
   },
   {
     id: "vsdx",
-    name: "Vsdx",
+    name: "VSDX",
     kind: ".vsdx diagrams",
-    tagline: "VSDX support is in development.",
-    status: "soon",
+    tagline: "Visio diagrams, parsed and rendered by a native Rust engine.",
+    status: "live",
   },
 ];
 

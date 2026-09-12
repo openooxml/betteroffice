@@ -21,6 +21,8 @@
         "@betteroffice/fonts-cjk": "workspace:*",
         "@betteroffice/pptx": "workspace:*",
         "@betteroffice/pptx-react": "workspace:*",
+        "@betteroffice/vsdx": "workspace:*",
+        "@betteroffice/vsdx-react": "workspace:*",
         "@betteroffice/xlsx": "workspace:*",
         "@betteroffice/xlsx-react": "workspace:*",
         "@tailwindcss/postcss": "^4.3.2",
@@ -146,6 +148,10 @@
     "bindings/python-pptx": {
       "name": "@betteroffice/python-pptx",
       "version": "0.0.2",
+    },
+    "bindings/python-vsdx": {
+      "name": "@betteroffice/python-vsdx",
+      "version": "0.0.1",
     },
     "bindings/python-xlsx": {
       "name": "@betteroffice/python-xlsx",
@@ -580,6 +586,8 @@
     "@betteroffice/python-docx": ["@betteroffice/python-docx@workspace:bindings/python-docx"],
 
     "@betteroffice/python-pptx": ["@betteroffice/python-pptx@workspace:bindings/python-pptx"],
+
+    "@betteroffice/python-vsdx": ["@betteroffice/python-vsdx@workspace:bindings/python-vsdx"],
 
     "@betteroffice/python-xlsx": ["@betteroffice/python-xlsx@workspace:bindings/python-xlsx"],
 

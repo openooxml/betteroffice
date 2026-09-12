@@ -5,6 +5,7 @@
 export const REGISTRY = [
   { path: 'bindings/python-docx', publish: true },
   { path: 'bindings/python-pptx', publish: true },
+  { path: 'bindings/python-vsdx', publish: false },
   { path: 'bindings/python-xlsx', publish: true }
 ];
 

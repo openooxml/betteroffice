@@ -19,6 +19,7 @@ pub enum Format {
     Docx,
     Xlsx,
     Pptx,
+    Vsdx,
 }
 
 impl Format {
@@ -28,6 +29,7 @@ impl Format {
             Self::Docx => Some("docx"),
             Self::Xlsx => Some("xlsx"),
             Self::Pptx => Some("pptx"),
+            Self::Vsdx => Some("vsdx"),
         }
     }
 }
@@ -39,6 +41,7 @@ impl fmt::Display for Format {
             Self::Docx => formatter.write_str("DOCX"),
             Self::Xlsx => formatter.write_str("XLSX"),
             Self::Pptx => formatter.write_str("PPTX"),
+            Self::Vsdx => formatter.write_str("VSDX"),
         }
     }
 }
@@ -58,8 +61,10 @@ pub struct RedactionReport {
 pub enum RedactError {
     #[error("invalid OOXML package: {0}")]
     Container(String),
-    #[error("could not detect DOCX, XLSX, or PPTX content")]
+    #[error("could not detect DOCX, XLSX, PPTX, or VSDX content")]
     UnknownFormat,
+    #[error("macro-enabled Visio packages (.vsdm) cannot be redacted")]
+    MacroEnabledVisio,
     #[error("requested {requested}, but package is {detected}")]
     FormatMismatch { requested: Format, detected: Format },
     #[error("invalid XML in {part}: {message}")]
@@ -141,6 +146,12 @@ fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
         {
             return Ok(Format::Pptx);
         }
+        if text.contains("ms-visio.drawing.macroenabled.main+xml") {
+            return Err(RedactError::MacroEnabledVisio);
+        }
+        if text.contains("ms-visio.drawing.main+xml") {
+            return Ok(Format::Vsdx);
+        }
     }
 
     let has = |expected: &str| {
@@ -154,6 +165,8 @@ fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
         Ok(Format::Xlsx)
     } else if has("ppt/presentation.xml") {
         Ok(Format::Pptx)
+    } else if has("visio/document.xml") {
+        Ok(Format::Vsdx)
     } else {
         Err(RedactError::UnknownFormat)
     }

@@ -22,12 +22,18 @@ describe("demo markdown", () => {
     }
   });
 
+  test("describes the VSDX route as an editor", () => {
+    const markdown = formatMarkdown("vsdx");
+    expect(markdown).toContain("interactive editor");
+    expect(markdown).toContain("React editor");
+  });
+
   test("a non-live format has no page", () => {
-    expect(formatMarkdown("vsdx")).toBeNull();
+    expect(formatMarkdown("odt")).toBeNull();
   });
 
   test("an unknown format has none", () => {
-    expect(formatMarkdown("odt")).toBeNull();
+    expect(formatMarkdown("drawio")).toBeNull();
     expect(formatMarkdown("")).toBeNull();
   });
 

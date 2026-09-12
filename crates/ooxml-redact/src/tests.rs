@@ -32,6 +32,23 @@ const PPTX_SECRETS: &[&str] = &[
     "PPTX_SECRET_COMPANY",
     "https://secret.example/pptx",
 ];
+const VSDX_SECRETS: &[&str] = &[
+    "Bühnenseite",
+    "GIGACORE 16i",
+    "VSDX_FIRST_RUN",
+    "VSDX_SECOND_RUN",
+    "VSDX_MASTER_SECRET",
+    "VSDX_SECRET_TITLE",
+    "VSDX_SECRET_AUTHOR",
+    "VSDX_SECRET_COMPANY",
+    "VSDX_SECRET_PROPERTY",
+    "VSDX_SECRET_THUMBNAIL",
+    "VSDX_PROPERTY_VALUE",
+    "VSDX_PROPERTY_PROMPT",
+    "VSDX_PROPERTY_LABEL",
+    "VSDX_USER_VALUE",
+    "VSDX_MASTER_PROPERTY_VALUE",
+];
 
 #[test]
 fn redacts_docx_without_changing_structure() {
@@ -65,6 +82,93 @@ fn redacts_pptx_without_changing_structure() {
 }
 
 #[test]
+fn detects_vsdx_by_content_type() {
+    assert_eq!(detect_format(&vsdx_fixture(true)).unwrap(), Format::Vsdx);
+    assert_eq!(Format::Vsdx.extension(), Some("vsdx"));
+    assert_eq!(Format::Vsdx.to_string(), "VSDX");
+}
+
+#[test]
+fn detects_vsdx_by_document_part_fallback() {
+    assert_eq!(detect_format(&vsdx_fixture(false)).unwrap(), Format::Vsdx);
+}
+
+#[test]
+fn redacts_vsdx_text_metadata_media_and_thumbnail() {
+    let source = vsdx_fixture(true);
+    let (output, report) = redact_with_report(&source, Format::Vsdx).unwrap();
+    assert_eq!(report.format, Format::Vsdx);
+    assert_fixture_properties(&source, &output, VSDX_SECRETS, "visio/media/image1.png");
+    assert_text_lengths(&source, &output, "visio/pages/page1.xml", "Text");
+
+    let parts = ooxml_opc::unzip_parts(&output).unwrap();
+    let page = String::from_utf8_lossy(part(&parts, "visio/pages/page1.xml"));
+    assert!(page.contains(r#"<cp IX="0"/>"#));
+    assert!(page.contains(r#"<pp IX="0"/>"#));
+    assert!(page.contains(r#"<tp IX="0"/>"#));
+    assert!(!page.contains("Bühnenseite"));
+    assert!(page.contains("xxxxxxxxxxx"));
+    assert!(page.contains(r#"<Cell N="Value" V="xxxxxxxxxxxxxxxxxxx"/>"#));
+    assert!(page.contains(r#"<Cell N="Prompt" V="xxxxxxxxxxxxxxxxxxxx"/>"#));
+    assert!(page.contains(r#"<Cell N="Label" V="xxxxxxxxxxxxxxxxxxx"/>"#));
+    assert!(page.contains(r#"<Cell N="Value" V="xxxxxxxxxxxxxxx"/>"#));
+    assert!(page.contains(r#"<Cell N="Format" V="0"/>"#));
+    assert!(page.contains(r#"<Cell N="SortKey" V="123"/>"#));
+    assert!(page.contains(r#"<Cell N="PinX" V="4.25"/>"#));
+    let master = String::from_utf8(part(&parts, "visio/masters/master1.xml").to_vec()).unwrap();
+    assert!(master.contains(r#"<Cell N="Value" V="xxxxxxxxxxxxxxxxxxxxxxxxxx"/>"#));
+    let thumbnail = part(&parts, "docProps/thumbnail.emf");
+    assert_eq!(&thumbnail[40..44], b" EMF");
+    assert!(!String::from_utf8_lossy(thumbnail).contains("VSDX_SECRET_THUMBNAIL"));
+    assert_eq!(report.media_parts, 2);
+    assert_eq!(report.attributes, 6);
+}
+
+#[test]
+fn redacts_visio_text_runs_with_utf8_accounting() {
+    let source = r#"<PageContents><Text><cp IX='0'/>Bühnenseite<pp IX='0'/>GIGACORE 16i<tp IX='0'/>VSDX_LAST_RUN</Text></PageContents>"#;
+    let runs = ["Bühnenseite", "GIGACORE 16i", "VSDX_LAST_RUN"];
+    let mut report = RedactionReport::default();
+    let output = xml::redact_xml(
+        Format::Vsdx,
+        "visio/pages/page1.xml",
+        source.as_bytes(),
+        &mut report,
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+
+    assert!(output.contains(r#"<cp IX="0"/>"#));
+    assert!(output.contains(r#"<pp IX="0"/>"#));
+    assert!(output.contains(r#"<tp IX="0"/>"#));
+    assert_eq!(report.text_nodes, runs.len());
+    assert_eq!(
+        report.characters,
+        runs.iter()
+            .flat_map(|run| run.chars())
+            .filter(|character| !character.is_whitespace())
+            .count()
+    );
+}
+
+#[test]
+fn rejects_macro_enabled_visio() {
+    let source = package(vec![
+        (
+            "[Content_Types].xml",
+            xml(
+                r#"<Types><Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.macroenabled.main+xml"/></Types>"#,
+            ),
+        ),
+        ("visio/document.xml", xml("<VisioDocument/>")),
+    ]);
+    assert!(matches!(
+        detect_format(&source),
+        Err(RedactError::MacroEnabledVisio)
+    ));
+}
+
+#[test]
 fn jpeg_placeholder_is_fixed_size() {
     let source = placeholder_image(ImageFormat::Jpeg);
     let mut report = RedactionReport::default();
@@ -80,6 +184,12 @@ fn jpeg_placeholder_is_fixed_size() {
 #[test]
 fn rejects_explicit_format_mismatch() {
     let error = redact(&docx_fixture(), Format::Xlsx).unwrap_err();
+    assert!(matches!(error, RedactError::FormatMismatch { .. }));
+}
+
+#[test]
+fn rejects_vsdx_requested_for_docx() {
+    let error = redact(&docx_fixture(), Format::Vsdx).unwrap_err();
     assert!(matches!(error, RedactError::FormatMismatch { .. }));
 }
 
@@ -1602,6 +1712,72 @@ fn pptx_fixture() -> Vec<u8> {
         ),
         ("ppt/media/image1.png", placeholder_png()),
     ])
+}
+
+fn vsdx_fixture(include_content_types: bool) -> Vec<u8> {
+    let mut parts = vec![
+        (
+            "_rels/.rels",
+            xml(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.microsoft.com/visio/2010/relationships/document" Target="visio/document.xml"/></Relationships>"#,
+            ),
+        ),
+        (
+            "visio/document.xml",
+            xml(r#"<VisioDocument xmlns="http://schemas.microsoft.com/office/visio/2012/main"/>"#),
+        ),
+        (
+            "visio/pages/pages.xml",
+            xml(
+                r#"<Pages xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Page ID="1" Name="Page-1"/></Pages>"#,
+            ),
+        ),
+        (
+            "visio/pages/page1.xml",
+            xml(
+                r#"<PageContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="1"><Text><cp IX='0'/>Bühnenseite<pp IX='0'/>GIGACORE 16i<tp IX='0'/></Text><Text><cp IX='0'/>VSDX_FIRST_RUN<pp IX='0'/>VSDX_SECOND_RUN</Text><Section N='Property'><Row N='Owner'><Cell N='Value' V='VSDX_PROPERTY_VALUE'/><Cell N='Prompt' V='VSDX_PROPERTY_PROMPT'/><Cell N='Label' V='VSDX_PROPERTY_LABEL'/><Cell N='Format' V='0'/><Cell N='SortKey' V='123'/></Row></Section><Section N='User'><Row N='Notes'><Cell N='Value' V='VSDX_USER_VALUE'/></Row></Section><Cell N='PinX' V='4.25'/></Shape></Shapes></PageContents>"#,
+            ),
+        ),
+        (
+            "visio/masters/masters.xml",
+            xml(
+                r#"<Masters xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Master ID="1"/></Masters>"#,
+            ),
+        ),
+        (
+            "visio/masters/master1.xml",
+            xml(
+                r#"<MasterContents xmlns="http://schemas.microsoft.com/office/visio/2012/main"><Shapes><Shape ID="2"><Text>VSDX_MASTER_SECRET</Text><Section N='Property'><Row N='Asset'><Cell N='Value' V='VSDX_MASTER_PROPERTY_VALUE'/></Row></Section></Shape></Shapes></MasterContents>"#,
+            ),
+        ),
+        (
+            "docProps/core.xml",
+            xml(
+                r#"<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>VSDX_SECRET_TITLE</dc:title><dc:creator>VSDX_SECRET_AUTHOR</dc:creator></cp:coreProperties>"#,
+            ),
+        ),
+        (
+            "docProps/app.xml",
+            xml(r#"<Properties><Company>VSDX_SECRET_COMPANY</Company></Properties>"#),
+        ),
+        (
+            "docProps/custom.xml",
+            xml(
+                r#"<Properties><property name="VSDX_SECRET_PROPERTY"><lpwstr>VSDX_SECRET_PROPERTY</lpwstr></property></Properties>"#,
+            ),
+        ),
+        ("visio/media/image1.png", placeholder_png()),
+        ("docProps/thumbnail.emf", b"VSDX_SECRET_THUMBNAIL".to_vec()),
+    ];
+    if include_content_types {
+        parts.push((
+            "[Content_Types].xml",
+            xml(
+                r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="emf" ContentType="image/x-emf"/><Override PartName="/visio/document.xml" ContentType="application/vnd.ms-visio.drawing.main+xml"/></Types>"#,
+            ),
+        ));
+    }
+    package(parts)
 }
 
 #[test]

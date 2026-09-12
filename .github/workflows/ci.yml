@@ -51,7 +51,9 @@ jobs:
         run: bun run typecheck:packages
 
       - name: Test
-        run: bun run test
+        run: |
+          bun run build:vsdx-wasm
+          bun run test
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'
@@ -60,14 +62,16 @@ jobs:
         run: |
           bun scripts/create-demo-deck.ts
           bun scripts/create-demo-workbook.ts
+          bun scripts/create-demo-diagram.ts
           bun run --filter './apps/demo' check:seeds
-          git diff --exit-code -- apps/demo/public/betteroffice-demo.pptx apps/demo/public/showcase.xlsx
+          git diff --exit-code -- apps/demo/public/betteroffice-demo.pptx apps/demo/public/showcase.xlsx apps/demo/public/betteroffice-demo.vsdx
 
       - name: Check minimal Wasm features
         run: |
           cargo check -p xlsx-wasm --target wasm32-unknown-unknown --no-default-features
           cargo check -p betteroffice-docx --target wasm32-unknown-unknown
           cargo check -p pptx-wasm --target wasm32-unknown-unknown
+          cargo check -p vsdx-wasm --target wasm32-unknown-unknown --no-default-features
 
       - name: Build
         run: bun run build:packages
@@ -127,6 +131,7 @@ jobs:
           cargo clippy -p betteroffice-drawingml --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-docx --all-targets --all-features -- -D warnings
           cargo clippy -p betteroffice-pptx --all-targets --all-features -- -D warnings
+          cargo clippy -p betteroffice-vsdx-edit --all-targets --all-features -- -D warnings
 
       - name: Lint standalone Rust bindings
         if: steps.ws.outputs.present == 'true'
@@ -146,6 +151,7 @@ jobs:
           cargo test -p betteroffice-drawingml --all-features
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
+          cargo test -p betteroffice-vsdx-edit --features wasm
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'

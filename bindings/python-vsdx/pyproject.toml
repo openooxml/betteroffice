@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "betteroffice-vsdx"
+dynamic = ["version"]
+description = "Read Visio VSDX diagrams on the BetterOffice Rust engine."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+requires-python = ">=3.9"
+authors = [{ name = "OpenOOXML" }]
+classifiers = ["Development Status :: 3 - Alpha", "License :: OSI Approved :: Apache Software License", "Programming Language :: Python :: 3", "Programming Language :: Python :: 3 :: Only", "Programming Language :: Rust", "Typing :: Typed"]
+
+[project.urls]
+Homepage = "https://betteroffice.dev"
+Documentation = "https://docs.betteroffice.dev"
+Source = "https://github.com/openooxml/betteroffice"
+
+[tool.maturin]
+module-name = "betteroffice_vsdx._betteroffice_vsdx"
+python-source = "python"
+features = ["pyo3/extension-module"]
+strip = true
+exclude = ["**/__pycache__/**", "**/*.pyc", "**/*.so"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

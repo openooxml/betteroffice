@@ -13,8 +13,10 @@ pub(crate) fn redact_xml(
     let mut reader = Reader::from_reader(bytes);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::with_capacity(bytes.len()));
-    let mut stack = Vec::new();
-    let mut cell_type: Option<String> = None;
+    let mut context = XmlContext {
+        stack: Vec::new(),
+        cell_type: None,
+    };
 
     loop {
         let event = reader
@@ -23,36 +25,41 @@ pub(crate) fn redact_xml(
         match event {
             Event::Start(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let rewritten =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
-                stack.push(local);
+                let (rewritten, section_name) =
+                    rewrite_start(format, path, &reader, start, &local, report, &mut context)?;
+                context.stack.push(ElementContext {
+                    name: local,
+                    section_name,
+                });
                 writer
                     .write_event(Event::Start(rewritten))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::Empty(start) => {
                 let local = local_name(start.name().local_name().as_ref());
-                let rewritten =
-                    rewrite_start(format, path, &reader, start, &local, report, &mut cell_type)?;
+                let (rewritten, _) =
+                    rewrite_start(format, path, &reader, start, &local, report, &mut context)?;
                 writer
                     .write_event(Event::Empty(rewritten))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::End(end) => {
-                if stack.last().is_some_and(|name| name == "c") {
-                    cell_type = None;
+                if context.stack.last().is_some_and(|entry| entry.name == "c") {
+                    context.cell_type = None;
                 }
-                stack.pop();
+                context.stack.pop();
                 writer
                     .write_event(Event::End(end))
                     .map_err(|error| xml_error(path, error))?;
             }
             Event::Text(text) => {
-                if let Some(kind) = replacement_kind(format, path, &stack, cell_type.as_deref()) {
+                if let Some(kind) =
+                    replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
+                {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     let unescaped = quick_xml::escape::unescape(&decoded)
                         .map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&unescaped, kind, &stack);
+                    let replacement = replace_text(&unescaped, kind);
                     charge_text(report, &unescaped);
                     writer
                         .write_event(Event::Text(BytesText::new(&replacement)))
@@ -64,9 +71,11 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::CData(text) => {
-                if let Some(kind) = replacement_kind(format, path, &stack, cell_type.as_deref()) {
+                if let Some(kind) =
+                    replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
+                {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&decoded, kind, &stack);
+                    let replacement = replace_text(&decoded, kind);
                     charge_text(report, &decoded);
                     writer
                         .write_event(Event::CData(BytesCData::new(&replacement)))
@@ -78,7 +87,9 @@ pub(crate) fn redact_xml(
                 }
             }
             Event::GeneralRef(reference) => {
-                if replacement_kind(format, path, &stack, cell_type.as_deref()).is_some() {
+                if replacement_kind(format, path, &context.stack, context.cell_type.as_deref())
+                    .is_some()
+                {
                     report.text_nodes += 1;
                     report.characters += 1;
                     writer
@@ -109,6 +120,16 @@ pub(crate) fn redact_xml(
     Ok(writer.into_inner())
 }
 
+struct ElementContext {
+    name: String,
+    section_name: Option<String>,
+}
+
+struct XmlContext {
+    stack: Vec<ElementContext>,
+    cell_type: Option<String>,
+}
+
 fn rewrite_start(
     format: Format,
     path: &str,
@@ -116,8 +137,8 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     report: &mut RedactionReport,
-    cell_type: &mut Option<String>,
-) -> Result<BytesStart<'static>, RedactError> {
+    context: &mut XmlContext,
+) -> Result<(BytesStart<'static>, Option<String>), RedactError> {
     let mut attributes = Vec::new();
     for attribute in start.attributes() {
         let attribute = attribute.map_err(|error| xml_error(path, error))?;
@@ -129,10 +150,28 @@ fn rewrite_start(
         attributes.push((key, value));
     }
 
+    let section_name = (element == "Section")
+        .then(|| {
+            attributes
+                .iter()
+                .find(|(key, _)| attribute_local(key) == "N")
+                .map(|(_, value)| value.clone())
+        })
+        .flatten();
+    let vsdx_user_data_cell = format == Format::Vsdx
+        && element == "Cell"
+        && context
+            .stack
+            .iter()
+            .any(|context| matches!(context.section_name.as_deref(), Some("Property" | "User")))
+        && attributes.iter().any(|(key, value)| {
+            attribute_local(key) == "N" && matches!(value.as_str(), "Value" | "Prompt" | "Label")
+        });
+
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
-        *cell_type = None;
+        context.cell_type = None;
     }
     let mut output = start.into_owned();
     output.clear_attributes();
@@ -151,7 +190,7 @@ fn rewrite_start(
             if external && is_unqualified(&key) && local.eq_ignore_ascii_case("Target") {
                 Some("https://example.com".to_owned())
             } else if !key.starts_with("xmlns")
-                && sensitive_attribute(format, path, element, local, &value)
+                && sensitive_attribute(format, path, element, local, &value, vsdx_user_data_cell)
             {
                 Some(placeholder(&value))
             } else {
@@ -166,13 +205,13 @@ fn rewrite_start(
             output.push_attribute((key.as_str(), value.as_str()));
         }
         if format == Format::Xlsx && element == "c" && local == "t" {
-            *cell_type = Some(value);
+            context.cell_type = Some(value);
         }
     }
     if relationship && external && !wrote_target_mode {
         output.push_attribute(("TargetMode", "External"));
     }
-    Ok(output)
+    Ok((output, section_name))
 }
 
 #[derive(Clone, Copy)]
@@ -188,10 +227,10 @@ enum Replacement {
 fn replacement_kind(
     format: Format,
     path: &str,
-    stack: &[String],
+    stack: &[ElementContext],
     cell_type: Option<&str>,
 ) -> Option<Replacement> {
-    let element = stack.last().map(String::as_str)?;
+    let element = stack.last().map(|context| context.name.as_str())?;
     let lower = path.to_ascii_lowercase();
     if lower == "docprops/core.xml" {
         return match element {
@@ -232,7 +271,10 @@ fn replacement_kind(
     if lower.contains("/charts/") {
         return match element {
             "f" => Some(Replacement::Formula),
-            "v" if stack.iter().any(|name| name == "strCache" || name == "tx") => {
+            "v" if stack
+                .iter()
+                .any(|context| context.name == "strCache" || context.name == "tx") =>
+            {
                 Some(Replacement::Text)
             }
             "v" => Some(Replacement::Number),
@@ -259,11 +301,15 @@ fn replacement_kind(
             "v" => Some(Replacement::Number),
             _ => None,
         },
+        Format::Vsdx => stack
+            .iter()
+            .any(|context| context.name == "Text")
+            .then_some(Replacement::Text),
         Format::Auto => None,
     }
 }
 
-fn replace_text(text: &str, kind: Replacement, _stack: &[String]) -> String {
+fn replace_text(text: &str, kind: Replacement) -> String {
     if text.trim().is_empty() {
         return text.to_owned();
     }
@@ -283,6 +329,7 @@ fn sensitive_attribute(
     element: &str,
     attribute: &str,
     value: &str,
+    vsdx_user_data_cell: bool,
 ) -> bool {
     let lower = path.to_ascii_lowercase();
     if lower == "docprops/custom.xml" && attribute == "name" {
@@ -323,6 +370,7 @@ fn sensitive_attribute(
                 || element == "tag" && matches!(attribute, "name" | "val")
                 || element == "custShow" && attribute == "name"
         }
+        Format::Vsdx => vsdx_user_data_cell && attribute == "V",
         Format::Auto => false,
     }
 }

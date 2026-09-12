@@ -9,7 +9,7 @@ const USAGE: &str = "\
 betteroffice-redact — locally redact an OOXML repro file
 
 usage:
-  betteroffice-redact <file.docx|file.xlsx|file.pptx> [options]
+  betteroffice-redact <file.docx|file.xlsx|file.pptx|file.vsdx> [options]
 
 options:
   -o, --output <path>    output path (default: <input>.redacted.<ext>)
@@ -128,7 +128,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         }
         index += 1;
     }
-    let input = input.ok_or("an input DOCX, XLSX, or PPTX file is required")?;
+    let input = input.ok_or("an input DOCX, XLSX, PPTX, or VSDX file is required")?;
     if endpoint.is_some() && !share {
         return Err("--endpoint requires --share".to_owned());
     }
@@ -199,5 +199,13 @@ mod tests {
             default_output(Path::new("report.docx"), Some("docx")),
             PathBuf::from("report.redacted.docx")
         );
+    }
+
+    #[test]
+    fn parses_vsdx_input() {
+        let Command::Run(options) = parse_args(["diagram.vsdx"].map(str::to_owned)).unwrap() else {
+            panic!("expected run command")
+        };
+        assert_eq!(options.input, PathBuf::from("diagram.vsdx"));
     }
 }

@@ -1,0 +1,13 @@
+[package]
+name = "betteroffice-vsdx-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+betteroffice-vsdx.workspace = true
+vsdx-eval.workspace = true
+vsdx-parse.workspace = true
+vsdx-render.workspace = true
+vsdx-resolve.workspace = true

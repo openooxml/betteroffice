@@ -248,6 +248,77 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-edit",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+]
+
+[[package]]
+name = "betteroffice-vsdx-edit"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "yrs",
+]
+
+[[package]]
+name = "betteroffice-vsdx-eval"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-formula"
+version = "0.1.0"
+
+[[package]]
+name = "betteroffice-vsdx-parse"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "quick-xml",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-python"
+version = "0.0.1"
+dependencies = [
+ "betteroffice-python-common",
+ "betteroffice-vsdx",
+ "betteroffice-vsdx-parse",
+ "pyo3",
+]
+
+[[package]]
+name = "betteroffice-vsdx-resolve"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "betteroffice-xlsx"
 version = "0.1.0"
 dependencies = [

@@ -232,7 +232,18 @@ Every phase ends at its gate (Part 9) and a local commit. **No phase pushes. No 
 
 **10 — Go live.** Only now: flip `apps/demo/lib/formats.ts` to `status: "live"` and update `apps/web/app/content.ts`, `apps/web/public/llms.txt`, `apps/docs/content/docs/`, `README.md`, `AGENTS.md` scopes. `llms.txt` is a public capability contract — it must not overclaim NURBS editing, data graphics, or Visio-equivalent routing.
 
-**Explicitly out of scope:** NURBS *editing* (preservation only), data graphics, data record sets, containers/lists, validation rules, actions/events, VBA, arbitrary stencil fidelity, and VSDX redaction.
+**Explicitly out of scope:** NURBS *editing* (preservation only), data graphics, data record sets, containers/lists, validation rules, actions/events, VBA, and arbitrary stencil fidelity.
+
+**VBA is permanently excluded** and is not subject to review: macro-bearing packages are rejected by document kind, which is a security property, not a missing feature.
+
+### Phase 11 — post-launch hardening (added after phase 10 closed)
+
+Two items are now **in scope**, having been reviewed and un-excluded:
+
+- **Geometry completion.** `crates/vsdx-resolve/src/geometry.rs` currently skips `NURBSTo`, `PolylineTo`, `SplineStart`, `SplineKnot` and `InfiniteLine`, emitting `GeometryIssue::UnsupportedRowType` and **dropping the segment**, so affected shapes render incomplete. Implement realization for all five. This was never a non-goal — only NURBS *editing* is excluded; rendering NURBS was always in scope and simply unfinished.
+- **VSDX redaction.** Previously excluded, now in scope. `crates/ooxml-redact` already implements DOCX/XLSX/PPTX behind a format enum (`lib.rs:24-26`), with `crates/ooxml-redact-cli` and `apps/redact-worker` wired up. Add VSDX as a fourth format following that existing pattern.
+
+Both must land with matching updates to the public capability copy in the same commit — `apps/web/public/llms.txt`, `apps/web/app/content.ts` and `README.md` are a contract, and adding capability without updating them is the same defect as overclaiming, in the opposite direction.
 
 ---
 

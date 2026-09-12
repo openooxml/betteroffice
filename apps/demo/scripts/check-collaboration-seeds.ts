@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { createYrsSession } from "../../../packages/docx/src/yrs/index.ts";
 import { openWorkbook } from "../../../packages/xlsx/src/index.ts";
 import { openPresentation } from "../../../packages/pptx/src/index.ts";
+import { openDiagram } from "../../../packages/vsdx/src/index.ts";
 import { buildCollaborationSeeds } from "./build-collaboration-seeds.ts";
 
 const demo = resolve(import.meta.dir, "..");
@@ -140,6 +141,17 @@ function assertPptxEquivalent(
   }
 }
 
+function assertVsdxEquivalent(diagramBytes: Uint8Array, committed: Uint8Array, generated: Uint8Array): number {
+  const committedDiagram = openDiagram(diagramBytes, { clientId: 2, initialUpdate: committed });
+  const generatedDiagram = openDiagram(diagramBytes, { clientId: 3, initialUpdate: generated });
+  try {
+    assertEqualBytes("VSDX", "state vector", committedDiagram.encodeStateVector(), generatedDiagram.encodeStateVector());
+    const snapshot = committedDiagram.snapshot();
+    assert.deepStrictEqual(snapshot, generatedDiagram.snapshot(), "VSDX collaboration seed content differs");
+    return snapshot.pages.length;
+  } finally { committedDiagram.dispose(); generatedDiagram.dispose(); }
+}
+
 function encodingStatus(committed: Uint8Array, generated: Uint8Array): string {
   return equalBytes(committed, generated)
     ? "byte-identical"
@@ -161,6 +173,9 @@ try {
     generatedPptx,
     workbookBytes,
     presentationBytes,
+    committedVsdx,
+    generatedVsdx,
+    diagramBytes,
   ] = await Promise.all([
     readFile(resolve(committedSeeds, "docx.bin")),
     readFile(resolve(generatedSeeds, "docx.bin")),
@@ -170,6 +185,9 @@ try {
     readFile(resolve(generatedSeeds, "pptx.bin")),
     readFile(resolve(demo, "public/showcase.xlsx")),
     readFile(resolve(demo, "public/betteroffice-demo.pptx")),
+    readFile(resolve(committedSeeds, "vsdx.bin")),
+    readFile(resolve(generatedSeeds, "vsdx.bin")),
+    readFile(resolve(demo, "public/betteroffice-demo.vsdx")),
   ]);
 
   const storyCount = await assertDocxEquivalent(
@@ -186,6 +204,7 @@ try {
     committedPptx,
     generatedPptx,
   );
+  const pageCount = assertVsdxEquivalent(diagramBytes, committedVsdx, generatedVsdx);
 
   console.log(
     `DOCX seed: ${encodingStatus(committedDocx, generatedDocx)}, ${storyCount} stories`,
@@ -196,6 +215,7 @@ try {
   console.log(
     `PPTX seed: ${encodingStatus(committedPptx, generatedPptx)}, ${slideCount} slides`,
   );
+  console.log(`VSDX seed: ${encodingStatus(committedVsdx, generatedVsdx)}, ${pageCount} pages`);
 } finally {
   await rm(generatedSeeds, { recursive: true, force: true });
 }

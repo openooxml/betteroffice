@@ -20,7 +20,7 @@ export const ECOSYSTEMS = [
     install: "npm install @betteroffice/docx-react",
     url: NPM,
     docs: `${DOCS}/docs/javascript`,
-    desc: "React editors for documents, spreadsheets and slides, plus framework-free cores for all four formats.",
+    desc: "React editors and framework-free cores for all three formats.",
   },
   {
     name: "Rust",
@@ -42,9 +42,9 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors and a diagram engine",
+  heading: "One suite, three editors and a diagram editor",
   prose:
-    "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets and slides are live today; the VSDX diagram engine is in development on the same foundation.",
+    "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets, slides and Visio diagrams are live today on the same foundation.",
 };
 
 export const EDITORS = [
@@ -69,8 +69,8 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX parsing, resolution, rendering, round-tripping, and transactional editing are in development.",
-    live: false,
+    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, and saving diagrams. No resize-handle or connector-drag UI.",
+    live: true,
   },
 ];
 
@@ -108,7 +108,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/vsdx",
-    desc: "VSDX core in development — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, and collaboration.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration.",
+  },
+  {
+    name: "@betteroffice/vsdx-react",
+    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, and save. No resize-handle or connector-drag UI.",
   },
 ];
 

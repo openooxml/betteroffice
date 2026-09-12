@@ -8,8 +8,11 @@ core packages and React editors. The same engines publish to npm, crates.io, and
 PyPI.
 
 VSDX support is in development. Its framework-free core parses, resolves,
-renders, round-trips, and transactionally edits `.vsdx` packages; no React editor
-or live demo is available yet.
+renders, round-trips, and transactionally edits `.vsdx` packages. A React editor
+and live demo are available: it can move, resize with Shift-drag, add, and delete shapes, set fill
+and line colours, and save. It does not provide text editing, stencils, resize-handle UI, or connector-drag/routing UI.
+Added shapes are always top-level, and their VSDX IDs are allocated by the editor.
+Shape drafts accept formulas only; cached cell values and nested added shapes are rejected.
 
 ## Guides
 

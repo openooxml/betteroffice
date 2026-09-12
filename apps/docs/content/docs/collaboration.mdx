@@ -8,8 +8,8 @@ an editor-owned Yrs replica, a sync-v1 provider, and a caller-owned binary
 transport. The backend routes frames by room and never parses Office files.
 
 VSDX's framework-free core has a convergent Yrs CRDT and WebAssembly boundary in
-development. It does not yet expose this React editor/provider integration or a
-live demo.
+development. Its React editor exposes the provider integration, and a live demo
+is available. A real two-browser collaboration proof remains outstanding.
 
 ## Architecture
 
@@ -52,6 +52,7 @@ The provider import differs by format; the transport contract does not.
 | DOCX | `@betteroffice/docx/collaboration` |
 | XLSX | `@betteroffice/xlsx/collaboration` |
 | PPTX | `@betteroffice/pptx` |
+| VSDX | `@betteroffice/vsdx` |
 
 Create the provider when the editor publishes its replica:
 
@@ -75,6 +76,7 @@ const collaboration = { clientId, initialUpdate, onReplica };
 <DocxEditor documentBuffer={docxBytes} collaboration={collaboration} />
 <XlsxEditor file={xlsxBytes} collaboration={collaboration} />
 <PptxEditor file={pptxBytes} fonts={fonts} collaboration={collaboration} />
+<VsdxEditor file={vsdxBytes} fonts={fonts} collaboration={collaboration} />
 ```
 
 `clientId` must be unique per open peer. `initialUpdate` must represent the

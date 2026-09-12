@@ -52,7 +52,8 @@
 | package | registry | what it does |
 |---|---|---|
 | [`betteroffice-vsdx`](https://crates.io/crates/betteroffice-vsdx) | crates.io | VSDX diagram core in development — parses, resolves, renders, round-trips, transactionally edits, and collaborates on `.vsdx` files |
-| [`@betteroffice/vsdx`](https://www.npmjs.com/package/@betteroffice/vsdx) | npm | framework-free VSDX core in development, powered by Rust through WebAssembly; no React editor or demo yet |
+| [`@betteroffice/vsdx`](https://www.npmjs.com/package/@betteroffice/vsdx) | npm | framework-free VSDX core in development, powered by Rust through WebAssembly |
+| [`@betteroffice/vsdx-react`](https://www.npmjs.com/package/@betteroffice/vsdx-react) | npm | drop-in React .vsdx editor |
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),

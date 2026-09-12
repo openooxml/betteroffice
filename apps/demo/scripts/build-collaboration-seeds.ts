@@ -10,6 +10,7 @@ import {
   initWasm as initPptxWasm,
   openPresentation,
 } from "../../../packages/pptx/src/index.ts";
+import { initWasm as initVsdxWasm, openDiagram } from "../../../packages/vsdx/src/index.ts";
 
 const demo = resolve(import.meta.dir, "..");
 const root = resolve(demo, "../..");
@@ -100,8 +101,20 @@ export async function buildCollaborationSeeds(
   pptxVerification.dispose();
   await writeFile(resolve(seeds, "pptx.bin"), pptxSeed);
 
+  await initVsdxWasm(await readFile(resolve(root, "packages/vsdx/src/wasm/generated/vsdx_wasm_bg.wasm")));
+  const vsdxBytes = new Uint8Array(await readFile(resolve(demo, "public/betteroffice-demo.vsdx")));
+  const diagram = openDiagram(vsdxBytes, { clientId: 1 });
+  const vsdxSeed = diagram.encodeStateAsUpdate();
+  const vsdxStateVector = diagram.encodeStateVector();
+  diagram.dispose();
+  const vsdxVerification = openDiagram(vsdxBytes, { clientId: 2, initialUpdate: vsdxSeed });
+  if (!equalBytes(vsdxVerification.encodeStateVector(), vsdxStateVector)) throw new Error("VSDX collaboration seed did not round-trip");
+  if (!equalBytes(vsdxVerification.encodeStateAsUpdate(), vsdxSeed)) throw new Error("VSDX collaboration seed changed during round-trip");
+  vsdxVerification.dispose();
+  await writeFile(resolve(seeds, "vsdx.bin"), vsdxSeed);
+
   console.log(
-    `Wrote DOCX (${docxSeed.byteLength} bytes), XLSX (${xlsxSeed.byteLength} bytes), and PPTX (${pptxSeed.byteLength} bytes) collaboration seeds`,
+    `Wrote DOCX (${docxSeed.byteLength} bytes), XLSX (${xlsxSeed.byteLength} bytes), PPTX (${pptxSeed.byteLength} bytes), and VSDX (${vsdxSeed.byteLength} bytes) collaboration seeds`,
   );
 }
 
