@@ -1006,6 +1006,74 @@ mod tests {
     }
 
     #[test]
+    fn remote_new_shape_with_a_self_parent_cycle_is_rejected() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_shape(&peer, "page:1:shape:forged", "page:1", "session", 1.0);
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged",
+            "parentId",
+            "page:1:shape:forged",
+        );
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn remote_new_shapes_with_a_two_shape_parent_cycle_are_rejected() {
+        let session = session();
+        let before = session.encode_state_as_update_v1();
+        let peer = peer_doc(&session, 9);
+        write_peer_new_shape(&peer, "page:1:shape:forged-a", "page:1", "session", 1.0);
+        write_peer_new_shape(&peer, "page:1:shape:forged-b", "page:1", "session", 1.0);
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged-a",
+            "parentId",
+            "page:1:shape:forged-b",
+        );
+        write_peer_shape_field(
+            &peer,
+            "page:1:shape:forged-b",
+            "parentId",
+            "page:1:shape:forged-a",
+        );
+        assert!(
+            session
+                .apply_update_v1(&peer_update(&session, &peer))
+                .is_err()
+        );
+        assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    #[test]
+    fn snapshot_terminates_on_a_cyclic_parent_chain_instead_of_overflowing() {
+        let session = session();
+        add_child_shape(&session, "page:1:shape:cycle-a", "page:1:shape:cycle-b");
+        add_child_shape(&session, "page:1:shape:cycle-b", "page:1:shape:cycle-a");
+        {
+            let mut txn = session.doc.transact_mut_with(HYDRATE_ORIGIN);
+            let pages = txn.get_map(PAGES).unwrap();
+            let page = match pages.get(&txn, "page:1") {
+                Some(yrs::Out::YMap(page)) => page,
+                _ => unreachable!(),
+            };
+            let shapes = match page.get(&txn, "shapes") {
+                Some(yrs::Out::YArray(shapes)) => shapes,
+                _ => unreachable!(),
+            };
+            shapes.push_back(&mut txn, "page:1:shape:cycle-a");
+        }
+        assert!(session.snapshot().is_err());
+    }
+
+    #[test]
     fn remote_new_cell_on_a_locked_target_is_rejected() {
         let session = session();
         add_cell(&session, "LockWidth", Some("1"), None);
