@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-vsdx-parse",
  "betteroffice-vsdx-resolve",
@@ -277,7 +277,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-parse"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-opc",
  "quick-xml",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "betteroffice-vsdx-resolve"
-version = "0.0.4"
+version = "0.1.0"
 dependencies = [
  "betteroffice-drawingml",
  "betteroffice-vsdx-parse",
