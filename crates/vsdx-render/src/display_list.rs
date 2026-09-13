@@ -195,8 +195,7 @@ pub enum Primitive {
         height: f32,
         paragraphs: Vec<TextParagraph>,
         lines: Vec<PositionedLine>,
-        /// Maps this local text rectangle, its lines and its caret stops into scene
-        /// coordinates before the final paint transform.
+        /// Maps local text and caret geometry into scene coordinates.
         #[serde(default, skip_serializing_if = "Affine::is_identity")]
         transform: Affine,
     },

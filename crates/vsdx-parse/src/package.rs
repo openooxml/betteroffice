@@ -27,9 +27,6 @@ pub enum CellRow {
 }
 
 /// Stable semantic identity for a ShapeSheet cell.
-///
-/// Future CRDT entities can retain this locator and add their entity identity
-/// alongside it without exposing lexical source spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellLocator {
     pub sheet: CellSheet,
@@ -719,7 +716,7 @@ fn save_cell_edits_with_new_cells(
     Ok(bytes)
 }
 
-/// Resolves semantic cell edits to package-local lexical provenance and saves them.
+/// Saves semantic formula edits, replacing or removing their cached values.
 pub fn save_semantic_cell_edits(
     package: &VsdxPackage,
     edits: &[SemanticCellEdit],
@@ -775,11 +772,7 @@ pub fn save_semantic_cell_edits(
     }
 }
 
-/// Applies page-local structural edits through the lexical container fallback.
-///
-/// Deleting a shape also deletes every local Connect that names it. The source
-/// package is never changed; the result is accepted only after reparsing and
-/// referential-integrity validation.
+/// Applies structural edits and validates references; deletion removes incident Connects.
 pub fn save_structural_edits(
     package: &VsdxPackage,
     edits: &[StructuralEdit],
@@ -1067,8 +1060,7 @@ fn direct_child<'a>(
     })
 }
 
-/// Inserts Sections before Text, ForeignData, or nested Shapes; indexed Rows
-/// precede the first direct Row with a greater IX, and all other children append.
+/// Inserts containers in schema order and indexed rows in numeric order.
 fn container_insertion_point(
     part: &PackagePart,
     owner: &crate::ElementSpan,
