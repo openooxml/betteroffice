@@ -6,3 +6,8 @@ uses a horizontal-first orthogonal bend. It does not emulate Visio obstacle avoi
 or manually edited route geometry; an unresolved route becomes a placeholder instead of a guessed line.
 
 VSDX resolved-scene to display-list compiler and hit tester.
+
+Geometry sections keep their individual `IX` identities. Enabled or unevaluable
+section-level `NoFill`, `NoLine`, and `NoShow` controls produce an explicit
+unsupported placeholder; their paint semantics are not yet implemented. Disabled
+controls remain renderable. The original section XML remains preserved on save.

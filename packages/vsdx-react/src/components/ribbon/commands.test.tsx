@@ -1,6 +1,6 @@
 import { expect, mock, test } from 'bun:test';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
-import { createRibbonCommands, findShapePlacement } from './commands';
+import { createRibbonCommands, findShapePlacement, numericCellValue } from './commands';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
@@ -116,4 +116,25 @@ test('refuses to add a shape onto a page that is no longer present', () => {
   commands.addShape.run();
   expect(diagram.addShape).not.toHaveBeenCalled();
   expect(errors).toHaveLength(1);
+});
+
+
+test('does not mistake a prefix of an unresolved formula for a numeric angle', () => {
+  const state = snapshot({ Angle: '2*ThePage!Angle' });
+  state.pages[0].shapes[1].cells[0].value = null;
+  const diagram = handle(state);
+  const errors: unknown[] = [];
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, (error) => errors.push(error), () => {});
+  commands.rotateRight.run();
+  expect(diagram.setCellFormula).not.toHaveBeenCalled();
+  expect(errors[0]).toEqual(new Error('Shape cell Angle has no resolved numeric value.'));
+});
+
+test('uses a shape root cell without confusing a same-named User cell', () => {
+  const state = snapshot({ PinX: '4' });
+  const shape = state.pages[0].shapes[1];
+  shape.cells.unshift({ ...shape.cells[0], value: '99', formula: '99', locator: { ...shape.cells[0].locator, section: 'User', row: { index: 0 } } });
+  expect(numericCellValue(shape, 'PinX')).toBe(4);
+  shape.cells.pop();
+  expect(() => numericCellValue(shape, 'PinX')).toThrow('Shape cell PinX has no resolved numeric value.');
 });

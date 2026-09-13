@@ -83,7 +83,6 @@ fn content_type(format: Format) -> &'static str {
         Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Format::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        Format::Vsdx => "application/vnd.ms-visio.drawing",
         Format::Auto => "application/octet-stream",
     }
 }
@@ -171,11 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn uses_visio_content_type_for_vsdx_uploads() {
-        assert_eq!(
-            content_type(Format::Vsdx),
-            "application/vnd.ms-visio.drawing"
-        );
+    fn refuses_visio_before_producing_uploadable_bytes() {
+        let source = ooxml_opc::rezip_parts(&[(
+            "visio/document.xml".to_owned(),
+            br#"<VisioDocument><CommentList><CommentEntry Author="PRIVATE_AUTHOR">PRIVATE_COMMENT</CommentEntry></CommentList></VisioDocument>"#.to_vec(),
+        )]).unwrap();
+        let error = redact_local(&source).err().expect("Visio must be rejected");
+        assert!(error.contains("Visio redaction is not supported"));
     }
 
     fn fixture() -> Vec<u8> {

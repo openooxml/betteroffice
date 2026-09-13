@@ -46,10 +46,7 @@ impl Diagram {
     pub fn package(&self) -> &VsdxPackage {
         &self.package
     }
-    /// Writes formulas to Cell@F, with a cache freshly evaluated from each formula
-    /// in Cell@V; formulas the display evaluator cannot evaluate drop the cache.
-    /// Edits are applied and re-parsed one at a time, so a later edit in the batch is
-    /// authorized and evaluated against every earlier edit already in effect.
+    /// Applies formula edits sequentially, recomputing caches and enforcing current locks.
     pub fn save_cell_edits(&self, edits: &[SemanticCellEdit]) -> Result<Vec<u8>> {
         let (bytes, _package) = self.apply_cell_edits(edits)?;
         Ok(bytes)
@@ -102,9 +99,7 @@ impl Diagram {
             )),
         }
     }
-    /// Saves the formula changes and structural edits (e.g. added shapes) accumulated by a
-    /// collaborative session. The session's own doc carries the original package, so this does
-    /// not need `self.package` at all.
+    /// Saves the collaborative session, including added shapes.
     pub fn save_session(&self, session: &vsdx_edit::DiagramSession) -> Result<Vec<u8>> {
         session
             .save()
@@ -150,6 +145,7 @@ fn authorize_structural_edits(package: &VsdxPackage, edits: &[StructuralEdit]) -
             sheet: CellSheet::Page(*page_id),
             shape_id: Some(*shape_id),
             section: None,
+            section_index: None,
             row: None,
             cell_name: "LockDelete".to_owned(),
         };
@@ -207,11 +203,7 @@ impl PackageMutationContext<'_> {
         }))
     }
 
-    /// Evaluates the cache a formula should carry after it is written.
-    ///
-    /// Returns `None` for formulas outside the display evaluation profile; a
-    /// formula edit without an evaluable cache drops the existing value instead
-    /// of preserving a cache that no longer matches the formula.
+    /// Computes a fresh cache, or returns None for unsupported formulas.
     fn evaluate_cache(&self, locator: &CellLocator, formula: &str) -> Result<Option<String>> {
         let resolver = Resolver::new(self.package);
         let evaluation = match (&locator.sheet, locator.shape_id) {
@@ -312,6 +304,7 @@ impl MutationContext for PackageMutationContext<'_> {
             sheet,
             shape_id,
             section,
+            section_index: None,
             row,
             cell_name,
         };
@@ -328,6 +321,7 @@ impl MutationContext for PackageMutationContext<'_> {
             sheet: locator.sheet.clone(),
             shape_id: locator.shape_id,
             section: None,
+            section_index: None,
             row: None,
             cell_name: lock.to_owned(),
         })?
@@ -347,6 +341,7 @@ impl MutationContext for PackageMutationContext<'_> {
                     sheet: locator.sheet.clone(),
                     shape_id: locator.shape_id,
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: lock.to_owned(),
                 },
@@ -381,7 +376,14 @@ fn sheet_path(package: &VsdxPackage, sheet: &CellSheet) -> std::result::Result<S
 }
 
 fn locator_key(locator: &CellLocator) -> String {
-    match (&locator.section, &locator.row) {
+    let section = locator
+        .section
+        .as_ref()
+        .map(|name| match locator.section_index {
+            Some(index) if name == "Geometry" => format!("{name}{}", u64::from(index) + 1),
+            _ => name.clone(),
+        });
+    match (&section, &locator.row) {
         (Some(section), Some(CellRow::Name(row))) => {
             format!("{section}.{row}.{}", locator.cell_name)
         }

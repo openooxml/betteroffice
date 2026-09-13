@@ -116,6 +116,8 @@ struct SnapshotCellLocator {
     sheet: SnapshotCellSheet,
     shape_id: Option<u32>,
     section: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    section_index: Option<u32>,
     row: Option<SnapshotCellRow>,
     cell_name: String,
 }
@@ -130,6 +132,7 @@ impl From<&CellLocator> for SnapshotCellLocator {
             },
             shape_id: locator.shape_id,
             section: locator.section.clone(),
+            section_index: locator.section_index,
             row: locator.row.as_ref().map(|row| match row {
                 CellRow::Index(id) => SnapshotCellRow::Index(*id),
                 CellRow::Name(name) => SnapshotCellRow::Name(name.clone()),
@@ -149,6 +152,7 @@ impl From<SnapshotCellLocator> for CellLocator {
             },
             shape_id: locator.shape_id,
             section: locator.section,
+            section_index: locator.section_index,
             row: locator.row.map(|row| match row {
                 SnapshotCellRow::Index(id) => CellRow::Index(id),
                 SnapshotCellRow::Name(name) => CellRow::Name(name),

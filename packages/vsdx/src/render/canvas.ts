@@ -44,7 +44,7 @@ function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive,
     const transform = 'transform' in primitive ? primitive.transform ?? identity() : identity(); ctx.transform(paintTransform.a, paintTransform.b, paintTransform.c, paintTransform.d, paintTransform.e, paintTransform.f); ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
     switch (primitive.kind) {
       case 'shape': paintShape(ctx, primitive); break;
-      case 'image': { const source = images.get(primitive.assetId); if (source) ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); break; }
+      case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } break; }
       case 'textBox': paintTextBox(ctx, primitive); break;
       case 'placeholder': paintPlaceholder(ctx, primitive); break;
       case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images); break;

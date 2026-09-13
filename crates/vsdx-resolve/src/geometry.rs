@@ -5,6 +5,16 @@ use ooxml_drawingml::GeometryPathCommand;
 /// are fractions of `width` and `height`, giving absolute points in local space.
 pub fn realize_geometry(section: &ResolvedSection, width: f64, height: f64) -> RealizedGeometry {
     let mut out = RealizedGeometry::default();
+    if !section.unsupported_controls.is_empty() {
+        out.issues.extend(
+            section
+                .unsupported_controls
+                .iter()
+                .cloned()
+                .map(GeometryIssue::UnsupportedSectionControl),
+        );
+        return out;
+    }
     let mut current = (0.0, 0.0);
     let rows: Vec<_> = if section.row_order.is_empty() {
         let mut rows: Vec<_> = section.rows.values().collect();
@@ -729,6 +739,8 @@ mod tests {
             )
         };
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -785,6 +797,8 @@ mod tests {
     #[test]
     fn geometry_uses_cached_values_and_reports_unsupported_rows() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -818,6 +832,8 @@ mod tests {
     fn geometry_rejects_non_finite_cached_values() {
         for value in ["NaN", "inf", "1e999"] {
             let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -842,6 +858,8 @@ mod tests {
     #[test]
     fn geometry_rejects_non_finite_realized_relative_coordinates() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -873,6 +891,8 @@ mod tests {
     #[test]
     fn rel_line_to_rows_realize_the_corpus_rectangle_from_shape_bounds() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -911,6 +931,8 @@ mod tests {
     #[test]
     fn rel_move_to_rows_realize_from_shape_bounds() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -944,6 +966,8 @@ mod tests {
     #[test]
     fn rel_rows_do_not_accumulate() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -980,6 +1004,8 @@ mod tests {
             [(f64::INFINITY, 1.0, "Width"), (4.0, f64::NAN, "Height")]
         {
             let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1047,6 +1073,8 @@ mod tests {
     #[test]
     fn zero_shape_bounds_realize_finite_degenerate_geometry() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1101,6 +1129,8 @@ mod tests {
     #[test]
     fn arc_to_rejects_non_finite_derived_geometry() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1126,6 +1156,8 @@ mod tests {
     #[test]
     fn ellipse_rejects_non_finite_derived_geometry() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1158,6 +1190,8 @@ mod tests {
     #[test]
     fn geometry_emits_finite_commands_unchanged() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1186,6 +1220,8 @@ mod tests {
     #[test]
     fn arc_to_bows_by_its_height_at_the_curve_midpoint() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1214,6 +1250,8 @@ mod tests {
     #[test]
     fn ellipse_uses_center_and_axis_endpoints() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1261,6 +1299,8 @@ mod tests {
     #[test]
     fn elliptical_arc_requires_all_cached_schema_cells() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1292,6 +1332,8 @@ mod tests {
     #[test]
     fn polyline_to_realizes_absolute_points_as_line_segments() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1329,6 +1371,8 @@ mod tests {
     #[test]
     fn polyline_to_relative_flags_are_fractions_of_the_shape_bounds() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1365,6 +1409,8 @@ mod tests {
     #[test]
     fn polyline_to_extends_to_its_declared_endpoint() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1411,6 +1457,8 @@ mod tests {
         ];
         for (index, value) in malformed.into_iter().enumerate() {
             let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1434,6 +1482,8 @@ mod tests {
             );
         }
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1456,6 +1506,8 @@ mod tests {
     #[test]
     fn polyline_to_rejects_non_finite_realized_points() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1520,6 +1572,8 @@ mod tests {
             ),
         ] {
             let section = ResolvedSection {
+                index: None,
+                unsupported_controls: Vec::new(),
                 name: "Geometry".into(),
                 deleted: false,
                 row_order: vec![],
@@ -1534,6 +1588,8 @@ mod tests {
     #[test]
     fn infinite_line_outside_the_shape_bounds_realizes_nothing() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1558,6 +1614,8 @@ mod tests {
     #[test]
     fn infinite_line_with_coincident_points_reports_an_issue() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1588,6 +1646,8 @@ mod tests {
     #[test]
     fn elliptical_arc_passes_through_its_control_point() {
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],
@@ -1670,6 +1730,8 @@ mod tests {
             )
         };
         let section = ResolvedSection {
+            index: None,
+            unsupported_controls: Vec::new(),
             name: "Geometry".into(),
             deleted: false,
             row_order: vec![],

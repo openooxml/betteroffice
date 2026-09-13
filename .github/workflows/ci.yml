@@ -51,9 +51,7 @@ jobs:
         run: bun run typecheck:packages
 
       - name: Test
-        run: |
-          bun run build:vsdx-wasm
-          bun run test
+        run: bun run test
 
       - name: Check generated Wasm declarations
         run: git diff --exit-code -- 'packages/*/src/wasm/generated/*'

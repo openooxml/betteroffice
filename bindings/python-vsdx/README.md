@@ -16,6 +16,9 @@ Geometry uses Visio's native inches. `Shape.pin_x`, `pin_y`, `width`, and
 
 `Diagram.open()` accepts `bytes`, `bytearray`, and `memoryview`. Values returned
 by `pages` are snapshots, so open the diagram again after changing its source.
+`cells` contains direct shape cells; section rows are not exposed. Geometry
+properties read stored numeric values, and `text` does not expand fields or
+inherited master text.
 
 ## API
 

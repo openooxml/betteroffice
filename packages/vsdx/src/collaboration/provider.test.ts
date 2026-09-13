@@ -208,10 +208,11 @@ describe('CollaborationProvider sync', () => {
     expect([...transport.sent[0]]).toEqual([0, 0, 2, 1, 2]);
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
     ]);
-    const [awareness] = decodeMessages(transport.sent[1]);
+    const [awareness] = decodeMessages(transport.sent[2]);
     if (awareness.type !== 'awareness') throw new Error('Expected awareness');
     expect(decodeAwarenessUpdate(awareness.update)[0].state).toMatchObject({
       clientId: 1,
@@ -270,9 +271,11 @@ describe('CollaborationProvider sync', () => {
     expect(provider.synced).toBe(false);
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
     ]);
@@ -287,9 +290,11 @@ describe('CollaborationProvider sync', () => {
     expect(transport.connectCount).toBe(1);
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
     ]);
@@ -473,7 +478,7 @@ describe('CollaborationProvider sync', () => {
     provider.connect();
     transport.emit({ type: 'open' });
 
-    const [announced] = decodeMessages(transport.sent[1]);
+    const [announced] = decodeMessages(transport.sent[2]);
     if (announced.type !== 'awareness') throw new Error('Expected awareness');
     expect(decodeAwarenessUpdate(announced.update)[0].state?.user.name).toHaveLength(1024);
 
@@ -530,7 +535,7 @@ describe('CollaborationProvider sync', () => {
 
     expect(errors.map((error) => error.code)).toEqual(['protocol']);
     expect(errors[0].message).toContain('Failed to encode awareness update');
-    expect(sentMessageTypes(transport)).toEqual(['sync-step-1', 'query-awareness']);
+    expect(sentMessageTypes(transport)).toEqual(['sync-step-1', 'sync-step-2', 'query-awareness']);
 
     transport.emit({ type: 'message', data: encodeSyncStep2(Uint8Array.of(4)) });
     replica.emit(Uint8Array.of(5), 'local');
@@ -541,6 +546,7 @@ describe('CollaborationProvider sync', () => {
     expect(replica.applied).toEqual([Uint8Array.of(4)]);
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'query-awareness',
       'update',
     ]);
@@ -665,6 +671,7 @@ describe('CollaborationProvider transport flow control', () => {
     transport.emit({ type: 'open' });
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
     ]);
@@ -912,6 +919,7 @@ describe('CollaborationProvider lifecycle', () => {
     transport.emit({ type: 'open' });
     expect(sentMessageTypes(transport)).toEqual([
       'sync-step-1',
+      'sync-step-2',
       'awareness',
       'query-awareness',
     ]);

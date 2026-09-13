@@ -34,10 +34,7 @@ pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 const MAX_STATE_VECTOR_BYTES: usize = 1024 * 1024;
 
-/// ```compile_fail
-/// let session = vsdx_edit::DiagramSession::open(&[], 1).unwrap();
-/// session.yrs_doc();
-/// ```
+/// A collaborative session with private CRDT storage.
 pub struct DiagramSession {
     pub(crate) doc: Doc,
     client_id: u64,
@@ -141,12 +138,14 @@ impl DiagramSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        // Remote bytes are trusted only after decoding and schema/policy validation on a staged clone;
-        // this rejects malformed state and protected-cell rewrites, but cannot authenticate an author.
+        diagram::normalize_concurrent_orders(&staged)?;
         diagram::validate_remote_update(&self.doc, &staged)?;
+        let update = staged
+            .transact()
+            .encode_state_as_update_v1(&self.doc.transact().state_vector());
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?)
+            .apply_update(decode_update_v1(&update).map_err(EditError::InvalidUpdate)?)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
         self.snapshot()
     }
@@ -533,6 +532,289 @@ mod tests {
     }
 
     #[test]
+    fn snapshots_evaluate_trusted_formulas_with_qualified_section_references() {
+        let session = session();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Width",
+            None,
+            None,
+            Some("=4"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Value",
+            Some("User"),
+            Some(CellRow::Name("Scale".into())),
+            Some("3"),
+            None,
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "PinX",
+            None,
+            None,
+            Some("Width/2+User.Scale"),
+            None,
+        );
+        let snapshot = session.snapshot().unwrap();
+        let pin = snapshot.pages[0].shapes[0]
+            .cells
+            .iter()
+            .find(|cell| cell.name == "PinX")
+            .unwrap();
+        assert_eq!(pin.value.as_deref(), Some("5"));
+        session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "PinX",
+                "Width*User.Scale",
+            )
+            .unwrap();
+        let edits = session.semantic_cell_edits().unwrap();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].value.as_deref(), Some("12"));
+    }
+
+    #[test]
+    fn snapshot_recomputes_dependent_values_after_editing_their_inputs() {
+        let session = session();
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "Width",
+            None,
+            None,
+            Some("2"),
+            Some("2"),
+        );
+        add_shape_cell(
+            &session,
+            "page:1:shape:1",
+            "PinX",
+            None,
+            None,
+            Some("Width/2"),
+            Some("1"),
+        );
+        session
+            .set_cell_formula(
+                &EditCtx::local("test"),
+                "page:1",
+                "page:1:shape:1",
+                "Width",
+                "4",
+            )
+            .unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let pin = snapshot.pages[0].shapes[0]
+            .cells
+            .iter()
+            .find(|cell| cell.name == "PinX")
+            .unwrap();
+        assert_eq!(pin.value.as_deref(), Some("2"));
+    }
+
+    #[test]
+    fn drafts_fail_atomically_for_invalid_or_duplicate_locators() {
+        let session = session();
+        let cell = CellSnapshot {
+            locator: CellLocator {
+                sheet: CellSheet::Page(1),
+                shape_id: None,
+                section: Some("Geometry".into()),
+                section_index: None,
+                row: Some(CellRow::Index(0)),
+                cell_name: "X".into(),
+            },
+            row_type: Some("MoveTo".into()),
+            name: "X".into(),
+            formula: Some("1".into()),
+            value: None,
+        };
+        let mut duplicate = cell.clone();
+        duplicate.locator.section_index = Some(0);
+        let mut row_without_section = cell.clone();
+        row_without_section.locator.section = None;
+        let mut invalid_formula = cell.clone();
+        invalid_formula.formula = Some("1+".into());
+        let mut invalid_xml = cell.clone();
+        invalid_xml.name.push('\0');
+        invalid_xml.locator.cell_name = invalid_xml.name.clone();
+        let mut raw_cache = cell.clone();
+        raw_cache.value = Some("999".into());
+        for cells in [
+            vec![cell.clone(), duplicate],
+            vec![row_without_section],
+            vec![invalid_formula],
+            vec![invalid_xml],
+            vec![raw_cache],
+        ] {
+            let before = session.encode_state_as_update_v1();
+            assert!(
+                session
+                    .add_shape(
+                        &EditCtx::local("test"),
+                        "page:1",
+                        &ShapeDraft { name: None, cells }
+                    )
+                    .is_err()
+            );
+            assert_eq!(session.encode_state_as_update_v1(), before);
+        }
+    }
+
+    #[test]
+    fn added_shape_ids_are_not_reused_after_deletion() {
+        let session = session();
+        let draft = ShapeDraft {
+            name: None,
+            cells: Vec::new(),
+        };
+        let first = session
+            .add_shape(&EditCtx::local("test"), "page:1", &draft)
+            .unwrap();
+        session
+            .delete_shape(&EditCtx::local("test"), "page:1", &first.shape_id)
+            .unwrap();
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 7).unwrap();
+        let second = reopened
+            .add_shape(&EditCtx::local("test"), "page:1", &draft)
+            .unwrap();
+        assert_ne!(first.shape_id, second.shape_id);
+    }
+
+    #[test]
+    fn hydrated_numeric_identities_reject_invalid_numbers() {
+        for field in ["sectionIndex", "rowIndex", "sourceId", "maxSourceId"] {
+            for value in [
+                -1.0,
+                0.5,
+                f64::NAN,
+                f64::INFINITY,
+                f64::from(u32::MAX) + 1.0,
+            ] {
+                let session = session();
+                add_cell_at(
+                    &session,
+                    "X",
+                    Some("Geometry"),
+                    Some(CellRow::Index(0)),
+                    Some("1"),
+                    None,
+                );
+                let peer = peer_doc(&session, 9);
+                let mut txn = peer.transact_mut();
+                let owner = if field == "maxSourceId" {
+                    match txn.get_map(PAGES).unwrap().get(&txn, "page:1").unwrap() {
+                        yrs::Out::YMap(page) => page,
+                        _ => unreachable!(),
+                    }
+                } else if field == "sourceId" {
+                    match txn
+                        .get_map(SHEETS)
+                        .unwrap()
+                        .get(&txn, "page:1:shape:1")
+                        .unwrap()
+                    {
+                        yrs::Out::YMap(shape) => shape,
+                        _ => unreachable!(),
+                    }
+                } else {
+                    match shape_cells(&txn, "page:1:shape:1")
+                        .get(&txn, "Geometry\u{1f}IX:0\u{1f}X")
+                        .unwrap()
+                    {
+                        yrs::Out::YMap(cell) => cell,
+                        _ => unreachable!(),
+                    }
+                };
+                owner.insert(&mut txn, field, value);
+                drop(txn);
+                let update = peer
+                    .transact()
+                    .encode_state_as_update_v1(&StateVector::default());
+                assert!(
+                    DiagramSession::open_from_update(&update, 10).is_err(),
+                    "{field}={value}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn concurrent_reorders_of_the_same_shape_converge() {
+        let left = session();
+        let right = DiagramSession::open_from_update(&left.encode_state_as_update_v1(), 8).unwrap();
+        left.reorder_shape(&EditCtx::local("left"), "page:1", "page:1:shape:1", 1)
+            .unwrap();
+        right
+            .reorder_shape(&EditCtx::local("right"), "page:1", "page:1:shape:1", 1)
+            .unwrap();
+        let left_update = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let right_update = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        left.apply_update_v1(&right_update).unwrap();
+        right.apply_update_v1(&left_update).unwrap();
+        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+        assert_eq!(left.snapshot().unwrap().pages[0].shapes.len(), 2);
+    }
+
+    #[test]
+    fn concurrent_page_reorders_and_shape_deletion_converge() {
+        for delete in [false, true] {
+            let left = session();
+            let right =
+                DiagramSession::open_from_update(&left.encode_state_as_update_v1(), 8).unwrap();
+            if delete {
+                left.reorder_shape(&EditCtx::local("left"), "page:1", "page:1:shape:1", 1)
+                    .unwrap();
+                right
+                    .delete_shape(&EditCtx::local("right"), "page:1", "page:1:shape:1")
+                    .unwrap();
+            } else {
+                left.reorder_page(&EditCtx::local("left"), "page:1", 1)
+                    .unwrap();
+                right
+                    .reorder_page(&EditCtx::local("right"), "page:1", 1)
+                    .unwrap();
+            }
+            let left_update = left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap();
+            let right_update = right
+                .encode_diff_v1(&left.encode_state_vector_v1())
+                .unwrap();
+            left.apply_update_v1(&right_update).unwrap();
+            right.apply_update_v1(&left_update).unwrap();
+            assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+            let left_update = left
+                .encode_diff_v1(&right.encode_state_vector_v1())
+                .unwrap();
+            let right_update = right
+                .encode_diff_v1(&left.encode_state_vector_v1())
+                .unwrap();
+            left.apply_update_v1(&right_update).unwrap();
+            right.apply_update_v1(&left_update).unwrap();
+            assert_eq!(
+                left.encode_state_vector_v1(),
+                right.encode_state_vector_v1()
+            );
+            assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+        }
+    }
+
+    #[test]
     fn guards_refuse_all_formula_spellings() {
         for formula in ["GUARD(1)", "=GUARD(1)", "guard(1)", "IF(1, GUARD(1), 0)"] {
             let session = session();
@@ -674,6 +956,7 @@ mod tests {
             sheet: CellSheet::Page(1),
             shape_id: Some(1),
             section: Some("Geometry".to_owned()),
+            section_index: None,
             row: Some(CellRow::Index(0)),
             cell_name: "X".to_owned(),
         };
@@ -798,6 +1081,7 @@ mod tests {
             sheet: CellSheet::Page(1),
             shape_id: Some(42),
             section: Some("Geometry".to_owned()),
+            section_index: None,
             row: Some(CellRow::Index(0)),
             cell_name: "X".to_owned(),
         };
@@ -849,11 +1133,7 @@ mod tests {
         }));
     }
 
-    /// Coverage for what `session_added_shapes_do_not_leak_into_cell_edits` (against the removed
-    /// `export()` API) used to pin: `semantic_cell_edits` filters to `ShapeOrigin::Original`
-    /// shapes before it ever looks at a cell, so a session-added shape's own draft cells cannot
-    /// reach the package-wide semantic-cell-edit list by construction, not by a value that could
-    /// be forgotten in a refactor.
+    /// Excludes draft cells from original-package edits.
     #[test]
     fn session_added_shapes_do_not_leak_into_semantic_cell_edits() {
         let session = session();
@@ -870,6 +1150,7 @@ mod tests {
                             sheet: CellSheet::Page(1),
                             shape_id: None,
                             section: None,
+                            section_index: None,
                             row: None,
                             cell_name: "Width".to_owned(),
                         },
@@ -924,6 +1205,7 @@ mod tests {
                     sheet: CellSheet::Page(1),
                     shape_id: Some(42),
                     section: Some("Geometry".to_owned()),
+                    section_index: None,
                     row: Some(CellRow::Name("MoveTo".to_owned())),
                     cell_name: "X".to_owned(),
                 },
@@ -1348,10 +1630,7 @@ mod tests {
         assert_eq!(before, session.encode_state_as_update_v1());
     }
 
-    /// `Width` never changes formula, so `validate_formula_mutations` has nothing to compare
-    /// and never looks at it; disabling `LockWidth` is itself an unprotected `CellEdit`, so
-    /// nothing refuses it either. Only comparing the protected *set* before and after (rather
-    /// than each formula in isolation) notices `Width` silently falling out of it.
+    /// Rejects remote changes that silently remove a protected cell.
     #[test]
     fn remote_update_that_disables_a_lock_forgets_the_cell_it_was_protecting() {
         let session = session();
@@ -1368,10 +1647,7 @@ mod tests {
         assert_eq!(before, session.encode_state_as_update_v1());
     }
 
-    /// The mutation policy behind local `delete_shape` only ever inspects `LockDelete`; a
-    /// `GUARD`-protected cell elsewhere on the shape does not by itself block deletion. A
-    /// remote deletion must accept exactly what a local one would, so this is not a gap to
-    /// close but a parity case to pin.
+    /// Matches local deletion policy for unrelated guarded cells.
     #[test]
     fn remote_deletion_of_an_unlocked_shape_with_a_guarded_cell_is_accepted() {
         let session = session();
@@ -1474,6 +1750,7 @@ mod tests {
             sheet: CellSheet::Page(1),
             shape_id: Some(1),
             section: Some("Geometry".to_owned()),
+            section_index: None,
             row: Some(CellRow::Index(0)),
             cell_name: "X".to_owned(),
         };
@@ -1939,6 +2216,7 @@ mod tests {
                 sheet: CellSheet::Page(1),
                 shape_id: None,
                 section: None,
+                section_index: None,
                 row: None,
                 cell_name: name.to_owned(),
             },

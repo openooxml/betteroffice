@@ -36,7 +36,6 @@ pub(crate) fn redact_xml_with_styles(
         current_style: None,
         cell_type: None,
         custom_property: 0,
-        sections: Vec::new(),
     };
     let mut skipped_depth = 0;
 
@@ -72,8 +71,7 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                let (rewritten, section) = rewrite_start(&reader, start, &local, &mut state)?;
-                state.sections.push(section);
+                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -85,7 +83,7 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                let (rewritten, _) = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
                 if empty_style {
                     state.current_style = None;
                 }
@@ -103,7 +101,6 @@ pub(crate) fn redact_xml_with_styles(
                     state.current_style = None;
                 }
                 stack.pop();
-                state.sections.pop();
                 writer
                     .write_event(Event::End(end))
                     .map_err(|error| xml_error(path, error))?;
@@ -176,7 +173,6 @@ struct RewriteState<'a> {
     current_style: Option<String>,
     cell_type: Option<String>,
     custom_property: usize,
-    sections: Vec<Option<String>>,
 }
 
 fn rewrite_start(
@@ -184,7 +180,7 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     state: &mut RewriteState<'_>,
-) -> Result<(BytesStart<'static>, Option<String>), RedactError> {
+) -> Result<BytesStart<'static>, RedactError> {
     let format = state.format;
     let path = state.path;
     let schema = schema_node(path, reader, start.name());
@@ -220,23 +216,6 @@ fn rewrite_start(
             .map(|(_, value)| value.clone());
     }
 
-    let section = (format == Format::Vsdx && element == "Section")
-        .then(|| {
-            attributes
-                .iter()
-                .find(|(key, _)| key == "N")
-                .map(|(_, value)| value.clone())
-        })
-        .flatten();
-    let vsdx_user_data_cell = format == Format::Vsdx
-        && element == "Cell"
-        && state
-            .sections
-            .iter()
-            .any(|section| matches!(section.as_deref(), Some("Property" | "User")))
-        && attributes.iter().any(|(key, value)| {
-            key == "N" && matches!(value.as_str(), "Value" | "Prompt" | "Label")
-        });
     let (relationship, external) = relationship_mode(path, element, &attributes);
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
@@ -246,10 +225,6 @@ fn rewrite_start(
     output.clear_attributes();
     for (key, value) in attributes {
         let local = attribute_local(&key);
-        if vsdx_user_data_cell && key == "F" {
-            state.report.attributes += 1;
-            continue;
-        }
         let instance = path.starts_with("customxml/")
             && schema::is_instance_namespace(
                 &reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
@@ -310,7 +285,7 @@ fn rewrite_start(
                 )
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && sensitive_attribute(format, path, element, local, &value, vsdx_user_data_cell)
+                && sensitive_attribute(format, path, element, local, &value)
             {
                 Some(placeholder(&value))
             } else {
@@ -331,7 +306,7 @@ fn rewrite_start(
     if relationship && external && !wrote_target_mode {
         output.push_attribute(("TargetMode", "External"));
     }
-    Ok((output, section))
+    Ok(output)
 }
 
 fn schema_node(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
@@ -445,10 +420,6 @@ fn replacement_kind(
             "v" => Some(Replacement::Number),
             _ => None,
         },
-        Format::Vsdx => stack
-            .iter()
-            .any(|name| name == "Text")
-            .then_some(Replacement::Text),
         Format::Auto => None,
     }
 }
@@ -473,7 +444,6 @@ fn sensitive_attribute(
     element: &str,
     attribute: &str,
     value: &str,
-    vsdx_user_data_cell: bool,
 ) -> bool {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".rels") {
@@ -520,7 +490,6 @@ fn sensitive_attribute(
                 || element == "tag" && matches!(attribute, "name" | "val")
                 || element == "custShow" && attribute == "name"
         }
-        Format::Vsdx => vsdx_user_data_cell && matches!(attribute, "V" | "F"),
         Format::Auto => false,
     }
 }

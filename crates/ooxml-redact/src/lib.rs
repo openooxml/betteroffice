@@ -23,7 +23,6 @@ pub enum Format {
     Docx,
     Xlsx,
     Pptx,
-    Vsdx,
 }
 
 impl Format {
@@ -33,7 +32,6 @@ impl Format {
             Self::Docx => Some("docx"),
             Self::Xlsx => Some("xlsx"),
             Self::Pptx => Some("pptx"),
-            Self::Vsdx => Some("vsdx"),
         }
     }
 }
@@ -45,7 +43,6 @@ impl fmt::Display for Format {
             Self::Docx => formatter.write_str("DOCX"),
             Self::Xlsx => formatter.write_str("XLSX"),
             Self::Pptx => formatter.write_str("PPTX"),
-            Self::Vsdx => formatter.write_str("VSDX"),
         }
     }
 }
@@ -65,10 +62,10 @@ pub struct RedactionReport {
 pub enum RedactError {
     #[error("invalid OOXML package: {0}")]
     Container(String),
-    #[error("could not detect DOCX, XLSX, PPTX, or VSDX content")]
+    #[error("could not detect DOCX, XLSX, or PPTX content")]
     UnknownFormat,
-    #[error("macro-enabled Visio packages (.vsdm) cannot be redacted")]
-    MacroEnabledVisio,
+    #[error("Visio redaction is not supported; no safe redacted package can be produced")]
+    UnsupportedVisio,
     #[error("requested {requested}, but package is {detected}")]
     FormatMismatch { requested: Format, detected: Format },
     #[error("invalid XML in {part}: {message}")]
@@ -148,11 +145,20 @@ pub fn redact_with_report(
 }
 
 fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
+    if parts
+        .iter()
+        .any(|(path, _)| normalize_part_name(path).starts_with("visio/"))
+    {
+        return Err(RedactError::UnsupportedVisio);
+    }
     if let Some((_, content_types)) = parts
         .iter()
         .find(|(path, _)| normalize_part_name(path) == "[content_types].xml")
     {
         let text = String::from_utf8_lossy(content_types).to_ascii_lowercase();
+        if declares_visio_main_part(content_types)? {
+            return Err(RedactError::UnsupportedVisio);
+        }
         if text.contains("wordprocessingml.document.main+xml")
             || text.contains("ms-word.document.macroenabled.main+xml")
         {
@@ -168,12 +174,6 @@ fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
         {
             return Ok(Format::Pptx);
         }
-        if text.contains("ms-visio.drawing.macroenabled.main+xml") {
-            return Err(RedactError::MacroEnabledVisio);
-        }
-        if text.contains("ms-visio.drawing.main+xml") {
-            return Ok(Format::Vsdx);
-        }
     }
 
     let has = |expected: &str| {
@@ -187,10 +187,53 @@ fn detect_parts(parts: &[(String, Vec<u8>)]) -> Result<Format, RedactError> {
         Ok(Format::Xlsx)
     } else if has("ppt/presentation.xml") {
         Ok(Format::Pptx)
-    } else if has("visio/document.xml") {
-        Ok(Format::Vsdx)
     } else {
         Err(RedactError::UnknownFormat)
+    }
+}
+
+fn declares_visio_main_part(bytes: &[u8]) -> Result<bool, RedactError> {
+    use quick_xml::events::Event;
+    use quick_xml::name::ResolveResult;
+    use quick_xml::{NsReader, XmlVersion};
+
+    let mut reader = NsReader::from_reader(bytes);
+    let error = |message: String| RedactError::Xml {
+        part: "[Content_Types].xml".to_owned(),
+        message,
+    };
+    loop {
+        match reader
+            .read_event()
+            .map_err(|value| error(value.to_string()))?
+        {
+            Event::Start(start) | Event::Empty(start)
+                if matches!(start.local_name().as_ref(), b"Override" | b"Default") =>
+            {
+                let namespace = reader.resolver().resolve_element(start.name()).0;
+                if !matches!(namespace, ResolveResult::Unbound)
+                    && !matches!(namespace, ResolveResult::Bound(ns) if ns.as_ref() == b"http://schemas.openxmlformats.org/package/2006/content-types")
+                {
+                    continue;
+                }
+                for attribute in start.attributes() {
+                    let attribute = attribute.map_err(|value| error(value.to_string()))?;
+                    if attribute.key.as_ref() == b"ContentType" {
+                        let value = attribute
+                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                            .map_err(|value| error(value.to_string()))?
+                            .to_ascii_lowercase();
+                        if value.starts_with("application/vnd.ms-visio.")
+                            && value.ends_with(".main+xml")
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+            Event::Eof => return Ok(false),
+            _ => {}
+        }
     }
 }
 

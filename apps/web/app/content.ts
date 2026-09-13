@@ -20,7 +20,7 @@ export const ECOSYSTEMS = [
     install: "npm install @betteroffice/docx-react",
     url: NPM,
     docs: `${DOCS}/docs/javascript`,
-    desc: "React editors and framework-free cores for all three formats.",
+    desc: "React editors and framework-free cores for documents, spreadsheets, slides and diagrams.",
   },
   {
     name: "Rust",
@@ -42,7 +42,7 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, three editors and a diagram editor",
+  heading: "One suite, four editors",
   prose:
     "BetterOffice packages the OpenOOXML engines as ready-to-use editors. Documents, spreadsheets, slides and Visio diagrams are live today on the same foundation.",
 };

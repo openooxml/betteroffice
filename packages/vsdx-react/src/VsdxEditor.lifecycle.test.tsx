@@ -88,19 +88,34 @@ test('a parent re-rendering with a new inline onChange does not reopen the docum
   canvasPrototype.getContext = getContext;
 });
 
-test('attaches collaboration that arrives after the file opens', async () => {
+test('late collaboration opens with its seed and client ID without reopening for equivalent options', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
-  let connected = false;
-  let replicas = 0;
-  const view = render(<VsdxEditor file={foundation} fonts={[]} />);
-  await waitFor(() => expect(opens).toBeGreaterThan(0));
-  view.rerender(<VsdxEditor file={foundation} fonts={[]} collaboration={{ clientId: 1, onReplica: (replica) => { if (replica) { replicas++; connected = true; } } }} />);
-  await waitFor(() => expect(replicas).toBe(1));
-  expect(connected).toBe(true);
-  cleanup();
-  canvasPrototype.getContext = getContext;
+  const seedHandle = originalOpenDiagram(foundation, { clientId: 900 });
+  seedHandle.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '23');
+  const initialUpdate = seedHandle.encodeStateAsUpdate();
+  seedHandle.dispose();
+  opens = 0;
+  let ready: DiagramHandle | undefined;
+  let attached: vsdx.CollaborationReplica | null = null;
+  const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} collaboration={{ clientId: 901, initialUpdate, onReplica: (replica) => { attached = replica; } }} />);
+    await waitFor(() => expect(attached?.clientId).toBe(901));
+    expect(ready!.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('23');
+    await act(async () => { ready!.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '31'); });
+    const opened = ready!;
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} collaboration={{ clientId: 901, initialUpdate: initialUpdate.slice(), onReplica: (replica) => { attached = replica; } }} />);
+    await waitFor(() => expect(attached).toBe(opened));
+    expect(opens).toBe(2);
+    expect(ready!.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('31');
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
 });
 
 test('attaches collaboration that arrives while initialization is pending', async () => {
@@ -130,6 +145,8 @@ test('attaches collaboration that arrives while initialization is pending', asyn
 });
 
 test('a stale paint does not resolve images after a newer paint has taken over', async () => {
+  const originalCreateImageBitmap = globalThis.createImageBitmap;
+  globalThis.createImageBitmap = async () => ({} as ImageBitmap);
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -166,8 +183,248 @@ test('a stale paint does not resolve images after a newer paint has taken over',
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(mediaBytesCalls).toEqual(['asset-1']);
   expect(onErrors).toEqual([]);
+  globalThis.createImageBitmap = originalCreateImageBitmap;
   cleanup();
   paintPageOverride = null;
   canvasPrototype.getContext = getContext;
 });
 
+
+
+test('changing the presence provider does not reattach the same collaboration callback', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const attached: Array<vsdx.CollaborationReplica | null> = [];
+  const onReplica = (replica: vsdx.CollaborationReplica | null) => { attached.push(replica); };
+  const presence = { peers: [], setCursor: () => {}, onPresence: () => () => {} };
+  const view = render(<VsdxEditor file={foundation} fonts={[]} collaboration={{ clientId: 920, onReplica }} />);
+  try {
+    await waitFor(() => expect(attached).toHaveLength(1));
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} collaboration={{ clientId: 920, onReplica, presence }} />);
+    await act(async () => {});
+    expect(attached).toHaveLength(1);
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} collaboration={{ clientId: 920, onReplica, presence: { ...presence } }} />);
+    await act(async () => {});
+    expect(attached).toHaveLength(1);
+    cleanup();
+    expect(attached).toHaveLength(2);
+    expect(attached[1]).toBeNull();
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+test('loading another font preserves unsaved edits and the active replica', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const font = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) };
+  let ready: DiagramHandle | undefined;
+  const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const original = ready!;
+    await act(async () => { original.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '37'); });
+    view.rerender(<VsdxEditor file={foundation} fonts={[font]} onReady={onReady} />);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    expect(ready).toBe(original);
+    expect(ready!.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('37');
+    expect(ready!.canUndo()).toBe(true);
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+
+test('an undecodable embedded image does not blank the rest of its page', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  const originalCreateImageBitmap = globalThis.createImageBitmap;
+  let fills = 0;
+  const errors: Error[] = [];
+  canvasPrototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'fillText' ? () => { fills++; } : () => {}, set: () => true }) as never;
+  globalThis.createImageBitmap = async () => { throw new Error('unsupported embedded image'); };
+  const fixture = await readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/nested-groups.vsdx'));
+  try {
+    await act(async () => { render(<VsdxEditor file={fixture} fonts={[]} onError={(error) => { errors.push(error); }} />); });
+    await waitFor(() => {
+      expect(errors.length).toBeGreaterThan(0);
+      expect(fills).toBeGreaterThan(0);
+    });
+    expect(errors[0].message).toBe('unsupported embedded image');
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+    globalThis.createImageBitmap = originalCreateImageBitmap;
+  }
+});
+
+
+test('late collaboration cannot discard unsaved local edits or attach the wrong replica', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const seed = originalOpenDiagram(foundation, { clientId: 930 });
+  const initialUpdate = seed.encodeStateAsUpdate();
+  seed.dispose();
+  let ready: DiagramHandle | undefined;
+  const attached: Array<vsdx.CollaborationReplica | null> = [];
+  const errors: Error[] = [];
+  const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
+  const onError = (error: Error) => { errors.push(error); };
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} onError={onError} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const original = ready!;
+    await act(async () => { original.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '41'); });
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} onError={onError} collaboration={{ clientId: 931, initialUpdate, onReplica: (replica) => { attached.push(replica); } }} />);
+    await act(async () => {});
+    expect(ready).toBe(original);
+    expect(original.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('41');
+    expect(attached).toEqual([]);
+    expect(errors[errors.length - 1]?.message).toBe('Save your changes before switching collaboration sessions.');
+    const reopened = originalOpenDiagram(original.save(), { clientId: 932 });
+    expect(reopened.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('41');
+    reopened.dispose();
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+test('layout failure cannot hide unsaved edits from the session guard', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  let ready: DiagramHandle | undefined;
+  const errors: Error[] = [];
+  const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
+  const onError = (error: Error) => { errors.push(error); };
+  const attached: Array<vsdx.CollaborationReplica | null> = [];
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} onError={onError} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const original = ready!;
+    original.layoutPage = () => { throw new Error('layout budget exceeded'); };
+    await act(async () => { original.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '43'); });
+    await waitFor(() => expect(errors.some(error => error.message === 'layout budget exceeded')).toBe(true));
+    expect(original.snapshot().pages[0].shapes[0].cells.find(cell => cell.name === 'Both')?.formula).toBe('43');
+    view.rerender(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} onError={onError} collaboration={{ clientId: 941, onReplica: replica => attached.push(replica) }} />);
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)); });
+    expect(ready).toBe(original);
+    expect(attached).toEqual([]);
+    expect(ready!.snapshot().pages[0].shapes[0].cells.find(cell => cell.name === 'Both')?.formula).toBe('43');
+  } finally {
+    cleanup();
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+test('restoring earlier bytes for the same font face registers them again', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const first = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) };
+  const second = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSerif-Regular.ttf')) };
+  const registered: vsdx.VsdxFontFace[] = [];
+  let ready: DiagramHandle | undefined;
+  const onReady = (api: { handle: DiagramHandle }) => {
+    ready = api.handle;
+    const register = ready.registerFont;
+    ready.registerFont = (face) => { registered.push(face); return register(face); };
+  };
+  const view = render(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const original = ready!;
+    view.rerender(<VsdxEditor file={foundation} fonts={[second]} onReady={onReady} />);
+    await waitFor(() => expect(registered).toHaveLength(1));
+    expect(registered[0].bytes).toEqual(second.bytes);
+    view.rerender(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />);
+    await waitFor(() => expect(registered).toHaveLength(2));
+    expect(registered[1].bytes).toEqual(first.bytes);
+    expect(ready).toBe(original);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+
+test('a superseded font load cannot replace the browser font after the newer face loads', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  const originalFontFace = globalThis.FontFace;
+  const originalFonts = document.fonts;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const finishes: Array<() => void> = [];
+  const installed: FontFace[] = [];
+  const removed: FontFace[] = [];
+  class DeferredFontFace {
+    load() { return new Promise<FontFace>((resolve) => { finishes.push(() => resolve(this as unknown as FontFace)); }); }
+  }
+  Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: DeferredFontFace });
+  Object.defineProperty(document, 'fonts', { configurable: true, value: { add: (face: FontFace) => { installed.push(face); }, delete: (face: FontFace) => { removed.push(face); } } });
+  const first = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSans-Regular.ttf')) };
+  const second = { family: 'Arial', bytes: await readFile(resolve(root, 'packages/fonts/assets/LiberationSerif-Regular.ttf')) };
+  let ready: DiagramHandle | undefined;
+  const onReady = (api: { handle: DiagramHandle }) => { ready = api.handle; };
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={onReady} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    view.rerender(<VsdxEditor file={foundation} fonts={[first]} onReady={onReady} />);
+    await waitFor(() => expect(finishes).toHaveLength(1));
+    view.rerender(<VsdxEditor file={foundation} fonts={[second]} onReady={onReady} />);
+    await waitFor(() => expect(finishes).toHaveLength(2));
+    await act(async () => { finishes[1](); });
+    expect(installed).toHaveLength(1);
+    await act(async () => { finishes[0](); });
+    expect(installed).toHaveLength(1);
+    cleanup();
+    expect(removed).toEqual(installed);
+  } finally {
+    cleanup();
+    Object.defineProperty(globalThis, 'FontFace', { configurable: true, value: originalFontFace });
+    Object.defineProperty(document, 'fonts', { configurable: true, value: originalFonts });
+    canvasPrototype.getContext = getContext;
+  }
+});
+
+
+test('a peer reordering pages preserves the active page by its identity', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: DiagramHandle | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} clientId={950} onReady={(api) => { ready = api.handle; }} />);
+  let peer: DiagramHandle | undefined;
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    peer = originalOpenDiagram(fixture, { clientId: 951, initialUpdate: ready!.encodeStateAsUpdate() });
+    peer.reorderPage('page:1', 1);
+    await act(async () => { ready!.applyUpdate(peer!.encodeStateAsUpdate(ready!.encodeStateVector())); });
+    expect(view.getByRole('tab', { name: 'Product map' }).getAttribute('aria-selected')).toBe('true');
+    expect(view.getByRole('tab', { name: 'Release flow' }).getAttribute('aria-selected')).toBe('false');
+    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toBe('Page 2 of 2');
+  } finally { peer?.dispose(); cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+
+test('an update received in onReady preserves the initial active page before React commits', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let view!: ReturnType<typeof render>;
+  await act(async () => { view = render(<VsdxEditor file={fixture} fonts={[]} clientId={952} onReady={({ handle }) => {
+    const peer = originalOpenDiagram(fixture, { clientId: 953, initialUpdate: handle.encodeStateAsUpdate() });
+    try { peer.reorderPage('page:1', 1); handle.applyUpdate(peer.encodeStateAsUpdate(handle.encodeStateVector())); }
+    finally { peer.dispose(); }
+  }} />); });
+  try {
+    await waitFor(() => expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toBe('Page 2 of 2'));
+    expect(view.getByRole('tab', { name: 'Product map' }).getAttribute('aria-selected')).toBe('true');
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});

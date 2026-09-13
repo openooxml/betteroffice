@@ -39,7 +39,8 @@ test('formats inch formulas without exponent noise or negative zero', () => {
   expect(inchFormula(-0)).toBe('0');
   expect(inchFormula(-1.5)).toBe('-1.5');
   expect(inchFormula(1 / 3)).toBe('0.333333');
-  expect(inchFormula(Number.NaN)).toBe('0');
+  expect(() => inchFormula(Number.NaN)).toThrow('Shape geometry must be finite');
+  expect(() => inchFormula(Number.POSITIVE_INFINITY)).toThrow('Shape geometry must be finite');
 });
 
 test('moves a shape by the pointer delta instead of teleporting its pin to release position', () => {

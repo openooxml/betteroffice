@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 type FixtureResult = {
@@ -26,8 +27,6 @@ type RecordedRun = RunResult & {
 };
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const scratch = path.join(root, '.scratch', 'vsdx-bench');
-const scratchRoot = path.dirname(scratch);
 const recordedPath = path.join(root, 'scripts', 'vsdx-bench-results.json');
 const stageKeys = ['parseMs', 'resolveMs', 'evaluateMs', 'renderMs', 'saveMs'] as const;
 const regression = { percent: 12, minimumMs: 3 };
@@ -93,6 +92,7 @@ function stageResult(stage: typeof stageKeys[number], current: FixtureResult, pr
 function printResults(commit: string, result: RunResult, previous?: RecordedRun): void {
   const baseline = previous ? previous.commit : 'none';
   console.log(`VSDX benchmark commit ${commit}; baseline ${baseline}; median of ${result.samples} samples after one warm-up`);
+  console.log("Synthetic fixtures; render uses fontless fallback layout, without font shaping.");
   const previousByName = new Map((previous ? previous.fixtures : []).map((fixture) => [fixture.name, fixture]));
   for (const fixture of result.fixtures) {
     const before = previousByName.get(fixture.name);
@@ -100,22 +100,23 @@ function printResults(commit: string, result: RunResult, previous?: RecordedRun)
   }
 }
 
-function cleanupScratch(): void {
+function cleanupScratch(scratch: string): void {
   fs.rmSync(scratch, { recursive: true, force: true });
-  if (fs.existsSync(scratchRoot) && fs.readdirSync(scratchRoot).length === 0) fs.rmdirSync(scratchRoot);
 }
 
-cleanupScratch();
+const commit = currentCommit();
+const dirty = run(['git', 'status', '--porcelain', '--untracked-files=normal'], 'checking benchmark source state').trim() !== '';
+if (record && dirty) throw new Error('Commit source changes before recording a benchmark baseline.');
+const scratch = fs.mkdtempSync(path.join(tmpdir(), 'betteroffice-vsdx-bench-'));
 try {
-  run(['bun', 'scripts/create-vsdx-fixture.ts', `--benchmark-dir=${path.relative(root, scratch)}`], 'generating synthetic fixtures');
+  run(['bun', 'scripts/create-vsdx-fixture.ts', `--benchmark-dir=${scratch}`], 'generating synthetic fixtures');
   const fixtures = fs.readdirSync(scratch)
     .filter((entry) => entry.endsWith('.vsdx'))
     .sort()
     .map((entry) => `${path.basename(entry, '.vsdx')}=${path.join(scratch, entry)}`);
   const result = JSON.parse(run(['cargo', 'run', '--quiet', '--release', '--offline', '-p', 'betteroffice-vsdx-bench', '--', ...fixtures], 'running staged benchmark')) as RunResult;
-  const commit = currentCommit();
   const previous = readRecordedRun();
-  printResults(commit, result, previous);
+  printResults(dirty ? `${commit} (working tree changes)` : commit, result, previous);
   if (previous && !record) {
     const failures = checkRegression(previous, result);
     if (failures.length > 0) throw new Error(`VSDX benchmark regression against ${previous.commit}:\n${failures.join('\n')}`);
@@ -126,5 +127,5 @@ try {
     console.log(`Recorded baseline in ${path.relative(root, recordedPath)}.`);
   }
 } finally {
-  cleanupScratch();
+  cleanupScratch(scratch);
 }

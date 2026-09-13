@@ -4,6 +4,7 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use betteroffice_vsdx::Diagram;
+use serde::Serialize;
 use vsdx_eval::{PageShapeReferences, evaluate_cell};
 use vsdx_parse::{ParseLimits, write_vsdx};
 use vsdx_render::Renderer;
@@ -11,7 +12,8 @@ use vsdx_resolve::{Lookup, Resolver};
 
 const SAMPLES: usize = 5;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct Timings {
     parse_ms: f64,
     resolve_ms: f64,
@@ -20,8 +22,10 @@ struct Timings {
     save_ms: f64,
 }
 
+#[derive(Serialize)]
 struct FixtureResult {
     name: String,
+    #[serde(flatten)]
     timings: Timings,
 }
 
@@ -51,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             timings: median(&samples),
         });
     }
-    print_results(&results);
+    print_results(&results)?;
     Ok(())
 }
 
@@ -142,22 +146,10 @@ fn median_by(samples: &[Timings], value: impl Fn(Timings) -> f64) -> f64 {
     values[values.len() / 2]
 }
 
-fn print_results(results: &[FixtureResult]) {
-    print!("{{\"samples\":{SAMPLES},\"fixtures\":[");
-    for (index, result) in results.iter().enumerate() {
-        if index != 0 {
-            print!(",");
-        }
-        let timings = result.timings;
-        print!(
-            "{{\"name\":\"{}\",\"parseMs\":{:.3},\"resolveMs\":{:.3},\"evaluateMs\":{:.3},\"renderMs\":{:.3},\"saveMs\":{:.3}}}",
-            result.name,
-            timings.parse_ms,
-            timings.resolve_ms,
-            timings.evaluate_ms,
-            timings.render_ms,
-            timings.save_ms
-        );
-    }
-    println!("]}}");
+fn print_results(results: &[FixtureResult]) -> Result<(), serde_json::Error> {
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({ "samples": SAMPLES, "fixtures": results }))?
+    );
+    Ok(())
 }

@@ -40,3 +40,31 @@ def test_page_order_and_names_follow_the_catalog(foundation_path):
             archive.writestr(name, content)
     diagram = Diagram.open(data.getvalue())
     assert [(page.id, page.name) for page in diagram.pages] == [(2, "First & correct"), (1, "Last")]
+
+
+@pytest.mark.parametrize("buffer_type", [bytes, bytearray, memoryview])
+def test_accepts_documented_buffers(foundation_path, buffer_type):
+    data = buffer_type(foundation_path.read_bytes())
+    diagram = Diagram.open(data)
+    assert len(diagram) == 1
+    assert diagram.pages[0].name == "Page-1"
+
+
+def test_snapshots_mutable_buffer_before_parsing(foundation_path):
+    data = bytearray(foundation_path.read_bytes())
+    diagram = Diagram.open(memoryview(data))
+    data[:] = b"x" * len(data)
+    assert diagram.pages[0].shapes[0].name == "Process"
+
+
+@pytest.mark.parametrize("data", [None, 10, "not bytes", [1, 2, 3]])
+def test_rejects_non_buffers(data):
+    with pytest.raises(TypeError):
+        Diagram.open(data)
+
+
+def test_missing_path_raises_file_not_found(tmp_path):
+    path = tmp_path / "missing.vsdx"
+    with pytest.raises(FileNotFoundError) as error:
+        Diagram.open_path(path)
+    assert error.value.filename == str(path)

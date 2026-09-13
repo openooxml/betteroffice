@@ -650,6 +650,29 @@ impl Renderer {
         if paint::number(resolved, "NoShow").is_some_and(|value| value != 0.0) {
             return Ok(());
         }
+        let mut sections = resolved
+            .sections
+            .values()
+            .filter(|section| section.name == "Geometry" && !section.deleted)
+            .collect::<Vec<_>>();
+        if let Some(section) = sections
+            .iter()
+            .find(|section| !section.unsupported_controls.is_empty())
+        {
+            return self.placeholder_at(
+                id,
+                z_order,
+                bounds(package, references, resolved, shape.id)
+                    .filter(|bounds| bounds_finite(*bounds))
+                    .unwrap_or_default(),
+                state,
+                &format!(
+                    "unsupported Geometry section controls at IX={}: {}",
+                    section.index.unwrap_or(0),
+                    section.unsupported_controls.join(", ")
+                ),
+            );
+        }
         if connectivity
             .connectors
             .get(&shape.id)
@@ -699,10 +722,16 @@ impl Renderer {
                 "overflowing transform",
             );
         }
-        let geometry = resolved
-            .sections
-            .get("Geometry")
-            .map(|section| realize_geometry(section, bounds.width, bounds.height));
+        sections.sort_by_key(|section| section.index.unwrap_or(0));
+        let geometry = (!sections.is_empty()).then(|| {
+            let mut geometry = vsdx_resolve::RealizedGeometry::default();
+            for section in sections {
+                let realized = realize_geometry(section, bounds.width, bounds.height);
+                geometry.commands.extend(realized.commands);
+                geometry.issues.extend(realized.issues);
+            }
+            geometry
+        });
         let child_shapes = shape.shapes().collect::<Vec<_>>();
         if !child_shapes.is_empty() {
             let group_transform = affine(transform.local);
@@ -1523,9 +1552,7 @@ struct Bounds {
     loc_pin_y: f64,
     angle: f64,
 }
-/// Deterministic dynamic-connector policy: `RoutStyle != 0` uses one horizontal-first
-/// orthogonal bend; every other connector uses a direct segment. This deliberately does not
-/// reproduce Visio obstacle avoidance, jump styles, or user-edited route geometry.
+/// Routes RoutStyle != 0 with one horizontal-first bend, otherwise directly.
 fn connector_route(
     begin: ScenePoint,
     end: ScenePoint,
@@ -1904,32 +1931,29 @@ fn path_hit(
         return false;
     };
     let (x, y) = inverse.apply_point(x, y);
-    let points = flatten_path(path);
-    if points.is_empty() {
-        return false;
-    }
-    let mut inside = false;
-    for index in 0..points.len() {
-        let (ax, ay) = points[index];
-        let (bx, by) = points[(index + 1) % points.len()];
-        if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
-            inside = !inside;
-        }
-    }
-    let closed = path
-        .iter()
-        .any(|command| matches!(command, ooxml_drawingml::GeometryPathCommand::Close));
-    fill && inside
-        || stroke_width > 0.0
+    let mut winding = 0_i64;
+    for points in flatten_path(path) {
+        if stroke_width > 0.0
             && points.windows(2).any(|segment| {
                 point_segment_distance(x, y, segment[0], segment[1]) <= stroke_width / 2.0
             })
-        || stroke_width > 0.0
-            && closed
-            && points.len() > 1
-            && point_segment_distance(x, y, points[points.len() - 1], points[0])
-                <= stroke_width / 2.0
+        {
+            return true;
+        }
+        for index in 0..points.len() {
+            let (ax, ay) = points[index];
+            let (bx, by) = points[(index + 1) % points.len()];
+            let side = (bx - ax) * (y - ay) - (x - ax) * (by - ay);
+            if ay <= y && by > y && side > 0.0 {
+                winding += 1;
+            } else if ay > y && by <= y && side < 0.0 {
+                winding -= 1;
+            }
+        }
+    }
+    fill && winding != 0
 }
+
 fn point_segment_distance(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, f32)) -> f32 {
     let dx = bx - ax;
     let dy = by - ay;
@@ -1941,13 +1965,17 @@ fn point_segment_distance(x: f32, y: f32, (ax, ay): (f32, f32), (bx, by): (f32, 
     };
     ((x - (ax + t * dx)).powi(2) + (y - (ay + t * dy)).powi(2)).sqrt()
 }
-fn flatten_path(path: &[ooxml_drawingml::GeometryPathCommand]) -> Vec<(f32, f32)> {
+fn flatten_path(path: &[ooxml_drawingml::GeometryPathCommand]) -> Vec<Vec<(f32, f32)>> {
     use ooxml_drawingml::GeometryPathCommand::*;
+    let mut paths = Vec::new();
     let mut points = Vec::new();
     let mut current = (0.0, 0.0);
     for command in path {
         match *command {
             Move { x, y } => {
+                if !points.is_empty() {
+                    paths.push(std::mem::take(&mut points));
+                }
                 current = (x as f32, y as f32);
                 points.push(current);
             }
@@ -1992,10 +2020,18 @@ fn flatten_path(path: &[ooxml_drawingml::GeometryPathCommand]) -> Vec<(f32, f32)
                 }
                 current = (x as f32, y as f32);
             }
-            Close => {}
+            Close => {
+                if let Some(first) = points.first().copied() {
+                    points.push(first);
+                    current = first;
+                }
+            }
         }
     }
-    points
+    if !points.is_empty() {
+        paths.push(points);
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -2345,6 +2381,85 @@ mod tests {
                 ShapeChild::Section(rectangle()),
             ],
         }
+    }
+
+    #[test]
+    fn unsupported_section_paint_controls_produce_placeholders() {
+        for control in ["NoFill", "NoLine", "NoShow"] {
+            for formula in ["0", "1", "Unknown(1)"] {
+                let mut shape = shape(1, 1.0, 1.0);
+                let section = shape
+                    .children
+                    .iter_mut()
+                    .find_map(|child| match child {
+                        ShapeChild::Section(section) if section.name == "Geometry" => Some(section),
+                        _ => None,
+                    })
+                    .unwrap();
+                section
+                    .children
+                    .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                        name: "Cell".into(),
+                        attributes: vec![
+                            ("N".into(), control.into()),
+                            ("F".into(), formula.into()),
+                            ("V".into(), "0".into()),
+                        ],
+                        children: Vec::new(),
+                    }));
+                let list = render(vec![shape]);
+                if formula == "0" {
+                    assert!(
+                        list.primitives
+                            .iter()
+                            .any(|primitive| matches!(primitive, Primitive::Shape { .. }))
+                    );
+                } else {
+                    assert!(list.primitives.iter().all(|primitive| matches!(primitive, Primitive::Placeholder { reason, .. } if reason.contains(control))));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn hit_testing_does_not_bridge_separate_subpaths() {
+        use ooxml_drawingml::GeometryPathCommand::*;
+        let path = [
+            Move { x: 0.0, y: 0.0 },
+            Line { x: 1.0, y: 0.0 },
+            Move { x: 3.0, y: 0.0 },
+            Line { x: 4.0, y: 0.0 },
+        ];
+        assert!(path_hit(&path, Affine::identity(), false, 0.1, 0.5, 0.0));
+        assert!(path_hit(&path, Affine::identity(), false, 0.1, 3.5, 0.0));
+        assert!(!path_hit(&path, Affine::identity(), false, 0.1, 2.0, 0.0));
+    }
+
+    #[test]
+    fn renders_each_indexed_geometry_section() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/indexed-geometry.vsdx");
+        let package = vsdx_parse::parse_vsdx(source).unwrap();
+        let list = Renderer::default()
+            .layout_page(&package, "visio/pages/page1.xml")
+            .unwrap();
+        let path = list
+            .primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { path, .. } => Some(path),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            path.iter()
+                .filter(|command| matches!(
+                    command,
+                    ooxml_drawingml::GeometryPathCommand::Move { .. }
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(path.len(), 4);
     }
 
     fn render(shapes: Vec<Shape>) -> VsdxDisplayList {

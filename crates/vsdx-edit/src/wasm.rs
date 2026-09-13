@@ -35,6 +35,7 @@ const MAX_PENDING_UPDATE_BYTES: usize = 8 * 1024 * 1024;
 #[serde(rename_all = "camelCase")]
 struct CellLocatorArgs {
     section: Option<String>,
+    section_index: Option<u32>,
     row_index: Option<u32>,
     row_name: Option<String>,
     row_type: Option<String>,
@@ -57,6 +58,7 @@ impl TryFrom<CellLocatorArgs> for CellLocator {
             sheet: CellSheet::Page(0),
             shape_id: None,
             section: value.section,
+            section_index: value.section_index,
             row,
             cell_name: value.cell_name,
         })
@@ -911,7 +913,11 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 document.apply_update_json_inner(&update).unwrap_err(),
-                format!("invalid diagram state: remote update changes immutable shape {field}")
+                if field == "id" {
+                    "invalid diagram state: shape ID does not match map key".to_owned()
+                } else {
+                    format!("invalid diagram state: remote update changes immutable shape {field}")
+                }
             );
             assert_eq!(before, document.encode_state_as_update());
         }
@@ -1138,7 +1144,7 @@ mod tests {
                 .iter()
                 .any(|cell| cell.name == "Added"
                     && cell.formula.as_deref() == Some("1")
-                    && cell.value.is_none())
+                    && cell.value.as_deref() == Some("1"))
         );
     }
 

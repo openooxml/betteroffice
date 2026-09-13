@@ -58,7 +58,7 @@ export function VsdxDemoClient() {
         </div>
       </header>
       <main className="flex min-h-0 flex-1 flex-col *:min-h-0 *:flex-1" data-testid="vsdx-demo-stage">
-        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : assets && collaboration ? <VsdxEditor file={assets.file} fonts={assets.fonts} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {error ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {error}</p> : assets && collaboration ? <VsdxEditor key={room} file={assets.file} fonts={assets.fonts} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
       </main>
     </div>
   );

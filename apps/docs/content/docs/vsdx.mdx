@@ -20,3 +20,5 @@ The VSDX engine processes Visio diagram packages. Support is under development; 
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
 
 The Python binding in `bindings/python-vsdx` reads pages, shapes, cells, and connections. It is held out of the PyPI release train. Build it from the repository with `python -m pip install ./bindings/python-vsdx`.
+
+Visio redaction is not supported. The redaction CLI rejects VSDX files before writing or uploading output.

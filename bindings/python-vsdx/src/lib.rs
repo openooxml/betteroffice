@@ -5,6 +5,7 @@ use betteroffice_vsdx::{Diagram as CoreDiagram, Error as CoreError};
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyMemoryView};
 
 create_exception!(betteroffice_vsdx, VsdxError, PyException);
 create_exception!(betteroffice_vsdx, ParseError, VsdxError);
@@ -162,7 +163,15 @@ impl PyPage {
 #[pymethods]
 impl PyDiagram {
     #[staticmethod]
-    fn open(py: Python<'_>, data: &[u8]) -> PyResult<Self> {
+    fn open(py: Python<'_>, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let bytes = if let Ok(bytes) = data.cast::<PyBytes>() {
+            bytes.clone()
+        } else {
+            PyMemoryView::from(data)?
+                .call_method0("tobytes")?
+                .cast_into::<PyBytes>()?
+        };
+        let data = bytes.as_bytes();
         Ok(Self {
             diagram: py.detach(|| CoreDiagram::open(data)).map_err(map_error)?,
         })
@@ -173,7 +182,9 @@ impl PyDiagram {
         let data = py
             .detach(|| fs::read(&path))
             .map_err(|error| python_common::map_io_error(&error, &path))?;
-        Self::open(py, &data)
+        Ok(Self {
+            diagram: py.detach(|| CoreDiagram::open(&data)).map_err(map_error)?,
+        })
     }
 
     #[getter]
