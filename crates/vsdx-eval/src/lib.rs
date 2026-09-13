@@ -546,7 +546,7 @@ impl<R: References> Engine<'_, R> {
                     },
                 };
                 let result = match self.refs.formula_in_scoped(sheet, scope, lookup) {
-                    Some(formula) => match parse(formula, self.limits) {
+                    Some(formula) => match parse(formula.trim_start_matches('='), self.limits) {
                         Ok(e) => {
                             let previous = self.sheet;
                             let previous_scope = self.scope;

@@ -2021,3 +2021,40 @@ fn style_references_supplied_by_a_master_are_consulted() {
         ("local", Provenance::StyleLine)
     );
 }
+
+#[test]
+fn geometry_control_diagnostics_follow_section_inheritance() {
+    let geometry = |formula: &str| {
+        let mut geometry = section("Geometry", Vec::new());
+        geometry.index = Some(1);
+        geometry
+            .children
+            .push(SectionChild::Unknown(vsdx_parse::OpaqueXml {
+                name: "Cell".into(),
+                attributes: vec![("N".into(), "NoShow".into()), ("F".into(), formula.into())],
+                children: Vec::new(),
+            }));
+        ShapeChild::Section(geometry)
+    };
+    for (formula, unsupported) in [("Inh", true), ("0", false)] {
+        let mut package = package();
+        let mut local = shape(10, vec![geometry(formula)]);
+        local.master = Some(5);
+        add_page(&mut package, local);
+        add_master(&mut package, 5, shape(50, vec![geometry("1")]));
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        let section = resolved
+            .sections
+            .values()
+            .find(|section| section.index == Some(1))
+            .unwrap();
+        assert_eq!(
+            section.unsupported_controls.contains(&"NoShow".to_owned()),
+            unsupported
+        );
+        assert_eq!(
+            !crate::realize_geometry(section, 1.0, 1.0).issues.is_empty(),
+            unsupported
+        );
+    }
+}

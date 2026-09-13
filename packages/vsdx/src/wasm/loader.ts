@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellFormulaReceipt, CollaborationUpdateOrigin, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -12,7 +12,7 @@ export interface DiagramHandle {
   layoutPage(pageIndex: number): PageDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
-  setCellFormula(pageId: string, shapeId: string, locator: { section?: string; rowIndex?: number; rowName?: string; cellName: string }, formula: string): CellFormulaReceipt;
+  setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
@@ -21,12 +21,15 @@ export interface DiagramHandle {
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
   save(): Uint8Array;
   canUndo(): boolean; canRedo(): boolean; undo(): HistoryResult; redo(): HistoryResult;
-  encodeStateVector(): Uint8Array; encodeStateAsUpdate(): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array;
+  encodeStateVector(): Uint8Array; encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array;
   applyUpdate(update: Uint8Array): DiagramSnapshot;
   onUpdate(listener: (update: Uint8Array, origin: CollaborationUpdateOrigin) => void): () => void;
   onResync(listener: (resync: CollaborationResync) => void): () => void;
   dispose(): void;
 }
+const MAX_QUEUED_UPDATES = 1024;
+const MAX_QUEUED_UPDATE_BYTES = 8 * 1024 * 1024;
+
 let initialized = false;
 let initialization: Promise<void> | undefined;
 export function initWasm(input: WasmInitInput = new URL('./generated/vsdx_wasm_bg.wasm', import.meta.url)): Promise<void> {
@@ -53,10 +56,12 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   const hitIds = new Map<string, string>();
   const listeners = new Map<number, (update: Uint8Array, origin: CollaborationUpdateOrigin) => void>();
   const resyncListeners = new Map<number, (resync: CollaborationResync) => void>();
-  const queued: Array<{ kind: 'update'; update: Uint8Array; origin: CollaborationUpdateOrigin } | { kind: 'resync'; update: Uint8Array }> = [];
+  const queued: Array<{ kind: 'update'; update: Uint8Array; origin: CollaborationUpdateOrigin } | { kind: 'resync' }> = [];
   let nextListener = 0, disposed = false, observing = false, depth = 0, flushing = false;
+  let queuedBytes = 0, resyncPending = false;
+  const clearQueued = () => { queued.length = 0; queuedBytes = 0; resyncPending = false; };
   const assertAlive = () => { if (disposed) throw new Error('diagram handle is disposed'); };
-  const resync = () => { queued.length = 0; queued.push({ kind: 'resync', update: doc.encodeStateAsUpdate().slice() }); };
+  const resync = () => { clearQueued(); resyncPending = true; queued.push({ kind: 'resync' }); };
   const drain = () => {
     if (!observing || disposed) return;
     for (;;) {
@@ -65,14 +70,33 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       if (event.byteLength === 1 && event[0] === 2) { resync(); continue; }
       const origin = event[0];
       if (origin !== 0 && origin !== 1) throw new Error(`vsdx wasm returned unknown update origin ${origin}`);
+      if (resyncPending) continue;
+      if (queued.length >= MAX_QUEUED_UPDATES || event.byteLength - 1 > MAX_QUEUED_UPDATE_BYTES - queuedBytes) { resync(); continue; }
+      queuedBytes += event.byteLength - 1;
       queued.push({ kind: 'update', update: event.slice(1), origin: origin === 0 ? 'local' : 'remote' });
     }
   };
   const flush = () => {
     if (disposed || flushing || depth !== 0) return;
     flushing = true;
-    try { while (!disposed && queued.length) { const event = queued.shift(); if (!event) break; if (event.kind === 'update') { for (const [id, listener] of [...listeners]) if (listeners.get(id) === listener) try { listener(event.update.slice(), event.origin); } catch {} } else { for (const [id, listener] of [...resyncListeners]) if (resyncListeners.get(id) === listener) try { listener({ update: event.update.slice() }); } catch {} } } }
-    finally { flushing = false; if (disposed) queued.length = 0; }
+    try {
+      while (!disposed && queued.length) {
+        const event = queued.shift();
+        if (!event) break;
+        if (event.kind === 'update') {
+          queuedBytes -= event.update.byteLength;
+          for (const [id, listener] of [...listeners]) {
+            if (listeners.get(id) === listener) try { listener(event.update.slice(), event.origin); } catch {}
+          }
+        } else {
+          resyncPending = false;
+          const update = doc.encodeStateAsUpdate().slice();
+          for (const [id, listener] of [...resyncListeners]) {
+            if (resyncListeners.get(id) === listener) try { listener({ update: update.slice() }); } catch {}
+          }
+        }
+      }
+    } finally { flushing = false; if (disposed) clearQueued(); }
   };
   const wasm = <T>(operation: () => T, drainUpdates = false): T => {
     assertAlive(); depth++;
@@ -106,10 +130,10 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
     save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
-    encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: () => wasm(() => doc.encodeStateAsUpdate().slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),
-    onUpdate(listener) { assertAlive(); if (typeof listener !== 'function') throw new TypeError('update listener must be a function'); const id = nextListener++; listeners.set(id, listener); if (!observing) { wasm(() => doc.startUpdateObservation()); observing = true; } return () => { listeners.delete(id); if (!listeners.size && !resyncListeners.size && observing && !disposed) { queued.length = 0; wasm(() => doc.clearUpdateObservation()); observing = false; } }; },
-    onResync(listener) { assertAlive(); if (typeof listener !== 'function') throw new TypeError('resync listener must be a function'); const id = nextListener++; resyncListeners.set(id, listener); if (!observing) { wasm(() => doc.startUpdateObservation()); observing = true; } return () => { resyncListeners.delete(id); if (!listeners.size && !resyncListeners.size && observing && !disposed) { queued.length = 0; wasm(() => doc.clearUpdateObservation()); observing = false; } }; },
-    dispose() { if (disposed) return; disposed = true; listeners.clear(); resyncListeners.clear(); queued.length = 0; let error: unknown; if (observing) try { doc.clearUpdateObservation(); } catch (caught) { error = caught; } try { renderer.free(); } catch (caught) { error ??= caught; } try { doc.free(); } catch (caught) { error ??= caught; } if (error) throw toError(error); },
+    encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: vector => wasm(() => (vector === undefined ? doc.encodeStateAsUpdate() : doc.encodeDiff(vector.slice())).slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),
+    onUpdate(listener) { assertAlive(); if (typeof listener !== 'function') throw new TypeError('update listener must be a function'); const id = nextListener++; listeners.set(id, listener); if (!observing) { wasm(() => doc.startUpdateObservation()); observing = true; } return () => { listeners.delete(id); if (!listeners.size && !resyncListeners.size && observing && !disposed) { clearQueued(); wasm(() => doc.clearUpdateObservation()); observing = false; } }; },
+    onResync(listener) { assertAlive(); if (typeof listener !== 'function') throw new TypeError('resync listener must be a function'); const id = nextListener++; resyncListeners.set(id, listener); if (!observing) { wasm(() => doc.startUpdateObservation()); observing = true; } return () => { resyncListeners.delete(id); if (!listeners.size && !resyncListeners.size && observing && !disposed) { clearQueued(); wasm(() => doc.clearUpdateObservation()); observing = false; } }; },
+    dispose() { if (disposed) return; disposed = true; listeners.clear(); resyncListeners.clear(); clearQueued(); let error: unknown; if (observing) try { doc.clearUpdateObservation(); } catch (caught) { error = caught; } try { renderer.free(); } catch (caught) { error ??= caught; } try { doc.free(); } catch (caught) { error ??= caught; } if (error) throw toError(error); },
   };
 }
 function requireInitialized(): void { if (!initialized) throw new Error('vsdx wasm is not initialized; call initWasm() first'); }

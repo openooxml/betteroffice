@@ -145,6 +145,7 @@ fn authorize_structural_edits(package: &VsdxPackage, edits: &[StructuralEdit]) -
             sheet: CellSheet::Page(*page_id),
             shape_id: Some(*shape_id),
             section: None,
+            section_index: None,
             row: None,
             cell_name: "LockDelete".to_owned(),
         };
@@ -303,6 +304,7 @@ impl MutationContext for PackageMutationContext<'_> {
             sheet,
             shape_id,
             section,
+            section_index: None,
             row,
             cell_name,
         };
@@ -319,6 +321,7 @@ impl MutationContext for PackageMutationContext<'_> {
             sheet: locator.sheet.clone(),
             shape_id: locator.shape_id,
             section: None,
+            section_index: None,
             row: None,
             cell_name: lock.to_owned(),
         })?
@@ -338,6 +341,7 @@ impl MutationContext for PackageMutationContext<'_> {
                     sheet: locator.sheet.clone(),
                     shape_id: locator.shape_id,
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: lock.to_owned(),
                 },
@@ -372,7 +376,14 @@ fn sheet_path(package: &VsdxPackage, sheet: &CellSheet) -> std::result::Result<S
 }
 
 fn locator_key(locator: &CellLocator) -> String {
-    match (&locator.section, &locator.row) {
+    let section = locator
+        .section
+        .as_ref()
+        .map(|name| match locator.section_index {
+            Some(index) if name == "Geometry" => format!("{name}{}", u64::from(index) + 1),
+            _ => name.clone(),
+        });
+    match (&section, &locator.row) {
         (Some(section), Some(CellRow::Name(row))) => {
             format!("{section}.{row}.{}", locator.cell_name)
         }

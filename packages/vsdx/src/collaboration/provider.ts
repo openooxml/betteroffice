@@ -471,6 +471,14 @@ export class CollaborationProvider {
       return;
     }
     if (!this.isCurrent(token) || !this.isOpen) return;
+    try {
+      const update = requireBytes(this.replica.encodeStateAsUpdate(), 'encodeStateAsUpdate');
+      this.sendFrame(encodeSyncStep2(update, this.maxFrameBytes));
+    } catch (cause) {
+      this.failConnection(token, normalizeError('replica', 'Failed to publish replica state', cause));
+      return;
+    }
+    if (!this.isCurrent(token) || !this.isOpen) return;
     this.startPresenceTimers();
     this.broadcastLocalPresence(false);
     if (!this.isCurrent(token) || !this.isOpen) return;

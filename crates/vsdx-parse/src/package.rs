@@ -32,6 +32,7 @@ pub struct CellLocator {
     pub sheet: CellSheet,
     pub shape_id: Option<u32>,
     pub section: Option<String>,
+    pub section_index: Option<u32>,
     pub row: Option<CellRow>,
     pub cell_name: String,
 }
@@ -103,6 +104,7 @@ struct NewContainerCell {
     part_path: String,
     owner_span: crate::SourceSpan,
     section: Option<String>,
+    section_index: Option<u32>,
     row: Option<CellRow>,
     name: String,
     formula: String,
@@ -762,6 +764,10 @@ fn save_cell_edits_with_new_cells(
         if let Some(section) = &new_cell.section {
             replacement.extend_from_slice(b"<Section N=");
             push_quoted(&mut replacement, section, quote)?;
+            if let Some(index) = new_cell.section_index {
+                replacement.extend_from_slice(b" IX=");
+                push_quoted(&mut replacement, &index.to_string(), quote)?;
+            }
             replacement.push(b'>');
         }
         if let Some(row) = &new_cell.row {
@@ -884,6 +890,7 @@ pub fn save_semantic_cell_edits(
                     part_path,
                     owner_span,
                     section,
+                    section_index: edit.locator.section_index,
                     row,
                     name: edit.locator.cell_name.clone(),
                     formula: formula.clone(),
@@ -1652,6 +1659,22 @@ enum LocalCell {
     NewContainer(String, crate::SourceSpan, Option<String>, Option<CellRow>),
 }
 
+fn section_matches_locator(
+    part: &PackagePart,
+    section: &crate::ElementSpan,
+    name: &str,
+    index: Option<u32>,
+) -> bool {
+    attribute_equals(&part.bytes, section, "N", name)
+        && section
+            .attributes
+            .get("IX")
+            .and_then(|attribute| attribute_value(&part.bytes, attribute))
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(0)
+            == index.unwrap_or(0)
+}
+
 fn resolve_cell_locator(
     package: &VsdxPackage,
     locator: &CellLocator,
@@ -1717,7 +1740,9 @@ fn resolve_cell_locator(
             };
             let section_matches = match (&locator.section, nearest("Section")) {
                 (None, None) => true,
-                (Some(name), Some(section)) => attribute_equals(&part.bytes, section, "N", name),
+                (Some(name), Some(section)) => {
+                    section_matches_locator(part, section, name, locator.section_index)
+                }
                 _ => false,
             };
             let row_matches = match (&locator.row, nearest("Row")) {
@@ -1744,7 +1769,7 @@ fn resolve_cell_locator(
         if let Some(existing_row) = part.spans.iter().find(|candidate| {
             local_name(&candidate.name) == "Row"
                 && nearest_parent(part, candidate.span, "Section").is_some_and(|section| {
-                    attribute_equals(&part.bytes, section, "N", section_name)
+                    section_matches_locator(part, section, section_name, locator.section_index)
                 })
                 && shape_matches(candidate)
                 && match row {
@@ -1758,7 +1783,7 @@ fn resolve_cell_locator(
         }
         if let Some(section) = part.spans.iter().find(|candidate| {
             local_name(&candidate.name) == "Section"
-                && attribute_equals(&part.bytes, candidate, "N", section_name)
+                && section_matches_locator(part, candidate, section_name, locator.section_index)
                 && shape_matches(candidate)
         }) {
             return Ok(LocalCell::NewContainer(
@@ -1812,7 +1837,9 @@ fn resolve_cell_locator(
                 nearest_parent(part, owner.span, "Section"),
             ) {
                 (None, None) => true,
-                (Some(name), Some(section)) => attribute_equals(&part.bytes, section, "N", name),
+                (Some(name), Some(section)) => {
+                    section_matches_locator(part, section, name, locator.section_index)
+                }
                 _ => false,
             };
             let row_matches = match (&locator.row, Some(owner)) {
@@ -2064,6 +2091,7 @@ mod tests {
                     sheet: CellSheet::Page(page_id),
                     shape_id: Some(1),
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: "Width".to_owned(),
                 },
@@ -2088,6 +2116,7 @@ mod tests {
                 sheet: CellSheet::Page(page_id),
                 shape_id: Some(1),
                 section: None,
+                section_index: None,
                 row: None,
                 cell_name: name.to_owned(),
             },
@@ -2116,6 +2145,7 @@ mod tests {
                     sheet: CellSheet::Page(page_id),
                     shape_id: Some(1),
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: "Width".to_owned(),
                 },
@@ -2136,6 +2166,7 @@ mod tests {
                     sheet: CellSheet::Page(page_id),
                     shape_id: Some(1),
                     section: Some("User".to_owned()),
+                    section_index: None,
                     row: Some(CellRow::Name("New".to_owned())),
                     cell_name: "Value".to_owned(),
                 },
@@ -2163,6 +2194,7 @@ mod tests {
                     sheet: CellSheet::Page(page_id),
                     shape_id: Some(1),
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: "Width".to_owned(),
                 },
@@ -2538,6 +2570,7 @@ mod tests {
                 sheet: CellSheet::Page(page_id),
                 shape_id: Some(1),
                 section: Some(section.to_owned()),
+                section_index: None,
                 row: Some(row),
                 cell_name: "Value".to_owned(),
             },
@@ -2685,6 +2718,7 @@ mod tests {
                     sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
                     shape_id: Some(1),
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: "A&B".to_owned(),
                 },
@@ -2696,6 +2730,7 @@ mod tests {
                     sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
                     shape_id: Some(1),
                     section: Some("A&B".to_owned()),
+                    section_index: None,
                     row: Some(CellRow::Index(0)),
                     cell_name: "SectionCell".to_owned(),
                 },
@@ -2707,6 +2742,7 @@ mod tests {
                     sheet: CellSheet::Page(*package.page_part_ids.get(&path).unwrap()),
                     shape_id: Some(1),
                     section: None,
+                    section_index: None,
                     row: None,
                     cell_name: "IdCell".to_owned(),
                 },

@@ -1,8 +1,8 @@
 export interface Affine { a: number; b: number; c: number; d: number; e: number; f: number; }
-export interface CellLocator { section?: string; rowIndex?: number; rowName?: string; cellName: string; }
+export interface CellLocator { section?: string; sectionIndex?: number; rowIndex?: number; rowName?: string; cellName: string; }
 export type SnapshotCellSheet = 'document' | { page: number } | { master: number };
 export type SnapshotCellRow = { index: number } | { name: string };
-export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; row: SnapshotCellRow | null; cellName: string; }
+export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; sectionIndex?: number | null; row: SnapshotCellRow | null; cellName: string; }
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
