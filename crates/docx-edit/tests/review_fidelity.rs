@@ -381,3 +381,34 @@ fn hidden_drawings_and_fields_follow_run_visibility() {
     assert_eq!(shown[1]["runs"][0]["kind"], "field");
     assert_eq!(hidden[0], shown[2]);
 }
+
+#[test]
+fn hidden_inline_content_control_breaks_follow_run_visibility() {
+    let body = r#"<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:sdt><w:sdtPr><w:text/></w:sdtPr><w:sdtContent><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden</w:t><w:br/></w:r></w:sdtContent></w:sdt></w:p><w:p><w:r><w:t>Visible</w:t><w:br/><w:t>After</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74213);
+    seed_from_docx(engine.doc(), &document(body, "")).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let lower = |show_hidden_text| -> Value {
+        serde_json::from_str(
+            &engine
+                .lower_story_json(
+                    "body",
+                    &docx_edit::bridge::RenderEnv {
+                        show_hidden_text,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let hidden = lower(false);
+    let shown = lower(true);
+    assert_eq!(hidden.as_array().unwrap().len(), 1);
+    assert_eq!(shown.as_array().unwrap().len(), 2);
+    assert_eq!(shown[0]["runs"][0]["text"], "Hidden");
+    assert_eq!(shown[0]["runs"][1]["kind"], "lineBreak");
+    assert_eq!(hidden[0]["runs"][1]["kind"], "lineBreak");
+    assert_eq!(hidden[0], shown[1]);
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}

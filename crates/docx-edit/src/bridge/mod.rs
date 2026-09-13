@@ -1458,7 +1458,7 @@ fn lower_inline_sdt_values(
             "break" => {
                 runs.push(RawRun {
                     kind: RawRunKind::LineBreak,
-                    formatting: RunFormatting::default(),
+                    formatting,
                     story_start: story_index,
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
