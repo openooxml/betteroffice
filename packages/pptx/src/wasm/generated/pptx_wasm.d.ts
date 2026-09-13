@@ -68,6 +68,7 @@ export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
     hitTestJson(x: number, y: number): string;
+    layoutProposalDiffSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
     constructor();
@@ -88,6 +89,7 @@ export interface InitOutput {
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;

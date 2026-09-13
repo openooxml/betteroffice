@@ -314,3 +314,176 @@ fn accepted_proposals_sync_and_undo_preserves_unrelated_peer_edits() {
         "Keep the peer's notes"
     );
 }
+
+#[test]
+fn inline_diff_preserves_context_utf16_offsets_and_never_enters_the_document() {
+    use pptx_edit::{ProposalTextChangeKind, ShapeDraft, TextStyle, TextStylePatch};
+    let session = DeckSession::open(FILE, 509).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    let text = "Q1 revenue 😀 and costs fell";
+    let added = session
+        .add_text_box(
+            &EditCtx::local("human"),
+            &slide_id,
+            &ShapeDraft {
+                name: "Review target".into(),
+                rect: ShapeRect {
+                    x: 100_000,
+                    y: 100_000,
+                    width: 2_000_000,
+                    height: 1_000_000,
+                },
+                text: text.into(),
+                style: TextStyle {
+                    font_size_pt: Some(24.0),
+                    ..Default::default()
+                },
+            },
+        )
+        .unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let shape = snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == added.shape_id)
+        .unwrap();
+    let story = &shape.text_stories[0];
+    let end = text.encode_utf16().count() as u32;
+    let proposal = session
+        .propose(request(vec![
+            ProposalEdit::ReplaceText {
+                story_id: story.id.clone(),
+                start: 0,
+                end: 2,
+                text: "Q2".into(),
+                style: None,
+            },
+            ProposalEdit::ReplaceText {
+                story_id: story.id.clone(),
+                start: end - 4,
+                end,
+                text: "rose".into(),
+                style: None,
+            },
+            ProposalEdit::FormatText {
+                story_id: story.id.clone(),
+                start: 3,
+                end: 10,
+                patch: TextStylePatch {
+                    bold: Some(true),
+                    ..Default::default()
+                },
+            },
+        ]))
+        .unwrap();
+    let state = session.encode_state_as_update_v1();
+    let diff = session.preview_proposal_diff(&proposal.id).unwrap();
+    assert_eq!(session.encode_state_as_update_v1(), state);
+    let mixed = &diff.snapshot.slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.id == added.shape_id)
+        .unwrap()
+        .text_stories[0];
+    assert!(mixed.plain_text().contains("😀 and costs"));
+    assert_eq!(mixed.plain_text().matches("😀").count(), 1);
+    assert_eq!(
+        mixed.length,
+        mixed.plain_text().encode_utf16().count() as u32 + 1
+    );
+    let without = |kind| {
+        let mut offset = 0;
+        mixed
+            .plain_text()
+            .chars()
+            .filter(|ch| {
+                let at = offset;
+                offset += ch.len_utf16() as u32;
+                !diff
+                    .text_changes
+                    .iter()
+                    .any(|change| change.kind == kind && change.start <= at && at < change.end)
+            })
+            .collect::<String>()
+    };
+    assert_eq!(without(ProposalTextChangeKind::Insertion), text);
+    assert_eq!(
+        without(ProposalTextChangeKind::Deletion),
+        "Q2 revenue 😀 and costs rose"
+    );
+    assert!(
+        mixed.paragraphs[0]
+            .runs
+            .iter()
+            .any(|run| run.text == "revenue"
+                && run.style.bold == Some(true)
+                && run.style.color.as_deref() == Some("#166534"))
+    );
+    let accepted = session.preview_proposal(&proposal.id).unwrap().snapshot;
+    session.accept_proposal(&proposal.id, false).unwrap();
+    assert_eq!(session.snapshot().unwrap(), accepted);
+    assert_eq!(
+        session.story(&story.id).unwrap().plain_text(),
+        "Q2 revenue 😀 and costs rose"
+    );
+    assert!(session.undo());
+    assert_eq!(session.snapshot().unwrap(), snapshot);
+}
+
+#[test]
+fn inline_diff_uses_current_targets_and_handles_long_replacements() {
+    let session = DeckSession::open(FILE, 510).unwrap();
+    let proposal = session
+        .propose(request(vec![edits(&session)[0].clone()]))
+        .unwrap();
+    let story_id = match &proposal.edits[0] {
+        ProposalEdit::ReplaceText { story_id, .. } => story_id.clone(),
+        _ => unreachable!(),
+    };
+    session
+        .insert_text(
+            &EditCtx::local("human"),
+            &story_id,
+            0,
+            "Human ",
+            &Default::default(),
+        )
+        .unwrap();
+    let state = session.encode_state_as_update_v1();
+    let diff = session.preview_proposal_diff(&proposal.id).unwrap();
+    assert!(diff.proposal.changes[0].old_text.starts_with("Human "));
+    assert!(!diff.proposal.stale_targets.is_empty());
+    assert_eq!(session.encode_state_as_update_v1(), state);
+    session.reject_proposal(&proposal.id);
+    let old = "old ".repeat(600);
+    let new = "new ".repeat(600);
+    let end = session.story(&story_id).unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| run.text.encode_utf16().count() as u32)
+        .sum();
+    session
+        .delete_text(&EditCtx::local("human"), &story_id, 0, end)
+        .unwrap();
+    session
+        .insert_text(
+            &EditCtx::local("human"),
+            &story_id,
+            0,
+            &old,
+            &Default::default(),
+        )
+        .unwrap();
+    let proposal = session
+        .propose(request(vec![ProposalEdit::ReplaceText {
+            story_id,
+            start: 0,
+            end: old.len() as u32,
+            text: new,
+            style: None,
+        }]))
+        .unwrap();
+    let diff = session.preview_proposal_diff(&proposal.id).unwrap();
+    assert!(!diff.text_changes.is_empty());
+    assert_eq!(session.proposals().unwrap().len(), 1);
+}

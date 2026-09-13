@@ -62,8 +62,8 @@ host-driven edits, `refreshProposals`, and `save`), `onChange` (deck snapshots),
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))
 - Real-time collaboration with people or agents; the deck is a CRDT
 - Live collaborator shape selections and presence chips, shown in each peer's color
-- Agent proposal review with target navigation, rendered before/after slides,
-  acceptance, rejection, stale-target review, and Undo
+- Agent proposal review directly on the slide canvas, with inline text diffs,
+  old/new shape bounds, before/after previews, acceptance, rejection, and Undo
 
 ## Review agent proposals
 
@@ -78,6 +78,19 @@ api.handle.propose('editor-agent', 'Clarify the speaker notes', [{
 }]);
 api.refreshProposals();
 ```
+
+Pending edits appear directly on the slide canvas: deleted text is red and
+struck through, inserted text is green and underlined, and moved/resized shapes
+show their previous and proposed bounds. Speaker notes have their own inline
+text diff. The canvas toolbar selects a proposal when several affect the slide
+and provides acceptance, rejection, and access to review details. Acceptance is
+available after the current diff has painted successfully.
+
+The canvas is in review mode while showing a diff. **Edit slide** (or Escape)
+returns to normal editing; **Show changes** restores the diff. This keeps
+temporary review offsets separate from editable text. Saving, PNG export, and
+presentation mode use the actual document. Changes from other users refresh the
+review, and stale targets require the explicit review described below.
 
 The **Agent proposals** button shows the pending count. Each group shows its
 author, rationale, targets, and text changes. **Preview** opens current and

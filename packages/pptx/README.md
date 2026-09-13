@@ -69,6 +69,10 @@ const proposal = deck.propose('editor-agent', 'Make the title concise', [{
 
 const preview = deck.previewProposal(proposal.id);
 const proposedSlide = deck.layoutProposalSlide(proposal.id, 0);
+const diff = deck.layoutProposalDiffSlide(proposal.id, 0);
+await paintSlide(canvas.getContext('2d')!, diff.frame, devicePixelRatio, 1, {
+  textChanges: diff.textChanges,
+});
 deck.acceptProposal(proposal.id);
 deck.undo();
 ```
@@ -79,6 +83,14 @@ against the current deck without changing it. `rejectProposal(id)` removes a
 pending group. Acceptance applies the whole group in one undo step and emits
 one local update; an invalid edit prevents the entire group from being staged
 or accepted.
+
+`layoutProposalDiffSlide()` lays removed and inserted text out together, keeping
+unchanged words as context and retaining fonts and emphasis. Pass its
+`textChanges` to `paintSlide()` for red highlights and strikethrough on deletions,
+and green highlights and underlines on insertions. Its snapshot and UTF-16
+ranges describe a temporary review layout; use the live handle for editing and
+the ordinary proposed layout for the result after acceptance. Review rendering
+does not replace the live hit-test state or add markup to saved presentations.
 
 Supported edits replace text within one paragraph, format text, align paragraphs,
 set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets

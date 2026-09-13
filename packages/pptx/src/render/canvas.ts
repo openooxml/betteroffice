@@ -15,6 +15,7 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
+import type { ProposalTextChange } from '../proposals';
 
 export type CanvasImageResolver = (
   assetId: string
@@ -23,6 +24,7 @@ export type CanvasImageResolver = (
 export interface PaintSlideOptions {
   resolveImage?: CanvasImageResolver;
   maxShadowPixels?: number;
+  textChanges?: readonly ProposalTextChange[];
 }
 
 interface ShadowBudget {
@@ -92,7 +94,7 @@ async function paintPrimitive(
         await paintImage(ctx, primitive, options.resolveImage, deviceScale, shadowBudget);
         break;
       case 'textBox':
-        paintTextBox(ctx, primitive);
+        paintTextBox(ctx, primitive, options.textChanges);
         break;
       case 'placeholder':
         paintPlaceholder(ctx, primitive);
@@ -768,7 +770,11 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
   }
 }
 
-function paintTextBox(ctx: CanvasRenderingContext2D, textBox: TextBoxPrimitive): void {
+function paintTextBox(
+  ctx: CanvasRenderingContext2D,
+  textBox: TextBoxPrimitive,
+  textChanges: readonly ProposalTextChange[] = []
+): void {
   if (!textBox.overflow) {
     ctx.beginPath();
     ctx.rect(textBox.x, textBox.y, textBox.w, textBox.h);
@@ -776,8 +782,43 @@ function paintTextBox(ctx: CanvasRenderingContext2D, textBox: TextBoxPrimitive):
   }
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
+  const changes = textChanges.filter((change) => change.storyId === textBox.storyId);
+  paintTextChanges(ctx, textBox, changes, false);
   for (const line of textBox.lines) {
     for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
+  }
+  paintTextChanges(ctx, textBox, changes, true);
+}
+
+function paintTextChanges(
+  ctx: CanvasRenderingContext2D,
+  textBox: TextBoxPrimitive,
+  changes: readonly ProposalTextChange[],
+  foreground: boolean
+): void {
+  if (changes.length === 0) return;
+  for (const line of textBox.lines) {
+    for (const run of line.runs) {
+      for (const change of changes) {
+        const start = Math.max(run.start, change.start);
+        const end = Math.min(run.end, change.end);
+        if (start >= end) continue;
+        const stops = line.caretStops.filter((stop) => stop.position >= start && stop.position <= end);
+        const left = stops.length > 1 ? Math.max(run.x, Math.min(...stops.map((stop) => stop.x))) : run.x;
+        const right = stops.length > 1 ? Math.min(run.x + run.width, Math.max(...stops.map((stop) => stop.x))) : run.x + run.width;
+        if (right <= left) continue;
+        const inserted = change.kind === 'insertion';
+        if (foreground) {
+          ctx.fillStyle = inserted ? '#166534' : '#b91c1c';
+          const baseline = line.baseline - (run.baselineOffsetPx ?? 0);
+          const y = baseline + run.fontSizePx * (inserted ? 0.08 : -0.3);
+          ctx.fillRect(left, y, right - left, Math.max(1, run.fontSizePx * 0.05));
+        } else {
+          ctx.fillStyle = inserted ? '#dcfce7cc' : '#fee2e2cc';
+          ctx.fillRect(left, line.y, right - left, line.height);
+        }
+      }
+    }
   }
 }
 

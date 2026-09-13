@@ -19,6 +19,7 @@ mod deck;
 mod effects;
 mod model;
 mod outline_gradients;
+mod proposal_diff;
 mod proposals;
 mod save;
 mod source_run_properties;
@@ -26,6 +27,7 @@ mod story;
 mod undo;
 
 pub use model::*;
+pub use proposal_diff::*;
 pub use proposals::*;
 pub use undo::DeckUndoManager;
 

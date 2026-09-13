@@ -4,6 +4,7 @@ import type {
   ShapeRect,
   ShapeSnapshot,
   ShapeStroke,
+  SlideDisplayList,
   TextStyleSnapshot,
 } from './types';
 
@@ -72,6 +73,18 @@ export interface Proposal {
 export interface ProposalPreview {
   proposal: Proposal;
   snapshot: DeckSnapshot;
+}
+
+export interface ProposalTextChange {
+  storyId: string;
+  start: number;
+  end: number;
+  kind: 'insertion' | 'deletion';
+}
+
+export interface ProposalDiffSlide extends ProposalPreview {
+  frame: SlideDisplayList;
+  textChanges: ProposalTextChange[];
 }
 
 export interface ProposalAcceptance {

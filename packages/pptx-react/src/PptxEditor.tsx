@@ -17,6 +17,7 @@ import type {
   PptxFontFace,
   PresentationHandle,
   Proposal,
+  ProposalDiffSlide,
   SlideDisplayList,
   StorySnapshot,
   TextBoxPrimitive,
@@ -25,6 +26,7 @@ import type {
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
 import { ProposalsPanel } from './components/ProposalsPanel';
+import { ProposalCanvasOverlay, ProposalCanvasToolbar, ProposalNotesDiff, useProposalCanvas } from './components/ProposalCanvas';
 import {
   useCallback,
   useEffect,
@@ -336,6 +338,21 @@ function PptxEditorContent({
   const [proposals, setProposals] = useState<Proposal[]>([]);
   const [proposalsOpen, setProposalsOpen] = useState(false);
   const proposalButtonRef = useRef<HTMLButtonElement>(null);
+  const canvasReview = useProposalCanvas(handleRef.current, proposals, model?.snapshot, model?.slideIndex ?? 0);
+  const [paintedReview, setPaintedReview] = useState<ProposalDiffSlide | null>(null);
+  const resolveProposalImage = useCallback((assetId: string) =>
+    resolveImage(assetId, handleRef, imageCacheRef, decodeImageError), [decodeImageError]);
+
+  useEffect(() => {
+    if (!canvasReview.reviewing) return;
+    setSelection(null);
+    setShapeSelection(null);
+    pointerGestureRef.current = null;
+    resizeRef.current = null;
+    setResizeDelta(null);
+    setDragPreview(null);
+    setTextBoxPreview(null);
+  }, [canvasReview.reviewing]);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -417,6 +434,17 @@ function PptxEditorContent({
   const refresh = useCallback(() => {
     refreshAt(undefined, false, true);
   }, [refreshAt]);
+
+  const navigateProposalTarget = useCallback((slideId: string, shapeId: string | null, proposalId?: string) => {
+    const index = modelRef.current?.snapshot.slides.findIndex((slide) => slide.id === slideId) ?? -1;
+    if (index < 0) return;
+    const refreshed = refreshAt(index);
+    const slide = refreshed?.snapshot.slides[refreshed.slideIndex];
+    setSelection(null);
+    setShapeSelection(shapeId && slide && findShape(slide.shapes, shapeId) ? { slideId, shapeId } : null);
+    if (proposalId) canvasReview.select(proposalId);
+    canvasReview.setEnabled(true);
+  }, [refreshAt, canvasReview.select, canvasReview.setEnabled]);
 
   const refreshProposals = useCallback(() => {
     try {
@@ -1252,6 +1280,7 @@ function PptxEditorContent({
     if (!handle) return;
     const modifier = event.metaKey || event.ctrlKey;
     if (event.key === 'Escape') {
+      canvasReview.setEnabled(false);
       setActiveTool('select');
       setTextBoxPreview(null);
       pointerGestureRef.current = null;
@@ -1270,6 +1299,7 @@ function PptxEditorContent({
       save();
       return;
     }
+    if (canvasReview.reviewing) return;
     if (!selection && !selectedShapeStoryId) return;
     if (modifier && (event.key === 'b' || event.key === 'B')) {
       event.preventDefault();
@@ -1749,10 +1779,10 @@ function PptxEditorContent({
       <div style={styles.toolbarShell}>
         <EditorToolbar
           currentFormatting={{ ...selectionFormatting, align: selectionAlignment }}
-          textSelectionActive={selection !== null || selectedShapeStoryId !== null}
+          textSelectionActive={!canvasReview.reviewing && (selection !== null || selectedShapeStoryId !== null)}
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
-          shapeSelectionActive={selectedShape?.kind === 'shape'}
+          shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
           onShapeFormat={formatShape}
           onInsertSlide={addSlide}
           slideLayouts={slideLayouts}
@@ -1767,6 +1797,7 @@ function PptxEditorContent({
           onZoomChange={setZoom}
           activeTool={activeTool}
           onToolChange={(tool) => {
+            canvasReview.setEnabled(false);
             setActiveTool(tool);
             if (tool !== 'select') {
               setSelection(null);
@@ -1893,6 +1924,8 @@ function PptxEditorContent({
           onFocus={() => setStageFocused(true)}
           onBlur={() => setStageFocused(false)}
         >
+          <ProposalCanvasToolbar review={canvasReview} ready={paintedReview === canvasReview.diff} onAccept={acceptProposal} onReject={rejectProposal}
+            onDetails={() => setProposalsOpen(true)} />
           <div ref={canvasHostRef} style={styles.canvasHost}>
             {model?.frame ? (
               <div
@@ -1905,6 +1938,7 @@ function PptxEditorContent({
                 <canvas
                   ref={canvasRef}
                   data-testid="pptx-slide-canvas"
+                  aria-hidden={canvasReview.reviewing}
                   style={{
                     ...styles.canvas,
                     cursor:
@@ -1916,7 +1950,7 @@ function PptxEditorContent({
                             ? 'move'
                             : 'default',
                   }}
-                  onPointerDown={pointerDown}
+                  onPointerDown={canvasReview.reviewing ? undefined : pointerDown}
                   onPointerMove={pointerMove}
                   onPointerUp={pointerUp}
                   onPointerLeave={pointerLeave}
@@ -1935,6 +1969,7 @@ function PptxEditorContent({
                         })
                   }
                 />
+                {!canvasReview.reviewing && <>
                 <SelectionOverlay
                   frame={model.frame}
                   selection={selection}
@@ -2022,6 +2057,16 @@ function PptxEditorContent({
                     aria-hidden="true"
                   />
                 ) : null}
+                </>}
+                {canvasReview.diff && <ProposalCanvasOverlay
+                  key={`${canvasReview.diff.proposal.id}:${model.slideIndex}`}
+                  diff={canvasReview.diff} current={model.snapshot} frame={model.frame}
+                  slideIndex={model.slideIndex} scale={scale} resolveImage={resolveProposalImage}
+                  onPainted={setPaintedReview}
+                  onTarget={(slideId, shapeId) => {
+                    navigateProposalTarget(slideId, shapeId, canvasReview.selected?.id);
+                    setProposalsOpen(true);
+                  }} />}
               </div>
             ) : (
               <div style={styles.empty}>
@@ -2039,21 +2084,17 @@ function PptxEditorContent({
           <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
             resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
             onAccept={acceptProposal} onReject={rejectProposal}
-            onNavigate={(slideId, shapeId) => {
-              const index = model.snapshot.slides.findIndex((slide) => slide.id === slideId);
-              if (index < 0) return;
-              refreshAt(index);
-              setSelection(null);
-              setShapeSelection(shapeId ? { slideId, shapeId } : null);
-            }}
+            onNavigate={navigateProposalTarget}
             onClose={() => { setProposalsOpen(false); proposalButtonRef.current?.focus(); }} />
         )}
       </div>
-      {activeSlide ? (
+      {activeSlide && canvasReview.diff?.proposal.changes.some((change) => change.slideId === activeSlide.id && !change.shapeId && change.oldText !== change.newText) ? (
+        <ProposalNotesDiff diff={canvasReview.diff} slideId={activeSlide.id} />
+      ) : activeSlide ? (
         <NotesPanel
           key={activeSlide.id}
           value={activeSlide.notes ?? ''}
-          disabled={!model}
+          disabled={!model || canvasReview.reviewing}
           label={t('notes.panelLabel')}
           placeholder={t('notes.placeholder')}
           onCommit={(text) => {
@@ -2544,8 +2585,8 @@ const styles: Record<string, CSSProperties> = {
     fontWeight: 700,
     lineHeight: '8px',
   },
-  stage: { position: 'relative', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
-  canvasHost: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: '100%', height: '100%', overflow: 'auto' },
+  stage: { position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, outline: 'none', overflow: 'hidden' },
+  canvasHost: { display: 'flex', flex: 1, minHeight: 0, alignItems: 'center', justifyContent: 'center', width: '100%', overflow: 'auto' },
   canvasFrame: { position: 'relative', flex: '0 0 auto' },
   canvas: { display: 'block', flex: '0 0 auto', background: '#fff', boxShadow: '0 8px 32px rgba(27, 39, 61, 0.2)', touchAction: 'none' },
   canvasOverlay: { position: 'absolute', inset: 0, display: 'block', pointerEvents: 'none' },

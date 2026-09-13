@@ -130,6 +130,17 @@
     "stalePreview": "This preview uses the updated slide. Applying will override the changed targets.",
     "geometry": "Position and size (x, y, width, height)",
     "appearance": "Appearance or text formatting changed",
-    "changedAgain": "The target changed again. Review the refreshed preview before applying."
+    "changedAgain": "The target changed again. Review the refreshed preview before applying.",
+    "canvasTitle": "Changes on this slide",
+    "editSlide": "Edit slide",
+    "showDiff": "Show changes",
+    "details": "Review details",
+    "removed": "Removed",
+    "added": "Added",
+    "reviewHint": "Review mode · changes apply when accepted",
+    "canvasStale": "Targets changed. Open Review details to inspect the updated preview before applying.",
+    "previousPosition": "Previous",
+    "proposedPosition": "Proposed",
+    "loadingDiff": "Loading changes…"
   }
 }

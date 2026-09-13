@@ -6,7 +6,7 @@ import initWasmModule, {
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
-import type { Proposal, ProposalAcceptance, ProposalEdit, ProposalPreview } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
@@ -57,6 +57,7 @@ export interface PresentationHandle extends CollaborationReplica {
   listProposals(): Proposal[];
   previewProposal(id: string): ProposalPreview;
   layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
+  layoutProposalDiffSlide(id: string, slideIndex: number): ProposalDiffSlide;
   acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
   rejectProposal(id: string): boolean;
   readonly clientId: number;
@@ -307,6 +308,9 @@ export function openPresentation(
     },
     previewProposal(id) {
       return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
+    },
+    layoutProposalDiffSlide(id, slideIndex) {
+      return jsonWasmCall(() => renderer.layoutProposalDiffSlideJson(doc, id, slideIndex));
     },
     layoutProposalSlide(id, slideIndex) {
       return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));

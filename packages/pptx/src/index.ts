@@ -1,6 +1,6 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
 export { StaleProposalError } from './proposals';
-export type { Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalPreview } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalDiffSlide, ProposalEdit, ProposalPreview, ProposalTextChange } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';
 export type { SlideToPngOptions } from './render/png';

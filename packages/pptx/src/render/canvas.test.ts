@@ -1661,3 +1661,33 @@ describe('PPTX table container', () => {
     );
   });
 });
+
+test('keeps inline revision marks inside their run at bidi boundaries and applies the text transform', async () => {
+  const rectangles: Array<{ x: number; width: number; color: string }> = [];
+  const rotations: number[] = [];
+  const state: Record<string, unknown> = { fillStyle: '' };
+  state.fillRect = (x: number, _y: number, width: number) => rectangles.push({ x, width, color: String(state.fillStyle) });
+  state.rotate = (angle: number) => rotations.push(angle);
+  const ctx = new Proxy(state, { get(target, key) { return key in target ? target[key as string] : () => {}; } }) as unknown as CanvasRenderingContext2D;
+  const box: TextBoxPrimitive = {
+    kind: 'textBox', objectId: 1, storyId: 'mixed', x: 0, y: 0, w: 100, h: 30,
+    anchor: 'top', paragraphs: [], transform: { rotationDeg: 30, flipH: true },
+    lines: [{
+      x: 0, y: 0, width: 100, height: 20, baseline: 16, start: 0, end: 4,
+      caretStops: [{ position: 0, x: 0 }, { position: 1, x: 10 }, { position: 2, x: 20 }, { position: 2, x: 100 }, { position: 3, x: 90 }, { position: 4, x: 80 }],
+      runs: [{
+        text: 'ab', start: 0, end: 2, x: 0, width: 20, fontId: 1, fontFamily: 'Arial',
+        fontSizePx: 16, bold: false, italic: false, underline: false, color: '#b91c1c', glyphs: [],
+      }, {
+        text: 'גד', start: 2, end: 4, x: 80, width: 20, fontId: 1, fontFamily: 'Arial',
+        fontSizePx: 16, bold: false, italic: false, underline: false, color: '#000000', glyphs: [],
+      }],
+    }],
+  };
+  const frame: SlideDisplayList = { contractVersion: 1, width: 100, height: 30, primitives: [box] };
+  await paintSlide(ctx, frame, 2, 0.5);
+  expect(rectangles).toEqual([]);
+  await paintSlide(ctx, frame, 2, 0.5, { textChanges: [{ storyId: 'mixed', start: 0, end: 2, kind: 'deletion' }] });
+  expect(rectangles).toEqual([{ x: 0, width: 20, color: '#fee2e2cc' }, { x: 0, width: 20, color: '#b91c1c' }]);
+  expect(rotations).toEqual([Math.PI / 6, Math.PI / 6]);
+});

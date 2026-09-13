@@ -19,7 +19,7 @@ interface Props {
   resolveImage: CanvasImageResolver;
   onAccept: (id: string, force?: boolean) => void;
   onReject: (id: string) => void;
-  onNavigate: (slideId: string, shapeId: string | null) => void;
+  onNavigate: (slideId: string, shapeId: string | null, proposalId?: string) => void;
   onClose: () => void;
 }
 
@@ -94,7 +94,7 @@ export function ProposalsPanel({
   ) => {
     previewButton.current = button;
     const change = proposal.changes[index];
-    onNavigate(change.slideId, change.shapeId);
+    onNavigate(change.slideId, change.shapeId, proposal.id);
     setPreview(null);
     setError(null);
     setSelected({ id: proposal.id, index });
@@ -166,7 +166,7 @@ export function ProposalsPanel({
             >
               <button
                 type="button"
-                onClick={() => onNavigate(change.slideId, change.shapeId)}
+                onClick={() => onNavigate(change.slideId, change.shapeId, proposal.id)}
                 style={styles.link}
               >
                 {location(change)}
@@ -265,7 +265,7 @@ export function ProposalsPanel({
                 onChange={(event) => {
                   const index = Number(event.target.value);
                   const change = preview.data.proposal.changes[index];
-                  onNavigate(change.slideId, change.shapeId);
+                  onNavigate(change.slideId, change.shapeId, selected.id);
                   setSelected({ id: selected.id, index });
                 }}
               >

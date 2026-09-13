@@ -5,6 +5,7 @@ export const __wbg_pptxrenderer_free: (a: number, b: number) => void;
 export const compileSlideJson: (a: number, b: number) => [number, number, number, number];
 export const parsePptxJson: (a: number, b: number) => [number, number, number, number];
 export const pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const pptxrenderer_layoutProposalDiffSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxrenderer_new: () => number;

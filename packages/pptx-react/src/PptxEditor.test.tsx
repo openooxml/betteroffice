@@ -9,7 +9,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from 'bun
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
-import type { PptxFontFace, SlideDisplayList } from '@betteroffice/pptx';
+import * as pptx from '@betteroffice/pptx';
+import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 
@@ -321,6 +322,43 @@ describe('PptxEditor caret painting', () => {
 });
 
 describe('PptxEditor proposal review', () => {
+  it('waits for the current canvas diff to paint before enabling acceptance', async () => {
+    const complete: Array<() => void> = [];
+    const painting = spyOn(pptx, 'paintSlide').mockImplementation((_ctx, _frame, _dpr, _scale, options) =>
+      options?.textChanges ? new Promise<void>((resolve) => complete.push(resolve)) : Promise.resolve());
+    const context = spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
+      setTransform() {}, drawImage() {},
+    } as unknown as CanvasRenderingContext2D);
+    let api: PptxEditorApi | undefined;
+    let view: ReturnType<typeof render> | undefined;
+    try {
+      view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+        clientId={9212} onReady={(ready) => { api = ready; }} />);
+      await act(async () => { await waitFor(() => expect(api).toBeDefined()); });
+      const handle = api!.handle;
+      const slideId = handle.snapshot().slides[0].id;
+      await act(async () => {
+        handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId, text: 'Pending notes' }]);
+        api!.refreshProposals();
+      });
+      await waitFor(() => expect(complete.length).toBe(1));
+      const accept = view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement;
+      expect(accept.disabled).toBe(true);
+      await act(async () => { api!.refresh(); });
+      await waitFor(() => expect(complete.length).toBe(2));
+      await act(async () => { complete[0](); });
+      expect(accept.disabled).toBe(true);
+      await act(async () => { complete[1](); });
+      await waitFor(() => expect(accept.disabled).toBe(false));
+      fireEvent.click(accept);
+      expect(handle.snapshot().slides[0].notes).toBe('Pending notes');
+    } finally {
+      view?.unmount();
+      painting.mockRestore();
+      context.mockRestore();
+    }
+  }, 30000);
+
   it('previews, accepts, undoes, rejects, and reviews stale targets through the editor UI', async () => {
     let api: PptxEditorApi | undefined;
     const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
@@ -338,6 +376,13 @@ describe('PptxEditor proposal review', () => {
     });
     expect(handle.snapshot()).toEqual(original);
     expect(view.getByTestId('pptx-proposals-count').textContent).toBe('1');
+    expect(view.getByTestId('pptx-canvas-proposal-diff').textContent).toContain('A reviewed title');
+    fireEvent.keyDown(view.getByRole('application'), { key: 'Backspace' });
+    expect(handle.snapshot()).toEqual(original);
+    fireEvent.click(view.getByTestId('pptx-canvas-review-toggle'));
+    expect(view.queryByTestId('pptx-canvas-proposal-diff')).toBeNull();
+    fireEvent.click(view.getByTestId('pptx-canvas-review-toggle'));
+    expect(view.getByTestId('pptx-canvas-proposal-diff')).toBeDefined();
     fireEvent.click(view.getByTestId('pptx-proposals-button'));
     expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title');
     fireEvent.click(view.getByTestId('pptx-proposal-preview'));
@@ -363,6 +408,8 @@ describe('PptxEditor proposal review', () => {
       api!.refresh();
     });
     expect(view.getByTestId('pptx-proposal-stale')).toBeDefined();
+    expect((view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement).disabled).toBe(true);
+    expect(view.getByTestId('pptx-proposal-notes-diff').textContent).toContain('Human notes');
     fireEvent.click(view.getByTestId('pptx-proposal-accept'));
     expect(handle.snapshot().slides[0].notes).toBe('Human notes');
     fireEvent.click(view.getByTestId('pptx-proposal-preview'));
@@ -384,6 +431,48 @@ describe('PptxEditor proposal review', () => {
     fireEvent.click(view.getAllByTestId('pptx-proposal-preview')[1]);
     await waitFor(() => expect(view.getByTestId('pptx-proposal-preview-dialog').textContent).toContain('Second slide'));
   }, 60000);
+
+  it('switches canvas proposals and never broadcasts a removed target selection', async () => {
+    let api: PptxEditorApi | undefined;
+    const cursors: Array<PptxPresenceCursor | null> = [];
+    const presence = { peers: [], setCursor: (cursor: PptxPresenceCursor | null) => cursors.push(cursor), onPresence: () => () => {} };
+    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+      collaboration={{ clientId: 9211, presence }} onReady={(ready) => { api = ready; }} />);
+    await act(async () => { await waitFor(() => expect(api).toBeDefined()); });
+    const handle = api!.handle;
+    const original = handle.snapshot();
+    const slide = original.slides[0];
+    const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    let first: string;
+    let second: string;
+    await act(async () => {
+      first = handle.propose('First agent', null, [{ type: 'replaceText', storyId: story.id, start: 0, end: 0, text: 'First proposal ' }]).id;
+      second = handle.propose('Second agent', null, [{ type: 'replaceText', storyId: story.id, start: 0, end: 0, text: 'Second proposal ' }]).id;
+      api!.refreshProposals();
+    });
+    const picker = view.getByRole('combobox', { name: 'Changes on this slide' });
+    expect(view.getByTestId('pptx-canvas-proposal-diff').textContent).toContain('First proposal');
+    fireEvent.change(picker, { target: { value: second! } });
+    expect(view.getByTestId('pptx-canvas-proposal-diff').textContent).toContain('Second proposal');
+    expect(handle.snapshot()).toEqual(original);
+    fireEvent.click(view.getByTestId('pptx-canvas-proposal-reject'));
+    expect(handle.listProposals().map((proposal) => proposal.id)).toEqual([first!]);
+    await act(async () => {
+      handle.removeShape(slide.id, shape.id);
+      api!.refresh();
+    });
+    fireEvent.click(view.getByTestId('pptx-proposals-button'));
+    const card = view.getByTestId('pptx-proposal');
+    const link = Array.from(card.querySelectorAll('button')).find((button) => button.textContent?.includes(shape.name))!;
+    const cursorCount = cursors.length;
+    fireEvent.click(link);
+    await act(async () => {});
+    expect(cursors.slice(cursorCount).some((cursor) => cursor?.shapeId === shape.id)).toBe(false);
+    expect((view.getByTestId('pptx-canvas-proposal-accept') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(view.getByTestId('pptx-canvas-proposal-reject'));
+    expect(view.queryByTestId('pptx-canvas-review-toolbar')).toBeNull();
+  }, 30000);
 });
 
 describe('PptxEditor speaker notes', () => {
