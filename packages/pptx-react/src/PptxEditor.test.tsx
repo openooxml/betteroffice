@@ -320,6 +320,72 @@ describe('PptxEditor caret painting', () => {
   });
 });
 
+describe('PptxEditor proposal review', () => {
+  it('previews, accepts, undoes, rejects, and reviews stale targets through the editor UI', async () => {
+    let api: PptxEditorApi | undefined;
+    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+      clientId={9210} onReady={(ready) => { api = ready; }} />);
+    await act(async () => { await waitFor(() => expect(api).toBeDefined(), { timeout: 15000 }); });
+    const handle = api!.handle;
+    const original = handle.snapshot();
+    const slide = original.slides[0];
+    const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    const end = story.paragraphs[0].runs.reduce((length, run) => length + run.text.length, 0);
+    await act(async () => {
+      handle.propose('Review agent', 'Tighten the title', [{ type: 'replaceText', storyId: story.id, start: 0, end, text: 'A reviewed title' }]);
+      api!.refreshProposals();
+    });
+    expect(handle.snapshot()).toEqual(original);
+    expect(view.getByTestId('pptx-proposals-count').textContent).toBe('1');
+    fireEvent.click(view.getByTestId('pptx-proposals-button'));
+    expect(view.getByTestId('pptx-proposal').textContent).toContain('A reviewed title');
+    fireEvent.click(view.getByTestId('pptx-proposal-preview'));
+    await waitFor(() => expect((view.getByTestId('pptx-proposal-preview-dialog') as HTMLDialogElement).open).toBe(true));
+    expect(view.getByRole('img', { name: 'Current slide' })).toBeDefined();
+    expect(view.getByRole('img', { name: 'Proposed slide' })).toBeDefined();
+    const dialog = view.getByTestId('pptx-proposal-preview-dialog');
+    fireEvent.click(Array.from(dialog.querySelectorAll('button')).find((button) => button.textContent === 'Close')!);
+    fireEvent.click(view.getByTestId('pptx-proposal-accept'));
+    await waitFor(() => expect(handle.listProposals()).toHaveLength(0));
+    expect(JSON.stringify(handle.snapshot())).toContain('A reviewed title');
+    fireEvent.keyDown(view.getByRole('application'), { key: 'z', ctrlKey: true, metaKey: true });
+    await waitFor(() => expect(handle.snapshot()).toEqual(original));
+    await act(async () => {
+      handle.propose('Review agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Reject this' }]);
+      api!.refreshProposals();
+    });
+    fireEvent.click(view.getByTestId('pptx-proposal-reject'));
+    expect(handle.snapshot()).toEqual(original);
+    await act(async () => {
+      handle.propose('Review agent', 'Updated speaker notes', [{ type: 'setSlideNotes', slideId: slide.id, text: 'Proposed notes' }]);
+      handle.setSlideNotes(slide.id, 'Human notes');
+      api!.refresh();
+    });
+    expect(view.getByTestId('pptx-proposal-stale')).toBeDefined();
+    fireEvent.click(view.getByTestId('pptx-proposal-accept'));
+    expect(handle.snapshot().slides[0].notes).toBe('Human notes');
+    fireEvent.click(view.getByTestId('pptx-proposal-preview'));
+    await waitFor(() => expect(view.getByTestId('pptx-proposal-force')).toBeDefined());
+    handle.setSlideNotes(slide.id, 'Newer human notes');
+    fireEvent.click(view.getByTestId('pptx-proposal-force'));
+    expect(handle.snapshot().slides[0].notes).toBe('Newer human notes');
+    expect(view.getByTestId('pptx-proposal-preview-dialog').textContent).toContain('Newer human notes');
+    fireEvent.click(view.getByTestId('pptx-proposal-force'));
+    await waitFor(() => expect(handle.snapshot().slides[0].notes).toBe('Proposed notes'));
+    expect(handle.listProposals()).toHaveLength(0);
+    await act(async () => {
+      handle.propose('Review agent', 'Review both slides', [
+        { type: 'setSlideNotes', slideId: original.slides[0].id, text: 'First slide' },
+        { type: 'setSlideNotes', slideId: original.slides[1].id, text: 'Second slide' },
+      ]);
+      api!.refreshProposals();
+    });
+    fireEvent.click(view.getAllByTestId('pptx-proposal-preview')[1]);
+    await waitFor(() => expect(view.getByTestId('pptx-proposal-preview-dialog').textContent).toContain('Second slide'));
+  }, 60000);
+});
+
 describe('PptxEditor speaker notes', () => {
   it('saves immediately and follows undo, redo, and remote updates', async () => {
     let api: PptxEditorApi | undefined;

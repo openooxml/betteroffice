@@ -5,6 +5,7 @@ use std::fmt;
 pub enum Error {
     Parse(pptx_parse::PptxError),
     Edit(pptx_edit::EditError),
+    Proposal(pptx_edit::ProposalError),
     Render(pptx_render::RenderError),
     /// The raster backend refused a surface or could not paint a primitive.
     Raster(String),
@@ -15,6 +16,7 @@ impl fmt::Display for Error {
         match self {
             Self::Parse(error) => error.fmt(formatter),
             Self::Edit(error) => error.fmt(formatter),
+            Self::Proposal(error) => error.fmt(formatter),
             Self::Render(error) => error.fmt(formatter),
             Self::Raster(message) => formatter.write_str(message),
         }
@@ -26,6 +28,7 @@ impl std::error::Error for Error {
         match self {
             Self::Parse(error) => Some(error),
             Self::Edit(error) => Some(error),
+            Self::Proposal(error) => Some(error),
             Self::Render(error) => Some(error),
             Self::Raster(_) => None,
         }
@@ -41,6 +44,12 @@ impl From<pptx_parse::PptxError> for Error {
 impl From<pptx_edit::EditError> for Error {
     fn from(error: pptx_edit::EditError) -> Self {
         Self::Edit(error)
+    }
+}
+
+impl From<pptx_edit::ProposalError> for Error {
+    fn from(error: pptx_edit::ProposalError) -> Self {
+        Self::Proposal(error)
     }
 }
 

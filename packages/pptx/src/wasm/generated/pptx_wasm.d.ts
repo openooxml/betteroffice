@@ -5,6 +5,7 @@ export class PptxDocument {
     private constructor();
     free(): void;
     [Symbol.dispose](): void;
+    acceptProposalJson(args: string): string;
     addCommentJson(args: string): string;
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
@@ -23,6 +24,7 @@ export class PptxDocument {
     insertParagraphBreakJson(args: string): string;
     insertSlideJson(args: string): string;
     insertTextJson(args: string): string;
+    listProposalsJson(): string;
     mediaBytes(part_path: string): Uint8Array;
     moveShapeJson(args: string): string;
     moveSlideJson(args: string): string;
@@ -34,7 +36,10 @@ export class PptxDocument {
      * fails — joining a room must not depend on carrying the right file.
      */
     static openCollaborativeFromUpdate(update: Uint8Array, client_id: number, source?: Uint8Array | null): PptxDocument;
+    previewProposalJson(args: string): string;
+    proposeJson(args: string): string;
     redoJson(): string;
+    rejectProposalJson(args: string): string;
     removeCommentJson(args: string): string;
     removeShapeJson(args: string): string;
     replyToCommentJson(args: string): string;
@@ -63,6 +68,7 @@ export class PptxRenderer {
     free(): void;
     [Symbol.dispose](): void;
     hitTestJson(x: number, y: number): string;
+    layoutProposalSlideJson(document: PptxDocument, id: string, slide_index: number): string;
     layoutSlideJson(document: PptxDocument, slide_index: number): string;
     constructor();
     registerFont(family: string, bold: boolean, italic: boolean, bytes: Uint8Array): number;
@@ -82,11 +88,13 @@ export interface InitOutput {
     readonly compileSlideJson: (a: number, b: number) => [number, number, number, number];
     readonly parsePptxJson: (a: number, b: number) => [number, number, number, number];
     readonly pptxrenderer_hitTestJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxrenderer_layoutProposalSlideJson: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly pptxrenderer_layoutSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxrenderer_new: () => number;
     readonly pptxrenderer_registerFont: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly rendererVersion: () => [number, number];
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
+    readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -106,12 +114,16 @@ export interface InitOutput {
     readonly pptxdocument_insertParagraphBreakJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_insertTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_listProposalsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_mediaBytes: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_moveSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_openCollaborative: (a: number, b: number, c: number) => [number, number, number];
     readonly pptxdocument_openCollaborativeFromUpdate: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
+    readonly pptxdocument_previewProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_proposeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_redoJson: (a: number) => [number, number, number, number];
+    readonly pptxdocument_rejectProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_removeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];

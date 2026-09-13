@@ -5,6 +5,8 @@ import initWasmModule, {
   rendererVersion,
 } from './generated/pptx_wasm.js';
 import type { InitInput } from './generated/pptx_wasm.js';
+import { StaleProposalError } from '../proposals';
+import type { Proposal, ProposalAcceptance, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
@@ -50,6 +52,13 @@ export interface OpenPresentationOptions {
 }
 
 export interface PresentationHandle extends CollaborationReplica {
+  isProposalsAvailable(): boolean;
+  propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
+  listProposals(): Proposal[];
+  previewProposal(id: string): ProposalPreview;
+  layoutProposalSlide(id: string, slideIndex: number): SlideDisplayList;
+  acceptProposal(id: string, options?: { force?: boolean }): ProposalAcceptance;
+  rejectProposal(id: string): boolean;
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
@@ -131,6 +140,11 @@ export interface PresentationHandle extends CollaborationReplica {
 }
 
 let initialized = false;
+
+export function isProposalsAvailable(): boolean {
+  return typeof PptxDocument.prototype.proposeJson === 'function'
+    && typeof PptxRenderer.prototype.layoutProposalSlideJson === 'function';
+}
 let initialization: Promise<void> | undefined;
 
 export function initWasm(
@@ -284,6 +298,25 @@ export function openPresentation(
   };
 
   const handle: PresentationHandle = {
+    isProposalsAvailable,
+    propose(agentId, note, edits) {
+      return jsonWasmCall(() => doc.proposeJson(JSON.stringify({ agentId, note, edits })));
+    },
+    listProposals() {
+      return isProposalsAvailable() ? jsonWasmCall(() => doc.listProposalsJson()) : [];
+    },
+    previewProposal(id) {
+      return jsonWasmCall(() => doc.previewProposalJson(JSON.stringify({ id })));
+    },
+    layoutProposalSlide(id, slideIndex) {
+      return jsonWasmCall(() => renderer.layoutProposalSlideJson(doc, id, slideIndex));
+    },
+    acceptProposal(id, options) {
+      return jsonWasmCall(() => doc.acceptProposalJson(JSON.stringify({ id, force: options?.force ?? false })), true);
+    },
+    rejectProposal(id) {
+      return jsonWasmCall(() => doc.rejectProposalJson(JSON.stringify({ id })));
+    },
     get clientId(): number {
       return wasmCall(() => doc.clientId);
     },
@@ -578,5 +611,14 @@ function call<T>(operation: () => string): T {
 
 function toError(error: unknown): Error {
   if (error instanceof Error) return error;
+  if (typeof error === 'string') {
+    try {
+      const parsed = JSON.parse(error);
+      if (parsed.code === 'staleProposal' && Array.isArray(parsed.targets)
+          && parsed.targets.every((target: unknown) => typeof target === 'string')) {
+        return new StaleProposalError(parsed.targets);
+      }
+    } catch {}
+  }
   return new Error(typeof error === 'string' ? error : String(error));
 }

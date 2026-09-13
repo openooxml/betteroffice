@@ -5,6 +5,10 @@ pub use pptx_edit::{
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
     TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
 };
+pub use pptx_edit::{
+    Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,
+    ProposalRequest, ProposalResult,
+};
 pub use pptx_parse::{
     BlipEffect, Bullet, Comment, CommentAuthor, GraphicFrame, GraphicFrameData, GroupShape,
     LineSpacing, MediaPart, ParagraphProperties, ParseLimits, Picture, PictureCrop, Placeholder,

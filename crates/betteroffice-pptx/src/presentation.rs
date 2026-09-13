@@ -24,6 +24,33 @@ pub struct Presentation {
 }
 
 impl Presentation {
+    pub fn propose(&self, request: crate::ProposalRequest) -> Result<crate::Proposal> {
+        Ok(self.session.propose(request)?)
+    }
+
+    pub fn proposals(&self) -> Result<Vec<crate::Proposal>> {
+        Ok(self.session.proposals()?)
+    }
+
+    pub fn preview_proposal(&self, id: &str) -> Result<crate::ProposalPreview> {
+        Ok(self.session.preview_proposal(id)?)
+    }
+
+    pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
+        let preview = self.session.proposal_preview_session(id)?;
+        Ok(self
+            .renderer
+            .layout_slide(preview.package(), &preview.snapshot()?, slide_index)?)
+    }
+
+    pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
+        Ok(self.session.accept_proposal(id, force)?)
+    }
+
+    pub fn reject_proposal(&self, id: &str) -> bool {
+        self.session.reject_proposal(id)
+    }
+
     pub fn open(bytes: &[u8]) -> Result<Self> {
         Self::open_with_limits_internal(bytes, &ParseLimits::default(), STANDALONE_CLIENT_ID)
     }

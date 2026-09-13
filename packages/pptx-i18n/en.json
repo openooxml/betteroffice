@@ -110,5 +110,26 @@
   },
   "errors": {
     "decodeSlideImage": "could not decode slide image"
+  },
+  "proposals": {
+    "title": "Agent proposals",
+    "close": "Close",
+    "empty": "No changes awaiting review.",
+    "preview": "Preview changes",
+    "previewTitle": "Review proposed changes",
+    "before": "Current slide",
+    "after": "Proposed slide",
+    "accept": "Accept proposal",
+    "reject": "Reject",
+    "force": "Apply updated proposal",
+    "blank": "Empty",
+    "target": "Slide {slide} · {name}",
+    "targetLabel": "Change",
+    "targetMissing": "The target is no longer available",
+    "stale": "These objects changed after the proposal was created. Preview the current changes before applying.",
+    "stalePreview": "This preview uses the updated slide. Applying will override the changed targets.",
+    "geometry": "Position and size (x, y, width, height)",
+    "appearance": "Appearance or text formatting changed",
+    "changedAgain": "The target changed again. Review the refreshed preview before applying."
   }
 }

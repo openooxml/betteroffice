@@ -8,7 +8,7 @@ import type {
   StorySnapshot,
   TextBoxPrimitive,
 } from '../index';
-import { initWasm, openPresentation, paintSlide } from '../index';
+import { initWasm, openPresentation, paintSlide, StaleProposalError } from '../index';
 
 const root = resolve(import.meta.dir, '../../../..');
 let handle: PresentationHandle;
@@ -28,6 +28,47 @@ beforeAll(async () => {
     clientId: 9001,
     fonts: [{ family: 'Liberation Sans', bytes: font }],
   });
+});
+
+test('proposals preview real frames, accept atomically, save, and preserve stale errors', () => {
+  const source = openPresentation(fixture, { clientId: 9201, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  try {
+    const before = source.snapshot();
+    const slide = before.slides[0];
+    const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
+    const story = shape.textStories[0];
+    const end = story.paragraphs[0].runs.reduce((length, run) => length + run.text.length, 0);
+    const updates: Uint8Array[] = [];
+    source.onUpdate((update) => updates.push(update));
+    const proposal = source.propose('review-agent', 'Improve this title', [
+      { type: 'replaceText', storyId: story.id, start: 0, end, text: 'A reviewed title' },
+      { type: 'setShapeRect', slideId: slide.id, shapeId: shape.id, rect: { x: shape.x + 100000, y: shape.y, width: shape.width, height: shape.height } },
+    ]);
+    const frameBefore = source.layoutSlide(0);
+    const frameAfter = source.layoutProposalSlide(proposal.id, 0);
+    expect(frameAfter).not.toEqual(frameBefore);
+    const preview = source.previewProposal(proposal.id);
+    expect(source.snapshot()).toEqual(before);
+    expect(source.canUndo()).toBe(false);
+    expect(updates).toHaveLength(0);
+    expect(source.acceptProposal(proposal.id).snapshot).toEqual(preview.snapshot);
+    expect(updates).toHaveLength(1);
+    const reopened = openPresentation(source.save(), { clientId: 9202 });
+    try {
+      expect(JSON.stringify(reopened.snapshot())).toContain('A reviewed title');
+      expect(reopened.listProposals()).toHaveLength(0);
+    } finally { reopened.dispose(); }
+    expect(source.undo().snapshot).toEqual(before);
+    const stale = source.propose('review-agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Proposed notes' }]);
+    source.setSlideNotes(slide.id, 'Human notes');
+    expect(() => source.acceptProposal(stale.id)).toThrow(StaleProposalError);
+    expect(source.listProposals()[0].staleTargets).toEqual([slide.id]);
+    expect(source.previewProposal(stale.id).proposal.changes[0].oldText).toBe('Human notes');
+    expect(source.acceptProposal(stale.id, { force: true }).snapshot.slides[0].notes).toBe('Proposed notes');
+    const rejected = source.propose('review-agent', null, [{ type: 'setSlideNotes', slideId: slide.id, text: 'Rejected notes' }]);
+    expect(source.rejectProposal(rejected.id)).toBe(true);
+    expect(source.snapshot().slides[0].notes).toBe('Proposed notes');
+  } finally { source.dispose(); }
 });
 
 afterAll(() => handle.dispose());

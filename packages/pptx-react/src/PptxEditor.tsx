@@ -5,6 +5,7 @@ import {
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
   slideToPng,
+  StaleProposalError,
 } from '@betteroffice/pptx';
 import type {
   CanvasImageResolver,
@@ -15,6 +16,7 @@ import type {
   PptxPresencePeer,
   PptxFontFace,
   PresentationHandle,
+  Proposal,
   SlideDisplayList,
   StorySnapshot,
   TextBoxPrimitive,
@@ -22,6 +24,7 @@ import type {
 } from '@betteroffice/pptx';
 import type { Translations } from '@betteroffice/pptx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
+import { ProposalsPanel } from './components/ProposalsPanel';
 import {
   useCallback,
   useEffect,
@@ -106,6 +109,7 @@ export interface PptxEditorApi {
   focus: () => void;
   handle: PresentationHandle;
   refresh: () => void;
+  refreshProposals: () => void;
   /** Serialize the presentation back to .pptx bytes, edits included. */
   save: () => Uint8Array;
 }
@@ -329,6 +333,9 @@ function PptxEditorContent({
     useState<CollaborationReplica | null>(null);
   const [remotePeers, setRemotePeers] = useState<readonly PptxPresencePeer[]>([]);
   const [presenting, setPresenting] = useState(false);
+  const [proposals, setProposals] = useState<Proposal[]>([]);
+  const [proposalsOpen, setProposalsOpen] = useState(false);
+  const proposalButtonRef = useRef<HTMLButtonElement>(null);
 
   onReadyRef.current = onReady;
   onChangeRef.current = onChange;
@@ -395,6 +402,7 @@ function PptxEditorContent({
         modelRef.current = next;
         setModel(next);
         setHistoryState({ canUndo: handle.canUndo(), canRedo: handle.canRedo() });
+        setProposals(handle.listProposals());
         setError(null);
         if (notify) onChangeRef.current?.(snapshot);
         return next;
@@ -409,6 +417,33 @@ function PptxEditorContent({
   const refresh = useCallback(() => {
     refreshAt(undefined, false, true);
   }, [refreshAt]);
+
+  const refreshProposals = useCallback(() => {
+    try {
+      setProposals(handleRef.current?.listProposals() ?? []);
+    } catch (value) {
+      reportError(value);
+    }
+  }, [reportError]);
+
+  const acceptProposal = useCallback((id: string, force = false) => {
+    try {
+      handleRef.current?.acceptProposal(id, { force });
+      refreshAt(undefined, true, true);
+    } catch (value) {
+      refreshProposals();
+      if (!(value instanceof StaleProposalError)) reportError(value);
+    }
+  }, [refreshAt, refreshProposals, reportError]);
+
+  const rejectProposal = useCallback((id: string) => {
+    try {
+      handleRef.current?.rejectProposal(id);
+      refreshProposals();
+    } catch (value) {
+      reportError(value);
+    }
+  }, [refreshProposals, reportError]);
 
   useEffect(() => {
     let disposed = false;
@@ -428,6 +463,8 @@ function PptxEditorContent({
     setHistoryState({ canUndo: false, canRedo: false });
     setActiveTool('select');
     setPresenting(false);
+    setProposals([]);
+    setProposalsOpen(false);
     pointerGestureRef.current = null;
     resizeRef.current = null;
     caretGoalRef.current = null;
@@ -460,6 +497,7 @@ function PptxEditorContent({
           onReadyRef.current?.({
             handle: opened,
             refresh,
+            refreshProposals,
             save: () => opened.save(),
             focus: () => stageRef.current?.focus(),
           });
@@ -1745,6 +1783,13 @@ function PptxEditorContent({
         >
           <EditorToolbar.Toolbar />
         </EditorToolbar>
+        {handleRef.current?.isProposalsAvailable() && (
+          <button ref={proposalButtonRef} type="button" data-testid="pptx-proposals-button"
+            aria-expanded={proposalsOpen} style={styles.presentButton}
+            onClick={() => { refreshProposals(); setProposalsOpen((open) => !open); }}>
+            {t('proposals.title')} <span data-testid="pptx-proposals-count">{proposals.length}</span>
+          </button>
+        )}
         {remotePeers.length > 0 ? (
           <div style={styles.presenceStrip} role="list" aria-label="Collaborators">
             {toolbarPresence.visible.map((peer) => {
@@ -1990,6 +2035,19 @@ function PptxEditorContent({
           </div>
           {error ? <div style={styles.error}>{error}</div> : null}
         </div>
+        {proposalsOpen && model && handleRef.current && (
+          <ProposalsPanel handle={handleRef.current} proposals={proposals} snapshot={model.snapshot}
+            resolveImage={(assetId) => resolveImage(assetId, handleRef, imageCacheRef, decodeImageError)}
+            onAccept={acceptProposal} onReject={rejectProposal}
+            onNavigate={(slideId, shapeId) => {
+              const index = model.snapshot.slides.findIndex((slide) => slide.id === slideId);
+              if (index < 0) return;
+              refreshAt(index);
+              setSelection(null);
+              setShapeSelection(shapeId ? { slideId, shapeId } : null);
+            }}
+            onClose={() => { setProposalsOpen(false); proposalButtonRef.current?.focus(); }} />
+        )}
       </div>
       {activeSlide ? (
         <NotesPanel

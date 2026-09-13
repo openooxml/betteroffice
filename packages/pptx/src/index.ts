@@ -1,4 +1,6 @@
 export { paintSlide, sizeCanvasForSlide } from './render/canvas';
+export { StaleProposalError } from './proposals';
+export type { Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalPreview } from './proposals';
 export type { CanvasImageResolver, PaintSlideOptions, SlideCanvasLike } from './render/canvas';
 export { slideToPng } from './render/png';
 export type { SlideToPngOptions } from './render/png';
@@ -27,6 +29,7 @@ export {
   initWasm,
   inspectPresentation,
   isWasmAvailable,
+  isProposalsAvailable,
   openPresentation,
   wasmVersion,
 } from './wasm/loader';

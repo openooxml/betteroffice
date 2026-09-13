@@ -51,6 +51,51 @@ Beyond rendering, `PresentationHandle` covers editing: text
 `hitTest`, undo/redo, and `save()`, which serializes the deck back to `.pptx`
 bytes with edits applied — untouched slides keep their exact source part bytes.
 
+## Agent proposals
+
+Stage a group of edits, inspect it, then accept or reject it:
+
+```ts
+const slide = deck.snapshot().slides[0];
+const shape = slide.shapes.find((shape) => shape.textStories.length > 0)!;
+const story = shape.textStories[0];
+const proposal = deck.propose('editor-agent', 'Make the title concise', [{
+  type: 'replaceText',
+  storyId: story.id,
+  start: 0,
+  end: story.paragraphs[0].runs.reduce((length, run) => length + run.text.length, 0),
+  text: 'A clear title',
+}]);
+
+const preview = deck.previewProposal(proposal.id);
+const proposedSlide = deck.layoutProposalSlide(proposal.id, 0);
+deck.acceptProposal(proposal.id);
+deck.undo();
+```
+
+`listProposals()` returns agent attribution, notes, edits, before/after targets,
+and current `staleTargets`. `previewProposal()` and `layoutProposalSlide()` replay
+against the current deck without changing it. `rejectProposal(id)` removes a
+pending group. Acceptance applies the whole group in one undo step and emits
+one local update; an invalid edit prevents the entire group from being staged
+or accepted.
+
+Supported edits replace text within one paragraph, format text, align paragraphs,
+set shape geometry/fill/stroke/adjustments, and replace speaker notes. Text offsets
+use UTF-16 and shape coordinates use EMU. Text replacement inherits the style at
+its start unless `style` is supplied. Edits run in order, so later text offsets
+refer to the result of earlier edits in the group.
+
+Changing a targeted shape or its notes makes acceptance throw `StaleProposalError`
+with target IDs. Review a fresh preview before calling
+`acceptProposal(id, { force: true })`; force still validates targets and ranges.
+Unrelated peer edits survive acceptance and Undo. Up to 64 proposals, each with
+1–256 edits, may be pending.
+
+Pending proposals belong to this open session: they are excluded from PPTX
+exports and collaboration updates. Accepted edits save and sync normally.
+`isProposalsAvailable()` supports hosts that load an older WASM build.
+
 ## Comments
 
 PowerPoint has two comment systems and a file only ever uses one: `legacy`

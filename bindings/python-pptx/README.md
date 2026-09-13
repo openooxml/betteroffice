@@ -92,6 +92,48 @@ paragraphs styles each of them as a single undoable edit. `delete_text` is the
 strict one: a range crossing a paragraph boundary raises `RangeError` rather
 than silently swallowing the break.
 
+## Agent proposals
+
+Proposals stage a group of edits without modifying the deck, its saved file, or
+its undo history:
+
+```python
+proposal = deck.propose("editor-agent", [{
+    "type": "setSlideNotes",
+    "slideId": deck.slide_ids[0],
+    "text": "Explain the customer outcome first.",
+}], note="Clarify the opening")
+
+preview = deck.preview_proposal(proposal.id)
+layout = deck.render_proposal(proposal.id, 0)
+deck.accept_proposal(proposal.id)
+deck.undo()
+```
+
+Register fonts before `render_proposal`, just as for `render_slide`.
+`proposals()` returns `Proposal` values with agent attribution, notes,
+`ProposalChange` values, and current `stale_targets`. `preview_proposal` returns
+a `ProposalPreview` containing fresh changes and the proposed deck snapshot.
+Snapshot and edit dictionaries use the core's camelCase JSON fields; the
+dataclass attributes use Python snake_case.
+
+Edit objects support `replaceText`, `formatText`, `setParagraphAlignment`,
+`setShapeRect`, `setShapeFill`, `setShapeStroke`, `setShapeAdjust`, and
+`setSlideNotes`. They share the [TypeScript edit contract](../../packages/pptx/src/proposals.ts).
+Replacement ranges stay within one paragraph and use UTF-16 offsets; shape
+geometry uses EMU. A group has 1–256 edits, applied in order, with up to 64
+pending groups per session.
+
+`accept_proposal` applies the entire validated group as one local undo step,
+regardless of the current `origin` setting. A changed target raises
+`StaleProposalError` with a `targets` list. Review the fresh preview before
+retrying with `force=True`. Deleted targets and invalid ranges remain errors.
+`reject_proposal(id)` removes the proposal without changing the deck.
+
+Pending proposals are local to the open session and are excluded from saved
+PPTX files and collaboration updates. Accepted edits save and synchronize
+normally, and Undo preserves unrelated peer edits.
+
 ## Lay a slide out
 
 **No font is compiled into the wheel**, so laying out a slide that has text

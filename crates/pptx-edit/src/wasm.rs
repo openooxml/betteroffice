@@ -223,8 +223,55 @@ struct HistoryResult {
     snapshot: DeckSnapshot,
 }
 
+#[derive(Deserialize)]
+struct ProposalIdArgs {
+    id: String,
+    #[serde(default)]
+    force: bool,
+}
+
 #[wasm_bindgen]
 impl PptxDocument {
+    #[wasm_bindgen(js_name = proposeJson)]
+    pub fn propose_json(&self, args: &str) -> Result<String, JsValue> {
+        json(
+            self.session
+                .propose(parse_args(args)?)
+                .map_err(proposal_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = listProposalsJson)]
+    pub fn list_proposals_json(&self) -> Result<String, JsValue> {
+        json(self.session.proposals().map_err(proposal_error)?)
+    }
+
+    #[wasm_bindgen(js_name = previewProposalJson)]
+    pub fn preview_proposal_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ProposalIdArgs = parse_args(args)?;
+        json(
+            self.session
+                .preview_proposal(&args.id)
+                .map_err(proposal_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = acceptProposalJson)]
+    pub fn accept_proposal_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ProposalIdArgs = parse_args(args)?;
+        json(
+            self.session
+                .accept_proposal(&args.id, args.force)
+                .map_err(proposal_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = rejectProposalJson)]
+    pub fn reject_proposal_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ProposalIdArgs = parse_args(args)?;
+        json(self.session.reject_proposal(&args.id))
+    }
+
     #[wasm_bindgen(js_name = openCollaborative)]
     pub fn open_collaborative(bytes: &[u8], client_id: f64) -> Result<PptxDocument, JsValue> {
         let client_id = parse_client_id(client_id)?;
@@ -727,4 +774,16 @@ fn parse_client_id(client_id: f64) -> Result<u64, JsValue> {
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&error.to_string())
+}
+
+fn proposal_error(error: crate::ProposalError) -> JsValue {
+    match error {
+        crate::ProposalError::Stale(targets) => JsValue::from_str(
+            &serde_json::json!({
+                "code": "staleProposal", "targets": targets,
+            })
+            .to_string(),
+        ),
+        other => js_error(other),
+    }
 }

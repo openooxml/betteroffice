@@ -16,9 +16,10 @@ use betteroffice_pptx::{
     Background, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSnapshot, EditCtx, EditError,
     EditOrigin, Error as CoreError, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
     ParagraphSnapshot, ParseLimits, Presentation as CorePresentation, PresetShapeDraft,
-    RenderOptions, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt,
-    ShapeRect, ShapeSnapshot, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideSnapshot,
-    StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle, TextStylePatch, TransformReceipt,
+    ProposalError, ProposalRequest, RenderOptions, ShapeAdjustReceipt, ShapeDraft,
+    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
+    TextStyle, TextStylePatch, TransformReceipt,
 };
 
 create_exception!(
@@ -92,9 +93,26 @@ fn map_error(error: CoreError) -> PyErr {
         CoreError::Parse(_) => ParseError::new_err(message),
         CoreError::Render(_) => RenderError::new_err(message),
         CoreError::Edit(edit) => map_edit_error(edit, message),
+        CoreError::Proposal(ProposalError::Stale(targets)) => Python::attach(|py| {
+            let error = StaleProposalError::new_err(message);
+            match error.value(py).setattr("targets", targets) {
+                Ok(()) => error,
+                Err(error) => error,
+            }
+        }),
+        CoreError::Proposal(ProposalError::NotFound(_)) => PyKeyError::new_err(message),
+        CoreError::Proposal(ProposalError::Invalid(_)) => PyValueError::new_err(message),
+        CoreError::Proposal(ProposalError::Edit(edit)) => map_edit_error(edit, message),
         _ => PptxError::new_err(message),
     }
 }
+
+create_exception!(
+    _betteroffice_pptx,
+    StaleProposalError,
+    PptxError,
+    "Proposal targets changed before acceptance."
+);
 
 fn parse_background(value: &str) -> PyResult<Background> {
     match value {
@@ -1921,6 +1939,53 @@ impl PyPresentation {
         Ok(PyDeck::from_core(&snapshot))
     }
 
+    fn propose_json(&self, args: &str) -> PyResult<String> {
+        let request: ProposalRequest =
+            serde_json::from_str(args).map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let proposal = self.presentation.propose(request).map_err(map_error)?;
+        serde_json::to_string(&proposal).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn proposals_json(&self) -> PyResult<String> {
+        let proposals = self.presentation.proposals().map_err(map_error)?;
+        serde_json::to_string(&proposals).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    fn preview_proposal_json(&self, id: &str) -> PyResult<String> {
+        let preview = self.presentation.preview_proposal(id).map_err(map_error)?;
+        serde_json::to_string(&preview).map_err(|error| PptxError::new_err(error.to_string()))
+    }
+
+    #[pyo3(signature = (id, *, force = false))]
+    fn accept_proposal(&self, id: &str, force: bool) -> PyResult<bool> {
+        let accepted = self
+            .presentation
+            .accept_proposal(id, force)
+            .map_err(map_error)?;
+        self.edited.set(self.edited.get() || accepted.applied);
+        Ok(accepted.applied)
+    }
+
+    fn reject_proposal(&self, id: &str) -> bool {
+        self.presentation.reject_proposal(id)
+    }
+
+    fn render_proposal(&self, id: &str, slide: &Bound<'_, PyAny>) -> PyResult<PyDisplayList> {
+        let index = self.resolve_slide_index(slide)?;
+        let rendered = self
+            .presentation
+            .render_proposal(id, index)
+            .map_err(map_error)?;
+        Ok(PyDisplayList {
+            payload: serde_json::to_string(&rendered.display_list)
+                .map_err(|error| RenderError::new_err(error.to_string()))?,
+            width: rendered.display_list.width,
+            height: rendered.display_list.height,
+            contract_version: rendered.display_list.contract_version,
+            primitives: rendered.display_list.primitives.len(),
+        })
+    }
+
     #[getter]
     fn can_undo(&self) -> bool {
         self.presentation.can_undo()
@@ -1987,6 +2052,7 @@ fn _betteroffice_pptx(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PyComment>()?;
     module.add_class::<PyCommentEdit>()?;
     module.add("PptxError", py.get_type::<PptxError>())?;
+    module.add("StaleProposalError", py.get_type::<StaleProposalError>())?;
     module.add("ParseError", py.get_type::<ParseError>())?;
     module.add("RangeError", py.get_type::<RangeError>())?;
     module.add("RenderError", py.get_type::<RenderError>())?;
