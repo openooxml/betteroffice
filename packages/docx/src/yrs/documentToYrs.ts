@@ -35,6 +35,8 @@ import type {
 } from '../types/document';
 import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
+import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
+import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
 import {
   blockSdtAttrsToPayload,
@@ -97,6 +99,7 @@ interface StoryOptions {
 }
 
 interface ProjectedCell {
+  paragraphFormatting?: ParagraphFormatting;
   attrs: Attrs;
   content: BlockContent[];
   extraRunFormatting?: TextFormatting;
@@ -110,7 +113,6 @@ interface ProjectedRow {
 interface ProjectedTable {
   attrs: Attrs;
   rows: ProjectedRow[];
-  paragraphFormatting?: ParagraphFormatting;
 }
 
 interface LoweringContext {
@@ -1228,7 +1230,9 @@ function projectRow(
   rowSpans: Map<string, RowSpanInfo>,
   tableBorders: TableBorders | undefined,
   defaultMargins: { top?: number; bottom?: number; left?: number; right?: number } | undefined,
-  theme: Theme | null
+  theme: Theme | null,
+  tableStyle: Style | undefined,
+  styleColumns: number
 ): ProjectedRow {
   const attrs: Attrs = {
     height: row.formatting?.height?.value ?? null,
@@ -1275,8 +1279,16 @@ function projectRow(
     }
     column += colspan;
     if (rowSpan?.skip) return;
-    cells.push(
-      projectCell(cell, {
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        startColumn,
+        column,
+        styleColumns
+      ),
+      ...projectCell(cell, {
         isHeader: rowIndex === 0 && !!table.formatting?.look?.firstRow,
         rowspan: rowSpan?.rowSpan ?? 1,
         gridWidth,
@@ -1288,12 +1300,20 @@ function projectRow(
         defaultMargins,
         theme,
         tableBidi: Boolean(table.formatting?.bidi),
-      })
-    );
+      }),
+    });
   });
   if (cells.length === 0) {
-    cells.push(
-      projectCell(
+    cells.push({
+      paragraphFormatting: tableCellParagraphFormatting(
+        table,
+        tableStyle,
+        rowIndex,
+        0,
+        totalColumns,
+        styleColumns
+      ),
+      ...projectCell(
         {
           type: 'tableCell',
           formatting: totalColumns > 1 ? { gridSpan: totalColumns } : undefined,
@@ -1312,8 +1332,8 @@ function projectRow(
           theme,
           tableBidi: Boolean(table.formatting?.bidi),
         }
-      )
-    );
+      ),
+    });
   }
   return { attrs: tableRowAttrsToTrPr(attrs), cells };
 }
@@ -1375,11 +1395,21 @@ function projectTable(
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
   const rowSpans = calculateRowSpans(table);
+  const styleColumns = tableColumnCount(table);
   return {
     attrs,
-    paragraphFormatting: (tableStyle ?? defaultStyle)?.pPr,
     rows: table.rows.map((row, rowIndex) =>
-      projectRow(row, table, rowIndex, rowSpans, borders, defaultMargins, theme)
+      projectRow(
+        row,
+        table,
+        rowIndex,
+        rowSpans,
+        borders,
+        defaultMargins,
+        theme,
+        tableStyle ?? defaultStyle,
+        styleColumns
+      )
     ),
   };
 }
@@ -1473,7 +1503,7 @@ function visitStory(
               appendBodyTail: false,
               seedComments: false,
               extraRunFormatting: cell.extraRunFormatting,
-              tableParagraphFormatting: table.paragraphFormatting,
+              tableParagraphFormatting: cell.paragraphFormatting,
             }
           );
         });

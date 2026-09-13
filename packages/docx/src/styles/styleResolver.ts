@@ -11,6 +11,7 @@
  * Based on ECMA-376 style cascade rules.
  */
 
+import { mergeParagraphFormatting } from '../utils/paragraphFormattingMerge';
 import type {
   StyleDefinitions,
   Style,
@@ -145,7 +146,7 @@ export class StyleResolver {
       this.mergeStyleIntoResult(result, style);
     }
     if (tableParagraphFormatting) {
-      result.paragraphFormatting = this.mergeParagraphFormatting(
+      result.paragraphFormatting = mergeParagraphFormatting(
         result.paragraphFormatting,
         tableParagraphFormatting
       );
@@ -304,53 +305,11 @@ export class StyleResolver {
 
   private mergeStyleIntoResult(result: ResolvedParagraphStyle, style: Style): void {
     if (style.pPr) {
-      result.paragraphFormatting = this.mergeParagraphFormatting(
-        result.paragraphFormatting,
-        style.pPr
-      );
+      result.paragraphFormatting = mergeParagraphFormatting(result.paragraphFormatting, style.pPr);
     }
     if (style.rPr) {
       result.runFormatting = this.mergeTextFormatting(result.runFormatting, style.rPr);
     }
-  }
-
-  /**
-   * Merge paragraph formatting (source overrides target)
-   */
-  private mergeParagraphFormatting(
-    target: ParagraphFormatting | undefined,
-    source: ParagraphFormatting | undefined
-  ): ParagraphFormatting | undefined {
-    if (!source) return target;
-    if (!target) return source ? { ...source } : undefined;
-
-    const result = { ...target };
-
-    for (const key of Object.keys(source) as (keyof ParagraphFormatting)[]) {
-      const value = source[key];
-      if (value !== undefined) {
-        if (key === 'runProperties') {
-          result.runProperties = this.mergeTextFormatting(
-            result.runProperties,
-            source.runProperties
-          );
-        } else if (key === 'borders' || key === 'numPr' || key === 'frame') {
-          const baseValue = result[key] as Record<string, unknown> | undefined;
-          const sourceValue = value as Record<string, unknown> | undefined;
-          (result as Record<string, unknown>)[key] = {
-            ...(baseValue || {}),
-            ...(sourceValue || {}),
-          };
-        } else if (key === 'tabs' && Array.isArray(value)) {
-          // Tabs from higher priority source replace lower priority
-          result.tabs = [...value];
-        } else {
-          (result as Record<string, unknown>)[key] = value;
-        }
-      }
-    }
-
-    return result;
   }
 
   private mergeTextFormatting(

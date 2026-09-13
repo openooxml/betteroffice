@@ -44,6 +44,10 @@ function fixture(withDefaults: boolean, withControl = true): Uint8Array<ArrayBuf
     table(paragraph('Nested table')) +
     paragraph('Outer restored');
   const body = paragraph('Before') + table(cell, 'Grid') + paragraph('After');
+  return documentFixture(body, styles);
+}
+
+function documentFixture(body: string, styles: string): Uint8Array<ArrayBuffer> {
   const parts = new Map<string, Uint8Array>();
   const set = (name: string, xml: string) => parts.set(name, toBytes(xml));
   set(
@@ -149,5 +153,68 @@ it('preserves table spacing through text edits and save/reopen for both seeders'
     } finally {
       session.destroy();
     }
+  }
+});
+
+it.each(['projected', 'native'])('applies conditional paragraph spacing (seeder: %s)', async (seeder) => {
+  const fixturePath = resolve(import.meta.dir, '__fixtures__/table-conditional-spacing');
+  const bytes = documentFixture(
+    readFileSync(resolve(fixturePath, 'body.xml'), 'utf8'),
+    readFileSync(resolve(fixturePath, 'styles.xml'), 'utf8')
+  );
+  const parsed = await parseDocx(bytes.buffer, { preloadFonts: false });
+  const original = structuredClone(parsed);
+  const projected = await createYrsSession({ clientId: 74219 });
+  const native = await createYrsSession({ clientId: 74219 });
+  try {
+    documentToYrs(projected, parsed);
+    if (seeder === 'native') {
+      native.seedFromDocx(bytes);
+      expect(projected.storyIds()).toEqual(native.storyIds());
+      for (const story of native.storyIds()) {
+        expect(projected.storySegments(story)).toEqual(native.storySegments(story));
+        expect(projected.yrsBlocksForStory(story)).toEqual(native.yrsBlocksForStory(story));
+      }
+    }
+    const expected = [
+      [
+        [190, 110, 110, 110, 200],
+        [130, 170, 180, 170, 140],
+        [130, 170, 180, 170, 140],
+        [130, 170, 180, 170, 140],
+        [210, 120, 120, 120, 220],
+      ],
+      [
+        [110, 110, 110, 110, 110],
+        [150, 150, 150, 150, 150],
+        [150, 150, 150, 150, 150],
+        [160, 160, 160, 160, 160],
+        [160, 160, 160, 160, 160],
+      ],
+      Array.from({ length: 5 }, () => [10, 10, 10, 10, 10]),
+      [
+        [190, 110, 200],
+        [170, 180, 170],
+        [130, 180, 140],
+        [210, 120, 220],
+      ],
+      [[400, 420, 120, 120, 220]],
+      Array.from({ length: 5 }, () => [130, 170, 170, 180, 180]),
+    ];
+    expected.forEach((rows, table) =>
+      rows.forEach((cells, row) =>
+        cells.forEach((after, cell) => {
+          expect(
+            projected.paragraphs(`body:t${table}:r${row}c${cell}`)[0].properties.spaceAfter
+          ).toBe(after);
+        })
+      )
+    );
+    expect(projected.paragraphs('body:t0:r0c0')[0].properties.lineSpacing).toBe(360);
+    expect(projected.paragraphs('body:t4:r0c0')[0].properties.lineSpacing).toBe(480);
+    expect(parsed).toEqual(original);
+  } finally {
+    projected.destroy();
+    native.destroy();
   }
 });

@@ -40,6 +40,7 @@ struct StoryPlan {
 }
 
 struct ProjectedCell {
+    paragraph_formatting: Option<Value>,
     attrs: JsonObject,
     content: Vec<Value>,
 }
@@ -52,7 +53,6 @@ struct ProjectedRow {
 struct ProjectedTable {
     attrs: JsonObject,
     rows: Vec<ProjectedRow>,
-    paragraph_formatting: Option<Value>,
 }
 
 #[derive(Clone, Copy)]
@@ -2514,6 +2514,7 @@ fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
     }
     let content = array(field(Some(cell), "content"));
     ProjectedCell {
+        paragraph_formatting: None,
         attrs,
         content: if content.is_empty() {
             vec![json!({ "type": "paragraph", "content": [] })]
@@ -2523,14 +2524,125 @@ fn project_cell(cell: &Value, options: CellOptions<'_>) -> ProjectedCell {
     }
 }
 
+struct TableStyleContext<'a> {
+    column_count: usize,
+    style: Option<&'a Value>,
+    borders: Option<&'a Value>,
+    margins: Option<&'a Value>,
+    theme: Option<&'a Value>,
+}
+
+fn table_column_count(table: &Value) -> usize {
+    array(field(Some(table), "rows"))
+        .iter()
+        .map(|row| {
+            let row_formatting = field(Some(row), "formatting");
+            let omitted = number(field(row_formatting, "gridBefore")).unwrap_or(0.0) as usize
+                + number(field(row_formatting, "gridAfter")).unwrap_or(0.0) as usize;
+            omitted
+                + array(field(Some(row), "cells"))
+                    .iter()
+                    .map(|cell| {
+                        number(field(field(Some(cell), "formatting"), "gridSpan")).unwrap_or(1.0)
+                            as usize
+                    })
+                    .sum::<usize>()
+        })
+        .max()
+        .unwrap_or(0)
+        .max(array(field(Some(table), "columnWidths")).len())
+}
+
+fn table_cell_paragraph_formatting(
+    table: &Value,
+    style: Option<&Value>,
+    row_index: usize,
+    start_column: usize,
+    end_column: usize,
+    columns: usize,
+) -> Option<Value> {
+    let mut result = field(style, "pPr").cloned();
+    let parts = array(field(style, "tblStylePr"));
+    if !parts.iter().any(|part| field(Some(part), "pPr").is_some()) {
+        return result;
+    }
+    let formatting = field(Some(table), "formatting");
+    let style_formatting = field(style, "tblPr");
+    let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
+    let mask = string(field(look, "value"))
+        .and_then(|value| u32::from_str_radix(value, 16).ok())
+        .unwrap_or(0);
+    let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
+    let first_row = flag("firstRow", 0x20);
+    let last_row = flag("lastRow", 0x40);
+    let first_column = flag("firstColumn", 0x80);
+    let last_column = flag("lastColumn", 0x100);
+    let rows = array(field(Some(table), "rows"));
+    let grid_before = number(field(
+        field(rows.get(row_index), "formatting"),
+        "gridBefore",
+    ))
+    .unwrap_or(0.0) as usize;
+    let start_column = start_column + grid_before;
+    let end_column = end_column + grid_before;
+    let at_first_row = first_row && row_index == 0;
+    let at_last_row = last_row && row_index + 1 == rows.len();
+    let at_first_column = first_column && start_column == 0;
+    let at_last_column = last_column && end_column == columns;
+    let band_size = |key| {
+        number(field(formatting, key).or_else(|| field(style_formatting, key))).unwrap_or(1.0)
+    };
+    let row_band_size = band_size("styleRowBandSize");
+    let column_band_size = band_size("styleColBandSize");
+    let mut regions = Vec::new();
+    if !flag("noHBand", 0x200) && !at_first_row && !at_last_row && row_band_size > 0.0 {
+        let band =
+            (row_index.saturating_sub(usize::from(first_row)) as f64 / row_band_size).floor();
+        regions.push(if band % 2.0 == 0.0 {
+            "band1Horz"
+        } else {
+            "band2Horz"
+        });
+    }
+    if !flag("noVBand", 0x400) && !at_first_column && !at_last_column && column_band_size > 0.0 {
+        let band = (start_column.saturating_sub(usize::from(first_column)) as f64
+            / column_band_size)
+            .floor();
+        regions.push(if band % 2.0 == 0.0 {
+            "band1Vert"
+        } else {
+            "band2Vert"
+        });
+    }
+    for (region, active) in [
+        ("firstCol", at_first_column),
+        ("lastCol", at_last_column),
+        ("firstRow", at_first_row),
+        ("lastRow", at_last_row),
+        ("nwCell", at_first_row && at_first_column),
+        ("neCell", at_first_row && at_last_column),
+        ("swCell", at_last_row && at_first_column),
+        ("seCell", at_last_row && at_last_column),
+    ] {
+        if active {
+            regions.push(region);
+        }
+    }
+    for region in regions {
+        let conditional = parts
+            .iter()
+            .find(|part| string(field(Some(part), "type")) == Some(region));
+        result = merge_paragraph_formatting(result.as_ref(), field(conditional, "pPr"));
+    }
+    result
+}
+
 fn project_row(
     row: &Value,
     table: &Value,
     row_index: usize,
     row_spans: &BTreeMap<(usize, usize), (usize, bool)>,
-    table_borders: Option<&Value>,
-    default_margins: Option<&Value>,
-    theme: Option<&Value>,
+    style_context: &TableStyleContext<'_>,
 ) -> ProjectedRow {
     let formatting = field(Some(row), "formatting");
     let mut attrs = map_from_value(json!({
@@ -2597,7 +2709,7 @@ fn project_row(
         if span.is_some_and(|(_, skip)| *skip) {
             continue;
         }
-        cells.push(project_cell(
+        let mut projected = project_cell(
             cell,
             CellOptions {
                 is_header: row_index == 0
@@ -2611,12 +2723,21 @@ fn project_row(
                 last_row: row_index + 1 == rows.len(),
                 first_column: start_column == 0,
                 last_column: column == total_columns,
-                table_borders,
-                default_margins,
-                theme,
+                table_borders: style_context.borders,
+                default_margins: style_context.margins,
+                theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
-        ));
+        );
+        projected.paragraph_formatting = table_cell_paragraph_formatting(
+            table,
+            style_context.style,
+            row_index,
+            start_column,
+            column,
+            style_context.column_count,
+        );
+        cells.push(projected);
     }
     if cells.is_empty() {
         let synthetic = if total_columns > 1 {
@@ -2631,7 +2752,7 @@ fn project_row(
                 "content": [{ "type": "paragraph", "content": [] }]
             })
         };
-        cells.push(project_cell(
+        let mut projected = project_cell(
             &synthetic,
             CellOptions {
                 is_header: row_index == 0
@@ -2645,12 +2766,21 @@ fn project_row(
                 last_row: row_index + 1 == rows.len(),
                 first_column: true,
                 last_column: true,
-                table_borders,
-                default_margins,
-                theme,
+                table_borders: style_context.borders,
+                default_margins: style_context.margins,
+                theme: style_context.theme,
                 table_bidi: truthy(field(field(Some(table), "formatting"), "bidi")),
             },
-        ));
+        );
+        projected.paragraph_formatting = table_cell_paragraph_formatting(
+            table,
+            style_context.style,
+            row_index,
+            0,
+            total_columns,
+            style_context.column_count,
+        );
+        cells.push(projected);
     }
     ProjectedRow {
         attrs: structural_attrs(attrs, &[]),
@@ -2742,6 +2872,7 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         );
     }
     let row_spans = calculate_row_spans(table);
+    let column_count = table_column_count(table);
     let rows = array(field(Some(table), "rows"))
         .iter()
         .enumerate()
@@ -2751,17 +2882,17 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
                 table,
                 row_index,
                 &row_spans,
-                borders,
-                default_margins.as_ref(),
-                theme,
+                &TableStyleContext {
+                    column_count,
+                    style: table_style.or(default_style),
+                    borders,
+                    margins: default_margins.as_ref(),
+                    theme,
+                },
             )
         })
         .collect();
-    ProjectedTable {
-        attrs,
-        rows,
-        paragraph_formatting: field(table_style.or(default_style), "pPr").cloned(),
-    }
+    ProjectedTable { attrs, rows }
 }
 
 fn table_cell_story_id(parent: &str, table: usize, row: usize, cell: usize) -> String {
@@ -2912,12 +3043,10 @@ fn visit_story(
                     None,
                     1,
                 ));
-                let previous_table_formatting = std::mem::replace(
-                    &mut context.styles.table_paragraph_formatting,
-                    table.paragraph_formatting,
-                );
+                let previous_table_formatting = context.styles.table_paragraph_formatting.take();
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
+                        context.styles.table_paragraph_formatting = cell.paragraph_formatting;
                         visit_story(
                             context,
                             table_cell_story_id(&story_id, current_table, row_index, cell_index),

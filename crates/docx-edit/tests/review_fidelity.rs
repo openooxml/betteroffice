@@ -273,3 +273,79 @@ fn table_spacing_also_overrides_application_defaults_when_document_defaults_are_
     assert_eq!(spacing["after"], 0.0);
     assert_eq!(spacing["line"], 1.0);
 }
+
+#[test]
+fn conditional_table_paragraph_spacing_follows_regions_and_cascade() {
+    let body = include_str!(
+        "../../../packages/docx/src/yrs/__fixtures__/table-conditional-spacing/body.xml"
+    );
+    let styles = include_str!(
+        "../../../packages/docx/src/yrs/__fixtures__/table-conditional-spacing/styles.xml"
+    );
+    let engine = EngineSession::new(74219);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &docx_edit::bridge::RenderEnv::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let expected = [
+        vec![
+            vec![190, 110, 110, 110, 200],
+            vec![130, 170, 180, 170, 140],
+            vec![130, 170, 180, 170, 140],
+            vec![130, 170, 180, 170, 140],
+            vec![210, 120, 120, 120, 220],
+        ],
+        vec![
+            vec![110; 5],
+            vec![150; 5],
+            vec![150; 5],
+            vec![160; 5],
+            vec![160; 5],
+        ],
+        vec![vec![10; 5]; 5],
+        vec![
+            vec![190, 110, 200],
+            vec![170, 180, 170],
+            vec![130, 180, 140],
+            vec![210, 120, 220],
+        ],
+        vec![vec![400, 420, 120, 120, 220]],
+        vec![vec![130, 170, 170, 180, 180]; 5],
+    ];
+    let tables = blocks
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["kind"] == "table")
+        .collect::<Vec<_>>();
+    assert_eq!(tables.len(), expected.len());
+    for (table, rows) in tables.iter().zip(expected) {
+        for (row, cells) in table["rows"].as_array().unwrap().iter().zip(rows) {
+            assert_eq!(row["cells"].as_array().unwrap().len(), cells.len());
+            for (cell, after) in row["cells"].as_array().unwrap().iter().zip(cells) {
+                assert!(
+                    (cell["blocks"][0]["attrs"]["spacing"]["after"]
+                        .as_f64()
+                        .unwrap()
+                        - f64::from(after) / 15.0)
+                        .abs()
+                        < 1e-8,
+                    "{cell}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        tables[0]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"]["line"],
+        1.5
+    );
+    assert_eq!(
+        tables[4]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"]["line"],
+        2.0
+    );
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}
