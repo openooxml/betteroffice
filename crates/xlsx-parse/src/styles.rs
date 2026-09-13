@@ -66,9 +66,12 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
                 }
                 b"rgbColor" if indexed_colors_depth == Some(depth - 1) => {
                     cap(ss.indexed_colors.len())?;
-                    let rgb = attr(&e, b"rgb")?
-                        .and_then(|value| normalize_rgb(&value))
-                        .ok_or_else(|| ParseError::Xml("invalid indexed palette color".into()))?;
+                    let rgb = match attr(&e, b"rgb")? {
+                        Some(value) => normalize_rgb(&value).ok_or_else(|| {
+                            ParseError::Xml("invalid indexed palette color".into())
+                        })?,
+                        None => String::new(),
+                    };
                     ss.indexed_colors.push(rgb);
                 }
                 b"numFmts" => section = Section::None,
@@ -292,16 +295,15 @@ fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
 /// normalize an `aarrggbb` or `rrggbb` hex to `#rrggbb`, dropping any alpha.
 fn normalize_rgb(v: &str) -> Option<String> {
     let hex = v.trim();
+    if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
     let rgb = match hex.len() {
         8 => hex.get(2..)?,
         6 => hex,
         _ => return None,
     };
-    if rgb.chars().all(|c| c.is_ascii_hexdigit()) {
-        Some(format!("#{}", rgb.to_ascii_lowercase()))
-    } else {
-        None
-    }
+    Some(format!("#{}", rgb.to_ascii_lowercase()))
 }
 
 /// parse `theme1.xml`'s `a:clrScheme` into the 12 slot colors, in declaration

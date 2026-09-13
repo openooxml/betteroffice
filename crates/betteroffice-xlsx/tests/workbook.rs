@@ -93,6 +93,23 @@ fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
 }
 
 #[test]
+fn saving_rejects_invalid_palette_colors_from_model_json() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut json = serde_json::to_value(&model.styles).unwrap();
+    json["indexed_colors"] = serde_json::json!(["#123456", "#GGGGGG"]);
+    model.styles = serde_json::from_value(json).unwrap();
+    let workbook = Workbook::from_model(model).unwrap();
+    assert!(
+        workbook
+            .save()
+            .unwrap_err()
+            .to_string()
+            .contains("indexed palette color at index 1")
+    );
+}
+
+#[test]
 fn restored_legacy_snapshots_publish_the_current_palette_identity() {
     let mut model = WorkbookModel::default();
     model.sheets.push(Sheet::new("Data"));

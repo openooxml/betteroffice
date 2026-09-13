@@ -88,6 +88,7 @@ pub fn serialize_workbook_with_active_sheet(
     wb: &Workbook,
     active_sheet: SheetId,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    validate_indexed_colors(&wb.styles)?;
     if wb.sheets.iter().any(|sheet| !sheet.charts.is_empty()) {
         return Err(ParseError::UnsupportedEdit(
             "a chart can only be written back into the package it was read from".to_owned(),
@@ -229,6 +230,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
             "sheet origin count does not match workbook".to_owned(),
@@ -3017,13 +3019,34 @@ fn write_colors(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
     Ok(())
 }
 
+fn validate_indexed_colors(ss: &Stylesheet) -> Result<(), ParseError> {
+    for (index, color) in ss.indexed_colors.iter().enumerate() {
+        let rgb = color.strip_prefix('#').unwrap_or(color);
+        if !color.is_empty()
+            && (rgb.len() != 6 || !rgb.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(ParseError::Malformed(format!(
+                "indexed palette color at index {index} must be empty or six hexadecimal RGB digits with an optional '#'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn write_indexed_colors(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
     w.create_element("indexedColors").write_inner_content(|w| {
         for rgb in &ss.indexed_colors {
-            let rgb = format!("FF{}", rgb.trim_start_matches('#').to_ascii_uppercase());
-            w.create_element("rgbColor")
-                .with_attribute(("rgb", rgb.as_str()))
-                .write_empty()?;
+            if rgb.is_empty() {
+                w.create_element("rgbColor").write_empty()?;
+            } else {
+                let rgb = format!(
+                    "FF{}",
+                    rgb.strip_prefix('#').unwrap_or(rgb).to_ascii_uppercase()
+                );
+                w.create_element("rgbColor")
+                    .with_attribute(("rgb", rgb.as_str()))
+                    .write_empty()?;
+            }
         }
         Ok(())
     })?;

@@ -458,6 +458,7 @@ pub struct Stylesheet {
     pub cell_xfs: Vec<Xf>,
     pub num_fmts: Vec<(u16, String)>,
     pub theme: Theme,
+    /// `#rrggbb` entries; empty strings preserve omitted colors and use the default index.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub indexed_colors: Vec<String>,
     #[serde(skip)]
@@ -553,6 +554,7 @@ impl Stylesheet {
     pub fn resolve_color(&self, color: &Color) -> Option<String> {
         if let Color::Indexed(index @ 0..=63) = color
             && let Some(rgb) = self.indexed_colors.get(*index as usize)
+            && !rgb.is_empty()
         {
             return Some(rgb.clone());
         }

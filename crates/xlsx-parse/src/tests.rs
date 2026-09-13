@@ -691,6 +691,106 @@ fn indexed_palettes_round_trip_and_preserve_other_color_metadata() {
 }
 
 #[test]
+fn indexed_palette_missing_colors_preserve_slots_through_saves() {
+    let palette = r#"<colors><indexedColors><rgbColor/><rgbColor rgb="FF5E88B1"/><rgbColor/></indexedColors><mruColors><color rgb="FF123456"/></mruColors></colors>"#;
+    let source = package_styled("<sheetData/>", Some(palette), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    let mut edited = parsed.workbook.clone();
+    assert_eq!(edited.styles.indexed_colors, ["", "#5e88b1", ""]);
+    for index in [0, 2] {
+        assert_eq!(
+            edited.styles.resolve_color(&Color::Indexed(index)),
+            Color::Indexed(index).resolve(&edited.styles.theme)
+        );
+    }
+    assert_eq!(
+        edited.styles.resolve_color(&Color::Indexed(1)).as_deref(),
+        Some("#5e88b1")
+    );
+    assert_eq!(
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+        source
+    );
+    edited.styles.fonts.push(xlsx_model::Font::default());
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(styles).contains(palette));
+    edited.styles.indexed_colors[1] = "#abcdef".into();
+    for saved in [
+        serialize_workbook(&edited).unwrap(),
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+    ] {
+        assert_eq!(parse_workbook(&saved).unwrap().styles, edited.styles);
+        let styles = &saved
+            .iter()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap()
+            .1;
+        assert!(String::from_utf8_lossy(styles).contains(
+            r#"<indexedColors><rgbColor/><rgbColor rgb="FFABCDEF"/><rgbColor/></indexedColors>"#
+        ));
+    }
+}
+
+#[test]
+fn indexed_palette_saves_reject_invalid_model_colors() {
+    let source = package_styled("<sheetData/>", Some(STYLED), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    for value in [
+        "#GGGGGG",
+        "#12345",
+        "#1234567",
+        "#FF123456",
+        "##123456",
+        "😀1234",
+        " ",
+        "#123456 ",
+    ] {
+        let mut edited = parsed.workbook.clone();
+        edited.styles.indexed_colors = vec![String::new(), value.into()];
+        for result in [
+            serialize_workbook(&edited),
+            serialize_workbook_with_package(&edited, &parsed.package),
+        ] {
+            assert!(
+                matches!(result, Err(ParseError::Malformed(ref message)) if message.contains("indexed palette color at index 1")),
+                "accepted invalid palette color: {value}"
+            );
+        }
+    }
+}
+
+#[test]
+fn indexed_palette_saves_normalize_hex_case_and_optional_prefix() {
+    let palette = r#"<colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors>"#;
+    let parsed =
+        parse_workbook_with_package(&package_styled("<sheetData/>", Some(palette), None)).unwrap();
+    let mut edited = parsed.workbook.clone();
+    edited.styles.indexed_colors = vec!["#aBcDeF".into(), "fedCBA".into()];
+    for saved in [
+        serialize_workbook(&edited).unwrap(),
+        serialize_workbook_with_package(&edited, &parsed.package).unwrap(),
+    ] {
+        assert_eq!(
+            parse_workbook(&saved).unwrap().styles.indexed_colors,
+            ["#abcdef", "#fedcba"]
+        );
+        let styles = &saved
+            .iter()
+            .find(|(name, _)| name == "xl/styles.xml")
+            .unwrap()
+            .1;
+        assert!(String::from_utf8_lossy(styles).contains(
+            r#"<indexedColors><rgbColor rgb="FFABCDEF"/><rgbColor rgb="FFFEDCBA"/></indexedColors>"#
+        ));
+    }
+}
+
+#[test]
 fn indexed_palettes_are_scoped_bounded_and_reject_invalid_entries() {
     let ignored = r#"<extLst><ext><colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors></ext></extLst>"#;
     assert!(
@@ -700,7 +800,7 @@ fn indexed_palettes_are_scoped_bounded_and_reject_invalid_entries() {
             .indexed_colors
             .is_empty()
     );
-    for value in ["", "FFGGGGGG", "😀1234"] {
+    for value in ["", "FFGGGGGG", "GG123456", "😀1234"] {
         let styles =
             format!(r#"<colors><indexedColors><rgbColor rgb="{value}"/></indexedColors></colors>"#);
         assert!(parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)).is_err());
