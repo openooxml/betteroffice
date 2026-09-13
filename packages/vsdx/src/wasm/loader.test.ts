@@ -100,6 +100,21 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('encodes only missing document changes when a remote state vector is provided', () => {
+    const source = openDiagram(foundation, { clientId: 9040 });
+    const peer = openDiagram(foundation, { clientId: 9041, initialUpdate: source.encodeStateAsUpdate() });
+    try {
+      const vector = peer.encodeStateVector();
+      const empty = source.encodeStateAsUpdate(vector);
+      expect(empty.byteLength).toBeLessThan(10);
+      source.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '43');
+      const diff = source.encodeStateAsUpdate(vector);
+      expect(diff.byteLength).toBeLessThan(source.encodeStateAsUpdate().byteLength);
+      peer.applyUpdate(diff);
+      expect(peer.snapshot()).toEqual(source.snapshot());
+    } finally { source.dispose(); peer.dispose(); }
+  });
+
   test('delivers local and remote frames', () => {
     const diagram = openDiagram(foundation, { clientId: 9004 });
     const drainUpdateEvent = VsdxDocument.prototype.drainUpdateEvent;
@@ -141,6 +156,29 @@ describe('VSDX wasm boundary', () => {
     unsubscribeUpdate();
     unsubscribeResync();
     diagram.dispose();
+  });
+
+  test('bounds reentrant observer bursts and resyncs the complete final state', () => {
+    const source = openDiagram(foundation, { clientId: 9042 });
+    const peer = openDiagram(foundation, { clientId: 9043 });
+    let started = false;
+    let updates = 0;
+    const resyncs: Uint8Array[] = [];
+    source.onUpdate(() => {
+      updates++;
+      if (started) return;
+      started = true;
+      for (let index = 0; index < 1100; index++) source.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, String(index));
+    });
+    source.onResync(({ update }) => resyncs.push(update));
+    try {
+      source.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '-1');
+      expect(updates).toBe(1);
+      expect(resyncs).toHaveLength(1);
+      peer.applyUpdate(resyncs[0]);
+      expect(peer.snapshot()).toEqual(source.snapshot());
+      expect(peer.snapshot().pages[0].shapes[0].cells.find((cell) => cell.name === 'Both')?.formula).toBe('1099');
+    } finally { source.dispose(); peer.dispose(); }
   });
 
   test('returns committed media and plain missing-media errors', () => {

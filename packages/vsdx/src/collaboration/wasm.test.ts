@@ -72,6 +72,36 @@ describe('VSDX collaboration replica', () => {
     rightProvider.destroy();
   });
 
+  test('reconnecting uploads offline edits while receiving changes from an online peer', async () => {
+    const source = openDiagram(fixture, { clientId: 4400 });
+    const seed = source.encodeStateAsUpdate();
+    source.dispose();
+    const online = openDiagram(fixture, { clientId: 4401, initialUpdate: seed });
+    const offline = openDiagram(fixture, { clientId: 4402, initialUpdate: seed });
+    const hub = new LoopbackHub();
+    const onlineProvider = new CollaborationProvider(online, hub.createTransport());
+    const offlineProvider = new CollaborationProvider(offline, hub.createTransport());
+    try {
+      onlineProvider.connect(); offlineProvider.connect();
+      await hub.open();
+      offlineProvider.disconnect();
+      online.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'Both' }, '17');
+      offline.setCellFormula('page:1', 'page:1:shape:1', { cellName: 'FOnly' }, '19');
+      offlineProvider.connect();
+      await hub.open();
+      expect(onlineProvider.synced).toBe(true);
+      expect(offlineProvider.synced).toBe(true);
+      expect(online.snapshot()).toEqual(offline.snapshot());
+      const cells = online.snapshot().pages[0].shapes[0].cells;
+      expect(cells.find((cell) => cell.name === 'Both')?.formula).toBe('17');
+      expect(cells.find((cell) => cell.name === 'FOnly')?.formula).toBe('19');
+      expect(hub.frames).toBeLessThan(30);
+    } finally {
+      onlineProvider.destroy(); offlineProvider.destroy();
+      online.dispose(); offline.dispose();
+    }
+  });
+
   test('refuses a guarded cell edit after the guard arrives through collaboration', async () => {
     const source = openDiagram(fixture, { clientId: 4200 });
     const seed = source.encodeStateAsUpdate();
@@ -122,6 +152,7 @@ describe('VSDX collaboration replica', () => {
 });
 
 class LoopbackHub {
+  frames = 0;
   private transports: LoopbackTransport[] = [];
   private queued: Array<{ target: LoopbackTransport; data: Uint8Array }> = [];
   private paused = false;
@@ -148,6 +179,7 @@ class LoopbackHub {
   }
 
   route(source: LoopbackTransport, data: Uint8Array): void {
+    if (++this.frames > 100) throw new Error('unbounded collaboration handshake');
     for (const target of this.transports) {
       if (target !== source) this.queued.push({ target, data: data.slice() });
     }

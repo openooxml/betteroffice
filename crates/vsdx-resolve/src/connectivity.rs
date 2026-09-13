@@ -362,9 +362,7 @@ fn number_from_cell(
         .map(|value| (value, NumericProvenance::CachedValue))
 }
 
-/// Uses the shared formula parser and numeric evaluation core with connectivity's deliberately
-/// narrow local-reference context. `vsdx-eval` depends on this crate, so connectivity cannot use
-/// its display evaluator. Cache fallback is owned by `number_from_cell`, not this evaluator.
+/// Evaluates numeric connectivity formulas with local references and no cache fallback.
 fn formula_number(shape: &ResolvedShape, formula: &str) -> Option<f64> {
     evaluate_number(
         formula,

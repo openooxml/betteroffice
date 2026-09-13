@@ -208,6 +208,7 @@ mod tests {
             sheet: vsdx_parse::CellSheet::Page(1),
             shape_id: Some(1),
             section: None,
+            section_index: None,
             row: None,
             cell_name: "Width".to_owned(),
         }

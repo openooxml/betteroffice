@@ -45,6 +45,10 @@ pub struct ResolvedRow {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedSection {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsupported_controls: Vec<String>,
     pub deleted: bool,
     pub rows: BTreeMap<String, ResolvedRow>,
     pub row_order: Vec<String>,
@@ -65,8 +69,14 @@ impl ResolvedShape {
                 .sections
                 .get(section)
                 .or_else(|| {
-                    self.sections
-                        .get(section.trim_end_matches(|c: char| c.is_ascii_digit()))
+                    self.sections.get(&section_key(
+                        section.trim_end_matches(|c: char| c.is_ascii_digit()),
+                        section
+                            .trim_start_matches(|c: char| !c.is_ascii_digit())
+                            .parse::<u32>()
+                            .ok()?
+                            .checked_sub(1),
+                    ))
                 })
                 .or_else(|| {
                     section
@@ -152,6 +162,7 @@ pub enum ResolvedTextToken {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum GeometryIssue {
     UnsupportedRowType(String),
+    UnsupportedSectionControl(String),
     UnevaluatedCell { row_type: String, cell: String },
     MissingCell { row_type: String, cell: String },
 }
@@ -172,4 +183,11 @@ pub enum ResolveError {
     MissingMaster(u32),
     #[error("inheritance cycle: {0}")]
     Cycle(String),
+}
+
+pub fn section_key(name: &str, index: Option<u32>) -> String {
+    match index.unwrap_or(0) {
+        0 => name.to_owned(),
+        index => format!("{name}\u{1f}IX:{index}"),
+    }
 }

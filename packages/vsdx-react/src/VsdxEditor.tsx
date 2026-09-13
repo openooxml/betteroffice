@@ -5,7 +5,7 @@ import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, Diagra
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
-import { RibbonCommandsProvider, cellValue, findShapePlacement, numberValue } from './components/ribbon/commands';
+import { RibbonCommandsProvider, findShapePlacement, numericCellValue } from './components/ribbon/commands';
 import { ShapesPanel } from './components/shapes/ShapesPanel';
 import { standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
@@ -13,6 +13,7 @@ import { StatusBar, clampZoom } from './components/statusbar';
 
 export interface VsdxShapeSelection { pageId: string; shapeId: string; hit: HitTestResult; }
 export interface VsdxEditorApi { handle: DiagramHandle; refresh: () => void; }
+/** Save edits before changing a session identity or seed, or remount for a new session. */
 export interface VsdxEditorCollaborationOptions {
   clientId: number;
   initialUpdate?: Uint8Array;
@@ -49,10 +50,21 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const workspaceRef = useRef<HTMLElement>(null);
   const imageCache = useRef(new Map<string, Promise<CanvasImageSource | null>>());
   const stableFonts = useStableFontFaces(fonts);
+  const fontsRef = useRef(stableFonts);
+  const registeredFontsRef = useRef<ReadonlyArray<VsdxFontFace>>([]);
+  const browserFontsRef = useRef(new Map<string, FontFace>());
+  fontsRef.current = stableFonts;
+  const requestedClientId = collaboration?.clientId ?? clientId;
+  const requestedInitialUpdate = useStableInitialUpdate(collaboration?.initialUpdate);
+  const sessionRef = useRef({ file, clientId: requestedClientId, initialUpdate: requestedInitialUpdate });
   const [model, setModel] = useState<EditorModel>({ snapshot: null, pageIndex: 0, frame: null });
   const modelRef = useRef(model);
   const [selection, setSelection] = useState<VsdxShapeSelection | null>(null);
   const [dirty, setDirty] = useState(false);
+  const sessionSwitchBlocked = dirty && sessionRef.current.file === file &&
+    (sessionRef.current.clientId !== requestedClientId || sessionRef.current.initialUpdate !== requestedInitialUpdate);
+  const sessionClientId = sessionSwitchBlocked ? sessionRef.current.clientId : requestedClientId;
+  const initialUpdate = sessionSwitchBlocked ? sessionRef.current.initialUpdate : requestedInitialUpdate;
   const [zoom, setZoom] = useState(1);
   const [shapesCollapsed, setShapesCollapsed] = useState(false);
   const [diagnostics, setDiagnostics] = useState<TextDiagnostic[]>([]);
@@ -63,52 +75,93 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   collaborationRef.current = collaboration;
-  modelRef.current = model;
 
   const reportError = useCallback((value: unknown) => { const next = value instanceof Error ? value : new Error(String(value)); setError(next.message); onErrorRef.current?.(next); }, []);
   const refresh = useCallback((requestedPage?: number, notify = false) => {
     const handle = handleRef.current;
     if (!handle) return;
+    if (notify) setDirty(true);
     try {
+      if (notify) onChangeRef.current?.();
       const current = handle.snapshot();
-      const pageIndex = Math.max(0, Math.min(requestedPage ?? modelRef.current.pageIndex, Math.max(0, current.pages.length - 1)));
+      const previous = modelRef.current;
+      const activeId = previous.snapshot?.pages[previous.pageIndex]?.id;
+      const retainedIndex = current.pages.findIndex((page) => page.id === activeId);
+      const pageIndex = Math.max(0, Math.min(requestedPage ?? (retainedIndex >= 0 ? retainedIndex : previous.pageIndex), Math.max(0, current.pages.length - 1)));
       const frame = current.pages.length ? handle.layoutPage(pageIndex) : null;
-      setModel({ snapshot: current, pageIndex, frame });
+      modelRef.current = { snapshot: current, pageIndex, frame };
+      setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
       setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
-      if (notify) { setDirty(true); onChangeRef.current?.(); }
     } catch (value) { reportError(value); }
   }, [reportError]);
 
   useEffect(() => {
+    sessionRef.current = { file, clientId: sessionClientId, initialUpdate };
     let disposed = false;
     let handle: DiagramHandle | null = null;
     let stopUpdates = () => {};
     let stopResync = () => {};
-    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); setModel({ snapshot: null, pageIndex: 0, frame: null }); setError(null); setDirty(false);
+    handleRef.current?.dispose(); handleRef.current = null; imageCache.current.clear(); setSelection(null); modelRef.current = { snapshot: null, pageIndex: 0, frame: null }; setModel(modelRef.current); setError(null); setDirty(false);
     if (!file) { setLoading(false); return; }
     setLoading(true);
-    void Promise.all([initWasm(), installFonts(stableFonts)]).then(() => {
+    const openingFonts = fontsRef.current;
+    void Promise.all([initWasm(), loadFonts(openingFonts)]).then(([, loadedFonts]) => {
       if (disposed) return;
       try {
         const activeCollaboration = collaborationRef.current;
-        handle = openDiagram(file, { clientId: activeCollaboration?.clientId ?? clientId, fonts: stableFonts, initialUpdate: activeCollaboration?.initialUpdate }); handleRef.current = handle; activeCollaboration?.onReplica?.(handle); attachedCollaborationRef.current = activeCollaboration;
+        handle = openDiagram(file, { clientId: sessionClientId, fonts: openingFonts, initialUpdate }); registeredFontsRef.current = openingFonts; installFonts(loadedFonts, browserFontsRef.current); handleRef.current = handle; activeCollaboration?.onReplica?.(handle); attachedCollaborationRef.current = activeCollaboration;
         stopUpdates = handle.onUpdate(() => refresh(undefined, true));
         stopResync = handle.onResync(() => refresh(undefined, true));
         refresh(0); setLoading(false); onReadyRef.current?.({ handle, refresh: () => refresh(undefined, false) });
       } catch (value) { setLoading(false); reportError(value); }
     }, (value: unknown) => { if (!disposed) { setLoading(false); reportError(value); } });
-    return () => { disposed = true; attachedCollaborationRef.current?.onReplica?.(null); attachedCollaborationRef.current = undefined; stopUpdates(); stopResync(); handle?.dispose(); if (handleRef.current === handle) handleRef.current = null; };
-  }, [clientId, file, stableFonts, refresh, reportError]);
+    return () => {
+      disposed = true;
+      try { attachedCollaborationRef.current?.onReplica?.(null); }
+      finally {
+        attachedCollaborationRef.current = undefined;
+        stopUpdates(); stopResync(); handle?.dispose();
+        if (handleRef.current === handle) handleRef.current = null;
+        for (const face of browserFontsRef.current.values()) document.fonts.delete?.(face);
+        browserFontsRef.current.clear();
+      }
+    };
+  }, [sessionClientId, initialUpdate, file, refresh, reportError]);
 
   useEffect(() => {
     const handle = handleRef.current;
     const attached = attachedCollaborationRef.current;
-    if (!handle || attached === collaboration) return;
+    if (!handle || sessionSwitchBlocked || attached?.onReplica === collaboration?.onReplica) return;
     attached?.onReplica?.(null);
     collaboration?.onReplica?.(handle);
     attachedCollaborationRef.current = collaboration;
-  }, [collaboration]);
+  }, [collaboration, sessionSwitchBlocked]);
+
+  useEffect(() => {
+    if (sessionSwitchBlocked) reportError(new Error('Save your changes before switching collaboration sessions.'));
+  }, [sessionSwitchBlocked, reportError]);
+
+  const hasDocument = model.snapshot !== null;
+  useEffect(() => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    const additions = stableFonts.filter((face) => !registeredFontsRef.current.some((registered) => fontFaceEqual(face, registered)));
+    if (!additions.length) return;
+    let disposed = false;
+    void loadFonts(additions).then((loadedFonts) => {
+      if (disposed || handleRef.current !== handle) return;
+      try {
+        for (const [index, face] of additions.entries()) {
+          handle.registerFont(face);
+          if (loadedFonts[index]) installFonts([loadedFonts[index]], browserFontsRef.current);
+          registeredFontsRef.current = [...registeredFontsRef.current.filter((registered) => !fontFaceKeyEqual(face, registered)), face];
+        }
+        refresh();
+      } catch (value) { reportError(value); }
+    }, (value: unknown) => { if (!disposed) reportError(value); });
+    return () => { disposed = true; };
+  }, [stableFonts, hasDocument, refresh, reportError]);
 
   useEffect(() => {
     const canvas = mainCanvasRef.current; const frame = model.frame;
@@ -119,7 +172,11 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
     void paintPage(context, frame, dpr, zoom, {
       signal: controller.signal,
-      resolveImage: (assetId) => controller.signal.aborted ? null : resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')),
+      resolveImage: async (assetId) => {
+        if (controller.signal.aborted) return null;
+        try { return await resolveImage(assetId, originHandle, imageCache, t('errors.decodePageImage')); }
+        catch (value) { if (!controller.signal.aborted) reportError(value); return null; }
+      },
     }).catch((value) => { if (!controller.signal.aborted) reportError(value); });
     return () => controller.abort();
   }, [model.frame, reportError, t, zoom]);
@@ -134,8 +191,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const onPointerDown = (event: PointerEvent<HTMLCanvasElement>) => {
     const handle = handleRef.current; const frame = model.frame; const page = model.snapshot?.pages[model.pageIndex];
     if (!handle || !frame || !page) return;
-    const point = canvasPointerPosition(event, frame);
+    pointerRef.current = null;
     try {
+      const point = canvasPointerPosition(event, frame);
       handle.layoutPage(model.pageIndex);
       const hit = handle.hitTest(point.canvas.x, point.canvas.y);
       setSelection(hit ? { pageId: page.id, shapeId: hit.shapeId, hit } : null);
@@ -143,12 +201,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       pointerRef.current = hit && placement ? {
         ...point,
         parentTransforms: shapeParentTransforms(frame.primitives, `${page.sourcePartPath}:${placement.shape.sourceId}`) ?? [],
-        angle: numberValue(cellValue(placement.shape, 'Angle')),
-        flipX: numberValue(cellValue(placement.shape, 'FlipX')) === 1,
-        flipY: numberValue(cellValue(placement.shape, 'FlipY')) === 1,
+        angle: numericCellValue(placement.shape, 'Angle', 0),
+        flipX: numericCellValue(placement.shape, 'FlipX', 0) === 1,
+        flipY: numericCellValue(placement.shape, 'FlipY', 0) === 1,
         resize: event.shiftKey,
-        pin: { x: numberValue(cellValue(placement.shape, 'PinX')), y: numberValue(cellValue(placement.shape, 'PinY')) },
-        size: { width: numberValue(cellValue(placement.shape, 'Width')), height: numberValue(cellValue(placement.shape, 'Height')) },
+        pin: { x: numericCellValue(placement.shape, 'PinX'), y: numericCellValue(placement.shape, 'PinY') },
+        size: { width: numericCellValue(placement.shape, 'Width'), height: numericCellValue(placement.shape, 'Height') },
       } : null;
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch (value) { reportError(value); }
@@ -157,10 +215,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const pointer = pointerRef.current; pointerRef.current = null;
     const handle = handleRef.current; const selected = selection; const frame = model.frame;
     if (!pointer || !handle || !selected || !frame) return;
-    const point = canvasPointerPosition(event, frame);
-    if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
-    const geometry = resolveDragGeometry(pointer, point.model);
     try {
+      const point = canvasPointerPosition(event, frame);
+      if (Math.abs(point.canvas.x - pointer.canvas.x) < 0.01 && Math.abs(point.canvas.y - pointer.canvas.y) < 0.01) return;
+      const geometry = resolveDragGeometry(pointer, point.model);
       if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
       else handle.moveShape(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y));
       refresh(undefined, true);
@@ -227,7 +285,8 @@ export function canvasPointerPosition(event: PointerEvent<HTMLCanvasElement>, fr
 }
 
 export function inchFormula(value: number): string {
-  const rounded = Number.isFinite(value) ? Number(value.toFixed(6)) : 0;
+  if (!Number.isFinite(value)) throw new Error('Shape geometry must be finite.');
+  const rounded = Number(value.toFixed(6));
   return String(Object.is(rounded, -0) ? 0 : rounded);
 }
 
@@ -266,10 +325,28 @@ export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, se
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...run.diagnostics); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
-async function installFonts(fonts: ReadonlyArray<VsdxFontFace>): Promise<void> { for (const font of fonts) { if (typeof FontFace === 'undefined' || typeof document === 'undefined') continue; const source = font.bytes.slice().buffer as ArrayBuffer; const face = await new FontFace(font.family, source, { style: font.italic ? 'italic' : 'normal', weight: font.bold ? '700' : '400' }).load(); document.fonts.add(face); } }
+interface LoadedFont { key: string; face: FontFace; }
+async function loadFonts(fonts: ReadonlyArray<VsdxFontFace>): Promise<LoadedFont[]> {
+  if (typeof FontFace === 'undefined' || typeof document === 'undefined') return [];
+  return Promise.all(fonts.map(async (font) => {
+    const source = font.bytes.slice().buffer as ArrayBuffer;
+    const face = await new FontFace(font.family, source, { style: font.italic ? 'italic' : 'normal', weight: font.bold ? '700' : '400' }).load();
+    return { key: JSON.stringify([font.family, font.bold ?? false, font.italic ?? false]), face };
+  }));
+}
+function installFonts(fonts: readonly LoadedFont[], installed: Map<string, FontFace>): void {
+  for (const { key, face } of fonts) {
+    const previous = installed.get(key);
+    if (previous) document.fonts.delete?.(previous);
+    document.fonts.add(face);
+    installed.set(key, face);
+  }
+}
+function useStableInitialUpdate(update: Uint8Array | undefined): Uint8Array | undefined { const stable = useRef(update); if (stable.current !== update && (!stable.current || !update || !bytesEqual(stable.current, update))) stable.current = update; return stable.current; }
 function useStableFontFaces(fonts: ReadonlyArray<VsdxFontFace>): ReadonlyArray<VsdxFontFace> { const stable = useRef(fonts); if (!fontFacesEqual(stable.current, fonts)) stable.current = fonts; return stable.current; }
 function fontFacesEqual(left: ReadonlyArray<VsdxFontFace>, right: ReadonlyArray<VsdxFontFace>): boolean { return left === right || (left.length === right.length && left.every((face, index) => fontFaceEqual(face, right[index]))); }
-function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) && (left.italic ?? false) === (right.italic ?? false) && bytesEqual(left.bytes, right.bytes); }
+function fontFaceKeyEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { return left.family === right.family && (left.bold ?? false) === (right.bold ?? false) && (left.italic ?? false) === (right.italic ?? false); }
+function fontFaceEqual(left: VsdxFontFace, right: VsdxFontFace): boolean { return fontFaceKeyEqual(left, right) && bytesEqual(left.bytes, right.bytes); }
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean { return left === right || (left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])); }
 function resolveImage(assetId: string, handle: DiagramHandle | null, cache: { current: Map<string, Promise<CanvasImageSource | null>> }, message: string): Promise<CanvasImageSource | null> { const existing = cache.current.get(assetId); if (existing) return existing; const pending = decodeImage(handle?.mediaBytes(assetId), message); cache.current.set(assetId, pending); return pending; }
 async function decodeImage(bytes: Uint8Array | undefined, message: string): Promise<CanvasImageSource | null> { if (!bytes) return null; const blob = new Blob([bytes.slice()]); if (typeof createImageBitmap === 'function') return createImageBitmap(blob); const url = URL.createObjectURL(blob); try { return await new Promise<HTMLImageElement>((resolve, reject) => { const image = new Image(); image.onload = () => resolve(image); image.onerror = () => reject(new Error(message)); image.src = url; }); } finally { URL.revokeObjectURL(url); } }

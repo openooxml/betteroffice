@@ -96,3 +96,27 @@ test('an aborted page never touches the canvas after its images load', async () 
   await paintPage(context(log), { contractVersion: 4, width: 1, height: 1, paintTransform: transform, primitives: [] }, 1, 1, { signal: controller.signal });
   expect(log).toEqual([]);
 });
+
+
+test('places the top of an image above its bottom in a Y-up diagram', async () => {
+  let yScale = 1, yOffset = 0;
+  const stack: Array<[number, number]> = [];
+  let top: number | undefined;
+  let bottom: number | undefined;
+  const ctx = {
+    clearRect: () => {},
+    save: () => { stack.push([yScale, yOffset]); },
+    restore: () => { [yScale, yOffset] = stack.pop()!; },
+    setTransform: (_a: number, _b: number, _c: number, d: number, _e: number, f: number) => { yScale = d; yOffset = f; },
+    transform: (_a: number, _b: number, _c: number, d: number, _e: number, f: number) => { yOffset += yScale * f; yScale *= d; },
+    translate: (_x: number, y: number) => { yOffset += yScale * y; },
+    scale: (_x: number, y: number) => { yScale *= y; },
+    drawImage: (_source: unknown, _x: number, y: number, _width: number, height: number) => {
+      top = y * yScale + yOffset;
+      bottom = (y + height) * yScale + yOffset;
+    },
+  } as unknown as CanvasRenderingContext2D;
+  await paintPage(ctx, { contractVersion: 4, width: 192, height: 192, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 192 }, primitives: [{ kind: 'image', id: 'picture', assetId: 'picture', zOrder: 0, x: 0, y: 0, width: 2, height: 2 }] }, 1, 1, { resolveImage: () => ({} as CanvasImageSource) });
+  expect(top).toBe(0);
+  expect(bottom).toBe(192);
+});

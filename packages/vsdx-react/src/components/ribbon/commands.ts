@@ -49,7 +49,7 @@ function placementIn(pages: readonly PageSnapshot[], selection: VsdxShapeSelecti
 }
 
 function findCell(shape: ShapeSnapshot | null, name: string) {
-  return shape?.cells.find((item) => item.locator.cellName === name || item.name === name);
+  return shape?.cells.find((item) => item.locator.section === null && item.locator.row === null && item.locator.cellName === name);
 }
 
 export function cellValue(shape: ShapeSnapshot | null, name: string): string | undefined {
@@ -75,8 +75,16 @@ function colorFormula(value = '#000000'): string {
 }
 
 export function numberValue(value: string | undefined): number {
-  const result = Number.parseFloat(value ?? '0');
+  const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
+}
+
+export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: number): number {
+  const value = cellValue(shape, name);
+  if (value === undefined && fallback !== undefined) return fallback;
+  const parsed = value?.trim() ? Number(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) throw new Error(`Shape cell ${name} has no resolved numeric value.`);
+  return parsed;
 }
 
 export function createRibbonCommands(
@@ -107,7 +115,7 @@ export function createRibbonCommands(
   const setNumeric = (cellName: string, next: (value: number) => string) => execute((currentHandle, currentSelection) => {
     const placement = livePlacement(currentHandle, currentSelection);
     if (!placement) return;
-    currentHandle.setCellFormula(currentSelection!.pageId, currentSelection!.shapeId, { cellName }, next(numberValue(cellValue(placement.shape, cellName))));
+    currentHandle.setCellFormula(currentSelection!.pageId, currentSelection!.shapeId, { cellName }, next(numericCellValue(placement.shape, cellName, 0)));
   }, true);
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
