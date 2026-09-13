@@ -91,6 +91,21 @@ describe('presentation image blobs', () => {
     expect(presentationImageBlob(padded.subarray(10, 10 + bytes.length)).type).toBe('image/bmp');
   });
 
+  test.each([false, true])('preserves wrappers whose extents precede anisotropic mapping (placeable=%s)', async (placeable) => {
+    for (const lateMode of [[], [record(0x0103, words(8))]]) {
+      const bytes = metafile([
+        record(0x020c, words(-2, 2)),
+        ...lateMode,
+        record(0x020b, words(0, 0)),
+        bitmapRecord(),
+        record(0, new Uint8Array()),
+      ], placeable);
+      const blob = presentationImageBlob(bytes);
+      expect(blob.type).toBe('');
+      expect(new Uint8Array(await blob.arrayBuffer())).toEqual(bytes);
+    }
+  });
+
   test('does not discard vector drawing or additional bitmap records', async () => {
     for (const extra of [record(0x0213, words(1, 1)), bitmapRecord()]) {
       const bytes = bitmapMetafile(bitmapRecord(), [extra]);

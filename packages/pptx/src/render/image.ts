@@ -23,6 +23,7 @@ function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
   let originY = 0;
   let windowWidth = 0;
   let windowHeight = 0;
+  let anisotropic = false;
   let bitmap: Uint8Array<ArrayBuffer> | undefined;
   for (let offset = start + 18; offset + 6 <= data.byteLength;) {
     const size = data.getUint32(offset, true) * 2;
@@ -32,6 +33,7 @@ function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
     if (bitmap) return;
     if (command === 0x0103) {
       if (size < 8 || data.getUint16(offset + 6, true) !== 8) return;
+      anisotropic = true;
     } else if (command === 0x0107) {
       if (size < 8 || ![1, 2, 3, 4].includes(data.getUint16(offset + 6, true))) return;
     } else if (command === 0x020b || command === 0x020c) {
@@ -42,6 +44,7 @@ function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
         originX = x;
         originY = y;
       } else {
+        if (!anisotropic) return;
         windowWidth = x;
         windowHeight = y;
       }
