@@ -1,6 +1,7 @@
 {
   "name": "@betteroffice/vsdx",
   "version": "0.0.1",
+  "private": true,
   "description": "In-development VSDX parsing, editing, and rendering core for Rust and WebAssembly.",
   "type": "module",
   "sideEffects": false,

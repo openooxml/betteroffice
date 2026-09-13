@@ -41,6 +41,12 @@ export const formats: Format[] = [
 
 export const liveFormats = formats.filter((format) => format.status === "live");
 
+export const listedFormats = formats.filter((format) => format.id !== "vsdx");
+
+export const listedLiveFormats = listedFormats.filter(
+  (format) => format.status === "live",
+);
+
 export function getFormat(id: string): Format | undefined {
   return liveFormats.find((format) => format.id === id);
 }

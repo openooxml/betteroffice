@@ -92,7 +92,8 @@ into wheels and an sdist and uploaded. A binding lands with `publish: false`, so
 merging it cannot create a PyPI project. Flipping that flag is what arms the
 upload, and it is the last step of a launch.
 
-Every registered binding is at `publish: true` today; none is held back.
+VSDX is held back with `publish: false`. Its npm packages are private and its Rust
+crates declare `publish = false`; all three remain available for local builds.
 
 ### One publish path
 

@@ -21,18 +21,20 @@ export const RUST_CRATES = [
   { name: 'betteroffice-docx-edit', dependency: 'docx-edit' },
   { name: 'betteroffice-docx', dependency: 'betteroffice-docx' },
   { name: 'betteroffice-pptx-parse', dependency: 'pptx-parse' },
-  { name: 'betteroffice-vsdx-parse', dependency: 'vsdx-parse' },
-  { name: 'betteroffice-vsdx-formula', dependency: 'vsdx-formula' },
-  { name: 'betteroffice-vsdx-resolve', dependency: 'vsdx-resolve' },
-  { name: 'betteroffice-vsdx-eval', dependency: 'vsdx-eval' },
-  { name: 'betteroffice-vsdx-render', dependency: 'vsdx-render' },
-  { name: 'betteroffice-vsdx-edit', dependency: 'vsdx-edit' },
-  { name: 'betteroffice-vsdx', dependency: 'betteroffice-vsdx' },
+  { name: 'betteroffice-vsdx-parse', dependency: 'vsdx-parse', publish: false },
+  { name: 'betteroffice-vsdx-formula', dependency: 'vsdx-formula', publish: false },
+  { name: 'betteroffice-vsdx-resolve', dependency: 'vsdx-resolve', publish: false },
+  { name: 'betteroffice-vsdx-eval', dependency: 'vsdx-eval', publish: false },
+  { name: 'betteroffice-vsdx-render', dependency: 'vsdx-render', publish: false },
+  { name: 'betteroffice-vsdx-edit', dependency: 'vsdx-edit', publish: false },
+  { name: 'betteroffice-vsdx', dependency: 'betteroffice-vsdx', publish: false },
   { name: 'betteroffice-pptx-edit', dependency: 'pptx-edit' },
   { name: 'betteroffice-pptx-render', dependency: 'pptx-render' },
   { name: 'betteroffice-pptx-raster', dependency: 'pptx-raster' },
   { name: 'betteroffice-pptx', dependency: 'betteroffice-pptx' }
 ];
+
+export const RUST_PUBLISH_CRATES = RUST_CRATES.filter((crate) => crate.publish !== false);
 
 export function rustReleaseVersion() {
   return JSON.parse(readFileSync(RUST_RELEASE_MANIFEST, 'utf8')).version;
@@ -71,8 +73,9 @@ export function validateRustTrain(metadata, version) {
     if (pkg.version !== version) {
       throw new Error(`${crate.name} is ${pkg.version}; expected ${version}`);
     }
-    if (JSON.stringify(pkg.publish) !== '["crates-io"]') {
-      throw new Error(`${crate.name} must publish only to crates-io`);
+    const registries = crate.publish === false ? [] : ['crates-io'];
+    if (JSON.stringify(pkg.publish) !== JSON.stringify(registries)) {
+      throw new Error(`${crate.name} must declare publish = ${JSON.stringify(registries)}`);
     }
     rustPackages.set(crate.name, pkg);
     for (const dependency of pkg.dependencies) {
