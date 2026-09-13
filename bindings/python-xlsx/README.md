@@ -124,6 +124,11 @@ except StaleProposalError as stale:
     wb.accept_proposal(proposal.id, force=True)
 ```
 
+A changed formula dependency can also make acceptance stale. In that case,
+read `proposals()` again to review the refreshed preview before accepting.
+Pending proposals remain local to this workbook session; ordinary peer edits
+preserve them and acceptance still checks their targets.
+
 An unknown proposal ID raises `KeyError`; `reject_proposal` returns `False`
 instead when there is nothing left to reject.
 

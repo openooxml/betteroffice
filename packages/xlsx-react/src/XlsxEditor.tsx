@@ -1327,8 +1327,10 @@ function XlsxEditorContent({
         refreshProposals();
         focusContainer();
       } catch (e) {
-        if (e instanceof StaleProposalError) setStaleFor((m) => ({ ...m, [id]: e.cells }));
-        else setError(e instanceof Error ? e.message : String(e));
+        if (e instanceof StaleProposalError) {
+          setStaleFor((m) => ({ ...m, [id]: e.cells }));
+          refreshProposals();
+        } else setError(e instanceof Error ? e.message : String(e));
       }
     },
     [applyResult, refreshProposals, focusContainer]

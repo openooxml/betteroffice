@@ -1981,7 +1981,7 @@ fn duplicate_runtime_client_ids_are_an_invalid_host_configuration() {
 }
 
 #[test]
-fn collaborative_undo_redo_track_only_local_user_edits() {
+fn collaborative_undo_redo_include_local_proposal_acceptance() {
     let bytes = sample_xlsx();
     let mut workbook = Workbook::open_collaborative(&bytes, 221).unwrap();
     workbook
@@ -2027,13 +2027,14 @@ fn collaborative_undo_redo_track_only_local_user_edits() {
     agent_only
         .accept_proposal("p1", false, CalculationOptions::default())
         .unwrap();
-    assert!(!agent_only.can_undo());
+    assert!(agent_only.can_undo());
     assert!(
-        !agent_only
+        agent_only
             .undo(CalculationOptions::default())
             .unwrap()
             .applied
     );
+    assert_eq!(agent_only.cell(SheetId(0), cell("A2")).unwrap().input, "5");
 }
 
 #[test]
@@ -3082,7 +3083,7 @@ fn unresolved_invalid_updates_never_enter_live_yrs_state() {
 }
 
 #[test]
-fn effective_remote_updates_clear_local_proposals() {
+fn effective_remote_updates_preserve_proposals_and_guard_stale_targets() {
     let bytes = sample_xlsx();
     let mut remote = Workbook::open_collaborative(&bytes, 801).unwrap();
     let mut local = Workbook::open_collaborative(&bytes, 802).unwrap();
@@ -3119,7 +3120,11 @@ fn effective_remote_updates_clear_local_proposals() {
         .unwrap();
     assert!(local.can_undo());
     assert!(!local.can_redo());
-    assert!(local.proposals().is_empty());
+    assert_eq!(local.proposals().len(), 1);
+    assert!(matches!(
+        local.accept_proposal("p1", false, CalculationOptions::default()),
+        Err(Error::StaleProposal(_))
+    ));
     assert_eq!(local.active_sheet(), SheetId(1));
     assert!(local.undo(CalculationOptions::default()).unwrap().applied);
     assert_eq!(local.cell(SheetId(0), cell("A1")).unwrap().input, "44");

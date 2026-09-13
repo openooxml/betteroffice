@@ -74,6 +74,10 @@ impl ProposalSet {
         &self.proposals
     }
 
+    pub fn get_mut(&mut self, id: &str) -> Option<&mut Proposal> {
+        self.proposals.iter_mut().find(|proposal| proposal.id == id)
+    }
+
     /// remove and return the proposal with `id`, if present.
     pub fn take(&mut self, id: &str) -> Option<Proposal> {
         let pos = self.proposals.iter().position(|p| p.id == id)?;

@@ -15,6 +15,7 @@ import type { PagedEditorRef } from '../PagedEditor';
 import type { CommentIdAllocator } from '../commentFactories';
 import { createComment } from '../commentFactories';
 import type { SelectionState } from '../types';
+import { overlapsTextRevision } from './agentProposalRange';
 
 type LocatedParagraph = {
   story: string;
@@ -238,10 +239,7 @@ export function useDocxEditorRefApi({
         if (!editor || !session || (!options.search && !options.replaceWith)) return false;
         const range = paragraphRange(session, options.paraId, options.search);
         if (!range) return false;
-        if (options.search) {
-          const context = session.selectionContext(range);
-          if (context.inInsertion || context.inDeletion) return false;
-        }
+        if (overlapsTextRevision(session, range)) return false;
         session.replaceRange(range, options.replaceWith, {
           name: options.author,
           date: new Date().toISOString(),

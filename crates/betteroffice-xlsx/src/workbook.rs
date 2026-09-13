@@ -582,7 +582,6 @@ impl Workbook {
         self.preserved_redo.clear();
         self.preserved.forget_shared_strings();
         self.authority.clear_history();
-        self.proposals.clear();
         self.edited_since_open = true;
         self.emit_update(UpdateEvent {
             update,
@@ -1395,6 +1394,30 @@ impl Workbook {
                 mutation: MutationResult::default(),
             });
         }
+        if !force {
+            rebuild_and_recalc_all(&mut preview, options.now_serial);
+            let mut refreshed = proposal.clone();
+            for edit in &mut refreshed.edits {
+                edit.new_text = display_text_at(
+                    &preview,
+                    SheetId(edit.sheet),
+                    CellRef::new(edit.row, edit.col),
+                )?;
+            }
+            refreshed.ghosts = proposal_ghosts(&self.model, &preview, &refreshed.edits)?;
+            if refreshed.ghosts != proposal.ghosts {
+                let targets = refreshed
+                    .edits
+                    .iter()
+                    .map(|edit| CellAddress {
+                        sheet: SheetId(edit.sheet),
+                        cell: CellRef::new(edit.row, edit.col),
+                    })
+                    .collect();
+                *self.proposals.get_mut(id).expect("proposal exists") = refreshed;
+                return Err(Error::StaleProposal(targets));
+            }
+        }
         self.ensure_graph();
         self.commit_agent(&ops, proposal.agent_id)?;
         for (sheet, cell, formula) in &touched {
@@ -1882,7 +1905,7 @@ impl Workbook {
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
-                .apply_local_update_v1(&staged.update, SyncOrigin::Agent)
+                .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);

@@ -801,5 +801,23 @@ describe('XlsxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('xlsx-proposal-force'));
     await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('42'));
     expect(workbook.listProposals()).toHaveLength(0);
+
+    await act(async () => {
+      workbook.editCell(0, 1, 6, '10');
+    });
+    await stage('=G2*2');
+    expect(view.getByTestId('xlsx-proposal-cell-new').textContent).toBe('20');
+    await act(async () => {
+      workbook.editCell(0, 1, 6, '99');
+      api!.refreshProposals();
+    });
+    fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
+    await waitFor(() =>
+      expect(view.getByTestId('xlsx-proposal-cell-new').textContent).toBe('198')
+    );
+    expect(workbook.cell(0, 6, 4).input).toBe('42');
+    fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
+    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('=G2*2'));
+    expect(workbook.listProposals()).toHaveLength(0);
   });
 });
