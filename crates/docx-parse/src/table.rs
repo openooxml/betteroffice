@@ -240,7 +240,7 @@ pub fn parse_document_table_look(element: Option<&XmlElement>) -> Option<TableLo
             *slot = Some(!matches_ci(raw, &["0", "false", "off"]));
         }
     }
-    (look != TableLook::default()).then_some(look)
+    Some(look)
 }
 
 pub fn parse_conditional_format_style(
@@ -805,6 +805,28 @@ mod tests {
         assert_eq!(parsed.grid_span, None);
         assert_eq!(parsed.v_merge.as_deref(), Some("continue"));
         assert_eq!(parsed.no_wrap, None);
+    }
+
+    #[test]
+    fn empty_table_look_remains_distinct_from_an_omitted_look() {
+        for (xml, expected) in [
+            ("<w:tblPr/>", None),
+            (
+                "<w:tblPr><w:tblLook/></w:tblPr>",
+                Some(TableLook::default()),
+            ),
+        ] {
+            let properties = root(xml);
+            assert_eq!(
+                parse_document_table_properties(Some(&properties)).and_then(|value| value.look),
+                expected
+            );
+            assert_eq!(
+                crate::formatting::parse_table_properties(Some(&properties))
+                    .and_then(|value| value.look),
+                expected
+            );
+        }
     }
 
     #[test]

@@ -399,9 +399,6 @@ fn write_table_look(writer: &mut XmlWriter, look: Option<&TableLook>) {
         (look.no_h_band, "w:noHBand"),
         (look.no_v_band, "w:noVBand"),
     ];
-    if look.value.is_none() && !values.iter().any(|(value, _)| value.is_some()) {
-        return;
-    }
     writer.start_element("w:tblLook");
     if let Some(value) = nonempty(look.value.as_deref()) {
         writer.attribute("w:val", value);
@@ -485,6 +482,16 @@ mod tests {
             now: "2000-01-01T00:00:00.000Z".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn an_explicit_empty_table_look_survives_serialization() {
+        let mut writer = XmlWriter::with_capacity(32);
+        write_table_look(&mut writer, None);
+        assert_eq!(writer.finish(), "");
+        let mut writer = XmlWriter::with_capacity(32);
+        write_table_look(&mut writer, Some(&TableLook::default()));
+        assert_eq!(writer.finish(), "<w:tblLook/>");
     }
 
     #[test]

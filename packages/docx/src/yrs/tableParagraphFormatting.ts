@@ -14,7 +14,7 @@ export function tableCellParagraphFormatting(
   if (!style?.tblStylePr?.some((part) => part.pPr)) return result;
   const look = table.formatting?.look ?? style.tblPr?.look;
   const flag = (key: Exclude<keyof TableLook, 'value'>, mask: number) =>
-    look?.[key] ?? (Number.parseInt(look?.value ?? '0', 16) & mask) !== 0;
+    look?.[key] ?? (Number.parseInt(look?.value ?? (look ? '0' : '04A0'), 16) & mask) !== 0;
   const firstRow = flag('firstRow', 0x20);
   const lastRow = flag('lastRow', 0x40);
   const firstColumn = flag('firstColumn', 0x80);

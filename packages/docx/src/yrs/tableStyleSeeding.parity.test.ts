@@ -200,6 +200,10 @@ it.each(['projected', 'native'])('applies conditional paragraph spacing (seeder:
       ],
       [[400, 420, 120, 120, 220]],
       Array.from({ length: 5 }, () => [130, 170, 170, 180, 180]),
+      [[190,110,110,110,110],[130,150,150,150,150],[130,160,160,160,160],
+        [130,150,150,150,150],[130,160,160,160,160]],
+      Array.from({ length: 5 }, () => [170,180,170,180,170]),
+      Array.from({ length: 5 }, () => [170,180,170,180,170]),
     ];
     expected.forEach((rows, table) =>
       rows.forEach((cells, row) =>

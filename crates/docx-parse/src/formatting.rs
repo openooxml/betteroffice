@@ -1081,7 +1081,7 @@ fn parse_table_look(element: Option<&XmlElement>) -> Option<TableLook> {
             *slot = Some(!matches_ci(raw, &["0", "false", "off"]));
         }
     }
-    (value != TableLook::default()).then_some(value)
+    Some(value)
 }
 
 fn parse_hex_prefix(raw: &str) -> Option<u32> {

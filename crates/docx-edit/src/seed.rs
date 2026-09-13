@@ -2571,7 +2571,7 @@ fn table_cell_paragraph_formatting(
     let look = field(formatting, "look").or_else(|| field(style_formatting, "look"));
     let mask = string(field(look, "value"))
         .and_then(|value| u32::from_str_radix(value, 16).ok())
-        .unwrap_or(0);
+        .unwrap_or(if look.is_none() { 0x04a0 } else { 0 });
     let flag = |key, bit| boolean(field(look, key)).unwrap_or(mask & bit != 0);
     let first_row = flag("firstRow", 0x20);
     let last_row = flag("lastRow", 0x40);

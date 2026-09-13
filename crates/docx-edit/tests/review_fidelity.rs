@@ -315,6 +315,15 @@ fn conditional_table_paragraph_spacing_follows_regions_and_cascade() {
         ],
         vec![vec![400, 420, 120, 120, 220]],
         vec![vec![130, 170, 170, 180, 180]; 5],
+        vec![
+            vec![190, 110, 110, 110, 110],
+            vec![130, 150, 150, 150, 150],
+            vec![130, 160, 160, 160, 160],
+            vec![130, 150, 150, 150, 150],
+            vec![130, 160, 160, 160, 160],
+        ],
+        vec![vec![170, 180, 170, 180, 170]; 5],
+        vec![vec![170, 180, 170, 180, 170]; 5],
     ];
     let tables = blocks
         .as_array()
