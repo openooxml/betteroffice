@@ -47,6 +47,8 @@
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
+The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
