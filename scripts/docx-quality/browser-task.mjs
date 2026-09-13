@@ -109,9 +109,22 @@ try {
     timeout: 30_000,
   });
   console.error('editor');
+  await page.evaluate(() => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.id = 'quality-source';
+    input.hidden = true;
+    document.body.append(input);
+  });
+  await page.locator('#quality-source').setInputFiles(resolve(file));
   const result = await page.evaluate(
-    ([bytes, fonts, config]) => window.oracleInit(bytes, fonts, config),
-    [Array.from(source), fontMode === 'cdn', profile]
+    async ([fonts, config]) => {
+      const input = document.getElementById('quality-source');
+      const bytes = new Uint8Array(await input.files[0].arrayBuffer());
+      input.remove();
+      return window.oracleInit(bytes, fonts, config);
+    },
+    [fontMode === 'cdn', profile]
   );
   console.error(`paint ${result.pages}`);
   await mkdir(out, { recursive: true });

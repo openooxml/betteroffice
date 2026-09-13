@@ -40,7 +40,7 @@ async function command(program, args, options = {}) {
 
 async function download(url, maximum = 32 * 1024 * 1024) {
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(Math.max(30_000, Math.ceil(maximum / (1024 * 1024)) * 1000)),
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
   });
@@ -64,14 +64,14 @@ async function registry(name) {
   );
 }
 
-async function asset(entry, destination, sample) {
+async function asset(entry, destination, sample, maximum = 32 * 1024 * 1024) {
   const url = new URL(entry.url);
   if (
     url.origin !== corpus ||
     !url.pathname.startsWith(`/${sample}/`) ||
     !Number.isInteger(entry.bytes) ||
     entry.bytes < 1 ||
-    entry.bytes > 32 * 1024 * 1024 ||
+    entry.bytes > maximum ||
     !/^[a-f0-9]{64}$/.test(entry.sha256)
   )
     throw new Error('Invalid corpus asset metadata');
@@ -102,7 +102,7 @@ async function reference(id) {
   const directory = resolve(output, id);
   await mkdir(resolve(directory, 'reference'), { recursive: true });
   const source = resolve(directory, `source.${metadata.format}`);
-  await asset(metadata.source, source, id);
+  await asset(metadata.source, source, id, 128 * 1024 * 1024);
   for (const [index, page] of metadata.reference_pages.entries()) {
     await asset(
       page,

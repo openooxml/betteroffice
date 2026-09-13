@@ -21,6 +21,8 @@ node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 
 The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the current samples across all three formats. The [`docx` collection](https://corpus.betteroffice.dev/collections/docx.json) selects Word documents. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
 
+Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
+
 XLSX capture uses `printDisplayList` when available, with font metrics measured
 at 72 layout DPI for the frozen Mac Office capture and the worksheet's explicit defaults.
 The Normal style resolves through its built-in ID and `xfId`; missing declarations fall back to style XF zero, then font zero.
