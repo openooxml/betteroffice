@@ -8,7 +8,7 @@ For current versions, use the linked registries and [release notes](https://gith
 
 ## npm packages
 
-DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope, Apache-2.0. VSDX links point to source packages. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free cores for custom UIs and headless use.
+DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free cores for custom UIs and headless use.
 
 - [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package so untouched parts are preserved.
 - [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes.
@@ -21,9 +21,6 @@ DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope
 - [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing, collaboration, and saving are live; untouched slides keep their exact source part bytes on save.
 - [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component.
 - [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
-- [@betteroffice/vsdx](https://github.com/openooxml/betteroffice/tree/main/packages/vsdx): framework-free VSDX core in development — parses, resolves, renders, and round-trips `.vsdx` packages while preserving untouched parts byte-exactly. It supports transactional editing that honours `GUARD`, `SETATREF`, and Lock cells; a convergent Yrs CRDT; a WebAssembly boundary; glue resolution; and a deterministic documented routing policy. Formula evaluation supports a bounded ShapeSheet subset; unsupported formulas are reported explicitly.
-- [@betteroffice/vsdx-react](https://github.com/openooxml/betteroffice/tree/main/packages/vsdx-react): the VSDX editor as a React component, with a tabbed ribbon, a searchable standard-shape gallery, a page tab strip, a zoom status bar, rendering, selection, diagnostics, collaboration-provider integration, move, resize with Shift-drag, add, delete, z-order arrange, rotate, flip, fill/line colour, and save. It does not provide text editing, Visio stencil (.vssx) loading, resize handles, or connector-routing UI.
-- [@betteroffice/vsdx-i18n](https://github.com/openooxml/betteroffice/tree/main/packages/vsdx-i18n): UI locale strings for the VSDX React editor.
 
 There is no Vue package. React and framework-free JavaScript are the supported entry points.
 
@@ -34,11 +31,10 @@ DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format 
 - [betteroffice-docx](https://crates.io/crates/betteroffice-docx): typed native API for opening, editing, laying out, and saving DOCX documents.
 - [betteroffice-xlsx](https://crates.io/crates/betteroffice-xlsx): typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks.
 - [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): typed native API for opening, editing, collaborating, and rendering PPTX presentations.
-- [betteroffice-vsdx](https://github.com/openooxml/betteroffice/tree/main/crates/betteroffice-vsdx): typed native API for VSDX diagram parsing, resolution, round-tripping, transactional editing, and collaboration.
 - [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
 - [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all four formats.
 
-The per-layer crates expose individual pipeline stages. VSDX entries link to source; the other entries link to crates.io:
+The per-layer crates expose individual pipeline stages:
 
 - [betteroffice-docx-parse](https://crates.io/crates/betteroffice-docx-parse): WordprocessingML parsing and the typed DOCX model.
 - [betteroffice-docx-layout](https://crates.io/crates/betteroffice-docx-layout): DOCX pagination and display lists.
@@ -53,12 +49,6 @@ The per-layer crates expose individual pipeline stages. VSDX entries link to sou
 - [betteroffice-pptx-edit](https://crates.io/crates/betteroffice-pptx-edit): the Yrs deck model for PPTX.
 - [betteroffice-pptx-render](https://crates.io/crates/betteroffice-pptx-render): slide layout and the PPTX display-list compiler.
 - [betteroffice-pptx-raster](https://crates.io/crates/betteroffice-pptx-raster): the tiny-skia backend that paints a PPTX display list to PNG.
-- [betteroffice-vsdx-parse](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-parse): lossless VSDX package parsing and byte-exact preservation of untouched parts.
-- [betteroffice-vsdx-formula](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-formula): VSDX ShapeSheet formula parsing.
-- [betteroffice-vsdx-resolve](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-resolve): VSDX inheritance and glue resolution.
-- [betteroffice-vsdx-eval](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-eval): bounded VSDX formula evaluation with cached-value fallback.
-- [betteroffice-vsdx-render](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-render): VSDX display-list rendering and deterministic connector routing.
-- [betteroffice-vsdx-edit](https://github.com/openooxml/betteroffice/tree/main/crates/vsdx-edit): transactional VSDX editing and the convergent Yrs diagram CRDT.
 - [betteroffice-ooxml-text](https://crates.io/crates/betteroffice-ooxml-text): shared text shaping, measurement, and line breaking.
 - [betteroffice-drawingml](https://crates.io/crates/betteroffice-drawingml): the DrawingML colors, themes, and geometry shared by all four formats.
 
@@ -84,13 +74,7 @@ Every editor replica is a Yrs (Rust Yjs) document, and the provider speaks the s
 - [Collaboration guide](https://docs.betteroffice.dev/docs/collaboration): connect editors through a shared transport.
 - [Visual fidelity results](https://github.com/openooxml/betteroffice#visual-fidelity): published packages and source builds compared with Microsoft Office on selected corpus samples.
 - [Benchmark method](https://github.com/openooxml/betteroffice/tree/main/scripts/office-quality): Office reference captures and image comparison.
-- [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors and a VSDX editor running in the browser.
-
-## Migrating from eigenpal
-
-eigenpal was a popular DOCX editor, deprecated when its maintainers moved to a commercial product. BetterOffice is an independent Apache-2.0 implementation. Use `@betteroffice/docx` for the framework-free core and `@betteroffice/docx-react` for the React editor; the JavaScript guide shows the current package imports and integration examples.
-
-- [Migration notes](https://docs.betteroffice.dev/docs/javascript#migrate-from-eigenpal): current package names and integration examples.
+- [Live demos](https://demo.betteroffice.dev): DOCX, XLSX, and PPTX editors running in the browser.
 
 ## Links
 
