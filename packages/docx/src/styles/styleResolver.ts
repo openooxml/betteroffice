@@ -4,8 +4,8 @@
  * Resolves OOXML style definitions to final paragraph and run properties.
  * Handles the cascade:
  * 1. Document defaults (docDefaults)
- * 2. Normal style (if no explicit styleId)
- * 3. Style chain (basedOn inheritance resolved during parsing)
+ * 2. Table paragraph context
+ * 3. Normal style or style chain (basedOn inheritance resolved during parsing)
  * 4. Inline properties
  *
  * Based on ECMA-376 style cascade rules.
@@ -126,7 +126,10 @@ export class StyleResolver {
    * @param styleId - The style ID to resolve (e.g., 'Heading1', 'Normal')
    * @returns Resolved paragraph and run formatting
    */
-  resolveParagraphStyle(styleId: string | undefined | null): ResolvedParagraphStyle {
+  resolveParagraphStyle(
+    styleId: string | undefined | null,
+    tableParagraphFormatting?: ParagraphFormatting
+  ): ResolvedParagraphStyle {
     const result: ResolvedParagraphStyle = {};
 
     // Start with document defaults
@@ -137,27 +140,17 @@ export class StyleResolver {
       result.runFormatting = { ...this.docDefaults.rPr };
     }
 
-    // If no styleId, apply Normal style (if exists)
-    if (!styleId) {
-      if (this.defaultParagraphStyle) {
-        this.mergeStyleIntoResult(result, this.defaultParagraphStyle);
-      }
-      return result;
+    const style = (styleId ? this.stylesById.get(styleId) : undefined) ?? this.defaultParagraphStyle;
+    if (style === BUILTIN_NORMAL_STYLE) {
+      this.mergeStyleIntoResult(result, style);
     }
-
-    // Get the requested style with its basedOn chain already resolved.
-    const style = this.stylesById.get(styleId);
-    if (!style) {
-      // Style not found, fall back to Normal
-      if (this.defaultParagraphStyle) {
-        this.mergeStyleIntoResult(result, this.defaultParagraphStyle);
-      }
-      return result;
+    if (tableParagraphFormatting) {
+      result.paragraphFormatting = this.mergeParagraphFormatting(
+        result.paragraphFormatting,
+        tableParagraphFormatting
+      );
     }
-
-    // Merge style properties into result
-    this.mergeStyleIntoResult(result, style);
-
+    if (style && style !== BUILTIN_NORMAL_STYLE) this.mergeStyleIntoResult(result, style);
     return result;
   }
 

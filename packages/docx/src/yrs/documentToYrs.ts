@@ -17,6 +17,7 @@ import type {
   InlineSdt,
   MathEquation,
   Paragraph,
+  ParagraphFormatting,
   ParagraphContent,
   Run,
   RunContent,
@@ -92,6 +93,7 @@ interface StoryOptions {
   appendBodyTail: boolean;
   seedComments: boolean;
   extraRunFormatting?: TextFormatting;
+  tableParagraphFormatting?: ParagraphFormatting;
 }
 
 interface ProjectedCell {
@@ -108,6 +110,7 @@ interface ProjectedRow {
 interface ProjectedTable {
   attrs: Attrs;
   rows: ProjectedRow[];
+  paragraphFormatting?: ParagraphFormatting;
 }
 
 interface LoweringContext {
@@ -801,7 +804,8 @@ function paragraphAttrs(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
   units: readonly InlineUnit[],
-  runBoundaries: Attrs[] | undefined
+  runBoundaries: Attrs[] | undefined,
+  tableParagraphFormatting?: ParagraphFormatting
 ): Attrs {
   const formatting = paragraph.formatting;
   const styleId = formatting?.styleId;
@@ -830,7 +834,7 @@ function paragraphAttrs(
   };
 
   if (styleResolver) {
-    const resolved = styleResolver.resolveParagraphStyle(styleId);
+    const resolved = styleResolver.resolveParagraphStyle(styleId, tableParagraphFormatting);
     const stylePpr = resolved.paragraphFormatting;
     attrs.alignment = formatting?.alignment ?? stylePpr?.alignment ?? null;
     attrs.spaceBefore = formatting?.spaceBefore ?? stylePpr?.spaceBefore ?? null;
@@ -973,7 +977,8 @@ function unitsForParagraphContent(content: ParagraphContent): number {
 function paragraphUnits(
   paragraph: Paragraph,
   styleResolver: StyleResolver | null,
-  extraRunFormatting?: TextFormatting
+  extraRunFormatting?: TextFormatting,
+  tableParagraphFormatting?: ParagraphFormatting
 ): { units: InlineUnit[]; ppr: Attrs } {
   const units: InlineUnit[] = [];
   const activeComments = new Set<number>();
@@ -1017,7 +1022,7 @@ function paragraphUnits(
     }
     paragraphContentUnitCounts.set(content as object, units.length - start);
   }
-  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries);
+  const attrs = paragraphAttrs(paragraph, styleResolver, units, boundaries, tableParagraphFormatting);
   return { units, ppr: paraAttrsToPpr(attrs) };
 }
 
@@ -1372,6 +1377,7 @@ function projectTable(
   const rowSpans = calculateRowSpans(table);
   return {
     attrs,
+    paragraphFormatting: (tableStyle ?? defaultStyle)?.pPr,
     rows: table.rows.map((row, rowIndex) =>
       projectRow(row, table, rowIndex, rowSpans, borders, defaultMargins, theme)
     ),
@@ -1419,7 +1425,12 @@ function visitStory(
   for (const block of blocks) {
     if (isRawXml(block)) continue;
     if (block.type === 'paragraph') {
-      const paragraph = paragraphUnits(block, context.styleResolver, options.extraRunFormatting);
+      const paragraph = paragraphUnits(
+        block,
+        context.styleResolver,
+        options.extraRunFormatting,
+        options.tableParagraphFormatting
+      );
       plan.units.push(...paragraph.units);
       plan.units.push(
         embedUnit('pilcrow', {
@@ -1462,6 +1473,7 @@ function visitStory(
               appendBodyTail: false,
               seedComments: false,
               extraRunFormatting: cell.extraRunFormatting,
+              tableParagraphFormatting: table.paragraphFormatting,
             }
           );
         });
@@ -1481,6 +1493,7 @@ function visitStory(
       includePageBreaks: options.includePageBreaks,
       appendBodyTail: false,
       seedComments: false,
+      tableParagraphFormatting: options.tableParagraphFormatting,
     });
     lastKind = 'blockSdt';
   }
