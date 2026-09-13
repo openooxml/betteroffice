@@ -92,6 +92,40 @@ fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
     }
 }
 
+#[test]
+fn restored_legacy_snapshots_publish_the_current_palette_identity() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let legacy = Workbook::from_model_collaborative(model.clone(), 11).unwrap();
+    model.styles.indexed_colors = vec!["#123456".into(); 64];
+    let mut restored = Workbook::from_model_collaborative(model.clone(), 12).unwrap();
+    restored
+        .apply_update_v1(
+            &legacy.encode_state_as_update_v1(),
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    restored
+        .edit_cell(SheetId(0), cell("A1"), "42", CalculationOptions::default())
+        .unwrap();
+    let snapshot = restored.encode_state_as_update_v1();
+    let mut same_palette = Workbook::from_model_collaborative(model.clone(), 13).unwrap();
+    same_palette
+        .apply_update_v1(&snapshot, CalculationOptions::default())
+        .unwrap();
+    assert_eq!(
+        same_palette.cell(SheetId(0), cell("A1")).unwrap().input,
+        "42"
+    );
+    model.styles.indexed_colors.fill("#abcdef".into());
+    let mut different_palette = Workbook::from_model_collaborative(model.clone(), 14).unwrap();
+    assert!(matches!(
+        different_palette.apply_update_v1(&snapshot, CalculationOptions::default()),
+        Err(Error::CollaborativeState(_))
+    ));
+    assert_eq!(different_palette.model(), &model);
+}
+
 fn sample_parts() -> Vec<(String, Vec<u8>)> {
     let mut sheet = Sheet::new("Data");
     sheet.set_cell(
