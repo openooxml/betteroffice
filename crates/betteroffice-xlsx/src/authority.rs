@@ -3489,6 +3489,43 @@ mod tests {
     }
 
     #[test]
+    fn canonical_cell_formats_preserve_high_precision_theme_tints() {
+        for tint in [
+            "-0.14996795556505021",
+            "-0.24994659260841701",
+            "-4.9989318521683403E-2",
+            "0.39994506668294322",
+        ] {
+            let format = CellFormat {
+                fill: xlsx_model::Fill::Solid(xlsx_model::Color::Theme {
+                    idx: 4,
+                    tint: tint.parse().unwrap(),
+                }),
+                ..CellFormat::default()
+            };
+            let (key, payload) = cell_format_entry(&format).unwrap();
+            let decoded: CellFormat = serde_json::from_str(&payload).unwrap();
+            assert_eq!(decoded, format, "{tint}");
+            assert_eq!(cell_format_entry(&decoded).unwrap(), (key, payload));
+
+            let mut model = rich_model();
+            let style = model.styles.intern_cell_format(&format).unwrap();
+            model.sheets[0].set_cell(
+                CellRef::new(1, 1),
+                Cell {
+                    value: CellValue::Number { value: 1.0 },
+                    style,
+                    ..Cell::default()
+                },
+            );
+            let authority = WorkbookAuthority::from_model_with_client_id(&model, 11).unwrap();
+            assert_eq!(authority.materialize().unwrap(), model);
+            let peer = authority_from_update(&model, &authority.encode_state_as_update_v1(), 12);
+            assert_eq!(peer.materialize().unwrap(), model);
+        }
+    }
+
+    #[test]
     fn known_schema_versions_materialize_and_upgrade_to_current() {
         let model = rich_model();
         for (index, (version, include_defined_names)) in
