@@ -134,6 +134,7 @@ pub(super) fn calculate_tab_width(
     declared: &[TabStopIn],
     left_indent_twips: f32,
     following_width_px: f32,
+    available_width_px: f32,
 ) -> f32 {
     let current_x_twips = px_to_twips(current_x_px);
     let grid = compute_tab_stops(declared, left_indent_twips);
@@ -157,6 +158,12 @@ pub(super) fn calculate_tab_width(
     // default grid instead
     if width < 1.0 {
         return default_grid_advance(current_x_px);
+    }
+    if kind == StopKind::End && width > available_width_px + 1e-3 {
+        let clamped = available_width_px - following_width_px;
+        if clamped > 1.0 {
+            return clamped;
+        }
     }
     width
 }

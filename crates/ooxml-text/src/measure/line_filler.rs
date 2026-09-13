@@ -377,15 +377,25 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Places a tab. Its width comes from the stop grid at the line's current
-    /// x in content-area coordinates — indent, first-line offset and any
-    /// float left margin all shift that x. A tab that wraps keeps its
-    /// pre-wrap width; it is not recomputed against the new line's x.
+    /// Places a tab against the stop grid, recomputing its width after wrapping.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
-
         let following = self.following_width_after(run_index);
-        // Float left margins shift tab coordinates.
+        let mut tab_width = self.tab_width(following);
+        if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
+            self.start_new_line(ri, 0)?;
+            tab_width = self.tab_width(following);
+        }
+
+        self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
+        self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
+        self.cur.width += tab_width;
+        self.cur.tail_run = ri;
+        self.cur.tail_char = 1;
+        Ok(())
+    }
+
+    fn tab_width(&self, following: f32) -> f32 {
         let line_x = self.cur.width + self.cur.left_offset;
         let is_first_line = self.lines.is_empty();
         let content_x = self.p.indent_left_px
@@ -395,34 +405,13 @@ impl Filler<'_> {
                 0.0
             }
             + line_x;
-        let mut tab_width = tabs::calculate_tab_width(
+        tabs::calculate_tab_width(
             content_x,
             self.p.tabs,
             tabs::px_to_twips(self.p.indent_left_px),
             following,
-        );
-
-        // Tab targeting a position past the line edge (Word's TOC styles
-        // author right stops a hair past the margin): snap to the margin and
-        // reserve room for the following runs.
-        if line_x + tab_width > self.cur.available + WRAP_SLACK_PX {
-            let clamped = self.cur.available - line_x - following;
-            if clamped > 1.0 {
-                tab_width = clamped;
-            }
-        }
-
-        if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
-            // line already full of preceding content
-            self.start_new_line(ri, 0)?;
-        }
-
-        self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
-        self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
-        self.cur.width += tab_width;
-        self.cur.tail_run = ri;
-        self.cur.tail_char = 1;
-        Ok(())
+            self.cur.available - self.cur.width,
+        )
     }
 
     /// Sums inline widths until the next tab or line break — what `end` and

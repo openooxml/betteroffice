@@ -1064,9 +1064,8 @@ fn tab_falls_back_to_default_grid() {
     );
 }
 
-// 14. an over-edge stop clamps; a wrapped tab keeps its pre-wrap width
 #[test]
-fn tab_clamps_to_line_edge_and_wraps_when_full() {
+fn right_aligned_tab_clamps_to_line_edge() {
     // end stop at 200px on a 100px line: clamp to 100 − W0
     let v = measure_with(
         json!({
@@ -1079,24 +1078,44 @@ fn tab_clamps_to_line_edge_and_wraps_when_full() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 1)]);
     approx(v["lines"][0]["width"].as_f64().unwrap(), 100.0, "clamped");
+}
 
-    // 22 zeros fill 195.77px of a 200px line; the tab's 44.23px to the 240px
-    // grid line cannot fit or clamp (no room for the following zero), so the
-    // tab wraps carrying that width
-    let v = measure(
-        json!([
-            { "kind": "text", "text": "0000000000000000000000" },
-            { "kind": "tab" },
-            { "kind": "text", "text": "0" }
-        ]),
+#[test]
+fn wrapped_tabs_resolve_against_the_new_line_grid() {
+    for tab_count in 1..=3 {
+        let mut runs = vec![json!({ "kind": "text", "text": "0".repeat(22) })];
+        runs.extend((0..tab_count).map(|_| json!({ "kind": "tab" })));
+        runs.push(json!({ "kind": "text", "text": "0" }));
+        let v = measure(json!(runs), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, tab_count + 1, 1)]);
+        approx(
+            v["lines"][1]["width"].as_f64().unwrap(),
+            tab_count as f64 * 48.0 + W0,
+            "wrapped tab advances from the new line origin",
+        );
+    }
+}
+
+#[test]
+fn wrapped_tab_uses_the_body_indent_instead_of_the_first_line_offset() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "text", "text": "0".repeat(17) },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": { "indent": { "left": 24.0, "firstLine": 24.0 } }
+        }),
         200.0,
     )
     .unwrap();
-    assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 2, 1)]);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 17), (1, 0, 2, 1)]);
     approx(
         v["lines"][1]["width"].as_f64().unwrap(),
-        (240.0 - 22.0 * W0) + W0,
-        "wrapped tab keeps pre-wrap width",
+        24.0 + W0,
+        "new line tab advances from the body indent to the 48px stop",
     );
 }
 
