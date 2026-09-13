@@ -4,4 +4,4 @@
 "@betteroffice/rust-crates": patch
 ---
 
-Use Word's 10 pt fallback when a DOCX run has no font size in its style hierarchy. Keep explicit sizes and inherited formatting while correcting wrapping and pagination in imported documents.
+Improve DOCX fidelity with Word's 10 pt fallback for undeclared font sizes, short-paragraph widow control, and corrected table padding, minimum row heights, and repeated-header pagination. Align automatic and wrapped tabs to the page grid, keep wrapped text metrics on their own lines, and hide list markers on page-break-only paragraphs. Preserve authored formatting and document state.
