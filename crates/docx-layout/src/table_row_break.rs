@@ -171,9 +171,12 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
         }
         offsets.retain(|offset| {
             *offset == row_height
-                || !unbreakable_ranges
+                || (unbreakable_ranges
                     .iter()
-                    .any(|(top, bottom)| *offset > *top && *offset < *bottom)
+                    .any(|(_, bottom)| *bottom > *offset)
+                    && !unbreakable_ranges
+                        .iter()
+                        .any(|(top, bottom)| *offset > *top && *offset < *bottom))
         });
         offsets.sort_by(f64::total_cmp);
         break_offsets.push(offsets);
@@ -367,6 +370,31 @@ mod tests {
         };
         assert_eq!(snap_row_break(&info, 0, 0.0, 100.0), 0.0);
         assert_eq!(snap_row_break(&info, 5, 0.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn keeps_the_last_line_with_trailing_cell_padding_and_paragraph_spacing() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [{
+                "id": 0,
+                "padding": { "top": 5, "bottom": 5, "left": 0, "right": 0 },
+                "blocks": [para_with_spacing(0.0, 3.0)]
+            }] }],
+            "columnWidths": [100],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "rows": [{ "height": 53, "cells": [{
+                "blocks": [para_measure(2)], "width": 100, "height": 53
+            }] }],
+            "columnWidths": [100], "totalWidth": 100, "totalHeight": 53,
+        }))
+        .unwrap();
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 50.0), 25.0);
+        assert_eq!(snap_row_break(&info, 0, 25.0, 27.0), 0.0);
+        assert_eq!(snap_row_break(&info, 0, 25.0, 28.0), 28.0);
     }
 
     #[test]
