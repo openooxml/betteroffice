@@ -208,3 +208,176 @@ fn undeclared_font_size_matches_word_without_overriding_the_style_hierarchy() {
         assert_eq!(engine.doc().encode_state_as_update_v1(), before);
     }
 }
+
+#[test]
+fn hidden_runs_preserve_edit_positions_and_can_be_revealed() {
+    let body = r#"<w:p><w:r><w:t>A</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>😀secret</w:t><w:tab/><w:br/></w:r><w:hyperlink w:anchor="hidden"><w:r><w:rPr><w:vanish/></w:rPr><w:t>link</w:t></w:r></w:hyperlink><w:r><w:t>Z</w:t></w:r></w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74209);
+    seed_from_docx(engine.doc(), &document(body, "")).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let lower = |show_hidden_text| {
+        engine
+            .with_lowered_story(
+                "body",
+                &docx_edit::bridge::RenderEnv {
+                    show_hidden_text,
+                    ..Default::default()
+                },
+                |blocks| serde_json::to_value(blocks).unwrap(),
+            )
+            .unwrap()
+    };
+    let hidden = lower(false);
+    let shown = lower(true);
+    assert_eq!(hidden[0]["runs"].as_array().unwrap().len(), 2, "{hidden}");
+    assert_eq!(hidden[0]["runs"][0]["text"], "A");
+    assert_eq!(hidden[0]["runs"][1]["text"], "Z");
+    assert_eq!(hidden[0]["runs"][1]["pmStart"], 16.0);
+    assert_eq!(hidden[0]["pmEnd"], shown[0]["pmEnd"]);
+    assert_eq!(hidden[1], shown[1]);
+    let shown_runs = shown[0]["runs"].as_array().unwrap();
+    assert!(shown_runs.iter().any(|run| run["kind"] == "tab"));
+    assert!(shown_runs.iter().any(|run| run["kind"] == "lineBreak"));
+    assert!(shown_runs.iter().any(|run| run["text"] == "link"));
+    assert!(shown_runs.iter().all(|run| run["hidden"] != true));
+    assert_eq!(hidden, lower(false));
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+
+    engine
+        .doc()
+        .apply_raw_ops(
+            "body",
+            vec![
+                docx_edit::RawOp::Delete { index: 15, len: 1 },
+                docx_edit::RawOp::Insert {
+                    index: 15,
+                    text: "Y".to_owned(),
+                    attrs: Default::default(),
+                },
+            ],
+            &docx_edit::EditCtx::local("", ""),
+        )
+        .unwrap();
+    assert_eq!(lower(false)[0]["runs"][1]["text"], "Y");
+    assert_eq!(lower(true)[0]["pmEnd"], shown[0]["pmEnd"]);
+}
+
+#[test]
+fn only_hidden_paragraph_marks_remove_hidden_paragraph_spacing() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="Instructions"><w:rPr><w:vanish/></w:rPr></w:style>"#;
+    let body = r#"<w:p><w:pPr><w:pStyle w:val="Instructions"/><w:spacing w:before="480" w:after="480"/><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr><w:r><w:t>Hidden instructions</w:t></w:r></w:p><w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr></w:p><w:p><w:r><w:rPr><w:vanish/></w:rPr><w:t>Hidden content, visible mark</w:t></w:r></w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74210);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &docx_edit::bridge::RenderEnv::default())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(blocks.as_array().unwrap().len(), 3);
+    assert_eq!(blocks[0]["kind"], "sectionBreak");
+    assert_eq!(blocks[1]["kind"], "paragraph");
+    assert_eq!(blocks[1]["runs"], json!([]));
+    assert_eq!(blocks[2]["runs"][0]["text"], "After");
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn revealed_hidden_text_is_measured_instead_of_painted_at_zero_width() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let engine = EngineSession::new(74211);
+    let text = "Instructions wrap as ordinary text when explicitly revealed. ".repeat(12);
+    let body = format!(
+        r#"<w:p><w:r><w:t>A</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>{text}</w:t></w:r><w:r><w:t>Z</w:t></w:r></w:p>"#,
+    );
+    seed_from_docx(engine.doc(), &document(&body, "")).unwrap();
+    let measure = |show_hidden_text| -> Value {
+        serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(
+                    &json!({
+                        "bodyStory": "body", "options": {},
+                        "renderEnv": {"showHiddenText": show_hidden_text},
+                        "measurement": {
+                            "fontChains": {"calibri|0|0": [font]},
+                            "defaults": {"fontFamily": "Calibri", "fontSize": 10}
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let hidden = measure(false);
+    let shown = measure(true);
+    let hidden_lines = hidden["measured"][0]["measure"]["lines"]
+        .as_array()
+        .unwrap();
+    let shown_lines = shown["measured"][0]["measure"]["lines"].as_array().unwrap();
+    assert_eq!(hidden_lines.len(), 1);
+    assert!(shown_lines.len() > 1);
+    assert!(hidden_lines[0]["width"].as_f64().unwrap() < 30.0);
+    assert!(shown_lines[0]["width"].as_f64().unwrap() > 100.0);
+    let display = engine.build_display_list_json(&hidden.to_string()).unwrap();
+    assert!(!display.contains("Instructions"));
+    let target = engine
+        .with_display_list(|list| {
+            list.pages[0].primitives.iter().find_map(|primitive| {
+                let docx_layout::display_list::Primitive::Text(run) = primitive else {
+                    return None;
+                };
+                (run.text == "Z").then(|| {
+                    (
+                        run.x.as_f64().unwrap() + run.width.as_f64().unwrap() / 2.0,
+                        run.baseline_y.as_f64().unwrap(),
+                        run.attrs.doc_start.unwrap(),
+                        run.attrs.doc_end.unwrap(),
+                    )
+                })
+            })
+        })
+        .flatten()
+        .unwrap();
+    assert_eq!(target.2, 2 + text.encode_utf16().count() as i64);
+    let hit: Value = serde_json::from_str(
+        &engine
+            .display_hit_test_regions_json(0, target.0, target.1)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(hit["region"], "body");
+    assert!((target.2..=target.3).contains(&hit["pos"].as_i64().unwrap()));
+}
+
+#[test]
+fn hidden_drawings_and_fields_follow_run_visibility() {
+    let shape = SHAPE.replacen("<w:r>", "<w:r><w:rPr><w:vanish/></w:rPr>", 1);
+    let body = format!(
+        r#"<w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr>{shape}</w:p><w:p><w:pPr><w:rPr><w:vanish/></w:rPr></w:pPr><w:fldSimple w:instr=" PAGE "><w:r><w:rPr><w:vanish/></w:rPr><w:t>1</w:t></w:r></w:fldSimple></w:p><w:p><w:r><w:t>After</w:t></w:r></w:p>"#,
+    );
+    let engine = EngineSession::new(74212);
+    seed_from_docx(engine.doc(), &document(&body, "")).unwrap();
+    let lower = |show_hidden_text| -> Value {
+        serde_json::from_str(
+            &engine
+                .lower_story_json(
+                    "body",
+                    &docx_edit::bridge::RenderEnv {
+                        show_hidden_text,
+                        ..Default::default()
+                    },
+                )
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let hidden = lower(false);
+    let shown = lower(true);
+    assert_eq!(hidden.as_array().unwrap().len(), 1);
+    assert_eq!(hidden[0]["runs"][0]["text"], "After");
+    assert_eq!(shown[0]["kind"], "shape");
+    assert_eq!(shown[1]["runs"][0]["kind"], "field");
+    assert_eq!(hidden[0], shown[2]);
+}
