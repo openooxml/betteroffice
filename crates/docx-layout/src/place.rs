@@ -811,9 +811,9 @@ fn build_resolved_lines(
 ///
 /// Two rules can move lines before they are placed. `w:keepLines` advances to a
 /// fresh column when the whole paragraph fits a column but not the space left
-/// here. Widow and orphan control applies to paragraphs of at least four lines
-/// that do not turn `w:widowControl` off: a lone opening line moves the
-/// paragraph on when two lines would fit there, and a lone trailing line is
+/// here. Widow and orphan control keeps two- and three-line paragraphs together
+/// unless they turn `w:widowControl` off. For longer paragraphs, a lone opening
+/// line moves the paragraph on when two lines would fit there, and a lone trailing line is
 /// avoided by pushing one more line down, provided the fragment keeps more than
 /// two.
 ///
@@ -864,7 +864,7 @@ fn layout_paragraph(
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
     });
-    let widow_control = lines.len() >= 4
+    let widow_control = lines.len() >= 2
         && block
             .attrs
             .as_ref()
@@ -876,6 +876,7 @@ fn layout_paragraph(
         .as_ref()
         .and_then(|attrs| attrs.keep_lines)
         .unwrap_or(false)
+        || (widow_control && lines.len() < 4)
     {
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
@@ -884,7 +885,7 @@ fn layout_paragraph(
             .leading_spacing(space_before)
             .max(state.deferred_spacing)
             + paragraph_height;
-        if required <= capacity && required > paginator.get_available_height() {
+        if paragraph_height <= capacity && required > paginator.get_available_height() {
             paginator.ensure_fits(required);
         }
     }
@@ -1549,6 +1550,67 @@ mod pagination_rule_tests {
     }
 
     #[test]
+    fn widow_control_keeps_short_paragraphs_together() {
+        for (lines, preceding_height) in [(2, 70.0), (3, 50.0), (3, 70.0)] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), vec![(1, 0, lines)]);
+        }
+    }
+
+    #[test]
+    fn short_paragraphs_still_split_when_widow_control_is_disabled() {
+        for (lines, preceding_height, split) in [(2, 70.0, 1), (3, 50.0, 2), (3, 70.0, 1)] {
+            let result = layout(vec![
+                paragraph(1, 1, preceding_height, json!({})),
+                paragraph(2, lines, 20.0, json!({ "widowControl": false })),
+            ]);
+            assert_eq!(
+                paragraph_slices(&result, 2.0),
+                vec![(0, 0, split), (1, split, lines)]
+            );
+        }
+    }
+
+    #[test]
+    fn widow_control_preserves_short_paragraphs_that_fit_exactly() {
+        for lines in [2, 3] {
+            let result = layout(vec![
+                paragraph(1, 1, 100.0 - lines as f64 * 20.0, json!({})),
+                paragraph(2, lines, 20.0, json!({})),
+            ]);
+            assert_eq!(paragraph_slices(&result, 2.0), vec![(0, 0, lines)]);
+        }
+    }
+
+    #[test]
+    fn widow_control_discards_boundary_spacing_when_moving_short_paragraphs() {
+        let result = layout(vec![
+            paragraph(1, 1, 30.0, json!({ "spacing": { "after": 60 } })),
+            paragraph(2, 3, 20.0, json!({ "spacing": { "before": 50 } })),
+        ]);
+        assert_eq!(paragraph_slices(&result, 2.0), vec![(1, 0, 3)]);
+        let Fragment::Paragraph(fragment) = &result.pages[1].fragments[0] else {
+            panic!()
+        };
+        assert_eq!(fragment.y, 10.0);
+    }
+
+    #[test]
+    fn oversized_short_paragraphs_still_terminate_with_every_line_visible() {
+        for (lines, height, expected) in [
+            (2, 60.0, vec![(0, 0, 1), (1, 1, 2)]),
+            (3, 60.0, vec![(0, 0, 1), (1, 1, 2), (2, 2, 3)]),
+            (3, 40.0, vec![(0, 0, 2), (1, 2, 3)]),
+        ] {
+            let result = layout(vec![paragraph(1, lines, height, json!({}))]);
+            assert_eq!(paragraph_slices(&result, 1.0), expected);
+        }
+    }
+
+    #[test]
     fn authored_widow_control_off_splits_where_the_default_moves_the_paragraph_on() {
         let default = layout(vec![
             paragraph(1, 1, 70.0, json!({})),
@@ -1577,7 +1639,7 @@ mod pagination_rule_tests {
         ]);
 
         assert_eq!(default.pages.len(), 3);
-        assert_eq!(paragraph_slices(&default, 3.0), vec![(1, 0, 1), (2, 1, 2)]);
+        assert_eq!(paragraph_slices(&default, 3.0), vec![(2, 0, 2)]);
         assert_eq!(disabled.pages.len(), 2);
         assert_eq!(paragraph_slices(&disabled, 3.0), vec![(1, 0, 2)]);
     }
