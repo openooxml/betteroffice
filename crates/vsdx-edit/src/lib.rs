@@ -34,10 +34,7 @@ pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_STATE_VECTOR_ENTRIES: u32 = 65_536;
 const MAX_STATE_VECTOR_BYTES: usize = 1024 * 1024;
 
-/// ```compile_fail
-/// let session = vsdx_edit::DiagramSession::open(&[], 1).unwrap();
-/// session.yrs_doc();
-/// ```
+/// A collaborative session with private CRDT storage.
 pub struct DiagramSession {
     pub(crate) doc: Doc,
     client_id: u64,
@@ -849,11 +846,7 @@ mod tests {
         }));
     }
 
-    /// Coverage for what `session_added_shapes_do_not_leak_into_cell_edits` (against the removed
-    /// `export()` API) used to pin: `semantic_cell_edits` filters to `ShapeOrigin::Original`
-    /// shapes before it ever looks at a cell, so a session-added shape's own draft cells cannot
-    /// reach the package-wide semantic-cell-edit list by construction, not by a value that could
-    /// be forgotten in a refactor.
+    /// Excludes draft cells from original-package edits.
     #[test]
     fn session_added_shapes_do_not_leak_into_semantic_cell_edits() {
         let session = session();
@@ -1348,10 +1341,7 @@ mod tests {
         assert_eq!(before, session.encode_state_as_update_v1());
     }
 
-    /// `Width` never changes formula, so `validate_formula_mutations` has nothing to compare
-    /// and never looks at it; disabling `LockWidth` is itself an unprotected `CellEdit`, so
-    /// nothing refuses it either. Only comparing the protected *set* before and after (rather
-    /// than each formula in isolation) notices `Width` silently falling out of it.
+    /// Rejects remote changes that silently remove a protected cell.
     #[test]
     fn remote_update_that_disables_a_lock_forgets_the_cell_it_was_protecting() {
         let session = session();
@@ -1368,10 +1358,7 @@ mod tests {
         assert_eq!(before, session.encode_state_as_update_v1());
     }
 
-    /// The mutation policy behind local `delete_shape` only ever inspects `LockDelete`; a
-    /// `GUARD`-protected cell elsewhere on the shape does not by itself block deletion. A
-    /// remote deletion must accept exactly what a local one would, so this is not a gap to
-    /// close but a parity case to pin.
+    /// Matches local deletion policy for unrelated guarded cells.
     #[test]
     fn remote_deletion_of_an_unlocked_shape_with_a_guarded_cell_is_accepted() {
         let session = session();

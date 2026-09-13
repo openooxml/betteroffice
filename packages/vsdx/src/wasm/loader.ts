@@ -81,7 +81,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   };
   const json = <T>(operation: () => string, drainUpdates = false): T => JSON.parse(wasm(operation, drainUpdates)) as T;
   return {
-    get clientId() { return wasm(() => doc.clientId); }, snapshot: () => json(() => doc.snapshotJson()),
+    clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
     layoutPage: pageIndex => {
       hitIds.clear();

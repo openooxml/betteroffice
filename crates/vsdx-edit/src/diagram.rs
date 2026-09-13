@@ -1023,16 +1023,12 @@ pub(crate) fn validate_remote_update(before: &Doc, staged: &Doc) -> EditResult<(
     Ok(())
 }
 
-/// Splits a `baseline_formulas`/`protected_formulas` key (`"{shape_id}/{cell_key}"`) back to
-/// its owning shape id. Shape ids never contain `/`; cell keys use `\u{1f}` as a separator, so
-/// the first `/` is always the boundary.
+/// Extracts the shape ID preceding the first slash in a formula key.
 fn shape_id_prefix(key: &str) -> &str {
     key.split_once('/').map_or(key, |(shape_id, _)| shape_id)
 }
 
-/// Authorizes every shape a remote update removed, the way `delete_shape` would: a shape whose
-/// parent was also removed rides along on the parent's authorization; a surviving-parent shape
-/// must clear its own `LockDelete` check.
+/// Checks LockDelete for remote deletions whose parent survives.
 fn authorize_removed_shapes(
     before: &Doc,
     before_identities: &std::collections::BTreeMap<String, ShapeIdentity>,
@@ -1059,8 +1055,7 @@ fn authorize_removed_shapes(
     Ok(())
 }
 
-/// Authorizes a remote deletion the same way a local `delete_shape` would: refused if
-/// `LockDelete` is enabled or itself guarded on the shape being removed.
+/// Rejects remote deletion when LockDelete is enabled or guarded.
 fn authorize_shape_deletion(before: &Doc, page_id: &str, shape_id: &str) -> EditResult<()> {
     let txn = before.transact();
     let context = CrdtMutationContext::new(&txn, page_id, shape_id)?;
@@ -1086,11 +1081,7 @@ fn authorize_shape_deletion(before: &Doc, page_id: &str, shape_id: &str) -> Edit
     }
 }
 
-/// A cell key absent before has no local-edit equivalent unless its whole shape is also new
-/// (`add_shape` seeds a fresh shape's cells together; `set_cell_formula_at` can only edit a key
-/// that already exists). So a new key grafted onto a shape the document already knew faces the
-/// same policy a local edit would: refused if the target is currently locked, and refused if the
-/// peer is planting a new GUARD rather than editing one the package already established.
+/// Enforces local locks and rejects new GUARDs on cells added to existing shapes.
 fn validate_new_cells(
     before: &Doc,
     staged: &Doc,

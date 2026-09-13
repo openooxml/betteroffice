@@ -1523,9 +1523,7 @@ struct Bounds {
     loc_pin_y: f64,
     angle: f64,
 }
-/// Deterministic dynamic-connector policy: `RoutStyle != 0` uses one horizontal-first
-/// orthogonal bend; every other connector uses a direct segment. This deliberately does not
-/// reproduce Visio obstacle avoidance, jump styles, or user-edited route geometry.
+/// Routes RoutStyle != 0 with one horizontal-first bend, otherwise directly.
 fn connector_route(
     begin: ScenePoint,
     end: ScenePoint,

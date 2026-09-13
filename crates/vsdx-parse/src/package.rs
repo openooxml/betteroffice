@@ -27,9 +27,6 @@ pub enum CellRow {
 }
 
 /// Stable semantic identity for a ShapeSheet cell.
-///
-/// Future CRDT entities can retain this locator and add their entity identity
-/// alongside it without exposing lexical source spans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CellLocator {
     pub sheet: CellSheet,
@@ -39,12 +36,7 @@ pub struct CellLocator {
     pub cell_name: String,
 }
 
-/// A semantic formula edit.
-///
-/// `formula` is required and writes Cell@F. `value` carries the cache freshly
-/// evaluated from that formula to Cell@V; when it is `None`, any existing
-/// cached value is dropped, because a cache never survives the formula change
-/// that invalidated it.
+/// A formula edit with a fresh cache; None removes the old cache.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SemanticCellEdit {
     pub locator: CellLocator,
@@ -842,11 +834,7 @@ fn save_cell_edits_with_new_cells(
     Ok(bytes)
 }
 
-/// Resolves semantic cell edits to package-local lexical provenance and saves them.
-///
-/// Each edit writes its formula to Cell@F. A present `value` writes the freshly
-/// evaluated cache to Cell@V; an absent one drops any existing cached value, so
-/// a cache never outlives the formula change that invalidated it.
+/// Saves semantic formula edits, replacing or removing their cached values.
 pub fn save_semantic_cell_edits(
     package: &VsdxPackage,
     edits: &[SemanticCellEdit],
@@ -916,11 +904,7 @@ pub fn save_semantic_cell_edits(
     }
 }
 
-/// Applies page-local structural edits through the lexical container fallback.
-///
-/// Deleting a shape also deletes every local Connect that names it. The source
-/// package is never changed; the result is accepted only after reparsing and
-/// referential-integrity validation.
+/// Applies structural edits and validates references; deletion removes incident Connects.
 pub fn save_structural_edits(
     package: &VsdxPackage,
     edits: &[StructuralEdit],
@@ -1512,8 +1496,7 @@ fn direct_child<'a>(
     })
 }
 
-/// Inserts Sections before Text, ForeignData, or nested Shapes; indexed Rows
-/// precede the first direct Row with a greater IX, and all other children append.
+/// Inserts containers in schema order and indexed rows in numeric order.
 fn container_insertion_point(
     part: &PackagePart,
     owner: &crate::ElementSpan,
