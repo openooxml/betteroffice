@@ -312,6 +312,69 @@ fn multi_run_line_takes_max_font_basis() {
 }
 
 #[test]
+fn wrapped_runs_only_contribute_metrics_to_the_lines_they_occupy() {
+    let preceding = json!({ "kind": "text", "text": "0".repeat(22) });
+    let small = measure(json!([preceding]), 200.0).unwrap();
+    let large = measure(
+        json!([{ "kind": "text", "text": "0", "fontSize": 24.0 }]),
+        200.0,
+    )
+    .unwrap();
+    for following in [
+        json!([{ "kind": "text", "text": "00", "fontSize": 24.0 }]),
+        json!([{ "kind": "text", "text": "0".repeat(20), "fontSize": 24.0 }]),
+        json!([{ "kind": "field", "fallback": "00", "fontSize": 24.0 }]),
+        json!([
+            { "kind": "tab", "fontSize": 24.0 },
+            { "kind": "text", "text": "00" }
+        ]),
+    ] {
+        let mut runs = vec![preceding.clone()];
+        runs.extend(following.as_array().unwrap().iter().cloned());
+        let measured = measure(json!(runs), 200.0).unwrap();
+        let lines = measured["lines"].as_array().unwrap();
+        assert!(lines.len() >= 2);
+        assert_eq!(spans(&measured)[0], (0, 0, 0, 22));
+        for metric in ["ascent", "descent", "lineHeight"] {
+            assert_eq!(
+                lines[0][metric], small["lines"][0][metric],
+                "{following}: {metric}"
+            );
+            for line in &lines[1..] {
+                assert_eq!(
+                    line[metric], large["lines"][0][metric],
+                    "{following}: {metric}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_runs_still_contribute_metrics_before_a_wrap() {
+    let measured = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(22) },
+            { "kind": "text", "text": "", "fontSize": 24.0 },
+            { "kind": "text", "text": "00" }
+        ]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&measured), vec![(0, 0, 1, 0), (2, 0, 2, 2)]);
+    approx(
+        measured["lines"][0]["lineHeight"].as_f64().unwrap(),
+        2.0 * LH,
+        "empty 24pt run contributes to its line",
+    );
+    approx(
+        measured["lines"][1]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "following line only contains 12pt text",
+    );
+}
+
+#[test]
 fn a_shorter_font_does_not_add_leading_below_a_taller_font() {
     let mut store = store();
     store.register(NOTO_NASKH_ARABIC.to_vec()).unwrap();

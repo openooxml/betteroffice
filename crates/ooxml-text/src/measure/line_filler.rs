@@ -366,11 +366,10 @@ impl Filler<'_> {
     /// Places a premeasured field as one unbreakable unit: it wraps whole to
     /// the next line rather than splitting, but never off an empty line.
     fn fill_field_run(&mut self, ri: u32, f: PreparedField) -> Result<(), MeasureError> {
-        self.update_max_font(f.font_size_pt, f.metrics_font, f.baseline_shift_px);
         if self.cur.width > 0.0 && self.cur.width + f.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
-            self.update_max_font(f.font_size_pt, f.metrics_font, f.baseline_shift_px);
         }
+        self.update_max_font(f.font_size_pt, f.metrics_font, f.baseline_shift_px);
         self.record_atomic(ri, 0, 1, f.width, f.bidi_level);
         self.cur.width += f.width;
         self.cur.tail_run = ri;
@@ -384,7 +383,6 @@ impl Filler<'_> {
     /// pre-wrap width; it is not recomputed against the new line's x.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
-        self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
 
         let following = self.following_width_after(run_index);
         // Float left margins shift tab coordinates.
@@ -417,9 +415,9 @@ impl Filler<'_> {
         if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
             // line already full of preceding content
             self.start_new_line(ri, 0)?;
-            self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
         }
 
+        self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
         self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
         self.cur.width += tab_width;
         self.cur.tail_run = ri;
@@ -453,9 +451,8 @@ impl Filler<'_> {
     /// wider than a whole line are chopped at cluster boundaries with a
     /// forced minimum of one cluster per line.
     fn fill_text_run(&mut self, ri: u32, t: &PreparedText) -> Result<(), MeasureError> {
-        // Empty runs still contribute line metrics.
-        self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
         if t.chars.is_empty() {
+            self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
             self.cur.tail_run = ri;
             self.cur.tail_char = 0;
             return Ok(());
@@ -491,11 +488,6 @@ impl Filler<'_> {
                     if best == 0 {
                         if self.cur.width > 0.0 {
                             self.start_new_line(ri, utf16_at(t, char_idx + chunk_start))?;
-                            self.update_max_font(
-                                t.font_size_pt,
-                                t.metrics_font,
-                                t.baseline_shift_px,
-                            );
                             continue;
                         }
                         best = 1;
@@ -509,7 +501,6 @@ impl Filler<'_> {
                     chunk_start += best;
                     if chunk_start < word.len() {
                         self.start_new_line(ri, utf16_at(t, char_idx + chunk_start))?;
-                        self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
                     }
                 }
                 char_idx = next_break;
@@ -527,7 +518,6 @@ impl Filler<'_> {
                     > self.cur.available + WRAP_SLACK_PX
             {
                 self.start_new_line(ri, utf16_at(t, char_idx))?;
-                self.update_max_font(t.font_size_pt, t.metrics_font, t.baseline_shift_px);
             }
 
             self.record_text_clusters(ri, word, t.letter_spacing);
