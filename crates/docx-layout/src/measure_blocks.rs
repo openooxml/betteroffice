@@ -1238,6 +1238,7 @@ fn measure_table(
     for (row_index, measured_row) in rows.iter_mut().enumerate() {
         let source_row = &table.rows[row_index];
         let mut max_height = 0.0_f64;
+        let mut max_padding_height = 0.0_f64;
         let mut max_border_height = 0.0_f64;
         for (cell_index, measured_cell) in measured_row.cells.iter_mut().enumerate() {
             let source_cell = &source_row.cells[cell_index];
@@ -1277,18 +1278,18 @@ fn measure_table(
                     .fold(0.0, f64::max);
                 previous_after = 0.0;
             }
-            measured_cell.height = content_height
-                + previous_after
-                + source_cell
-                    .padding
-                    .as_ref()
-                    .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.top)
+            let padding_height = source_cell
+                .padding
+                .as_ref()
+                .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.top)
                 + source_cell
                     .padding
                     .as_ref()
                     .map_or(DEFAULT_CELL_PADDING_Y, |padding| padding.bottom);
+            measured_cell.height = content_height + previous_after + padding_height;
             if source_cell.row_span.unwrap_or(1.0) <= 1.0 {
                 max_height = max_height.max(measured_cell.height);
+                max_padding_height = max_padding_height.max(padding_height);
             }
             max_border_height = max_border_height.max(cell_border_height(source_cell));
         }
@@ -1296,7 +1297,7 @@ fn measure_table(
             source_row.height_rule.as_deref() == Some("exact") && source_row.height.is_some();
         measured_row.height = match (source_row.height, source_row.height_rule.as_deref()) {
             (Some(height), Some("exact")) => height,
-            (Some(height), _) => max_height.max(height) + max_border_height,
+            (Some(height), _) => max_height.max(height + max_padding_height) + max_border_height,
             (None, _) => max_height + max_border_height,
         };
     }
@@ -1523,6 +1524,24 @@ mod tests {
             let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
             assert_eq!(measured.rows[0].height, expected);
             assert_eq!(measured.total_height, expected);
+        }
+    }
+
+    #[test]
+    fn minimum_row_height_reserves_cell_margins_outside_the_content_minimum() {
+        for (minimum, content, expected) in [(40, 16, 56.0), (80, 16, 96.0), (40, 60, 76.0)] {
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "height":minimum, "heightRule":"atLeast", "cells":[{
+                    "id":"cell", "padding":{"top":5,"bottom":10,"left":0,"right":0},
+                    "borders":{"top":{"width":1},"bottom":{"width":1}},
+                    "blocks":[{"kind":"image","id":"image","src":"","width":10,"height":content}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.rows[0].cells[0].height, content as f64 + 15.0);
         }
     }
 
