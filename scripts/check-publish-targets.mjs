@@ -7,7 +7,7 @@
 // that 404s. This runs first and names what has to be bootstrapped by hand.
 import { fileURLToPath } from 'node:url';
 import { publishedPackageVersions } from './published-packages.mjs';
-import { RUST_CRATES } from './rust-crates.mjs';
+import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const NPM_REGISTRY = process.env.NPM_REGISTRY_URL ?? 'https://registry.npmjs.org';
 const CRATES_REGISTRY = process.env.CRATES_REGISTRY_URL ?? 'https://crates.io/api/v1/crates';
@@ -115,7 +115,7 @@ async function checkNpm() {
 }
 
 async function checkCrates() {
-  const audit = await auditCrates(RUST_CRATES.map((crate) => crate.name));
+  const audit = await auditCrates(RUST_PUBLISH_CRATES.map((crate) => crate.name));
   // Mirrors release.yml's `Detect crates.io bootstrap token`: a token can create a crate.
   const bootstrap = Boolean(process.env.CRATES_IO_BOOTSTRAP_TOKEN);
   for (const { name, state } of audit) {

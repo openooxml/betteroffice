@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { formats, liveFormats } from "./formats.ts";
+import { formats, liveFormats, listedLiveFormats } from "./formats.ts";
 import { formatMarkdown, indexMarkdown } from "./markdown.ts";
 
 describe("demo markdown", () => {
-  test("index links every live format", () => {
+  test("index links every listed live format", () => {
     const markdown = indexMarkdown();
-    for (const format of liveFormats) {
+    for (const format of listedLiveFormats) {
       expect(markdown).toContain(`/${format.id}`);
       expect(markdown).toContain(format.tagline);
     }
-    for (const format of formats.filter((format) => format.status !== "live")) {
+    for (const format of formats.filter((format) => !listedLiveFormats.includes(format))) {
       expect(markdown).not.toContain(`/${format.id}`);
     }
   });

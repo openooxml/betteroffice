@@ -1,4 +1,4 @@
-import { getFormat, liveFormats } from "./formats";
+import { getFormat, listedLiveFormats } from "./formats";
 
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
@@ -11,7 +11,7 @@ const INTRO =
   "Live demos of the BetterOffice engines. Each demo opens a real file in the browser and runs on native OOXML engines written in Rust and compiled to WebAssembly. Parsing and rendering happen on the page. Edits in shared demo rooms synchronize through the collaboration relay.";
 
 export function indexMarkdown(): string {
-  const list = liveFormats
+  const list = listedLiveFormats
     .map(
       (format) =>
         `- [${format.id.toUpperCase()}](${SITE}/${format.id}) — ${format.kind}. ${format.tagline}`,

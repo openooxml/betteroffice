@@ -1,5 +1,5 @@
 import {
-  RUST_CRATES,
+  RUST_PUBLISH_CRATES,
   cargoMetadata,
   run,
   rustReleaseVersion,
@@ -98,7 +98,7 @@ async function waitForRegistry(name, version) {
 }
 
 function publishDryRun() {
-  for (const crate of RUST_CRATES) {
+  for (const crate of RUST_PUBLISH_CRATES) {
     run('cargo', [
       'package',
       '--no-verify',
@@ -124,7 +124,7 @@ async function publish() {
     return;
   }
 
-  for (const crate of RUST_CRATES) {
+  for (const crate of RUST_PUBLISH_CRATES) {
     const existing = await crateVersion(crate.name, version);
     if (existing) {
       if (existing.yanked) throw new Error(`${crate.name}@${version} is yanked`);
@@ -135,7 +135,9 @@ async function publish() {
 
     const internalDependencies = packages
       .get(crate.name)
-      .dependencies.filter((dependency) => packages.has(dependency.name));
+      .dependencies.filter((dependency) =>
+        RUST_PUBLISH_CRATES.some((crate) => crate.name === dependency.name)
+      );
     for (const dependency of internalDependencies) {
       await waitForRegistry(dependency.name, version);
     }

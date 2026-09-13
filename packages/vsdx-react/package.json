@@ -1,6 +1,7 @@
 {
   "name": "@betteroffice/vsdx-react",
   "version": "0.0.1",
+  "private": true,
   "description": "React VSDX editor for @betteroffice/vsdx: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, Shift-drag to resize, add, delete, set fill or line colour, and save. It has no resize-handle or connector-drag UI.",
   "type": "module",
   "sideEffects": false,

@@ -1,15 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { publishedPackageVersions } from './published-packages.mjs';
-import { RUST_CRATES } from './rust-crates.mjs';
+import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
+import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const script = fileURLToPath(new URL('./check-publish-targets.mjs', import.meta.url));
 const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
 const packages = publishedPackageVersions();
-const crates = RUST_CRATES.map((crate) => crate.name);
+const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 
 const NOT_FOUND = new Response('{"error":"Not found"}', { status: 404 });
 
@@ -71,6 +71,12 @@ function published(name: string) {
 }
 
 describe('npm publish targets', () => {
+  test('VSDX packages stay out of npm publication', () => {
+    for (const name of ['@betteroffice/vsdx', '@betteroffice/vsdx-react', '@betteroffice/vsdx-i18n']) {
+      expect(packages.map((entry) => entry.name)).not.toContain(name);
+    }
+  });
+
   test('a package that exists at its release version passes', async () => {
     const result = await guard('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
@@ -101,6 +107,11 @@ describe('npm publish targets', () => {
 });
 
 describe('crates.io publish targets', () => {
+  test('the release list matches publishable manifests and excludes VSDX', () => {
+    expect([...crates].sort()).toEqual(publishedCrates());
+    expect(crates.some((name) => name.includes('vsdx'))).toBe(false);
+  });
+
   test('a crate that exists passes', async () => {
     const result = await guard('--crates', () => Response.json({}));
     expect(result.status).toBe(0);
