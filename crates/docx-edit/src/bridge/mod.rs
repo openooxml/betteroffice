@@ -2969,11 +2969,19 @@ fn lower_paragraph_tabs(values: &BTreeMap<String, Any>, result: &mut ParagraphAt
     }
 }
 
+fn paragraph_default_font_size(values: &BTreeMap<String, Any>) -> f64 {
+    values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .and_then(|defaults| map_number(defaults, "fontSize"))
+        .map_or(10.0, |value| value / 2.0)
+}
+
 fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+    result.default_font_size = Some(paragraph_default_font_size(values));
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return;
     };
-    result.default_font_size = map_number(defaults, "fontSize").map(|value| value / 2.0);
     if let Some(Any::Map(fonts)) = defaults.get("fontFamily") {
         result.default_font_family =
             map_string(fonts, "ascii").or_else(|| map_string(fonts, "hAnsi"));
@@ -2981,7 +2989,10 @@ fn lower_paragraph_defaults(values: &BTreeMap<String, Any>, result: &mut Paragra
 }
 
 fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
-    let mut result = RunFormatting::default();
+    let mut result = RunFormatting {
+        font_size: Some(paragraph_default_font_size(values)),
+        ..RunFormatting::default()
+    };
     let Some(Any::Map(defaults)) = values.get("defaultTextFormatting") else {
         return result;
     };
@@ -3005,7 +3016,6 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
             .or_else(|| slots.cs.clone());
         result.font_slots = Some(slots);
     }
-    result.font_size = map_number(defaults, "fontSize").map(|value| value / 2.0);
     result.font_size_cs = map_number(defaults, "fontSizeCs").map(|value| value / 2.0);
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
@@ -3653,10 +3663,10 @@ mod tests {
                 "id": "placeholder",
                 "paraId": para_id,
                 "runs": [{
-                    "kind": "text", "text": text, "logicalOrder": 0,
+                    "kind": "text", "text": text, "fontSize": 10.0, "logicalOrder": 0,
                     "pmStart": start + 1.0, "pmEnd": start + 2.0
                 }],
-                "attrs": {},
+                "attrs": {"defaultFontSize": 10.0},
                 "pmStart": start, "pmEnd": start + 3.0
             })
         };
@@ -4251,15 +4261,15 @@ mod tests {
                 "paraId": "41:0",
                 "runs": [
                     {
-                        "kind": "text", "text": "Alpha", "bold": true,
+                        "kind": "text", "text": "Alpha", "bold": true, "fontSize": 10.0,
                         "color": "#4472C4", "logicalOrder": 0, "pmStart": 1.0, "pmEnd": 6.0
                     },
                     {
-                        "kind": "text", "text": " ", "logicalOrder": 1,
+                        "kind": "text", "text": " ", "fontSize": 10.0, "logicalOrder": 1,
                         "pmStart": 6.0, "pmEnd": 7.0
                     },
                     {
-                        "kind": "text", "text": "link", "italic": true,
+                        "kind": "text", "text": "link", "italic": true, "fontSize": 10.0,
                         "hyperlink": {
                             "href": "https://example.test", "tooltip": "Example",
                             "noDefaultStyle": true
@@ -4283,6 +4293,7 @@ mod tests {
                     "listMarker": "1.",
                     "listMarkerRevision": "ins",
                     "defaultTabStopTwips": 720.0,
+                    "defaultFontSize": 10.0,
                     "pPrIns": { "revisionId": 2.0, "author": "Bob", "date": DATE }
                 },
                 "pmStart": 0.0, "pmEnd": 12.0

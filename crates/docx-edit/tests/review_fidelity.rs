@@ -150,3 +150,61 @@ fn dark_cells_preserve_colors_inherited_from_styles_and_defaults() {
         );
     }
 }
+
+#[test]
+fn undeclared_font_size_matches_word_without_overriding_the_style_hierarchy() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    for (defaults, normal, expected) in [("", "", 10.0), ("22", "", 11.0), ("22", "24", 12.0)] {
+        let size = |value: &str| {
+            if value.is_empty() {
+                String::new()
+            } else {
+                format!(r#"<w:sz w:val="{value}"/>"#)
+            }
+        };
+        let styles = format!(
+            r#"<w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/>{}</w:rPr></w:rPrDefault></w:docDefaults>
+<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:rPr>{}</w:rPr></w:style>
+<w:style w:type="character" w:styleId="Emphasis"><w:name w:val="Emphasis"/><w:rPr><w:sz w:val="26"/></w:rPr></w:style>"#,
+            size(defaults),
+            size(normal),
+        );
+        let text = "Inherited text must wrap at the same position as an explicit size. ".repeat(6);
+        let body = format!(
+            r#"<w:p><w:r><w:t>{text}</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:sz w:val="{}"/></w:rPr><w:t>{text}</w:t></w:r></w:p>
+<w:p/>
+<w:p><w:r><w:rPr><w:rStyle w:val="Emphasis"/></w:rPr><w:t>Character style</w:t></w:r>
+<w:r><w:rPr><w:rStyle w:val="Emphasis"/><w:sz w:val="28"/></w:rPr><w:t>Direct size</w:t></w:r></w:p>"#,
+            expected * 2.0,
+        );
+        let engine = EngineSession::new(74208);
+        seed_from_docx(engine.doc(), &document(&body, &styles)).unwrap();
+        let before = engine.doc().encode_state_as_update_v1();
+        let output: Value = serde_json::from_str(
+            &engine
+                .layout_document_with_regions_json(
+                    &json!({
+                        "bodyStory": "body", "options": {}, "renderEnv": {},
+                        "measurement": {
+                            "fontChains": {"arial|0|0": [font], "calibri|0|0": [font]},
+                            "defaults": {"fontSize": 11, "fontFamily": "Arial"},
+                            "authoritativeShaping": true
+                        }
+                    })
+                    .to_string(),
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let measured = output["measured"].as_array().unwrap();
+        assert_eq!(measured[0]["block"]["runs"][0]["fontSize"], expected);
+        assert_eq!(measured[0]["measure"], measured[1]["measure"]);
+        assert!(measured[0]["measure"]["lines"].as_array().unwrap().len() > 1);
+        assert_eq!(measured[2]["block"]["attrs"]["defaultFontSize"], expected);
+        assert_eq!(measured[3]["block"]["runs"][0]["fontSize"], 13.0);
+        assert_eq!(measured[3]["block"]["runs"][1]["fontSize"], 14.0);
+        engine.build_display_list_json(&output.to_string()).unwrap();
+        assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    }
+}
