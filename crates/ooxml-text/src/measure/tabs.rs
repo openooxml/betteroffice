@@ -101,7 +101,8 @@ fn compute_tab_stops(declared: &[TabStopIn], left_indent_twips: f32) -> Vec<(f32
         left_indent_twips
     };
     let grid_ceiling = left_indent_twips + GRID_CEILING_SPAN_TWIPS;
-    let mut grid_pos = grid_seed + DEFAULT_TAB_INTERVAL_TWIPS;
+    let mut grid_pos =
+        ((grid_seed / DEFAULT_TAB_INTERVAL_TWIPS).floor() + 1.0) * DEFAULT_TAB_INTERVAL_TWIPS;
     while grid_pos - DEFAULT_TAB_INTERVAL_TWIPS < grid_ceiling {
         let shadowed = kept.iter().any(|s| same_stop_position(s.0, grid_pos));
         let knocked_out = cleared_at.iter().any(|&p| same_stop_position(p, grid_pos));

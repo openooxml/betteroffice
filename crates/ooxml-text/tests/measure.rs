@@ -859,6 +859,60 @@ fn tab_advances_to_default_grid_stops() {
     );
 }
 
+#[test]
+fn automatic_tabs_resume_on_grid_multiples_after_custom_stops() {
+    for (stops, expected) in [
+        (json!([{ "val": "start", "pos": 1500.0 }]), 144.0),
+        (json!([{ "val": "start", "pos": 1440.0 }]), 144.0),
+        (
+            json!([
+                { "val": "start", "pos": 1500.0 },
+                { "val": "clear", "pos": 2160.0 }
+            ]),
+            192.0,
+        ),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [
+                    { "kind": "tab" },
+                    { "kind": "text", "text": "0" },
+                    { "kind": "tab" },
+                    { "kind": "text", "text": "0" }
+                ],
+                "attrs": { "tabs": stops }
+            }),
+            300.0,
+        )
+        .unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 3, 1)]);
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected + W0,
+            "automatic tab after custom stop",
+        );
+    }
+}
+
+#[test]
+fn paragraph_indent_does_not_shift_the_automatic_tab_grid() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "tab" }, { "kind": "text", "text": "0" }],
+            "attrs": { "indent": { "left": 10.0 } }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        48.0 - 10.0 + W0,
+        "automatic tab position is relative to the content area",
+    );
+}
+
 // 12. end and center anchor following text; decimal uses start; bar is zero
 #[test]
 fn tab_stop_alignment_semantics() {
