@@ -9,7 +9,9 @@
 use crate::LayoutError;
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
-use crate::table_row_break::{build_table_row_break_info, snap_row_break};
+use crate::table_row_break::{
+    build_table_row_break_info, first_table_fragment_height, minimum_row_slice, snap_row_break,
+};
 use crate::types::{
     Fragment, LayoutBlock, MeasuredBlock, SectionBreakBlock, SectionBreakType, TableBlock,
     TableExtent, TableFragment,
@@ -154,6 +156,7 @@ pub fn layout_table(
     let header_row_count = tally_header_rows(block);
     let header_rows_height = get_header_rows_height(measure, header_row_count);
     let break_info = build_table_row_break_info(block, measure);
+    let first_fragment_height = first_table_fragment_height(block, measure, &break_info);
     let keep_heights = row_keep_heights(block, measure);
 
     let mut row_index = 0usize;
@@ -185,14 +188,24 @@ pub fn layout_table(
         } else {
             0.0
         };
-        let first_safe_offset = break_info.break_offsets[row_index]
-            .iter()
-            .copied()
-            .find(|offset| *offset > consumed);
-        let minimum_body_slice = first_safe_offset
-            .map(|offset| offset - consumed)
-            .unwrap_or(row_remaining_at_start);
+        let header_start_height = if first_fragment_height <= column_capacity {
+            first_fragment_height
+        } else {
+            header_rows_height
+        };
+        if is_first_fragment
+            && header_row_count > 0
+            && header_start_height <= column_capacity
+            && header_start_height + pending_spacing > paginator.get_available_height()
+            && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
+        {
+            paginator.ensure_fits(header_start_height + pending_spacing);
+            continue;
+        }
+        let minimum_body_slice =
+            minimum_row_slice(block, measure, &break_info, row_index, consumed);
         let header_overhead = if !is_first_fragment
+            && row_index >= header_row_count
             && header_row_count > 0
             && header_rows_height + minimum_body_slice.max(0.0) <= column_capacity
         {
@@ -308,11 +321,7 @@ pub fn layout_table(
             is_floating: None,
             carried_from_prev: Some(!is_first_fragment),
             carried_to_next: Some(!is_last_fragment),
-            header_row_count: if !is_first_fragment && header_row_count > 0 {
-                Some(header_row_count as f64)
-            } else {
-                None
-            },
+            header_row_count: (header_overhead > 0.0).then_some(header_row_count as f64),
             clip_top: if clip_top > 0.0 { Some(clip_top) } else { None },
             clip_bottom,
         });
@@ -338,19 +347,15 @@ pub fn layout_table(
         // If content remains, advance to the next column/page so the next
         // iteration sees fresh space (the current page is exhausted).
         if row_index < rows.len() {
-            let next_offset = break_info.break_offsets[row_index]
-                .iter()
-                .copied()
-                .find(|offset| *offset > consumed);
-            let next_slice = next_offset
-                .map(|offset| offset - consumed)
-                .unwrap_or(rows[row_index].height - consumed);
-            let next_needed =
-                if header_row_count > 0 && header_rows_height + next_slice <= column_capacity {
-                    header_rows_height
-                } else {
-                    0.0
-                } + next_slice;
+            let next_slice = minimum_row_slice(block, measure, &break_info, row_index, consumed);
+            let next_needed = if row_index >= header_row_count
+                && header_row_count > 0
+                && header_rows_height + next_slice <= column_capacity
+            {
+                header_rows_height
+            } else {
+                0.0
+            } + next_slice;
             paginator.ensure_fits(next_needed);
         }
     }

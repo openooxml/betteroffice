@@ -9,7 +9,7 @@
 //! actually demands: every member paragraph in full (spacing before, measured
 //! height, spacing after) plus one witness slice of the follower — never the
 //! follower in full, since the binding is only to where it begins. The witness
-//! is a paragraph's first line, a table's first row, the whole height of an
+//! is a paragraph's first line, a table's initial header/body slice, the height of an
 //! image or text box, and nothing at all for any other follower kind.
 //!
 //! Spacing is read through the shared paragraph-spacing helpers, which suppress
@@ -19,6 +19,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
 use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock};
 
 /// A maximal keep-with-next run and its follower.
@@ -131,7 +132,16 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
         .map(|mb| &mb.measure);
     let witness_line = match follower_measure {
         Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => p.lines[0].line_height,
-        Some(BlockExtent::Table(t)) => t.rows.first().map_or(0.0, |row| row.height),
+        Some(BlockExtent::Table(table)) => match group
+            .follower
+            .and_then(|index| measured.get(index))
+            .map(|measured| &measured.block)
+        {
+            Some(LayoutBlock::Table(block)) => {
+                first_table_fragment_height(block, table, &build_table_row_break_info(block, table))
+            }
+            _ => 0.0,
+        },
         Some(BlockExtent::Image(image)) => image.height,
         Some(BlockExtent::TextBox(text_box)) => text_box.height,
         _ => 0.0,

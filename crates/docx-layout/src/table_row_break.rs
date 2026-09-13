@@ -188,6 +188,52 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
     }
 }
 
+pub(crate) fn minimum_row_slice(
+    block: &TableBlock,
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+    row: usize,
+    consumed: f64,
+) -> f64 {
+    let remaining = measure.rows[row].height - consumed;
+    if consumed == 0.0
+        && block
+            .rows
+            .get(row)
+            .is_some_and(|row| row.cant_split.unwrap_or(false))
+    {
+        return remaining;
+    }
+    info.break_offsets[row]
+        .iter()
+        .copied()
+        .find(|offset| *offset > consumed)
+        .map_or(remaining, |offset| offset - consumed)
+}
+
+pub(crate) fn first_table_fragment_height(
+    block: &TableBlock,
+    measure: &TableExtent,
+    info: &TableRowBreakInfo,
+) -> f64 {
+    let headers = block
+        .rows
+        .iter()
+        .take_while(|row| row.is_header.unwrap_or(false))
+        .count()
+        .min(measure.rows.len());
+    if headers == 0 {
+        return measure.rows.first().map_or(0.0, |row| row.height);
+    }
+    let header_height: f64 = measure.rows[..headers].iter().map(|row| row.height).sum();
+    header_height
+        + if headers < measure.rows.len() {
+            minimum_row_slice(block, measure, info, headers, 0.0)
+        } else {
+            0.0
+        }
+}
+
 /// Given a row and how much of it has already been placed (`from_offset`),
 /// return how many more px can be placed ending on a whole line, without
 /// exceeding `max_slice`. Returns 0 when not even the first line fits.
