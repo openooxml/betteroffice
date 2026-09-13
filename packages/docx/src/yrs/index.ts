@@ -355,6 +355,8 @@ export interface YrsRenderEnv {
   pageContentHeight?: number | null;
   /** yrs revision/paragraph id → dense numeric layout id (list markers, revisions). */
   numericIds?: Record<string, number>;
+  /** Include hidden text in visible layout without changing the document. */
+  showHiddenText?: boolean;
 }
 
 /** Receipt of {@link YrsSession.addComment}. */

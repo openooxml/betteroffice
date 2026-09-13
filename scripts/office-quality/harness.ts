@@ -117,7 +117,7 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
   const fonts = useFonts ? await fontsFor(bytes) : [];
   let pages: number;
   if (format === 'pptx') {
-    const { initWasm, openPresentation, paintSlide, sizeCanvasForSlide } = await import(
+    const { initWasm, openPresentation, paintSlide, sizeCanvasForSlide, presentationImageBlob } = await import(
       '@betteroffice/pptx'
     );
     await initWasm();
@@ -134,7 +134,11 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
             if (!images.has(path))
               images.set(
                 path,
-                await createImageBitmap(new Blob([handle.mediaBytes(path).slice()]))
+                await createImageBitmap(
+                  typeof presentationImageBlob === 'function'
+                    ? presentationImageBlob(handle.mediaBytes(path))
+                    : new Blob([handle.mediaBytes(path).slice()])
+                )
               );
             return images.get(path)!;
           },

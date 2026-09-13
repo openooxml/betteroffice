@@ -5,6 +5,7 @@ import { createServer } from 'node:net';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { FORMATS, renderSection } from './readme.mjs';
+import { measureSamples } from './results.mjs';
 import { CORPUS_ORIGIN as corpus, selectSamples } from './samples.mjs';
 
 const execute = promisify(execFile);
@@ -40,7 +41,9 @@ async function command(program, args, options = {}) {
 
 async function download(url, maximum = 32 * 1024 * 1024) {
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(Math.max(30_000, Math.ceil(maximum / (1024 * 1024)) * 1000)),
+    signal: AbortSignal.timeout(
+      Math.max(30_000, Math.ceil(maximum / (1024 * 1024)) * 1000)
+    ),
     credentials: 'omit',
     referrerPolicy: 'no-referrer',
   });
@@ -226,49 +229,50 @@ for (const format of FORMATS.filter((format) =>
       ...(channel === 'published' ? roots : {}),
     });
     try {
-      for (const sample of samples.filter((sample) => sample.format === format)) {
-        const candidate = resolve(sample.directory, channel);
-        const difference = resolve(sample.directory, `${channel}-diff`);
-        await command(
-          process.execPath,
-          [
-            'scripts/docx-quality/browser-task.mjs',
-            sample.source,
-            candidate,
-            'cdn',
-            `${server.url}/?format=${format}`,
-          ],
-          {
-            env: {
-              ...process.env,
-              QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
-              QUALITY_ENGINE_LABEL:
-                channel === 'published'
-                  ? `@betteroffice/${format}@${versions[format]}${
-                      reactVersion ? `; @betteroffice/docx-react@${reactVersion}` : ''
-                    }`
-                  : commit,
-            },
-          }
-        );
-        await command(python, [
-          'scripts/office-quality/compare.py',
-          resolve(sample.directory, 'reference'),
-          candidate,
-          '--out',
-          difference,
-        ]);
-        const comparison = JSON.parse(
-          await readFile(resolve(difference, 'score.json'), 'utf8')
-        );
-        sample.comparisons.push({
-          ...comparison,
+      await measureSamples(
+        samples.filter((sample) => sample.format === format),
+        {
           channel,
           version: channel === 'published' ? versions[format] : undefined,
           renderer_source_commit: channel === 'commit' ? commit : undefined,
-        });
-        console.log(`${sample.id} ${channel}: ${comparison.penalized_ssim.toFixed(4)}`);
-      }
+        },
+        {
+          capture: (sample) =>
+            command(
+              process.execPath,
+              [
+                'scripts/docx-quality/browser-task.mjs',
+                sample.source,
+                resolve(sample.directory, channel),
+                'cdn',
+                `${server.url}/?format=${format}`,
+              ],
+              {
+                env: {
+                  ...process.env,
+                  QUALITY_CAPTURE_CONFIG: JSON.stringify(sample.capture_profile),
+                  QUALITY_ENGINE_LABEL:
+                    channel === 'published'
+                      ? `@betteroffice/${format}@${versions[format]}${
+                          reactVersion ? `; @betteroffice/docx-react@${reactVersion}` : ''
+                        }`
+                      : commit,
+                },
+              }
+            ),
+          compare: async (sample) => {
+            const difference = resolve(sample.directory, `${channel}-diff`);
+            await command(python, [
+              'scripts/office-quality/compare.py',
+              resolve(sample.directory, 'reference'),
+              resolve(sample.directory, channel),
+              '--out',
+              difference,
+            ]);
+            return JSON.parse(await readFile(resolve(difference, 'score.json'), 'utf8'));
+          },
+        }
+      );
     } finally {
       server.child.kill();
     }

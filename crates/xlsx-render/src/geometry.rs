@@ -60,7 +60,7 @@ impl PrintMetrics {
             && (1.0..=409.0).contains(&self.default_row_height_pt)
             && self
                 .default_column_width
-                .is_none_or(|w| w.is_finite() && w > 0.0 && w <= 255.0)
+                .is_none_or(|w| (0.0..=255.0).contains(&w))
             && (1.0..=409.0).contains(&self.font_size_pt)
             && (0.0..=4096.0).contains(&self.font_ascent)
             && (0.0..=4096.0).contains(&self.font_descent)
@@ -186,6 +186,8 @@ impl GridGeometry {
         if x < last_edge {
             let idx = self.col_x.partition_point(|&edge| edge <= x);
             idx.saturating_sub(1) as ColId
+        } else if self.default_col_px == 0.0 {
+            self.n_cols
         } else {
             let extra = ((x - last_edge) / self.default_col_px).max(0.0) as ColId;
             self.n_cols + extra
@@ -282,5 +284,37 @@ mod tests {
         let (rows, cols) = g.viewport_range(&vp);
         assert_eq!(cols, 1..4);
         assert_eq!(rows, 2..4);
+    }
+
+    #[test]
+    fn hidden_default_columns_preserve_visible_spans_and_end_at_the_sized_prefix() {
+        let g = GridGeometry::with_sizes(
+            &sheet_with(&[(1, 12.0), (3, 10.0), (4, 0.0)], &[]),
+            0.0,
+            20.0,
+            col_chars_to_px,
+        );
+        let first_width = col_chars_to_px(12.0);
+        let total_width = first_width + col_chars_to_px(10.0);
+        assert_eq!(g.col_x(1), 0.0);
+        assert_eq!(g.col_x(2), first_width);
+        assert_eq!(g.col_x(3), first_width);
+        assert_eq!(g.col_x(16_384), total_width);
+        assert_eq!(g.col_at_x(-1.0), 0);
+        assert_eq!(g.col_at_x(0.0), 1);
+        assert_eq!(g.col_at_x(first_width), 3);
+        assert_eq!(g.col_at_x(total_width - 0.01), 3);
+        assert_eq!(g.col_at_x(total_width), 5);
+        assert_eq!(g.col_at_x(total_width + 100.0), 5);
+        assert_eq!(
+            g.viewport_range(&Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: total_width + 100.0,
+                height: 20.0,
+            })
+            .1,
+            1..6
+        );
     }
 }
