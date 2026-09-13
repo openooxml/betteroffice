@@ -299,6 +299,16 @@ fn lower_story<T: ReadTxn>(
                         });
                     }
                     let kind = shared_map_string(&page_break, txn, "_kind").unwrap_or_default();
+                    if kind == "pageBreak"
+                        && let Some(LayoutBlock::Paragraph(paragraph)) = blocks.last_mut()
+                        && paragraph.runs.is_empty()
+                        && paragraph.pm_end == Some(pm_cursor as f64)
+                        && paragraph.pm_end == paragraph.pm_start.map(|start| start + 2.0)
+                        && let Some(attrs) = paragraph.attrs.as_mut()
+                        && attrs.list_marker.is_some()
+                    {
+                        attrs.list_marker_hidden = Some(true);
+                    }
                     let id = BlockId::Str(format!("{story_id}:{kind}:{story_index}"));
                     if kind == "columnBreak" {
                         blocks.push(LayoutBlock::ColumnBreak(ColumnBreakBlock {
@@ -3868,6 +3878,70 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn page_break_only_list_paragraphs_hide_the_marker_until_text_is_added() {
+        for kind in ["pageBreak", "columnBreak"] {
+            let doc = EditingDoc::new(43);
+            doc.create_story("body", "", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![
+                    RawOp::Delete { index: 0, len: 1 },
+                    RawOp::InsertEmbed {
+                        index: 0,
+                        kind: "pilcrow".to_owned(),
+                        payload: vec![("listMarker".to_owned(), Any::from("2."))],
+                        attrs: Attrs::new(),
+                    },
+                    RawOp::InsertEmbed {
+                        index: 1,
+                        kind: "pilcrow".to_owned(),
+                        payload: vec![("listMarker".to_owned(), Any::from("■"))],
+                        attrs: Attrs::new(),
+                    },
+                    RawOp::InsertEmbed {
+                        index: 2,
+                        kind: kind.to_owned(),
+                        payload: Vec::new(),
+                        attrs: Attrs::new(),
+                    },
+                ],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+
+            let lower = || {
+                serde_json::to_value(
+                    yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap(),
+                )
+                .unwrap()
+            };
+            let blocks = lower();
+            assert_eq!(blocks[2]["kind"], kind);
+            assert_eq!(blocks[0]["attrs"]["listMarker"], "2.");
+            assert_ne!(blocks[0]["attrs"]["listMarkerHidden"], true);
+            assert_eq!(blocks[1]["attrs"]["listMarker"], "■");
+            assert_eq!(
+                blocks[1]["attrs"]["listMarkerHidden"] == true,
+                kind == "pageBreak"
+            );
+
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::Insert {
+                    index: 1,
+                    text: "Item".to_owned(),
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = lower();
+            assert_eq!(blocks[1]["attrs"]["listMarker"], "■");
+            assert_ne!(blocks[1]["attrs"]["listMarkerHidden"], true);
+        }
     }
 
     #[test]
