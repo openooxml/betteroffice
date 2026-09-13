@@ -1360,7 +1360,9 @@ fn table_cell_block_height(block: &LayoutBlock, measure: &BlockExtent) -> f64 {
     let image_height = non_empty
         .iter()
         .filter_map(|run| match run {
-            Run::Image(image) => Some(image.height),
+            Run::Image(image) => {
+                Some(rotation_bound(&image.rotation_bounds, "height").unwrap_or(image.height))
+            }
             _ => None,
         })
         .fold(0.0_f64, f64::max);
@@ -1543,6 +1545,47 @@ mod tests {
             assert_eq!(measured.rows[0].height, expected);
             assert_eq!(measured.rows[0].cells[0].height, content as f64 + 15.0);
         }
+    }
+
+    #[test]
+    fn rotated_image_only_cells_use_the_visual_height() {
+        for (rotation, expected) in [(None, 102.0), (Some(90), 52.0), (Some(270), 52.0)] {
+            let bounds = rotation.map(|_| json!({"width":80,"height":30}));
+            let mut table: TableBlock = serde_json::from_value(json!({
+                "id":"table", "columnWidths":[100],
+                "rows":[{"id":"row", "cells":[{
+                    "id":"cell", "padding":{"top":5,"bottom":7,"left":0,"right":0},
+                    "blocks":[{"kind":"paragraph","id":"paragraph",
+                        "attrs":{"spacing":{"before":4,"after":6}},
+                        "runs":[{"kind":"image","src":"","width":30,"height":80,
+                            "rotationDeg":rotation,"rotationBounds":bounds}]}]
+                }]}]
+            }))
+            .unwrap();
+            let measured = measure_table(&mut table, 100.0, &MeasurementConfig::default()).unwrap();
+            assert_eq!(measured.rows[0].height, expected);
+            assert_eq!(measured.rows[0].cells[0].height, expected);
+        }
+    }
+
+    #[test]
+    fn rotated_images_mixed_with_text_keep_the_measured_line_height() {
+        let block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"paragraph","id":"paragraph","runs":[
+                {"kind":"text","text":"label"},
+                {"kind":"image","src":"","width":30,"height":80,
+                    "rotationDeg":270,"rotationBounds":{"width":80,"height":30}}
+            ]
+        }))
+        .unwrap();
+        let measure: BlockExtent = serde_json::from_value(json!({
+            "kind":"paragraph","totalHeight":44,"lines":[{
+                "headRun":0,"headChar":0,"tailRun":1,"tailChar":1,
+                "width":90,"ascent":30,"descent":4,"lineHeight":44
+            }]
+        }))
+        .unwrap();
+        assert_eq!(table_cell_block_height(&block, &measure), 44.0);
     }
 
     #[test]
