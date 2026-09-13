@@ -36,10 +36,7 @@ test('generates every format and never reuses scores for a different release or 
   expect(section).toContain('| PPTX | [0.0.4]');
   expect(section).toContain('| XLSX | [0.1.0]');
   expect(section).toContain('| — |');
-  expect(section).toContain(
-    '| demo | published | missing | No result for this revision |'
-  );
-  expect(section).toContain('| demo | commit | missing | No result for this revision |');
+  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
 });
 
 test('replaces and moves the generated block without touching other sections', () => {
@@ -79,10 +76,10 @@ test('keeps each format tied to its own published version and comparison', () =>
   }
   const section = renderSection(input);
   expect(section).toMatch(
-    /\| PPTX .*\| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \| 0 \/ 0 \|/
+    /\| PPTX .*\| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
   );
   expect(section).toMatch(
-    /\| XLSX .*\| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \| 0 \/ 0 \|/
+    /\| XLSX .*\| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
   );
 });
 
@@ -101,8 +98,8 @@ test('all failures show no score and cannot carry an invented zero', () => {
   };
   const section = renderSection(failedReport);
   expect(section).not.toContain('0.0000');
-  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \| 1 \/ 1 \|/);
-  expect(section).toContain('| demo | published | capture | Could not render |');
+  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
+  expect(section).not.toContain('Could not render');
   expect(() =>
     renderSection({
       ...failedReport,
@@ -113,7 +110,7 @@ test('all failures show no score and cannot carry an invented zero', () => {
   ).toThrow('Invalid failed comparison');
 });
 
-test('failure text cannot inject Markdown tables or HTML', () => {
+test('omits failure diagnostics from the README', () => {
   const input = report();
   const failedReport = {
     ...input,
@@ -137,8 +134,8 @@ test('failure text cannot inject Markdown tables or HTML', () => {
   expect(section).not.toContain('<script>');
   expect(section).not.toContain('https://example.com');
   expect(section).not.toContain('extra row');
-  expect(section).toContain('&#124;');
-  expect(section).toContain('\\[link\\]');
+  expect(section).not.toContain('Failed or missing');
+  expect(section).not.toContain('| Sample | Channel | Stage | Error |');
 });
 
 test('duplicate and invalid successful comparisons cannot be published', () => {

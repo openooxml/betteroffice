@@ -23,7 +23,7 @@ The runner compares the latest npm releases with the checked-out source using pi
 
 Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
 
-Capture and comparison failures are recorded per sample and channel without stopping the remaining samples. The report and generated README include scored/total coverage and concise failure reasons. Failed comparisons have no SSIM and are excluded from the means; differing coverage can make channel means incomparable. Source/reference metadata, downloads, and hash validation still fail the run before capture. Invalid successful comparison records cannot be published.
+Capture and comparison failures are recorded per sample and channel without stopping the remaining samples. The report includes scored/total coverage and concise failure reasons; the generated README shows scores and coverage. Failed comparisons have no SSIM and are excluded from the means; differing coverage can make channel means incomparable. Source/reference metadata, downloads, and hash validation still fail the run before capture. Invalid successful comparison records cannot be published.
 
 XLSX capture uses `printDisplayList` when available, with font metrics measured
 at 72 layout DPI for the frozen Mac Office capture and the worksheet's explicit defaults.

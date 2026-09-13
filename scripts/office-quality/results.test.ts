@@ -80,12 +80,10 @@ test('capture and comparison failures preserve later samples and the other chann
   };
   const section = renderSection(JSON.parse(JSON.stringify(report)));
   expect(section).toMatch(
-    /\| XLSX .*\| 0\.8000 \| 1\/3 .*\| 0\.8000 \| 3\/3 \| 2 \/ 0 \|/
+    /\| XLSX .*\| 0\.8000 \| 1\/3 .*\| 0\.8000 \| 3\/3 \|$/m
   );
-  expect(section).toContain('| capture-fails | published | capture | Error: viewport');
-  expect(section).toContain(
-    '| compare-fails | published | compare | compare.py: error: page 1:'
-  );
+  expect(section).not.toContain('capture-fails');
+  expect(section).not.toContain('compare-fails');
   expect(section).not.toContain('/private/');
 });
 
