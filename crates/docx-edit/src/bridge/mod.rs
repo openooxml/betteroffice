@@ -76,6 +76,8 @@ pub struct RenderEnv {
     /// safe-integer range instead, which is stable but not shared with a peer
     /// that numbers the same document differently.
     pub numeric_ids: BTreeMap<String, f64>,
+    /// Include hidden text in visible layout without changing the document.
+    pub show_hidden_text: bool,
 }
 
 impl RenderEnv {
@@ -463,7 +465,7 @@ fn lower_story<T: ReadTxn>(
                 {
                     paragraph_runs.push(RawRun {
                         kind: RawRunKind::LineBreak,
-                        formatting: RunFormatting::default(),
+                        formatting: lower_run_formatting(attributes, env),
                         story_start: story_index,
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
@@ -502,6 +504,7 @@ fn lower_story<T: ReadTxn>(
                         formatting: RunFormatting {
                             italic: Some(true),
                             font_family: Some("Cambria Math".to_owned()),
+                            hidden: mark_bool(attributes, "hidden"),
                             // Sentinel consumed by `stamp_logical_order`: a
                             // math fallback run gets no logical order.
                             logical_order: Some(u64::MAX),
@@ -552,6 +555,7 @@ fn lower_story<T: ReadTxn>(
                     paragraph_drawings.push(DrawingMarker {
                         pm_offset,
                         block: LayoutBlock::Shape(block),
+                        hidden: mark_bool(attributes, "hidden") == Some(true),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -575,6 +579,7 @@ fn lower_story<T: ReadTxn>(
                     paragraph_drawings.push(DrawingMarker {
                         pm_offset,
                         block: LayoutBlock::Chart(block),
+                        hidden: mark_bool(attributes, "hidden") == Some(true),
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -1453,7 +1458,7 @@ fn lower_inline_sdt_values(
             "break" => {
                 runs.push(RawRun {
                     kind: RawRunKind::LineBreak,
-                    formatting: RunFormatting::default(),
+                    formatting,
                     story_start: story_index,
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
@@ -1728,6 +1733,7 @@ struct RawRun {
 struct DrawingMarker {
     pm_offset: u32,
     block: LayoutBlock,
+    hidden: bool,
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -1858,7 +1864,7 @@ fn push_text_chunks(
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph_parts<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
-    drawings: Vec<DrawingMarker>,
+    mut drawings: Vec<DrawingMarker>,
     pilcrow: &MapRef,
     pilcrow_attributes: Option<&Attrs>,
     txn: &T,
@@ -1868,8 +1874,18 @@ fn flush_paragraph_parts<T: ReadTxn>(
     paragraph_pm_units: u32,
     list_state: &mut ListState,
 ) -> Vec<LayoutBlock> {
+    if env.show_hidden_text {
+        for run in &mut raw_runs {
+            if run.formatting.hidden == Some(true) {
+                run.formatting.hidden = None;
+            }
+        }
+    } else {
+        raw_runs.retain(|run| run.formatting.hidden != Some(true));
+        drawings.retain(|drawing| !drawing.hidden);
+    }
     if drawings.is_empty() {
-        return vec![LayoutBlock::Paragraph(flush_paragraph(
+        let paragraph = flush_paragraph(
             raw_runs,
             pilcrow,
             pilcrow_attributes,
@@ -1879,7 +1895,19 @@ fn flush_paragraph_parts<T: ReadTxn>(
             paragraph_pm_start,
             paragraph_pm_units,
             list_state,
-        ))];
+        );
+        if !env.show_hidden_text
+            && paragraph.runs.is_empty()
+            && mark_bool(pilcrow_attributes, "hidden").or_else(|| {
+                shared_any(pilcrow, txn, "defaultTextFormatting")
+                    .as_ref()
+                    .and_then(any_map)
+                    .and_then(|defaults| map_bool(defaults, "hidden"))
+            }) == Some(true)
+        {
+            return Vec::new();
+        }
+        return vec![LayoutBlock::Paragraph(paragraph)];
     }
 
     let mut blocks = Vec::new();

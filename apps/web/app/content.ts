@@ -61,7 +61,7 @@ export const EDITORS = [
   {
     name: "Slides",
     format: "pptx",
-    desc: "Slide model, masters and shape editing on the same shared core.",
+    desc: "Slide model, masters and shape editing, with browser rendering of supported bitmap-only WMF images.",
     status: "available",
   },
   {
@@ -82,7 +82,7 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout in Rust, compiled to WebAssembly. Hidden content is omitted by default and can be revealed through the render options.",
   },
   {
     name: "@betteroffice/docx-react",
@@ -98,7 +98,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine. Custom browser image loaders can use presentationImageBlob for supported bitmap-only WMF wrappers.",
   },
   {
     name: "@betteroffice/pptx-react",

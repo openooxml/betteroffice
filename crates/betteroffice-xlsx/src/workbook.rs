@@ -572,7 +572,7 @@ impl Workbook {
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority
-            .apply_update_v1(&commit_update)
+            .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
         self.graph = Some(graph);

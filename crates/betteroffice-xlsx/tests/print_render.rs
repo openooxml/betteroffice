@@ -101,6 +101,62 @@ fn stored_column_width_includes_padding_and_device_rounding() {
 }
 
 #[test]
+fn printing_with_hidden_default_columns_keeps_explicit_columns_visible() {
+    let mut sheet = Sheet::new("Hidden defaults");
+    sheet.col_widths.insert(1, 12.0);
+    sheet.col_widths.insert(3, 13.0);
+    sheet.col_widths.insert(4, 0.0);
+    for col in 0..6 {
+        sheet.set_cell(
+            CellRef::new(0, col),
+            Cell {
+                value: CellValue::Text {
+                    value: format!("Column {col}"),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let mut metrics = metrics();
+    metrics.default_column_width = Some(0.0);
+    let printed = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:F1").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    assert_eq!(printed.width, 200.0);
+    assert!(printed.height > 0.0);
+    let texts: Vec<_> = printed
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            DrawCmd::Text { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, ["Column 1", "Column 3"]);
+    for range in ["A1:A1", "C1:C1", "E1:F1"] {
+        assert!(matches!(
+            workbook.print_display_list(
+                SheetId(0),
+                CellRange::parse_a1(range).unwrap(),
+                &metrics,
+                false,
+            ),
+            Err(Error::InvalidViewport)
+        ));
+    }
+}
+
+#[test]
 fn print_gridlines_are_optional_and_invalid_metrics_are_rejected() {
     let workbook = workbook();
     let range = CellRange::parse_a1("A1:B3").unwrap();
@@ -116,6 +172,14 @@ fn print_gridlines_are_optional_and_invalid_metrics_are_rejected() {
     for dpi in [0.0, -1.0, f32::NAN, f32::INFINITY, 601.0] {
         let mut invalid = metrics();
         invalid.dpi = dpi;
+        assert!(matches!(
+            workbook.print_display_list(SheetId(0), range, &invalid, true),
+            Err(Error::InvalidViewport)
+        ));
+    }
+    for width in [-1.0, f64::NAN, f64::INFINITY, 256.0] {
+        let mut invalid = metrics();
+        invalid.default_column_width = Some(width);
         assert!(matches!(
             workbook.print_display_list(SheetId(0), range, &invalid, true),
             Err(Error::InvalidViewport)

@@ -2,6 +2,7 @@ import {
   initWasm,
   openPresentation,
   paintSlide,
+  presentationImageBlob,
   PRESENCE_LABEL_DURATION_MS,
   sizeCanvasForSlide,
   slideToPng,
@@ -2410,7 +2411,7 @@ async function decodeImage(
   errorMessage: string
 ): Promise<CanvasImageSource | null> {
   if (!bytes) return null;
-  const blob = new Blob([bytes.slice()]);
+  const blob = presentationImageBlob(bytes);
   if (typeof createImageBitmap === 'function') return createImageBitmap(blob);
   const url = URL.createObjectURL(blob);
   try {

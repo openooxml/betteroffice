@@ -1226,6 +1226,13 @@ fn note_ref_unit(
     )
 }
 
+fn hidden_marks(marks: &[Mark]) -> &[Mark] {
+    marks
+        .iter()
+        .find(|mark| mark.name == "hidden")
+        .map_or(&[], std::slice::from_ref)
+}
+
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
@@ -1299,7 +1306,7 @@ fn run_content_to_units(
         "drawing" => vec![embed_unit(
             "image",
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
-            &[],
+            hidden_marks(marks),
             None,
             1,
         )],
@@ -1309,7 +1316,7 @@ fn run_content_to_units(
                 field(Some(content), "shape").unwrap_or(&Value::Null),
                 source,
             ),
-            &[],
+            hidden_marks(marks),
             None,
             1,
         )],
@@ -1319,7 +1326,7 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
-            &[],
+            hidden_marks(marks),
             None,
             1,
         )],
