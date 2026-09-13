@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { cellRect, initWasm, openWorkbook } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
-import { XlsxEditor } from './XlsxEditor';
+import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
 const WASM = resolve(import.meta.dir, '../../xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
 const FIXTURE = resolve(import.meta.dir, '../../xlsx/test-fixtures/sample.xlsx');
@@ -752,5 +752,54 @@ describe('XlsxEditor chart objects', () => {
     // no invisible selection left swallowing the keyboard.
     await waitFor(() => expect(view.outline()).toBeNull());
     await waitFor(() => expect(view.selectionBox()).not.toBeNull());
+  });
+});
+
+describe('XlsxEditor proposal review', () => {
+  it('reviews a staged proposal through accept, undo, reject, stale warning, and force apply', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const workbook = api!.handle;
+    const before = workbook.cell(0, 6, 4).input;
+    const stage = async (input: string) => {
+      await act(async () => {
+        workbook.propose('Audit agent', 'Review this change', [
+          { sheet: 0, row: 6, col: 4, input },
+        ]);
+        api!.refreshProposals();
+      });
+    };
+
+    await stage('12');
+    expect(workbook.cell(0, 6, 4).input).toBe(before);
+    fireEvent.click(view.getByTestId('xlsx-proposals-button'));
+    expect(view.getByTestId('xlsx-proposal').textContent).toContain('Audit agent');
+    fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
+    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('12'));
+    expect(workbook.listProposals()).toHaveLength(0);
+    fireEvent.click(view.getByTestId('xlsx-undo'));
+    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe(before));
+
+    await stage('24');
+    fireEvent.click(view.getByTestId('xlsx-proposal-reject'));
+    await waitFor(() => expect(workbook.listProposals()).toHaveLength(0));
+    expect(workbook.cell(0, 6, 4).input).toBe(before);
+
+    await stage('42');
+    await act(async () => {
+      workbook.editCell(0, 6, 4, '99');
+      api!.refreshProposals();
+    });
+    fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
+    await waitFor(() =>
+      expect(view.getByTestId('xlsx-proposal-stale').textContent).toContain('E7')
+    );
+    expect(workbook.cell(0, 6, 4).input).toBe('99');
+    fireEvent.click(view.getByTestId('xlsx-proposal-force'));
+    await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('42'));
+    expect(workbook.listProposals()).toHaveLength(0);
   });
 });
