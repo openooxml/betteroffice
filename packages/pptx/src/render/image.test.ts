@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { presentationImageBlob } from './image';
 
-function record(command: number, payload: Uint8Array): Uint8Array {
+function record(command: number, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(6 + payload.length);
   const view = new DataView(bytes.buffer);
   view.setUint32(0, bytes.length / 2, true);
@@ -10,14 +10,14 @@ function record(command: number, payload: Uint8Array): Uint8Array {
   return bytes;
 }
 
-function words(...values: number[]): Uint8Array {
+function words(...values: number[]): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(values.length * 2);
   const view = new DataView(bytes.buffer);
   values.forEach((value, index) => view.setInt16(index * 2, value, true));
   return bytes;
 }
 
-function metafile(records: Uint8Array[], placeable = false): Uint8Array {
+function metafile(records: Uint8Array[], placeable = false): Uint8Array<ArrayBuffer> {
   const start = placeable ? 22 : 0;
   const bytes = new Uint8Array(start + 18 + records.reduce((sum, item) => sum + item.length, 0));
   const view = new DataView(bytes.buffer);
@@ -34,7 +34,7 @@ function metafile(records: Uint8Array[], placeable = false): Uint8Array {
   return bytes;
 }
 
-function bitmapRecord(): Uint8Array {
+function bitmapRecord(): Uint8Array<ArrayBuffer> {
   const payload = new Uint8Array(20 + 40 + 16);
   const view = new DataView(payload.buffer);
   view.setUint32(0, 0x00cc0020, true);
@@ -52,7 +52,7 @@ function bitmapRecord(): Uint8Array {
   return record(0x0b41, payload);
 }
 
-function bitmapMetafile(bitmap = bitmapRecord(), extras: Uint8Array[] = [], placeable = false): Uint8Array {
+function bitmapMetafile(bitmap = bitmapRecord(), extras: Uint8Array[] = [], placeable = false): Uint8Array<ArrayBuffer> {
   return metafile([
     record(0x0103, words(8)),
     record(0x020c, words(-2, 2)),
