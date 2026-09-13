@@ -828,7 +828,7 @@ impl Workbook {
         let number_format = uniform(number_formats.iter().map(|(kind, _)| *kind));
         let number_format_pattern =
             uniform(number_formats.iter().map(|(_, pattern)| pattern.clone())).flatten();
-        let theme = &self.model.styles.theme;
+        let styles = &self.model.styles;
         Ok(SelectionFormatting {
             number_format,
             number_format_pattern,
@@ -850,14 +850,14 @@ impl Workbook {
                     .font
                     .color
                     .as_ref()
-                    .and_then(|color| color.resolve(theme))
+                    .and_then(|color| styles.resolve_color(color))
                     .unwrap_or_else(|| "#000000".into())
                     .to_ascii_lowercase()
             })),
             fill_color: uniform(formats.iter().map(|(_, format)| {
                 match &format.fill {
-                    Fill::Solid(color) => color
-                        .resolve(theme)
+                    Fill::Solid(color) => styles
+                        .resolve_color(color)
                         .unwrap_or_else(|| "#ffffff".into())
                         .to_ascii_lowercase(),
                     Fill::None => "#ffffff".into(),
@@ -868,7 +868,7 @@ impl Workbook {
             border_color: uniform_border_value(&formats, |edge| {
                 edge.color
                     .as_ref()
-                    .and_then(|color| color.resolve(theme))
+                    .and_then(|color| styles.resolve_color(color))
                     .unwrap_or_else(|| "#000000".into())
                     .to_ascii_lowercase()
             }),

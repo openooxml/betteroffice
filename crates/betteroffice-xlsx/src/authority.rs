@@ -150,6 +150,20 @@ impl WorkbookBase {
                 }
             }
         }
+        if !model.styles.indexed_colors.is_empty() {
+            let mut legacy_model = model.clone();
+            legacy_model.styles.indexed_colors.clear();
+            let legacy_base =
+                Self::from_model_with_legacy_dimensions(&legacy_model, legacy_dimensions)?;
+            for (version, legacy_fingerprints) in legacy_base.fingerprints {
+                let accepted = fingerprints.entry(version).or_default();
+                for fingerprint in legacy_fingerprints {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
+                }
+            }
+        }
         Ok(Self {
             bootstrap_client_id,
             date_system: model.date_system,
@@ -3486,6 +3500,27 @@ mod tests {
             left.encode_state_as_update_v1(),
             right.encode_state_as_update_v1()
         );
+    }
+
+    #[test]
+    fn indexed_palettes_survive_legacy_snapshots_and_distinguish_current_bases() {
+        let mut model = rich_model();
+        let legacy = WorkbookAuthority::from_model_with_client_id(&model, 11).unwrap();
+        model.styles.indexed_colors = vec!["#123456".into(); 64];
+        let current = WorkbookAuthority::from_model_with_client_id(&model, 12).unwrap();
+        let SnapshotAdoption::Replacement(restored) =
+            current.snapshot_replacement(&legacy.encode_state_as_update_v1())
+        else {
+            panic!("legacy snapshot should retain the source palette");
+        };
+        assert_eq!(restored.materialize().unwrap(), model);
+        let mut other_model = model.clone();
+        other_model.styles.indexed_colors[2] = "#abcdef".into();
+        let other = WorkbookAuthority::from_model_with_client_id(&other_model, 13).unwrap();
+        assert!(matches!(
+            current.snapshot_replacement(&other.encode_state_as_update_v1()),
+            SnapshotAdoption::Incompatible(_)
+        ));
     }
 
     #[test]

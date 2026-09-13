@@ -19,6 +19,79 @@ fn cell(address: &str) -> CellRef {
     CellRef::parse_a1(address).unwrap()
 }
 
+#[test]
+fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
+    let mut model = WorkbookModel::default();
+    model.styles.indexed_colors = vec!["#123456".into(), "#5e88b1".into(), "#99cc00".into()];
+    let format = xlsx_model::CellFormat {
+        font: xlsx_model::Font {
+            color: Some(xlsx_model::Color::Indexed(2)),
+            ..Default::default()
+        },
+        fill: xlsx_model::Fill::Solid(xlsx_model::Color::Indexed(1)),
+        border: xlsx_model::Border {
+            bottom: Some(xlsx_model::BorderEdge {
+                style: xlsx_model::BorderStyle::Thin,
+                color: Some(xlsx_model::Color::Indexed(0)),
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let style = model.styles.intern_cell_format(&format).unwrap();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            style,
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let mut workbook = Workbook::from_model_collaborative(model.clone(), 11).unwrap();
+    let mut peer = Workbook::from_model_collaborative(model, 12).unwrap();
+    let before = peer.encode_state_vector_v1();
+    workbook
+        .edit_cell(SheetId(0), cell("A1"), "2", CalculationOptions::default())
+        .unwrap();
+    peer.apply_update_v1(
+        &workbook.encode_diff_v1(&before).unwrap(),
+        CalculationOptions::default(),
+    )
+    .unwrap();
+    assert_eq!(workbook.model(), peer.model());
+    let saved = Workbook::open(&workbook.save().unwrap()).unwrap();
+    for workbook in [&workbook, &peer, &saved] {
+        let selection = workbook
+            .selection_formatting(SheetId(0), CellRange::new(cell("A1"), cell("A1")))
+            .unwrap();
+        assert_eq!(selection.fill_color.as_deref(), Some("#5e88b1"));
+        assert_eq!(selection.text_color.as_deref(), Some("#99cc00"));
+        assert_eq!(selection.border_color.as_deref(), Some("#123456"));
+        let list = workbook
+            .display_list(&Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: 200.0,
+                height: 100.0,
+            })
+            .unwrap();
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::FillRect { color, .. } if color == "#5e88b1"))
+        );
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, DrawCmd::Text { text, color, .. } if text == "2" && color == "#99cc00")));
+        assert!(
+            list.commands
+                .iter()
+                .any(|cmd| matches!(cmd, DrawCmd::Line { color, .. } if color == "#123456"))
+        );
+        assert_eq!(workbook.model().styles.cell_format(style), format);
+    }
+}
+
 fn sample_parts() -> Vec<(String, Vec<u8>)> {
     let mut sheet = Sheet::new("Data");
     sheet.set_cell(

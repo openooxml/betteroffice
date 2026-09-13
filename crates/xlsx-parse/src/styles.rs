@@ -54,10 +54,23 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
     let mut border: Option<Border> = None;
     let mut edge: Option<(u8, BorderEdge)> = None;
     let mut xf: Option<Xf> = None;
+    let mut colors_depth = None;
+    let mut indexed_colors_depth = None;
 
     loop {
         match next_event(&mut reader, &mut buf, &mut depth)? {
             Event::Start(e) => match local_name(&e).as_slice() {
+                b"colors" if depth == 2 => colors_depth = Some(depth),
+                b"indexedColors" if colors_depth == Some(depth - 1) => {
+                    indexed_colors_depth = Some(depth);
+                }
+                b"rgbColor" if indexed_colors_depth == Some(depth - 1) => {
+                    cap(ss.indexed_colors.len())?;
+                    let rgb = attr(&e, b"rgb")?
+                        .and_then(|value| normalize_rgb(&value))
+                        .ok_or_else(|| ParseError::Xml("invalid indexed palette color".into()))?;
+                    ss.indexed_colors.push(rgb);
+                }
                 b"numFmts" => section = Section::None,
                 b"fonts" => section = Section::Fonts,
                 b"fills" => section = Section::Fills,
@@ -123,6 +136,10 @@ fn parse_styles(data: &[u8]) -> Result<Stylesheet, ParseError> {
                 _ => {}
             },
             Event::End(e) => match e.name().local_name().as_ref() {
+                b"colors" if colors_depth == Some(depth + 1) => colors_depth = None,
+                b"indexedColors" if indexed_colors_depth == Some(depth + 1) => {
+                    indexed_colors_depth = None;
+                }
                 b"font" => {
                     if let Some(f) = font.take() {
                         cap(ss.fonts.len())?;
@@ -276,7 +293,7 @@ fn parse_color(e: &BytesStart) -> Result<Option<Color>, ParseError> {
 fn normalize_rgb(v: &str) -> Option<String> {
     let hex = v.trim();
     let rgb = match hex.len() {
-        8 => &hex[2..],
+        8 => hex.get(2..)?,
         6 => hex,
         _ => return None,
     };

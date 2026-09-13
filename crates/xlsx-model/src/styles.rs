@@ -458,6 +458,8 @@ pub struct Stylesheet {
     pub cell_xfs: Vec<Xf>,
     pub num_fmts: Vec<(u16, String)>,
     pub theme: Theme,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub indexed_colors: Vec<String>,
     #[serde(skip)]
     font_memo: PoolMemo,
     #[serde(skip)]
@@ -478,6 +480,7 @@ impl PartialEq for Stylesheet {
             && self.cell_xfs == other.cell_xfs
             && self.num_fmts == other.num_fmts
             && self.theme == other.theme
+            && self.indexed_colors == other.indexed_colors
     }
 }
 
@@ -546,6 +549,16 @@ const DEFAULT_ALIGNMENT: Alignment = Alignment {
 };
 
 impl Stylesheet {
+    /// Resolve a color using this workbook's indexed palette and theme.
+    pub fn resolve_color(&self, color: &Color) -> Option<String> {
+        if let Color::Indexed(index @ 0..=63) = color
+            && let Some(rgb) = self.indexed_colors.get(*index as usize)
+        {
+            return Some(rgb.clone());
+        }
+        color.resolve(&self.theme)
+    }
+
     /// true when no style data is present, so the serializer skips the part.
     pub fn is_empty(&self) -> bool {
         self.fonts.is_empty()
@@ -554,6 +567,7 @@ impl Stylesheet {
             && self.cell_xfs.is_empty()
             && self.num_fmts.is_empty()
             && self.theme == Theme::default()
+            && self.indexed_colors.is_empty()
     }
 
     /// the `Xf` a cell's `s` index selects.
@@ -1128,6 +1142,28 @@ mod tests {
             Some("#123456")
         );
         assert_eq!(Color::Auto.resolve(&t), None);
+    }
+
+    #[test]
+    fn workbook_indexed_palettes_override_only_palette_colors() {
+        let legacy = serde_json::to_string(&Stylesheet::default()).unwrap();
+        assert!(!legacy.contains("indexed_colors"));
+        let mut styles: Stylesheet = serde_json::from_str(&legacy).unwrap();
+        assert!(styles.indexed_colors.is_empty());
+        styles.indexed_colors = vec!["#123456".into(); 66];
+        assert!(!styles.is_empty());
+        assert_eq!(
+            styles.resolve_color(&Color::Indexed(2)).as_deref(),
+            Some("#123456")
+        );
+        assert_eq!(styles.resolve_color(&Color::Indexed(64)), None);
+        assert_eq!(styles.resolve_color(&Color::Indexed(65)), None);
+        assert_eq!(styles.resolve_color(&Color::Auto), None);
+        styles.indexed_colors.clear();
+        assert_eq!(
+            styles.resolve_color(&Color::Indexed(2)).as_deref(),
+            Some("#ff0000")
+        );
     }
 
     #[test]

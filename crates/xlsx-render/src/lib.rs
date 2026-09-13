@@ -14,7 +14,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
-use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet, Theme};
+use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{
@@ -512,7 +512,7 @@ where
         let Some(Fill::Solid(color)) = styles.fill_for(style) else {
             continue;
         };
-        let Some(hex) = color.resolve(theme) else {
+        let Some(hex) = styles.resolve_color(color) else {
             continue;
         };
         let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
@@ -576,7 +576,6 @@ where
             &cols,
             sheet_ref,
             styles,
-            theme,
             at,
             border,
         );
@@ -980,7 +979,7 @@ fn cell_display_text(
         .color
         .or_else(|| {
             font.and_then(|f| f.color.as_ref())
-                .and_then(|c| c.resolve(&styles.theme))
+                .and_then(|c| styles.resolve_color(c))
         })
         .unwrap_or_else(|| TEXT_COLOR.to_string());
     Some((formatted.text, color))
@@ -1083,7 +1082,6 @@ fn emit_borders(
     cols: &AxisLayout,
     sheet: &Sheet,
     styles: &Stylesheet,
-    theme: &Theme,
     at: CellRef,
     border: &Border,
 ) {
@@ -1103,27 +1101,27 @@ fn emit_borders(
         && y >= clip.y
         && y <= clip_y2
     {
-        commands.push(border_line(clip.x, y, clip_x2, y, edge, theme));
+        commands.push(border_line(clip.x, y, clip_x2, y, edge, styles));
     }
     if let Some(edge) = &border.left
         && x >= clip.x
         && x <= clip_x2
     {
-        commands.push(border_line(x, clip.y, x, clip_y2, edge, theme));
+        commands.push(border_line(x, clip.y, x, clip_y2, edge, styles));
     }
     if let Some(edge) = &border.bottom
         && y2 >= clip.y
         && y2 <= clip_y2
         && !neighbor_edge(sheet, styles, end_row + 1, at.col, |b| b.top.is_some())
     {
-        commands.push(border_line(clip.x, y2, clip_x2, y2, edge, theme));
+        commands.push(border_line(clip.x, y2, clip_x2, y2, edge, styles));
     }
     if let Some(edge) = &border.right
         && x2 >= clip.x
         && x2 <= clip_x2
         && !neighbor_edge(sheet, styles, at.row, end_col + 1, |b| b.left.is_some())
     {
-        commands.push(border_line(x2, clip.y, x2, clip_y2, edge, theme));
+        commands.push(border_line(x2, clip.y, x2, clip_y2, edge, styles));
     }
 }
 
@@ -1144,12 +1142,19 @@ fn neighbor_edge(
 
 /// one border edge as a `Line`, mapping the weight to a stroke width and dash
 /// style; an unset edge color resolves to black, matching excel's automatic color.
-fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &BorderEdge, theme: &Theme) -> DrawCmd {
+fn border_line(
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    edge: &BorderEdge,
+    styles: &Stylesheet,
+) -> DrawCmd {
     let (width, style) = border_stroke(edge.style);
     let color = edge
         .color
         .as_ref()
-        .and_then(|c| c.resolve(theme))
+        .and_then(|c| styles.resolve_color(c))
         .unwrap_or_else(|| BORDER_COLOR.to_string());
     DrawCmd::Line {
         x1,

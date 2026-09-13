@@ -2880,6 +2880,7 @@ fn styles_xml_with_namespace(ss: &Stylesheet, main_namespace: &str) -> Result<Ve
                 write_fills(w, ss)?;
                 write_borders(w, ss)?;
                 write_cell_xfs(w, ss)?;
+                write_colors(w, ss)?;
                 Ok(())
             })?;
         Ok(())
@@ -2980,16 +2981,53 @@ fn styles_xml_with_template(
         write_xf,
         || fragment(|writer| write_cell_xfs(writer, stylesheet)),
     )?;
-    template.render(
-        vec![
-            ("numFmts", num_fmts),
-            ("fonts", fonts),
-            ("fills", fills),
-            ("borders", borders),
-            ("cellXfs", cell_xfs),
-        ],
-        stylesheet_child_rank,
-    )
+    let mut replacements = vec![
+        ("numFmts", num_fmts),
+        ("fonts", fonts),
+        ("fills", fills),
+        ("borders", borders),
+        ("cellXfs", cell_xfs),
+    ];
+    if stylesheet.indexed_colors != original.indexed_colors {
+        let colors = match template.child("colors") {
+            Some(source) => {
+                let colors = XmlTemplate::capture(&source.bytes)?;
+                let indexed = if stylesheet.indexed_colors.is_empty() {
+                    None
+                } else {
+                    Some(fragment(|writer| write_indexed_colors(writer, stylesheet))?)
+                };
+                Some(colors.render(vec![("indexedColors", indexed)], |name| {
+                    if name == "indexedColors" { 0 } else { 1 }
+                })?)
+            }
+            None if stylesheet.indexed_colors.is_empty() => None,
+            None => Some(fragment(|writer| write_colors(writer, stylesheet))?),
+        };
+        replacements.push(("colors", colors));
+    }
+    template.render(replacements, stylesheet_child_rank)
+}
+
+fn write_colors(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
+    if !ss.indexed_colors.is_empty() {
+        w.create_element("colors")
+            .write_inner_content(|w| write_indexed_colors(w, ss))?;
+    }
+    Ok(())
+}
+
+fn write_indexed_colors(w: &mut Writer<Vec<u8>>, ss: &Stylesheet) -> io::Result<()> {
+    w.create_element("indexedColors").write_inner_content(|w| {
+        for rgb in &ss.indexed_colors {
+            let rgb = format!("FF{}", rgb.trim_start_matches('#').to_ascii_uppercase());
+            w.create_element("rgbColor")
+                .with_attribute(("rgb", rgb.as_str()))
+                .write_empty()?;
+        }
+        Ok(())
+    })?;
+    Ok(())
 }
 
 fn stylesheet_child_rank(name: &str) -> usize {

@@ -630,6 +630,92 @@ const STYLED: &str = r#"
 "#;
 
 #[test]
+fn indexed_palettes_round_trip_and_preserve_other_color_metadata() {
+    let palette = r#"<colors><indexedColors><rgbColor rgb="00000000"/><rgbColor rgb="FF5E88B1"/><rgbColor rgb="FF99CC00"/></indexedColors><mruColors><color rgb="FF123456"/></mruColors></colors>"#;
+    let source = package_styled("<sheetData/>", Some(palette), None);
+    let parsed = parse_workbook_with_package(&source).unwrap();
+    assert_eq!(
+        parsed.workbook.styles.indexed_colors,
+        ["#000000", "#5e88b1", "#99cc00"]
+    );
+    assert_eq!(
+        parsed
+            .workbook
+            .styles
+            .resolve_color(&Color::Indexed(1))
+            .as_deref(),
+        Some("#5e88b1")
+    );
+    let fresh = parse_workbook(&serialize_workbook(&parsed.workbook).unwrap()).unwrap();
+    assert_eq!(fresh.styles, parsed.workbook.styles);
+
+    let mut edited = parsed.workbook.clone();
+    edited.styles.fonts.push(xlsx_model::Font::default());
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(String::from_utf8_lossy(styles).contains(palette));
+
+    edited.styles.indexed_colors[1] = "#abcdef".into();
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(
+        String::from_utf8_lossy(styles)
+            .contains(r#"<mruColors><color rgb="FF123456"/></mruColors>"#)
+    );
+    assert_eq!(parse_workbook(&saved).unwrap().styles, edited.styles);
+
+    edited.styles.indexed_colors.clear();
+    let saved = serialize_workbook_with_package(&edited, &parsed.package).unwrap();
+    let styles = &saved
+        .iter()
+        .find(|(name, _)| name == "xl/styles.xml")
+        .unwrap()
+        .1;
+    assert!(!String::from_utf8_lossy(styles).contains("indexedColors"));
+    assert!(String::from_utf8_lossy(styles).contains("mruColors"));
+    assert!(
+        parse_workbook(&saved)
+            .unwrap()
+            .styles
+            .indexed_colors
+            .is_empty()
+    );
+}
+
+#[test]
+fn indexed_palettes_are_scoped_bounded_and_reject_invalid_entries() {
+    let ignored = r#"<extLst><ext><colors><indexedColors><rgbColor rgb="FF123456"/></indexedColors></colors></ext></extLst>"#;
+    assert!(
+        parse_workbook(&package_styled("<sheetData/>", Some(ignored), None))
+            .unwrap()
+            .styles
+            .indexed_colors
+            .is_empty()
+    );
+    for value in ["", "FFGGGGGG", "😀1234"] {
+        let styles =
+            format!(r#"<colors><indexedColors><rgbColor rgb="{value}"/></indexedColors></colors>"#);
+        assert!(parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)).is_err());
+    }
+    let styles = format!(
+        "<colors><indexedColors>{}</indexedColors></colors>",
+        r#"<rgbColor rgb="FF123456"/>"#.repeat(crate::MAX_STYLE_ENTRIES + 1)
+    );
+    assert!(matches!(
+        parse_workbook(&package_styled("<sheetData/>", Some(&styles), None)),
+        Err(ParseError::TooManyStyles)
+    ));
+}
+
+#[test]
 fn parses_full_styled_workbook() {
     let body = r#"<sheetData><row r="1"><c r="A1" s="1"><v>3.5</v></c></row></sheetData>"#;
     let wb = parse_workbook(&package_styled(body, Some(STYLED), None)).unwrap();
