@@ -299,6 +299,27 @@ fn apply_paragraph_attr_projection(
         }
         set_or_remove(txn, map, key, Some(value.clone()));
     }
+    if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+        let mut original = (*original).clone();
+        for key in [
+            "spaceBefore",
+            "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
+        ] {
+            match attrs.get(key) {
+                Some(value) if *value != Any::Null => {
+                    original.insert(key.to_owned(), value.clone());
+                }
+                _ => {
+                    original.remove(key);
+                }
+            }
+        }
+        map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
+    }
     Ok(())
 }
 

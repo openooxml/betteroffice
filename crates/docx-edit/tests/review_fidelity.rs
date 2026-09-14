@@ -755,3 +755,103 @@ fn line_unit_paragraph_spacing_yields_to_twip_edits_and_round_trips() {
     assert_eq!(blocks[0]["attrs"]["spacing"]["before"], 0.0);
     assert_eq!(blocks[0]["attrs"]["spacing"]["after"], 8.0);
 }
+
+#[test]
+fn line_unit_paragraph_spacing_style_changes_round_trip() {
+    use docx_edit::{EditCtx, ParaSelector, ResolvedStyleProjection};
+    let body = r#"<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:beforeLines="100" w:afterLines="50" w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr><w:r><w:t>Styled spacing</w:t></w:r></w:p>"#;
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>"#;
+    let engine = EngineSession::new(74235);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    for (attrs, expected_before, expected_after) in [
+        (
+            json!({"spaceBefore":0,"spaceAfter":120,"spaceAfterLines":75,"afterAutospacing":false}),
+            0.0,
+            12.0,
+        ),
+        (json!({}), 0.0, 0.0),
+    ] {
+        engine
+            .doc()
+            .apply_paragraph_style(
+                &EditCtx::local("", ""),
+                &ParaSelector::One(id.clone()),
+                &ResolvedStyleProjection {
+                    style_id: "Body".into(),
+                    known: true,
+                    paragraph_attrs: serde_json::from_value(attrs.clone()).unwrap(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let blocks: Value = serde_json::from_str(
+            &engine
+                .lower_story_json("body", &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            blocks[0]["attrs"]["spacing"]["before"]
+                .as_f64()
+                .unwrap_or(0.0),
+            expected_before
+        );
+        assert_eq!(
+            blocks[0]["attrs"]["spacing"]["after"]
+                .as_f64()
+                .unwrap_or(0.0),
+            expected_after
+        );
+        let snapshot = engine.doc().paragraphs("body").unwrap().remove(0);
+        let original =
+            serde_json::to_value(snapshot.properties.get("_originalFormatting").unwrap()).unwrap();
+        for key in [
+            "spaceBefore",
+            "spaceAfter",
+            "spaceBeforeLines",
+            "spaceAfterLines",
+            "beforeAutospacing",
+            "afterAutospacing",
+        ] {
+            assert_eq!(original.get(key), attrs.get(key));
+        }
+        let formatting = serde_json::from_value(original).unwrap();
+        let xml = docx_parse::serializer::serialize_paragraph_formatting(
+            Some(&formatting),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let reopened = EngineSession::new(74236);
+        seed_from_docx(
+            reopened.doc(),
+            &document(
+                &format!("<w:p>{xml}<w:r><w:t>Styled spacing</w:t></w:r></w:p>"),
+                styles,
+            ),
+        )
+        .unwrap();
+        let blocks: Value = serde_json::from_str(
+            &reopened
+                .lower_story_json("body", &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            blocks[0]["attrs"]["spacing"]["before"]
+                .as_f64()
+                .unwrap_or(0.0),
+            expected_before
+        );
+        assert_eq!(
+            blocks[0]["attrs"]["spacing"]["after"]
+                .as_f64()
+                .unwrap_or(0.0),
+            expected_after
+        );
+    }
+}
