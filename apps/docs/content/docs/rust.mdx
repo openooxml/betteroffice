@@ -109,9 +109,10 @@ cargo add betteroffice-pptx --features raster
 geometry, images, shaped text, caret data — alongside hit-test metadata, and it
 fails until at least one font face has been registered. With the feature on,
 `render_png` rasterizes a slide straight from the deck, resolving pictures out of
-the package, so only fonts need registering. Yrs edits reach that display list
-but are not projected back into PresentationML, so `save` re-zips the parts it
-retained rather than your edits.
+the package, so only fonts need registering. `save` writes Yrs edits back into
+PresentationML: parts an edit did not touch keep their exact source bytes, and
+edited slides are patched at the XML level so unmodeled markup survives. The ZIP
+container is rebuilt, so the output is not byte-identical to the input.
 
 ## The facades
 

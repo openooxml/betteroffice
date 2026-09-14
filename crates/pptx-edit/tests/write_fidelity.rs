@@ -57,6 +57,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="7" name="Tracked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr spc="300"/><a:t>Wide</a:t></a:r><a:r><a:rPr spc="300" b="1"/><a:t>Caps</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="8" name="Linked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r><a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -682,6 +685,213 @@ fn an_edit_spanning_two_runs_keeps_both_baselines() {
             ("2".to_owned(), Some(-25.0)),
             ("O".to_owned(), None),
         ]
+    );
+}
+
+const LINK_RUN: &str = r#"<a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+const SLIDE_NUMBER_FIELD: &str = r#"<a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#;
+
+fn linked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Linked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn linked_shape_xml(saved: &[u8]) -> String {
+    part_text(&parts(saved), "ppt/slides/slide1.xml")
+        .split(r#"name="Linked""#)
+        .nth(1)
+        .unwrap()
+        .split("</p:sp>")
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn linked_runs(saved: &[u8]) -> Vec<(String, Option<String>, Option<bool>)> {
+    let package = pptx_parse::parse_pptx(saved).unwrap();
+    let shape = package.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Linked" => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    shape.text.as_ref().unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.properties.hyperlink_relationship_id.clone(),
+                run.properties.bold,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_edit_spanning_plain_and_linked_runs_keeps_the_link_and_the_field() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 4).unwrap();
+    session.delete_text(&context(), &story_id, 10, 11).unwrap();
+    session.delete_text(&context(), &story_id, 11, 16).unwrap();
+    session
+        .insert_text(&context(), &story_id, 11, "now", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>See</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the doc</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t> now </a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See".to_owned(), None, None),
+            ("the doc".to_owned(), Some("rId2".to_owned()), None),
+            (" now ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "Seethe doc now 1"
+    );
+}
+
+#[test]
+fn a_field_in_an_edited_span_keeps_its_binding_until_its_text_changes() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 13, 18).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>  </a:t></a:r>"#),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs  1"
+    );
+
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 19, 20).unwrap();
+    session
+        .insert_text(&context(), &story_id, 19, "2", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("<a:fld"), "{shape}");
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>2</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs today 2"
+    );
+}
+
+#[test]
+fn text_typed_at_the_end_of_a_link_stays_linked() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session
+        .insert_text(
+            &context(),
+            &story_id,
+            12,
+            "X",
+            &TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(&format!(
+            r#"{LINK_RUN}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        )),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See ".to_owned(), None, None),
+            ("the docs".to_owned(), Some("rId2".to_owned()), None),
+            ("X".to_owned(), Some("rId2".to_owned()), Some(true)),
+            (" today ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docsX today 1"
+    );
+}
+
+#[test]
+fn deleting_a_linked_run_drops_its_link() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 4, 12).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("hlinkClick"), "{shape}");
+    assert!(
+        shape.contains(
+            r#"<a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        ),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See  today 1"
     );
 }
 
