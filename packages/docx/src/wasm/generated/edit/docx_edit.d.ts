@@ -810,7 +810,8 @@ export class EditSession {
      * table vocabulary the layout engine consumes. `env_json` supplies the
      * document-level values lowering cannot read off the story:
      * `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
-     * "pageContentHeight":number|null,"numericIds":{yrsId: number}}`, all
+     * "pageContentHeight":number|null,"numericIds":{yrsId: number},
+     * "tocStyleIds":[styleId]}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an
      * embed lowering does not support.

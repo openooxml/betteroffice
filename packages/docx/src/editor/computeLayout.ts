@@ -105,7 +105,16 @@ export function buildResidentRegionLayoutRequest(
       watermark: resolvedFinalSectionProperties(document?.package.document)?.watermark,
     },
     notes: { contents },
-    renderEnv,
+    renderEnv: {
+      ...renderEnv,
+      tocStyleIds: [...new Set([
+        ...(renderEnv.tocStyleIds ?? []),
+        ...(document?.package.styles?.styles ?? [])
+          .filter((style) => style.type === 'paragraph' && typeof style.styleId === 'string' && style.styleId &&
+            [style.styleId, style.name].some((name) => /^TOC\s*\d+$/i.test(name ?? '')))
+          .map((style) => style.styleId),
+      ])],
+    },
   };
 }
 

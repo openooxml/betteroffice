@@ -75,10 +75,13 @@ test('requires the requested collection identity and schema', async () => {
 
 test('validates sample IDs, uniqueness, and the 100-sample limit in both selection paths', async () => {
   const hundred = Array.from({ length: 100 }, (_, index) => `sample-${index}`);
-  expect(
-    await selectSamples({ QUALITY_SAMPLES: JSON.stringify(hundred) }, async () => '')
-  ).toEqual(hundred);
-  expect(await selectSamples({}, async () => collection(hundred))).toEqual(hundred);
+  for (const count of [64, 81, 100]) {
+    const ids = hundred.slice(0, count);
+    expect(
+      await selectSamples({ QUALITY_SAMPLES: JSON.stringify(ids) }, async () => '')
+    ).toEqual(ids);
+    expect(await selectSamples({}, async () => collection(ids))).toEqual(ids);
+  }
 
   for (const ids of [
     [],

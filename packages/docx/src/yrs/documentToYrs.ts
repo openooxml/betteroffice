@@ -320,9 +320,20 @@ function runMarks(
   const runStyleFormatting = run.formatting?.styleId
     ? styleResolver?.getRunStyleOwnProperties(run.formatting.styleId)
     : undefined;
-  return formattingToMarks(
+  const marks = formattingToMarks(
     mergeTextFormatting(mergeTextFormatting(styleFormatting, runStyleFormatting), run.formatting)
   );
+  const styleId = run.formatting?.styleId;
+  const styleName = styleId ? styleResolver?.getStyle(styleId)?.name : undefined;
+  if ([styleId, styleName].some((name) => /^(?:Followed)?Hyperlink$/i.test(name ?? ''))) {
+    for (const [property, name] of [['color', 'textColor'], ['underline', 'underline']] as const) {
+      if (run.formatting?.[property] === undefined && runStyleFormatting?.[property] !== undefined) {
+        const mark = marks.find((mark) => mark.name === name);
+        if (mark) mark.attrs.inheritedHyperlink = true;
+      }
+    }
+  }
+  return marks;
 }
 
 function imagePayload(image: Image): Attrs {

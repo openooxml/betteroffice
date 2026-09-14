@@ -3,7 +3,7 @@
   "editor": { "appLabel": "Visio diagram editor", "opening": "Opening diagram…", "noPages": "No pages", "openPrompt": "Open a VSDX file", "toolbarLabel": "Diagram editing tools", "addShape": "Add shape", "deleteShape": "Delete selected", "fillColor": "Fill", "lineColor": "Line", "save": "Download" },
   "pages": { "panelLabel": "Pages", "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}" },
   "statusBar": { "pageList": "Page list", "previousPage": "Previous page", "nextPage": "Next page", "pageTabs": "Page tabs", "addPage": "Add page", "zoomControls": "Zoom controls", "zoomOut": "Zoom out", "zoomIn": "Zoom in", "zoomSlider": "Zoom level", "zoomPercentage": "{zoom}%", "resetZoom": "Reset zoom to 100%", "fitToWindow": "Fit to window" },
-  "shapes": { "selected": "Selected: {name}" },
+  "shapes": { "selected": "Selected: {name}", "editingText": "Editing text of shape {name}" },
   "diagnostics": {
     "heading": "Document notices",
     "integrityHeading": "Content could not be preserved",
@@ -12,10 +12,11 @@
     "fidelity": { "font-substituted": "A font was substituted.", "unsupported-effect": "An effect was rendered differently.", "unsupported-geometry": "A shape was approximated." },
     "unknown": "{category} notice: {code}"
   },
-  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram" },
+  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram", "resizeLocked": "Shape is locked and cannot be resized with handles." },
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",
+    "empty": "No commands here yet",
     "documentName": "Diagram",
     "saved": "Saved",
     "dirty": "Unsaved changes",
@@ -26,6 +27,7 @@
       "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
     }
   },
+  "contextMenu": { "label": "Shape actions" },
   "shapesPanel": {
     "title": "Shapes",
     "collapse": "Collapse Shapes",
@@ -42,20 +44,32 @@
       "ellipse": "Ellipse",
       "rightTriangle": "Right Triangle",
       "triangle": "Triangle",
+      "rotatedTriangle": "Rotated Triangle",
       "pentagon": "Pentagon",
       "hexagon": "Hexagon",
       "heptagon": "Heptagon",
       "octagon": "Octagon",
       "decagon": "Decagon",
+      "cylinder": "Cylinder",
+      "parallelogram": "Parallelogram",
+      "trapezoid": "Trapezoid",
       "diamond": "Diamond",
       "cross": "Cross",
       "chevron": "Chevron",
-      "parallelogram": "Parallelogram",
-      "trapezoid": "Trapezoid",
-      "cylinder": "Cylinder",
       "cube": "Cube",
-      "arc": "Arc",
-      "teardrop": "Teardrop"
+      "teardrop": "Teardrop",
+      "semicircle": "Semicircle",
+      "halfEllipse": "Half Ellipse",
+      "cone": "Cone",
+      "invertedCone": "Inverted Cone",
+      "pyramid": "Pyramid",
+      "pointedOval": "Pointed Oval",
+      "funnel": "Funnel",
+      "star4": "4-Point Star",
+      "star5": "5-Point Star",
+      "star6": "6-Point Star",
+      "star7": "7-Point Star",
+      "star16": "16-Point Star"
     }
   }
 }

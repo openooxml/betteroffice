@@ -1,3 +1,5 @@
+import { MAX_REFERENCE_PAGES } from './reference.mjs';
+
 export type OfficePageBounds = {
   kind: 'office-page-bounds';
   pages: {
@@ -17,7 +19,7 @@ export function validatePageBounds(input: unknown): OfficePageBounds | null {
     profile.kind !== 'office-page-bounds' ||
     !Array.isArray(profile.pages) ||
     !profile.pages.length ||
-    profile.pages.length > 100
+    profile.pages.length > MAX_REFERENCE_PAGES
   )
     throw new Error('Invalid Office page bounds profile');
   return {

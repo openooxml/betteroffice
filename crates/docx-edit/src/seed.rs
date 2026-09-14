@@ -979,12 +979,32 @@ fn embed_unit(
 
 fn run_marks(run: &Value, style_formatting: Option<&Value>, styles: &StyleResolver) -> Vec<Mark> {
     let formatting = field(Some(run), "formatting");
-    let run_style = styles.run_style_own(
-        formatting.and_then(|formatting| string(field(Some(formatting), "styleId"))),
-    );
+    let style_id = string(field(formatting, "styleId"));
+    let run_style = styles.run_style_own(style_id);
     let inherited = merge_text_formatting(style_formatting, run_style.as_ref());
     let merged = merge_text_formatting(inherited.as_ref(), formatting);
-    formatting_to_marks(merged.as_ref())
+    let mut marks = formatting_to_marks(merged.as_ref());
+    let hyperlink_style = style_id.is_some_and(is_hyperlink_style_name)
+        || style_id
+            .and_then(|id| styles.style(id))
+            .and_then(|style| string(field(Some(style), "name")))
+            .is_some_and(is_hyperlink_style_name);
+    if hyperlink_style {
+        for (property, name) in [("color", "textColor"), ("underline", "underline")] {
+            if field(formatting, property).is_none()
+                && field(run_style.as_ref(), property).is_some()
+                && let Some(mark) = marks.iter_mut().find(|mark| mark.name == name)
+            {
+                mark.attrs
+                    .push(("inheritedHyperlink".to_owned(), Value::Bool(true)));
+            }
+        }
+    }
+    marks
+}
+
+fn is_hyperlink_style_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("Hyperlink") || name.eq_ignore_ascii_case("FollowedHyperlink")
 }
 
 fn emu_to_pixels(value: f64) -> f64 {

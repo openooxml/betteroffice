@@ -87,6 +87,37 @@ export function numericCellValue(shape: ShapeSnapshot, name: string, fallback?: 
   return parsed;
 }
 
+/** True when a ShapeSheet lock cell evaluates to the enabled value 1. */
+export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): boolean {
+  return Number(cellValue(shape, name)) === 1;
+}
+
+/** True when the stored formula for a cell carries a GUARD interception. */
+export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
+  return (cellFormula(shape, name) ?? '').toUpperCase().includes('GUARD');
+}
+
+/** True when a delete would be refused by LockDelete or a GUARD on it. */
+export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
+  if (!shape) return false;
+  return lockCellEnabled(shape, 'LockDelete') || cellIsGuarded(shape, 'LockDelete');
+}
+
+export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
+
+/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
+export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
+  if (!shape) return false;
+  if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
+  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => cellIsGuarded(shape, cell));
+}
+
+/** True when a single-cell write would be refused by a GUARD on that cell. */
+export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
+  if (!shape) return false;
+  return cellIsGuarded(shape, cellName);
+}
+
 export function createRibbonCommands(
   handle: DiagramHandle | null,
   selection: VsdxShapeSelection | null,
@@ -120,7 +151,7 @@ export function createRibbonCommands(
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
-    delete: { id: 'delete', enabled: selected, run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
+    delete: { id: 'delete', enabled: selected && !isDeleteBlocked(shape), run: execute((currentHandle, currentSelection) => { currentHandle.deleteShape(currentSelection!.pageId, currentSelection!.shapeId); }, true) },
     fillColor: { id: 'fillColor', enabled: selected, value: color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
     lineColor: { id: 'lineColor', enabled: selected, value: color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
     lineWeight: { id: 'lineWeight', enabled: selected, value: cellFormula(shape, 'LineWeight'), run: (value?: string) => { if (value) formula('LineWeight', value)(); } },
@@ -129,10 +160,10 @@ export function createRibbonCommands(
     bringForward: { id: 'bringForward', enabled: selected && current!.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: selected && current!.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
     sendToBack: { id: 'sendToBack', enabled: selected && current!.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected, run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected, run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
-    flipHorizontal: { id: 'flipHorizontal', enabled: selected, active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
-    flipVertical: { id: 'flipVertical', enabled: selected, active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
+    rotateRight: { id: 'rotateRight', enabled: selected && !isCellWriteBlocked(shape, 'Angle'), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    flipHorizontal: { id: 'flipHorizontal', enabled: selected && !isCellWriteBlocked(shape, 'FlipX'), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
+    flipVertical: { id: 'flipVertical', enabled: selected && !isCellWriteBlocked(shape, 'FlipY'), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {
       id: 'addShape',
       enabled: Boolean(pageById(pages, pageId)),
@@ -141,7 +172,7 @@ export function createRibbonCommands(
         if (!page) throw new Error(`vsdx page ${pageId ?? ''} is no longer part of the diagram`);
         const rectangle = standardShapeById('rectangle');
         if (!rectangle) throw new Error('vsdx standard rectangle shape is unavailable');
-        currentHandle.addShape(page.id, rectangle.draft(1, 1, 1, 1));
+        currentHandle.addShape(page.id, rectangle.draft(1, 1, rectangle.defaultSize.width, rectangle.defaultSize.height));
       }),
     },
     download: { id: 'download', enabled: Boolean(handle), run: () => { if (!handle) return; try { onDownload(handle.save()); } catch (error) { onError(error); } } },

@@ -1,7 +1,10 @@
 import { useMemo, useRef, useState } from 'react';
-import type { CSSProperties, KeyboardEvent } from 'react';
+import type { CSSProperties, DragEvent, KeyboardEvent } from 'react';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import type { StandardShape } from './shapeLibrary';
+
+/** Native drag payload identifying a stencil entry. */
+export const STENCIL_DRAG_MIME = 'application/x-betteroffice-shape';
 
 export interface ShapesPanelProps {
   shapes: readonly StandardShape[];
@@ -19,13 +22,16 @@ const styles: Record<string, CSSProperties> = {
   content: { display: 'flex', flexDirection: 'column', minWidth: 220, width: 280, height: '100%' },
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', minHeight: 44, padding: '0 10px 0 14px', borderBottom: '1px solid #e5e5e5', fontWeight: 600, fontSize: 14 },
   toggle: { appearance: 'none', display: 'grid', placeItems: 'center', width: 28, height: 28, padding: 0, border: 0, borderRadius: 4, background: 'transparent', color: '#424242', cursor: 'pointer' },
-  search: { width: 'calc(100% - 24px)', height: 32, margin: 12, padding: '0 9px', border: '1px solid #bdbdbd', borderRadius: 3, outline: 0, color: '#242424', font: '400 13px ui-sans-serif, system-ui, sans-serif', boxSizing: 'border-box' },
+  searchWrap: { position: 'relative', margin: 12, width: 'calc(100% - 24px)', boxSizing: 'border-box' },
+  search: { width: '100%', height: 32, padding: '0 30px 0 9px', border: '1px solid #bdbdbd', borderRadius: 3, outline: 0, color: '#242424', font: '400 13px ui-sans-serif, system-ui, sans-serif', boxSizing: 'border-box' },
+  searchButton: { appearance: 'none', position: 'absolute', top: 0, right: 0, display: 'grid', placeItems: 'center', width: 30, height: 32, padding: 0, border: 0, borderRadius: '0 3px 3px 0', background: 'transparent', color: '#616161', cursor: 'pointer' },
   heading: { margin: '3px 12px 10px', color: '#424242', fontWeight: 600, fontSize: 12 },
   grid: { display: 'flex', flexDirection: 'column', gap: 5, padding: '0 10px 12px', overflowY: 'auto' },
   row: { display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 5 },
   cell: { display: 'flex', minWidth: 0 },
   tile: { appearance: 'none', flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', minWidth: 0, minHeight: 92, padding: '7px 3px 5px', border: '1px solid transparent', borderRadius: 3, background: 'transparent', color: '#242424', cursor: 'pointer', font: '400 11px ui-sans-serif, system-ui, sans-serif', textAlign: 'center' },
   preview: { width: 54, height: 46, marginBottom: 5, overflow: 'visible', fill: '#fff', stroke: '#424242', strokeWidth: 0.03 },
+  label: { display: 'block', width: '100%', maxWidth: '100%', overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' },
   empty: { margin: '20px 12px', color: '#616161', textAlign: 'center' },
 };
 
@@ -45,6 +51,7 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
   const [query, setQuery] = useState('');
   const [focusIndex, setFocusIndex] = useState(0);
   const tileRefs = useRef(new Map<number, HTMLButtonElement>());
+  const searchRef = useRef<HTMLInputElement>(null);
   const filteredShapes = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
     return normalized ? shapes.filter((shape) => t(shape.nameKey).toLocaleLowerCase().includes(normalized)) : shapes;
@@ -63,20 +70,25 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
       <nav style={styles.rail} aria-label={t('shapesPanel.categoriesLabel')}>
         <ul style={{ display: 'contents', margin: 0, padding: 0, listStyle: 'none' }}>
           <li>
-            <span role="img" aria-label={t('shapesPanel.standardShapes')} aria-current="true" title={t('shapesPanel.standardShapes')} style={styles.railButton}>
+            <button type="button" aria-label={t('shapesPanel.standardShapes')} aria-current="true" title={t('shapesPanel.standardShapes')} onClick={() => { if (collapsed) onToggleCollapsed(); }} style={styles.railButton}>
               <svg aria-hidden="true" width="18" height="18" viewBox="0 0 18 18"><rect x="3" y="3" width="5" height="5" fill="none" stroke="currentColor" /><circle cx="13" cy="5.5" r="2.5" fill="none" stroke="currentColor" /><path d="M 3 14 L 6 10 L 9 14 Z" fill="none" stroke="currentColor" /></svg>
-            </span>
+            </button>
           </li>
-          {collapsed && <li><button type="button" aria-label={t('shapesPanel.expand')} aria-expanded="false" title={t('shapesPanel.expand')} onClick={onToggleCollapsed} style={{ ...styles.toggle, marginTop: 8 }}>›</button></li>}
+          {collapsed && <li><button type="button" aria-label={t('shapesPanel.expand')} aria-expanded="false" title={t('shapesPanel.expand')} onClick={onToggleCollapsed} style={{ ...styles.toggle, marginTop: 8 }}><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M 6 3 L 11 8 L 6 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></li>}
         </ul>
       </nav>
       {!collapsed && (
         <section style={styles.content} aria-label={t('shapesPanel.title')}>
           <header style={styles.header}>
             <span>{t('shapesPanel.title')}</span>
-            <button type="button" aria-label={t('shapesPanel.collapse')} aria-expanded="true" title={t('shapesPanel.collapse')} onClick={onToggleCollapsed} style={styles.toggle}>‹</button>
+            <button type="button" aria-label={t('shapesPanel.collapse')} aria-expanded="true" title={t('shapesPanel.collapse')} onClick={onToggleCollapsed} style={styles.toggle}><svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><path d="M 10 3 L 5 8 L 10 13" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button>
           </header>
-          <input type="search" value={query} onChange={(event) => { setQuery(event.target.value); setFocusIndex(0); }} placeholder={t('shapesPanel.searchPlaceholder')} aria-label={t('shapesPanel.searchLabel')} style={styles.search} />
+          <div style={styles.searchWrap}>
+            <input ref={searchRef} type="search" value={query} onChange={(event) => { setQuery(event.target.value); setFocusIndex(0); }} placeholder={t('shapesPanel.searchPlaceholder')} aria-label={t('shapesPanel.searchLabel')} style={styles.search} />
+            <button type="button" aria-hidden="true" tabIndex={-1} onClick={() => searchRef.current?.focus()} style={styles.searchButton}>
+              <svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M 10.5 10.5 L 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+            </button>
+          </div>
           <h2 style={styles.heading}>{t('shapesPanel.standardShapes')}</h2>
           {filteredShapes.length === 0 ? <p style={styles.empty}>{t('shapesPanel.empty')}</p> : (
             <div role="grid" aria-label={t('shapesPanel.standardShapes')} style={styles.grid}>
@@ -91,13 +103,15 @@ export function ShapesPanel({ shapes, collapsed, onToggleCollapsed, onInsert, t,
                           type="button"
                           tabIndex={index === activeIndex ? 0 : -1}
                           aria-label={t(shape.nameKey)}
+                          draggable
+                          onDragStart={(event: DragEvent<HTMLButtonElement>) => { event.dataTransfer.setData(STENCIL_DRAG_MIME, shape.id); event.dataTransfer.effectAllowed = 'copy'; }}
                           onFocus={() => setFocusIndex(index)}
                           onClick={() => onInsert(shape)}
                           onKeyDown={(event) => moveFocus(event, index)}
                           style={styles.tile}
                         >
                           <svg aria-hidden="true" viewBox="0 0 1 1" preserveAspectRatio="xMidYMid meet" style={styles.preview}><path d={shape.preview} /></svg>
-                          <span>{t(shape.nameKey)}</span>
+                          <span title={t(shape.nameKey)} style={styles.label}>{t(shape.nameKey)}</span>
                         </button>
                       </div>
                     );

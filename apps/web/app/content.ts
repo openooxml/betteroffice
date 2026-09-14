@@ -67,7 +67,7 @@ export const EDITORS = [
   {
     name: "Diagrams",
     format: "vsdx",
-    desc: "VSDX editor with a tabbed ribbon, a standard-shape gallery, a page tab strip and a zoom status bar, for moving, Shift-drag resizing, adding and deleting shapes, setting fill and line colour, and saving diagrams. It opens Visio drawings and templates. No resize-handle or connector-drag UI.",
+    desc: "VSDX editor with a flat command bar, a searchable standard-shape gallery that drags onto the canvas, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, rotating with a grip, adding and deleting shapes, arranging z-order, flipping, setting fill and line colour, editing shape text in place, and saving diagrams, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. It opens Visio drawings and templates. No connector-drag UI.",
     status: "source preview",
   },
 ];
@@ -107,12 +107,12 @@ export const PACKAGES = [
   {
     name: "@betteroffice/vsdx",
     sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates.",
+    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points, and setShapeText replaces a shape's text as one policy-checked mutation.",
   },
   {
     name: "@betteroffice/vsdx-react",
     sourceOnly: true,
-    desc: "The VSDX editor as a drop-in React component: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, resize with Shift-drag, add, delete, set fill or line colour, and save. No resize-handle or connector-drag UI.",
+    desc: "The VSDX editor as a drop-in React component: a flat command bar, a searchable standard-shape gallery that drags onto the canvas, a page tab strip and a zoom status bar over move, resize with handles and Shift-drag, rotate with a grip, add, delete, z-order arrange, flip, set fill or line colour, edit shape text in place, and save, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. No connector-drag UI.",
   },
 ];
 

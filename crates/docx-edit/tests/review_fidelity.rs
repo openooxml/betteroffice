@@ -75,6 +75,91 @@ fn universal_section_measures_match_canonical_twip_layout() {
 }
 
 #[test]
+fn semantic_toc_styles_preserve_direct_and_custom_hyperlink_formatting() {
+    let fixture: Value = serde_json::from_str(include_str!("fixtures/toc_styles.json")).unwrap();
+    let body = fixture["paragraphStyles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|style| {
+            format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="{}"/></w:pPr>{}</w:p>"#,
+                style.as_str().unwrap(),
+                fixture["content"].as_str().unwrap()
+            )
+        })
+        .collect::<String>();
+    let engine = EngineSession::new(74501);
+    seed_from_docx(
+        engine.doc(),
+        &document(&body, fixture["styles"].as_str().unwrap()),
+    )
+    .unwrap();
+    let env = serde_json::from_value(json!({"tocStyleIds":fixture["tocStyles"]})).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let lowered: Value =
+        serde_json::from_str(&engine.lower_story_json("body", &env).unwrap()).unwrap();
+    let canonical: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(canonical[3], lowered[3]);
+    for (index, paragraph) in lowered.as_array().unwrap().iter().enumerate() {
+        let toc = index < 4;
+        for (run_index, run) in paragraph["runs"].as_array().unwrap().iter().enumerate() {
+            assert_eq!(run["hyperlink"]["href"], "#heading");
+            assert_eq!(
+                run["hyperlink"]["noDefaultStyle"],
+                if toc { json!(true) } else { Value::Null }
+            );
+            let (color, underline) = match run_index {
+                0 if toc => (Value::Null, Value::Null),
+                0 | 2 => (json!("#0000FF"), json!("single")),
+                1 => (json!("#112233"), json!("double")),
+                3 => (json!("#775533"), json!("dotted")),
+                4 => (json!("#445566"), json!("wave")),
+                _ => panic!("unexpected run"),
+            };
+            assert_eq!(run["color"], color, "paragraph {index}, run {run_index}");
+            assert_eq!(
+                run["underline"]["style"], underline,
+                "paragraph {index}, run {run_index}"
+            );
+        }
+    }
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    engine
+        .doc()
+        .format_range(
+            &docx_edit::EditCtx::local("", "2026-09-14T00:00:00Z"),
+            docx_edit::StoryRange::new("body", 0, 9),
+            &docx_edit::InlineFormatDelta {
+                color: docx_edit::Patch::Set(docx_edit::ColorPatch::Rgb("0000FF".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let edited: Value =
+        serde_json::from_str(&engine.lower_story_json("body", &env).unwrap()).unwrap();
+    assert_eq!(edited[0]["runs"][0]["color"], "#0000FF");
+    assert!(edited[0]["runs"][0]["underline"].is_null());
+    engine
+        .doc()
+        .set_hyperlink(
+            &docx_edit::EditCtx::local("", "2026-09-14T00:00:00Z"),
+            docx_edit::StoryRange::new("body", 0, 9),
+            Some(yrs::Any::from_json(r##"{"href":"#changed","custom":"retained"}"##).unwrap()),
+        )
+        .unwrap();
+    let relinked: Value =
+        serde_json::from_str(&engine.lower_story_json("body", &env).unwrap()).unwrap();
+    assert_eq!(relinked[0]["runs"][0]["color"], "#0000FF");
+    assert_eq!(relinked[0]["runs"][0]["hyperlink"]["href"], "#changed");
+}
+
+#[test]
 fn vml_horizontal_rule_uses_paragraph_width_without_changing_flow() {
     for columns in [1, 2] {
         let body = format!(

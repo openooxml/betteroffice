@@ -62,6 +62,8 @@ const AUTO_PARAGRAPH_SPACING_PX: f64 = 14.0;
 #[derive(Clone, Debug, Default, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct RenderEnv {
+    #[serde(skip_serializing_if = "BTreeSet::is_empty")]
+    pub toc_style_ids: BTreeSet<String>,
     /// Six-digit RGB values keyed by OOXML theme slot. A missing slot falls
     /// back to the default Office palette.
     pub theme_colors: BTreeMap<String, String>,
@@ -441,6 +443,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -483,6 +486,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -499,6 +503,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -516,6 +521,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -560,6 +566,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -587,6 +594,7 @@ fn lower_story<T: ReadTxn>(
                         story_end: story_index + 1,
                         pm_start: paragraph_pm_units,
                         pm_end: paragraph_pm_units + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(attributes),
                         inline_sdt_widget: None,
                     });
                     story_index += 1;
@@ -1515,6 +1523,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + width,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                     });
                 }
@@ -1528,6 +1537,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1540,6 +1550,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1553,6 +1564,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: None,
                     });
                 }
@@ -1584,6 +1596,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1605,6 +1618,7 @@ fn lower_inline_sdt_values(
                     story_end: story_index + 1,
                     pm_start: child_pm_start,
                     pm_end: child_pm_start + 1,
+                    inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                     inline_sdt_widget: None,
                 });
                 1
@@ -1631,6 +1645,7 @@ fn lower_inline_sdt_values(
                         story_end: story_index + 1,
                         pm_start: child_pm_start,
                         pm_end: child_pm_start + 1,
+                        inherited_hyperlink: inherited_hyperlink_style(Some(&attrs)),
                         inline_sdt_widget: widget.clone(),
                     });
                 }
@@ -1794,6 +1809,7 @@ enum RawRunKind {
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
+    inherited_hyperlink: (bool, bool),
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -1930,6 +1946,7 @@ fn push_text_chunks(
             story_end: end,
             pm_start: chunk_pm_start + start - chunk_start,
             pm_end: chunk_pm_start + end - chunk_start,
+            inherited_hyperlink: inherited_hyperlink_style(attributes),
             inline_sdt_widget: None,
         });
     }
@@ -2055,11 +2072,14 @@ fn flush_paragraph<T: ReadTxn>(
         .is_some_and(|suffix| suffix.parse::<usize>().is_ok());
     let style_id = paragraph_style_id(&values);
     let defaults = paragraph_run_defaults(&values);
+    let semantic_toc = style_id
+        .as_ref()
+        .is_some_and(|id| env.toc_style_ids.contains(id));
 
     for run in &mut raw_runs {
         apply_run_defaults(&mut run.formatting, &defaults);
-        if style_id.as_deref().is_some_and(is_toc_style) {
-            strip_toc_hyperlink_style(&mut run.formatting);
+        if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
+            strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
@@ -3245,11 +3265,23 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn strip_toc_hyperlink_style(formatting: &mut RunFormatting) {
+fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool) {
+    let inherited = |key| {
+        attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
+            == Some(true)
+    };
+    (inherited("textColor"), inherited("underline"))
+}
+
+fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool)) {
     if let Some(hyperlink) = &mut formatting.hyperlink {
         hyperlink.no_default_style = Some(true);
-        formatting.color = None;
-        formatting.underline = None;
+        if inherited.0 {
+            formatting.color = None;
+        }
+        if inherited.1 {
+            formatting.underline = None;
+        }
     }
 }
 
@@ -4580,6 +4612,7 @@ mod tests {
                     },
                     {
                         "kind": "text", "text": "link", "italic": true, "fontSize": 10.0,
+                        "color": "#0563C1", "underline": { "style": "single", "color": "#00FF00" },
                         "hyperlink": {
                             "href": "https://example.test", "tooltip": "Example",
                             "noDefaultStyle": true

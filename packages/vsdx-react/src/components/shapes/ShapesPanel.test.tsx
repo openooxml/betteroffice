@@ -3,11 +3,11 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { createT, en } from '@betteroffice/vsdx-i18n';
 import { standardShapes } from './shapeLibrary';
 import type { StandardShape } from './shapeLibrary';
-import { ShapesPanel } from './ShapesPanel';
+import { STENCIL_DRAG_MIME, ShapesPanel } from './ShapesPanel';
 
 if (!GlobalRegistrator.isRegistered) GlobalRegistrator.register();
 
-const { cleanup, fireEvent, render } = await import('@testing-library/react');
+const { cleanup, createEvent, fireEvent, render } = await import('@testing-library/react');
 const t = createT(en);
 
 afterEach(() => cleanup());
@@ -64,6 +64,17 @@ test('inserts the selected shape once per activation', () => {
   fireEvent.click(rectangle);
   fireEvent.click(rectangle);
   expect(view.inserted).toEqual(['rectangle', 'rectangle']);
+});
+
+test('carries the dragged tile as a copy under the stencil media type', () => {
+  const view = panel();
+  const ellipse = view.getByRole('button', { name: 'Ellipse' });
+  expect(ellipse.getAttribute('draggable')).toBe('true');
+  const payload = new Map<string, string>();
+  const event = createEvent.dragStart(ellipse, { dataTransfer: { setData: (type: string, value: string) => payload.set(type, value), effectAllowed: 'none' } });
+  fireEvent(ellipse, event);
+  expect(payload.get(STENCIL_DRAG_MIME)).toBe('ellipse');
+  expect((event as Event & { dataTransfer: { effectAllowed: string } }).dataTransfer.effectAllowed).toBe('copy');
 });
 
 test('moves focus through the grid with arrow keys', () => {

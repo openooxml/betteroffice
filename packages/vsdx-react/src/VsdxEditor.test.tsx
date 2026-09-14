@@ -17,6 +17,19 @@ test('collects structured diagnostics without matching their text', () => {
   ]);
 });
 
+test('collects defaulted paint diagnostics and tolerates shapes without them', () => {
+  const shapes: PageDisplayList = {
+    ...frame,
+    primitives: [
+      { kind: 'shape', id: 'resolved', zOrder: 0, path: [] },
+      { kind: 'group', id: 'group', zOrder: 1, primitives: [{ kind: 'shape', id: 'defaulted', zOrder: 2, path: [], diagnostics: [{ category: 'fidelity', code: 'unresolvable-fill-colour', detail: 'unresolvable fill colour: missing colour cell FillForegnd' }] }] },
+    ],
+  };
+  expect(collectDiagnostics(shapes)).toEqual([
+    { category: 'fidelity', code: 'unresolvable-fill-colour', detail: 'unresolvable fill colour: missing colour cell FillForegnd' },
+  ]);
+});
+
 function textBox(frame: PageDisplayList) {
   const box = frame.primitives[0];
   if (box.kind !== 'textBox') throw new Error('fixture must start with a text box');
