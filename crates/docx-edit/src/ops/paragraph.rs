@@ -862,16 +862,30 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
             "afterAutospacing",
         ),
     ] {
-        if let Patch::Set(value) = patch {
-            map.insert(txn, lines_key, Any::Number(0.0));
-            map.insert(txn, auto_key, Any::Bool(false));
-            if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
-                let mut original = (*original).clone();
-                original.insert(key.to_owned(), Any::Number(*value));
-                original.insert(lines_key.to_owned(), Any::Number(0.0));
-                original.insert(auto_key.to_owned(), Any::Bool(false));
-                map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
+        match patch {
+            Patch::Keep => continue,
+            Patch::Clear => {
+                map.remove(txn, lines_key);
+                map.remove(txn, auto_key);
             }
+            Patch::Set(_) => {
+                map.insert(txn, lines_key, Any::Number(0.0));
+                map.insert(txn, auto_key, Any::Bool(false));
+            }
+        }
+        if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+            let mut original = (*original).clone();
+            for key in [key, lines_key, auto_key] {
+                match map.get(txn, key) {
+                    Some(Out::Any(value)) => {
+                        original.insert(key.to_owned(), value);
+                    }
+                    _ => {
+                        original.remove(key);
+                    }
+                }
+            }
+            map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
         }
     }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {

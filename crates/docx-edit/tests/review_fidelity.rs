@@ -855,3 +855,72 @@ fn line_unit_paragraph_spacing_style_changes_round_trip() {
         );
     }
 }
+
+#[test]
+fn line_unit_paragraph_spacing_clears_and_round_trips() {
+    use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch};
+    let body = r#"<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:beforeLines="100" w:afterLines="50" w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr><w:r><w:t>Cleared spacing</w:t></w:r></w:p>"#;
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:style>"#;
+    let engine = EngineSession::new(74237);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    engine
+        .doc()
+        .set_paragraph_attrs(
+            &EditCtx::local("", ""),
+            &ParaSelector::One(id),
+            &ParaAttrDelta {
+                space_before: Patch::Clear,
+                space_after: Patch::Clear,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let snapshot = engine.doc().paragraphs("body").unwrap().remove(0);
+    let original =
+        serde_json::to_value(snapshot.properties.get("_originalFormatting").unwrap()).unwrap();
+    for key in [
+        "spaceBefore",
+        "spaceAfter",
+        "spaceBeforeLines",
+        "spaceAfterLines",
+        "beforeAutospacing",
+        "afterAutospacing",
+    ] {
+        assert!(!snapshot.properties.contains_key(key));
+        assert!(original.get(key).is_none());
+    }
+    let formatting = serde_json::from_value(original).unwrap();
+    let xml = docx_parse::serializer::serialize_paragraph_formatting(
+        Some(&formatting),
+        None,
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    let reopened = EngineSession::new(74238);
+    seed_from_docx(
+        reopened.doc(),
+        &document(
+            &format!("<w:p>{xml}<w:r><w:t>Cleared spacing</w:t></w:r></w:p>"),
+            styles,
+        ),
+    )
+    .unwrap();
+    for session in [&engine, &reopened] {
+        let blocks: Value = serde_json::from_str(
+            &session
+                .lower_story_json("body", &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        for side in ["before", "after"] {
+            assert_eq!(
+                blocks[0]["attrs"]["spacing"][side].as_f64().unwrap_or(0.0),
+                0.0
+            );
+        }
+    }
+}
