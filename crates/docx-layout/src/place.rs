@@ -667,10 +667,20 @@ fn place(
                     .get(section_idx + 1)
                     .copied()
                     .flatten();
+                let next_section_config = plan
+                    .section_configs
+                    .get(section_idx + 1)
+                    .cloned()
+                    .unwrap_or_else(|| initial_config.clone());
+                let restart_starts_page = restart.is_some()
+                    && crate::section_breaks::restart_starts_page(
+                        paginator,
+                        &next_section_config,
+                        next_type,
+                    );
                 let next_type = match (next_type, restart) {
-                    (None | Some(SectionBreakType::NextPage), Some(restart))
-                        if restart.align_parity =>
-                    {
+                    (Some(SectionBreakType::OddPage | SectionBreakType::EvenPage), _) => next_type,
+                    (_, Some(restart)) if restart.align_parity && restart_starts_page => {
                         Some(if paginator.physical_parity_is_odd(restart.start) {
                             SectionBreakType::OddPage
                         } else {
@@ -679,23 +689,11 @@ fn place(
                     }
                     _ => next_type,
                 };
-                let next_section_config = plan
-                    .section_configs
-                    .get(section_idx + 1)
-                    .cloned()
-                    .unwrap_or_else(|| initial_config.clone());
                 let opened_column_region =
                     hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
                 paginator.set_section_index(section_idx + 1);
                 if let Some(restart) = restart
-                    && matches!(
-                        next_type,
-                        None | Some(
-                            SectionBreakType::NextPage
-                                | SectionBreakType::OddPage
-                                | SectionBreakType::EvenPage
-                        )
-                    )
+                    && restart_starts_page
                 {
                     paginator.restart_page_numbering(restart.start);
                 }

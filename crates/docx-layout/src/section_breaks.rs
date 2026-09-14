@@ -147,6 +147,25 @@ fn page_size_differs(current: &Size, next: &Size) -> bool {
         || js_math_round(next.h) != js_math_round(current.h)
 }
 
+pub(crate) fn restart_starts_page<P: SectionBreakPaginator>(
+    paginator: &mut P,
+    next: &SectionLayoutConfig,
+    section_type: Option<SectionBreakType>,
+) -> bool {
+    match section_type {
+        Some(SectionBreakType::Continuous) => {
+            page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        Some(SectionBreakType::NextColumn) => {
+            let columns = paginator.current_columns().count;
+            columns == 1.0
+                || next.columns.as_ref().map_or(1.0, |next| next.count) != columns
+                || page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        _ => true,
+    }
+}
+
 // JS Math.max(a, b): NaN-propagating (Rust's f64::max ignores NaN).
 fn js_max(a: f64, b: f64) -> f64 {
     if a.is_nan() || b.is_nan() {

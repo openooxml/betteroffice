@@ -23,6 +23,7 @@ export interface DocumentSettings {
   themeFontLang?: { eastAsia?: string; bidi?: string };
   compatibilityFlags: CompatibilityFlags;
   updateFields?: boolean;
+  evenAndOddHeaders?: boolean;
   trackRevisions?: boolean;
   doNotTrackMoves?: boolean;
   doNotTrackFormatting?: boolean;

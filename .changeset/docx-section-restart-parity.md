@@ -2,4 +2,4 @@
 '@betteroffice/docx': patch
 ---
 
-Honor page-number restart parity at next-page section breaks when different odd and even headers are enabled.
+Preserve the document-wide facing-page setting and honor page-number restart parity at next-page and promoted section breaks.
