@@ -1,6 +1,7 @@
 mod fonts;
 mod mask;
 mod media;
+mod media_parts;
 mod rels;
 mod schema;
 mod scrub;
@@ -139,6 +140,7 @@ pub fn redact_with_report_and_options(
     } else {
         prune_scrubbed_parts(&mut parts, &scrubbed)?
     };
+    media_parts::convert_wdp_parts(&mut parts)?;
     let collect_styles = |name: &str| {
         parts
             .iter()

@@ -10,7 +10,9 @@ pub(crate) fn is_replaceable_part(path: &str) -> bool {
     let extension = path.rsplit_once('.').map(|(_, extension)| extension);
     matches!(
         extension,
-        Some("png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "svg" | "emf" | "wmf")
+        Some(
+            "png" | "jpg" | "jpeg" | "gif" | "bmp" | "tif" | "tiff" | "svg" | "emf" | "wmf" | "wdp"
+        )
     ) || path.contains("/media/")
         || path.ends_with("/thumbnail")
 }
