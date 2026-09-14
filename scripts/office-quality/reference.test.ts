@@ -3,6 +3,7 @@ import { validateReferenceMetadata } from './reference.mjs';
 
 const hash = 'a'.repeat(64);
 const metadata = (pages = 179) => ({
+  format: 'docx',
   source: { sha256: hash },
   reference: { status: 'ok', dpi: 150, sha256: hash, pages },
   reference_pages: Array.from({ length: pages }, (_, index) => ({
@@ -12,12 +13,25 @@ const metadata = (pages = 179) => ({
   })),
 });
 
-test('accepts complete references through the 250-page boundary without changing metadata', () => {
+test('accepts complete DOCX references through the 250-page boundary without changing metadata', () => {
   for (const pages of [1, 100, 101, 179, 182, 250]) {
     const input = metadata(pages);
     const before = structuredClone(input);
     expect(() => validateReferenceMetadata(input, 'example')).not.toThrow();
     expect(input).toEqual(before);
+  }
+});
+
+test('keeps non-DOCX references within the generic capture harness limit', () => {
+  for (const format of ['pptx', 'xlsx', 'vsdx']) {
+    for (const pages of [1, 100]) {
+      expect(() => validateReferenceMetadata({ ...metadata(pages), format }, 'example')).not.toThrow();
+    }
+    for (const pages of [101, 179, 250]) {
+      expect(() => validateReferenceMetadata({ ...metadata(pages), format }, 'example')).toThrow(
+        'Invalid Office reference'
+      );
+    }
   }
 });
 
