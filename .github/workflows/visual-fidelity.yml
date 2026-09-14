@@ -30,7 +30,7 @@ jobs:
   measure:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
     steps:

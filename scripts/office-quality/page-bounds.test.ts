@@ -39,6 +39,22 @@ test('preserves extra actual pages at native size', () => {
   });
 });
 
+test('supports long DOCX references and preserves pages beyond the reference limit', () => {
+  for (const count of [101, 179, 182, 250]) {
+    const bounds = validatePageBounds(profile(Array.from({ length: count }, () => a4)));
+    expect(bounds?.pages).toHaveLength(count);
+    expect(capturePageExtent(bounds, count - 1, 1240, 1754).output).toEqual({
+      width_px: 1241,
+      height_px: 1755,
+    });
+    expect(capturePageExtent(bounds, count, 1275, 1650)).toMatchObject({
+      page: count + 1,
+      output: { width_px: 1275, height_px: 1650 },
+      adjustment: 'none',
+    });
+  }
+});
+
 test('rejects larger geometry differences on either axis', () => {
   const bounds = validatePageBounds(profile());
   for (const [width, height] of [
@@ -80,7 +96,7 @@ test('rejects unknown or malformed profiles and excessive page counts', () => {
     { kind: 'other', pages: [a4] },
     { kind: 'office-page-bounds', pages: null },
     profile([]),
-    profile(Array.from({ length: 101 }, () => a4)),
+    profile(Array.from({ length: 251 }, () => a4)),
   ]) {
     expect(() => validatePageBounds(value)).toThrow('Invalid Office page bounds profile');
   }
