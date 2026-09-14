@@ -133,7 +133,7 @@ mod tests {
             random_characters: true,
         });
         masker.random.as_mut().unwrap().fill = |bytes| {
-            for (index, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+            for (index, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                 chunk.copy_from_slice(&(index as u32).to_ne_bytes());
             }
             Ok(())
