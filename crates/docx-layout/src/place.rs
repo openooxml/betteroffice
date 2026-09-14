@@ -33,7 +33,7 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::page_flow::{PageFlowGeometry, Paginator};
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
@@ -193,8 +193,24 @@ fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
 
 /// Suppresses spacing between adjacent same-style contextual paragraphs.
 fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
-    let (LayoutBlock::Paragraph(c), LayoutBlock::Paragraph(n)) = (curr, next) else {
+    let LayoutBlock::Paragraph(c) = curr else {
         return;
+    };
+    let next_is_table = matches!(next, LayoutBlock::Table(_));
+    let n = match next {
+        LayoutBlock::Paragraph(paragraph) => paragraph,
+        LayoutBlock::Table(table) if table.floating.is_none() && is_empty_paragraph(c) => {
+            let Some(LayoutBlock::Paragraph(paragraph)) = table
+                .rows
+                .first_mut()
+                .and_then(|row| row.cells.first_mut())
+                .and_then(|cell| cell.blocks.first_mut())
+            else {
+                return;
+            };
+            paragraph
+        }
+        _ => return,
     };
     let same_style = c
         .attrs
@@ -214,7 +230,8 @@ fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     {
         spacing.after = Some(0.0);
     }
-    if let Some(na) = &mut n.attrs
+    if !next_is_table
+        && let Some(na) = &mut n.attrs
         && na.contextual_spacing.unwrap_or(false)
         && let Some(spacing) = &mut na.spacing
     {
