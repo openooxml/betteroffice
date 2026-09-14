@@ -5,6 +5,7 @@ use quick_xml::{NsReader, Writer, XmlVersion};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
 use crate::styles::StyleMap;
+use crate::visio;
 use crate::{Format, RedactError, RedactionReport};
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub(crate) fn redact_xml_with_styles(
         current_style: None,
         cell_type: None,
         custom_property: 0,
+        visio_sections: Vec::new(),
     };
     let mut skipped_depth = 0;
 
@@ -71,7 +73,7 @@ pub(crate) fn redact_xml_with_styles(
                     skipped_depth = 1;
                     continue;
                 }
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, &stack, false)?;
                 stack.push(local);
                 writer
                     .write_event(Event::Start(rewritten))
@@ -83,7 +85,7 @@ pub(crate) fn redact_xml_with_styles(
                     continue;
                 }
                 let empty_style = local == "style" && word_node(&reader, start.name());
-                let rewritten = rewrite_start(&reader, start, &local, &mut state)?;
+                let rewritten = rewrite_start(&reader, start, &local, &mut state, &stack, true)?;
                 if empty_style {
                     state.current_style = None;
                 }
@@ -99,6 +101,12 @@ pub(crate) fn redact_xml_with_styles(
                     && word_node(&reader, end.name())
                 {
                     state.current_style = None;
+                }
+                if visio::is_visio(format)
+                    && local_name(end.name().local_name().as_ref()).eq_ignore_ascii_case("Section")
+                    && state.visio_sections.pop().is_none()
+                {
+                    return Err(visio::ambiguous(path, "unbalanced Section end"));
                 }
                 stack.pop();
                 writer
@@ -173,6 +181,7 @@ struct RewriteState<'a> {
     current_style: Option<String>,
     cell_type: Option<String>,
     custom_property: usize,
+    visio_sections: Vec<Option<String>>,
 }
 
 fn rewrite_start(
@@ -180,6 +189,8 @@ fn rewrite_start(
     start: BytesStart<'_>,
     element: &str,
     state: &mut RewriteState<'_>,
+    _stack: &[String],
+    is_empty: bool,
 ) -> Result<BytesStart<'static>, RedactError> {
     let format = state.format;
     let path = state.path;
@@ -215,8 +226,31 @@ fn rewrite_start(
             .find(|(key, _)| attribute_local(key) == "styleId" && word_attribute(reader, key))
             .map(|(_, value)| value.clone());
     }
+    let visio_active = visio::is_visio(format);
+    let visio_part =
+        visio_active && visio::is_visio_part(path) && !path.to_ascii_lowercase().ends_with(".rels");
+    if visio_active && visio::is_section(element) {
+        if !state.visio_sections.is_empty() {
+            return Err(visio::ambiguous(path, "nested Section"));
+        }
+        if !is_empty {
+            state
+                .visio_sections
+                .push(visio::attribute_named(&attributes, "N"));
+        }
+    }
+    if visio_active && visio::is_cell(element) && state.visio_sections.len() > 1 {
+        return Err(visio::ambiguous(path, "nested Section"));
+    }
 
     let (relationship, external) = relationship_mode(path, element, &attributes);
+    let visio_section = state.visio_sections.last().cloned().flatten();
+    let visio_section_missing = state.visio_sections.last().is_some();
+    let visio_cell = if visio::is_cell(element) {
+        visio::attribute_named(&attributes, "N")
+    } else {
+        None
+    };
     let mut wrote_target_mode = false;
     if format == Format::Xlsx && element == "c" {
         state.cell_type = None;
@@ -258,39 +292,54 @@ fn rewrite_start(
         } else {
             None
         };
-        let replacement =
-            if external && is_unqualified(&key) && local.eq_ignore_ascii_case("Target") {
-                Some("https://example.com".to_owned())
-            } else if custom_property && key == "name" {
-                Some(format!("RedactedProperty{}", state.custom_property))
-            } else if word && local == "date" && word_attribute(reader, &key)
-                || modern_comment
-                    && local == "dateUtc"
-                    && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
+        let replacement = if external
+            && is_unqualified(&key)
+            && local.eq_ignore_ascii_case("Target")
+        {
+            Some("https://example.com".to_owned())
+        } else if custom_property && key == "name" {
+            Some(format!("RedactedProperty{}", state.custom_property))
+        } else if word && local == "date" && word_attribute(reader, &key)
+            || modern_comment
+                && local == "dateUtc"
+                && matches!(reader.resolver().resolve_attribute(QName(key.as_bytes())).0,
                         ResolveResult::Bound(ns) if ns.as_ref()
                             == b"http://schemas.microsoft.com/office/word/2018/wordml/cex")
-            {
-                Some("1970-01-01T00:00:00Z".to_owned())
-            } else if style_replacement.is_some() {
-                style_replacement
-            } else if instance && local == "nil" {
-                let value = value.trim_matches([' ', '\t', '\r', '\n']);
-                Some(
-                    if matches!(value, "true" | "false" | "1" | "0") {
-                        value
-                    } else {
-                        "false"
-                    }
-                    .to_owned(),
-                )
-            } else if !key.starts_with("xmlns")
-                && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && sensitive_attribute(format, path, element, local, &value)
-            {
-                Some(placeholder(&value))
+        {
+            Some("1970-01-01T00:00:00Z".to_owned())
+        } else if style_replacement.is_some() {
+            style_replacement
+        } else if instance && local == "nil" {
+            let value = value.trim_matches([' ', '\t', '\r', '\n']);
+            Some(
+                if matches!(value, "true" | "false" | "1" | "0") {
+                    value
+                } else {
+                    "false"
+                }
+                .to_owned(),
+            )
+        } else if visio_part && !key.starts_with("xmlns") {
+            let section = if visio_section_missing {
+                Some(visio_section.as_deref().unwrap_or(""))
             } else {
                 None
             };
+            let preserve =
+                visio::preserve_attribute(element, &key, &value, section, visio_cell.as_deref());
+            if preserve {
+                None
+            } else {
+                Some(placeholder(&value))
+            }
+        } else if !key.starts_with("xmlns")
+            && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
+            && sensitive_attribute(format, path, element, local, &value)
+        {
+            Some(placeholder(&value))
+        } else {
+            None
+        };
         if let Some(replacement) = replacement {
             if replacement != value {
                 state.report.attributes += 1;
@@ -420,6 +469,7 @@ fn replacement_kind(
             "v" => Some(Replacement::Number),
             _ => None,
         },
+        Format::Vsdx | Format::Vstx => visio::redact_text(path).then_some(Replacement::Text),
         Format::Auto => None,
     }
 }
@@ -490,6 +540,7 @@ fn sensitive_attribute(
                 || element == "tag" && matches!(attribute, "name" | "val")
                 || element == "custShow" && attribute == "name"
         }
+        Format::Vsdx | Format::Vstx => false,
         Format::Auto => false,
     }
 }

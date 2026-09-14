@@ -33,6 +33,15 @@ pub fn redact_local(input: &[u8]) -> Result<RedactedFile, String> {
     enforce_size(input.len(), "input")?;
     let (bytes, report) =
         ooxml_redact::redact_with_report(input, Format::Auto).map_err(|error| error.to_string())?;
+    match report.format {
+        Format::Vsdx | Format::Vstx => {
+            return Err(
+                "Visio redaction is not supported; no safe redacted package can be produced"
+                    .to_owned(),
+            );
+        }
+        Format::Auto | Format::Docx | Format::Xlsx | Format::Pptx => {}
+    }
     enforce_size(bytes.len(), "redacted output")?;
     Ok(RedactedFile { bytes, report })
 }
@@ -83,7 +92,7 @@ fn content_type(format: Format) -> &'static str {
         Format::Docx => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         Format::Xlsx => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         Format::Pptx => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        Format::Auto => "application/octet-stream",
+        Format::Auto | Format::Vsdx | Format::Vstx => "application/octet-stream",
     }
 }
 
