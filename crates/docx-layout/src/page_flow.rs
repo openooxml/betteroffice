@@ -21,7 +21,7 @@
 //!
 //! Columns live in a *region* starting at `column_region_top`. A new page
 //! resets that to the content top; [`Paginator::update_columns`] sets it to the
-//! current pen and returns to column zero, so a continuous section break stacks
+//! deepest column and returns to column zero, so a continuous section break stacks
 //! its new column band below content already on the page. Geometry that cannot
 //! change mid-sheet is deferred until the next page.
 
@@ -84,6 +84,7 @@ pub struct Paginator {
     pending_columns: Option<ColumnLayout>,
     column_width: f64,
     column_region_top: f64,
+    column_region_bottom: f64,
     footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     start_page_number: u32,
     section_index: usize,
@@ -118,6 +119,7 @@ impl Paginator {
             pending_columns: None,
             column_width,
             column_region_top,
+            column_region_bottom: column_region_top,
             footnote_reserved_heights,
             start_page_number: 1,
             section_index: 0,
@@ -250,6 +252,7 @@ impl Paginator {
         state.content_top = content_top;
         state.content_limit = content_limit;
         self.column_region_top = content_top;
+        self.column_region_bottom = content_top;
     }
 
     /// Opens the next page, promoting any deferred geometry first, and returns
@@ -330,6 +333,7 @@ impl Paginator {
 
         // reset column region to page top on new page
         self.column_region_top = content_top;
+        self.column_region_bottom = content_top;
 
         self.states.len() - 1
     }
@@ -372,6 +376,7 @@ impl Paginator {
     fn advance_column(&mut self, idx: usize) -> (usize, bool) {
         self.suppress_leading_spacing = true;
         if (self.states[idx].column_index as f64) < self.columns.count - 1.0 {
+            self.column_region_bottom = self.column_region_bottom.max(self.states[idx].pen_y);
             let region_top = self.column_region_top;
             let state = &mut self.states[idx];
             state.column_index += 1;
@@ -504,8 +509,15 @@ impl Paginator {
             None
         };
 
-        self.column_region_top = self.states[idx].pen_y;
-        self.states[idx].column_index = 0;
+        let page = &self.pages[page_index];
+        let content_limit =
+            page.size.h - page.margins.bottom - self.footnote_reservation(page.number);
+        self.column_region_top = self.column_region_bottom.max(self.states[idx].pen_y);
+        self.column_region_bottom = self.column_region_top;
+        let state = &mut self.states[idx];
+        state.pen_y = self.column_region_top;
+        state.column_index = 0;
+        state.content_limit = content_limit;
     }
 
     /// Queues a column layout for the next page, leaving the band in force to
