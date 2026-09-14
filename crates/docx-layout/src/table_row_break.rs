@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::cell_layout::{cell_vertical_offset, layout_cell_content};
+use crate::cell_layout::{cell_vertical_offset, layout_cell_content, nested_table_float_offset};
 use crate::table_grid::resolve_cell_grid;
 use crate::types::{BlockExtent, LayoutBlock, TableBlock, TableExtent};
 
@@ -63,6 +63,13 @@ fn cell_unbreakable_ranges(
         };
         if let Some(height) = height {
             y += previous_after;
+            if let Some(LayoutBlock::Table(table)) = block
+                && let Some(offset) = nested_table_float_offset(table.floating.as_ref())
+            {
+                ranges.push((y + offset, y + offset + height));
+                previous_after = 0.0;
+                continue;
+            }
             let top = y;
             y += height;
             ranges.push((top, y));
