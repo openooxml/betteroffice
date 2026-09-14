@@ -89,9 +89,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.7538 | 14/14 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.8288 | 14/14 |
-| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.8478 | 9/9 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.8769 | 9/9 |
-| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7163 | 4/8 | [0c5c4fcf](https://github.com/openooxml/betteroffice/commit/0c5c4fcfc06947f12056ee04f0bf76dff9867eb9) | 0.7695 | 8/8 |
+| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.7538 | 14/14 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.8309 | 14/14 |
+| PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.8478 | 9/9 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.8769 | 9/9 |
+| XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7163 | 4/8 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
