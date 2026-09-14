@@ -1,4 +1,5 @@
 mod fonts;
+mod mask;
 mod media;
 mod rels;
 mod schema;
@@ -11,6 +12,7 @@ use std::fmt;
 
 use thiserror::Error;
 
+use crate::mask::TextMasker;
 use crate::media::replace_media;
 use crate::scrub::{normalize_part_name, prune_scrubbed_parts};
 use crate::styles::StyleMap;
@@ -58,6 +60,11 @@ pub struct RedactionReport {
     pub xml_comments: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RedactionOptions {
+    pub random_characters: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum RedactError {
     #[error("invalid OOXML package: {0}")]
@@ -72,6 +79,8 @@ pub enum RedactError {
     Xml { part: String, message: String },
     #[error("could not replace image {part}: {message}")]
     Image { part: String, message: String },
+    #[error("could not obtain secure randomness: {0}")]
+    Randomness(String),
 }
 
 pub fn detect_format(bytes: &[u8]) -> Result<Format, RedactError> {
@@ -86,6 +95,22 @@ pub fn redact(bytes: &[u8], format: Format) -> Result<Vec<u8>, RedactError> {
 pub fn redact_with_report(
     bytes: &[u8],
     requested: Format,
+) -> Result<(Vec<u8>, RedactionReport), RedactError> {
+    redact_with_report_and_options(bytes, requested, &RedactionOptions::default())
+}
+
+pub fn redact_with_options(
+    bytes: &[u8],
+    requested: Format,
+    options: &RedactionOptions,
+) -> Result<Vec<u8>, RedactError> {
+    redact_with_report_and_options(bytes, requested, options).map(|(bytes, _)| bytes)
+}
+
+pub fn redact_with_report_and_options(
+    bytes: &[u8],
+    requested: Format,
+    options: &RedactionOptions,
 ) -> Result<(Vec<u8>, RedactionReport), RedactError> {
     let mut parts = ooxml_opc::unzip_parts(bytes).map_err(RedactError::Container)?;
     let detected = detect_parts(&parts)?;
@@ -124,6 +149,7 @@ pub fn redact_with_report(
     };
     let main_styles = collect_styles("word/styles.xml")?;
     let glossary_styles = collect_styles("word/glossary/styles.xml")?;
+    let mut masker = TextMasker::new(options);
     for (path, data) in &mut parts {
         let canonical = normalize_part_name(path);
         if blanked.contains(&canonical) {
@@ -136,7 +162,14 @@ pub fn redact_with_report(
             } else {
                 &main_styles
             };
-            *data = redact_xml_with_styles(detected, &canonical, data, &mut report, styles)?;
+            *data = redact_xml_with_styles(
+                detected,
+                &canonical,
+                data,
+                &mut report,
+                styles,
+                &mut masker,
+            )?;
         }
     }
 

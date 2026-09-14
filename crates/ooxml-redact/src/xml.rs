@@ -2,6 +2,7 @@ use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::name::{QName, ResolveResult};
 use quick_xml::{NsReader, Writer, XmlVersion};
 
+use crate::mask::{TextMasker, placeholder};
 use crate::rels::{self, attribute_local, is_unqualified};
 use crate::schema;
 use crate::styles::StyleMap;
@@ -14,7 +15,14 @@ pub(crate) fn redact_xml(
     bytes: &[u8],
     report: &mut RedactionReport,
 ) -> Result<Vec<u8>, RedactError> {
-    redact_xml_with_styles(format, path, bytes, report, &StyleMap::default())
+    redact_xml_with_styles(
+        format,
+        path,
+        bytes,
+        report,
+        &StyleMap::default(),
+        &mut TextMasker::new(&Default::default()),
+    )
 }
 
 pub(crate) fn redact_xml_with_styles(
@@ -23,6 +31,7 @@ pub(crate) fn redact_xml_with_styles(
     bytes: &[u8],
     report: &mut RedactionReport,
     styles: &StyleMap,
+    masker: &mut TextMasker,
 ) -> Result<Vec<u8>, RedactError> {
     let mut reader = NsReader::from_reader(bytes);
     reader.config_mut().trim_text(false);
@@ -36,6 +45,7 @@ pub(crate) fn redact_xml_with_styles(
         current_style: None,
         cell_type: None,
         custom_property: 0,
+        masker,
     };
     let mut skipped_depth = 0;
 
@@ -112,7 +122,7 @@ pub(crate) fn redact_xml_with_styles(
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     let unescaped = quick_xml::escape::unescape(&decoded)
                         .map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&unescaped, kind, &stack);
+                    let replacement = replace_text(&unescaped, kind, state.masker)?;
                     charge_text(state.report, &unescaped);
                     writer
                         .write_event(Event::Text(BytesText::new(&replacement)))
@@ -128,7 +138,7 @@ pub(crate) fn redact_xml_with_styles(
                     replacement_kind(format, path, &stack, state.cell_type.as_deref())
                 {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
-                    let replacement = replace_text(&decoded, kind, &stack);
+                    let replacement = replace_text(&decoded, kind, state.masker)?;
                     charge_text(state.report, &decoded);
                     writer
                         .write_event(Event::CData(BytesCData::new(&replacement)))
@@ -140,11 +150,38 @@ pub(crate) fn redact_xml_with_styles(
                 }
             }
             Event::GeneralRef(reference) => {
-                if replacement_kind(format, path, &stack, state.cell_type.as_deref()).is_some() {
-                    state.report.text_nodes += 1;
-                    state.report.characters += 1;
+                if let Some(kind) =
+                    replacement_kind(format, path, &stack, state.cell_type.as_deref())
+                {
+                    let replacement = if state.masker.is_random()
+                        && matches!(kind, Replacement::Text)
+                    {
+                        let character = reference
+                            .resolve_char_ref()
+                            .map_err(|error| xml_error(path, error))?;
+                        let decoded = reference.decode().map_err(|error| xml_error(path, error))?;
+                        let text = character
+                            .map(|character| character.to_string())
+                            .unwrap_or_else(|| {
+                                match decoded.as_ref() {
+                                    "amp" => "&",
+                                    "lt" => "<",
+                                    "gt" => ">",
+                                    "quot" => "\"",
+                                    "apos" => "'",
+                                    _ => "x",
+                                }
+                                .to_owned()
+                            });
+                        charge_text(state.report, &text);
+                        state.masker.replace(&text)?
+                    } else {
+                        state.report.text_nodes += 1;
+                        state.report.characters += 1;
+                        "x".to_owned()
+                    };
                     writer
-                        .write_event(Event::Text(BytesText::new("x")))
+                        .write_event(Event::Text(BytesText::new(&replacement)))
                         .map_err(|error| xml_error(path, error))?;
                 } else {
                     writer
@@ -173,6 +210,7 @@ struct RewriteState<'a> {
     current_style: Option<String>,
     cell_type: Option<String>,
     custom_property: usize,
+    masker: &'a mut TextMasker,
 }
 
 fn rewrite_start(
@@ -287,7 +325,7 @@ fn rewrite_start(
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
                 && sensitive_attribute(format, path, element, local, &value)
             {
-                Some(placeholder(&value))
+                Some(state.masker.replace(&value)?)
             } else {
                 None
             };
@@ -424,18 +462,22 @@ fn replacement_kind(
     }
 }
 
-fn replace_text(text: &str, kind: Replacement, _stack: &[String]) -> String {
+fn replace_text(
+    text: &str,
+    kind: Replacement,
+    masker: &mut TextMasker,
+) -> Result<String, RedactError> {
     if text.trim().is_empty() {
-        return text.to_owned();
+        return Ok(text.to_owned());
     }
-    match kind {
-        Replacement::Text => placeholder(text),
+    Ok(match kind {
+        Replacement::Text => return masker.replace(text),
         Replacement::Number => numeric_placeholder(text),
         Replacement::Formula => "0".to_owned(),
         Replacement::Date => "1970-01-01T00:00:00Z".to_owned(),
         Replacement::Boolean => "false".to_owned(),
         Replacement::Error => "#N/A".to_owned(),
-    }
+    })
 }
 
 fn sensitive_attribute(
@@ -492,18 +534,6 @@ fn sensitive_attribute(
         }
         Format::Auto => false,
     }
-}
-
-fn placeholder(text: &str) -> String {
-    text.chars()
-        .map(|character| {
-            if character.is_whitespace() {
-                character
-            } else {
-                'x'
-            }
-        })
-        .collect()
 }
 
 fn numeric_placeholder(text: &str) -> String {

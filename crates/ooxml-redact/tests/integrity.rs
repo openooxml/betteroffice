@@ -1,11 +1,62 @@
 use std::collections::{BTreeMap, HashSet};
 
 use docx_parse::{S9ParseOptions, parse_docx_s9_wire};
-use ooxml_redact::{Format, redact, redact_with_report};
+use ooxml_redact::{Format, RedactionOptions, redact, redact_with_options, redact_with_report};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/redaction-integrity.docx");
+
+#[test]
+fn random_characters_keep_style_and_relationship_mappings_consistent() {
+    let default = parts(&redact(FIXTURE, Format::Docx).unwrap());
+    let random = parts(
+        &redact_with_options(
+            FIXTURE,
+            Format::Docx,
+            &RedactionOptions {
+                random_characters: true,
+            },
+        )
+        .unwrap(),
+    );
+    for (path, bytes) in &default {
+        if path.ends_with(".rels") {
+            assert_eq!(&random[path], bytes, "{path}");
+        }
+    }
+    for path in ["word/styles.xml", "word/document.xml"] {
+        for tag in [
+            "style",
+            "basedOn",
+            "next",
+            "link",
+            "pStyle",
+            "rStyle",
+            "tblStyle",
+            "numStyleLink",
+            "styleLink",
+        ] {
+            assert_eq!(
+                elements(&default[path], tag),
+                elements(&random[path], tag),
+                "{path}: {tag}"
+            );
+        }
+    }
+    parse_docx_s9_wire(
+        &redact_with_options(
+            FIXTURE,
+            Format::Docx,
+            &RedactionOptions {
+                random_characters: true,
+            },
+        )
+        .unwrap(),
+        S9ParseOptions::default(),
+    )
+    .unwrap();
+}
 
 fn parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
     ooxml_opc::unzip_parts(bytes).unwrap().into_iter().collect()
