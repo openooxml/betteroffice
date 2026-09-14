@@ -53,6 +53,8 @@ Standard legacy VML horizontal rules render in DOCX and retain their source XML 
 
 The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
 
+The source-available VSDX editor offers a focusable canvas with keyboard undo and redo, Delete, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete, arrange, rotate and flip.
+
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),

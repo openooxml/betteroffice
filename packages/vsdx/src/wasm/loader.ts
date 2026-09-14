@@ -15,6 +15,7 @@ export interface DiagramHandle {
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  transformShape(pageId: string, shapeId: string, xFormula: string, yFormula: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
@@ -124,6 +125,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
+    transformShape: (pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula) => json(() => doc.transformShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula })), true),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),

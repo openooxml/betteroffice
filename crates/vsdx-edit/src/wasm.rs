@@ -94,6 +94,17 @@ struct ResizeShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct TransformShapeArgs {
+    page_id: String,
+    shape_id: String,
+    x_formula: String,
+    y_formula: String,
+    width_formula: String,
+    height_formula: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ReorderShapeArgs {
     page_id: String,
     shape_id: String,
@@ -320,6 +331,11 @@ impl VsdxDocument {
         self.resize_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = transformShapeJson)]
+    pub fn transform_shape_json(&self, args: &str) -> Result<String, JsValue> {
+        self.transform_shape_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = reorderShapeJson)]
     pub fn reorder_shape_json(&self, args: &str) -> Result<String, JsValue> {
         self.reorder_shape_json_inner(args).map_err(js_error)
@@ -498,6 +514,28 @@ impl VsdxDocument {
     fn resize_shape_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.resize_shape(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn transform_shape(
+        &self,
+        args: TransformShapeArgs,
+    ) -> crate::EditResult<[crate::CellFormulaReceipt; 4]> {
+        self.session.transform_shape(
+            &local_context(),
+            &args.page_id,
+            &args.shape_id,
+            args.x_formula,
+            args.y_formula,
+            args.width_formula,
+            args.height_formula,
+        )
+    }
+
+    fn transform_shape_json_inner(&self, args: &str) -> Result<String, String> {
+        let args = parse_args_inner(args)?;
+        self.transform_shape(args)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
@@ -693,6 +731,87 @@ mod tests {
         let snapshot = document.snapshot_json().unwrap();
         assert!(snapshot.contains(r#""name":"Width","formula":"1""#));
         assert!(snapshot.contains(r#""name":"Height","formula":"1""#));
+    }
+
+    #[test]
+    fn transform_shape_json_inner_refuses_atomic_locks() {
+        for (lock, message) in [
+            (
+                "LockMoveX",
+                "invalid diagram state: LockMoveX protects this move gesture",
+            ),
+            (
+                "LockMoveY",
+                "invalid diagram state: LockMoveY protects this move gesture",
+            ),
+            (
+                "LockWidth",
+                "invalid diagram state: LockWidth protects this resize gesture",
+            ),
+            (
+                "LockHeight",
+                "invalid diagram state: LockHeight protects this resize gesture",
+            ),
+        ] {
+            let document = document();
+            add_cell(&document, "PinX", "PinX", "1");
+            add_cell(&document, "PinY", "PinY", "1");
+            add_cell(&document, "Width", "Width", "1");
+            add_cell(&document, "Height", "Height", "1");
+            add_cell(&document, lock, lock, "1");
+            let before = document.encode_state_as_update();
+            assert_eq!(
+                document.transform_shape_json_inner(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"2","widthFormula":"2","heightFormula":"2"}"#
+                ).unwrap_err(),
+                message
+            );
+            let snapshot = document.snapshot_json().unwrap();
+            assert!(snapshot.contains(r#""name":"PinX","formula":"1""#));
+            assert!(snapshot.contains(r#""name":"PinY","formula":"1""#));
+            assert!(snapshot.contains(r#""name":"Width","formula":"1""#));
+            assert!(snapshot.contains(r#""name":"Height","formula":"1""#));
+            assert_eq!(document.encode_state_as_update(), before);
+        }
+    }
+
+    #[test]
+    fn transform_shape_json_inner_refuses_guarded_cells_atomically() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        add_cell(&document, "PinY", "PinY", "1");
+        add_cell(&document, "Width", "Width", "GUARD(1)");
+        add_cell(&document, "Height", "Height", "1");
+        let before = document.encode_state_as_update();
+        assert_eq!(
+            document.transform_shape_json_inner(
+                r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"2","yFormula":"2","widthFormula":"2","heightFormula":"2"}"#
+            ).unwrap_err(),
+            "invalid diagram state: GUARD protects the requested cell"
+        );
+        let snapshot = document.snapshot_json().unwrap();
+        assert!(snapshot.contains(r#""name":"PinX","formula":"1""#));
+        assert!(snapshot.contains(r#""name":"PinY","formula":"1""#));
+        assert!(snapshot.contains(r#""name":"Width","formula":"GUARD(1)""#));
+        assert!(snapshot.contains(r#""name":"Height","formula":"1""#));
+        assert_eq!(document.encode_state_as_update(), before);
+    }
+
+    #[test]
+    fn wasm_transform_shape_json_returns_receipts() {
+        let document = document();
+        add_cell(&document, "PinX", "PinX", "1");
+        add_cell(&document, "PinY", "PinY", "2");
+        add_cell(&document, "Width", "Width", "3");
+        add_cell(&document, "Height", "Height", "4");
+        assert_eq!(
+            document
+                .transform_shape_json(
+                    r#"{"pageId":"page:1","shapeId":"page:1:shape:1","xFormula":"5","yFormula":"6","widthFormula":"7","heightFormula":"8"}"#,
+                )
+                .unwrap(),
+            r#"[{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinX","before":"1","after":"5"},{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"PinY","before":"2","after":"6"},{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"Width","before":"3","after":"7"},{"pageId":"page:1","shapeId":"page:1:shape:1","cellName":"Height","before":"4","after":"8"}]"#
+        );
     }
 
     #[test]

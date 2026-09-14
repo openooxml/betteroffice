@@ -919,6 +919,163 @@ mod tests {
     }
 
     #[test]
+    fn transform_shape_is_one_undo_step() {
+        let session = session();
+        for (name, formula) in [
+            ("PinX", "1"),
+            ("PinY", "2"),
+            ("Width", "3"),
+            ("Height", "4"),
+        ] {
+            add_cell(&session, name, Some(formula), None);
+        }
+        session
+            .transform_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "5",
+                "6",
+                "7",
+                "8",
+            )
+            .unwrap();
+        let formulas = |session: &DiagramSession| {
+            let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+            ["PinX", "PinY", "Width", "Height"]
+                .map(|name| {
+                    cells
+                        .iter()
+                        .find(|cell| cell.name == name)
+                        .unwrap()
+                        .formula
+                        .clone()
+                        .unwrap()
+                })
+                .to_vec()
+        };
+        assert_eq!(formulas(&session), vec!["5", "6", "7", "8"]);
+        session.add_undo_barrier();
+        assert!(session.undo());
+        assert_eq!(formulas(&session), vec!["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn transform_refusal_leaves_all_four_cells_unchanged() {
+        for lock in ["LockMoveX", "LockMoveY", "LockWidth", "LockHeight"] {
+            let session = session();
+            for (name, formula) in [
+                ("PinX", "1"),
+                ("PinY", "1"),
+                ("Width", "1"),
+                ("Height", "1"),
+                (lock, "1"),
+            ] {
+                add_cell(&session, name, Some(formula), None);
+            }
+            assert!(
+                session
+                    .transform_shape(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        "2",
+                        "2",
+                        "2",
+                        "2",
+                    )
+                    .is_err()
+            );
+            let cells = &session.snapshot().unwrap().pages[0].shapes[0].cells;
+            for name in ["PinX", "PinY", "Width", "Height"] {
+                assert_eq!(
+                    cells
+                        .iter()
+                        .find(|cell| cell.name == name)
+                        .unwrap()
+                        .formula
+                        .as_deref(),
+                    Some("1"),
+                    "lock {lock} must roll back {name}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transform_refusal_emits_no_updates() {
+        use std::sync::{Arc, Mutex};
+        for lock in ["LockMoveX", "LockMoveY", "LockWidth", "LockHeight"] {
+            let session = session();
+            for (name, formula) in [
+                ("PinX", "1"),
+                ("PinY", "1"),
+                ("Width", "1"),
+                ("Height", "1"),
+                (lock, "1"),
+            ] {
+                add_cell(&session, name, Some(formula), None);
+            }
+            let before = session.encode_state_as_update_v1();
+            let count = Arc::new(Mutex::new(0usize));
+            let observed = Arc::clone(&count);
+            let _subscription = session
+                .observe_update_v1(move |_| {
+                    *observed.lock().unwrap() += 1;
+                })
+                .unwrap();
+            assert!(
+                session
+                    .transform_shape(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        "2",
+                        "2",
+                        "2",
+                        "2",
+                    )
+                    .is_err()
+            );
+            assert_eq!(*count.lock().unwrap(), 0, "lock {lock} must emit nothing");
+            assert_eq!(session.encode_state_as_update_v1(), before);
+        }
+    }
+
+    #[test]
+    fn transform_success_emits_one_update() {
+        use std::sync::{Arc, Mutex};
+        let session = session();
+        for (name, formula) in [
+            ("PinX", "1"),
+            ("PinY", "1"),
+            ("Width", "1"),
+            ("Height", "1"),
+        ] {
+            add_cell(&session, name, Some(formula), None);
+        }
+        let count = Arc::new(Mutex::new(0usize));
+        let observed = Arc::clone(&count);
+        let _subscription = session
+            .observe_update_v1(move |_| {
+                *observed.lock().unwrap() += 1;
+            })
+            .unwrap();
+        session
+            .transform_shape(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                "2",
+                "2",
+                "2",
+                "2",
+            )
+            .unwrap();
+        assert_eq!(*count.lock().unwrap(), 1);
+    }
+
+    #[test]
     fn second_axis_guard_leaves_gesture_unchanged() {
         let session = session();
         add_cell(&session, "PinX", Some("1"), None);

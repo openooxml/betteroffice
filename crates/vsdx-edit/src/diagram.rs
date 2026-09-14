@@ -657,6 +657,41 @@ impl DiagramSession {
         )
     }
 
+    /** One handle gesture: pin plus size in a single transaction. */
+    #[allow(clippy::too_many_arguments)]
+    pub fn transform_shape(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        x_formula: impl Into<String>,
+        y_formula: impl Into<String>,
+        width_formula: impl Into<String>,
+        height_formula: impl Into<String>,
+    ) -> EditResult<[CellFormulaReceipt; 4]> {
+        let receipts = self.set_cell_formulas(
+            context,
+            page_id,
+            shape_id,
+            vec![
+                ("PinX", x_formula.into(), MutationGesture::MoveX),
+                ("PinY", y_formula.into(), MutationGesture::MoveY),
+                ("Width", width_formula.into(), MutationGesture::ResizeWidth),
+                (
+                    "Height",
+                    height_formula.into(),
+                    MutationGesture::ResizeHeight,
+                ),
+            ],
+        )?;
+        Ok([
+            receipts[0].clone(),
+            receipts[1].clone(),
+            receipts[2].clone(),
+            receipts[3].clone(),
+        ])
+    }
+
     pub fn reorder_shape(
         &self,
         context: &EditCtx,
@@ -807,10 +842,23 @@ impl DiagramSession {
         first: (&str, String, MutationGesture),
         second: (&str, String, MutationGesture),
     ) -> EditResult<[CellFormulaReceipt; 2]> {
+        let receipts = self.set_cell_formulas(context, page_id, shape_id, vec![first, second])?;
+        Ok([receipts[0].clone(), receipts[1].clone()])
+    }
+
+    /** Validate every cell before writing any of them. */
+    fn set_cell_formulas(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        cells: Vec<(&str, String, MutationGesture)>,
+    ) -> EditResult<Vec<CellFormulaReceipt>> {
         let mut txn = self.transact_for(context);
         let context_for_policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
-        let decide =
-            |(name, formula, gesture): (&str, String, MutationGesture)| match decide_mutation(
+        let mut resolved = Vec::with_capacity(cells.len());
+        for (name, formula, gesture) in cells {
+            match decide_mutation(
                 &context_for_policy,
                 context_for_policy.locator(CellLocator {
                     sheet: CellSheet::Page(0),
@@ -824,35 +872,30 @@ impl DiagramSession {
                 formula.clone(),
                 &ParseLimits::default(),
             ) {
-                MutationOutcome::Allowed { target, .. } => Ok((target, formula)),
+                MutationOutcome::Allowed { target, .. } => resolved.push((target, formula)),
                 MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
-                    Err(EditError::InvalidState(reason))
+                    return Err(EditError::InvalidState(reason));
                 }
-            };
-        let (first_target, first_formula) = decide(first)?;
-        let (second_target, second_formula) = decide(second)?;
-        let first_cell = cell_map(&mut txn, page_id, shape_id, &first_target)?;
-        let second_cell = cell_map(&mut txn, page_id, shape_id, &second_target)?;
-        let first_before = map_string(&first_cell, &txn, "formula");
-        let second_before = map_string(&second_cell, &txn, "formula");
-        first_cell.insert(&mut txn, "formula", first_formula.as_str());
-        second_cell.insert(&mut txn, "formula", second_formula.as_str());
-        Ok([
-            CellFormulaReceipt {
+            }
+        }
+        let mut maps = Vec::with_capacity(resolved.len());
+        for (target, _) in &resolved {
+            let cell = cell_map(&mut txn, page_id, shape_id, target)?;
+            maps.push(map_string(&cell, &txn, "formula"));
+        }
+        let mut receipts = Vec::with_capacity(resolved.len());
+        for ((target, formula), before) in resolved.into_iter().zip(maps) {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts.push(CellFormulaReceipt {
                 page_id: page_id.to_owned(),
                 shape_id: shape_id.to_owned(),
-                cell_name: first_target.cell_name,
-                before: first_before,
-                after: first_formula,
-            },
-            CellFormulaReceipt {
-                page_id: page_id.to_owned(),
-                shape_id: shape_id.to_owned(),
-                cell_name: second_target.cell_name,
-                before: second_before,
-                after: second_formula,
-            },
-        ])
+                cell_name: target.cell_name,
+                before,
+                after: formula,
+            });
+        }
+        Ok(receipts)
     }
 }
 

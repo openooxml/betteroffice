@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { canvasPointToModel, paintPage } from './canvas';
+import { canvasPointToModel, modelPointToCanvas, paintPage } from './canvas';
 import type { PageDisplayList } from '../types';
 
 function context(log: string[]): CanvasRenderingContext2D {
@@ -73,6 +73,28 @@ test('canvasPointToModel divides out the canvas scale', () => {
 test('canvasPointToModel rejects a degenerate transform and a non-positive scale', () => {
   expect(() => canvasPointToModel({ a: 0, b: 0, c: 0, d: 0, e: 0, f: 0 }, 1, 1)).toThrow();
   expect(() => canvasPointToModel(pagePaintTransform, 1, 1, 0)).toThrow();
+});
+
+test('modelPointToCanvas round-trips through canvasPointToModel', () => {
+  const points = [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2.5, y: -3.25 }, { x: -1, y: 8 }];
+  const rotated = { a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 };
+  for (const point of points) {
+    const canvas = modelPointToCanvas(pagePaintTransform, point.x, point.y);
+    const back = canvasPointToModel(pagePaintTransform, canvas.x, canvas.y);
+    expect(back.x).toBeCloseTo(point.x, 10); expect(back.y).toBeCloseTo(point.y, 10);
+    const scaled = modelPointToCanvas(pagePaintTransform, point.x, point.y, 2);
+    const backScaled = canvasPointToModel(pagePaintTransform, scaled.x, scaled.y, 2);
+    expect(backScaled.x).toBeCloseTo(point.x, 10); expect(backScaled.y).toBeCloseTo(point.y, 10);
+    const turned = modelPointToCanvas(rotated, point.x, point.y);
+    const backTurned = canvasPointToModel(rotated, turned.x, turned.y);
+    expect(backTurned.x).toBeCloseTo(point.x, 10); expect(backTurned.y).toBeCloseTo(point.y, 10);
+    const turnedScaled = modelPointToCanvas(rotated, point.x, point.y, 2);
+    const backTurnedScaled = canvasPointToModel(rotated, turnedScaled.x, turnedScaled.y, 2);
+    expect(backTurnedScaled.x).toBeCloseTo(point.x, 10); expect(backTurnedScaled.y).toBeCloseTo(point.y, 10);
+  }
+  expect(modelPointToCanvas(pagePaintTransform, 1, 1)).toEqual({ x: 96, y: 672 });
+  expect(() => modelPointToCanvas(pagePaintTransform, 1, 1, 0)).toThrow('VSDX canvas scale must be a positive number');
+  expect(() => modelPointToCanvas(pagePaintTransform, 1, 1, Number.NaN)).toThrow('VSDX canvas scale must be a positive number');
 });
 
 test('a delayed image cannot overwrite a newer page or disturb its canvas state', async () => {

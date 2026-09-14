@@ -1,9 +1,13 @@
 export { VsdxEditor } from './VsdxEditor';
 export type { VsdxEditorApi, VsdxEditorCollaborationOptions, VsdxEditorProps, VsdxShapeSelection } from './VsdxEditor';
 export { Ribbon } from './components/ribbon/Ribbon';
+export { CommandMenu, CommandMenuItem } from './components/ribbon/CommandMenu';
+export type { CommandMenuEntry } from './components/ribbon/CommandMenu';
+export { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
+export type { ShapeContextMenuProps } from './components/ribbon/ShapeContextMenu';
 export { RibbonIcon } from './components/ribbon/RibbonIcon';
 export type { RibbonIconName } from './components/ribbon/RibbonIcon';
-export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, useRibbonCommands } from './components/ribbon/commands';
+export { RibbonCommandsContext, RibbonCommandsProvider, createRibbonCommands, findShapePlacement, isCellWriteBlocked, isDeleteBlocked, useRibbonCommands } from './components/ribbon/commands';
 export type { RibbonCommand, RibbonCommandId, RibbonCommands, RibbonCommandsProviderProps, ShapePlacement } from './components/ribbon/commands';
 export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';

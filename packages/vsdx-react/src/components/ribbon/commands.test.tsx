@@ -44,6 +44,19 @@ test('uses exact z-order bounds and ShapeSheet formulas', () => {
   expect(commands.fillColor.value).toBe('#112233'); expect(commands.lineColor.value).toBe('#445566'); expect(commands.lineWeight.value).toBe('0.01 in'); expect(commands.linePattern.value).toBe('4');
 });
 
+test('locks and guards disable the operations the mutation policy would refuse', () => {
+  const state = snapshot({ LockDelete: '1', Angle: 'GUARD(0)', FlipX: 'GUARD(0)', FlipY: '0' });
+  const diagram = handle(state);
+  const commands = createRibbonCommands(diagram, selected, 'page', () => {}, () => {}, () => {});
+  expect(commands.delete.enabled).toBe(false);
+  expect(commands.rotateLeft.enabled).toBe(false);
+  expect(commands.rotateRight.enabled).toBe(false);
+  expect(commands.flipHorizontal.enabled).toBe(false);
+  expect(commands.flipVertical.enabled).toBe(true);
+  expect(commands.bringForward.enabled).toBe(true);
+  expect(commands.sendBackward.enabled).toBe(true);
+});
+
 test('does not reorder forward past the topmost shape', () => {
   const state = snapshot(); const diagram = handle(state); const commands = createRibbonCommands(diagram, { ...selected, shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }, 'page', () => {}, () => {}, () => {});
   expect(commands.bringForward.enabled).toBe(false); commands.bringForward.run(); expect(diagram.reorderShape).not.toHaveBeenCalled();

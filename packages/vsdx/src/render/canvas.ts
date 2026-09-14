@@ -15,6 +15,10 @@ export function canvasPointToModel(paintTransform: Affine, x: number, y: number,
   const px = x / scale - paintTransform.e, py = y / scale - paintTransform.f;
   return { x: (paintTransform.d * px - paintTransform.c * py) / determinant + 0, y: (paintTransform.a * py - paintTransform.b * px) / determinant + 0 };
 }
+export function modelPointToCanvas(paintTransform: Affine, x: number, y: number, scale = 1): ModelPoint {
+  if (!Number.isFinite(scale) || scale <= 0) throw new Error('VSDX canvas scale must be a positive number');
+  return { x: (paintTransform.a * x + paintTransform.c * y + paintTransform.e) * scale + 0, y: (paintTransform.b * x + paintTransform.d * y + paintTransform.f) * scale + 0 };
+}
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
   if (list.contractVersion !== 4) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);

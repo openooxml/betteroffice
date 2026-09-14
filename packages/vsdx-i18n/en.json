@@ -16,6 +16,7 @@
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",
+    "empty": "No commands here yet",
     "documentName": "Diagram",
     "saved": "Saved",
     "dirty": "Unsaved changes",
@@ -26,6 +27,7 @@
       "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
     }
   },
+  "contextMenu": { "label": "Shape actions" },
   "shapesPanel": {
     "title": "Shapes",
     "collapse": "Collapse Shapes",
