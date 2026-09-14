@@ -74,6 +74,9 @@ const PRESETS: &[&str] = &[
 /// Connectors whose ECMA-376 adjusts are unpinned, so they may route outside the frame.
 const UNPINNED_CONNECTORS: &[&str] = &["bentConnector", "curvedConnector"];
 
+/// Stars ECMA-376 scales by `hf`/`vf`; their outline leaves the frame near the top of `adj`.
+const FRAME_SCALED_STARS: &[&str] = &["star5", "star6", "star7", "star10"];
+
 /// Adjusts whose feature must move strictly with the value across the ECMA-376 range.
 const KNOBS: &[(&str, &str)] = &[
     ("chevron", "adj"),
@@ -230,7 +233,10 @@ fn feature(shape: &str, adjust: &str, path: &[GeometryPathCommand]) -> f64 {
         ("chevron" | "homePlate", _) => 1.0 - v[1].0,
         (_, "adj2") => 1.0 - distance(v[0], v[1]),
         (_, "adj1") => distance(v[0], v[6]),
-        (star, _) if star.starts_with("star") => distance(v[1], (0.5, 0.5)),
+        (star, _) if star.starts_with("star") => {
+            let points: usize = star["star".len()..].parse().unwrap();
+            distance(v[1], v[1 + points])
+        }
         _ => v[0].0,
     }
 }
@@ -297,7 +303,8 @@ proptest! {
     ) {
         let pinned = PRESETS
             .iter()
-            .filter(|shape| !UNPINNED_CONNECTORS.iter().any(|prefix| shape.starts_with(prefix)));
+            .filter(|shape| !UNPINNED_CONNECTORS.iter().any(|prefix| shape.starts_with(prefix)))
+            .filter(|shape| !FRAME_SCALED_STARS.contains(shape));
         for shape in pinned {
             for (x, y) in coordinates(&draw(shape, &adjustments, aspect)) {
                 prop_assert!(

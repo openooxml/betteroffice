@@ -17,17 +17,9 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
             vec![("adj1", 0.5), ("adj2", 0.5)]
         }
         "chevron" | "homePlate" => vec![("adj", 0.5)],
-        value
-            if value
-                .strip_prefix("star")
-                .and_then(|points| points.parse::<usize>().ok())
-                .is_some_and(|points| {
-                    matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32)
-                }) =>
-        {
-            vec![("adj", 0.45)]
-        }
-        _ => Vec::new(),
+        _ => star_preset(shape_type)
+            .map(|star| vec![("adj", star.adjustment)])
+            .unwrap_or_default(),
     };
     values
         .into_iter()
@@ -139,11 +131,7 @@ pub fn preset_geometry_to_path(
         "decagon" => regular_polygon(10),
         "dodecagon" => regular_polygon(12),
         value if value.starts_with("star") => {
-            let points = value[4..].parse::<usize>().ok()?;
-            if !matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32) {
-                return None;
-            }
-            star(points, adjustments.get("adj").copied())
+            star(star_preset(value)?, adjustments.get("adj").copied())
         }
         "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
         "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
@@ -345,15 +333,44 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
     )
 }
 
-fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let inner_radius = clamp_fraction(adjustment, 0.45) * 0.5;
+/// A `starN` preset's point count, default `adj`, and `hf`/`vf` radius factors.
+#[derive(Clone, Copy)]
+struct StarPreset {
+    points: usize,
+    adjustment: f64,
+    hf: f64,
+    vf: f64,
+}
+
+fn star_preset(shape_type: &str) -> Option<StarPreset> {
+    let points = shape_type.strip_prefix("star")?.parse::<usize>().ok()?;
+    let (adjustment, hf, vf) = match points {
+        4 => (0.125, 1.0, 1.0),
+        5 => (0.190_98, 1.051_46, 1.105_57),
+        6 => (0.288_68, 1.154_7, 1.0),
+        7 => (0.346_01, 1.025_72, 1.052_1),
+        10 => (0.425_33, 1.051_46, 1.0),
+        8 | 12 | 16 | 24 | 32 => (0.375, 1.0, 1.0),
+        _ => return None,
+    };
+    Some(StarPreset {
+        points,
+        adjustment,
+        hf,
+        vf,
+    })
+}
+
+fn star(preset: StarPreset, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let (rx, ry) = (0.5 * preset.hf, 0.5 * preset.vf);
+    let inner = pin(adjustment, preset.adjustment, 0.5) * 2.0;
     polygon(
-        &(0..points * 2)
+        &(0..preset.points * 2)
             .map(|i| {
-                let a =
-                    -std::f64::consts::PI / 2.0 + i as f64 * std::f64::consts::PI / points as f64;
-                let r = if i % 2 == 0 { 0.5 } else { inner_radius };
-                (0.5 + a.cos() * r, 0.5 + a.sin() * r)
+                let a = -std::f64::consts::PI / 2.0
+                    + i as f64 * std::f64::consts::PI / preset.points as f64;
+                let scale = if i % 2 == 0 { 1.0 } else { inner };
+                (0.5 + a.cos() * rx * scale, ry + a.sin() * ry * scale)
             })
             .collect::<Vec<_>>(),
     )
@@ -658,6 +675,94 @@ mod tests {
             };
             assert_eq!(path(2.0), path(1.0), "{shape}");
         }
+    }
+
+    const STARS: [&str; 10] = [
+        "star4", "star5", "star6", "star7", "star8", "star10", "star12", "star16", "star24",
+        "star32",
+    ];
+
+    fn star_vertices(shape: &str, adjust: Option<f64>) -> Vec<(f64, f64)> {
+        let adjustments = adjust
+            .map(|value| HashMap::from([("adj".to_owned(), value)]))
+            .unwrap_or_default();
+        preset_geometry_to_path(shape, &adjustments, 1.0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|command| match command {
+                GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                    Some((x, y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cross(origin: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+        (a.0 - origin.0) * (b.1 - origin.1) - (a.1 - origin.1) * (b.0 - origin.0)
+    }
+
+    #[test]
+    fn five_point_star_at_its_default_is_a_regular_pentagram() {
+        for adjust in [None, Some(0.190_98)] {
+            let v = star_vertices("star5", adjust);
+            assert!(cross(v[0], v[4], v[1]).abs() < 1e-5, "{adjust:?}");
+            assert!(cross(v[0], v[4], v[3]).abs() < 1e-5, "{adjust:?}");
+        }
+    }
+
+    #[test]
+    fn star_inner_radius_is_twice_adj_times_the_outer() {
+        let v = star_vertices("star8", Some(0.25));
+        let radius = |(x, y): (f64, f64)| (x - 0.5).hypot(y - 0.5);
+        assert_close(radius(v[0]), 0.5);
+        assert_close(radius(v[1]), 0.25);
+    }
+
+    #[test]
+    fn star_adjustment_pins_between_zero_and_half() {
+        assert_eq!(
+            star_vertices("star5", Some(0.8)),
+            star_vertices("star5", Some(0.5))
+        );
+        let v = star_vertices("star8", Some(0.5));
+        assert_close((v[1].0 - 0.5).hypot(v[1].1 - 0.5), 0.5);
+        let v = star_vertices("star8", Some(-0.1));
+        assert_close(v[1].0, 0.5);
+        assert_close(v[1].1, 0.5);
+    }
+
+    #[test]
+    fn stars_fill_their_frame() {
+        for shape in STARS {
+            let v = star_vertices(shape, None);
+            let min_x = v.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let max_x = v.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+            let min_y = v.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let max_y = v.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+            for (actual, expected) in [(min_x, 0.0), (max_x, 1.0), (min_y, 0.0), (max_y, 1.0)] {
+                assert!((actual - expected).abs() < 1e-4, "{shape}: {actual}");
+            }
+        }
+    }
+
+    #[test]
+    fn stars_default_to_their_own_adjustment() {
+        for (shape, expected) in [("star4", 0.125), ("star5", 0.190_98), ("star12", 0.375)] {
+            assert_eq!(
+                preset_geometry_default_adjustments(shape).get("adj"),
+                Some(&expected)
+            );
+        }
+        for shape in STARS {
+            let default = preset_geometry_default_adjustments(shape)["adj"];
+            assert_eq!(
+                star_vertices(shape, None),
+                star_vertices(shape, Some(default)),
+                "{shape}"
+            );
+        }
+        assert!(preset_geometry_to_path("star9", &HashMap::new(), 1.0).is_none());
     }
 
     fn assert_close(actual: f64, expected: f64) {
