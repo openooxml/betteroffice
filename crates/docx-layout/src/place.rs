@@ -299,12 +299,13 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     // group height must see contextual-spacing suppression (§17.3.1.9)
     apply_contextual_spacing_measured(measured);
 
-    let plan = prescan(
+    let mut plan = prescan(
         measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
 
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
@@ -317,6 +318,9 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(Some(restart)) = plan.section_page_restarts.first() {
+        paginator.restart_page_numbering(restart.start);
+    }
 
     let placement = place(
         measured,
@@ -391,12 +395,13 @@ pub fn layout_document_incremental(
         columns: options.columns.clone(),
     };
     apply_contextual_spacing_measured(&mut input.measured);
-    let plan = prescan(
+    let mut plan = prescan(
         &input.measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
     let resume = previous_checkpoints
         .iter()
@@ -657,6 +662,23 @@ fn place(
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
                 let next_type = break_type_after_section(plan, section_idx);
+                let restart = plan
+                    .section_page_restarts
+                    .get(section_idx + 1)
+                    .copied()
+                    .flatten();
+                let next_type = match (next_type, restart) {
+                    (None | Some(SectionBreakType::NextPage), Some(restart))
+                        if restart.align_parity =>
+                    {
+                        Some(if paginator.physical_parity_is_odd(restart.start) {
+                            SectionBreakType::OddPage
+                        } else {
+                            SectionBreakType::EvenPage
+                        })
+                    }
+                    _ => next_type,
+                };
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
@@ -665,6 +687,18 @@ fn place(
                 let opened_column_region =
                     hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
                 paginator.set_section_index(section_idx + 1);
+                if let Some(restart) = restart
+                    && matches!(
+                        next_type,
+                        None | Some(
+                            SectionBreakType::NextPage
+                                | SectionBreakType::OddPage
+                                | SectionBreakType::EvenPage
+                        )
+                    )
+                {
+                    paginator.restart_page_numbering(restart.start);
+                }
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
                 if opened_column_region

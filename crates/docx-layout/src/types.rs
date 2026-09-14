@@ -1837,8 +1837,17 @@ pub struct LayoutOptions {
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
     pub body_break_type: Option<SectionBreakType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageRestart {
+    pub start: u64,
+    pub align_parity: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
