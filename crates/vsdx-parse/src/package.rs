@@ -46,6 +46,13 @@ pub struct SemanticCellEdit {
     pub value: Option<String>,
 }
 
+/// Plain-text content of a shape's `Text` element.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SemanticTextEdit {
+    pub locator: CellLocator,
+    pub text: String,
+}
+
 /// The user action that requested a ShapeSheet mutation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MutationGesture {
@@ -75,6 +82,13 @@ pub enum StructuralEdit {
     DeleteShape {
         page_id: u32,
         shape_id: u32,
+    },
+    AddConnect {
+        page_id: u32,
+        from_sheet: u32,
+        from_cell: String,
+        to_sheet: u32,
+        to_cell: String,
     },
     /// Moves a shape before `before_shape_id`, or to the end when it is absent.
     ReorderShape {
@@ -911,6 +925,157 @@ pub fn save_semantic_cell_edits(
     }
 }
 
+/// Patches only the inner XML of each edited shape's `Text` element.
+pub fn save_semantic_text_edits(
+    package: &VsdxPackage,
+    edits: &[SemanticTextEdit],
+) -> Result<Vec<u8>, VsdxError> {
+    let limits = ParseLimits::default();
+    let mut part_edits: BTreeMap<String, Vec<crate::SpanEdit>> = BTreeMap::new();
+    for edit in edits {
+        validate_text_content(&edit.text, &limits)?;
+        let (page_id, shape_id) = match (&edit.locator.sheet, edit.locator.shape_id) {
+            (CellSheet::Page(page_id), Some(shape_id)) => (*page_id, shape_id),
+            _ => {
+                return Err(VsdxError::InvalidCellEdit {
+                    part: format!("{:?}", edit.locator.sheet),
+                    message: "text edits require a page shape".to_owned(),
+                });
+            }
+        };
+        let path = package
+            .page_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == page_id).then(|| path.clone()))
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: page_id.to_string(),
+                message: "page does not exist".to_owned(),
+            })?;
+        let part = package
+            .parts
+            .iter()
+            .find(|part| part.path == path)
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: "part does not exist".to_owned(),
+            })?;
+        let shape = part
+            .spans
+            .iter()
+            .find(|span| {
+                local_name(&span.name) == "Shape"
+                    && attribute_equals(&part.bytes, span, "ID", &shape_id.to_string())
+            })
+            .ok_or_else(|| VsdxError::InvalidCellEdit {
+                part: path.clone(),
+                message: format!("shape {shape_id} does not exist"),
+            })?;
+        let text = part.spans.iter().find(|span| {
+            local_name(&span.name) == "Text"
+                && nearest_parent(part, span.span, "Shape")
+                    .is_some_and(|parent| parent.span == shape.span)
+        });
+        let escaped = escape_text_content(&edit.text);
+        match text {
+            Some(text) => {
+                let outer_end = text.span.end().ok_or(VsdxError::InvalidSpan)?;
+                let open_end = tag_close(&part.bytes, text.span.offset, outer_end)
+                    .ok_or(VsdxError::InvalidSpan)?;
+                if part.bytes[open_end.saturating_sub(1)] == b'/' {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: text.span,
+                        replacement: format!("<{}>{escaped}</{}>", text.name, text.name)
+                            .into_bytes(),
+                    });
+                } else {
+                    let inner_start = open_end + 1;
+                    let closing = part.bytes[inner_start..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .map(|relative| relative + inner_start)
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: inner_start,
+                            length: closing - inner_start,
+                        },
+                        replacement: escaped.into_bytes(),
+                    });
+                }
+            }
+            None => {
+                let outer_end = shape.span.end().ok_or(VsdxError::InvalidSpan)?;
+                if outer_end >= 2 && part.bytes[outer_end - 2..outer_end] == *b"/>" {
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: outer_end - 2,
+                            length: 2,
+                        },
+                        replacement: format!("><Text>{escaped}</Text></{}>", shape.name)
+                            .into_bytes(),
+                    });
+                } else {
+                    let closing = part.bytes[..outer_end]
+                        .iter()
+                        .rposition(|byte| *byte == b'<')
+                        .ok_or(VsdxError::InvalidSpan)?;
+                    part_edits.entry(path).or_default().push(crate::SpanEdit {
+                        span: crate::SourceSpan {
+                            offset: closing,
+                            length: 0,
+                        },
+                        replacement: format!("<Text>{escaped}</Text>").into_bytes(),
+                    });
+                }
+            }
+        }
+    }
+    if part_edits.values().all(|edits| edits.is_empty()) {
+        return write_vsdx(package);
+    }
+    let mut output = package.clone();
+    for (path, edits) in &part_edits {
+        let part = package
+            .parts
+            .iter()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        let bytes = apply_span_edits(&part.bytes, edits)?;
+        let target = output
+            .parts
+            .iter_mut()
+            .find(|part| &part.path == path)
+            .expect("validated source part");
+        target.bytes = bytes;
+    }
+    let bytes = write_vsdx(&output)?;
+    parse_vsdx(&bytes)?;
+    Ok(bytes)
+}
+
+fn validate_text_content(value: &str, limits: &ParseLimits) -> Result<(), VsdxError> {
+    if value.len() > limits.max_xml_text_bytes {
+        return Err(VsdxError::PatchLimit { kind: "editBytes" });
+    }
+    if value.chars().any(|c| !matches!(c, '\u{9}' | '\u{A}' | '\u{D}' | '\u{20}'..='\u{D7FF}' | '\u{E000}'..='\u{FFFD}' | '\u{10000}'..='\u{10FFFF}')) {
+        return Err(VsdxError::InvalidXmlCharacter);
+    }
+    Ok(())
+}
+
+fn escape_text_content(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            _ => output.push(character),
+        }
+    }
+    output
+}
+
 /// Applies structural edits and validates references; deletion removes incident Connects.
 pub fn save_structural_edits(
     package: &VsdxPackage,
@@ -934,7 +1099,8 @@ pub fn save_structural_edits(
         let page_id = match edit {
             StructuralEdit::AddShape { page_id, .. }
             | StructuralEdit::DeleteShape { page_id, .. }
-            | StructuralEdit::ReorderShape { page_id, .. } => page_id,
+            | StructuralEdit::ReorderShape { page_id, .. }
+            | StructuralEdit::AddConnect { page_id, .. } => page_id,
             StructuralEdit::ReorderPages { .. } => continue,
         };
         let path = package
@@ -984,6 +1150,13 @@ pub fn save_structural_edits(
                     before_shape_id,
                     ..
                 } => reorder_shape(&current, shapes, *shape_id, *before_shape_id)?,
+                StructuralEdit::AddConnect {
+                    from_sheet,
+                    from_cell,
+                    to_sheet,
+                    to_cell,
+                    ..
+                } => add_connect(&current, *from_sheet, from_cell, *to_sheet, to_cell)?,
                 StructuralEdit::ReorderPages { .. } => unreachable!(),
             };
             bytes = apply_span_edits(&bytes, &replacement)?;
@@ -1393,6 +1566,110 @@ fn delete_shape(
         })?);
     }
     Ok(replacements)
+}
+
+fn add_connect(
+    part: &PackagePart,
+    from_sheet: u32,
+    from_cell: &str,
+    to_sheet: u32,
+    to_cell: &str,
+) -> Result<Vec<SpanEdit>, VsdxError> {
+    if !matches!(from_cell, "BeginX" | "BeginY" | "EndX" | "EndY") {
+        return Err(VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "Connect FromCell must be a connector endpoint".to_owned(),
+        });
+    }
+    if !valid_glue_target(to_cell) {
+        return Err(VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "Connect ToCell must be PinX, PinY, or Connections.XN".to_owned(),
+        });
+    }
+    let connects = direct_child(part, "Connects", None);
+    let contents = part
+        .spans
+        .iter()
+        .find(|span| local_name(&span.name) == "PageContents")
+        .ok_or_else(|| VsdxError::InvalidCellEdit {
+            part: part.path.clone(),
+            message: "page has no PageContents container".to_owned(),
+        })?;
+    let owner = connects.unwrap_or(contents);
+    let prefix = owner.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+    let qualify = |name: &str| {
+        if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}:{name}")
+        }
+    };
+    let mut fragment = format!("<{} FromSheet=\"", qualify("Connect")).into_bytes();
+    fragment.extend_from_slice(from_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" FromCell=\"");
+    push_quoted_fragment(&mut fragment, from_cell)?;
+    fragment.extend_from_slice(b"\" ToSheet=\"");
+    fragment.extend_from_slice(to_sheet.to_string().as_bytes());
+    fragment.extend_from_slice(b"\" ToCell=\"");
+    push_quoted_fragment(&mut fragment, to_cell)?;
+    fragment.extend_from_slice(b"\"/>");
+    if let Some(connects) = connects {
+        let end = connects.span.end().ok_or(VsdxError::InvalidSpan)?;
+        if end >= 2 && part.bytes[end - 2..end] == *b"/>" {
+            let mut replacement = Vec::from(b">".as_slice());
+            replacement.extend_from_slice(&fragment);
+            replacement.extend_from_slice(format!("</{}>", connects.name).as_bytes());
+            return Ok(vec![SpanEdit {
+                span: crate::SourceSpan {
+                    offset: end - 2,
+                    length: 2,
+                },
+                replacement,
+            }]);
+        }
+        let close = part.bytes[..end]
+            .iter()
+            .rposition(|byte| *byte == b'<')
+            .ok_or(VsdxError::InvalidSpan)?;
+        return Ok(vec![SpanEdit {
+            span: crate::SourceSpan {
+                offset: close,
+                length: 0,
+            },
+            replacement: fragment,
+        }]);
+    }
+    let end = contents.span.end().ok_or(VsdxError::InvalidSpan)?;
+    let close = part.bytes[..end]
+        .iter()
+        .rposition(|byte| *byte == b'<')
+        .ok_or(VsdxError::InvalidSpan)?;
+    let container = qualify("Connects");
+    let mut replacement = format!("<{container}>").into_bytes();
+    replacement.extend_from_slice(&fragment);
+    replacement.extend_from_slice(format!("</{container}>").as_bytes());
+    Ok(vec![SpanEdit {
+        span: crate::SourceSpan {
+            offset: close,
+            length: 0,
+        },
+        replacement,
+    }])
+}
+
+fn valid_glue_target(cell: &str) -> bool {
+    if matches!(cell, "PinX" | "PinY") {
+        return true;
+    }
+    cell.strip_prefix("Connections.X")
+        .and_then(|ordinal| ordinal.parse::<u32>().ok())
+        .is_some_and(|ordinal| ordinal >= 1)
+}
+
+fn push_quoted_fragment(output: &mut Vec<u8>, value: &str) -> Result<(), VsdxError> {
+    output.extend_from_slice(&escape_attribute_value(value, b'"')?);
+    Ok(())
 }
 
 pub fn remove_connects_referencing_shapes(sheet: &mut Sheet, deleted: &HashSet<u32>) {
@@ -1887,6 +2164,26 @@ fn immediate_parent(part: &PackagePart, child: crate::SourceSpan) -> Option<&cra
 
 fn local_name(name: &str) -> &str {
     name.rsplit_once(':').map_or(name, |(_, name)| name)
+}
+
+/// Offset of the `>` closing the tag opened at `start`, skipping quoted values.
+fn tag_close(source: &[u8], start: usize, end: usize) -> Option<usize> {
+    let mut index = start;
+    let mut quote = None;
+    while index < end {
+        let byte = source[index];
+        if let Some(active) = quote {
+            if byte == active {
+                quote = None;
+            }
+        } else if byte == b'\'' || byte == b'"' {
+            quote = Some(byte);
+        } else if byte == b'>' {
+            return Some(index);
+        }
+        index += 1;
+    }
+    None
 }
 
 fn contains(parent: crate::SourceSpan, child: crate::SourceSpan) -> bool {
@@ -2500,6 +2797,185 @@ mod tests {
     }
 
     #[test]
+    fn add_connect_appends_glue_without_touching_existing_spans() {
+        let source = b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes><Connects><Connect FromSheet='1' FromCell='BeginX' ToSheet='1' ToCell='PinX'/></Connects></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 2,
+                from_cell: "EndX".to_owned(),
+                to_sheet: 1,
+                to_cell: "Connections.X1".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(
+                    b"<Connect FromSheet='1' FromCell='BeginX' ToSheet='1' ToCell='PinX'/>".len()
+                )
+                .any(|window| window
+                    == b"<Connect FromSheet='1' FromCell='BeginX' ToSheet='1' ToCell='PinX'/>")
+        );
+        assert!(after
+            .windows(b"<Connect FromSheet=\"2\" FromCell=\"EndX\" ToSheet=\"1\" ToCell=\"Connections.X1\"/>".len())
+            .any(|window| window
+                == b"<Connect FromSheet=\"2\" FromCell=\"EndX\" ToSheet=\"1\" ToCell=\"Connections.X1\"/>"));
+        assert!(
+            after
+                .windows(b"<Shape ID='1'/>".len())
+                .any(|window| window == b"<Shape ID='1'/>")
+        );
+        let connects = reparsed.page_contents[&path].connects().collect::<Vec<_>>();
+        assert_eq!(connects.len(), 2);
+        assert_eq!(connects[1].from_sheet, 2);
+        assert_eq!(connects[1].from_cell.as_deref(), Some("EndX"));
+        assert_eq!(connects[1].to_sheet, 1);
+        assert_eq!(connects[1].to_cell.as_deref(), Some("Connections.X1"));
+        validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_connect_creates_a_connects_container_when_missing() {
+        let source =
+            b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 2,
+                from_cell: "BeginX".to_owned(),
+                to_sheet: 1,
+                to_cell: "PinX".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        assert_eq!(
+            reparsed.part_bytes(&path).unwrap(),
+            b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes><Connects><Connect FromSheet=\"2\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
+        );
+        validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_connect_preserves_prefixed_containers() {
+        for container in ["<v:Connects/>", "<v:Connects></v:Connects>", ""] {
+            let source = format!(
+                "<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes><v:Shape ID='1'/><v:Shape ID='2'/></v:Shapes>{container}</v:PageContents>"
+            );
+            let (package, path) = package_with_page_xml(source.as_bytes());
+            let saved = save_structural_edits(
+                &package,
+                &[StructuralEdit::AddConnect {
+                    page_id: package.page_part_ids[&path],
+                    from_sheet: 2,
+                    from_cell: "BeginX".to_owned(),
+                    to_sheet: 1,
+                    to_cell: "PinX".to_owned(),
+                }],
+            )
+            .unwrap();
+            let reparsed = parse_vsdx(&saved).unwrap();
+            let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+            assert!(after.contains("<v:Connect "));
+            assert!(after.contains("</v:Connects>"));
+            assert_eq!(reparsed.page_contents[&path].connects().count(), 1);
+            validate_structure(&reparsed).unwrap();
+        }
+    }
+
+    #[test]
+    fn add_connect_refuses_cells_outside_the_glue_contract() {
+        let source =
+            b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        for (from_cell, to_cell) in [
+            ("PinX", "PinX"),
+            ("BeginX", "Width"),
+            ("BeginX", "Connections.X0"),
+            ("BeginX", "Connections.X"),
+        ] {
+            assert!(
+                save_structural_edits(
+                    &package,
+                    &[StructuralEdit::AddConnect {
+                        page_id,
+                        from_sheet: 2,
+                        from_cell: from_cell.to_owned(),
+                        to_sheet: 1,
+                        to_cell: to_cell.to_owned(),
+                    }],
+                )
+                .is_err(),
+                "{from_cell} -> {to_cell}"
+            );
+        }
+        assert!(
+            save_structural_edits(
+                &package,
+                &[StructuralEdit::AddConnect {
+                    page_id,
+                    from_sheet: 2,
+                    from_cell: "BeginX".to_owned(),
+                    to_sheet: 99,
+                    to_cell: "PinX".to_owned(),
+                }],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn add_connect_leaves_other_parts_byte_identical() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let path = package.page_part_paths[0].clone();
+        let page_id = package.page_part_ids[&path];
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddConnect {
+                page_id,
+                from_sheet: 1,
+                from_cell: "EndX".to_owned(),
+                to_sheet: 1,
+                to_cell: "PinY".to_owned(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        for part in &package.parts {
+            if part.path == path {
+                continue;
+            }
+            assert_eq!(
+                reparsed.part_bytes(&part.path),
+                Some(part.bytes.as_slice()),
+                "untouched part changed: {}",
+                part.path
+            );
+        }
+        let after = reparsed.part_bytes(&path).unwrap();
+        assert!(
+            after
+                .windows(b"Mystery='yes'".len())
+                .any(|window| window == b"Mystery='yes'")
+        );
+        assert!(
+            after
+                .windows(b"<UnknownConnect Flag='yes'>".len())
+                .any(|window| window == b"<UnknownConnect Flag='yes'>")
+        );
+    }
+
+    #[test]
     fn deleting_a_missing_shape_fails() {
         let (package, path) =
             package_with_page_xml(b"<PageContents><Shapes><Shape ID='1'/></Shapes></PageContents>");
@@ -2705,6 +3181,125 @@ mod tests {
                 .values()
                 .any(|sheet| sheet_has_value(sheet, "patched"))
         );
+    }
+
+    #[test]
+    fn saves_shape_text_without_rewriting_other_parts_or_lexical_spans() {
+        let source = include_bytes!("../tests/fixtures/foundation.vsdx");
+        let package = parse_vsdx(source).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let edit = SemanticTextEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: None,
+                section_index: None,
+                row: None,
+                cell_name: "Text".to_owned(),
+            },
+            text: "Hello & <World>\nNew line".to_owned(),
+        };
+        let before: BTreeMap<_, _> = unzip_parts(source).unwrap().into_iter().collect();
+        let saved = save_semantic_text_edits(&package, std::slice::from_ref(&edit)).unwrap();
+        let after: BTreeMap<_, _> = unzip_parts(&saved).unwrap().into_iter().collect();
+        for (path, bytes) in &before {
+            if path == &part_path {
+                let original = package.part_bytes(path).unwrap();
+                let text = package
+                    .element_spans(path)
+                    .unwrap()
+                    .iter()
+                    .find(|span| {
+                        span.name == "Text"
+                            && original[span.span.offset..span.span.end().unwrap()]
+                                .windows(b"<fld".len())
+                                .any(|window| window == b"<fld")
+                    })
+                    .unwrap();
+                let outer_end = text.span.end().unwrap();
+                let inner_start = original[text.span.offset..outer_end]
+                    .iter()
+                    .position(|byte| *byte == b'>')
+                    .unwrap()
+                    + text.span.offset
+                    + 1;
+                let closing = original[inner_start..outer_end]
+                    .iter()
+                    .rposition(|byte| *byte == b'<')
+                    .unwrap()
+                    + inner_start;
+                assert_only_span_changed(
+                    original,
+                    &after[path],
+                    crate::SourceSpan {
+                        offset: inner_start,
+                        length: closing - inner_start,
+                    },
+                    "Hello &amp; &lt;World&gt;\nNew line".len(),
+                );
+            } else {
+                assert_eq!(&after[path], bytes, "{path}");
+            }
+        }
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let sheet = reparsed.page_contents.get(&part_path).unwrap();
+        let shape = sheet.shapes().find(|shape| shape.id == 1).unwrap();
+        let round_tripped = shape
+            .text()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|token| match token {
+                crate::TextToken::Literal(value) => Some(value.clone()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert_eq!(round_tripped, "Hello & <World>\nNew line");
+    }
+
+    #[test]
+    fn saving_shape_text_rejects_non_shape_targets_and_forbidden_characters() {
+        let package = parse_vsdx(include_bytes!("../tests/fixtures/foundation.vsdx")).unwrap();
+        let part_path = package.page_part_paths.first().unwrap().clone();
+        let page_id = package.page_part_ids.get(&part_path).copied().unwrap();
+        let locator = |shape_id: Option<u32>| CellLocator {
+            sheet: CellSheet::Page(page_id),
+            shape_id,
+            section: None,
+            section_index: None,
+            row: None,
+            cell_name: "Text".to_owned(),
+        };
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(None),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(999)),
+                    text: "x".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidCellEdit { .. })
+        ));
+        assert!(matches!(
+            save_semantic_text_edits(
+                &package,
+                &[SemanticTextEdit {
+                    locator: locator(Some(1)),
+                    text: "bad\0".to_owned()
+                }]
+            ),
+            Err(VsdxError::InvalidXmlCharacter)
+        ));
     }
 
     #[test]

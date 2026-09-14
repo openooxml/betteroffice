@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -14,11 +14,16 @@ export interface DiagramHandle {
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
   moveShape(pageId: string, shapeId: string, xFormula: string, yFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
+  setShapeBounds(pageId: string, shapeId: string, xFormula: string, yFormula: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt, CellFormulaReceipt];
+  resizeLocPin(pageId: string, shapeId: string, width: number, height: number): { x: number; y: number };
   resizeShape(pageId: string, shapeId: string, widthFormula: string, heightFormula: string): [CellFormulaReceipt, CellFormulaReceipt];
   reorderShape(pageId: string, shapeId: string, toIndex: number): ShapeReceipt;
   reorderPage(pageId: string, toIndex: number): ShapeReceipt;
   addShape(pageId: string, draft: FormulaShapeDraft): ShapeReceipt;
+  addConnector(pageId: string, draft: FormulaShapeDraft, from: ConnectorGlue, to: ConnectorGlue): ShapeReceipt;
   deleteShape(pageId: string, shapeId: string): ShapeReceipt;
+  shapeText(pageId: string, shapeId: string): string;
+  setShapeText(pageId: string, shapeId: string, text: string): TextReceipt;
   save(): Uint8Array;
   canUndo(): boolean; canRedo(): boolean; undo(): HistoryResult; redo(): HistoryResult;
   encodeStateVector(): Uint8Array; encodeStateAsUpdate(remoteStateVector?: Uint8Array): Uint8Array; encodeDiff(vector: Uint8Array): Uint8Array;
@@ -123,11 +128,16 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
     moveShape: (pageId, shapeId, xFormula, yFormula) => json(() => doc.moveShapeJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula })), true),
+    setShapeBounds: (pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula) => json(() => doc.setShapeBoundsJson(JSON.stringify({ pageId, shapeId, xFormula, yFormula, widthFormula, heightFormula })), true),
+    resizeLocPin: (pageId, shapeId, width, height) => { const [x, y] = wasm(() => doc.resizeLocPin(pageId, shapeId, width, height)); return { x, y }; },
     resizeShape: (pageId, shapeId, widthFormula, heightFormula) => json(() => doc.resizeShapeJson(JSON.stringify({ pageId, shapeId, widthFormula, heightFormula })), true),
     reorderShape: (pageId, shapeId, toIndex) => json(() => doc.reorderShapeJson(JSON.stringify({ pageId, shapeId, toIndex })), true),
     reorderPage: (pageId, toIndex) => json(() => doc.reorderPageJson(JSON.stringify({ pageId, toIndex })), true),
     addShape: (pageId, draft) => json(() => doc.addShapeJson(JSON.stringify({ pageId, draft })), true),
+    addConnector: (pageId, draft, from, to) => json(() => doc.addConnectorJson(JSON.stringify({ pageId, draft, from, to })), true),
     deleteShape: (pageId, shapeId) => json(() => doc.deleteShapeJson(JSON.stringify({ pageId, shapeId })), true),
+    shapeText: (pageId, shapeId) => json(() => doc.shapeTextJson(JSON.stringify({ pageId, shapeId }))),
+    setShapeText: (pageId, shapeId, text) => json(() => doc.setShapeTextJson(JSON.stringify({ pageId, shapeId, text })), true),
     save: () => wasm(() => doc.save().slice()),
     canUndo: () => wasm(() => doc.canUndo()), canRedo: () => wasm(() => doc.canRedo()), undo: () => json(() => doc.undoJson(), true), redo: () => json(() => doc.redoJson(), true),
     encodeStateVector: () => wasm(() => doc.encodeStateVector().slice()), encodeStateAsUpdate: vector => wasm(() => (vector === undefined ? doc.encodeStateAsUpdate() : doc.encodeDiff(vector.slice())).slice()), encodeDiff: vector => wasm(() => doc.encodeDiff(vector.slice()).slice()), applyUpdate: update => json(() => doc.applyUpdateJson(update.slice()), true),

@@ -275,6 +275,20 @@ fn unused_paint_channel_does_not_block_the_used_channel() {
 }
 
 #[test]
+fn unused_paint_channel_failure_is_not_reported() {
+    for make_shape in [paint_control_shape, connector_shape] {
+        for (control, unused) in [("NoFill", "FillForegnd"), ("NoLine", "LineColor")] {
+            let mut shape = make_shape(1, vec![geometry_section(None, Some((control, "1")))]);
+            with_formula(&mut shape, unused, "Unknown(1)");
+            let list = render(vec![shape]);
+            assert!(
+                matches!(list.primitives.as_slice(), [Primitive::Shape { diagnostics, .. }] if diagnostics.is_empty())
+            );
+        }
+    }
+}
+
+#[test]
 fn connector_sections_emit_one_route_with_the_used_channels() {
     let list = render(vec![connector_shape(
         1,
@@ -304,6 +318,36 @@ fn empty_sections_do_not_request_unused_paint() {
             matches!(list.primitives.as_slice(), [Primitive::Shape { fill, stroke, .. }] if fill.is_some() == (control == "NoLine") && stroke.is_some() == (control == "NoFill"))
         );
     }
+}
+
+#[test]
+fn defaulted_paint_is_reported_once_across_sections() {
+    let mut shape = paint_control_shape(
+        1,
+        vec![
+            geometry_section(Some(0), None),
+            geometry_section(Some(1), None),
+        ],
+    );
+    with_formula(&mut shape, "FillForegnd", "Unknown(1)");
+    let list = render(vec![shape]);
+    let primitives = shape_primitives(&list);
+    assert_eq!(primitives.len(), 2);
+    let reported = primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            Primitive::Shape {
+                fill, diagnostics, ..
+            } => {
+                assert!(fill.is_some());
+                Some(diagnostics)
+            }
+            _ => None,
+        })
+        .flatten()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(reported, ["unresolvable-fill-colour"]);
 }
 
 #[test]

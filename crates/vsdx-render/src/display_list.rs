@@ -173,6 +173,9 @@ pub enum Primitive {
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "Affine::is_identity")]
         transform: Affine,
+        /// Paint channels that fell back to the Visio default; empty when fully resolved.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        diagnostics: Vec<Diagnostic>,
     },
     Image {
         id: String,
@@ -296,7 +299,10 @@ impl DiagnosticCategory {
             | "missing-tab-position"
             | "justify-fallback"
             | "unresolvable-character-pos"
-            | "unresolvable-character-case" => Self::Fidelity,
+            | "unresolvable-character-case"
+            | "unresolvable-fill-colour"
+            | "unresolvable-stroke-colour"
+            | "unresolvable-stroke-width" => Self::Fidelity,
             _ => Self::Integrity,
         }
     }

@@ -896,6 +896,10 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
+    if let Some(Value::Array(ids)) = value.get("tocStyleIds") {
+        env.toc_style_ids
+            .extend(ids.iter().filter_map(Value::as_str).map(str::to_owned));
+    }
     if let Some(Value::Object(colors)) = value.get("themeColors") {
         for (key, entry) in colors {
             if let Some(hex) = entry.as_str() {
@@ -3290,7 +3294,8 @@ impl EditSession {
     /// table vocabulary the layout engine consumes. `env_json` supplies the
     /// document-level values lowering cannot read off the story:
     /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
-    /// "pageContentHeight":number|null,"numericIds":{yrsId: number}}`, all
+    /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
+    /// "tocStyleIds":[styleId]}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.

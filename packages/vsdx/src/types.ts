@@ -9,7 +9,9 @@ export interface PageSnapshot { id: string; sourcePartPath: string; name: string
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
+export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
+export interface ConnectorGlue { shapeId: string; toCell?: string; }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
 export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };
 export interface Stroke { color: string; width: number; dashed?: boolean; }
@@ -19,7 +21,7 @@ export interface TextRun { text: string; family: string; sizeIn: number; bold: b
 export interface TextParagraph { runs: TextRun[]; }
 export interface PositionedLine { x: number; y: number; width: number; height: number; start: number; end: number; caretStops: Array<{ position: number; x: number; y: number }>; }
 interface PrimitiveBase { id: string; zOrder: number; }
-export interface ShapePrimitive extends PrimitiveBase { kind: 'shape'; path: GeometryPathCommand[]; fill?: Paint; stroke?: Stroke; transform?: Affine; }
+export interface ShapePrimitive extends PrimitiveBase { kind: 'shape'; path: GeometryPathCommand[]; fill?: Paint; stroke?: Stroke; transform?: Affine; diagnostics?: TextDiagnostic[]; }
 export interface ImagePrimitive extends PrimitiveBase { kind: 'image'; assetId: string; x: number; y: number; width: number; height: number; transform?: Affine; }
 export interface TextBoxPrimitive extends PrimitiveBase { kind: 'textBox'; x: number; y: number; width: number; height: number; paragraphs: TextParagraph[]; lines: PositionedLine[]; transform?: Affine; }
 export interface PlaceholderPrimitive extends PrimitiveBase { kind: 'placeholder'; x: number; y: number; width: number; height: number; reason: string; }

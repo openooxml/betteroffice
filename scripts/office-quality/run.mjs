@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { FORMATS, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
+import { validateReferenceMetadata } from './reference.mjs';
 import { CORPUS_ORIGIN as corpus, selectSamples } from './samples.mjs';
 
 const execute = promisify(execFile);
@@ -93,15 +94,7 @@ async function reference(id) {
   const metadata = JSON.parse(await download(metadataUrl, 2 * 1024 * 1024));
   if (!FORMATS.includes(metadata.format))
     throw new Error(`Unsupported sample format: ${id}`);
-  if (
-    metadata.reference.status !== 'ok' ||
-    metadata.reference.dpi !== 150 ||
-    metadata.reference.sha256 !== metadata.source.sha256 ||
-    metadata.reference.pages !== metadata.reference_pages.length ||
-    metadata.reference.pages < 1 ||
-    metadata.reference.pages > 100
-  )
-    throw new Error(`Invalid Office reference: ${id}`);
+  validateReferenceMetadata(metadata, id);
   const directory = resolve(output, id);
   await mkdir(resolve(directory, 'reference'), { recursive: true });
   const source = resolve(directory, `source.${metadata.format}`);

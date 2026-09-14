@@ -256,6 +256,49 @@ describe('VSDX wasm boundary', () => {
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
+  test('persists a glued connector through save and reopen', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9017 });
+    const rect = (pinX: string) => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const to = diagram.addShape(pageId, rect('5'));
+    const receipt = diagram.addConnector(pageId, { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '2' },
+      { locator: { cellName: 'EndX' }, formula: '4' },
+      { locator: { cellName: 'EndY' }, formula: '2' },
+    ] }, { shapeId: from.shapeId }, { shapeId: to.shapeId, toCell: 'PinX' });
+    const live = diagram.layoutPage(0);
+    expect(live.primitives).toContainEqual(expect.objectContaining({
+      id: `${diagram.snapshot().pages[0].sourcePartPath}:4`, kind: 'shape',
+      path: [{ type: 'move', x: 1, y: 1 }, { type: 'line', x: 5, y: 1 }],
+    }));
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9018 });
+    expect(reopened.layoutPage(0)).toEqual(live);
+    const savedConnector = reopened.snapshot().pages[0].shapes.find(shape => shape.id === 'page:1:shape:4');
+    expect(savedConnector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    expect(receipt.shapeId).not.toBe(savedConnector!.id);
+    reopened.deleteShape(pageId, savedConnector!.id);
+    const deleted = reopened.save();
+    reopened.dispose();
+    const archive = await JSZip.loadAsync(deleted);
+    const pageXml = await archive.file(editedPart)!.async('text');
+    expect(pageXml).not.toMatch(/FromSheet="4"|ToSheet="4"/);
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
   test('persists deletion and removes dependent Connect records through deleteShapeJson', async () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';
@@ -517,6 +560,31 @@ describe('VSDX wasm boundary', () => {
     expect(reopened.snapshot().pages[0].shapes).toContainEqual(expect.objectContaining({ id: 'page:1:shape:2' }));
     reopened.dispose();
     await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
+  test('shape bounds emit one complete update and undo all four cells', () => {
+    const diagram = openDiagram(demo, { clientId: 9080 });
+    const peer = openDiagram(demo, { clientId: 9081 });
+    try {
+      const before = diagram.snapshot();
+      const observed: ReturnType<typeof diagram.snapshot>[] = [];
+      const stop = diagram.onUpdate((update) => { peer.applyUpdate(update); observed.push(peer.snapshot()); });
+      const receipts = diagram.setShapeBounds('page:1', 'page:1:shape:20', '2', '3', '4', '5');
+      expect(receipts.map((receipt) => receipt.after)).toEqual(['2', '3', '4', '5']);
+      expect(observed).toEqual([diagram.snapshot()]);
+      expect(diagram.undo().applied).toBe(true);
+      expect(diagram.snapshot()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      stop();
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'PinY' }, 'GUARD(3)');
+      const locked = diagram.snapshot();
+      expect(() => diagram.setShapeBounds('page:1', 'page:1:shape:20', '6', '7', '8', '9')).toThrow('GUARD');
+      expect(diagram.snapshot()).toEqual(locked);
+      expect(diagram.resizeLocPin('page:1', 'page:1:shape:20', 8, 10)).toEqual({ x: 2.8, y: 0.575 });
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinX' }, 'Width*0.5');
+      diagram.setCellFormula('page:1', 'page:1:shape:20', { cellName: 'LocPinY' }, 'Height*0.5');
+      expect(diagram.resizeLocPin('page:1', 'page:1:shape:20', 8, 10)).toEqual({ x: 4, y: 5 });
+    } finally { diagram.dispose(); peer.dispose(); }
   });
 
   test('aborts a guarded move batch without changing the save bytes', () => {

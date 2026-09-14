@@ -1,9 +1,17 @@
-use crate::display_list::{Paint, Stroke};
+use crate::display_list::{Diagnostic, Paint, Stroke};
 use vsdx_eval::{Evaluation, PageShapeReferences, Value, evaluate_cell_with_shape_package_theme};
 use vsdx_parse::{ParseLimits, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape};
 
-/// Resolves only the paint channels at least one emitting section uses.
+/// Paint for the channels an emitting section uses; a channel that fails keeps the Visio default.
+pub struct PaintOutcome {
+    pub fill: Option<Paint>,
+    pub stroke: Option<Stroke>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+const DEFAULT_STROKE_WIDTH: f64 = 0.01;
+
 pub fn paint(
     package: &VsdxPackage,
     references: Option<&PageShapeReferences>,
@@ -11,37 +19,57 @@ pub fn paint(
     shape_id: u32,
     needs_fill: bool,
     needs_stroke: bool,
-) -> Result<(Option<Paint>, Option<Stroke>), String> {
-    let fill = if needs_fill {
-        value(shape, "FillPattern")
-            .filter(|v| *v != "0")
-            .map(|_| colour(package, references, shape, shape_id, "FillForegnd"))
-            .transpose()?
-            .map(|color| Paint::Solid { color })
+) -> PaintOutcome {
+    let mut diagnostics = Vec::new();
+    let fill = if needs_fill && value(shape, "FillPattern").is_some_and(|v| v != "0") {
+        let color = match colour(package, references, shape, shape_id, "FillForegnd") {
+            Ok(color) => color,
+            Err(reason) => {
+                diagnostics.push(Diagnostic::for_code(
+                    "unresolvable-fill-colour",
+                    format!("unresolvable fill colour: {reason}"),
+                ));
+                default_colour(package)
+            }
+        };
+        Some(Paint::Solid { color })
     } else {
         None
     };
-    let stroke = if needs_stroke {
-        value(shape, "LinePattern")
-            .filter(|v| *v != "0")
-            .map(|_| colour(package, references, shape, shape_id, "LineColor"))
-            .transpose()?
-            .map(|color| {
-                let width = number(shape, "LineWeight").unwrap_or(0.01) as f32;
-                if !width.is_finite() {
-                    return Err::<Stroke, String>("non-finite stroke width".into());
-                }
-                Ok(Stroke {
-                    color,
-                    width,
-                    dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
-                })
-            })
-            .transpose()?
+    let stroke = if needs_stroke && value(shape, "LinePattern").is_some_and(|v| v != "0") {
+        let width = number(shape, "LineWeight").unwrap_or(DEFAULT_STROKE_WIDTH) as f32;
+        let width = if width.is_finite() {
+            width
+        } else {
+            diagnostics.push(Diagnostic::for_code(
+                "unresolvable-stroke-width",
+                "unresolvable stroke width: non-finite LineWeight",
+            ));
+            DEFAULT_STROKE_WIDTH as f32
+        };
+        let color = match colour(package, references, shape, shape_id, "LineColor") {
+            Ok(color) => color,
+            Err(reason) => {
+                diagnostics.push(Diagnostic::for_code(
+                    "unresolvable-stroke-colour",
+                    format!("unresolvable stroke colour: {reason}"),
+                ));
+                default_colour(package)
+            }
+        };
+        Some(Stroke {
+            color,
+            width,
+            dashed: value(shape, "LinePattern").is_some_and(|v| v != "1"),
+        })
     } else {
         None
     };
-    Ok((fill, stroke))
+    PaintOutcome {
+        fill,
+        stroke,
+        diagnostics,
+    }
 }
 pub fn number(shape: &ResolvedShape, name: &str) -> Option<f64> {
     value(shape, name)?
@@ -54,6 +82,10 @@ fn value<'a>(shape: &'a ResolvedShape, name: &str) -> Option<&'a str> {
         Lookup::Found(cell) => cell.cell.value.as_deref(),
         Lookup::Deleted | Lookup::Absent => None,
     }
+}
+/// Visio's unformatted foreground: palette index 0, black when the file has no palette.
+fn default_colour(package: &VsdxPackage) -> String {
+    crate::palette_colour(package, 0.0).unwrap_or_else(|| "#000000".into())
 }
 fn colour(
     package: &VsdxPackage,

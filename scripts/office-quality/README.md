@@ -21,7 +21,7 @@ node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 
 The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the current samples across all three formats. The [`docx` collection](https://corpus.betteroffice.dev/collections/docx.json) selects Word documents. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
 
-Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
+DOCX references and page-bounds profiles support 1–250 pages. PPTX, XLSX, and VSDX references remain limited to 100 pages, matching their capture harness. Extra rendered DOCX pages retain their native dimensions and contribute to the page-count penalty. Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
 
 Capture and comparison failures are recorded per sample and channel without stopping the remaining samples. The report includes scored/total coverage and concise failure reasons; the generated README shows scores and coverage. Failed comparisons have no SSIM and are excluded from the means; differing coverage can make channel means incomparable. Source/reference metadata, downloads, and hash validation still fail the run before capture. Invalid successful comparison records cannot be published.
 
@@ -42,6 +42,8 @@ gh workflow run visual-fidelity.yml --ref main -f branch=main
 ```
 
 Keep `--ref main`; set `branch` to the repository branch to measure. The optional `collection` and `samples` inputs select the corpus as above. The action uses existing bot credentials to update the [README scores](../../README.md#visual-fidelity) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. CI retains score JSON and generated Markdown; documents and page images are excluded from uploaded artifacts.
+
+The measurement job allows 90 minutes for setup, builds, and both comparison channels. Each browser capture retains its default 600-second deadline. The longer job budget accommodates larger collections; incomplete captures remain recorded failures.
 
 ## Office references
 
