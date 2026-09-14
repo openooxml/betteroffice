@@ -1748,6 +1748,8 @@ struct AnchorPosIn {
     horizontal: Option<AnchorAxisIn>,
     #[serde(default)]
     vertical: Option<AnchorAxisIn>,
+    #[serde(default)]
+    relative_height: Option<u64>,
 }
 
 /// one axis of an anchor: an OOXML `relativeFrom` band plus either an `align`
@@ -4919,13 +4921,56 @@ fn build_display_list_selected(
             content_height: page.size.h - page.margins.top - page.margins.bottom,
         };
 
-        // Behind-document floating images paint before body content.
-        for frag in &page.fragments {
-            if let FragmentIn::Paragraph(pf) = frag
-                && let Some(mb) = by_id.get(&block_key(&pf.block_id))
-                && let BlockIn::Paragraph(block) = &mb.block
-            {
-                emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, true);
+        let mut behind_objects = Vec::new();
+        for fragment in &page.fragments {
+            match fragment {
+                FragmentIn::Paragraph(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    let BlockIn::Paragraph(block) = &measured.block else {
+                        continue;
+                    };
+                    for run in &block.runs {
+                        if let RunIn::Image(image) = run
+                            && image.wrap_type.as_deref() == Some("behind")
+                            && is_floating_image_run(image)
+                        {
+                            behind_objects.push(BehindObject::Image {
+                                block,
+                                image,
+                                fragment_y: fragment.y,
+                            });
+                        }
+                    }
+                }
+                FragmentIn::Shape(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    if let BlockIn::Shape(block) = &measured.block
+                        && block.position.is_some()
+                        && block.behind_doc.unwrap_or(false)
+                    {
+                        behind_objects.push(BehindObject::Shape { fragment, block });
+                    }
+                }
+                _ => {}
+            }
+        }
+        behind_objects.sort_by_key(BehindObject::relative_height);
+        for object in behind_objects {
+            match object {
+                BehindObject::Image {
+                    block,
+                    image,
+                    fragment_y,
+                } => {
+                    emit_floating_image(&mut prims, block, image, fragment_y, &float_geom);
+                }
+                BehindObject::Shape { fragment, block } => {
+                    emit_shape_fragment(&mut prims, fragment, block, &ctx);
+                }
             }
         }
 
@@ -5038,7 +5083,9 @@ fn build_display_list_selected(
                     let BlockIn::Shape(block) = &mb.block else {
                         continue;
                     };
-                    emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    if block.position.is_none() || !block.behind_doc.unwrap_or(false) {
+                        emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    }
                 }
                 FragmentIn::Chart(cf) => {
                     prev_para_borders = None;
@@ -7555,6 +7602,28 @@ fn resolve_anchored_position(
     (x, y)
 }
 
+enum BehindObject<'a> {
+    Image {
+        block: &'a ParagraphBlockIn,
+        image: &'a ImageRunIn,
+        fragment_y: f64,
+    },
+    Shape {
+        fragment: &'a ShapeFragmentIn,
+        block: &'a ShapeBlockIn,
+    },
+}
+
+impl BehindObject<'_> {
+    fn relative_height(&self) -> u64 {
+        match self {
+            Self::Image { image, .. } => image.position.as_ref().and_then(|p| p.relative_height),
+            Self::Shape { block, .. } => block.relative_height,
+        }
+        .unwrap_or(0)
+    }
+}
+
 /// Emits a paragraph's floating image runs at their resolved page rectangles.
 /// `want_behind` selects the pass: behind-document floats paint before body
 /// content, the rest after.
@@ -7565,9 +7634,6 @@ fn emit_paragraph_floating_images(
     geom: &PageFloatGeom,
     want_behind: bool,
 ) {
-    let block_ref = BlockRef::of(&block.id);
-    // Float anchors resolve against the content area, not the page.
-    let fragment_content_y = frag_y - geom.margin_top;
     for run in &block.runs {
         let RunIn::Image(imr) = run else { continue };
         if !is_floating_image_run(imr) {
@@ -7577,36 +7643,46 @@ fn emit_paragraph_floating_images(
         if is_behind != want_behind {
             continue;
         }
-        let (x, y) = resolve_anchored_position(imr, fragment_content_y, geom);
-        // Content-relative back to page-local.
-        let page_x = geom.margin_left + x;
-        let page_y = geom.margin_top + y;
-        let rot = imr
-            .rotation_deg
-            .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
-        let layout_width = image_layout_width(imr);
-        let layout_height = image_layout_height(imr);
-        let mut attrs = block_ref.attrs();
-        attrs.doc_start = imr.pm_start;
-        attrs.doc_end = imr.pm_end;
-        stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-        attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
-        attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-        prims.push(Primitive::Image(ImagePrimitive {
-            rel_id: imr.src.clone(),
-            x: px(page_x),
-            y: px(page_y),
-            w: px(layout_width),
-            h: px(layout_height),
-            rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
-            opacity: imr.opacity.map(px),
-            filter: None,
-            decorative: imr.decorative.unwrap_or(false),
-            crop: crop_of(imr),
-            alt_text: capped_alt_text(imr.alt.as_deref()),
-            attrs,
-        }));
+        emit_floating_image(prims, block, imr, frag_y, geom);
     }
+}
+
+fn emit_floating_image(
+    prims: &mut Vec<Primitive>,
+    block: &ParagraphBlockIn,
+    imr: &ImageRunIn,
+    frag_y: f64,
+    geom: &PageFloatGeom,
+) {
+    let block_ref = BlockRef::of(&block.id);
+    let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
+    let page_x = geom.margin_left + x;
+    let page_y = geom.margin_top + y;
+    let rot = imr
+        .rotation_deg
+        .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
+    let layout_width = image_layout_width(imr);
+    let layout_height = image_layout_height(imr);
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = imr.pm_start;
+    attrs.doc_end = imr.pm_end;
+    stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
+    prims.push(Primitive::Image(ImagePrimitive {
+        rel_id: imr.src.clone(),
+        x: px(page_x),
+        y: px(page_y),
+        w: px(layout_width),
+        h: px(layout_height),
+        rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
+        opacity: imr.opacity.map(px),
+        filter: None,
+        decorative: imr.decorative.unwrap_or(false),
+        crop: crop_of(imr),
+        alt_text: capped_alt_text(imr.alt.as_deref()),
+        attrs,
+    }));
 }
 
 /// paint one DrawingML shape fragment: a page-placed path primitive carrying

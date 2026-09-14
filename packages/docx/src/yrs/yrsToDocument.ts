@@ -65,6 +65,7 @@ interface YrsImageAttrs {
   distLeft?: number;
   distRight?: number;
   position?: {
+    relativeHeight?: number;
     horizontal?: { relativeTo?: string; posOffset?: number; align?: string };
     vertical?: { relativeTo?: string; posOffset?: number; align?: string };
   };
@@ -649,6 +650,7 @@ function imageRunFromPayload(payload: Attrs): Run {
 
   if (attrs.position?.horizontal && attrs.position.vertical) {
     image.position = {
+      relativeHeight: attrs.position.relativeHeight,
       horizontal: {
         relativeTo: (attrs.position.horizontal.relativeTo || 'column') as NonNullable<
           Image['position']

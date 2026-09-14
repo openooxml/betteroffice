@@ -403,6 +403,7 @@ function imagePayload(image: Image): Attrs {
     distRight: image.wrap.distR != null ? emuToPixels(image.wrap.distR) : null,
     position: image.position
       ? {
+          relativeHeight: image.position.relativeHeight,
           horizontal: image.position.horizontal
             ? {
                 relativeTo: image.position.horizontal.relativeTo,
