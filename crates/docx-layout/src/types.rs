@@ -630,6 +630,20 @@ pub struct HorizontalRule {
     pub pm_end: f64,
 }
 
+impl HorizontalRule {
+    pub(crate) fn rendered_width(&self, content_width: f64) -> f64 {
+        self.width_percent
+            .map(|percent| content_width * percent / 100.0)
+            .or(self.width)
+            .unwrap_or(content_width)
+            .clamp(0.0, content_width.max(0.0))
+    }
+
+    pub(crate) fn advance_width(&self, content_width: f64) -> f64 {
+        self.rendered_width(content_width) + 2.0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SdtGroup {

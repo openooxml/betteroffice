@@ -28,7 +28,7 @@ pub(crate) fn measure_paragraph(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Option<crate::types::ParagraphExtent> {
-    let block = block_in(paragraph)?;
+    let block = block_in(paragraph, content_width)?;
     let defaults = defaults_in(&config.defaults)?;
     let compat = compat_in(&config.compat)?;
     let zones = match floating_zones {
@@ -57,13 +57,32 @@ pub(crate) fn measure_paragraph(
     Some(extent_from_out(extent))
 }
 
-fn block_in(paragraph: &ParagraphBlock) -> Option<BlockIn> {
+fn block_in(paragraph: &ParagraphBlock, content_width: f64) -> Option<BlockIn> {
+    let attrs = paragraph.attrs.as_ref();
+    let indent = attrs.and_then(|attrs| attrs.indent.as_ref());
+    let rule_width = (content_width
+        - indent.and_then(|indent| indent.left).unwrap_or(0.0)
+        - indent.and_then(|indent| indent.right).unwrap_or(0.0))
+    .max(0.0);
     Some(BlockIn {
         kind: "paragraph".to_owned(),
         runs: paragraph
             .runs
             .iter()
-            .map(run_in)
+            .map(|run| {
+                let mut mapped = run_in(run)?;
+                if let Some(rule) = attrs.and_then(|attrs| {
+                    attrs
+                        .horizontal_rules
+                        .iter()
+                        .find(|rule| run.pm_start() == Some(rule.pm_start))
+                }) {
+                    mapped.kind = "horizontalRule".to_owned();
+                    mapped.fallback = Some("\u{200b}".to_owned());
+                    mapped.width = finite(rule.advance_width(rule_width));
+                }
+                Some(mapped)
+            })
             .collect::<Option<Vec<_>>>()?,
         attrs: match paragraph.attrs.as_ref() {
             None => None,
@@ -1097,7 +1116,7 @@ mod parity_tests {
 
             assert_eq!(
                 legacy_block_in(&paragraph).map(|b| format!("{b:?}")),
-                block_in(&paragraph).map(|b| format!("{b:?}")),
+                block_in(&paragraph, 600.0).map(|b| format!("{b:?}")),
                 "case {case}: BlockIn differs for {spec}"
             );
 
@@ -1304,7 +1323,7 @@ mod parity_tests {
                 });
                 assert_eq!(
                     legacy_block_in(&block).map(|b| format!("{b:?}")),
-                    block_in(&block).map(|b| format!("{b:?}")),
+                    block_in(&block, 600.0).map(|b| format!("{b:?}")),
                     "{name} = {value}: BlockIn differs"
                 );
                 let legacy = legacy_measure(

@@ -31,6 +31,8 @@
 
 DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
 
+Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving.
+
 ### Spreadsheets — `.xlsx`
 
 | package | registry | what it does |

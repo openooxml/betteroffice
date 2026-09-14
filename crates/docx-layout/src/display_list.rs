@@ -5851,7 +5851,20 @@ fn emit_line(
                     }
                 }
                 RunIn::Text(text) => {
-                    pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt)
+                    if let Some(rule) = attrs.and_then(|attrs| {
+                        attrs
+                            .horizontal_rules
+                            .iter()
+                            .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                    }) {
+                        if text.fmt.hidden != Some(true) {
+                            fixed_width += rule.advance_width(
+                                (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0),
+                            );
+                        }
+                    } else {
+                        pool_estimate += fallback_text_width(&seg.text, &text.fmt, default_font_pt);
+                    }
                 }
                 RunIn::Field(f) => match ctx.field_width(seg.pm_start) {
                     Some((fallback, resolved)) => {
@@ -6022,10 +6035,29 @@ fn emit_line(
                 // editing view paints them dimmed rather than suppressing them, so
                 // the display list keeps their primitives for hit-testing too
                 RunIn::Text(t) => {
-                    let w = width_per_estimate
-                        * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
-                        + word_space_extra
-                            * seg.text.chars().filter(|&ch| ch == ' ').count() as f64;
+                    let w = attrs
+                        .and_then(|attrs| {
+                            attrs
+                                .horizontal_rules
+                                .iter()
+                                .find(|rule| seg.pm_start == Some(rule.pm_start as i64))
+                        })
+                        .map(|rule| {
+                            if t.fmt.hidden == Some(true) {
+                                0.0
+                            } else {
+                                rule.advance_width(
+                                    (geom.frag_width - geom.indent_left - geom.indent_right)
+                                        .max(0.0),
+                                )
+                            }
+                        })
+                        .unwrap_or_else(|| {
+                            width_per_estimate
+                                * fallback_text_width(&seg.text, &t.fmt, default_font_pt)
+                                + word_space_extra
+                                    * seg.text.chars().filter(|&ch| ch == ' ').count() as f64
+                        });
                     push_bidi_text_items(
                         &mut logical_items,
                         &seg.text,
@@ -6113,43 +6145,50 @@ fn emit_line(
         };
         match item {
             LinePaintItem::Text(item) => {
-                if let Some(rule) = attrs.and_then(|attrs| {
+                let rule = attrs.and_then(|attrs| {
                     attrs.horizontal_rules.iter().find(|rule| {
                         item.pm_start == Some(rule.pm_start as i64)
                             && item.pm_end == Some(rule.pm_end as i64)
                     })
-                }) {
+                });
+                let mut text_x = pen_x;
+                if let Some(rule) = rule.filter(|_| item.fmt.hidden != Some(true)) {
                     let standalone = segments.iter().all(|segment| {
-                        matches!(segment.run, RunIn::Text(_))
-                            && (segment.text.is_empty() || segment.text == "\u{200b}")
+                        segment.pm_start == Some(rule.pm_start as i64)
+                            || matches!(segment.run, RunIn::Text(text) if text.fmt.hidden == Some(true)
+                                || segment.text.is_empty())
                     });
-                    emit_horizontal_rule(
-                        prims,
-                        rule,
-                        block_ref,
-                        if standalone {
-                            geom.frag_x + geom.indent_left
-                        } else {
-                            pen_x
-                        },
-                        baseline,
-                        (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0),
-                        standalone,
-                    );
+                    let available_width =
+                        (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0);
+                    if standalone {
+                        let remaining = available_width - rule.rendered_width(available_width);
+                        text_x = geom.frag_x
+                            + geom.indent_left
+                            + match rule.alignment.as_str() {
+                                "left" => 0.0,
+                                "right" => remaining,
+                                _ => remaining / 2.0,
+                            };
+                    }
+                    emit_horizontal_rule(prims, rule, block_ref, text_x, baseline, available_width);
                 }
-                let paint_width = item.width
-                    + if item.exact_advance && item.text == " " {
-                        word_space_extra
-                    } else {
-                        0.0
-                    };
+                let paint_width = if rule.is_some() && item.fmt.hidden == Some(true) {
+                    0.0
+                } else {
+                    item.width
+                        + if item.exact_advance && item.text == " " {
+                            word_space_extra
+                        } else {
+                            0.0
+                        }
+                };
                 emit_text_segment(
                     prims,
                     &item.text,
                     item.fmt,
                     item.pm_start,
                     item.pm_end,
-                    pen_x,
+                    text_x,
                     baseline,
                     paint_width,
                     word_space_px.clone(),
@@ -6168,7 +6207,7 @@ fn emit_line(
                 if item.pm_start.is_some() {
                     emitted_positioned_text = true;
                 }
-                pen_x += paint_width;
+                pen_x = text_x + paint_width;
             }
             LinePaintItem::Tab {
                 run,
@@ -7265,21 +7304,10 @@ fn emit_horizontal_rule(
     x: f64,
     baseline: f64,
     available_width: f64,
-    standalone: bool,
 ) {
-    let width = rule
-        .width_percent
-        .map(|percent| available_width * percent / 100.0)
-        .or(rule.width)
-        .unwrap_or(if standalone { available_width } else { 0.0 })
-        .clamp(0.0, available_width);
+    let width = rule.rendered_width(available_width);
     let height = (rule.height - 8.0 / 15.0).max(0.0);
-    let shift = match rule.alignment.as_str() {
-        "left" => 0.0,
-        "right" => available_width - width,
-        _ => (available_width - width) / 2.0,
-    };
-    let x = x + shift + if rule.no_shade { 0.0 } else { 1.0 };
+    let x = x + if rule.no_shade { 0.0 } else { 1.0 };
     let y = baseline - if rule.no_shade { height } else { rule.height };
     let mut attrs = block_ref.attrs();
     attrs.doc_start = Some(rule.pm_start as i64);

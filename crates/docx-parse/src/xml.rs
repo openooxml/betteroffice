@@ -580,19 +580,17 @@ pub(crate) fn parse_xml_strict(
                         part: part.to_owned(),
                     });
                 }
-                append_element(
-                    decode_element(&reader, start, part, budget)?,
-                    &mut stack,
-                    &mut roots,
-                    part,
-                )?;
+                let mut element = decode_element(&reader, start, part, budget)?;
+                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
+                append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::End(_) => {
-                let element = stack.pop().ok_or_else(|| ParseError::MalformedXml {
+                let mut element = stack.pop().ok_or_else(|| ParseError::MalformedXml {
                     part: part.to_owned(),
                     offset: reader.buffer_position(),
                     message: "unexpected closing element".to_owned(),
                 })?;
+                retain_drawing_namespace_aliases(&mut element, &stack, part, budget)?;
                 append_element(element, &mut stack, &mut roots, part)?;
             }
             Event::Text(text) => {
@@ -671,6 +669,118 @@ pub(crate) fn parse_xml_strict(
         });
     }
     Ok(XmlDocument { roots })
+}
+
+fn canonical_namespace(prefix: &str) -> Option<&'static str> {
+    if !crate::serializer::parts::is_story_root_prefix(prefix) {
+        return None;
+    }
+    match prefix {
+        "w" => Some(namespaces::W),
+        "v" => Some(namespaces::V),
+        "o" => Some(namespaces::O),
+        "a" => Some(namespaces::A),
+        "r" => Some(namespaces::R),
+        "wp" => Some(namespaces::WP),
+        "wp14" => Some(namespaces::WP14),
+        "wps" => Some(namespaces::WPS),
+        "wpc" => Some(namespaces::WPC),
+        "wpg" => Some(namespaces::WPG),
+        "pic" => Some(namespaces::PIC),
+        "m" => Some(namespaces::M),
+        "mc" => Some(namespaces::MC),
+        "w14" => Some(namespaces::W14),
+        "w15" => Some(namespaces::W15),
+        "w10" => Some("urn:schemas-microsoft-com:office:word"),
+        "w16se" => Some("http://schemas.microsoft.com/office/word/2015/wordml/symex"),
+        "w16cid" => Some("http://schemas.microsoft.com/office/word/2016/wordml/cid"),
+        "w16" => Some("http://schemas.microsoft.com/office/word/2018/wordml"),
+        "w16cex" => Some("http://schemas.microsoft.com/office/word/2018/wordml/cex"),
+        "w16sdtdh" => Some("http://schemas.microsoft.com/office/word/2020/wordml/sdtdatahash"),
+        "wne" => Some("http://schemas.microsoft.com/office/word/2006/wordml"),
+        _ => None,
+    }
+}
+
+fn retain_drawing_namespace_aliases(
+    element: &mut XmlElement,
+    ancestors: &[XmlElement],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), ParseError> {
+    if !matches!(element.local_name(), "pict" | "object") {
+        return Ok(());
+    }
+    let mut bindings = IndexMap::new();
+    for ancestor in ancestors {
+        for (name, value) in &ancestor.attributes {
+            if name == "xmlns" || name.starts_with("xmlns:") {
+                let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+                if canonical_namespace(prefix) == Some(value.as_str()) {
+                    bindings.shift_remove(name.as_str());
+                } else {
+                    bindings.insert(name.as_str(), value.as_str());
+                }
+            }
+        }
+    }
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let mut used_prefixes = std::collections::HashSet::new();
+    let mut pending = vec![&*element];
+    while let Some(node) = pending.pop() {
+        used_prefixes.insert(node.namespace_prefix().unwrap_or("").to_owned());
+        for (name, value) in &node.attributes {
+            if matches!(
+                local_name(name),
+                "Ignorable"
+                    | "MustUnderstand"
+                    | "Requires"
+                    | "ProcessContent"
+                    | "PreserveElements"
+                    | "PreserveAttributes"
+            ) {
+                for token in value.split_whitespace() {
+                    used_prefixes.insert(
+                        token
+                            .split_once(':')
+                            .map_or(token, |(prefix, _)| prefix)
+                            .to_owned(),
+                    );
+                }
+            }
+            if let Some((prefix, _)) = name.split_once(':')
+                && prefix != "xmlns"
+            {
+                used_prefixes.insert(prefix.to_owned());
+            }
+        }
+        pending.extend(node.child_elements());
+    }
+    let mut attribute_bytes: usize = element
+        .attributes
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum();
+    for (name, value) in bindings {
+        let prefix = name.strip_prefix("xmlns:").unwrap_or("");
+        if !used_prefixes.contains(prefix) || element.attributes.contains_key(name) {
+            continue;
+        }
+        attribute_bytes += name.len() + value.len();
+        if element.attributes.len() >= budget.limits.max_attributes_per_element
+            || attribute_bytes > budget.limits.max_attribute_bytes
+        {
+            return Err(ParseError::ResourceLimit {
+                kind: "drawingNamespaceAliases",
+                part: part.to_owned(),
+            });
+        }
+        budget.charge_text(name.len() + value.len(), part)?;
+        element.attributes.insert(name.to_owned(), value.to_owned());
+    }
+    Ok(())
 }
 
 fn decode_element(

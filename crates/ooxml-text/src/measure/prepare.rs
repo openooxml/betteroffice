@@ -247,6 +247,12 @@ pub(super) fn prepare_runs(
                 object_level,
             )?)),
             "image" => prepared.push(prepare_image_run(run, object_level)?),
+            "horizontalRule" if run.hidden => prepared.push(PreparedRun::Hidden { utf16_len: 1 }),
+            "horizontalRule" => {
+                let mut rule = prepare_field_run(store, input, run, object_level)?;
+                rule.width = validate_image_dim(run.width.unwrap_or(0.0), "run.width")?;
+                prepared.push(PreparedRun::Field(rule));
+            }
             "field" => prepared.push(PreparedRun::Field(prepare_field_run(
                 store,
                 input,

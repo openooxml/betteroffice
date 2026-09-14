@@ -1190,6 +1190,31 @@ fn field_measures_at_fallback_text() {
     );
 }
 
+#[test]
+fn horizontal_rule_reserves_atomic_width_and_run_font_metrics() {
+    let v = measure(
+        json!([
+            {"kind":"text","text":"000000000000000"},
+            {"kind":"horizontalRule","width":100,"fallback":"\u{200b}","fontSize":24},
+            {"kind":"text","text":"0"}
+        ]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 15), (1, 0, 2, 1)]);
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        100.0 + W0,
+        "rule advance",
+    );
+    approx(
+        v["lines"][1]["lineHeight"].as_f64().unwrap(),
+        2.0 * LH,
+        "rule font metrics",
+    );
+    assert!(measure(json!([{"kind":"horizontalRule","width":-1}]), 200.0).is_err());
+}
+
 // 18. a field that doesn't fit a non-empty line wraps whole (one unbreakable
 // glyph), and a field after a tab anchors on end stops via followingWidth
 #[test]

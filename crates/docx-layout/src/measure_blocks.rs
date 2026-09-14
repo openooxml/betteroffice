@@ -523,6 +523,7 @@ fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphEx
     for line in &mut extent.lines {
         let mut height = 0.0_f64;
         let mut standalone = true;
+        let mut rule_count = 0;
         for (index, run) in paragraph
             .runs
             .iter()
@@ -533,12 +534,16 @@ fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphEx
             if index == line.tail_run && line.tail_char == 0 {
                 continue;
             }
+            if matches!(run, crate::types::Run::Text(text) if text.fmt.hidden == Some(true)) {
+                continue;
+            }
             if let Some(rule) = attrs
                 .horizontal_rules
                 .iter()
                 .find(|rule| run.pm_start() == Some(rule.pm_start))
             {
                 height = height.max(rule.height + 1.0);
+                rule_count += 1;
             } else if !matches!(run, crate::types::Run::Text(text) if text.text.is_empty()) {
                 standalone = false;
             }
@@ -547,7 +552,7 @@ fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphEx
             continue;
         }
         let original_height = line.line_height;
-        if standalone {
+        if standalone && rule_count == 1 {
             line.line_height = line.line_height.max(height);
             line.ascent = line.line_height;
             line.descent = 0.0;

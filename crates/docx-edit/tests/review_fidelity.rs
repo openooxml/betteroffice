@@ -2,7 +2,7 @@ use docx_edit::{EngineSession, seed_from_docx};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
-const HORIZONTAL_RULE: &str = r##"<w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
+const HORIZONTAL_RULE: &str = r##"<w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect id="horizontal-rule-1" style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
 const SHAPE: &str = r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="66675" distR="123825" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1828800" cy="914400"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Inside shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
 
 fn document(body: &str, styles: &str) -> Vec<u8> {
@@ -103,6 +103,11 @@ fn vml_horizontal_rule_respects_inline_baselines_and_exact_spacing() {
         for exact in [false, true] {
             for height in [1.5, 24.0] {
                 let rule = HORIZONTAL_RULE.replace("height:1.5pt", &format!("height:{height}pt"));
+                let rule = if mixed {
+                    rule.replace("o:hrstd=\"t\"", "o:hrstd=\"t\" o:hrpct=\"500\"")
+                } else {
+                    rule
+                };
                 let before = if mixed { "<w:t>Before </w:t>" } else { "" };
                 let after = if mixed { "<w:t> After</w:t>" } else { "" };
                 let line_rule = if exact { "exact" } else { "auto" };
@@ -168,7 +173,13 @@ fn vml_horizontal_rule_respects_inline_baselines_and_exact_spacing() {
                 );
                 if mixed {
                     assert!(lines[0]["x1"].as_f64().unwrap() > 110.0);
-                    assert_eq!(lines[0]["x1"], lines[0]["x2"]);
+                    assert!(
+                        (lines[0]["x2"].as_f64().unwrap()
+                            - lines[0]["x1"].as_f64().unwrap()
+                            - 312.0)
+                            .abs()
+                            < 0.01
+                    );
                 }
             }
         }
@@ -204,6 +215,217 @@ fn vml_horizontal_rule_preserves_run_font_and_follows_hard_breaks() {
         lines[0]["x2"].as_f64().unwrap() - lines[0]["x1"].as_f64().unwrap(),
         624.0
     );
+}
+
+#[test]
+fn vml_horizontal_rule_reserves_width_and_wraps_between_text() {
+    for (prefix, percentage, expected_lines) in [
+        ("Before ".to_owned(), Some(500), 1),
+        ("M".repeat(50), Some(500), 2),
+        ("Before ".to_owned(), Some(1000), 3),
+        ("Before ".to_owned(), None, 3),
+    ] {
+        let rule = percentage.map_or_else(
+            || HORIZONTAL_RULE.to_owned(),
+            |percentage| {
+                HORIZONTAL_RULE.replace(
+                    "o:hrstd=\"t\"",
+                    &format!("o:hrstd=\"t\" o:hrpct=\"{percentage}\""),
+                )
+            },
+        );
+        let body = format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t xml:space="preserve">{prefix}</w:t>{rule}<w:t xml:space="preserve"> Suffix</w:t></w:r></w:p>"#
+        );
+        let output = layout(&body, 1);
+        assert_eq!(
+            output["measured"][0]["measure"]["lines"]
+                .as_array()
+                .unwrap()
+                .len(),
+            expected_lines
+        );
+        for (authoritative, alignment) in [true, false].into_iter().flat_map(|authoritative| {
+            ["left", "center", "right"].map(|alignment| (authoritative, alignment))
+        }) {
+            let mut output = output.clone();
+            output["measured"][0]["block"]["attrs"]["horizontalRules"][0]["alignment"] =
+                json!(alignment);
+            if !authoritative {
+                for line in output["measured"][0]["measure"]["lines"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                        line.as_object_mut().unwrap().remove(key);
+                    }
+                }
+            }
+            let display: Value = serde_json::from_str(
+                &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+            )
+            .unwrap();
+            let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+            let line = primitives
+                .iter()
+                .find(|primitive| primitive["kind"] == "line")
+                .unwrap();
+            let right = line["x2"].as_f64().unwrap();
+            assert!(right <= 721.01, "{percentage:?} {authoritative}: {right}");
+            let suffix = primitives
+                .iter()
+                .find(|primitive| {
+                    primitive["text"]
+                        .as_str()
+                        .is_some_and(|text| text.contains('S'))
+                })
+                .unwrap();
+            if percentage == Some(500) {
+                assert!(
+                    suffix["x"].as_f64().unwrap() >= right,
+                    "{authoritative}: {suffix}"
+                );
+            } else {
+                assert!(
+                    suffix["baselineY"].as_f64().unwrap() > line["y1"].as_f64().unwrap() + 10.0
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn vml_horizontal_rule_carets_follow_standalone_alignment_and_adjacent_rules() {
+    let rule = HORIZONTAL_RULE.replace("o:hrstd=\"t\"", "o:hrstd=\"t\" o:hrpct=\"250\"");
+    for count in [1, 2] {
+        for paragraph_alignment in ["left", "center", "right"] {
+            let rules = (0..count)
+                .map(|index| rule.replace("horizontal-rule-1", &format!("horizontal-rule-{index}")))
+                .collect::<String>();
+            let body = format!(
+                r#"<w:p><w:pPr><w:jc w:val="{paragraph_alignment}"/><w:ind w:firstLine="240"/></w:pPr><w:r>{rules}</w:r></w:p>"#
+            );
+            let output = layout(&body, 1);
+            for (authoritative, alignment) in [true, false].into_iter().flat_map(|authoritative| {
+                ["left", "center", "right"].map(|alignment| (authoritative, alignment))
+            }) {
+                let mut output = output.clone();
+                for rule in output["measured"][0]["block"]["attrs"]["horizontalRules"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    rule["alignment"] = json!(alignment);
+                }
+                if !authoritative {
+                    for line in output["measured"][0]["measure"]["lines"]
+                        .as_array_mut()
+                        .unwrap()
+                    {
+                        for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                            line.as_object_mut().unwrap().remove(key);
+                        }
+                    }
+                }
+                let display: Value = serde_json::from_str(
+                    &docx_layout::display_list::build_display_list_json(&output.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                let lines = display["pages"][0]["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|primitive| primitive["kind"] == "line")
+                    .collect::<Vec<_>>();
+                let typed = serde_json::from_value(display.clone()).unwrap();
+                for index in 0..count {
+                    let line = lines[index * 4];
+                    let start = line["docStart"].as_i64().unwrap();
+                    let caret = docx_layout::hit::caret_rect(&typed, start).unwrap();
+                    assert!(
+                        (caret.x + 1.0 - line["x1"].as_f64().unwrap()).abs() < 0.01,
+                        "{count} {paragraph_alignment} {alignment}: {caret:?} {line}"
+                    );
+                    if index > 0 {
+                        assert!(line["x1"].as_f64().unwrap() > lines[0]["x2"].as_f64().unwrap());
+                    }
+                    if index == count - 1 {
+                        let end = line["docEnd"].as_i64().unwrap();
+                        let caret = docx_layout::hit::caret_rect(&typed, end).unwrap();
+                        assert!((caret.x - line["x2"].as_f64().unwrap() - 1.0).abs() < 0.01);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vml_horizontal_rule_hidden_layout_inputs_keep_zero_advance_and_no_ink() {
+    let rule = HORIZONTAL_RULE.replace("height:1.5pt", "height:24pt");
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let config = serde_json::from_value(json!({
+        "fontChains":{"calibri|0|0":[font]},
+        "defaults":{"fontFamily":"Calibri","fontSize":12}
+    }))
+    .unwrap();
+    for mixed in [false, true] {
+        let suffix = if mixed { "<w:t>Suffix</w:t>" } else { "" };
+        let mut output = layout(&format!("<w:p><w:r>{rule}{suffix}</w:r></w:p>"), 1);
+        let mut block = output["measured"][0]["block"].clone();
+        block["runs"][0]["hidden"] = json!(true);
+        let measure = |block: &Value| {
+            let mut blocks = vec![serde_json::from_value(block.clone()).unwrap()];
+            serde_json::to_value(
+                &docx_layout::measure_blocks::measure_blocks(&mut blocks, 624.0, &config).unwrap()
+                    [0],
+            )
+            .unwrap()
+        };
+        let measured = measure(&block);
+        let mut without_rule = block.clone();
+        without_rule["attrs"]["horizontalRules"] = json!([]);
+        assert_eq!(measured, measure(&without_rule));
+        output["measured"][0]["block"] = block;
+        output["measured"][0]["measure"] = measured;
+        for authoritative in [true, false] {
+            if !authoritative {
+                for line in output["measured"][0]["measure"]["lines"]
+                    .as_array_mut()
+                    .unwrap()
+                {
+                    for key in ["runAdvances", "clusterAdvances", "bidiSlices"] {
+                        line.as_object_mut().unwrap().remove(key);
+                    }
+                }
+            }
+            let display: Value = serde_json::from_str(
+                &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+            )
+            .unwrap();
+            let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+            assert!(
+                primitives
+                    .iter()
+                    .all(|primitive| primitive["kind"] != "line")
+            );
+            if !mixed {
+                assert!(
+                    primitives
+                        .iter()
+                        .any(|primitive| primitive["text"] == "\u{200b}")
+                );
+            }
+            if let Some(marker) = primitives
+                .iter()
+                .find(|primitive| primitive["text"] == "\u{200b}")
+            {
+                assert_eq!(marker["width"], 0.0);
+                assert_eq!(marker["docStart"], 1);
+                assert_eq!(marker["docEnd"], 2);
+            }
+        }
+    }
 }
 
 #[test]

@@ -12,7 +12,7 @@ use crate::image::{
 use crate::media::{MediaMap, resolve_image_data};
 use crate::relationships::RelationshipMap;
 use crate::scalars::ColorValue;
-use crate::xml::XmlElement;
+use crate::xml::{XmlElement, namespaces};
 
 const EMU_PER_PIXEL: f64 = 9_525.0;
 const MAX_STYLE_BYTES: usize = 65_536;
@@ -39,19 +39,22 @@ pub struct HorizontalRule {
 
 pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
     let mut shapes = Vec::new();
-    collect_vml_shapes(picture, 0, &mut shapes);
-    let [shape] = shapes.as_slice() else {
+    collect_horizontal_rule_shapes(picture, &IndexMap::new(), 0, &mut shapes);
+    let [(shape, bindings)] = shapes.as_slice() else {
         return None;
     };
-    if shape.name != "v:rect"
+    if shape.local_name() != "rect"
         || direct_image_data(shape).is_some()
-        || !matches!(shape.attribute(Some("o"), "hr"), Some("t" | "true" | "1"))
+        || !matches!(
+            office_attribute(shape, bindings, "hr"),
+            Some("t" | "true" | "1")
+        )
     {
         return None;
     }
     let style = parse_style_attr(shape.attribute(None, "style"));
     let standard = matches!(
-        shape.attribute(Some("o"), "hrstd"),
+        office_attribute(shape, bindings, "hrstd"),
         Some("t" | "true" | "1")
     );
     let width = (!standard)
@@ -62,8 +65,7 @@ pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
     if width.is_some() {
         return None;
     }
-    let width_percent = shape
-        .attribute(Some("o"), "hrpct")
+    let width_percent = office_attribute(shape, bindings, "hrpct")
         .and_then(js_number)
         .filter(|value| *value > 0.0 && *value <= 1000.0)
         .map(|value| value / 10.0);
@@ -78,7 +80,7 @@ pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
         width,
         width_percent,
         height,
-        alignment: match (standard, shape.attribute(Some("o"), "hralign")) {
+        alignment: match (standard, office_attribute(shape, bindings, "hralign")) {
             (true, _) => "left",
             (_, Some("left")) => "left",
             (_, Some("right")) => "right",
@@ -86,11 +88,63 @@ pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
         }
         .to_owned(),
         no_shade: matches!(
-            shape.attribute(Some("o"), "hrnoshade"),
+            office_attribute(shape, bindings, "hrnoshade"),
             Some("t" | "true" | "1")
         ),
         color: normalize_color(shape.attribute(None, "fillcolor")),
         xml: picture.to_raw_inline_xml(),
+    })
+}
+
+fn collect_horizontal_rule_shapes<'a>(
+    element: &'a XmlElement,
+    inherited: &IndexMap<&'a str, &'a str>,
+    depth: usize,
+    output: &mut Vec<(&'a XmlElement, IndexMap<&'a str, &'a str>)>,
+) {
+    if depth > MAX_VML_DEPTH || output.len() >= MAX_VML_SHAPES {
+        return;
+    }
+    let mut bindings = inherited.clone();
+    for (name, value) in &element.attributes {
+        if name == "xmlns" {
+            bindings.insert("", value);
+        } else if let Some(prefix) = name.strip_prefix("xmlns:") {
+            bindings.insert(prefix, value);
+        }
+    }
+    let prefix = element.namespace_prefix().unwrap_or("");
+    if (prefix == "v" && !bindings.contains_key(prefix)
+        || bindings.get(prefix).copied() == Some(namespaces::V))
+        && matches!(
+            element.local_name(),
+            "shape" | "rect" | "roundrect" | "oval"
+        )
+    {
+        output.push((element, bindings.clone()));
+    }
+    for child in element.child_elements() {
+        collect_horizontal_rule_shapes(child, &bindings, depth + 1, output);
+        if output.len() >= MAX_VML_SHAPES {
+            break;
+        }
+    }
+}
+
+fn office_attribute<'a>(
+    element: &'a XmlElement,
+    bindings: &IndexMap<&str, &str>,
+    local: &str,
+) -> Option<&'a str> {
+    element.attributes.iter().find_map(|(name, value)| {
+        if name == local {
+            return Some(value.as_str());
+        }
+        let (prefix, name) = name.split_once(':')?;
+        (name == local
+            && (prefix == "o" && !bindings.contains_key(prefix)
+                || bindings.get(prefix).copied() == Some(namespaces::O)))
+        .then_some(value.as_str())
     })
 }
 
@@ -860,7 +914,7 @@ mod tests {
 
     #[test]
     fn horizontal_rule_retains_relative_width_and_raw_vml() {
-        let xml = r##"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
+        let xml = r##"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
         let rule = parse_horizontal_rule(&root(xml)).unwrap();
         assert_eq!(rule.width, None);
         assert_eq!(rule.width_percent, None);
@@ -890,7 +944,7 @@ mod tests {
 
     #[test]
     fn horizontal_rule_distinguishes_rectangles_and_authored_sizing() {
-        let xml = r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o"><v:rect style="width:72pt;height:3pt" o:hr="0"/></w:pict>"#;
+        let xml = r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:72pt;height:3pt" o:hr="0"/></w:pict>"#;
         assert!(parse_horizontal_rule(&root(xml)).is_none());
         let xml = xml.replace(
             "o:hr=\"0\"",
@@ -914,9 +968,86 @@ mod tests {
     }
 
     #[test]
+    fn horizontal_rule_resolves_inherited_aliases_and_preserves_replay_bindings() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:wx="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:legacy="urn:schemas-microsoft-com:vml" xmlns:office="urn:schemas-microsoft-com:office:office" xmlns:ext="urn:extension" xmlns:unused="urn:unused" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:p><w:r xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><wx:pict mc:Ignorable="unused"><legacy:rect style="width:0pt;height:1.5pt" office:hr="t" office:hrstd="t" office:hrpct="500" office:hrnoshade="t" ext:value="kept" a:value="kept" pic:value="kept"/></wx:pict></w:r></w:p></w:body></w:document>"#;
+        let parsed = root(xml);
+        let picture = parsed.find_deep("w", "pict").unwrap();
+        let rule = parse_horizontal_rule(picture).unwrap();
+        assert_eq!(rule.width_percent, Some(50.0));
+        assert!(rule.no_shade);
+        for prefix in ["wx", "legacy", "office", "ext", "unused", "a", "pic"] {
+            assert!(rule.xml.contains(&format!("xmlns:{prefix}=")));
+        }
+        assert_eq!(parse_horizontal_rule(&root(&rule.xml)), Some(rule.clone()));
+        let run = crate::inline::Run {
+            node_type: crate::inline::RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![crate::inline::RunContent::HorizontalRule {
+                rule: Box::new(rule.clone()),
+            }],
+        };
+        let mut context =
+            crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
+                seed: "0".repeat(64),
+                now: "2000-01-01T00:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+        let saved = crate::serializer::serialize_run(&run, &mut context).unwrap();
+        assert_eq!(
+            parse_horizontal_rule(&root(&saved)).unwrap().width_percent,
+            Some(50.0)
+        );
+        let paragraph = parsed.find_deep("w", "p").unwrap();
+        assert!(paragraph.attributes.is_empty());
+    }
+
+    #[test]
+    fn horizontal_rule_keeps_canonical_picture_attributes_unchanged() {
+        let picture = r#"<w:pict><v:rect o:hr="t" o:hrstd="t"/></w:pict>"#;
+        let xml = format!(
+            r#"<w:document xmlns:w="{}" xmlns:v="{}" xmlns:o="{}"><w:p><w:r>{picture}</w:r></w:p></w:document>"#,
+            namespaces::W,
+            namespaces::V,
+            namespaces::O
+        );
+        let parsed = root(&xml);
+        let parsed_picture = parsed.find_deep("w", "pict").unwrap();
+        assert!(parsed_picture.attributes.is_empty());
+        assert_eq!(parsed_picture.to_raw_inline_xml(), picture);
+    }
+
+    #[test]
+    fn horizontal_rule_rejects_foreign_namespaces_and_shadowed_bindings() {
+        for (vml, office, rect, hr) in [
+            (namespaces::V, "urn:foreign", "legacy", "office"),
+            ("urn:foreign", namespaces::O, "legacy", "office"),
+            (namespaces::V, "urn:foreign", "v", "o"),
+            ("urn:foreign", namespaces::O, "v", "o"),
+        ] {
+            let xml = format!(
+                r#"<w:document xmlns:w="w" xmlns:{rect}="{vml}" xmlns:{hr}="{office}"><w:p><w:r><w:pict><{rect}:rect {hr}:hr="t"/></w:pict></w:r></w:p></w:document>"#
+            );
+            assert!(parse_horizontal_rule(root(&xml).find_deep("w", "pict").unwrap()).is_none());
+        }
+        let xml = format!(
+            r#"<w:document xmlns:w="w" xmlns:legacy="{}" xmlns:office="{}"><w:p xmlns:legacy="urn:foreign"><w:r><w:pict><legacy:rect office:hr="t"/></w:pict></w:r></w:p></w:document>"#,
+            namespaces::V,
+            namespaces::O
+        );
+        assert!(parse_horizontal_rule(root(&xml).find_deep("w", "pict").unwrap()).is_none());
+        let xml = format!(
+            r#"<w:pict xmlns:w="w" xmlns:legacy="{}" xmlns:office="{}"><legacy:rect office:hr="t"><legacy:imagedata/></legacy:rect></w:pict>"#,
+            namespaces::V,
+            namespaces::O
+        );
+        assert!(parse_horizontal_rule(&root(&xml)).is_none());
+    }
+
+    #[test]
     fn horizontal_rule_keeps_mixed_vml_picture_fallback() {
         let picture = root(
-            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o" xmlns:r="r"><v:rect o:hr="t"/><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId7"/></v:shape></w:pict>"#,
+            r#"<w:pict xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:r="r"><v:rect o:hr="t"/><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId7"/></v:shape></w:pict>"#,
         );
         assert!(parse_horizontal_rule(&picture).is_none());
         let image = parse_vml_image_content(&picture, None, None).unwrap();
