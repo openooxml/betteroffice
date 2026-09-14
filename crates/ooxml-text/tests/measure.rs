@@ -1366,12 +1366,8 @@ fn visible_list_marker_reserves_the_hanging_slot_on_the_first_line() {
 // Lines without a font-bearing run use the fallback at the 12pt default: ascent
 // 0.8 × 16 = 12.8, descent 0.2 × 16 = 3.2, ruled height 16 × 1.15 = 18.4.
 
-// 22. an image alone on the line grows it to the image height plus the
-// descent buffer on BOTH sides; with text, the image seats on the baseline
-// (full height above, text descent below)
 #[test]
 fn inline_image_grows_the_line_box() {
-    // image alone: fallback descent 3.2 buffers both sides
     let v = measure(
         json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
         200.0,
@@ -1382,10 +1378,10 @@ fn inline_image_grows_the_line_box() {
     approx(line["width"].as_f64().unwrap(), 50.0, "image width");
     approx(
         line["lineHeight"].as_f64().unwrap(),
-        106.4,
-        "alone: h + 2×3.2",
+        103.2,
+        "alone: image height plus descent",
     );
-    approx(line["ascent"].as_f64().unwrap(), 103.2, "alone ascent");
+    approx(line["ascent"].as_f64().unwrap(), 100.0, "alone ascent");
     approx(line["descent"].as_f64().unwrap(), 3.2, "alone descent");
 
     // image flowing with text: baseline-seated, text descent below only
@@ -1444,6 +1440,26 @@ fn inline_image_grows_the_line_box() {
 }
 
 #[test]
+fn inline_images_keep_the_same_top_with_or_without_text() {
+    let image = json!({ "kind": "image", "width": 50.0, "height": 100.0 });
+    for runs in [
+        json!([image]),
+        json!([image, { "kind": "text", "text": "0" }]),
+        json!([{ "kind": "text", "text": "0" }, image]),
+        json!([image, image]),
+    ] {
+        let measured = measure(runs, 200.0).unwrap();
+        let line = &measured["lines"][0];
+        approx(line["ascent"].as_f64().unwrap(), 100.0, "image baseline");
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            100.0 + line["descent"].as_f64().unwrap(),
+            "only descent follows the image",
+        );
+    }
+}
+
+#[test]
 fn inline_wrap_distances_do_not_move_text_or_resize_image_only_lines() {
     for mut runs in [
         json!([{ "kind": "image", "width": 50.0, "height": 100.0 }]),
@@ -1472,7 +1488,7 @@ fn inline_image_wrapping_and_column_fit() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 1, 1)]);
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        30.0 + 2.0 * 3.2,
+        30.0 + 3.2,
         "wrapped image line",
     );
 
@@ -1490,7 +1506,7 @@ fn inline_image_wrapping_and_column_fit() {
     );
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        50.0 + 2.0 * 3.2,
+        50.0 + 3.2,
         "rendered (fitted) height reserved",
     );
     approx(

@@ -23,10 +23,8 @@
 //!   `exact`, floored `atLeast` or sub-single box moves the pair rather than
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
-//! - An image taller than the ruled text height grows the line box. Alone on
-//!   the line it takes the text descent as a buffer above and below; flowing
-//!   with text it seats on the baseline — full height above, only the text
-//!   descent below. The reported `descent` stays text metrics either way.
+//! - A tall inline image sits on the baseline with text descent below it.
+//!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
 //!   default-font-size estimate, never the line's real metrics, which are
 //!   unknown until the line closes. That running Y advances by each line's
@@ -656,7 +654,12 @@ impl Filler<'_> {
             let image_h = self.cur.max_image_height_px;
             let buffer = content.descent;
             descent = buffer;
-            if self.cur.head_run == self.cur.tail_run {
+            if self.cur.head_run == self.cur.tail_run
+                && matches!(
+                    self.p.prepared.get(self.cur.head_run as usize),
+                    Some(PreparedRun::OwnLineImage(_))
+                )
+            {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
             } else {
