@@ -3421,6 +3421,69 @@ mod tests {
     use super::*;
     use crate::{EditCtx, RawOp};
 
+    #[test]
+    fn seeded_docx_retains_original_images_for_materialization_and_save() {
+        let image_bytes = vec![1, 2, 3, 4];
+        let source = ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/_rels/document.xml.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdImage" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/original.png"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body><w:p><w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="1" name="original"/><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rIdImage"/></pic:blipFill></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p></w:body></w:document>"#.to_vec()),
+            ("word/media/original.png".to_owned(), image_bytes.clone()),
+        ])
+        .unwrap();
+        let expected = crate::seed::parse_docx_for_edit(&source).unwrap();
+        assert!(!expected.document.package.media_entries.is_empty());
+        let session = EditSession::new(7.0).unwrap();
+        let host: Value = serde_json::from_str(&session.open_docx(&source, true).unwrap()).unwrap();
+        assert_eq!(
+            host["envelope"]["document"]["package"]["mediaEntries"],
+            json!([])
+        );
+        assert_eq!(
+            session.docx_source.borrow().as_deref(),
+            Some(source.as_slice())
+        );
+        let blocks = session
+            .engine
+            .lower_story_json("body", &crate::bridge::RenderEnv::default())
+            .unwrap();
+        assert!(blocks.contains("data:image/png;base64,AQIDBA=="));
+        let materialized: docx_parse::S9WireEnvelope =
+            serde_json::from_str(&session.materialize_docx().unwrap().unwrap()).unwrap();
+        assert_eq!(materialized, expected);
+
+        let request = serde_json::from_value(json!({
+            "determinism": {
+                "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "now": "2030-01-02T03:04:05.006Z"
+            },
+            "document": {"content": materialized.document.package.document.content},
+            "relationshipEntries": materialized.document.package.relationship_entries,
+            "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        let saved = docx_parse::serializer::write_docx_s13(
+            request,
+            session.docx_source.borrow().as_deref().unwrap(),
+        )
+        .unwrap();
+        let saved_parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        assert_eq!(
+            saved_parts
+                .iter()
+                .find(|(path, _)| path == "word/media/original.png")
+                .unwrap()
+                .1,
+            image_bytes
+        );
+        let reopened = crate::seed::parse_docx_for_edit(&saved).unwrap();
+        assert_eq!(
+            reopened.document.package.media_entries,
+            expected.document.package.media_entries
+        );
+    }
+
     fn seed_paragraph_after_embeds(doc: &EditingDoc, embeds: &[&str], text: &str) {
         doc.create_story_with_paragraph_id("body", "p0", "Alpha", "Normal", "left")
             .unwrap();
