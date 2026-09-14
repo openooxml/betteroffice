@@ -361,6 +361,8 @@ pub struct DocAttrs {
     pub image_flip_h: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "flipV")]
     pub image_flip_v: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
+    pub image_shape_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_frame: Option<ContentFrame>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1668,6 +1670,8 @@ struct ImageRunIn {
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
+    shape_type: Option<String>,
+    #[serde(default)]
     transform: Option<String>,
     #[serde(default)]
     wrap_type: Option<String>,
@@ -2019,6 +2023,8 @@ pub(crate) struct ImageBlockIn {
     /// Alternative text from `wp:docPr` `descr`.
     #[serde(default)]
     pub(crate) alt: Option<String>,
+    #[serde(default)]
+    pub(crate) shape_type: Option<String>,
     #[serde(default)]
     pub(crate) transform: Option<String>,
     #[serde(default)]
@@ -3653,6 +3659,7 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
     attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
+    attrs.image_shape_type = run.shape_type.clone();
     attrs.effects = run.effects.clone();
     attrs.border = run.outline.clone();
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
@@ -3689,6 +3696,7 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.height,
         block.rotation_bounds.as_ref(),
     );
+    attrs.image_shape_type = block.shape_type.clone();
     attrs.effects = block.effects.clone();
     attrs.border = block.outline.clone();
 }
