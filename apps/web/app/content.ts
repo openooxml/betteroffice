@@ -18,7 +18,7 @@ export const ECOSYSTEMS = [
     install: "npm install @betteroffice/docx-react",
     url: NPM,
     docs: `${DOCS}/docs/javascript`,
-    desc: "Published React editors and framework-free cores for DOCX, XLSX and PPTX; VSDX is available from source.",
+    desc: "Published React editors and framework-free cores for DOCX, XLSX and PPTX.",
   },
   {
     name: "Rust",
@@ -40,9 +40,9 @@ export const ECOSYSTEMS = [
 
 export const SUITE = {
   label: "Suite",
-  heading: "One suite, four editors",
+  heading: "One suite, three editors",
   prose:
-    "DOCX, XLSX and PPTX editors are published on npm. The VSDX diagram editor is available as a source preview with a browser demo.",
+    "DOCX, XLSX and PPTX editors are published on npm and render inside your app.",
 };
 
 export const EDITORS = [
@@ -63,12 +63,6 @@ export const EDITORS = [
     format: "pptx",
     desc: "Slide model, masters and shape editing, with browser rendering of supported bitmap-only WMF images.",
     status: "available",
-  },
-  {
-    name: "Diagrams",
-    format: "vsdx",
-    desc: "VSDX editor with a flat command bar, a searchable standard-shape gallery that drags onto the canvas, a page tab strip and a zoom status bar, for moving, resizing with handles and Shift-drag, rotating with a grip, adding and deleting shapes, arranging z-order, flipping, setting fill and line colour, editing shape text in place, and saving diagrams, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. It opens Visio drawings and templates. No connector-drag UI.",
-    status: "source preview",
   },
 ];
 
@@ -103,16 +97,6 @@ export const PACKAGES = [
   {
     name: "@betteroffice/pptx-react",
     desc: "The slides editor as a drop-in React component.",
-  },
-  {
-    name: "@betteroffice/vsdx",
-    sourceOnly: true,
-    desc: "VSDX core — Rust and WebAssembly support for parsing, rendering, round-tripping, editing, saving, and collaboration on Visio drawings and templates. addConnector adds a 1D connector glued to two shapes at their pins or existing connection points, and setShapeText replaces a shape's text as one policy-checked mutation.",
-  },
-  {
-    name: "@betteroffice/vsdx-react",
-    sourceOnly: true,
-    desc: "The VSDX editor as a drop-in React component: a flat command bar, a searchable standard-shape gallery that drags onto the canvas, a page tab strip and a zoom status bar over move, resize with handles and Shift-drag, rotate with a grip, add, delete, z-order arrange, flip, set fill or line colour, edit shape text in place, and save, with a focusable canvas offering keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus. No connector-drag UI.",
   },
 ];
 

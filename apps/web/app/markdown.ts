@@ -32,7 +32,7 @@ export function homepageMarkdown(): string {
 
   const packages = PACKAGES.map(
     (pkg) =>
-      `- [\`${pkg.name}\`](${pkg.sourceOnly ? `${REPO}/tree/main/packages/${pkg.name.split("/")[1]}` : `https://www.npmjs.com/package/${pkg.name}`})${pkg.sourceOnly ? " (source preview)" : ""} — ${pkg.desc}`,
+      `- [\`${pkg.name}\`](https://www.npmjs.com/package/${pkg.name}) — ${pkg.desc}`,
   ).join("\n");
 
   const ecosystems = ECOSYSTEMS.map(

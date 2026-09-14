@@ -194,15 +194,15 @@ export default function Home() {
                 <span className="text-[0.8125rem] text-ink">{pkg.desc}</span>
                 <span className="mt-auto flex gap-4 pt-3">
                   <a
-                    href={pkg.sourceOnly ? `${REPO}/tree/main/packages/${pkg.name.split("/")[1]}` : `https://www.npmjs.com/package/${pkg.name}`}
+                    href={`https://www.npmjs.com/package/${pkg.name}`}
                     target="_blank"
                     rel="noopener"
                     className={cardLink}
                   >
-                    {pkg.sourceOnly ? "source" : "npm"} <ArrowUpRight size={11} strokeWidth={2} />
+                    npm <ArrowUpRight size={11} strokeWidth={2} />
                   </a>
                   <a
-                    href={`${DOCS}/docs/${pkg.sourceOnly ? "vsdx" : "javascript"}`}
+                    href={`${DOCS}/docs/javascript`}
                     className={cardLink}
                   >
                     guide <ArrowUpRight size={11} strokeWidth={2} />

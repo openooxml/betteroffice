@@ -34,8 +34,6 @@ export const metadata: Metadata = {
     "javascript spreadsheet library",
     "PPTX editor",
     "react pptx viewer",
-    "VSDX diagram engine",
-    "VSDX parser",
     "Word-compatible editor",
     "Excel-compatible spreadsheet",
     "OOXML",
