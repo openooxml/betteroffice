@@ -52,8 +52,8 @@ test.each([0, 20, 4_294_967_295, -1, 1.5, 4_294_967_296])('both import paths ret
       if (paragraph?.type !== 'paragraph') throw new Error('missing saved paragraph');
       const run = paragraph.content.find((content) => content.type === 'run');
       if (run?.type !== 'run') throw new Error('missing saved run');
-      const savedImage = run.content.find((content) => content.type === 'image');
-      if (savedImage?.type !== 'image') throw new Error('missing saved image');
+      const savedImage = run.content.find((content) => content.type === 'drawing');
+      if (savedImage?.type !== 'drawing' || !savedImage.image) throw new Error('missing saved image');
       expect(savedImage.image.position?.relativeHeight).toBe(rank);
     }
   } finally {
