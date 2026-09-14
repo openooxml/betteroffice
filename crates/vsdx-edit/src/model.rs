@@ -95,6 +95,14 @@ pub struct ShapeDraft {
     pub cells: Vec<CellSnapshot>,
 }
 
+/// One glued connector endpoint; `to_cell` defaults to `PinX` when absent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorGlue {
+    pub shape_id: String,
+    pub to_cell: Option<String>,
+}
+
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum SnapshotCellSheet {

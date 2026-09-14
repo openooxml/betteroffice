@@ -256,6 +256,46 @@ describe('VSDX wasm boundary', () => {
     await expectUntouchedParts(foundation, saved, editedPart);
   });
 
+  test('persists a glued connector through save and reopen', async () => {
+    const pageId = 'page:1';
+    const editedPart = 'visio/pages/page1.xml';
+    const diagram = openDiagram(foundation, { clientId: 9017 });
+    const rect = (pinX: string) => ({ name: 'Rect', cells: [
+      { locator: { cellName: 'Width' }, formula: '1' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'PinX' }, formula: pinX },
+      { locator: { cellName: 'PinY' }, formula: '1' },
+      { locator: { cellName: 'LocPinX' }, formula: '0' },
+      { locator: { cellName: 'LocPinY' }, formula: '0' },
+    ] });
+    const from = diagram.addShape(pageId, rect('1'));
+    const to = diagram.addShape(pageId, rect('5'));
+    const receipt = diagram.addConnector(pageId, { name: 'Connector', cells: [
+      { locator: { cellName: 'OneD' }, formula: '1' },
+      { locator: { cellName: 'BeginX' }, formula: '1' },
+      { locator: { cellName: 'BeginY' }, formula: '2' },
+      { locator: { cellName: 'EndX' }, formula: '4' },
+      { locator: { cellName: 'EndY' }, formula: '2' },
+    ] }, { shapeId: from.shapeId }, { shapeId: to.shapeId, toCell: 'PinX' });
+    const live = diagram.layoutPage(0);
+    expect(live.primitives).toContainEqual(expect.objectContaining({ id: `${diagram.snapshot().pages[0].sourcePartPath}:4`, kind: 'shape' }));
+    const saved = diagram.save();
+    diagram.dispose();
+
+    const reopened = openDiagram(saved, { clientId: 9018 });
+    expect(reopened.layoutPage(0)).toEqual(live);
+    const savedConnector = reopened.snapshot().pages[0].shapes.find(shape => shape.id === 'page:1:shape:4');
+    expect(savedConnector).toEqual(expect.objectContaining({ name: 'Connector' }));
+    expect(receipt.shapeId).not.toBe(savedConnector!.id);
+    reopened.deleteShape(pageId, savedConnector!.id);
+    const deleted = reopened.save();
+    reopened.dispose();
+    const archive = await JSZip.loadAsync(deleted);
+    const pageXml = await archive.file(editedPart)!.async('text');
+    expect(pageXml).not.toMatch(/FromSheet="4"|ToSheet="4"/);
+    await expectUntouchedParts(foundation, saved, editedPart);
+  });
+
   test('persists deletion and removes dependent Connect records through deleteShapeJson', async () => {
     const pageId = 'page:1';
     const shapeId = 'page:1:shape:1';

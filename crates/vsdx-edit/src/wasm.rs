@@ -123,6 +123,22 @@ struct DeleteShapeArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ConnectorGlueArgs {
+    shape_id: String,
+    to_cell: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddConnectorArgs {
+    page_id: String,
+    draft: FormulaShapeDraft,
+    from: ConnectorGlueArgs,
+    to: ConnectorGlueArgs,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
 struct FormulaShapeDraft {
     name: Option<String>,
@@ -340,6 +356,11 @@ impl VsdxDocument {
         self.delete_shape_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = addConnectorJson)]
+    pub fn add_connector_json(&self, args: &str) -> Result<String, JsValue> {
+        self.add_connector_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = save)]
     pub fn save(&self) -> Result<Vec<u8>, JsValue> {
         self.save_inner().map_err(js_error)
@@ -474,6 +495,27 @@ impl VsdxDocument {
         let args: DeleteShapeArgs = parse_args_inner(args)?;
         self.session
             .delete_shape(&local_context(), &args.page_id, &args.shape_id)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn add_connector_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: AddConnectorArgs = parse_args_inner(args)?;
+        let draft = args.draft.try_into().map_err(str::to_owned)?;
+        self.session
+            .add_connector(
+                &local_context(),
+                &args.page_id,
+                &draft,
+                &crate::ConnectorGlue {
+                    shape_id: args.from.shape_id,
+                    to_cell: args.from.to_cell,
+                },
+                &crate::ConnectorGlue {
+                    shape_id: args.to.shape_id,
+                    to_cell: args.to.to_cell,
+                },
+            )
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }

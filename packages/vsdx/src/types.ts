@@ -10,6 +10,7 @@ export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface FormulaShapeDraft { name?: string; cells: Array<{ locator: CellLocator & { rowType?: string }; name?: string; formula?: string }> }
+export interface ConnectorGlue { shapeId: string; toCell?: string; }
 export interface VsdxFontFace { family: string; bold?: boolean; italic?: boolean; bytes: Uint8Array; }
 export type Paint = { kind: 'solid'; color: string } | { kind: 'gradient'; stops: Array<{ position: number; color: string }> };
 export interface Stroke { color: string; width: number; dashed?: boolean; }
