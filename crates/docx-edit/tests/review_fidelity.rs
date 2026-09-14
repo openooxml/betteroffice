@@ -743,6 +743,53 @@ fn table_cell_auto_spacing_recomputes_boundaries_after_a_split() {
 }
 
 #[test]
+fn table_cell_auto_spacing_matches_zero_with_boundary_drawings() {
+    for mode in ["square", "top-bottom", "inline"] {
+        let shape = match mode {
+            "top-bottom" => SHAPE.replace(
+                r#"<wp:wrapSquare wrapText="bothSides"/>"#,
+                "<wp:wrapTopAndBottom/>",
+            ),
+            "inline" => {
+                let start = SHAPE.find("<wp:anchor").unwrap();
+                let extent = SHAPE.find("<wp:extent").unwrap();
+                format!("{}<wp:inline>{}", &SHAPE[..start], &SHAPE[extent..])
+                    .replace("</wp:anchor>", "</wp:inline>")
+                    .replace(r#"<wp:wrapSquare wrapText="bothSides"/>"#, "")
+            }
+            _ => SHAPE.to_owned(),
+        };
+        for leading in [true, false] {
+            let text = "<w:r><w:t>Text beside drawing</w:t></w:r>";
+            let content = if leading {
+                format!("{shape}{text}")
+            } else {
+                format!("{text}{shape}")
+            };
+            let render = |spacing| {
+                layout(
+                    &spacing_table(&format!(
+                        r#"<w:p><w:pPr><w:spacing {spacing}/></w:pPr>{content}</w:p>"#
+                    )),
+                    1,
+                )
+            };
+            let automatic = render(r#"w:beforeAutospacing="1" w:afterAutospacing="1""#);
+            let zero = render(r#"w:before="0" w:after="0""#);
+            assert_eq!(
+                automatic["layout"], zero["layout"],
+                "{mode}, leading={leading}"
+            );
+            assert_eq!(
+                automatic["measured"][0]["measure"]["totalHeight"],
+                zero["measured"][0]["measure"]["totalHeight"],
+                "{mode}, leading={leading}",
+            );
+        }
+    }
+}
+
+#[test]
 fn table_cell_auto_spacing_matches_zero_spacing_pagination_for_single_paragraph_rows() {
     let render = |spacing| {
         let row = format!(
