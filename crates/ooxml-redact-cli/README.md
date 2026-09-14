@@ -13,7 +13,7 @@ cargo run -p betteroffice-redact-cli -- report.docx --random-chars -o report.red
 cargo run -p betteroffice-redact-cli -- japanese.docx --random-chars -o japanese.redacted.docx
 ```
 
-Random mode preserves Latin, Hiragana, Katakana, and Han scripts automatically, along with whitespace and character counts. Other text symbols become letters from the text node’s dominant supported script. Each replacement uses fresh operating-system randomness; there is no reusable substitution key or seed option. Numeric, date, and formula values keep the existing schema-compatible masks. Style references, relationships, and identifiers keep their structural handling.
+Random mode preserves Latin, Hiragana, Katakana, and Han scripts automatically, along with whitespace and character counts. Other text symbols become letters from the text node’s dominant supported script. Each replacement uses fresh operating-system randomness; there is no reusable substitution key or seed option. Numeric, date, and formula values use schema-compatible placeholders; typed numeric custom properties use `0`. Style references, relationships, and identifiers keep their structural handling.
 
 Files stay local unless `--share` is supplied. Existing output files and the original input cannot be overwritten.
 

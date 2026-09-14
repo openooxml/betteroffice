@@ -88,14 +88,15 @@ pub(crate) fn redact_xml_with_styles(
             continue;
         }
         if let Event::Start(start) | Event::Empty(start) = &event
-            && application_version(path, &reader, start.name())
+            && let Some(value) = fixed_metadata_value(path, &reader, start.name())
         {
-            let rewritten = rewrite_start(&reader, start.to_owned(), "AppVersion", &mut state)?;
+            let local = local_name(start.local_name().as_ref());
+            let rewritten = rewrite_start(&reader, start.to_owned(), &local, &mut state)?;
             writer
                 .write_event(Event::Start(rewritten.borrow()))
                 .map_err(|error| xml_error(path, error))?;
             writer
-                .write_event(Event::Text(BytesText::new("0.0000")))
+                .write_event(Event::Text(BytesText::new(value)))
                 .map_err(|error| xml_error(path, error))?;
             if matches!(event, Event::Empty(_)) {
                 writer
@@ -404,13 +405,51 @@ fn word_attribute(reader: &NsReader<&[u8]>, name: &str) -> bool {
     )
 }
 
-fn application_version(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
-    path.eq_ignore_ascii_case("docprops/app.xml")
+fn fixed_metadata_value(
+    path: &str,
+    reader: &NsReader<&[u8]>,
+    name: QName<'_>,
+) -> Option<&'static str> {
+    let application = path.eq_ignore_ascii_case("docprops/app.xml");
+    let custom = path.eq_ignore_ascii_case("docprops/custom.xml");
+    if !application && !custom {
+        return None;
+    }
+    let namespace = reader.resolver().resolve_element(name).0;
+    if application
         && name.local_name().as_ref() == b"AppVersion"
-        && matches!(reader.resolver().resolve_element(name).0,
+        && matches!(&namespace,
             ResolveResult::Bound(ns) if matches!(ns.as_ref(),
                 b"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
                 | b"http://purl.oclc.org/ooxml/officeDocument/extendedProperties"))
+    {
+        Some("0.0000")
+    } else if custom
+        && matches!(
+            name.local_name().as_ref(),
+            b"i1"
+                | b"i2"
+                | b"i4"
+                | b"i8"
+                | b"int"
+                | b"ui1"
+                | b"ui2"
+                | b"ui4"
+                | b"ui8"
+                | b"uint"
+                | b"r4"
+                | b"r8"
+                | b"decimal"
+        )
+        && matches!(namespace,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"
+                | b"http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes"))
+    {
+        Some("0")
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]

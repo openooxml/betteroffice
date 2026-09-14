@@ -94,6 +94,80 @@ fn fixed_application_versions_do_not_skip_xml_security_validation() {
 }
 
 #[test]
+fn typed_custom_numbers_use_valid_neutral_values() {
+    let cases = [
+        ("i1", "-128", "127"),
+        ("i2", "-32768", "32767"),
+        ("i4", "-2147483648", "2147483647"),
+        ("i8", "-9223372036854775808", "9223372036854775807"),
+        ("int", "-2147483648", "2147483647"),
+        ("ui1", "0", "255"),
+        ("ui2", "0", "65535"),
+        ("ui4", "0", "4294967295"),
+        ("ui8", "0", "18446744073709551615"),
+        ("uint", "0", "4294967295"),
+        ("r4", "-1.17549435E-38", "3.4028235E38"),
+        ("r8", "-2.2250738585072014E-308", "1.7976931348623157E308"),
+        ("decimal", "-12345678901234567890.123456789", "0.123456789"),
+    ];
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+                "http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes",
+            ] {
+                for (kind, minimum, maximum) in cases {
+                    for value in [minimum, maximum, "&#49;<![CDATA[23]]>", ""] {
+                        let source = format!(
+                            r#"<p:Properties xmlns:p="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:t="{namespace}" xmlns:other="urn:foreign"><p:property name="PRIVATE_NUMBER" pid="2"><t:{kind}>{value}</t:{kind}></p:property><p:property name="PRIVATE_EMPTY" pid="3"><t:{kind}/></p:property><other:i4>123</other:i4><p:property name="PRIVATE_TEXT" pid="4"><t:lpwstr>PRIVATE_VALUE</t:lpwstr></p:property></p:Properties>"#
+                        );
+                        let output = xml::redact_xml_with_styles(
+                            format,
+                            "docprops/custom.xml",
+                            source.as_bytes(),
+                            &mut RedactionReport::default(),
+                            &StyleMap::default(),
+                            &mut TextMasker::new(&RedactionOptions { random_characters }),
+                        )
+                        .unwrap();
+                        let output = String::from_utf8(output).unwrap();
+                        assert_eq!(
+                            output.matches(&format!("<t:{kind}>0</t:{kind}>")).count(),
+                            2
+                        );
+                        assert!(output.contains("<other:i4>888</other:i4>"));
+                        assert!(output.contains(&format!("xmlns:t=\"{namespace}\"")));
+                        assert!(!output.contains("PRIVATE_"));
+                        assert!(output.contains("name=\"RedactedProperty3\" pid=\"4\""));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_custom_number_replacement_is_scoped_and_rejects_dtds() {
+    let input = br#"<root xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4>123</vt:i4></root>"#;
+    for path in ["word/document.xml", "docProps/app.xml"] {
+        assert_eq!(
+            xml::redact_xml(Format::Docx, path, input, &mut RedactionReport::default()).unwrap(),
+            input
+        );
+    }
+    let input = br#"<Properties xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4><!DOCTYPE private>123</vt:i4></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/custom.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn random_characters_preserve_each_office_format() {
     let options = RedactionOptions {
         random_characters: true,
@@ -307,7 +381,7 @@ fn custom_property_placeholders_are_unique_and_preserve_types() {
         assert!(!text.contains("Client"));
         assert!(!text.contains("Confidential"));
         assert!(text.contains("pid=\"2\" fmtid=\"{D5CDD505-2E9C-101B-9397-08002B2CF9AE}\""));
-        assert!(text.contains("<vt:i4>888</vt:i4>"));
+        assert!(text.contains("<vt:i4>0</vt:i4>"));
         assert!(text.contains("<vt:bool>false</vt:bool>"));
     }
 }
