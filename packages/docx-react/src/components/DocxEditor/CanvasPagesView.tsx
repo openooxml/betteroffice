@@ -29,6 +29,7 @@ import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
 import { displayListNeedsHostImages } from './canvasPresentation';
+import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
 
@@ -202,7 +203,7 @@ export function CanvasPagesView({
     else canvasesRef.current.delete(pageKey);
   }, []);
   const transferredCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
-  const presentedCanvasesRef = useRef(new WeakSet<HTMLCanvasElement>());
+  const [replayState] = useState(() => new CanvasReplayState());
   const offscreenSignatureRef = useRef('');
   const replayGenerationRef = useRef(0);
   const [offscreenFailed, setOffscreenFailed] = useState(false);
@@ -230,13 +231,6 @@ export function CanvasPagesView({
     },
     [publishWorkerPresentation]
   );
-  const rasterEnvironmentRef = useRef<{
-    dpr: number;
-    zoom: number;
-    glyphCacheReady: boolean;
-    resolveImage?: ImageResolver;
-  } | null>(null);
-
   // ===========================================================================
   // Page windowing: only pages near the viewport hold rastered bitmaps. Every
   // page keeps its canvas element (stable keys and CSS-sized boxes, so scroll
@@ -446,21 +440,9 @@ export function CanvasPagesView({
       return;
     }
     const glyphCache = glyphCacheRef.current ?? undefined;
-    const previousEnvironment = rasterEnvironmentRef.current;
-    const rasterEnvironmentChanged =
-      !previousEnvironment ||
-      previousEnvironment.dpr !== dpr ||
-      previousEnvironment.zoom !== zoom ||
-      previousEnvironment.glyphCacheReady !== glyphCacheReady ||
-      previousEnvironment.resolveImage !== resolveImage;
-    rasterEnvironmentRef.current = { dpr, zoom, glyphCacheReady, resolveImage };
-    const preparations: Array<
-      Promise<{
-        canvas: HTMLCanvasElement;
-        buffer: HTMLCanvasElement;
-        page: DisplayList['pages'][number];
-      }>
-    > = [];
+    replayState.updateFrame(frame);
+    const environment = { dpr, zoom, glyphCache, resolveImage };
+    const preparations: CanvasReplayPreparation[] = [];
     for (const [i, page] of displayList.pages.entries()) {
       const retainedPage = frame?.pages[i];
       const pageKey = retainedPage ? retainedPage.pageId.toString() : `index:${page.pageIndex}`;
@@ -474,44 +456,43 @@ export function CanvasPagesView({
         if (canvas.width !== 0 || canvas.height !== 0) {
           canvas.width = 0;
           canvas.height = 0;
-          presentedCanvasesRef.current.delete(canvas);
+          replayState.release(canvas);
         }
         continue;
       }
       // A remounted canvas (surface-mode flip) has no pixels regardless of
       // the retained frame's damage set — always paint it.
-      const damaged =
-        !frame ||
-        !retainedPage ||
-        rasterEnvironmentChanged ||
-        !presentedCanvasesRef.current.has(canvas) ||
-        frame.damagedPageIds.has(retainedPage.pageId);
-      if (!damaged) continue;
+      const presentation = replayState.prepare(canvas, retainedPage?.pageId, environment);
+      if (!presentation) continue;
       // Raster off-DOM first. The connected canvas keeps its previous pixels
       // until every damaged page has finished all async image/glyph work.
       const buffer = document.createElement('canvas');
-      preparations.push(
-        rasterizeDisplayPageToBackBuffer(
+      preparations.push({
+        buffer,
+        ready: rasterizeDisplayPageToBackBuffer(
           buffer,
           page,
           { resolveImage, glyphCache },
           dpr,
           zoom
-        ).then(() => ({ canvas, buffer, page }))
-      );
+        ),
+        present() {
+          presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
+          replayState.didPresent(presentation);
+        },
+      });
     }
-    const present = (prepared: Awaited<(typeof preparations)[number]>[]) => {
-      if (replayGeneration !== replayGenerationRef.current) return;
-      for (const { canvas, buffer, page } of prepared) {
-        presentDisplayPageBackBuffer(canvas, buffer, page, zoom);
-        presentedCanvasesRef.current.add(canvas);
-      }
-    };
-    void Promise.all(preparations).then(present, (error) => {
+    void presentCanvasReplay(
+      preparations,
+      () => replayGeneration === replayGenerationRef.current
+    ).catch((error) => {
       if (replayGeneration === replayGenerationRef.current) {
         console.error('[CanvasRenderer] Atomic canvas replay failed', error);
       }
     });
+    return () => {
+      replayGenerationRef.current += 1;
+    };
     // glyphCacheReady is a redraw trigger (the cache itself is read via ref);
     // zoom re-runs the raster so the enlarged canvas paints at full resolution;
     // windowStart/windowEnd re-run it so pages entering the window paint and
