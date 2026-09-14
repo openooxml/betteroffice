@@ -487,7 +487,7 @@ export function CanvasPagesView({
       () => replayGeneration === replayGenerationRef.current
     ).catch((error) => {
       if (replayGeneration === replayGenerationRef.current) {
-        console.error('[CanvasRenderer] Atomic canvas replay failed', error);
+        console.error('[CanvasRenderer] Canvas replay failed', error);
       }
     });
     return () => {

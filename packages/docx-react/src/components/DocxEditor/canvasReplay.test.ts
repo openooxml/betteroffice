@@ -314,4 +314,129 @@ describe('presentCanvasReplay', () => {
     ).rejects.toThrow('presentation failed');
     expect(buffers.map(({ width }) => width)).toEqual([0, 0]);
   });
+
+  test('a transient copy failure retries only that page after presenting healthy pages', async () => {
+    const state = new CanvasReplayState();
+    const surfaces = [canvas(), canvas(), canvas()];
+    const releases = [0, 0, 0];
+    const buffers = surfaces.map((_, index) => {
+      let width = 100;
+      return {
+        get width() {
+          return width;
+        },
+        set width(value: number) {
+          width = value;
+          if (value === 0) releases[index] += 1;
+        },
+        height: 100,
+      } as HTMLCanvasElement;
+    });
+    const attempts = [0, 0, 0];
+    const copied: number[] = [];
+    state.updateFrame(frame(1));
+    for (const [index, surface] of surfaces.entries()) {
+      state.didPresent(state.prepare(surface, ids[index], environment)!);
+    }
+    state.updateFrame(frame(2));
+    await presentCanvasReplay(
+      buffers.map((buffer, index) => {
+        const presentation = state.prepare(surfaces[index], ids[index], environment)!;
+        return {
+          buffer,
+          ready: Promise.resolve(),
+          present() {
+            attempts[index] += 1;
+            expect(releases).toEqual([0, 0, 0]);
+            expect(buffer.width).toBe(100);
+            if (index === 1 && attempts[index] === 1) throw new Error('temporary copy failure');
+            copied.push(index);
+            state.didPresent(presentation);
+          },
+        };
+      }),
+      () => true
+    );
+    expect(copied).toEqual([0, 2, 1]);
+    expect(attempts).toEqual([1, 2, 1]);
+    expect(releases).toEqual([1, 1, 1]);
+    expect(buffers.map(({ width, height }) => [width, height])).toEqual([
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ]);
+    for (const [index, surface] of surfaces.entries()) {
+      expect(state.prepare(surface, ids[index], environment)).toBeNull();
+    }
+  });
+
+  test('permanent copy failure is bounded and retains only failed-page damage', async () => {
+    const state = new CanvasReplayState();
+    const surfaces = [canvas(), canvas(), canvas()];
+    const buffers = surfaces.map(canvas);
+    const attempts = [0, 0, 0];
+    state.updateFrame(frame(1));
+    await expect(
+      presentCanvasReplay(
+        buffers.map((buffer, index) => {
+          const presentation = state.prepare(surfaces[index], ids[index], environment)!;
+          return {
+            buffer,
+            ready: Promise.resolve(),
+            present() {
+              attempts[index] += 1;
+              if (index === 1) throw new Error('permanent copy failure');
+              state.didPresent(presentation);
+            },
+          };
+        }),
+        () => true
+      )
+    ).rejects.toThrow('permanent copy failure');
+    expect(attempts).toEqual([1, 2, 1]);
+    expect(buffers.map(({ width, height }) => [width, height])).toEqual([
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ]);
+    expect(state.prepare(surfaces[0], 1n, environment)).toBeNull();
+    expect(state.prepare(surfaces[1], 2n, environment)).not.toBeNull();
+    expect(state.prepare(surfaces[2], 3n, environment)).toBeNull();
+  });
+
+  test('a stale generation cancels the failed-page retry and releases scratch', async () => {
+    const state = new CanvasReplayState();
+    const surfaces = [canvas(), canvas()];
+    const buffers = surfaces.map(canvas);
+    const attempts = [0, 0];
+    let current = true;
+    state.updateFrame(frame(1));
+    await presentCanvasReplay(
+      buffers.map((buffer, index) => {
+        const presentation = state.prepare(surfaces[index], ids[index], environment)!;
+        return {
+          buffer,
+          ready: Promise.resolve(),
+          present() {
+            attempts[index] += 1;
+            if (index === 0) {
+              queueMicrotask(() => {
+                current = false;
+              });
+              throw new Error('copy failed before supersession');
+            }
+            state.didPresent(presentation);
+          },
+        };
+      }),
+      () => current
+    );
+    expect(attempts).toEqual([1, 1]);
+    expect(buffers.map(({ width, height }) => [width, height])).toEqual([
+      [0, 0],
+      [0, 0],
+    ]);
+    expect(state.prepare(surfaces[0], 1n, environment)).not.toBeNull();
+    expect(state.prepare(surfaces[1], 2n, environment)).toBeNull();
+  });
 });

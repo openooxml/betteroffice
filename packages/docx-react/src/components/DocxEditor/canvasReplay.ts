@@ -88,8 +88,20 @@ export async function presentCanvasReplay(
     const results = await Promise.allSettled(preparations.map(({ ready }) => ready));
     const failure = results.find((result) => result.status === 'rejected');
     if (failure?.status === 'rejected') throw failure.reason;
-    if (isCurrent()) {
-      for (const preparation of preparations) preparation.present();
+    let pending = preparations;
+    for (let attempt = 0; attempt < 2 && isCurrent(); attempt += 1) {
+      const failures: Array<{ preparation: CanvasReplayPreparation; reason: unknown }> = [];
+      for (const preparation of pending) {
+        try {
+          preparation.present();
+        } catch (reason) {
+          failures.push({ preparation, reason });
+        }
+      }
+      if (failures.length === 0) return;
+      if (attempt === 1) throw failures[0].reason;
+      pending = failures.map(({ preparation }) => preparation);
+      await Promise.resolve();
     }
   } finally {
     for (const { buffer } of preparations) {
