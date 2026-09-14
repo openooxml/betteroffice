@@ -429,7 +429,10 @@ async function replayOffscreen(
       ).then(() => ({ canvas, buffer: resolvedBuffer, pageId }))
     );
   }
-  const prepared = await Promise.all(preparations);
+  const prepared = await Promise.all(preparations).catch(async (error) => {
+    await Promise.allSettled(preparations);
+    throw error;
+  });
   let caretPainted =
     caretTarget !== null && paintedCaretPageId === caretTarget.pageId && paintedCaretKey === caretKey;
   // Present only after the entire damaged frame is ready. This loop is

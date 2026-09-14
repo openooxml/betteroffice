@@ -237,6 +237,14 @@ function caret(page: number): YrsResidentCaretRect {
   return { pageIndex: page - 1, pageId: String(page), x: 5, y: 6, height: 12 };
 }
 
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe('resident worker page damage', () => {
   test('paints each page once while a three-page window crosses twelve pages', async () => {
     const w = worker();
@@ -278,6 +286,53 @@ describe('resident worker page damage', () => {
     w.resetCalls();
     await w.build([]);
     expect(w.harness.rasterized).toEqual([]);
+  });
+
+  test('finishes rejected-batch writers before a queued frame can reuse their buffers', async () => {
+    const w = worker();
+    await w.bootstrap();
+    await w.attach([1, 2]);
+    const oldStarted = deferred();
+    const releaseOld = deferred();
+    const oldFinished = deferred();
+    const retryStarted = deferred();
+    const releaseRetry = deferred();
+    const rasterize = w.harness.rasterize;
+    let retryWriting = false;
+    w.harness.rasterize = async (...args) => {
+      const page = args[1];
+      if (page.pageIndex === 1 && page.width === 120) {
+        oldStarted.resolve();
+        await releaseOld.promise;
+        await rasterize(...args);
+        oldFinished.resolve();
+        return;
+      }
+      if (page.pageIndex === 0 && page.width === 140) {
+        retryWriting = true;
+        retryStarted.resolve();
+        await releaseRetry.promise;
+      }
+      await rasterize(...args);
+    };
+    w.harness.failRaster = 1;
+    let failedReplyArrived = false;
+    const failed = w.build([1, 2], 120).then((reply) => {
+      failedReplyArrived = true;
+      return reply;
+    });
+    await oldStarted.promise;
+    const retry = w.build([1, 2], 140);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const beforeRelease = { failedReplyArrived, retryWriting };
+    releaseOld.resolve();
+    await oldFinished.promise;
+    await retryStarted.promise;
+    releaseRetry.resolve();
+    expect((await failed).ok).toBe(false);
+    expect((await retry).ok).toBe(true);
+    expect(w.surfaces.get('2')!.pixels).toBe('2:140');
+    expect(beforeRelease).toEqual({ failedReplyArrived: false, retryWriting: false });
   });
 
   test('retries every unpresented page after a failed zoom change', async () => {
