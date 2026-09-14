@@ -193,6 +193,33 @@ mod tests {
     }
 
     #[test]
+    fn random_masks_depend_on_entropy_and_script_classes_not_source_letters() {
+        for source in 'a'..='z' {
+            assert_eq!(deterministic().replace(&source.to_string()).unwrap(), "a");
+        }
+        for source in 'A'..='Z' {
+            assert_eq!(deterministic().replace(&source.to_string()).unwrap(), "A");
+        }
+        let first = "Alpha ひらがな カタカナ 日本語";
+        let second = "Bravo あいうえ サシスセ 山川田";
+        assert_eq!(
+            deterministic().replace(first).unwrap(),
+            deterministic().replace(second).unwrap()
+        );
+        let mut shifted = deterministic();
+        shifted.random.as_mut().unwrap().fill = |bytes| {
+            for (index, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                chunk.copy_from_slice(&((index + 1) as u32).to_ne_bytes());
+            }
+            Ok(())
+        };
+        assert_ne!(
+            deterministic().replace(first).unwrap(),
+            shifted.replace(first).unwrap()
+        );
+    }
+
+    #[test]
     fn randomness_failure_is_reported_without_a_fallback() {
         let mut masker = deterministic();
         masker.random.as_mut().unwrap().fill =
