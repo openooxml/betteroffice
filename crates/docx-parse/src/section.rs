@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::borders::{BorderSpec, parse_border_spec};
 use crate::notes::{NoteProperties, parse_endnote_properties, parse_footnote_properties};
 use crate::scalars::ColorValue;
-use crate::xml::XmlElement;
+use crate::xml::{XmlElement, parse_twips_measure};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Column {
@@ -168,29 +168,29 @@ pub fn parse_section_properties(element: Option<&XmlElement>) -> SectionProperti
     };
     let mut value = SectionProperties::default();
     if let Some(size) = element.child("w", "pgSz") {
-        value.page_width = numeric(size, "w");
-        value.page_height = numeric(size, "h");
+        value.page_width = twips(size, "w", false);
+        value.page_height = twips(size, "h", false);
         value.orientation = enum_attribute(size, "orient", &["landscape", "portrait"]);
     }
     if let Some(margins) = element.child("w", "pgMar") {
-        value.margin_top = numeric(margins, "top");
-        value.margin_bottom = numeric(margins, "bottom");
-        value.margin_left = numeric(margins, "left");
-        value.margin_right = numeric(margins, "right");
-        value.header_distance = numeric(margins, "header");
-        value.footer_distance = numeric(margins, "footer");
-        value.gutter = numeric(margins, "gutter");
+        value.margin_top = twips(margins, "top", true);
+        value.margin_bottom = twips(margins, "bottom", true);
+        value.margin_left = twips(margins, "left", false);
+        value.margin_right = twips(margins, "right", false);
+        value.header_distance = twips(margins, "header", false);
+        value.footer_distance = twips(margins, "footer", false);
+        value.gutter = twips(margins, "gutter", false);
     }
     if let Some(columns) = element.child("w", "cols") {
         value.column_count = numeric(columns, "num");
-        value.column_space = numeric(columns, "space");
+        value.column_space = twips(columns, "space", false);
         value.equal_width = explicit_bool_attribute(columns, "equalWidth");
         value.separator = truthy_attribute(columns, "sep");
         let definitions: Vec<_> = columns
             .children_named("w", "col")
             .map(|column| Column {
-                width: numeric(column, "w"),
-                space: numeric(column, "space"),
+                width: twips(column, "w", false),
+                space: twips(column, "space", false),
             })
             .collect();
         if !definitions.is_empty() {
@@ -224,7 +224,7 @@ pub fn parse_section_properties(element: Option<&XmlElement>) -> SectionProperti
     value.line_numbers = element.child("w", "lnNumType").map(|line| LineNumbering {
         start: numeric(line, "start"),
         count_by: numeric(line, "countBy"),
-        distance: numeric(line, "distance"),
+        distance: twips(line, "distance", false),
         restart: enum_attribute(line, "restart", &["continuous", "newPage", "newSection"]),
     });
     value.page_numbering =
@@ -393,6 +393,10 @@ fn numeric(element: &XmlElement, name: &str) -> Option<f64> {
     element.parse_numeric_attribute(Some("w"), name, 1.0)
 }
 
+fn twips(element: &XmlElement, name: &str, signed: bool) -> Option<f64> {
+    parse_twips_measure(element.attribute(Some("w"), name)?, signed)
+}
+
 fn boolean_child(parent: &XmlElement, child: &str) -> Option<bool> {
     parent
         .child("w", child)
@@ -415,6 +419,64 @@ fn truthy_attribute(element: &XmlElement, name: &str) -> Option<bool> {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn universal_measures_preserve_section_geometry_and_round_trip() {
+        let xml = br#"<w:sectPr><w:pgSz w:w="21cm" w:h="297mm"/><w:pgMar w:top="-1.25cm" w:bottom="-0.5in" w:left="10mm" w:right="36pt" w:header="3pc" w:footer="3pi" w:gutter="2.54mm"/><w:cols w:num="2" w:space="1.27cm"><w:col w:w="72pt" w:space="0mm"/></w:cols><w:lnNumType w:start="1" w:countBy="2" w:distance="0.25in"/><w:docGrid w:linePitch="360"/></w:sectPr>"#;
+        let limits = ParseLimits::default();
+        let document = parse_xml(xml, "word/document.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let properties = parse_section_properties(document.root());
+        assert_eq!(properties.page_width, Some(11906.0));
+        assert_eq!(properties.page_height, Some(16838.0));
+        assert_eq!(properties.margin_top, Some(-709.0));
+        assert_eq!(properties.margin_bottom, Some(-720.0));
+        assert_eq!(properties.margin_left, Some(567.0));
+        assert_eq!(properties.margin_right, Some(720.0));
+        assert_eq!(properties.header_distance, Some(720.0));
+        assert_eq!(properties.footer_distance, Some(720.0));
+        assert_eq!(properties.gutter, Some(144.0));
+        assert_eq!(properties.column_count, Some(2.0));
+        assert_eq!(properties.column_space, Some(720.0));
+        let column = &properties.columns.as_ref().unwrap()[0];
+        assert_eq!(column.width, Some(1440.0));
+        assert_eq!(column.space, Some(0.0));
+        let numbering = properties.line_numbers.as_ref().unwrap();
+        assert_eq!(numbering.start, Some(1.0));
+        assert_eq!(numbering.count_by, Some(2.0));
+        assert_eq!(numbering.distance, Some(360.0));
+        assert_eq!(
+            properties.doc_grid.as_ref().unwrap().line_pitch,
+            Some(360.0)
+        );
+        let saved = crate::serializer::serialize_section_properties(Some(&properties));
+        let reopened = parse_xml(
+            saved.as_bytes(),
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        assert_eq!(parse_section_properties(reopened.root()), properties);
+    }
+
+    #[test]
+    fn malformed_section_measures_do_not_become_integer_prefixes() {
+        let limits = ParseLimits::default();
+        let document = parse_xml(
+            br#"<w:sectPr><w:pgSz w:w="21CM" w:h="297px"/><w:pgMar w:top="10junk" w:left="-10mm" w:right="-720" w:bottom="10mmjunk" w:header="1e2pt" w:footer="+1pt" w:gutter="0.5"/><w:cols w:num="2suffix" w:space="5cmjunk"/><w:docGrid w:linePitch="360suffix"/></w:sectPr>"#,
+            "word/document.xml", &mut ParseBudget::new(&limits)).unwrap();
+        let properties = parse_section_properties(document.root());
+        assert_eq!(
+            properties,
+            SectionProperties {
+                column_count: Some(2.0),
+                doc_grid: Some(DocumentGrid {
+                    line_pitch: Some(360.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        );
+    }
 
     #[test]
     fn parses_inline_section_markers_and_inherits_story_references() {

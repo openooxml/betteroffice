@@ -42,6 +42,39 @@ fn layout(body: &str, columns: u32) -> Value {
 }
 
 #[test]
+fn universal_section_measures_match_canonical_twip_layout() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let render = |width, height, margin| {
+        let body = format!(
+            r#"{}<w:sectPr><w:pgSz w:w="{width}" w:h="{height}"/><w:pgMar w:top="{margin}" w:bottom="{margin}" w:left="{margin}" w:right="{margin}" w:header="0" w:footer="0" w:gutter="0"/></w:sectPr>"#,
+            paragraph("Physical page dimensions").repeat(40)
+        );
+        let bytes = document(&body, "");
+        let parsed = docx_parse::parse_docx_s9_wire(&bytes, Default::default()).unwrap();
+        let engine = EngineSession::new(74290);
+        seed_from_docx(engine.doc(), &bytes).unwrap();
+        serde_json::from_str::<Value>(&engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":{}, "options":{},
+            "regions":{"sections":parsed.document.package.document.sections},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap()).unwrap()
+    };
+    let physical = render("21cm", "297mm", "10mm");
+    let canonical = render("11906", "16838", "567");
+    assert_eq!(physical["layout"], canonical["layout"]);
+    let pages = physical["layout"]["pages"].as_array().unwrap();
+    assert_eq!(pages.len(), 2);
+    for page in pages {
+        assert_eq!(page["size"]["w"], 11906.0 / 15.0);
+        assert_eq!(page["size"]["h"], 16838.0 / 15.0);
+        let fragment = &page["fragments"][0];
+        assert_eq!(fragment["x"], 567.0 / 15.0);
+        assert_eq!(fragment["y"], 567.0 / 15.0);
+        assert!((fragment["width"].as_f64().unwrap() - (11906.0 - 1134.0) / 15.0).abs() < 0.001);
+    }
+}
+
+#[test]
 fn vml_horizontal_rule_uses_paragraph_width_without_changing_flow() {
     for columns in [1, 2] {
         let body = format!(

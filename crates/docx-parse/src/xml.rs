@@ -971,6 +971,49 @@ pub fn namespace_prefix(name: &str) -> Option<&str> {
     name.split_once(':').map(|(prefix, _)| prefix)
 }
 
+/// Parse integer twips or an OOXML universal measure into whole twips.
+pub(crate) fn parse_twips_measure(value: &str, signed: bool) -> Option<f64> {
+    let value = value.trim_matches([' ', '\t', '\r', '\n']);
+    let unit = [
+        ("mm", 1440.0 / 25.4),
+        ("cm", 1440.0 / 2.54),
+        ("in", 1440.0),
+        ("pt", 20.0),
+        ("pc", 240.0),
+        ("pi", 240.0),
+    ]
+    .into_iter()
+    .find_map(|(suffix, scale)| value.strip_suffix(suffix).map(|number| (number, scale)));
+    let Some((number, scale)) = unit else {
+        let digits = value.strip_prefix(['+', '-']).unwrap_or(value);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        return if signed {
+            value.parse::<f64>().ok().filter(|value| value.is_finite())
+        } else {
+            value.parse::<u64>().ok().map(|value| value as f64)
+        };
+    };
+    let digits = if signed {
+        number.strip_prefix('-').unwrap_or(number)
+    } else {
+        number
+    };
+    let (integer, fraction) = digits
+        .split_once('.')
+        .map_or((digits, None), |(a, b)| (a, Some(b)));
+    if integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || fraction
+            .is_some_and(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return None;
+    }
+    let twips = number.parse::<f64>().ok()? * scale;
+    twips.is_finite().then(|| twips.round())
+}
+
 pub(crate) fn parse_javascript_integer_prefix(value: &str) -> Option<f64> {
     let value = value.trim_start();
     let bytes = value.as_bytes();
@@ -1015,6 +1058,55 @@ fn escape_attribute(value: &str, output: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn twips_measures_convert_supported_units_and_validate_the_entire_value() {
+        for value in ["25.4mm", "2.54cm", "1in", "72pt", "6pc", "6pi"] {
+            assert_eq!(parse_twips_measure(value, false), Some(1440.0), "{value}");
+            assert_eq!(
+                parse_twips_measure(&format!("-{value}"), true),
+                Some(-1440.0)
+            );
+            assert_eq!(parse_twips_measure(&format!("-{value}"), false), None);
+        }
+        for (value, expected) in [
+            ("1440", 1440.0),
+            ("+1440", 1440.0),
+            (" \t1440\r\n", 1440.0),
+            (" 10mm ", 567.0),
+            ("0.5pt", 10.0),
+            ("0mm", 0.0),
+        ] {
+            assert_eq!(parse_twips_measure(value, false), Some(expected), "{value}");
+        }
+        assert_eq!(parse_twips_measure("-720", true), Some(-720.0));
+        assert_eq!(parse_twips_measure("-720", false), None);
+        assert_eq!(parse_twips_measure("-1.25cm", true), Some(-709.0));
+        for value in [
+            "",
+            "mm",
+            ".5pt",
+            "1.pt",
+            "1.2.3pt",
+            "+1pt",
+            "1e2pt",
+            "10px",
+            "10PT",
+            "10mmjunk",
+            "10 mm",
+            "0.5",
+            "NaN",
+            "Infinity",
+            "--1pt",
+            "18446744073709551616",
+        ] {
+            assert_eq!(parse_twips_measure(value, false), None, "{value}");
+        }
+        assert_eq!(
+            parse_twips_measure(&format!("{}in", "9".repeat(310)), true),
+            None
+        );
+    }
 
     fn parse(input: &str) -> Result<XmlDocument, ParseError> {
         let limits = ParseLimits::default();
