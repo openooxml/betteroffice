@@ -4,6 +4,7 @@ use docx_layout::types::{
     AxisPosition, BlockId, BoxEdges, ImageRunPosition, LineBreakRun, ParagraphAttrs,
     ParagraphBlock, Run, RunFormatting, ShapeBlock, TabRun, TextRun,
 };
+use docx_parse::{drawingml::resolve_color_value_to_hex, scalars::ColorValue};
 use serde_json::{Map, Value, json};
 
 use super::RenderEnv;
@@ -463,6 +464,23 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
 
 fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
     let value = value?.as_object()?;
+    let base = shape_base_color(value)?;
+    let mut color = ColorValue {
+        theme_tint: string_in(value, "themeTint"),
+        theme_shade: string_in(value, "themeShade"),
+        luminance_modulation: number_in(value, "luminanceModulation"),
+        luminance_offset: number_in(value, "luminanceOffset"),
+        saturation_modulation: number_in(value, "saturationModulation"),
+        ..ColorValue::default()
+    };
+    if color == ColorValue::default() {
+        return Some(base);
+    }
+    color.rgb = Some(base.clone());
+    resolve_color_value_to_hex(Some(&color)).or(Some(base))
+}
+
+fn shape_base_color(value: &Map<String, Value>) -> Option<String> {
     if let Some(rgb) = value
         .get("rgb")
         .and_then(Value::as_str)
@@ -879,6 +897,80 @@ fn preset_geometry(shape_type: &str) -> Option<Vec<Value>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shape_color_modifiers_follow_shared_hsl_and_tint_rules() {
+        for (color, expected) in [
+            (
+                json!({"themeColor":"accent4","luminanceModulation":0.4,"luminanceOffset":0.6}),
+                "#FFE699",
+            ),
+            (
+                json!({"rgb":"4472C4","luminanceModulation":0.6,"luminanceOffset":0.4}),
+                "#8FAADC",
+            ),
+            (
+                json!({"rgb":"4472C4","luminanceModulation":0.75}),
+                "#2F5597",
+            ),
+            (
+                json!({"rgb":"4472C4","saturationModulation":0.0}),
+                "#848484",
+            ),
+            (json!({"rgb":"204060","themeShade":"80"}), "#102030"),
+            (json!({"rgb":"204060","themeTint":"80"}), "#8F9FAF"),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":0.0,"luminanceOffset":0.0}),
+                "#000000",
+            ),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":2.0,"luminanceOffset":0.6}),
+                "#FFFFFF",
+            ),
+            (
+                json!({"rgb":"FFC000","luminanceModulation":-1.0}),
+                "#FFC000",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn shape_color_modifiers_preserve_existing_base_color_selection() {
+        for (slot, expected) in [
+            ("tx1", "#000000"),
+            ("dark1", "#000000"),
+            ("bg1", "#FFFFFF"),
+            ("light1", "#FFFFFF"),
+            ("tx2", "#44546A"),
+            ("bg2", "#E7E6E6"),
+            ("hyperlink", "#0563C1"),
+            ("followedhyperlink", "#954F72"),
+            ("AcCeNt4", "#FFC000"),
+        ] {
+            let color = json!({"themeColor":slot,"luminanceModulation":1.0});
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
+        }
+        for (color, expected) in [
+            (json!({"themeColor":"unknown","luminanceOffset":0.6}), None),
+            (
+                json!({"rgb":"aabbcc","themeColor":"accent4"}),
+                Some("#aabbcc"),
+            ),
+            (
+                json!({"rgb":"FF0000","themeColor":"accent4","luminanceModulation":0.5}),
+                Some("#800000"),
+            ),
+            (
+                json!({"rgb":"aabbcc","luminanceModulation":"invalid"}),
+                Some("#aabbcc"),
+            ),
+            (json!({"rgb":"aabbcc","alpha":0.5}), Some("#aabbcc")),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), expected);
+        }
+    }
 
     #[test]
     fn shape_wrap_distances_lower_from_emu_to_pixels() {

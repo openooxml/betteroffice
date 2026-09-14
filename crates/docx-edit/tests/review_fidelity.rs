@@ -1629,3 +1629,34 @@ fn line_unit_paragraph_spacing_clears_and_round_trips() {
         }
     }
 }
+
+#[test]
+fn shape_color_luminance_survives_import_and_reaches_display_paint() {
+    for color in [
+        r#"<a:schemeClr val="accent4"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:schemeClr>"#,
+        r#"<a:srgbClr val="FFC000"><a:lumMod val="40000"/><a:lumOff val="60000"/></a:srgbClr>"#,
+    ] {
+        let shape = SHAPE.replace(r#"<a:srgbClr val="CCCCCC"/>"#, color);
+        let output = layout(&format!("<w:p>{shape}</w:p>"), 1);
+        let block = output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry["block"])
+            .find(|block| block["kind"] == "shape")
+            .unwrap();
+        assert_eq!(block["fill"]["color"], "#FFE699");
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let shape = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "shape")
+            .unwrap();
+        assert_eq!(shape["fill"], "#FFE699");
+        assert_eq!(shape["fillPaint"]["color"], "#FFE699");
+    }
+}
