@@ -48,6 +48,7 @@ pub(crate) fn redact_xml_with_styles(
         masker,
     };
     let mut skipped_depth = 0;
+    let mut preserve_skipped_end = false;
 
     loop {
         let event = reader
@@ -59,7 +60,15 @@ pub(crate) fn redact_xml_with_styles(
         if skipped_depth > 0 {
             match event {
                 Event::Start(_) => skipped_depth += 1,
-                Event::End(_) => skipped_depth -= 1,
+                Event::End(end) => {
+                    skipped_depth -= 1;
+                    if skipped_depth == 0 && preserve_skipped_end {
+                        writer
+                            .write_event(Event::End(end))
+                            .map_err(|error| xml_error(path, error))?;
+                        preserve_skipped_end = false;
+                    }
+                }
                 Event::Text(text) => {
                     let decoded = text.decode().map_err(|error| xml_error(path, error))?;
                     charge_text(state.report, &decoded);
@@ -69,8 +78,32 @@ pub(crate) fn redact_xml_with_styles(
                     charge_text(state.report, &decoded);
                 }
                 Event::Comment(_) | Event::PI(_) => state.report.xml_comments += 1,
-                Event::Eof => return Err(xml_error(path, "unterminated schema element")),
+                Event::GeneralRef(_) if preserve_skipped_end => {
+                    state.report.text_nodes += 1;
+                    state.report.characters += 1;
+                }
+                Event::Eof => return Err(xml_error(path, "unterminated redacted element")),
                 _ => {}
+            }
+            continue;
+        }
+        if let Event::Start(start) | Event::Empty(start) = &event
+            && application_version(path, &reader, start.name())
+        {
+            let rewritten = rewrite_start(&reader, start.to_owned(), "AppVersion", &mut state)?;
+            writer
+                .write_event(Event::Start(rewritten.borrow()))
+                .map_err(|error| xml_error(path, error))?;
+            writer
+                .write_event(Event::Text(BytesText::new("0.0000")))
+                .map_err(|error| xml_error(path, error))?;
+            if matches!(event, Event::Empty(_)) {
+                writer
+                    .write_event(Event::End(rewritten.to_end()))
+                    .map_err(|error| xml_error(path, error))?;
+            } else {
+                skipped_depth = 1;
+                preserve_skipped_end = true;
             }
             continue;
         }
@@ -369,6 +402,15 @@ fn word_attribute(reader: &NsReader<&[u8]>, name: &str) -> bool {
             .resolve_attribute(QName(name.as_bytes()))
             .0,
     )
+}
+
+fn application_version(path: &str, reader: &NsReader<&[u8]>, name: QName<'_>) -> bool {
+    path.eq_ignore_ascii_case("docprops/app.xml")
+        && name.local_name().as_ref() == b"AppVersion"
+        && matches!(reader.resolver().resolve_element(name).0,
+            ResolveResult::Bound(ns) if matches!(ns.as_ref(),
+                b"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"
+                | b"http://purl.oclc.org/ooxml/officeDocument/extendedProperties"))
 }
 
 #[derive(Clone, Copy)]

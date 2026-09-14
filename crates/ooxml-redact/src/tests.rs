@@ -34,6 +34,66 @@ const PPTX_SECRETS: &[&str] = &[
 ];
 
 #[test]
+fn application_versions_use_a_fixed_valid_value_in_both_masking_modes() {
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+                "http://purl.oclc.org/ooxml/officeDocument/extendedProperties",
+            ] {
+                for content in [
+                    "16.0000",
+                    "<![CDATA[16.0000]]>",
+                    "&#49;6.<!-- private -->0000",
+                    "",
+                ] {
+                    let source = format!(
+                        r#"<ep:Properties xmlns:ep="{namespace}" xmlns:other="urn:foreign"><ep:AppVersion>{content}</ep:AppVersion><ep:AppVersion/><other:AppVersion>16.0000</other:AppVersion><ep:Company>PRIVATE_COMPANY</ep:Company><ep:Pages>7</ep:Pages></ep:Properties>"#
+                    );
+                    let output = xml::redact_xml_with_styles(
+                        format,
+                        "docProps/app.xml",
+                        source.as_bytes(),
+                        &mut RedactionReport::default(),
+                        &StyleMap::default(),
+                        &mut TextMasker::new(&RedactionOptions { random_characters }),
+                    )
+                    .unwrap();
+                    let output = String::from_utf8(output).unwrap();
+                    assert_eq!(
+                        output
+                            .matches("<ep:AppVersion>0.0000</ep:AppVersion>")
+                            .count(),
+                        2
+                    );
+                    assert!(!output.contains("<other:AppVersion>0.0000"));
+                    assert!(!output.contains("16.0000"));
+                    assert!(!output.contains("PRIVATE_COMPANY"));
+                    assert!(!output.contains("private"));
+                    assert!(output.contains("<ep:Pages>7</ep:Pages>"));
+                    assert!(output.contains(&format!("xmlns:ep=\"{namespace}\"")));
+                    assert!(output.contains("xmlns:other=\"urn:foreign\""));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_application_versions_do_not_skip_xml_security_validation() {
+    let input = br#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><AppVersion><!DOCTYPE private>16.0000</AppVersion></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/app.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn random_characters_preserve_each_office_format() {
     let options = RedactionOptions {
         random_characters: true,
