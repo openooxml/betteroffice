@@ -600,6 +600,168 @@ fn line_unit_paragraph_spacing_honors_style_precedence_and_auto_spacing() {
     assert_eq!(engine.doc().encode_state_as_update_v1(), before);
 }
 
+fn spacing_paragraph(spacing: &str, text: &str) -> String {
+    format!(
+        r#"<w:p><w:pPr><w:spacing {spacing} w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#
+    )
+}
+
+fn spacing_table(content: &str) -> String {
+    format!(
+        r#"<w:tbl><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="7200"/></w:tblGrid><w:tr><w:tc>{content}</w:tc></w:tr></w:tbl>"#
+    )
+}
+
+#[test]
+fn table_cell_auto_spacing_preserves_explicit_sides_and_interior_spacing() {
+    let automatic =
+        r#"w:before="100" w:after="100" w:beforeAutospacing="1" w:afterAutospacing="1""#;
+    for (spacing, expected) in [
+        (automatic, (0.0, 0.0)),
+        (
+            r#"w:before="100" w:after="100""#,
+            (100.0 / 15.0, 100.0 / 15.0),
+        ),
+        (
+            r#"w:before="100" w:beforeAutospacing="1" w:after="120""#,
+            (0.0, 8.0),
+        ),
+        (
+            r#"w:before="120" w:after="100" w:afterAutospacing="1""#,
+            (8.0, 0.0),
+        ),
+        (r#"w:beforeLines="100" w:afterLines="50""#, (16.0, 8.0)),
+    ] {
+        let body = spacing_table(&spacing_paragraph(spacing, "Cell"));
+        let engine = EngineSession::new(74310);
+        seed_from_docx(engine.doc(), &document(&body, "")).unwrap();
+        let before = engine.doc().encode_state_as_update_v1();
+        let blocks: Value = serde_json::from_str(
+            &engine
+                .lower_story_json("body", &Default::default())
+                .unwrap(),
+        )
+        .unwrap();
+        let spacing = &blocks[0]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"];
+        assert_eq!(spacing["before"], expected.0);
+        assert_eq!(spacing["after"], expected.1);
+        assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+    }
+
+    let p = spacing_paragraph(automatic, "Text");
+    let body = format!("{p}{}{p}", spacing_table(&p.repeat(3)));
+    let engine = EngineSession::new(74311);
+    seed_from_docx(engine.doc(), &document(&body, "")).unwrap();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    for index in [0, 2] {
+        assert_eq!(blocks[index]["attrs"]["spacing"]["before"], 14.0);
+        assert_eq!(blocks[index]["attrs"]["spacing"]["after"], 14.0);
+    }
+    let paragraphs = &blocks[1]["rows"][0]["cells"][0]["blocks"];
+    for (index, before, after) in [(0, 0.0, 14.0), (1, 14.0, 14.0), (2, 14.0, 0.0)] {
+        assert_eq!(paragraphs[index]["attrs"]["spacing"]["before"], before);
+        assert_eq!(paragraphs[index]["attrs"]["spacing"]["after"], after);
+    }
+}
+
+#[test]
+fn table_cell_auto_spacing_follows_styles_nested_cells_and_content_controls() {
+    let styles = r#"<w:style w:type="paragraph" w:styleId="Automatic"><w:pPr><w:spacing w:before="100" w:after="100" w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr></w:style>"#;
+    let p = r#"<w:p><w:pPr><w:pStyle w:val="Automatic"/></w:pPr><w:r><w:t>Text</w:t></w:r></w:p>"#;
+    let disabled = r#"<w:p><w:pPr><w:pStyle w:val="Automatic"/><w:spacing w:beforeAutospacing="0" w:afterAutospacing="0"/></w:pPr><w:r><w:t>Disabled</w:t></w:r></w:p>"#;
+    let controlled = format!(
+        r#"<w:sdt><w:sdtPr><w:id w:val="123"/></w:sdtPr><w:sdtContent>{p}{p}</w:sdtContent></w:sdt>"#
+    );
+    let body = format!(
+        "{}{}{}",
+        spacing_table(&format!("{p}{}{p}", spacing_table(p))),
+        spacing_table(&controlled),
+        spacing_table(disabled)
+    );
+    let engine = EngineSession::new(74312);
+    seed_from_docx(engine.doc(), &document(&body, styles)).unwrap();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    let outer = &blocks[0]["rows"][0]["cells"][0]["blocks"];
+    assert_eq!(outer[0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(outer[0]["attrs"]["spacing"]["after"], 14.0);
+    assert_eq!(outer[2]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(outer[2]["attrs"]["spacing"]["after"], 0.0);
+    let inner = &outer[1]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"];
+    assert_eq!(inner["before"], 0.0);
+    assert_eq!(inner["after"], 0.0);
+    let controlled = &blocks[1]["rows"][0]["cells"][0]["blocks"];
+    assert_eq!(controlled[0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(controlled[0]["attrs"]["spacing"]["after"], 14.0);
+    assert_eq!(controlled[1]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(controlled[1]["attrs"]["spacing"]["after"], 0.0);
+    let disabled = &blocks[2]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"];
+    assert_eq!(disabled["before"], 100.0 / 15.0);
+    assert_eq!(disabled["after"], 100.0 / 15.0);
+}
+
+#[test]
+fn table_cell_auto_spacing_recomputes_boundaries_after_a_split() {
+    let p = spacing_paragraph(r#"w:beforeAutospacing="1" w:afterAutospacing="1""#, "AB");
+    let engine = EngineSession::new(74313);
+    seed_from_docx(engine.doc(), &document(&spacing_table(&p), "")).unwrap();
+    let lower = || -> Value {
+        serde_json::from_str(
+            &engine
+                .lower_story_json("body", &Default::default())
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let original = lower();
+    let cell = &original[0]["rows"][0]["cells"][0];
+    assert_eq!(cell["blocks"][0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(cell["blocks"][0]["attrs"]["spacing"]["after"], 0.0);
+    engine
+        .doc()
+        .split_paragraph(
+            &docx_edit::EditCtx::local("", "2026-09-14T00:00:00Z"),
+            docx_edit::Position::new(cell["id"].as_str().unwrap(), 1),
+            None,
+        )
+        .unwrap();
+    let split = lower();
+    let paragraphs = &split[0]["rows"][0]["cells"][0]["blocks"];
+    assert_eq!(paragraphs[0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(paragraphs[0]["attrs"]["spacing"]["after"], 14.0);
+    assert_eq!(paragraphs[1]["attrs"]["spacing"]["before"], 14.0);
+    assert_eq!(paragraphs[1]["attrs"]["spacing"]["after"], 0.0);
+}
+
+#[test]
+fn table_cell_auto_spacing_matches_zero_spacing_pagination_for_single_paragraph_rows() {
+    let render = |spacing| {
+        let row = format!(
+            "<w:tr><w:tc>{}</w:tc></w:tr>",
+            spacing_paragraph(spacing, "Cell")
+        );
+        let body = format!(
+            r#"<w:tbl><w:tblPr><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid><w:gridCol w:w="7200"/></w:tblGrid>{}</w:tbl>"#,
+            row.repeat(40)
+        );
+        layout(&body, 1)
+    };
+    let automatic = render(r#"w:beforeAutospacing="1" w:afterAutospacing="1""#);
+    let zero = render(r#"w:before="0" w:after="0""#);
+    assert_eq!(automatic["layout"]["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(automatic["layout"], zero["layout"]);
+    assert_eq!(automatic["measured"][0]["measure"]["totalHeight"], 640.0);
+}
+
 #[test]
 fn line_unit_paragraph_spacing_uses_each_sections_grid_pitch() {
     let font = docx_layout::register_measure_font(FONT).unwrap();

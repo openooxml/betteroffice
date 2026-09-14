@@ -170,8 +170,22 @@ pub fn yrs_doc_to_layout_blocks(
     let txn = doc.yrs_doc().transact();
     let mut active_stories = BTreeSet::new();
     let mut list_state = ListState::default();
-    lower_story(&txn, story_id, env, 0, &mut active_stories, &mut list_state)
-        .map(|(blocks, _)| blocks)
+    lower_story(
+        &txn,
+        story_id,
+        env,
+        0,
+        &mut active_stories,
+        &mut list_state,
+        CellEdges::default(),
+    )
+    .map(|(blocks, _)| blocks)
+}
+
+#[derive(Clone, Copy, Default)]
+struct CellEdges {
+    before: bool,
+    after: bool,
 }
 
 fn lower_story<T: ReadTxn>(
@@ -181,6 +195,7 @@ fn lower_story<T: ReadTxn>(
     pm_base: u64,
     active_stories: &mut BTreeSet<String>,
     list_state: &mut ListState,
+    cell_edges: CellEdges,
 ) -> Result<(Vec<LayoutBlock>, u64), BridgeError> {
     if !active_stories.insert(story_id.to_owned()) {
         return Err(BridgeError::RecursiveStory(story_id.to_owned()));
@@ -223,7 +238,7 @@ fn lower_story<T: ReadTxn>(
                     at_block_boundary = false;
                 }
                 Out::YMap(pilcrow) if is_pilcrow(&pilcrow, txn) => {
-                    let paragraph_blocks = flush_paragraph_parts(
+                    let mut paragraph_blocks = flush_paragraph_parts(
                         paragraph_runs,
                         paragraph_drawings,
                         &pilcrow,
@@ -235,6 +250,15 @@ fn lower_story<T: ReadTxn>(
                         paragraph_pm_units,
                         list_state,
                     );
+                    let values = pilcrow_values(&pilcrow, txn);
+                    suppress_cell_edge_spacing(
+                        &mut paragraph_blocks,
+                        &values,
+                        CellEdges {
+                            before: cell_edges.before && paragraph_start == 0,
+                            after: cell_edges.after && story_index + 1 == story.len(txn),
+                        },
+                    );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     if !shared_map_string(&pilcrow, txn, "paraId")
                         .is_some_and(|id| hidden_field_paragraphs.contains(&id))
@@ -243,7 +267,6 @@ fn lower_story<T: ReadTxn>(
                     }
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
-                    let values = pilcrow_values(&pilcrow, txn);
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
                     {
                         blocks.push(LayoutBlock::SectionBreak(section_break));
@@ -363,6 +386,10 @@ fn lower_story<T: ReadTxn>(
                         pm_cursor + 1,
                         active_stories,
                         list_state,
+                        CellEdges {
+                            before: cell_edges.before && story_index == 0,
+                            after: cell_edges.after && story_index + 1 == story.len(txn),
+                        },
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
                     blocks.extend(child_blocks);
@@ -792,6 +819,10 @@ fn lower_table<T: ReadTxn>(
                 cell_pm_start + 1,
                 active_stories,
                 list_state,
+                CellEdges {
+                    before: true,
+                    after: true,
+                },
             )?;
 
             let width_value = map_number(tc_pr, "width");
@@ -2883,6 +2914,40 @@ fn lower_paragraph_border(
     })
 }
 
+fn paragraph_auto_spacing(values: &BTreeMap<String, Any>, key: &str) -> bool {
+    values.get(key).and_then(any_bool).or_else(|| {
+        values
+            .get("_originalFormatting")
+            .and_then(any_map)
+            .and_then(|map| map_bool(map, key))
+    }) == Some(true)
+}
+
+fn suppress_cell_edge_spacing(
+    blocks: &mut [LayoutBlock],
+    values: &BTreeMap<String, Any>,
+    edges: CellEdges,
+) {
+    if edges.before
+        && paragraph_auto_spacing(values, "beforeAutospacing")
+        && let Some(spacing) = blocks.iter_mut().find_map(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph.attrs.as_mut()?.spacing.as_mut(),
+            _ => None,
+        })
+    {
+        spacing.before = Some(0.0);
+    }
+    if edges.after
+        && paragraph_auto_spacing(values, "afterAutospacing")
+        && let Some(spacing) = blocks.iter_mut().rev().find_map(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => paragraph.attrs.as_mut()?.spacing.as_mut(),
+            _ => None,
+        })
+    {
+        spacing.after = Some(0.0);
+    }
+}
+
 fn lower_paragraph_spacing(
     values: &BTreeMap<String, Any>,
     result: &mut ParagraphAttrs,
@@ -2892,17 +2957,8 @@ fn lower_paragraph_spacing(
         .filter(|line| line.is_finite() && *line > 0.0)
         .unwrap_or(16.0);
     let spacing_map = values.get("spacing").and_then(any_map);
-    let original = values.get("_originalFormatting").and_then(any_map);
-    let auto_before = values
-        .get("beforeAutospacing")
-        .and_then(any_bool)
-        .or_else(|| original.and_then(|map| map_bool(map, "beforeAutospacing")))
-        == Some(true);
-    let auto_after = values
-        .get("afterAutospacing")
-        .and_then(any_bool)
-        .or_else(|| original.and_then(|map| map_bool(map, "afterAutospacing")))
-        == Some(true);
+    let auto_before = paragraph_auto_spacing(values, "beforeAutospacing");
+    let auto_after = paragraph_auto_spacing(values, "afterAutospacing");
     let before_lines = (!auto_before)
         .then(|| value_number(values.get("spaceBeforeLines")))
         .flatten()
