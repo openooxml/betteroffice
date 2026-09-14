@@ -1141,6 +1141,68 @@ fn tab_in_hanging_indent_lands_on_the_body_edge() {
     );
 }
 
+#[test]
+fn declared_tabs_before_the_indent_preserve_their_alignment() {
+    for (alignment, expected) in [
+        ("start", 40.0 + 2.0 * W0),
+        ("end", 40.0),
+        ("center", 40.0 + W0),
+    ] {
+        let v = measure_with(
+            json!({
+                "kind": "paragraph",
+                "runs": [{ "kind": "tab" }, { "kind": "text", "text": "00" }],
+                "attrs": {
+                    "indent": { "left": 64.0, "hanging": 64.0 },
+                    "tabs": [{ "val": alignment, "pos": 600.0 }]
+                }
+            }),
+            300.0,
+        )
+        .unwrap();
+        approx(
+            v["lines"][0]["width"].as_f64().unwrap(),
+            expected,
+            alignment,
+        );
+    }
+}
+
+#[test]
+fn hanging_indent_preserves_declared_tabs_before_the_body_edge() {
+    for label in ["", "(1)"] {
+        for explicit_body_stop in [false, true] {
+            let mut stops = vec![json!({ "val": "end", "pos": 595.0 })];
+            if explicit_body_stop {
+                stops.push(json!({ "val": "start", "pos": 879.0 }));
+            }
+            let v = measure_with(
+                json!({
+                    "kind": "paragraph",
+                    "runs": [
+                        { "kind": "tab" },
+                        { "kind": "text", "text": label },
+                        { "kind": "tab" },
+                        { "kind": "text", "text": "00000000" }
+                    ],
+                    "attrs": {
+                        "indent": { "left": 58.6, "hanging": 58.6 },
+                        "tabs": stops
+                    }
+                }),
+                139.0,
+            )
+            .unwrap();
+            assert_eq!(spans(&v), vec![(0, 0, 3, 8)]);
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                58.6 + 8.0 * W0,
+                "body text starts at the left indent after the label tab",
+            );
+        }
+    }
+}
+
 // 16. a tab's font contributes to line metrics
 #[test]
 fn tab_font_size_drives_line_metrics() {
