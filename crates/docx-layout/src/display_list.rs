@@ -8639,6 +8639,11 @@ pub(crate) fn emit_table_fragment(
         let cell = &block.rows[p.g.row_index].cells[p.g.cell_index];
         let cx = frag.x + p.g.x;
         let cy = frag.y + p.cell_y;
+        let clip_top_y = if p.g.row_index < header_row_count {
+            clip_top_y
+        } else {
+            clip_top_y + header_height
+        };
         // The outer left border insets cell content by its width.
         let is_first_col = if bidi {
             p.g.column_index + p.g.col_span >= col_count

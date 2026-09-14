@@ -645,44 +645,6 @@
           "x": 67
         },
         {
-          "baselineY": 79.2,
-          "blockId": 500003,
-          "cell": {
-            "cellId": "50-r3-c0",
-            "col": 0,
-            "colSpan": 1,
-            "headerIds": [
-              "50-r0-c0"
-            ],
-            "row": 3,
-            "rowSpan": 1
-          },
-          "clipGroup": {
-            "clip": {
-              "h": 120,
-              "w": 400,
-              "x": 60,
-              "y": 60
-            },
-            "id": "clip-50-r3-c0"
-          },
-          "color": "#000000",
-          "font": "400 14.667px Calibri, sans-serif",
-          "kind": "text",
-          "lineIndex": 1,
-          "table": {
-            "columnCount": 1,
-            "headerRowCount": 1,
-            "rowCount": 7,
-            "rowEnd": 6,
-            "rowStart": 3,
-            "tableId": "50"
-          },
-          "text": "c",
-          "width": 400,
-          "x": 67
-        },
-        {
           "baselineY": 103.2,
           "blockId": 500003,
           "cell": {
@@ -697,10 +659,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 120,
+              "h": 96,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r3-c0"
           },
@@ -735,10 +697,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 120,
+              "h": 96,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r3-c0"
           },
@@ -773,10 +735,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 120,
+              "h": 96,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r3-c0"
           },
@@ -811,10 +773,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 120,
+              "h": 96,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r3-c0"
           },
@@ -1273,44 +1235,6 @@
           "x": 67
         },
         {
-          "baselineY": 79.2,
-          "blockId": 500005,
-          "cell": {
-            "cellId": "50-r5-c0",
-            "col": 0,
-            "colSpan": 1,
-            "headerIds": [
-              "50-r0-c0"
-            ],
-            "row": 5,
-            "rowSpan": 1
-          },
-          "clipGroup": {
-            "clip": {
-              "h": 72,
-              "w": 400,
-              "x": 60,
-              "y": 60
-            },
-            "id": "clip-50-r5-c0"
-          },
-          "color": "#000000",
-          "font": "400 14.667px Calibri, sans-serif",
-          "kind": "text",
-          "lineIndex": 3,
-          "table": {
-            "columnCount": 1,
-            "headerRowCount": 1,
-            "rowCount": 7,
-            "rowEnd": 7,
-            "rowStart": 5,
-            "tableId": "50"
-          },
-          "text": "c",
-          "width": 400,
-          "x": 67
-        },
-        {
           "baselineY": 103.2,
           "blockId": 500005,
           "cell": {
@@ -1325,10 +1249,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 72,
+              "h": 48,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r5-c0"
           },
@@ -1363,10 +1287,10 @@
           },
           "clipGroup": {
             "clip": {
-              "h": 72,
+              "h": 48,
               "w": 400,
               "x": 60,
-              "y": 60
+              "y": 84
             },
             "id": "clip-50-r5-c0"
           },

@@ -1006,6 +1006,142 @@ fn vmerge_continuation_slice_is_flagged_and_unselectable() {
     );
 }
 
+#[test]
+fn continued_cells_paint_below_repeated_headers() {
+    let paragraph = |id: u64, texts: &[&str]| {
+        serde_json::json!({
+            "kind": "paragraph", "id": id, "pmStart": id, "pmEnd": id + 80,
+            "runs": texts.iter().enumerate().map(|(i, text)| serde_json::json!({
+                "kind": "text", "text": text, "pmStart": id + i as u64 * 20
+            })).collect::<Vec<_>>()
+        })
+    };
+    let paragraph_measure = |texts: &[&str]| {
+        serde_json::json!({
+            "kind": "paragraph", "totalHeight": texts.len() * 24,
+            "lines": texts.iter().enumerate().map(|(i, text)| serde_json::json!({
+                "headRun": i, "headChar": 0, "tailRun": i, "tailChar": text.len(),
+                "width": 80, "ascent": 12, "descent": 4, "lineHeight": 24
+            })).collect::<Vec<_>>()
+        })
+    };
+    let cell = |id, texts: &[&str]| serde_json::json!({ "blocks": [paragraph(id, texts)] });
+    let cell_measure = |texts: &[&str]| serde_json::json!({ "blocks": [paragraph_measure(texts)] });
+    let continued = [
+        "consumed-one",
+        "consumed-two",
+        "continued-one",
+        "continued-two",
+    ];
+    for split_row in [false, true] {
+        for repeat_headers in [false, true] {
+            let mut spanning_cell = cell(700, &continued);
+            spanning_cell["rowSpan"] = serde_json::json!(if split_row { 1 } else { 2 });
+            spanning_cell["background"] = serde_json::json!("#ffee99");
+            spanning_cell["borders"] = serde_json::json!({
+                "left": { "width": 1, "color": "#000000" },
+                "right": { "width": 1, "color": "#000000" }
+            });
+            let header_count = if repeat_headers { 2 } else { 0 };
+            let body_top = 50.0 + header_count as f64 * 24.0;
+            let mut input = serde_json::json!({
+                "measured": [{
+                    "block": { "kind": "table", "id": 7, "rows": [
+                        { "isHeader": true, "cells": [cell(100, &["header-one"])] },
+                        { "isHeader": true, "cells": [cell(200, &["header-two"])] },
+                        { "cells": [spanning_cell, cell(800, &["first-body"])] },
+                        { "cells": [cell(900, &["next-body"])] }
+                    ] },
+                    "measure": { "kind": "table", "columnWidths": [100, 100],
+                        "totalHeight": if split_row { 192 } else { 144 }, "rows": [
+                            { "height": 24, "cells": [cell_measure(&["header-one"])] },
+                            { "height": 24, "cells": [cell_measure(&["header-two"])] },
+                            { "height": if split_row { 96 } else { 48 }, "cells": [
+                                cell_measure(&continued), cell_measure(&["first-body"])
+                            ] },
+                            { "height": 48, "cells": [cell_measure(&["next-body"])] }
+                        ] }
+                }],
+                "options": {},
+                "layout": { "pages": [
+                    { "size": { "w": 400, "h": 200 }, "margins": {}, "fragments": [
+                        { "kind": "table", "blockId": 7, "x": 50, "y": 50,
+                          "width": 200, "height": 96, "rowStart": 0, "rowEnd": 3,
+                          "carriedToNext": true }
+                    ] },
+                    { "size": { "w": 400, "h": 200 }, "margins": {}, "fragments": [
+                        { "kind": "table", "blockId": 7, "x": 50, "y": 50,
+                          "width": 200, "height": 48 + header_count * 24,
+                          "rowStart": if split_row { 2 } else { 3 },
+                          "rowEnd": if split_row { 3 } else { 4 },
+                          "clipTop": if split_row { 48 } else { 0 },
+                          "headerRowCount": header_count, "carriedFromPrev": true }
+                    ] }
+                ] }
+            });
+            if split_row {
+                input["layout"]["pages"][0]["fragments"][0]["clipBottom"] = serde_json::json!(48);
+            }
+            let json = build_display_list_json(&input.to_string()).expect("builds");
+            let dl: DisplayList = serde_json::from_str(&json).unwrap();
+            let texts = |page: usize| {
+                dl.pages[page]
+                    .primitives
+                    .iter()
+                    .filter_map(|p| match p {
+                        Primitive::Text(t) => Some(t.text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let first = texts(0);
+            for text in [
+                "header-one",
+                "header-two",
+                "consumed-one",
+                "consumed-two",
+                "first-body",
+            ] {
+                assert!(first.contains(&text), "first-page text missing: {text}");
+            }
+            let next = texts(1);
+            assert!(!next.contains(&"consumed-one"));
+            assert!(!next.contains(&"consumed-two"));
+            for text in ["continued-one", "continued-two"] {
+                assert!(next.contains(&text), "continued text missing: {text}");
+            }
+            if !split_row {
+                assert!(next.contains(&"next-body"));
+            }
+            for text in ["header-one", "header-two"] {
+                assert_eq!(next.contains(&text), repeat_headers);
+            }
+            let mut continued_primitives = 0;
+            for primitive in &dl.pages[1].primitives {
+                let Some(attrs) = doc_attrs(primitive) else {
+                    continue;
+                };
+                let Some(cell) = &attrs.cell else { continue };
+                let clip = attrs.clip_group.as_ref().unwrap().clip.as_ref().unwrap();
+                let top = clip.y.as_ref().unwrap().as_f64().unwrap();
+                if cell.row >= 2 {
+                    assert!(
+                        top >= body_top,
+                        "body cell paints into repeated header: {primitive:?}"
+                    );
+                } else {
+                    assert!(top < body_top, "repeated header was clipped away");
+                }
+                if cell.row == 2 && cell.col == 0 {
+                    continued_primitives += 1;
+                    assert_eq!(cell.continuation, (!split_row).then_some(true));
+                }
+            }
+            assert!(continued_primitives > 0);
+        }
+    }
+}
+
 /// Cell floats preserve cell-relative geometry and paint order.
 #[test]
 fn cell_anchored_floating_images_paint_at_cell_relative_geometry() {
