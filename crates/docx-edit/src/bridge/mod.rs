@@ -1778,7 +1778,7 @@ enum RawRunKind {
 struct RawRun {
     kind: RawRunKind,
     formatting: RunFormatting,
-    inherited_hyperlink: Option<(bool, bool)>,
+    inherited_hyperlink: (bool, bool),
     /// Story-global UTF-16 bounds of the source content.
     story_start: u32,
     story_end: u32,
@@ -2048,10 +2048,7 @@ fn flush_paragraph<T: ReadTxn>(
     for run in &mut raw_runs {
         apply_run_defaults(&mut run.formatting, &defaults);
         if semantic_toc || style_id.as_deref().is_some_and(is_toc_style) {
-            strip_toc_hyperlink_style(
-                &mut run.formatting,
-                run.inherited_hyperlink.unwrap_or((true, true)),
-            );
+            strip_toc_hyperlink_style(&mut run.formatting, run.inherited_hyperlink);
         }
     }
     let raw_runs = coalesce_runs(raw_runs);
@@ -3212,17 +3209,12 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
 }
 
-fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> Option<(bool, bool)> {
-    if attribute_map(attributes, "hyperlink").and_then(|map| map_bool(map, "styleProvenance"))
-        != Some(true)
-    {
-        return None;
-    }
+fn inherited_hyperlink_style(attributes: Option<&Attrs>) -> (bool, bool) {
     let inherited = |key| {
         attribute_map(attributes, key).and_then(|map| map_bool(map, "inheritedHyperlink"))
             == Some(true)
     };
-    Some((inherited("textColor"), inherited("underline")))
+    (inherited("textColor"), inherited("underline"))
 }
 
 fn strip_toc_hyperlink_style(formatting: &mut RunFormatting, inherited: (bool, bool)) {
@@ -4564,6 +4556,7 @@ mod tests {
                     },
                     {
                         "kind": "text", "text": "link", "italic": true, "fontSize": 10.0,
+                        "color": "#0563C1", "underline": { "style": "single", "color": "#00FF00" },
                         "hyperlink": {
                             "href": "https://example.test", "tooltip": "Example",
                             "noDefaultStyle": true

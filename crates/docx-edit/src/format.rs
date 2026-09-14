@@ -374,12 +374,6 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         crate::check_range(&story, &txn, range.start, len)?;
-        let hyperlink = hyperlink.map(|mut value| {
-            if let Any::Map(map) = &mut value {
-                Arc::make_mut(map).insert("styleProvenance".to_owned(), Any::Bool(true));
-            }
-            value
-        });
         story.format(
             &mut txn,
             range.start,

@@ -1219,7 +1219,6 @@ fn hyperlink_mark(hyperlink: &Value) -> Mark {
             ("href", Value::String(href)),
             ("tooltip", nullish(field(Some(hyperlink), "tooltip"))),
             ("rId", nullish(field(Some(hyperlink), "rId"))),
-            ("styleProvenance", Value::Bool(true)),
         ]),
     )
 }

@@ -106,7 +106,7 @@ for (const seeder of ['projected', 'native']) {
       session.setHyperlink({ story: 'body', start: { paraId, offset: 0 }, end: { paraId, offset: 9 } },
         { href: '#changed' });
       expect(session.storySegments('body')[0]!.attributes.hyperlink).toMatchObject({
-        href: '#changed', styleProvenance: true,
+        href: '#changed',
       });
       const relinked = await parseDocx(await repackDocx(yrsToDocument(session, parsed)), { preloadFonts: false });
       const paragraph = relinked.package.document.content[0];
@@ -135,4 +135,47 @@ test('TOC names cannot turn headings or character styles into TOC paragraphs', (
   ] } } } as Document;
   const request = buildResidentRegionLayoutRequest(document, 24, { tocStyleIds: ['CustomTOC'] });
   expect(request.renderEnv.tocStyleIds).toEqual(['CustomTOC', '10', 'TOC2']);
+});
+
+test('persisted and peer TOC state preserves formatting without hyperlink provenance', async () => {
+  const parsed = await parseDocx(source().buffer, { preloadFonts: false });
+  const env = buildResidentRegionLayoutRequest(parsed, 24, {}).renderEnv;
+  for (const style of ['10', 'TOC1']) {
+    for (const delivery of ['persisted', 'peer']) {
+      for (const inheritedColor of [false, true]) {
+        const origin = await createYrsSession({ clientId: 74510 });
+        const received = await createYrsSession({ clientId: 74511 });
+        const reopened = await createYrsSession({ clientId: 74512 });
+        try {
+          documentToYrs(origin, parsed);
+          origin.setParagraphAttr(origin.paragraphs('body')[0]!.paraId, 'pStyle', style);
+          origin.applyRawOps('body', [{ op: 'format', index: 0, len: 9, attrs: {
+            hyperlink: { href: '#heading' },
+            textColor: { rgb: '112233', ...(inheritedColor ? { inheritedHyperlink: true } : {}) },
+            underline: { style: 'double' },
+          } }]);
+          if (delivery === 'persisted') received.loadState(origin.encodeState());
+          else received.applyUpdate(origin.encodeStateAsUpdate());
+          const before = received.encodeState();
+          const live = (received.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]!;
+          expect(live.color).toBe(inheritedColor ? undefined : '#112233');
+          expect(live.underline).toMatchObject({ style: 'double' });
+          expect(live.hyperlink).toMatchObject({ href: '#heading', noDefaultStyle: true });
+          expect(received.encodeState()).toEqual(before);
+          const saved = await parseDocx(await repackDocx(yrsToDocument(received, parsed)), { preloadFonts: false });
+          const run = linkedRuns(saved)[0]!;
+          expect(run.formatting?.color?.rgb).toBe(inheritedColor ? undefined : '112233');
+          expect(run.formatting?.underline?.style).toBe('double');
+          documentToYrs(reopened, saved);
+          const after = (reopened.yrsBlocksForStory('body', env) as LoweredParagraph[])[0]!.runs[0]!;
+          expect(after.color).toBe(live.color);
+          expect(after.underline).toEqual(live.underline);
+        } finally {
+          origin.destroy();
+          received.destroy();
+          reopened.destroy();
+        }
+      }
+    }
+  }
 });

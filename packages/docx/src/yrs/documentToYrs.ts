@@ -506,7 +506,6 @@ function hyperlinkMark(hyperlink: Hyperlink): MarkDescriptor {
       href: hyperlink.href || (hyperlink.anchor ? `#${hyperlink.anchor}` : ''),
       tooltip: hyperlink.tooltip ?? null,
       rId: hyperlink.rId ?? null,
-      styleProvenance: true,
     },
   };
 }
