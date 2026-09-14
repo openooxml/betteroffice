@@ -13,6 +13,10 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   alignment?: ParagraphFormatting['alignment'];
   spaceBefore?: number;
   spaceAfter?: number;
+  spaceBeforeLines?: number;
+  spaceAfterLines?: number;
+  beforeAutospacing?: boolean;
+  afterAutospacing?: boolean;
   lineSpacing?: number;
   lineSpacingRule?: ParagraphFormatting['lineSpacingRule'];
   indentLeft?: number;
@@ -78,8 +82,12 @@ export function paragraphAttrsToFormatting(
 
   const hasFormatting =
     attrs.alignment ||
-    attrs.spaceBefore ||
-    attrs.spaceAfter ||
+    attrs.spaceBefore != null ||
+    attrs.spaceAfter != null ||
+    attrs.spaceBeforeLines != null ||
+    attrs.spaceAfterLines != null ||
+    attrs.beforeAutospacing != null ||
+    attrs.afterAutospacing != null ||
     attrs.lineSpacing ||
     attrs.indentLeft ||
     attrs.indentRight ||
@@ -98,8 +106,12 @@ export function paragraphAttrsToFormatting(
 
   return {
     alignment: attrs.alignment || undefined,
-    spaceBefore: attrs.spaceBefore || undefined,
-    spaceAfter: attrs.spaceAfter || undefined,
+    spaceBefore: attrs.spaceBefore ?? undefined,
+    spaceAfter: attrs.spaceAfter ?? undefined,
+    spaceBeforeLines: attrs.spaceBeforeLines ?? undefined,
+    spaceAfterLines: attrs.spaceAfterLines ?? undefined,
+    beforeAutospacing: attrs.beforeAutospacing ?? undefined,
+    afterAutospacing: attrs.afterAutospacing ?? undefined,
     lineSpacing: attrs.lineSpacing || undefined,
     lineSpacingRule: attrs.lineSpacingRule || undefined,
     indentLeft: attrs.indentLeft || undefined,

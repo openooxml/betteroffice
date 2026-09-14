@@ -312,6 +312,8 @@ export interface ParagraphFormatting {
   spaceBefore?: number;
   /** Spacing after in twips (w:spacing/@w:after) */
   spaceAfter?: number;
+  spaceBeforeLines?: number;
+  spaceAfterLines?: number;
   /** Line spacing value (w:spacing/@w:line) */
   lineSpacing?: number;
   /** Line spacing rule (w:spacing/@w:lineRule) */

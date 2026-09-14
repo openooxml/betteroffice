@@ -486,6 +486,10 @@ pub struct ParagraphFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub space_after: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_before_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub space_after_lines: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line_spacing: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub line_spacing_rule: Option<String>,
@@ -560,6 +564,8 @@ pub fn parse_paragraph_properties(
     if let Some(spacing) = p_pr.child("w", "spacing") {
         value.space_before = spacing.parse_numeric_attribute(Some("w"), "before", 1.0);
         value.space_after = spacing.parse_numeric_attribute(Some("w"), "after", 1.0);
+        value.space_before_lines = spacing.parse_numeric_attribute(Some("w"), "beforeLines", 1.0);
+        value.space_after_lines = spacing.parse_numeric_attribute(Some("w"), "afterLines", 1.0);
         value.line_spacing = spacing.parse_numeric_attribute(Some("w"), "line", 1.0);
         value.line_spacing_rule = attribute_nonempty(spacing, "lineRule");
         value.before_autospacing = spacing
@@ -652,6 +658,8 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.bidi, &source.bidi);
             overlay(&mut result.space_before, &source.space_before);
             overlay(&mut result.space_after, &source.space_after);
+            overlay(&mut result.space_before_lines, &source.space_before_lines);
+            overlay(&mut result.space_after_lines, &source.space_after_lines);
             overlay(&mut result.line_spacing, &source.line_spacing);
             overlay(&mut result.line_spacing_rule, &source.line_spacing_rule);
             overlay(&mut result.before_autospacing, &source.before_autospacing);
@@ -1411,6 +1419,37 @@ fn overlay<T: Clone>(target: &mut Option<T>, source: &Option<T>) {
 mod tests {
     use super::*;
     use crate::xml::{ParseBudget, ParseLimits, parse_xml};
+
+    #[test]
+    fn line_unit_paragraph_spacing_survives_parsing_merging_and_serialization() {
+        let element = root(
+            r#"<w:pPr><w:spacing w:before="50" w:after="60" w:beforeLines="50" w:afterLines="100"/></w:pPr>"#,
+        );
+        let inherited = parse_paragraph_properties(Some(&element), None).unwrap();
+        let direct = ParagraphFormatting {
+            space_before: Some(120.0),
+            space_after_lines: Some(0.0),
+            before_autospacing: Some(false),
+            ..ParagraphFormatting::default()
+        };
+        let merged = merge_paragraph_formatting(Some(&inherited), Some(&direct)).unwrap();
+        assert_eq!(merged.space_before, Some(120.0));
+        assert_eq!(merged.space_before_lines, Some(50.0));
+        assert_eq!(merged.space_after_lines, Some(0.0));
+        let xml = crate::serializer::serialize_paragraph_formatting(
+            Some(&merged),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let reparsed = parse_paragraph_properties(Some(&root(&xml)), None).unwrap();
+        assert_eq!(reparsed, merged);
+        assert!(xml.contains("w:beforeLines=\"50\""));
+        assert!(xml.contains("w:afterLines=\"0\""));
+    }
 
     fn root(xml: &str) -> XmlElement {
         let limits = ParseLimits::default();

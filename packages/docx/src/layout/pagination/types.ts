@@ -376,6 +376,8 @@ export type Run = TextRun | TabRun | ImageRun | LineBreakRun | FieldRun;
 
 /** Paragraph spacing (w:spacing): above/below plus the w:lineRule line rule. */
 export type ParagraphSpacing = {
+  beforeLines?: number;
+  afterLines?: number;
   before?: number;
   after?: number;
   line?: number;

@@ -41,9 +41,13 @@ use crate::{
 /// The paragraph attributes a style definition owns. Applying a style resets
 /// every one of them to the style's value, or clears it when the style has
 /// none — an attribute here is never left over from the previous style.
-pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 16] = [
+pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
     "alignment",
     "spaceBefore",
+    "spaceBeforeLines",
+    "spaceAfterLines",
+    "beforeAutospacing",
+    "afterAutospacing",
     "spaceAfter",
     "lineSpacing",
     "lineSpacingRule",
@@ -76,13 +80,17 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
 /// style and vertical rhythm but nothing else.
-const INHERITED_PARA_ATTRS: [&str; 7] = [
+const INHERITED_PARA_ATTRS: [&str; 11] = [
     "defaultTextFormatting",
     "pStyle",
     "lineSpacing",
     "lineSpacingRule",
     "spaceAfter",
     "spaceBefore",
+    "spaceBeforeLines",
+    "spaceAfterLines",
+    "beforeAutospacing",
+    "afterAutospacing",
     "contextualSpacing",
 ];
 
@@ -819,6 +827,32 @@ fn apply_para_delta(txn: &mut TransactionMut<'_>, map: &MapRef, delta: &ParaAttr
     apply(txn, map, "spaceAfter", &delta.space_after, |v| {
         Any::Number(*v)
     });
+    for (patch, key, lines_key, auto_key) in [
+        (
+            &delta.space_before,
+            "spaceBefore",
+            "spaceBeforeLines",
+            "beforeAutospacing",
+        ),
+        (
+            &delta.space_after,
+            "spaceAfter",
+            "spaceAfterLines",
+            "afterAutospacing",
+        ),
+    ] {
+        if let Patch::Set(value) = patch {
+            map.insert(txn, lines_key, Any::Number(0.0));
+            map.insert(txn, auto_key, Any::Bool(false));
+            if let Some(Out::Any(Any::Map(original))) = map.get(txn, "_originalFormatting") {
+                let mut original = (*original).clone();
+                original.insert(key.to_owned(), Any::Number(*value));
+                original.insert(lines_key.to_owned(), Any::Number(0.0));
+                original.insert(auto_key.to_owned(), Any::Bool(false));
+                map.insert(txn, "_originalFormatting", Any::Map(Arc::new(original)));
+            }
+        }
+    }
     apply(txn, map, INDENT_LEFT, &delta.indent_left, |v| {
         Any::Number(*v)
     });

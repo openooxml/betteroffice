@@ -307,9 +307,11 @@ pub fn parse_document_paragraph_properties(
     if let Some(spacing) = properties.child("w", "spacing") {
         let before = spacing
             .parse_numeric_attribute(Some("w"), "before", 1.0)
+            .or(value.space_before_lines)
             .map(|_| true);
         let after = spacing
             .parse_numeric_attribute(Some("w"), "after", 1.0)
+            .or(value.space_after_lines)
             .map(|_| true);
         if before.is_some() || after.is_some() {
             value.spacing_explicit = Some(SpacingExplicit { before, after });

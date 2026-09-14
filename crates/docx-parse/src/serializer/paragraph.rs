@@ -737,27 +737,31 @@ fn write_tabs(writer: &mut XmlWriter, tabs: Option<&[crate::tabs::TabStop]>) {
 fn write_spacing(writer: &mut XmlWriter, formatting: &ParagraphFormatting) {
     if formatting.space_before.is_none()
         && formatting.space_after.is_none()
+        && formatting.space_before_lines.is_none()
+        && formatting.space_after_lines.is_none()
         && formatting.line_spacing.is_none()
         && nonempty(formatting.line_spacing_rule.as_deref()).is_none()
-        && formatting.before_autospacing != Some(true)
-        && formatting.after_autospacing != Some(true)
+        && formatting.before_autospacing.is_none()
+        && formatting.after_autospacing.is_none()
     {
         return;
     }
     writer.start_element("w:spacing");
     optional_int(writer, "w:before", formatting.space_before);
     optional_int(writer, "w:after", formatting.space_after);
+    optional_int(writer, "w:beforeLines", formatting.space_before_lines);
+    optional_int(writer, "w:afterLines", formatting.space_after_lines);
     optional_int(writer, "w:line", formatting.line_spacing);
     optional_attr(
         writer,
         "w:lineRule",
         formatting.line_spacing_rule.as_deref(),
     );
-    if formatting.before_autospacing == Some(true) {
-        writer.attribute("w:beforeAutospacing", "1");
+    if let Some(auto) = formatting.before_autospacing {
+        writer.attribute("w:beforeAutospacing", if auto { "1" } else { "0" });
     }
-    if formatting.after_autospacing == Some(true) {
-        writer.attribute("w:afterAutospacing", "1");
+    if let Some(auto) = formatting.after_autospacing {
+        writer.attribute("w:afterAutospacing", if auto { "1" } else { "0" });
     }
     writer.end_element();
 }

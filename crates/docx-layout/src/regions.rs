@@ -80,6 +80,8 @@ pub struct AuthoredRegionSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredSectionProperties {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_grid: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_width: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page_height: Option<f64>,
@@ -233,6 +235,24 @@ impl DocumentRegions {
             properties.overlay(authored);
         }
         properties
+    }
+
+    /// One paragraph-spacing line, in pixels.
+    pub fn paragraph_spacing_line_px(&self, section_index: usize) -> f64 {
+        self.sections
+            .get(section_index)
+            .or_else(|| self.sections.last())
+            .and_then(|section| section.properties.as_ref())
+            .and_then(|properties| properties.doc_grid.as_ref())
+            .filter(|grid| {
+                matches!(
+                    grid.get("type").and_then(Value::as_str),
+                    Some("lines" | "linesAndChars" | "snapToChars")
+                )
+            })
+            .and_then(|grid| grid.get("linePitch").and_then(Value::as_f64))
+            .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+            .map_or(16.0, twips_to_pixels)
     }
 
     pub fn footnote_columns(&self, section_index: usize) -> u64 {

@@ -17,6 +17,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
+use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -1016,7 +1017,7 @@ impl EngineSession {
         let request: RegionLayoutInput =
             serde_json::from_str(input_json).map_err(|error| format!("parse: {error}"))?;
         let (mut input, regions, mut notes, measurement, render_env, body_story) = request.split();
-        let parsed_render_env = if render_env.is_null() {
+        let mut parsed_render_env = if render_env.is_null() {
             None
         } else {
             Some(
@@ -1024,6 +1025,12 @@ impl EngineSession {
                     .map_err(|error| format!("parse render environment: {error}"))?,
             )
         };
+        if regions.sections.len() <= 1
+            && let Some(env) = &mut parsed_render_env
+        {
+            let line_px = regions.paragraph_spacing_line_px(0);
+            env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
+        }
         let resident_body = body_story.is_some();
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -1032,6 +1039,13 @@ impl EngineSession {
             let mut blocks = self
                 .with_lowered_story(story, render_env, <[LayoutBlock]>::to_vec)
                 .map_err(|error| error.to_string())?;
+            let mut section_index = 0;
+            for block in &mut blocks {
+                resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
+                if matches!(block, LayoutBlock::SectionBreak(_)) {
+                    section_index += 1;
+                }
+            }
             apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
             let widths = region_measurement_widths(&blocks, &input, &regions);
             let geometry = initial_float_page_geometry(&input, &regions);
@@ -1188,6 +1202,12 @@ impl EngineSession {
                     <[LayoutBlock]>::to_vec,
                 )
                 .map_err(|error| error.to_string())?;
+            for block in &mut blocks {
+                resolve_line_unit_spacing(
+                    block,
+                    regions.paragraph_spacing_line_px(page.region_section_index),
+                );
+            }
             apply_note_presentation(
                 &mut blocks,
                 content.display_number.unwrap_or(1),
@@ -1274,9 +1294,15 @@ impl EngineSession {
                 let Some(r_id) = r_id else {
                     continue;
                 };
-                let blocks = self
+                let mut blocks = self
                     .with_lowered_story(&format!("hf:{r_id}"), render_env, <[LayoutBlock]>::to_vec)
                     .map_err(|error| error.to_string())?;
+                for block in &mut blocks {
+                    resolve_line_unit_spacing(
+                        block,
+                        regions.paragraph_spacing_line_px(section_index),
+                    );
+                }
                 let metrics = HeaderFooterMetrics {
                     kind,
                     page_size: &page_size,
@@ -1727,6 +1753,10 @@ impl EngineSession {
                         blocks,
                         &mut |index, _key, _previous_block, next_block| {
                             let width = widths.get(index).copied().unwrap_or(default_width);
+                            resolve_line_unit_spacing(
+                                next_block,
+                                regions.paragraph_spacing_line_px(0),
+                            );
                             docx_layout::measure_blocks::measure_block(
                                 next_block,
                                 width,

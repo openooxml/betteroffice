@@ -78,6 +78,8 @@ pub struct RenderEnv {
     pub numeric_ids: BTreeMap<String, f64>,
     /// Include hidden text in visible layout without changing the document.
     pub show_hidden_text: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paragraph_spacing_line_px: Option<f64>,
 }
 
 impl RenderEnv {
@@ -2727,7 +2729,7 @@ fn lower_paragraph_attrs(
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
-    lower_paragraph_spacing(values, &mut result);
+    lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
@@ -2881,11 +2883,34 @@ fn lower_paragraph_border(
     })
 }
 
-fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut ParagraphAttrs) {
+fn lower_paragraph_spacing(
+    values: &BTreeMap<String, Any>,
+    result: &mut ParagraphAttrs,
+    line_px: Option<f64>,
+) {
+    let line_px = line_px
+        .filter(|line| line.is_finite() && *line > 0.0)
+        .unwrap_or(16.0);
     let spacing_map = values.get("spacing").and_then(any_map);
     let original = values.get("_originalFormatting").and_then(any_map);
-    let auto_before = original.and_then(|map| map_bool(map, "beforeAutospacing")) == Some(true);
-    let auto_after = original.and_then(|map| map_bool(map, "afterAutospacing")) == Some(true);
+    let auto_before = values
+        .get("beforeAutospacing")
+        .and_then(any_bool)
+        .or_else(|| original.and_then(|map| map_bool(map, "beforeAutospacing")))
+        == Some(true);
+    let auto_after = values
+        .get("afterAutospacing")
+        .and_then(any_bool)
+        .or_else(|| original.and_then(|map| map_bool(map, "afterAutospacing")))
+        == Some(true);
+    let before_lines = (!auto_before)
+        .then(|| value_number(values.get("spaceBeforeLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let after_lines = (!auto_after)
+        .then(|| value_number(values.get("spaceAfterLines")))
+        .flatten()
+        .filter(|value| value.is_finite() && *value > 0.0);
     let before = value_number(values.get("spaceBefore"))
         .or_else(|| spacing_map.and_then(|map| map_number(map, "before")));
     let after = value_number(values.get("spaceAfter"))
@@ -2895,17 +2920,30 @@ fn lower_paragraph_spacing(values: &BTreeMap<String, Any>, result: &mut Paragrap
     let line_rule = value_string(values.get("lineSpacingRule"))
         .or_else(|| spacing_map.and_then(|map| map_string(map, "lineRule")));
 
-    if auto_before || auto_after || before.is_some() || after.is_some() || line.is_some() {
+    if auto_before
+        || auto_after
+        || before.is_some()
+        || after.is_some()
+        || line.is_some()
+        || before_lines.is_some()
+        || after_lines.is_some()
+    {
         let mut spacing = ParagraphSpacing {
+            before_lines,
+            after_lines,
             before: if auto_before {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                before.map(twips_to_pixels)
+                before_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| before.map(twips_to_pixels))
             },
             after: if auto_after {
                 Some(AUTO_PARAGRAPH_SPACING_PX)
             } else {
-                after.map(twips_to_pixels)
+                after_lines
+                    .map(|lines| lines * line_px / 100.0)
+                    .or_else(|| after.map(twips_to_pixels))
             },
             ..ParagraphSpacing::default()
         };

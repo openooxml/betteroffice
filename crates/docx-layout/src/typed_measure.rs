@@ -1143,6 +1143,7 @@ mod parity_tests {
                     line: Some(1.0),
                     line_unit: Some("multiple".to_owned()),
                     line_rule: Some("auto".to_owned()),
+                    ..ParagraphSpacing::default()
                 };
                 let mut indent = ParagraphIndent {
                     left: Some(4.0),

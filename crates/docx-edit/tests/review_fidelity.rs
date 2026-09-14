@@ -562,3 +562,196 @@ fn hidden_inline_content_control_breaks_follow_run_visibility() {
     assert_eq!(hidden[0], shown[1]);
     assert_eq!(engine.doc().encode_state_as_update_v1(), before);
 }
+
+#[test]
+fn line_unit_paragraph_spacing_honors_style_precedence_and_auto_spacing() {
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="50" w:after="50" w:beforeLines="50" w:afterLines="100"/></w:pPr></w:style>
+<w:style w:type="paragraph" w:styleId="Automatic"><w:basedOn w:val="Normal"/><w:pPr><w:spacing w:beforeAutospacing="1" w:afterAutospacing="1"/></w:pPr></w:style>"#;
+    let body = r#"<w:p><w:r><w:t>Inherited</w:t></w:r></w:p>
+<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:line="480" w:lineRule="auto"/></w:pPr><w:r><w:t>Direct twips</w:t></w:r></w:p>
+<w:p><w:pPr><w:spacing w:before="80" w:after="80" w:beforeLines="0" w:afterLines="0"/></w:pPr><w:r><w:t>Reset lines</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Automatic"/></w:pPr><w:r><w:t>Automatic</w:t></w:r></w:p>
+<w:p><w:pPr><w:spacing w:beforeLines="25" w:afterLines="25" w:line="600" w:lineRule="exact"/></w:pPr></w:p>
+<w:p><w:pPr><w:pStyle w:val="Automatic"/><w:spacing w:beforeAutospacing="0" w:afterAutospacing="0"/></w:pPr><w:r><w:t>Automatic disabled</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74230);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    for (index, before, after) in [
+        (0, 8.0, 16.0),
+        (1, 8.0, 16.0),
+        (2, 80.0 / 15.0, 80.0 / 15.0),
+        (3, 14.0, 14.0),
+        (4, 4.0, 4.0),
+        (5, 8.0, 16.0),
+    ] {
+        assert_eq!(blocks[index]["attrs"]["spacing"]["before"], before);
+        assert_eq!(blocks[index]["attrs"]["spacing"]["after"], after);
+    }
+    assert_eq!(
+        blocks[4]["attrs"]["spacingExplicit"],
+        json!({"before":true,"after":true})
+    );
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn line_unit_paragraph_spacing_uses_each_sections_grid_pitch() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let p = r#"<w:p><w:pPr><w:spacing w:beforeLines="100" w:afterLines="50" w:line="600" w:lineRule="exact"/></w:pPr><w:r><w:t>Grid spacing</w:t></w:r></w:p>"#;
+    let boundary = r#"<w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr></w:p>"#;
+    let table = format!(
+        r#"<w:tbl><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc>{p}</w:tc></w:tr></w:tbl>"#
+    );
+    let body = format!("{p}{table}{boundary}{p}{boundary}{p}");
+    let engine = EngineSession::new(74231);
+    seed_from_docx(engine.doc(), &document(&body, "")).unwrap();
+    let before = engine.doc().encode_state_as_update_v1();
+    let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&json!({
+        "bodyStory":"body", "renderEnv":{}, "options":{},
+        "regions":{"sections":[
+            {"properties":{"docGrid":{"type":"linesAndChars","linePitch":326}}},
+            {"properties":{"docGrid":{"type":"lines","linePitch":480}}},
+            {"properties":{"docGrid":{"linePitch":720}}}
+        ]},
+        "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+    }).to_string()).unwrap()).unwrap();
+    let measured = output["measured"].as_array().unwrap();
+    let paragraphs = measured
+        .iter()
+        .filter(|m| m["block"]["runs"][0]["text"] == "Grid spacing")
+        .collect::<Vec<_>>();
+    assert_eq!(paragraphs.len(), 3);
+    for (paragraph, line) in paragraphs.into_iter().zip([326.0 / 15.0, 32.0, 16.0]) {
+        assert_eq!(paragraph["block"]["attrs"]["spacing"]["before"], line);
+        assert_eq!(paragraph["block"]["attrs"]["spacing"]["after"], line / 2.0);
+        assert!(
+            (paragraph["measure"]["totalHeight"].as_f64().unwrap() - (40.0 + line * 1.5)).abs()
+                < 0.001
+        );
+    }
+    let table = measured
+        .iter()
+        .find(|m| m["block"]["kind"] == "table")
+        .unwrap();
+    assert_eq!(
+        table["block"]["rows"][0]["cells"][0]["blocks"][0]["attrs"]["spacing"]["before"],
+        326.0 / 15.0
+    );
+    assert_eq!(engine.doc().encode_state_as_update_v1(), before);
+}
+
+#[test]
+fn line_unit_paragraph_spacing_reuses_clean_blocks_after_editing() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:beforeLines="50" w:afterLines="50"/></w:pPr></w:style>"#;
+    let body = r#"<w:p><w:r><w:t>Alpha</w:t></w:r></w:p>
+<w:tbl><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+<w:p><w:r><w:t>Bravo</w:t></w:r></w:p>
+<w:p><w:r><w:t>Charlie</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74232);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let request = json!({"bodyStory":"body", "renderEnv":{}, "options":{},
+        "regions":{"sections":[{"properties":{"docGrid":{"type":"lines","linePitch":326}}}]},
+        "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}}).to_string();
+    let extras = json!({"fontChains":{"calibri|0|0":[font]}}).to_string();
+    engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame(&extras, 0).unwrap();
+    engine
+        .doc()
+        .insert_text(
+            &docx_edit::EditCtx::local("", ""),
+            docx_edit::Position::new("body", 9),
+            "xx",
+            docx_edit::FormatPolicy::Inherit,
+        )
+        .unwrap();
+    let before = engine.stats();
+    engine.apply_and_layout("body", 1).unwrap();
+    let after = engine.stats();
+    assert_eq!(
+        after.resident_measure_calls - before.resident_measure_calls,
+        1
+    );
+    assert_eq!(
+        after.resident_reused_blocks - before.resident_reused_blocks,
+        3
+    );
+    let fast = engine.retained_kernel_inputs_json().unwrap();
+    let fast_display = engine
+        .with_display_list(|display| serde_json::to_value(display).unwrap())
+        .unwrap();
+    engine.layout_document_with_regions_json(&request).unwrap();
+    engine.build_display_list_frame(&extras, 2).unwrap();
+    assert_eq!(engine.retained_kernel_inputs_json().unwrap(), fast);
+    assert_eq!(
+        engine
+            .with_display_list(|display| serde_json::to_value(display).unwrap())
+            .unwrap(),
+        fast_display
+    );
+}
+
+#[test]
+fn line_unit_paragraph_spacing_yields_to_twip_edits_and_round_trips() {
+    use docx_edit::{EditCtx, ParaAttrDelta, ParaSelector, Patch};
+    let body = r#"<w:p><w:pPr><w:spacing w:before="50" w:after="50" w:beforeLines="100" w:afterLines="50" w:beforeAutospacing="1"/></w:pPr><w:r><w:t>Edited spacing</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74233);
+    seed_from_docx(engine.doc(), &document(body, "")).unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    engine
+        .doc()
+        .set_paragraph_attrs(
+            &EditCtx::local("", ""),
+            &ParaSelector::One(id),
+            &ParaAttrDelta {
+                space_before: Patch::Set(0.0),
+                space_after: Patch::Set(120.0),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let blocks: Value = serde_json::from_str(
+        &engine
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(blocks[0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(blocks[0]["attrs"]["spacing"]["after"], 8.0);
+    let snapshot = engine.doc().paragraphs("body").unwrap().remove(0);
+    let original =
+        serde_json::to_value(snapshot.properties.get("_originalFormatting").unwrap()).unwrap();
+    let formatting = serde_json::from_value(original).unwrap();
+    let xml = docx_parse::serializer::serialize_paragraph_formatting(
+        Some(&formatting),
+        None,
+        None,
+        None,
+        false,
+        None,
+    )
+    .unwrap();
+    let reopened = EngineSession::new(74234);
+    seed_from_docx(
+        reopened.doc(),
+        &document(
+            &format!("<w:p>{xml}<w:r><w:t>Edited spacing</w:t></w:r></w:p>"),
+            "",
+        ),
+    )
+    .unwrap();
+    let blocks: Value = serde_json::from_str(
+        &reopened
+            .lower_story_json("body", &Default::default())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(blocks[0]["attrs"]["spacing"]["before"], 0.0);
+    assert_eq!(blocks[0]["attrs"]["spacing"]["after"], 8.0);
+}
