@@ -122,6 +122,7 @@ fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
 fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
     Some(AttrsIn {
         alignment: attrs.alignment.clone(),
+        line_grid_pitch: attrs.line_grid_pitch.and_then(finite),
         spacing: attrs.spacing.as_ref().map(|spacing| SpacingIn {
             before: spacing.before.and_then(finite),
             after: spacing.after.and_then(finite),

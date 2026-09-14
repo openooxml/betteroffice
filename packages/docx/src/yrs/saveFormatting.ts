@@ -33,6 +33,7 @@ export interface ParagraphSaveAttrs extends Record<string, unknown> {
   contextualSpacing?: boolean;
   pageBreakBefore?: boolean;
   widowControl?: boolean | null;
+  snapToGrid?: boolean | null;
   bidi?: boolean;
   _originalFormatting?: ParagraphFormatting;
   _originalRunBoundaries?: unknown[];
@@ -74,6 +75,9 @@ export function paragraphAttrsToFormatting(
     if (attrs.widowControl !== (orig.widowControl ?? undefined)) {
       result.widowControl = attrs.widowControl ?? undefined;
     }
+    if (attrs.snapToGrid !== (orig.snapToGrid ?? undefined)) {
+      result.snapToGrid = attrs.snapToGrid ?? undefined;
+    }
     if (attrs.bidi !== (orig.bidi || undefined)) {
       result.bidi = attrs.bidi || undefined;
     }
@@ -101,6 +105,7 @@ export function paragraphAttrsToFormatting(
     attrs.contextualSpacing ||
     attrs.pageBreakBefore ||
     attrs.widowControl != null ||
+    attrs.snapToGrid != null ||
     attrs.bidi;
   if (!hasFormatting) return undefined;
 
@@ -127,6 +132,7 @@ export function paragraphAttrsToFormatting(
     contextualSpacing: attrs.contextualSpacing || undefined,
     pageBreakBefore: attrs.pageBreakBefore || undefined,
     widowControl: attrs.widowControl ?? undefined,
+    snapToGrid: attrs.snapToGrid ?? undefined,
     bidi: attrs.bidi || undefined,
   };
 }

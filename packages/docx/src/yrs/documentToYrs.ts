@@ -885,6 +885,7 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? stylePpr?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
@@ -926,6 +927,7 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;

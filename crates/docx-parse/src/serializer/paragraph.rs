@@ -145,6 +145,7 @@ pub fn serialize_paragraph_formatting(
             "w:suppressAutoHyphens",
             formatting.suppress_auto_hyphens,
         );
+        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         write_spacing(&mut body, formatting);
         write_indentation(&mut body, formatting);
         on_off(&mut body, "w:bidi", formatting.bidi);

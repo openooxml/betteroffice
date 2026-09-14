@@ -1342,7 +1342,20 @@ fn line_unit_paragraph_spacing_reuses_clean_blocks_after_editing() {
         "regions":{"sections":[{"properties":{"docGrid":{"type":"lines","linePitch":326}}}]},
         "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}}).to_string();
     let extras = json!({"fontChains":{"calibri|0|0":[font]}}).to_string();
-    engine.layout_document_with_regions_json(&request).unwrap();
+    let initial: Value =
+        serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap()).unwrap();
+    assert_eq!(
+        initial["measured"][0]["block"]["attrs"]["lineGridPitch"],
+        326.0 / 15.0
+    );
+    assert!(
+        (initial["measured"][0]["measure"]["lines"][0]["lineHeight"]
+            .as_f64()
+            .unwrap()
+            - 326.0 / 15.0)
+            .abs()
+            < 0.00001
+    );
     engine.build_display_list_frame(&extras, 0).unwrap();
     engine
         .doc()
@@ -1604,5 +1617,227 @@ fn line_unit_paragraph_spacing_clears_and_round_trips() {
                 0.0
             );
         }
+    }
+}
+
+const LINE_GRID_STYLES: &str = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style>"#;
+
+#[test]
+fn document_line_grid_honors_paragraph_styles_and_section_types() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let styles = r#"<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:rPr><w:sz w:val="24"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Off"><w:basedOn w:val="Normal"/><w:pPr><w:snapToGrid w:val="0"/></w:pPr></w:style><w:style w:type="paragraph" w:styleId="Derived"><w:basedOn w:val="Off"/></w:style>"#;
+    let body = r#"<w:p><w:r><w:t>Snapped</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Derived"/></w:pPr><w:r><w:t>Inherited opt out</w:t></w:r></w:p>
+<w:p><w:pPr><w:pStyle w:val="Derived"/><w:snapToGrid/></w:pPr><w:r><w:t>Direct opt in</w:t></w:r></w:p>
+<w:p><w:pPr><w:spacing w:line="150" w:lineRule="exact"/></w:pPr><w:r><w:t>Exact</w:t></w:r></w:p>
+<w:p><w:r><w:rPr><w:snapToGrid w:val="0"/></w:rPr><w:t>Run opt out affects characters</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74300);
+    seed_from_docx(engine.doc(), &document(body, styles)).unwrap();
+    let initial = engine.doc().encode_state_as_update_v1();
+    for kind in [
+        json!(null),
+        json!("default"),
+        json!("lines"),
+        json!("linesAndChars"),
+        json!("snapToChars"),
+    ] {
+        let active = matches!(
+            kind.as_str(),
+            Some("lines" | "linesAndChars" | "snapToChars")
+        );
+        let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":{}, "options":{},
+            "regions":{"sections":[{"properties":{"docGrid":{"type":kind,"linePitch":360}}}]},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap()).unwrap();
+        let heights: Vec<f64> = output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["measure"]["lines"][0]["lineHeight"].as_f64().unwrap())
+            .collect();
+        let natural = 18.3984375;
+        let expected = [
+            if active { 24.0 } else { natural },
+            natural,
+            if active { 24.0 } else { natural },
+            10.0,
+            if active { 24.0 } else { natural },
+        ];
+        for (actual, expected) in heights.iter().zip(expected) {
+            assert!((*actual - expected).abs() < 0.00001);
+        }
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let text = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|primitive| primitive["kind"] == "text" && primitive["docStart"] == 1)
+            .unwrap();
+        let fragment_y = output["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap();
+        let baseline = text["baselineY"].as_f64().unwrap();
+        let expected = fragment_y + 14.484375 + (heights[0] - 17.875) / 2.0;
+        assert!(
+            (baseline - expected).abs() < 0.001,
+            "baseline {baseline}, expected {expected}"
+        );
+    }
+    assert_eq!(engine.doc().encode_state_as_update_v1(), initial);
+}
+
+#[test]
+fn document_line_grid_snaps_table_cells_only_with_compatibility_flag() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let body = r#"<w:p><w:r><w:t>Body</w:t></w:r></w:p><w:tbl><w:tblGrid><w:gridCol w:w="9360"/></w:tblGrid><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#;
+    let engine = EngineSession::new(74301);
+    seed_from_docx(engine.doc(), &document(body, LINE_GRID_STYLES)).unwrap();
+    for flag in [json!(null), json!(false), json!(true)] {
+        let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":{}, "options":{},
+            "regions":{"settings":{"compatibilityFlags":{"adjustLineHeightInTable":flag}},
+                "sections":[{"properties":{"docGrid":{"type":"lines","linePitch":360}}}]},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap()).unwrap();
+        assert_eq!(
+            output["measured"][0]["measure"]["lines"][0]["lineHeight"],
+            24.0
+        );
+        let table = &output["measured"][1]["block"];
+        let pitch = &table["rows"][0]["cells"][0]["blocks"][0]["attrs"]["lineGridPitch"];
+        assert_eq!(
+            *pitch,
+            if flag == true {
+                json!(24.0)
+            } else {
+                Value::Null
+            }
+        );
+        let height = output["measured"][1]["measure"]["rows"][0]["cells"][0]["blocks"][0]["lines"]
+            [0]["lineHeight"]
+            .as_f64()
+            .unwrap();
+        let expected = if flag == true { 24.0 } else { 18.3984375 };
+        assert!((height - expected).abs() < 0.00001);
+    }
+}
+
+#[test]
+fn document_line_grid_opt_out_round_trips_after_style_edits() {
+    use docx_edit::{EditCtx, ParaSelector, ResolvedStyleProjection};
+    let body =
+        r#"<w:p><w:pPr><w:snapToGrid w:val="0"/></w:pPr><w:r><w:t>Grid opt out</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74302);
+    seed_from_docx(engine.doc(), &document(body, LINE_GRID_STYLES)).unwrap();
+    let id = engine.doc().paragraphs("body").unwrap()[0].para_id.clone();
+    for attrs in [
+        json!({"snapToGrid":false}),
+        json!({"snapToGrid":true}),
+        json!({}),
+    ] {
+        engine
+            .doc()
+            .apply_paragraph_style(
+                &EditCtx::local("", ""),
+                &ParaSelector::One(id.clone()),
+                &ResolvedStyleProjection {
+                    style_id: "Normal".into(),
+                    known: true,
+                    paragraph_attrs: serde_json::from_value(attrs.clone()).unwrap(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let snapshot = engine.doc().paragraphs("body").unwrap().remove(0);
+        let original =
+            serde_json::to_value(snapshot.properties.get("_originalFormatting").unwrap()).unwrap();
+        assert_eq!(original.get("snapToGrid"), attrs.get("snapToGrid"));
+        let formatting = serde_json::from_value(original).unwrap();
+        let xml = docx_parse::serializer::serialize_paragraph_formatting(
+            Some(&formatting),
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        let reopened = EngineSession::new(74303);
+        seed_from_docx(
+            reopened.doc(),
+            &document(
+                &format!("<w:p>{xml}<w:r><w:t>Grid opt out</w:t></w:r></w:p>"),
+                "",
+            ),
+        )
+        .unwrap();
+        for session in [&engine, &reopened] {
+            let blocks: Value = serde_json::from_str(
+                &session
+                    .lower_story_json("body", &Default::default())
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                blocks[0]["attrs"].get("snapToGrid"),
+                attrs.get("snapToGrid")
+            );
+        }
+    }
+}
+
+#[test]
+fn document_line_grid_paginate_with_the_measured_grid_height() {
+    let font = docx_layout::register_measure_font(FONT).unwrap();
+    let body = "<w:p><w:r><w:t>Grid row</w:t></w:r></w:p>".repeat(5);
+    let engine = EngineSession::new(74304);
+    seed_from_docx(engine.doc(), &document(&body, LINE_GRID_STYLES)).unwrap();
+    for kind in ["default", "lines"] {
+        let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&json!({
+            "bodyStory":"body", "renderEnv":{},
+            "options":{"pageSize":{"w":300,"h":96},"margins":{"top":0,"bottom":0,"left":0,"right":0}},
+            "regions":{"sections":[{"properties":{"pageWidth":4500,"pageHeight":1440,
+                "marginTop":0,"marginBottom":0,"marginLeft":0,"marginRight":0,
+                "docGrid":{"type":kind,"linePitch":360}}}]},
+            "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
+        }).to_string()).unwrap()).unwrap();
+        assert_eq!(
+            output["layout"]["pages"].as_array().unwrap().len(),
+            if kind == "lines" { 2 } else { 1 }
+        );
+        let first = output["layout"]["pages"][0]["fragments"]
+            .as_array()
+            .unwrap();
+        assert_eq!(first.len(), if kind == "lines" { 4 } else { 5 });
+        if kind == "lines" {
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|fragment| fragment["y"].as_f64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![0.0, 24.0, 48.0, 72.0]
+            );
+        }
+    }
+}
+
+#[test]
+fn document_line_grid_applies_before_spacing_in_synthetic_fallback() {
+    let body = r#"<w:p><w:pPr><w:spacing w:line="360" w:lineRule="auto"/></w:pPr><w:r><w:t>Grid</w:t></w:r></w:p><w:p><w:pPr><w:spacing w:line="600" w:lineRule="atLeast"/></w:pPr><w:r><w:t>Minimum</w:t></w:r></w:p>"#;
+    let engine = EngineSession::new(74305);
+    seed_from_docx(engine.doc(), &document(body, LINE_GRID_STYLES)).unwrap();
+    let output: Value = serde_json::from_str(&engine.layout_document_with_regions_json(&json!({
+        "bodyStory":"body", "renderEnv":{}, "options":{},
+        "regions":{"sections":[{"properties":{"docGrid":{"type":"lines","linePitch":480}}}]},
+        "measurement":{"fontChains":{},"defaults":{"fontFamily":"Missing grid font","fontSize":12}}
+    }).to_string()).unwrap()).unwrap();
+    for (index, height) in [48.0, 40.0].into_iter().enumerate() {
+        let line = &output["measured"][index]["measure"]["lines"][0];
+        assert_eq!(line["syntheticFallback"], true);
+        assert_eq!(line["lineHeight"], height);
     }
 }

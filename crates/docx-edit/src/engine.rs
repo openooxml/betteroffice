@@ -17,7 +17,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
-use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
+use docx_layout::paragraph_spacing::{resolve_line_grid, resolve_line_unit_spacing};
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
     DocumentRegions, RegionLayoutInput, apply_document_regions, apply_section_geometry,
@@ -1031,6 +1031,12 @@ impl EngineSession {
             let line_px = regions.paragraph_spacing_line_px(0);
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
         }
+        if let Some(env) = &mut parsed_render_env {
+            env.line_grid_pitch = (regions.sections.len() <= 1)
+                .then(|| regions.line_grid_pitch_px(0))
+                .flatten();
+            env.line_grid_pitch_in_tables = regions.adjust_line_height_in_table().then_some(true);
+        }
         let resident_body = body_story.is_some();
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
@@ -1042,6 +1048,9 @@ impl EngineSession {
             let mut section_index = 0;
             for block in &mut blocks {
                 resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
+                if let Some(pitch) = regions.line_grid_pitch_px(section_index) {
+                    resolve_line_grid(block, Some(pitch), regions.adjust_line_height_in_table());
+                }
                 if matches!(block, LayoutBlock::SectionBreak(_)) {
                     section_index += 1;
                 }
@@ -1207,6 +1216,9 @@ impl EngineSession {
                     block,
                     regions.paragraph_spacing_line_px(page.region_section_index),
                 );
+                if let Some(pitch) = regions.line_grid_pitch_px(page.region_section_index) {
+                    resolve_line_grid(block, Some(pitch), regions.adjust_line_height_in_table());
+                }
             }
             apply_note_presentation(
                 &mut blocks,
@@ -1302,6 +1314,13 @@ impl EngineSession {
                         block,
                         regions.paragraph_spacing_line_px(section_index),
                     );
+                    if let Some(pitch) = regions.line_grid_pitch_px(section_index) {
+                        resolve_line_grid(
+                            block,
+                            Some(pitch),
+                            regions.adjust_line_height_in_table(),
+                        );
+                    }
                 }
                 let metrics = HeaderFooterMetrics {
                     kind,

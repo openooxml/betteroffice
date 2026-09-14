@@ -82,6 +82,10 @@ pub struct RenderEnv {
     pub show_hidden_text: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_grid_pitch: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_grid_pitch_in_tables: Option<bool>,
 }
 
 impl RenderEnv {
@@ -181,7 +185,18 @@ pub fn yrs_doc_to_layout_blocks(
         &mut list_state,
         CellEdges::default(),
     )
-    .map(|(blocks, _)| blocks)
+    .map(|(mut blocks, _)| {
+        if env.line_grid_pitch.is_some() {
+            for block in &mut blocks {
+                docx_layout::paragraph_spacing::resolve_line_grid(
+                    block,
+                    env.line_grid_pitch,
+                    env.line_grid_pitch_in_tables.unwrap_or(false),
+                );
+            }
+        }
+        blocks
+    })
 }
 
 #[derive(Clone, Copy, Default)]
@@ -2843,6 +2858,7 @@ fn lower_paragraph_attrs(
     result.keep_next = true_property(values, "keepNext");
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");
+    result.snap_to_grid = values.get("snapToGrid").and_then(any_bool);
     result.page_break_before = true_property(values, "pageBreakBefore");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");

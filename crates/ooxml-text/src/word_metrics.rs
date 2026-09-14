@@ -64,14 +64,13 @@
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
 //!
-//! # 4. Snap-to-grid — not applied
+//! # 4. Snap-to-grid
 //!
-//! Where a section defines a document grid (`w:docGrid`, §17.6.5), Word snaps
-//! each line's height up to the next grid multiple unless the paragraph or
-//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2). Measurement
-//! here never snaps: the input carries no grid pitch, so a line's height is
-//! whatever rules 1 and 2 compute and nothing more. CJK documents relying on
-//! the grid measure slightly short as a result.
+//! The line filler rounds the natural single-line height to the section grid
+//! before applying paragraph spacing, retaining the grid half-leading.
+//! Paragraph `w:snapToGrid` opt-outs and table compatibility are resolved by
+//! the caller; exact line spacing bypasses snapping. Run `w:snapToGrid`
+//! controls character spacing, independently of this vertical grid.
 //!
 //! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
 //!
@@ -298,6 +297,31 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
                 }
             }
         }
+    }
+}
+
+/// Apply a line grid before paragraph spacing.
+pub fn apply_spacing_rule_with_grid(
+    mut content: LineBox,
+    rule: &LineSpacingRule,
+    pitch: Option<f32>,
+) -> LineBox {
+    let pitch = pitch.filter(|pitch| pitch.is_finite() && *pitch > 0.0);
+    let Some(pitch) = pitch.filter(|_| !matches!(rule, LineSpacingRule::Exact { .. })) else {
+        return apply_spacing_rule(content, rule);
+    };
+    let height = content.height();
+    let rows = (height / pitch - 4.0 * f32::EPSILON).ceil().max(1.0);
+    let snapped = rows * pitch;
+    if !snapped.is_finite() {
+        return apply_spacing_rule(content, rule);
+    }
+    content.leading += (snapped - height).max(0.0);
+    if let LineSpacingRule::AtLeast { px } = rule {
+        content.ascent += (*px - content.height()).max(0.0);
+        content
+    } else {
+        apply_spacing_rule(content, rule)
     }
 }
 

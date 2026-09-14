@@ -69,6 +69,8 @@ pub struct RegionSection {
 #[serde(rename_all = "camelCase")]
 pub struct AuthoredRegionSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_flags: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub footnote_pr: Option<NoteProperties>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endnote_pr: Option<NoteProperties>,
@@ -239,6 +241,11 @@ impl DocumentRegions {
 
     /// One paragraph-spacing line, in pixels.
     pub fn paragraph_spacing_line_px(&self, section_index: usize) -> f64 {
+        self.line_grid_pitch_px(section_index).unwrap_or(16.0)
+    }
+
+    /// Active section line pitch, in pixels.
+    pub fn line_grid_pitch_px(&self, section_index: usize) -> Option<f64> {
         self.sections
             .get(section_index)
             .or_else(|| self.sections.last())
@@ -252,7 +259,16 @@ impl DocumentRegions {
             })
             .and_then(|grid| grid.get("linePitch").and_then(Value::as_f64))
             .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
-            .map_or(16.0, twips_to_pixels)
+            .map(twips_to_pixels)
+    }
+
+    pub fn adjust_line_height_in_table(&self) -> bool {
+        self.settings
+            .as_ref()
+            .and_then(|settings| settings.compatibility_flags.as_ref())
+            .and_then(|flags| flags.get("adjustLineHeightInTable"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     pub fn footnote_columns(&self, section_index: usize) -> u64 {

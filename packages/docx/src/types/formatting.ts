@@ -377,6 +377,7 @@ export interface ParagraphFormatting {
   pageBreakBefore?: boolean;
   /** Contextual spacing — suppress space between paragraphs of the same style (w:contextualSpacing) */
   contextualSpacing?: boolean;
+  snapToGrid?: boolean;
 
   // Numbering/List
   /** Numbering properties (w:numPr) */

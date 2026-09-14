@@ -330,6 +330,8 @@ pub struct AttrsIn {
     #[serde(default)]
     pub spacing: Option<SpacingIn>,
     #[serde(default)]
+    pub line_grid_pitch: Option<f32>,
+    #[serde(default)]
     pub indent: Option<IndentIn>,
     /// Custom tab stops in twips.
     #[serde(default)]

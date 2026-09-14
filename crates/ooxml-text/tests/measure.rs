@@ -2579,3 +2579,121 @@ fn an_oversized_fallback_chain_measures_like_its_head() {
         assert_eq!(short, measure_chain(ids), "chain of {len} ids");
     }
 }
+
+#[test]
+fn line_grid_snaps_each_line_and_retains_font_metrics() {
+    let block = json!({"kind":"paragraph", "attrs":{"lineGridPitch":24},
+        "runs":[{"kind":"text","text":"Small"},{"kind":"lineBreak"},
+            {"kind":"text","text":"Tall","fontSize":24}]});
+    let output = measure_with(block, 300.0).unwrap();
+    assert_eq!(output["lines"].as_array().unwrap().len(), 2);
+    for (line, scale) in output["lines"].as_array().unwrap().iter().zip([1.0, 2.0]) {
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            24.0 * scale,
+            "grid height",
+        );
+        approx(line["ascent"].as_f64().unwrap(), ASC * scale, "ascent");
+        approx(line["descent"].as_f64().unwrap(), DESC * scale, "descent");
+    }
+    approx(
+        output["totalHeight"].as_f64().unwrap(),
+        72.0,
+        "paragraph height",
+    );
+}
+
+#[test]
+fn line_grid_handles_empty_paragraphs_and_exact_spacing() {
+    for runs in [
+        json!([]),
+        json!([{"kind":"text","text":" "}]),
+        json!([{"kind":"text","text":"A"}]),
+    ] {
+        let block = json!({"kind":"paragraph","attrs":{"lineGridPitch":24},"runs":runs});
+        let output = measure_with(block.clone(), 300.0).unwrap();
+        approx(output["totalHeight"].as_f64().unwrap(), 24.0, "grid height");
+        let mut exact = block.clone();
+        exact["attrs"]["spacing"] = json!({"line":10,"lineUnit":"px","lineRule":"exact"});
+        let output = measure_with(exact, 300.0).unwrap();
+        approx(
+            output["totalHeight"].as_f64().unwrap(),
+            10.0,
+            "exact height",
+        );
+        for pitch in [json!(null), json!(0), json!(-24)] {
+            let mut disabled = block.clone();
+            disabled["attrs"]["lineGridPitch"] = pitch;
+            let output = measure_with(disabled, 300.0).unwrap();
+            let natural = if runs.as_array().unwrap().is_empty() || runs[0]["text"] == " " {
+                18.4
+            } else {
+                LH
+            };
+            approx(
+                output["totalHeight"].as_f64().unwrap(),
+                natural,
+                "disabled grid height",
+            );
+        }
+    }
+    let output = measure_with(
+        json!({"kind":"paragraph","attrs":{
+        "lineGridPitch":24,"suppressEmptyParagraphHeight":true},"runs":[]}),
+        300.0,
+    )
+    .unwrap();
+    assert_eq!(output["totalHeight"], 0.0);
+}
+
+#[test]
+fn line_grid_precedes_auto_multipliers_and_minimum_spacing() {
+    let base_baseline = ASC + (32.0 - ASC - DESC) / 2.0;
+    for (spacing, height, baseline_delta) in [
+        (json!({"line":1.0,"lineUnit":"multiplier"}), 32.0, 0.0),
+        (json!({"line":1.15,"lineUnit":"multiplier"}), 36.8, 2.4),
+        (json!({"line":1.5,"lineUnit":"multiplier"}), 48.0, 8.0),
+        (json!({"line":2.0,"lineUnit":"multiplier"}), 64.0, 16.0),
+        (json!({"line":16.0,"lineRule":"atLeast"}), 32.0, 0.0),
+        (json!({"line":40.0,"lineRule":"atLeast"}), 40.0, 8.0),
+    ] {
+        let output = measure_with(
+            json!({"kind":"paragraph", "attrs":{
+            "lineGridPitch":32,"spacing":spacing},"runs":[{"kind":"text","text":"A"}]}),
+            300.0,
+        )
+        .unwrap();
+        let line = &output["lines"][0];
+        let ascent = line["ascent"].as_f64().unwrap();
+        let descent = line["descent"].as_f64().unwrap();
+        approx(
+            line["lineHeight"].as_f64().unwrap(),
+            height,
+            "Word grid row advance",
+        );
+        approx(
+            ascent + (height - ascent - descent) / 2.0,
+            base_baseline + baseline_delta,
+            "Word grid baseline delta",
+        );
+    }
+}
+
+#[test]
+fn line_grid_keeps_exact_spacing_float_probes_unchanged() {
+    let measure = |pitch: Value| {
+        let request = json!({
+            "block":{"kind":"paragraph","attrs":{"lineGridPitch":pitch,
+                "spacing":{"line":8,"lineRule":"exact"}},"runs":[{"kind":"text","text":"A"}]},
+            "maxWidth":300,
+            "fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontSize":12,"fontFamily":"Liberation Sans"},
+            "floatingZones":[{"leftMargin":300,"rightMargin":0,"topY":12,"bottomY":24,"fullWidthBlock":true}]
+        });
+        measure_paragraph_json(&store(), &request.to_string()).unwrap()
+    };
+    let without_grid = measure(Value::Null);
+    for pitch in [json!(0), json!(-32), json!(32)] {
+        assert_eq!(measure(pitch), without_grid);
+    }
+}

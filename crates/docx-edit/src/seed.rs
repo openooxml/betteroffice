@@ -1818,6 +1818,7 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
             "contextualSpacing",
             "outlineLevel",
             "bidi",
@@ -1910,6 +1911,7 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {

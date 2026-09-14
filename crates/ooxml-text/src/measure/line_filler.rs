@@ -62,6 +62,7 @@ pub(super) struct FillParams<'a> {
     pub store: &'a crate::font_store::FontStore,
     pub prepared: &'a [PreparedRun],
     pub spacing: Option<&'a SpacingIn>,
+    pub line_grid_pitch: Option<f32>,
     /// Content width for every line after the first (indents applied).
     pub body_width: f32,
     /// Content width for the first line (first-line/hanging offset applied).
@@ -166,10 +167,27 @@ fn skip_obstructing_floats(
     }
 }
 
-/// Probe height for zone intersection tests: the default font size in px,
-/// never the line's own metrics, which are unknown until the line closes.
+/// Probe height before the line metrics are available.
 fn estimated_line_height(p: &FillParams) -> f32 {
-    pt_to_px(p.default_font_size_pt)
+    let size = pt_to_px(p.default_font_size_pt);
+    let rule = rule_from_spacing(p.spacing);
+    if !floor_applies(&rule)
+        || !p
+            .line_grid_pitch
+            .is_some_and(|pitch| pitch.is_finite() && pitch > 0.0)
+    {
+        return size;
+    }
+    wm::apply_spacing_rule_with_grid(
+        wm::LineBox {
+            ascent: size,
+            descent: 0.0,
+            leading: 0.0,
+        },
+        &rule,
+        p.line_grid_pitch,
+    )
+    .height()
 }
 
 /// Wraps the prepared runs into lines and totals the paragraph height.
@@ -249,6 +267,7 @@ pub(super) fn empty_paragraph_extent(
     font: FontId,
     size_pt: f32,
     spacing: Option<&SpacingIn>,
+    line_grid_pitch: Option<f32>,
     compat: &CompatIn,
 ) -> Result<ParagraphExtentOut, MeasureError> {
     let metrics = store
@@ -257,7 +276,7 @@ pub(super) fn empty_paragraph_extent(
     let size_px = pt_to_px(size_pt);
     let content = wm::single_line_box(metrics, size_px, &to_flags(compat));
     let rule = rule_from_spacing(spacing);
-    let ruled = wm::apply_spacing_rule(content, &rule);
+    let ruled = wm::apply_spacing_rule_with_grid(content, &rule, line_grid_pitch);
     let mut line_height = ruled.height();
     if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
@@ -641,7 +660,7 @@ impl Filler<'_> {
                 leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
             },
         };
-        let ruled = wm::apply_spacing_rule(content, &self.rule);
+        let ruled = wm::apply_spacing_rule_with_grid(content, &self.rule, self.p.line_grid_pitch);
         let mut ascent = ruled.ascent;
         let mut descent = ruled.descent;
         let text_line_height = ruled.height();
@@ -699,7 +718,6 @@ impl Filler<'_> {
             bidi_slices,
         });
 
-        // Float probes advance by text height, excluding image growth.
         self.cumulative_height += text_line_height;
         Ok(())
     }
@@ -1059,6 +1077,7 @@ mod tests {
             },
             prepared,
             spacing: None,
+            line_grid_pitch: None,
             body_width: width,
             first_line_width: width,
             default_font_size_pt: 12.0,

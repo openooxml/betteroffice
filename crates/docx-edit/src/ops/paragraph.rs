@@ -41,7 +41,7 @@ use crate::{
 /// The paragraph attributes a style definition owns. Applying a style resets
 /// every one of them to the style's value, or clears it when the style has
 /// none — an attribute here is never left over from the previous style.
-pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
+pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 21] = [
     "alignment",
     "spaceBefore",
     "spaceBeforeLines",
@@ -59,6 +59,7 @@ pub const STYLE_CONTROLLED_PARA_ATTRS: [&str; 20] = [
     "keepNext",
     "keepLines",
     "widowControl",
+    "snapToGrid",
     "pageBreakBefore",
     "outlineLevel",
     "defaultTextFormatting",
@@ -80,9 +81,10 @@ pub const STYLE_CONTROLLED_MARKS: [&str; 7] = [
 /// The only paragraph properties an EMPTY second half inherits on split —
 /// pressing Enter at the end of a paragraph starts a clean one that keeps the
 /// style and vertical rhythm but nothing else.
-const INHERITED_PARA_ATTRS: [&str; 11] = [
+const INHERITED_PARA_ATTRS: [&str; 12] = [
     "defaultTextFormatting",
     "pStyle",
+    "snapToGrid",
     "lineSpacing",
     "lineSpacingRule",
     "spaceAfter",
@@ -308,6 +310,7 @@ fn apply_paragraph_attr_projection(
             "spaceAfterLines",
             "beforeAutospacing",
             "afterAutospacing",
+            "snapToGrid",
         ] {
             match attrs.get(key) {
                 Some(value) if *value != Any::Null => {

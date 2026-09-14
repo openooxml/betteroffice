@@ -25,6 +25,35 @@ pub fn resolve_line_unit_spacing(block: &mut LayoutBlock, line_px: f64) {
     }
 }
 
+/// Resolve the section grid before measurement.
+pub fn resolve_line_grid(block: &mut LayoutBlock, pitch: Option<f64>, adjust_tables: bool) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            if pitch.is_some()
+                || paragraph
+                    .attrs
+                    .as_ref()
+                    .is_some_and(|attrs| attrs.line_grid_pitch.is_some())
+            {
+                let attrs = paragraph.attrs.get_or_insert_with(Default::default);
+                attrs.line_grid_pitch = pitch.filter(|pitch| {
+                    pitch.is_finite() && *pitch > 0.0 && attrs.snap_to_grid != Some(false)
+                });
+            }
+        }
+        LayoutBlock::Table(table) => {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    for block in &mut cell.blocks {
+                        resolve_line_grid(block, pitch.filter(|_| adjust_tables), adjust_tables);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn resolve_shape_line_spacing(shape: &mut ShapeBlock, line_px: f64) {
     if let Some(paragraphs) = &mut shape.inner_text {
         for paragraph in paragraphs {

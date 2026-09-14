@@ -36,3 +36,17 @@ test('imported paragraph spacing keeps the updated authored properties', () => {
   expect(paragraphAttrsToFormatting({ ...formatting, _originalFormatting: formatting }))
     .toMatchObject(formatting);
 });
+
+test('paragraph grid opt-outs survive fresh and imported formatting saves', () => {
+  for (const snapToGrid of [false, true]) {
+    expect(paragraphAttrsToFormatting({ snapToGrid })).toMatchObject({ snapToGrid });
+    expect(paragraphAttrsToFormatting({
+      snapToGrid,
+      _originalFormatting: { snapToGrid: !snapToGrid, indentLeft: 120 },
+    })).toMatchObject({ snapToGrid, indentLeft: 120 });
+  }
+  expect(paragraphAttrsToFormatting({
+    snapToGrid: null,
+    _originalFormatting: { snapToGrid: false, indentLeft: 120 },
+  })).toMatchObject({ snapToGrid: undefined, indentLeft: 120 });
+});

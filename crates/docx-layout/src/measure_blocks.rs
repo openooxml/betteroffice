@@ -10,7 +10,8 @@ use crate::types::{
     ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
     TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
 };
-use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
+use ooxml_text::word_metrics::apply_spacing_rule_with_grid;
+use ooxml_text::{LineBox, LineSpacingRule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
@@ -656,20 +657,22 @@ fn synthetic_row(
     width: f64,
     font_px: f64,
     rule: Option<&LineSpacingRule>,
+    grid_pitch: Option<f32>,
 ) -> TypesetRow {
-    let (ascent, descent, line_height) = match rule {
+    let (ascent, descent, line_height) = match (rule, grid_pitch) {
         // single spacing is the identity, so skip the f32 box round-trip
-        None | Some(LineSpacingRule::Auto { line_240ths: 240 }) => {
+        (None | Some(LineSpacingRule::Auto { line_240ths: 240 }), None) => {
             (font_px * 0.8, font_px * 0.2, font_px * 1.15)
         }
-        Some(rule) => {
-            let ruled = apply_spacing_rule(
+        (rule, _) => {
+            let ruled = apply_spacing_rule_with_grid(
                 LineBox {
                     ascent: (font_px * 0.8) as f32,
                     descent: (font_px * 0.2) as f32,
                     leading: (font_px * 0.15) as f32,
                 },
-                rule,
+                rule.unwrap_or(&LineSpacingRule::Auto { line_240ths: 240 }),
+                grid_pitch,
             );
             (
                 f64::from(ruled.ascent),
@@ -706,6 +709,12 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         .as_ref()
         .and_then(|attrs| attrs.spacing.as_ref());
     let rule = synthetic_line_rule(spacing);
+    let grid_pitch = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.line_grid_pitch)
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0)
+        .map(|pitch| pitch as f32);
     let measurable = content_width.is_finite() && content_width > 0.0;
     let slot = |width: f64| if measurable { width } else { 0.0 };
 
@@ -745,6 +754,7 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
                     slot(line_width),
                     font_px,
                     rule.as_ref(),
+                    grid_pitch,
                 ));
                 head_run = index + 1;
                 font_px = default_font_px;
@@ -765,6 +775,7 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         slot(line_width),
         font_px,
         rule.as_ref(),
+        grid_pitch,
     ));
 
     ParagraphExtent {

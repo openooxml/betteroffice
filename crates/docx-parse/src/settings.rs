@@ -17,6 +17,8 @@ pub struct CompatibilityFlags {
     pub do_not_expand_shift_return: bool,
     pub use_word97_line_break_rules: bool,
     pub balance_single_byte_double_byte_width: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjust_line_height_in_table: Option<bool>,
 }
 
 impl Default for CompatibilityFlags {
@@ -27,6 +29,7 @@ impl Default for CompatibilityFlags {
             do_not_expand_shift_return: false,
             use_word97_line_break_rules: false,
             balance_single_byte_double_byte_width: false,
+            adjust_line_height_in_table: None,
         }
     }
 }
@@ -183,6 +186,9 @@ fn parse_compatibility_flags(root: &XmlElement) -> CompatibilityFlags {
         balance_single_byte_double_byte_width: compatibility
             .child("w", "balanceSingleByteDoubleByteWidth")
             .is_some_and(boolean_element),
+        adjust_line_height_in_table: compatibility
+            .child("w", "adjustLineHeightInTable")
+            .map(boolean_element),
         ..CompatibilityFlags::default()
     };
     for setting in compatibility.children_named("w", "compatSetting") {
@@ -276,6 +282,23 @@ mod tests {
         assert_eq!(parsed.compatibility_flags.compatibility_mode, 15);
         assert!(parsed.compatibility_flags.no_leading);
         assert!(!parsed.compatibility_flags.do_not_expand_shift_return);
+    }
+
+    #[test]
+    fn parses_line_grid_table_compatibility() {
+        assert_eq!(
+            parse(None).compatibility_flags.adjust_line_height_in_table,
+            None
+        );
+        for (attribute, expected) in [("", true), (" w:val=\"0\"", false)] {
+            let parsed = parse(Some(&format!(
+                "<w:settings><w:compat><w:adjustLineHeightInTable{attribute}/></w:compat></w:settings>"
+            )));
+            assert_eq!(
+                parsed.compatibility_flags.adjust_line_height_in_table,
+                Some(expected)
+            );
+        }
     }
 
     #[test]

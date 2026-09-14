@@ -6,6 +6,7 @@ export interface CompatibilityFlags {
   doNotExpandShiftReturn: boolean;
   useWord97LineBreakRules: boolean;
   balanceSingleByteDoubleByteWidth: boolean;
+  adjustLineHeightInTable?: boolean;
 }
 
 export const DEFAULT_COMPATIBILITY_FLAGS: CompatibilityFlags = {

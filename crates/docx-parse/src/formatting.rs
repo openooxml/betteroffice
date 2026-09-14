@@ -536,6 +536,8 @@ pub struct ParagraphFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub contextual_spacing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub num_pr: Option<NumberingProperties>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub num_pr_from_style: Option<NumberingProperties>,
@@ -604,6 +606,7 @@ pub fn parse_paragraph_properties(
     value.widow_control = boolean_child(p_pr, "widowControl");
     value.page_break_before = boolean_child(p_pr, "pageBreakBefore");
     value.contextual_spacing = boolean_child(p_pr, "contextualSpacing");
+    value.snap_to_grid = boolean_child(p_pr, "snapToGrid");
     if let Some(num_pr) = p_pr.child("w", "numPr") {
         let num_id_element = num_pr.child("w", "numId");
         let ilvl_element = num_pr.child("w", "ilvl");
@@ -693,6 +696,7 @@ pub fn merge_paragraph_formatting(
             overlay(&mut result.widow_control, &source.widow_control);
             overlay(&mut result.page_break_before, &source.page_break_before);
             overlay(&mut result.contextual_spacing, &source.contextual_spacing);
+            overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             if let Some(source) = &source.num_pr {
                 let mut merged = target.num_pr.clone().unwrap_or_default();
                 overlay(&mut merged.num_id, &source.num_id);

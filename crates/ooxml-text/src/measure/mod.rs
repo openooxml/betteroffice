@@ -321,6 +321,7 @@ pub fn measure_paragraph_typed(
 
     let attrs = request.block.attrs.as_ref();
     let spacing = attrs.and_then(|a| a.spacing.as_ref());
+    let line_grid_pitch = attrs.and_then(|a| a.line_grid_pitch);
     if let Some(sp) = spacing {
         sp.validate()?;
     }
@@ -351,7 +352,14 @@ pub fn measure_paragraph_typed(
             .unwrap_or(&request.defaults.font_family);
         // Empty paragraphs use the regular face.
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            line_grid_pitch,
+            &request.compat,
+        );
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -368,7 +376,14 @@ pub fn measure_paragraph_typed(
             .or_else(|| attrs.and_then(|a| a.default_font_family.as_deref()))
             .unwrap_or(&request.defaults.font_family);
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            line_grid_pitch,
+            &request.compat,
+        );
     }
 
     // Visible markers consume width only at zero hanging.
@@ -405,6 +420,7 @@ pub fn measure_paragraph_typed(
         store,
         prepared: &prepared,
         spacing,
+        line_grid_pitch,
         body_width,
         first_line_width,
         default_font_size_pt: request.defaults.font_size,
