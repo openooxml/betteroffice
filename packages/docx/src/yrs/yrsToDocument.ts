@@ -588,10 +588,28 @@ function mathFromPayload(payload: Attrs): MathEquation {
 }
 
 function horizontalRuleRun(payload: Attrs, attributes: Attrs): Run {
+  const value = asObject(payload.rule);
+  const height = asFiniteNumber(value?.height);
+  if (
+    !value || height === undefined ||
+    (value.width != null && asFiniteNumber(value.width) === undefined) ||
+    (value.widthPercent != null && asFiniteNumber(value.widthPercent) === undefined) ||
+    typeof value.alignment !== 'string' || typeof value.noShade !== 'boolean' ||
+    typeof value.color !== 'string' || typeof value.xml !== 'string'
+  ) throw new Error('Malformed horizontalRule embed payload');
+  const rule: HorizontalRuleContent['rule'] = {
+    width: asFiniteNumber(value.width) ?? null,
+    widthPercent: asFiniteNumber(value.widthPercent) ?? null,
+    height,
+    alignment: value.alignment,
+    noShade: value.noShade,
+    color: value.color,
+    xml: value.xml,
+  };
   const formatting = attrsToTextFormatting(formattingAttrs(attributes));
   return {
     type: 'run',
-    content: [{ type: 'horizontalRule', rule: payload.rule as HorizontalRuleContent['rule'] }],
+    content: [{ type: 'horizontalRule', rule }],
     ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
   };
 }

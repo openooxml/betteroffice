@@ -499,31 +499,42 @@ fn lower_story<T: ReadTxn>(
                     if shared_map_string(&rule, txn, "_kind").as_deref()
                         == Some("horizontalRule") =>
                 {
-                    if let Some(rule) = shared_any(&rule, txn, "rule")
+                    let Some(rule) = shared_any(&rule, txn, "rule")
+                        .filter(|value| {
+                            any_map(value).is_some_and(|map| {
+                                ["width", "widthPercent", "height"].iter().all(|key| {
+                                    !matches!(map.get(*key), Some(Any::Number(value)) if !value.is_finite())
+                                })
+                            })
+                        })
                         .and_then(|value| any_json(&value))
                         .and_then(|value| {
                             serde_json::from_value::<docx_parse::vml::HorizontalRule>(value).ok()
                         })
-                    {
-                        paragraph_runs.push(RawRun {
-                            kind: RawRunKind::HorizontalRule(HorizontalRule {
-                                width: rule.width.map(|width| width / 9_525.0),
-                                width_percent: rule.width_percent,
-                                height: rule.height / 9_525.0,
-                                alignment: rule.alignment,
-                                no_shade: rule.no_shade,
-                                color: rule.color,
-                                pm_start: 0.0,
-                                pm_end: 0.0,
-                            }),
-                            formatting: lower_run_formatting(attributes, env),
-                            story_start: story_index,
-                            story_end: story_index + 1,
-                            pm_start: paragraph_pm_units,
-                            pm_end: paragraph_pm_units + 1,
-                            inline_sdt_widget: None,
+                    else {
+                        return Err(BridgeError::UnsupportedEmbed {
+                            story: story_id.to_owned(),
+                            index: story_index,
                         });
-                    }
+                    };
+                    paragraph_runs.push(RawRun {
+                        kind: RawRunKind::HorizontalRule(HorizontalRule {
+                            width: rule.width.map(|width| width / 9_525.0),
+                            width_percent: rule.width_percent,
+                            height: rule.height / 9_525.0,
+                            alignment: rule.alignment,
+                            no_shade: rule.no_shade,
+                            color: rule.color,
+                            pm_start: 0.0,
+                            pm_end: 0.0,
+                        }),
+                        formatting: lower_run_formatting(attributes, env),
+                        story_start: story_index,
+                        story_end: story_index + 1,
+                        pm_start: paragraph_pm_units,
+                        pm_end: paragraph_pm_units + 1,
+                        inline_sdt_widget: None,
+                    });
                     story_index += 1;
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
@@ -3544,6 +3555,64 @@ mod tests {
                 .map(|(key, value)| (key.to_owned(), value))
                 .collect::<HashMap<_, _>>(),
         ))
+    }
+
+    #[test]
+    fn horizontal_rule_payloads_reject_invalid_values_and_recover_positions() {
+        let cases: Vec<Value> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/horizontal_rule_payloads.json"
+        ))
+        .unwrap();
+        let valid = Any::from_json(&cases[0]["payload"]["rule"].to_string()).unwrap();
+        for case in cases {
+            let doc = EditingDoc::new(7);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            let payload = case["payload"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| (key.clone(), Any::from_json(&value.to_string()).unwrap()))
+                .collect();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "horizontalRule".to_owned(),
+                    payload,
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let lowered = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default());
+            if case["valid"] == true {
+                assert!(lowered.is_ok(), "{}: {lowered:?}", case["name"]);
+            } else {
+                assert!(
+                    matches!(lowered, Err(BridgeError::UnsupportedEmbed { story, index: 1 }) if story == "body"),
+                    "{}",
+                    case["name"]
+                );
+                doc.set_embed_attrs(
+                    &EditCtx::local("", DATE),
+                    Position::new("body", 1),
+                    vec![("rule".to_owned(), valid.clone())],
+                )
+                .unwrap();
+            }
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+                panic!()
+            };
+            let rules = &paragraph.attrs.as_ref().unwrap().horizontal_rules;
+            assert_eq!(rules.len(), 1);
+            assert_eq!((rules[0].pm_start, rules[0].pm_end), (2.0, 3.0));
+            let Run::Text(tail) = paragraph.runs.last().unwrap() else {
+                panic!()
+            };
+            assert_eq!(tail.text, "B");
+            assert_eq!((tail.pm_start, tail.pm_end), (Some(3.0), Some(4.0)));
+        }
     }
 
     #[test]

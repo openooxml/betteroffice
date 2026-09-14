@@ -1,6 +1,10 @@
 import { beforeAll, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
+import { rezipPartsToArrayBuffer, toBytes } from '../docx/rezip/parts';
+import { readDocxContainer } from '../docx/zipContainer';
 import type { Document, HorizontalRuleContent, Paragraph, ParagraphContent } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
 import { documentToYrs } from './documentToYrs';
@@ -115,5 +119,100 @@ test('linked horizontal rules survive save reconstruction', async () => {
     });
   } finally {
     session.destroy();
+  }
+});
+
+const payloadCases = JSON.parse(readFileSync(resolve(
+  import.meta.dir, '../../../../crates/docx-edit/tests/fixtures/horizontal_rule_payloads.json'
+), 'utf8')) as Array<{ name: string; valid: boolean; payload: Record<string, unknown> }>;
+
+for (const entry of payloadCases) {
+  test(`raw horizontal rule payload: ${entry.name}`, async () => {
+    const document = fixture([{ type: 'run', content: [{ type: 'text', text: 'AB' }] }]);
+    const session = await createYrsSession({ clientId: 58436 });
+    try {
+      documentToYrs(session, document);
+      session.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'horizontalRule', payload: entry.payload }]);
+      if (!entry.valid) {
+        expect(() => yrsToDocument(session, document)).toThrow('Malformed horizontalRule embed payload');
+        return;
+      }
+      const saved = yrsToDocument(session, document).package.document.content[0] as Paragraph;
+      const value = entry.payload.rule as HorizontalRuleContent['rule'];
+      expect(saved.content).toEqual([
+        { type: 'run', content: [{ type: 'text', text: 'A' }] },
+        { type: 'run', content: [{ type: 'horizontalRule', rule: { ...value, width: value.width ?? null, widthPercent: value.widthPercent ?? null } }] },
+        { type: 'run', content: [{ type: 'text', text: 'B' }] },
+      ]);
+    } finally {
+      session.destroy();
+    }
+  });
+}
+
+for (const attributes of [
+  {},
+  { hyperlink: { href: 'https://example.com/rule' } },
+  { ins: { id: 'rule-insertion', author: 'Reviewer', date: '2026-09-14T00:00:00Z' } },
+]) {
+  test(`malformed rule recovery preserves surrounding text with ${Object.keys(attributes).join() || 'plain'} content`, async () => {
+    const document = fixture([{ type: 'run', content: [{ type: 'text', text: 'AB' }] }]);
+    const session = await createYrsSession({ clientId: 58437 });
+    try {
+      documentToYrs(session, document);
+      session.applyRawOps('body', [{ op: 'insertEmbed', index: 1, kind: 'horizontalRule', payload: {}, attrs: attributes }]);
+      expect(() => yrsToDocument(session, document)).toThrow('Malformed horizontalRule embed payload');
+      session.applyRawOps('body', [{ op: 'setEmbedAttr', index: 1, key: 'rule', value: rule.rule }]);
+      const saved = yrsToDocument(session, document).package.document.content[0] as Paragraph;
+      expect(saved.content[0]).toEqual({ type: 'run', content: [{ type: 'text', text: 'A' }] });
+      expect(saved.content.at(-1)).toEqual({ type: 'run', content: [{ type: 'text', text: 'B' }] });
+      const middle = saved.content[1];
+      if (middle.type === 'hyperlink') expect(middle.children).toEqual([{ type: 'run', content: [rule] }]);
+      else if (middle.type === 'insertion') expect(middle.content).toEqual([{ type: 'run', content: [rule] }]);
+      else expect(middle).toEqual({ type: 'run', content: [rule] });
+    } finally {
+      session.destroy();
+    }
+  });
+}
+
+test('nullable and omitted rule widths preserve authored XML on save', async () => {
+  const pict = '<w:pict><v:rect style="height:1.5pt" o:hr="t" o:hrstd="t"/></w:pict>';
+  const xml = `<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><w:body><w:p><w:r><w:t>Before</w:t></w:r><w:r>${pict}</w:r><w:r><w:t>After</w:t></w:r></w:p><w:sectPr/></w:body></w:document>`;
+  const parts = new Map([
+    ['[Content_Types].xml', toBytes('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>')],
+    ['_rels/.rels', toBytes('<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>')],
+    ['word/document.xml', toBytes(xml)],
+  ]);
+  const bytes = rezipPartsToArrayBuffer(parts);
+  const parsed = await parseDocx(bytes, { preloadFonts: false });
+  let nullableXml: string | null = null;
+  for (const omitWidths of [false, true]) {
+    const session = await createYrsSession({ clientId: 58438 });
+    try {
+      documentToYrs(session, parsed);
+      if (omitWidths) {
+        const segment = session.storySegments('body').find((entry) =>
+          entry.kind === 'embed' && entry.embedKind === 'horizontalRule'
+        );
+        if (!segment || segment.kind !== 'embed') throw new Error('expected rule embed');
+        const value = { ...(segment.payload.rule as HorizontalRuleContent['rule']) };
+        delete (value as Partial<typeof value>).width;
+        delete (value as Partial<typeof value>).widthPercent;
+        session.applyRawOps('body', [{ op: 'setEmbedAttr', index: 6, key: 'rule', value }]);
+      }
+      const saved = await repackDocx(yrsToDocument(session, parsed));
+      const savedXml = readDocxContainer(saved).text('word/document.xml');
+      expect(savedXml).toContain(pict);
+      if (omitWidths) expect(savedXml).toBe(nullableXml);
+      else nullableXml = savedXml;
+      const paragraph = session.paragraphs('body')[0];
+      session.insertText({ story: 'body', paraId: paragraph.paraId, offset: 0 }, 'Edited ');
+      const edited = readDocxContainer(await repackDocx(yrsToDocument(session, parsed)));
+      expect(edited.text('word/document.xml')).toContain('Edited Before');
+      expect(edited.text('word/document.xml')).toContain(pict);
+    } finally {
+      session.destroy();
+    }
   }
 });
