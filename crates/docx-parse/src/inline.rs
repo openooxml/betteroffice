@@ -289,7 +289,7 @@ fn parse_run_contents(element: &XmlElement) -> Vec<RunContent> {
     for child in element.child_elements() {
         match child.local_name() {
             "t" => output.push(RunContent::Text {
-                text: text_node_content(child),
+                text: run_text_node_content(child),
                 preserve_space: (child.attribute(Some("xml"), "space") == Some("preserve"))
                     .then_some(true),
             }),
@@ -456,6 +456,26 @@ fn contains_drawing_owned_content(element: &XmlElement) -> bool {
 fn text_node_content(element: &XmlElement) -> String {
     let mut output = String::new();
     append_text_node_content(element, &mut output);
+    output
+}
+
+fn run_text_node_content(element: &XmlElement) -> String {
+    let text = text_node_content(element);
+    if !text.contains(['\r', '\n']) {
+        return text;
+    }
+    let mut output = String::with_capacity(text.len());
+    let mut characters = text.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\r' && characters.peek() == Some(&'\n') {
+            characters.next();
+        }
+        output.push(if matches!(character, '\r' | '\n') {
+            ' '
+        } else {
+            character
+        });
+    }
     output
 }
 
@@ -2262,6 +2282,69 @@ mod tests {
         .root()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn literal_text_line_endings_remain_inline_spaces() {
+        for space in ["", " xml:space=\"preserve\""] {
+            let run = root(&format!(
+                "<w:r><w:t{space}> left\n\u{a0}\nright  </w:t><w:br/><w:t>after</w:t><w:cr/><w:tab/><w:instrText> PAGE\n </w:instrText></w:r>"
+            ));
+            let projected = parse_run(&run, None, None, None).run;
+            assert_eq!(
+                projected.content[0],
+                RunContent::Text {
+                    text: " left \u{a0} right  ".to_owned(),
+                    preserve_space: (!space.is_empty()).then_some(true),
+                }
+            );
+            assert!(matches!(projected.content[1], RunContent::Break { .. }));
+            assert!(matches!(projected.content[3], RunContent::Break { .. }));
+            assert!(matches!(projected.content[4], RunContent::Tab));
+            assert!(matches!(
+                &projected.content[5],
+                RunContent::InstrText { text } if text == " PAGE\n "
+            ));
+            let mut context = crate::serializer::SerializerContext::new(
+                &crate::serializer::SerializerDeterminism {
+                    seed: "0".repeat(64),
+                    now: "2026-09-14T00:00:00.000Z".to_owned(),
+                },
+            )
+            .unwrap();
+            let saved = crate::serializer::serialize_run(&projected, &mut context).unwrap();
+            let mut expected = projected.content;
+            if let RunContent::Text { preserve_space, .. } = &mut expected[0] {
+                *preserve_space = Some(true);
+            }
+            assert_eq!(
+                parse_run(&root(&saved), None, None, None).run.content,
+                expected
+            );
+        }
+        for ending in ["\n", "\r", "\r\n", "&#10;", "&#13;", "&#13;&#10;"] {
+            let projected = parse_run(
+                &root(&format!("<w:r><w:t>left{ending}right</w:t></w:r>")),
+                None,
+                None,
+                None,
+            );
+            assert!(matches!(
+                &projected.run.content[0],
+                RunContent::Text { text, .. } if text == "left right"
+            ));
+        }
+        let untouched = " left\t\u{a0}right  ";
+        let projected = parse_run(
+            &root(&format!("<w:r><w:t>{untouched}</w:t></w:r>")),
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(
+            &projected.run.content[0],
+            RunContent::Text { text, .. } if text == untouched
+        ));
     }
 
     #[test]

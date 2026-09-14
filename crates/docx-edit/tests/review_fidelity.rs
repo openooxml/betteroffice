@@ -42,6 +42,29 @@ fn layout(body: &str, columns: u32) -> Value {
 }
 
 #[test]
+fn literal_text_line_feeds_keep_authoritative_wrapping_and_pagination() {
+    let text = format!(
+        "Question\n\u{a0}\n{}",
+        "Long answers must wrap within the page and continue onto later pages. ".repeat(75)
+    );
+    let body = paragraph(&text);
+    let output = layout(&body, 1);
+    let normalized = layout(&body.replace('\n', " "), 1);
+    let lines = output["measured"][0]["measure"]["lines"]
+        .as_array()
+        .unwrap();
+    assert!(lines.len() > 1);
+    for line in lines {
+        assert_ne!(line["syntheticFallback"], true);
+        assert!(line["clusterAdvances"].as_array().is_some());
+        assert!(line["width"].as_f64().unwrap() <= 625.0);
+    }
+    assert!(output["layout"]["pages"].as_array().unwrap().len() > 1);
+    assert_eq!(output["measured"], normalized["measured"]);
+    assert_eq!(output["layout"], normalized["layout"]);
+}
+
+#[test]
 fn vml_horizontal_rule_uses_paragraph_width_without_changing_flow() {
     for columns in [1, 2] {
         let body = format!(
