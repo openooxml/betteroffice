@@ -1682,13 +1682,7 @@ fn note_ref_mark_types(run: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn run_boundary(
-    run: &Value,
-    style_formatting: Option<&Value>,
-    styles: &StyleResolver,
-    source: &BTreeMap<String, String>,
-) -> Option<Value> {
-    let units = run_to_units(run, style_formatting, styles, None, &[], source);
+fn run_boundary(run: &Value, units: &[InlineUnit]) -> Option<Value> {
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -2064,20 +2058,22 @@ fn paragraph_units(
                 }
             }
             "run" => {
-                let boundary = run_boundary(content, style_formatting.as_ref(), styles, source);
-                if let (Some(boundaries), Some(boundary)) = (&mut boundaries, boundary) {
-                    boundaries.push(boundary);
-                } else {
-                    boundaries = None;
-                }
-                units.extend(run_to_units(
+                let run_units = run_to_units(
                     content,
                     style_formatting.as_ref(),
                     styles,
                     comment_id,
                     &[],
                     source,
-                ));
+                );
+                if let Some(run_boundaries) = &mut boundaries {
+                    if let Some(boundary) = run_boundary(content, &run_units) {
+                        run_boundaries.push(boundary);
+                    } else {
+                        boundaries = None;
+                    }
+                }
+                units.extend(run_units);
             }
             "hyperlink" => {
                 boundaries = None;
@@ -3780,14 +3776,47 @@ mod tests {
                 "formatting": { "styleId": "FootnoteReference" },
                 "content": [{ "type": content_type }, { "type": content_type }],
             });
-            assert!(run_to_units(&run, None, &styles, None, &[], &BTreeMap::new()).is_empty());
-            let boundary = run_boundary(&run, None, &styles, &BTreeMap::new()).unwrap();
+            let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+            assert!(units.is_empty());
+            let boundary = run_boundary(&run, &units).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
             );
             assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn reused_run_units_keep_comments_out_of_saved_boundaries() {
+        let (units, ppr) = paragraph_units(
+            &json!({"content": [
+                {"type": "commentRangeStart", "id": 7},
+                {"type": "run", "formatting": {"bold": true}, "content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "tab"},
+                    {"type": "softHyphen"}
+                ]},
+                {"type": "commentRangeEnd", "id": 7},
+                {"type": "run", "content": [{"type": "footnoteRef", "id": 12}]}
+            ]}),
+            &StyleResolver::new(None),
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 4);
+        assert!(
+            units[..3]
+                .iter()
+                .all(|unit| unit.comment_id.as_deref() == Some("7"))
+        );
+        assert!(units[3].comment_id.is_none());
+        assert_eq!(units[3].pm_size, 1);
+        let boundaries = ppr["_originalRunBoundaries"].as_array().unwrap();
+        assert_eq!(boundaries.len(), 2);
+        assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
+        assert_eq!(boundaries[0]["marksKey"], "bold:{}");
+        assert_eq!(boundaries[1]["text"], "12");
     }
 
     #[test]

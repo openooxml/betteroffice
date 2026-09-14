@@ -2,7 +2,57 @@
 
 use serde::Serialize;
 
-use crate::types::{BlockExtent, LayoutBlock};
+use crate::types::{BlockExtent, FloatingTablePosition, LayoutBlock};
+
+pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>) -> Option<f64> {
+    let position = position?;
+    (position.vert_anchor.as_deref() == Some("text")
+        && matches!(
+            position.horz_anchor.as_deref(),
+            None | Some("text" | "margin")
+        )
+        && position.tblp_x.is_none_or(f64::is_finite)
+        && matches!(
+            position.tblp_x_spec.as_deref(),
+            None | Some("left" | "center" | "right")
+        )
+        && position.tblp_y_spec.is_none())
+    .then_some(position.tblp_y)
+    .flatten()
+    .filter(|offset| offset.is_finite() && *offset >= 0.0)
+}
+
+pub(crate) fn nested_table_horizontal_offset(
+    position: Option<&FloatingTablePosition>,
+    justification: Option<&str>,
+    indent: Option<f64>,
+    table_width: f64,
+    content_width: f64,
+) -> f64 {
+    if let Some(position) = position
+        && matches!(
+            position.horz_anchor.as_deref(),
+            None | Some("margin" | "text")
+        )
+    {
+        match position.tblp_x_spec.as_deref() {
+            Some("left") => return 0.0,
+            Some("center") => return (content_width - table_width) / 2.0,
+            Some("right") => return content_width - table_width,
+            None => {
+                if let Some(offset) = position.tblp_x.filter(|offset| offset.is_finite()) {
+                    return offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    match justification {
+        Some("center") => ((content_width - table_width) / 2.0).max(0.0),
+        Some("right") => (content_width - table_width).max(0.0),
+        _ => indent.unwrap_or(0.0).max(0.0),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +108,7 @@ pub fn layout_cell_content(
     let mut flat_bottoms: Vec<f64> = Vec::new();
     let mut y = start_y;
     let mut prev_after = 0.0f64;
+    let mut float_bottom = start_y;
     let n = block_measures.map(|m| m.len()).unwrap_or(0);
 
     for i in 0..n {
@@ -78,6 +129,16 @@ pub fn layout_cell_content(
             }
             line_tops.push(tops);
             prev_after = spacing.and_then(|s| s.after).unwrap_or(0.0);
+        } else if let (Some(LayoutBlock::Table(table)), BlockExtent::Table(extent)) =
+            (block, measure)
+            && let Some(offset) = nested_table_float_offset(table.floating.as_ref())
+        {
+            y += prev_after;
+            let bottom = y + offset + extent.total_height;
+            float_bottom = float_bottom.max(bottom);
+            line_tops.push(Vec::new());
+            flat_bottoms.push(bottom);
+            prev_after = 0.0;
         } else if let Some(total_height) = extent_total_height(measure) {
             // Nested table / non-paragraph: one atomic block (break only at its bottom).
             y += prev_after;
@@ -94,7 +155,7 @@ pub fn layout_cell_content(
     CellContentLayout {
         line_tops,
         flat_bottoms,
-        content_height: y - start_y + prev_after,
+        content_height: (y + prev_after).max(float_bottom) - start_y,
     }
 }
 
@@ -105,6 +166,46 @@ mod tests {
 
     const LINE: f64 = 20.0;
     const SP: f64 = 8.0;
+
+    #[test]
+    fn nested_float_offsets_require_supported_finite_text_positions() {
+        let mut position: FloatingTablePosition = serde_json::from_value(json!({
+            "vertAnchor":"text", "horzAnchor":"margin", "tblpX":28, "tblpY":20
+        }))
+        .unwrap();
+        assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
+        position.tblp_x = None;
+        assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
+        for x in [Some(f64::NAN), Some(f64::INFINITY)] {
+            position.tblp_x = x;
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
+        position.tblp_x = Some(28.0);
+        for y in [None, Some(-1.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            position.tblp_y = y;
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
+        position.tblp_y = Some(20.0);
+        for spec in ["left", "center", "right"] {
+            position.tblp_x_spec = Some(spec.to_owned());
+            assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
+        }
+        for spec in ["inside", "outside", "unsupported"] {
+            position.tblp_x_spec = Some(spec.to_owned());
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
+        position.tblp_x_spec = None;
+        position.tblp_y_spec = Some("top".to_owned());
+        assert_eq!(nested_table_float_offset(Some(&position)), None);
+        position.tblp_y_spec = None;
+        position.horz_anchor = Some("page".to_owned());
+        assert_eq!(nested_table_float_offset(Some(&position)), None);
+        position.horz_anchor = None;
+        for anchor in [None, Some("page"), Some("margin")] {
+            position.vert_anchor = anchor.map(str::to_owned);
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
+    }
 
     fn para(spacing: Option<(f64, f64)>) -> LayoutBlock {
         let attrs = spacing
