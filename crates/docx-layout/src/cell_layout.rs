@@ -11,12 +11,47 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
             position.horz_anchor.as_deref(),
             None | Some("text" | "margin")
         )
-        && position.tblp_x.is_some_and(f64::is_finite)
-        && position.tblp_x_spec.is_none()
+        && position.tblp_x.is_none_or(f64::is_finite)
+        && matches!(
+            position.tblp_x_spec.as_deref(),
+            None | Some("left" | "center" | "right")
+        )
         && position.tblp_y_spec.is_none())
     .then_some(position.tblp_y)
     .flatten()
     .filter(|offset| offset.is_finite() && *offset >= 0.0)
+}
+
+pub(crate) fn nested_table_horizontal_offset(
+    position: Option<&FloatingTablePosition>,
+    justification: Option<&str>,
+    indent: Option<f64>,
+    table_width: f64,
+    content_width: f64,
+) -> f64 {
+    if let Some(position) = position
+        && matches!(
+            position.horz_anchor.as_deref(),
+            None | Some("margin" | "text")
+        )
+    {
+        match position.tblp_x_spec.as_deref() {
+            Some("left") => return 0.0,
+            Some("center") => return (content_width - table_width) / 2.0,
+            Some("right") => return content_width - table_width,
+            None => {
+                if let Some(offset) = position.tblp_x.filter(|offset| offset.is_finite()) {
+                    return offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    match justification {
+        Some("center") => ((content_width - table_width) / 2.0).max(0.0),
+        Some("right") => (content_width - table_width).max(0.0),
+        _ => indent.unwrap_or(0.0).max(0.0),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -133,13 +168,15 @@ mod tests {
     const SP: f64 = 8.0;
 
     #[test]
-    fn nested_float_offsets_require_finite_absolute_text_positions() {
+    fn nested_float_offsets_require_supported_finite_text_positions() {
         let mut position: FloatingTablePosition = serde_json::from_value(json!({
             "vertAnchor":"text", "horzAnchor":"margin", "tblpX":28, "tblpY":20
         }))
         .unwrap();
         assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
-        for x in [None, Some(f64::NAN), Some(f64::INFINITY)] {
+        position.tblp_x = None;
+        assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
+        for x in [Some(f64::NAN), Some(f64::INFINITY)] {
             position.tblp_x = x;
             assert_eq!(nested_table_float_offset(Some(&position)), None);
         }
@@ -149,14 +186,25 @@ mod tests {
             assert_eq!(nested_table_float_offset(Some(&position)), None);
         }
         position.tblp_y = Some(20.0);
-        position.tblp_x_spec = Some("center".to_owned());
-        assert_eq!(nested_table_float_offset(Some(&position)), None);
+        for spec in ["left", "center", "right"] {
+            position.tblp_x_spec = Some(spec.to_owned());
+            assert_eq!(nested_table_float_offset(Some(&position)), Some(20.0));
+        }
+        for spec in ["inside", "outside", "unsupported"] {
+            position.tblp_x_spec = Some(spec.to_owned());
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
         position.tblp_x_spec = None;
         position.tblp_y_spec = Some("top".to_owned());
         assert_eq!(nested_table_float_offset(Some(&position)), None);
         position.tblp_y_spec = None;
         position.horz_anchor = Some("page".to_owned());
         assert_eq!(nested_table_float_offset(Some(&position)), None);
+        position.horz_anchor = None;
+        for anchor in [None, Some("page"), Some("margin")] {
+            position.vert_anchor = anchor.map(str::to_owned);
+            assert_eq!(nested_table_float_offset(Some(&position)), None);
+        }
     }
 
     fn para(spacing: Option<(f64, f64)>) -> LayoutBlock {

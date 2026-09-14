@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, HashMap};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::cell_layout::nested_table_float_offset;
+use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
 use crate::types::{
-    BlockExtent, ChartExtent, ImageExtent, ImageRunPosition, LayoutBlock, ParagraphBlock,
-    ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock, TableCellExtent,
-    TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
+    BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
+    ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
+    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
@@ -943,6 +943,20 @@ fn table_floating_zone(
             _ => 0.0,
         }
     };
+    Some(table_floating_zone_at_x(
+        floating,
+        measure,
+        content_width,
+        x,
+    ))
+}
+
+fn table_floating_zone_at_x(
+    floating: &FloatingTablePosition,
+    measure: &TableExtent,
+    content_width: f64,
+    x: f64,
+) -> FloatingZone {
     let (left_margin, right_margin) = if x < content_width / 2.0 {
         (
             x + measure.total_width + floating.right_from_text.unwrap_or(12.0),
@@ -955,13 +969,13 @@ fn table_floating_zone(
         )
     };
     let top_y = floating.tblp_y.unwrap_or(0.0);
-    Some(FloatingZone {
+    FloatingZone {
         left_margin,
         right_margin,
         top_y: top_y - floating.top_from_text.unwrap_or(0.0),
         bottom_y: top_y + measure.total_height + floating.bottom_from_text.unwrap_or(0.0),
         full_width_block: false,
-    })
+    }
 }
 
 fn extract_text_box_zone(
@@ -1251,9 +1265,17 @@ fn measure_cell_blocks_with_table_floats(
             _ => measure_block(block, content_width, config)?,
         };
         if let (LayoutBlock::Table(table), BlockExtent::Table(measure)) = (&*block, &extent)
+            && let Some(floating) = table.floating.as_ref()
             && nested_table_float_offset(table.floating.as_ref()).is_some()
-            && let Some(mut zone) = table_floating_zone(table, measure, content_width)
         {
+            let x = nested_table_horizontal_offset(
+                Some(floating),
+                table.justification.as_deref(),
+                table.indent,
+                measure.total_width,
+                content_width,
+            );
+            let mut zone = table_floating_zone_at_x(floating, measure, content_width, x);
             zone.top_y += y;
             zone.bottom_y += y;
             zones.push(zone);
@@ -1554,6 +1576,7 @@ mod tests {
                 "runs":[{"kind":"text","text":text}]})
         };
         let padding = json!({"top":0,"bottom":0,"left":0,"right":0});
+        let mut cases = Vec::new();
         for (anchor, offset, width, before, table_top, after_top) in [
             ("text", 0.0, 220.0, 6.0, 24.0, 70.0),
             ("text", 20.0, 220.0, 6.0, 44.0, 90.0),
@@ -1562,12 +1585,83 @@ mod tests {
             ("text", 20.0, 80.0, 6.0, 44.0, 30.0),
             ("margin", 20.0, 220.0, 6.0, 24.0, 70.0),
         ] {
+            cases.push((
+                json!({"vertAnchor":anchor,"horzAnchor":"margin","tblpX":0,"tblpY":offset}),
+                width,
+                before,
+                table_top,
+                after_top,
+                None,
+                None,
+                0.0,
+                None,
+            ));
+        }
+        for (horizontal, indent, justification, table_x, text_x) in [
+            (json!({}), None, None, 0.0, 92.0),
+            (json!({}), Some(30.0), None, 30.0, 122.0),
+            (json!({}), None, Some("center"), 70.0, 162.0),
+            (json!({}), None, Some("right"), 140.0, 0.0),
+            (json!({"tblpXSpec":"left"}), None, None, 0.0, 92.0),
+            (json!({"tblpXSpec":"center"}), None, None, 70.0, 162.0),
+            (json!({"tblpXSpec":"right"}), None, None, 140.0, 0.0),
+            (
+                json!({"tblpX":140,"tblpXSpec":"left"}),
+                None,
+                None,
+                0.0,
+                92.0,
+            ),
+            (
+                json!({"tblpX":140,"tblpXSpec":"center"}),
+                None,
+                None,
+                70.0,
+                162.0,
+            ),
+            (
+                json!({"tblpX":0,"tblpXSpec":"right"}),
+                None,
+                None,
+                140.0,
+                0.0,
+            ),
+        ] {
+            let mut floating = json!({"vertAnchor":"text","horzAnchor":"margin","tblpY":20});
+            floating
+                .as_object_mut()
+                .unwrap()
+                .extend(horizontal.as_object().unwrap().clone());
+            cases.push((
+                floating,
+                80.0,
+                6.0,
+                44.0,
+                30.0,
+                indent,
+                justification,
+                table_x,
+                Some(text_x),
+            ));
+        }
+        for (
+            floating,
+            width,
+            before,
+            table_top,
+            after_top,
+            indent,
+            justification,
+            table_x,
+            text_x,
+        ) in cases
+        {
             let mut block: LayoutBlock = serde_json::from_value(json!({
                 "kind":"table","id":"outer","columnWidths":[220],
                 "rows":[{"id":"outer-row","cells":[{"id":"outer-cell","padding":padding,"blocks":[
                     paragraph("Before",0.0,8.0),
                     {"kind":"table","id":"nested",
-                     "columnWidths":[width],"floating":{"vertAnchor":anchor,"horzAnchor":"margin","tblpX":0,"tblpY":offset},
+                     "columnWidths":[width],"floating":floating,"indent":indent,"justification":justification,
                      "rows":[{"id":"nested-row","height":40,"heightRule":"exact","cells":[{"id":"nested-cell","padding":padding,"blocks":[paragraph("Table",0.0,0.0)]}]}]},
                     paragraph("After",before,0.0),
                     paragraph("Tail",0.0,0.0)
@@ -1585,11 +1679,7 @@ mod tests {
                 Some(&measured_cell.blocks),
                 0.0,
             );
-            assert_eq!(
-                layout.line_tops[2],
-                vec![after_top],
-                "{anchor} {offset} {width}"
-            );
+            assert_eq!(layout.line_tops[2], vec![after_top], "{floating} {width}");
             assert_eq!(layout.line_tops[3], vec![after_top + 16.0]);
             let expected_height = (after_top + 32.0).max(table_top + 40.0);
             assert_eq!(extent.total_height, expected_height);
@@ -1623,6 +1713,29 @@ mod tests {
                 .collect();
             assert!((baselines["After"] - baselines["Before"] - after_top).abs() < 0.01);
             assert!((baselines["Table"] - baselines["Before"] - table_top).abs() < 0.01);
+            let positions: BTreeMap<String, f64> = display.pages[0]
+                .primitives
+                .iter()
+                .filter_map(|primitive| match primitive {
+                    crate::display_list::Primitive::Text(text) => {
+                        Some((text.text.clone(), text.x.as_f64().unwrap()))
+                    }
+                    crate::display_list::Primitive::GlyphRun(text) => {
+                        Some((text.text.clone(), text.glyphs[0].x))
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                (positions["Table"] - positions["Before"] - table_x).abs() < 0.01,
+                "{floating}"
+            );
+            if let Some(text_x) = text_x {
+                assert!(
+                    (positions["After"] - positions["Before"] - text_x).abs() < 0.01,
+                    "{floating}"
+                );
+            }
 
             input.options.page_size.as_mut().unwrap().h = 80.0;
             let split_pages = crate::compute_layout_input(&mut input).unwrap();
@@ -1656,7 +1769,7 @@ mod tests {
             assert_eq!(painted.len(), 4);
             assert!(
                 painted.values().all(|count| *count == 1),
-                "{anchor} {offset} {width}: {painted:?}"
+                "{floating} {width}: {painted:?}"
             );
         }
     }
