@@ -107,6 +107,10 @@ pub enum RunContent {
     Drawing { image: Box<crate::image::Image> },
     #[serde(rename = "shape")]
     Shape { shape: Box<crate::shape::Shape> },
+    #[serde(rename = "horizontalRule")]
+    HorizontalRule {
+        rule: Box<crate::vml::HorizontalRule>,
+    },
     #[serde(rename = "chart")]
     Chart { chart: Box<crate::chart::Chart> },
     /// A drawing the parser does not model, replayed verbatim on save.

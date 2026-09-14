@@ -64,7 +64,7 @@ export type {
   SdtGalleryState,
   SdtControlState,
 } from './content/sdt';
-export type { FieldFormData, CommentReferenceContent } from './content/run';
+export type { FieldFormData, CommentReferenceContent, HorizontalRuleContent } from './content/run';
 export type {
   ImageWrapPoint,
   ImageRotationBounds,

@@ -88,6 +88,19 @@ export interface SeparatorContent {
   type: 'separator' | 'continuationSeparator';
 }
 
+export interface HorizontalRuleContent {
+  type: 'horizontalRule';
+  rule: {
+    width: number | null;
+    widthPercent: number | null;
+    height: number;
+    alignment: string;
+    noShade: boolean;
+    color: string;
+    xml: string;
+  };
+}
+
 /** Legacy `w:ffData` projected as inert form-control state. */
 export interface FieldFormData {
   name?: string;
@@ -191,6 +204,7 @@ export type RunContent =
   | NoteReferenceContent
   | NoteRefMarkContent
   | SeparatorContent
+  | HorizontalRuleContent
   | CommentReferenceContent
   | FieldCharContent
   | InstrTextContent

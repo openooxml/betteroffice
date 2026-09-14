@@ -2,6 +2,7 @@ use docx_edit::{EngineSession, seed_from_docx};
 use serde_json::{Value, json};
 
 const FONT: &[u8] = include_bytes!("../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf");
+const HORIZONTAL_RULE: &str = r##"<w:pict xmlns:v="urn:schemas-microsoft-com:vml" xmlns:o="urn:schemas-microsoft-com:office:office"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
 const SHAPE: &str = r#"<w:r><w:drawing><wp:anchor distT="0" distB="0" distL="66675" distR="123825" simplePos="0" relativeHeight="0" behindDoc="0" locked="0" layoutInCell="1" allowOverlap="1"><wp:simplePos x="0" y="0"/><wp:positionH relativeFrom="margin"><wp:align>inside</wp:align></wp:positionH><wp:positionV relativeFrom="paragraph"><wp:posOffset>0</wp:posOffset></wp:positionV><wp:extent cx="1828800" cy="914400"/><wp:wrapSquare wrapText="bothSides"/><wp:docPr id="1" name="Inside shape"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr/><wps:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:solidFill><a:srgbClr val="CCCCCC"/></a:solidFill></wps:spPr><wps:bodyPr/></wps:wsp></a:graphicData></a:graphic></wp:anchor></w:drawing></w:r>"#;
 
 fn document(body: &str, styles: &str) -> Vec<u8> {
@@ -38,6 +39,171 @@ fn layout(body: &str, columns: u32) -> Value {
             "columns":{"count":columns,"gap":48}},
         "measurement":{"fontChains":{"calibri|0|0":[font]},"defaults":{"fontFamily":"Calibri","fontSize":12}}
     }).to_string()).unwrap()).unwrap()
+}
+
+#[test]
+fn vml_horizontal_rule_uses_paragraph_width_without_changing_flow() {
+    for columns in [1, 2] {
+        let body = format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r>{HORIZONTAL_RULE}</w:r></w:p>{}"#,
+            paragraph("After")
+        );
+        let output = layout(&body, columns);
+        let blank = layout(
+            &format!(
+                r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr></w:p>{}"#,
+                paragraph("After")
+            ),
+            columns,
+        );
+        let fragments = &output["layout"]["pages"][0]["fragments"];
+        assert_eq!(
+            fragments[1]["y"],
+            blank["layout"]["pages"][0]["fragments"][1]["y"]
+        );
+        assert_eq!(
+            output["measured"][0]["block"]["attrs"]["horizontalRules"][0]["height"],
+            2.0
+        );
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let lines: Vec<_> = display["pages"][0]["primitives"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|primitive| primitive["kind"] == "line")
+            .collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[0]["x2"].as_f64().unwrap() - lines[0]["x1"].as_f64().unwrap(),
+            fragments[0]["width"].as_f64().unwrap()
+        );
+        assert_eq!(lines[0]["docStart"], 1);
+        assert_eq!(lines[0]["docEnd"], 2);
+        let display: docx_layout::display_list::DisplayList =
+            serde_json::from_value(display.clone()).unwrap();
+        for position in [1, 2] {
+            let caret = docx_layout::hit::caret_rect(&display, position).unwrap();
+            assert_eq!(caret.page_index, 0);
+            assert!(caret.y < fragments[1]["y"].as_f64().unwrap());
+        }
+        let y = lines[0]["y1"].as_f64().unwrap();
+        assert!(matches!(
+            docx_layout::hit::hit_test(&display, 0, 200.0, y),
+            Some(1 | 2)
+        ));
+    }
+}
+
+#[test]
+fn vml_horizontal_rule_respects_inline_baselines_and_exact_spacing() {
+    for mixed in [false, true] {
+        for exact in [false, true] {
+            for height in [1.5, 24.0] {
+                let rule = HORIZONTAL_RULE.replace("height:1.5pt", &format!("height:{height}pt"));
+                let before = if mixed { "<w:t>Before </w:t>" } else { "" };
+                let after = if mixed { "<w:t> After</w:t>" } else { "" };
+                let line_rule = if exact { "exact" } else { "auto" };
+                let body = format!(
+                    r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="{line_rule}"/><w:rPr><w:sz w:val="20"/></w:rPr></w:pPr><w:r><w:rPr><w:sz w:val="20"/></w:rPr>{before}{rule}{after}</w:r></w:p>{}"#,
+                    paragraph("After")
+                );
+                let output = layout(&body, 1);
+                let plain = layout(&body.replace(&rule, ""), 1);
+                let measure = &output["measured"][0]["measure"];
+                let line = &measure["lines"][0];
+                let plain_line = &plain["measured"][0]["measure"]["lines"][0];
+                assert_eq!(measure["lines"].as_array().unwrap().len(), 1);
+                let actual = line["lineHeight"].as_f64().unwrap();
+                if exact || height == 1.5 {
+                    assert!((actual - plain_line["lineHeight"].as_f64().unwrap()).abs() < 0.01);
+                } else if mixed {
+                    assert_eq!(line["ascent"], 33.0);
+                    assert!(actual > 33.0);
+                } else {
+                    assert_eq!(actual, 33.0);
+                    assert_eq!(line["ascent"], 33.0);
+                    assert_eq!(line["descent"], 0.0);
+                }
+                if exact || mixed && height == 1.5 {
+                    assert!(
+                        (line["ascent"].as_f64().unwrap() - plain_line["ascent"].as_f64().unwrap())
+                            .abs()
+                            < 0.01
+                    );
+                }
+                let fragments = &output["layout"]["pages"][0]["fragments"];
+                assert!(
+                    (fragments[1]["y"].as_f64().unwrap()
+                        - fragments[0]["y"].as_f64().unwrap()
+                        - actual)
+                        .abs()
+                        < 1e-5
+                );
+                let display: Value = serde_json::from_str(
+                    &docx_layout::display_list::build_display_list_json(&output.to_string())
+                        .unwrap(),
+                )
+                .unwrap();
+                let lines: Vec<_> = display["pages"][0]["primitives"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|primitive| primitive["kind"] == "line")
+                    .collect();
+                assert_eq!(lines.len(), 4);
+                let y = fragments[0]["y"].as_f64().unwrap();
+                let baseline = y
+                    + line["ascent"].as_f64().unwrap()
+                    + ((actual
+                        - line["ascent"].as_f64().unwrap()
+                        - line["descent"].as_f64().unwrap())
+                        / 2.0)
+                        .max(0.0);
+                assert!(
+                    (lines[0]["y1"].as_f64().unwrap() - (baseline - height * 4.0 / 3.0)).abs()
+                        < 0.01
+                );
+                if mixed {
+                    assert!(lines[0]["x1"].as_f64().unwrap() > 110.0);
+                    assert_eq!(lines[0]["x1"], lines[0]["x2"]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn vml_horizontal_rule_preserves_run_font_and_follows_hard_breaks() {
+    let output = layout(
+        &format!(
+            r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0"/></w:pPr><w:r><w:t>Before</w:t><w:br/></w:r><w:r><w:rPr><w:sz w:val="72"/></w:rPr>{HORIZONTAL_RULE}</w:r></w:p>"#
+        ),
+        1,
+    );
+    let measured = &output["measured"][0];
+    assert_eq!(measured["block"]["runs"][2]["fontSize"], 36.0);
+    assert_eq!(measured["measure"]["lines"].as_array().unwrap().len(), 2);
+    let line = &measured["measure"]["lines"][1];
+    assert!(line["lineHeight"].as_f64().unwrap() > 48.0);
+    assert_eq!(line["ascent"], line["lineHeight"]);
+    let display: Value = serde_json::from_str(
+        &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+    )
+    .unwrap();
+    let lines: Vec<_> = display["pages"][0]["primitives"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|primitive| primitive["kind"] == "line")
+        .collect();
+    assert_eq!(lines.len(), 4);
+    assert_eq!(
+        lines[0]["x2"].as_f64().unwrap() - lines[0]["x1"].as_f64().unwrap(),
+        624.0
+    );
 }
 
 #[test]

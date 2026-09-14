@@ -550,6 +550,8 @@ pub struct ListNumPr {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ParagraphAttrs {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub horizontal_rules: Vec<HorizontalRule>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alignment: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -613,6 +615,19 @@ pub struct ParagraphAttrs {
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_del: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalRule {
+    pub width: Option<f64>,
+    pub width_percent: Option<f64>,
+    pub height: f64,
+    pub alignment: String,
+    pub no_shade: bool,
+    pub color: String,
+    pub pm_start: f64,
+    pub pm_end: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

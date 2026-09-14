@@ -609,6 +609,8 @@ function runContentToUnits(
       ];
     case 'drawing':
       return [embedUnit('image', imagePayload(content.image))];
+    case 'horizontalRule':
+      return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
       return [embedUnit('shape', shapePayload(content.shape))];
     case 'chart':

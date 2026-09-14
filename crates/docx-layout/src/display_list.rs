@@ -1799,6 +1799,8 @@ struct FieldRunIn {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ParaAttrsIn {
     #[serde(default)]
+    horizontal_rules: Vec<crate::types::HorizontalRule>,
+    #[serde(default)]
     alignment: Option<String>,
     /// Resolved paragraph spacing.
     #[serde(default)]
@@ -6111,6 +6113,30 @@ fn emit_line(
         };
         match item {
             LinePaintItem::Text(item) => {
+                if let Some(rule) = attrs.and_then(|attrs| {
+                    attrs.horizontal_rules.iter().find(|rule| {
+                        item.pm_start == Some(rule.pm_start as i64)
+                            && item.pm_end == Some(rule.pm_end as i64)
+                    })
+                }) {
+                    let standalone = segments.iter().all(|segment| {
+                        matches!(segment.run, RunIn::Text(_))
+                            && (segment.text.is_empty() || segment.text == "\u{200b}")
+                    });
+                    emit_horizontal_rule(
+                        prims,
+                        rule,
+                        block_ref,
+                        if standalone {
+                            geom.frag_x + geom.indent_left
+                        } else {
+                            pen_x
+                        },
+                        baseline,
+                        (geom.frag_width - geom.indent_left - geom.indent_right).max(0.0),
+                        standalone,
+                    );
+                }
                 let paint_width = item.width
                     + if item.exact_advance && item.text == " " {
                         word_space_extra
@@ -7230,6 +7256,62 @@ fn page_border_primitive(
         bottom: page_border_side(pb.bottom.as_ref()),
         left: page_border_side(pb.left.as_ref()),
     })
+}
+
+fn emit_horizontal_rule(
+    prims: &mut Vec<Primitive>,
+    rule: &crate::types::HorizontalRule,
+    block_ref: &BlockRef,
+    x: f64,
+    baseline: f64,
+    available_width: f64,
+    standalone: bool,
+) {
+    let width = rule
+        .width_percent
+        .map(|percent| available_width * percent / 100.0)
+        .or(rule.width)
+        .unwrap_or(if standalone { available_width } else { 0.0 })
+        .clamp(0.0, available_width);
+    let height = (rule.height - 8.0 / 15.0).max(0.0);
+    let shift = match rule.alignment.as_str() {
+        "left" => 0.0,
+        "right" => available_width - width,
+        _ => (available_width - width) / 2.0,
+    };
+    let x = x + shift + if rule.no_shade { 0.0 } else { 1.0 };
+    let y = baseline - if rule.no_shade { height } else { rule.height };
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = Some(rule.pm_start as i64);
+    attrs.doc_end = Some(rule.pm_end as i64);
+    if rule.no_shade {
+        prims.push(Primitive::Rect(RectPrimitive {
+            x: px(x),
+            y: px(y),
+            w: px(width),
+            h: px(height),
+            fill: rule.color.clone(),
+            attrs,
+        }));
+    } else {
+        for (x1, y1, x2, y2) in [
+            (x, y, x + width, y),
+            (x, y + height, x + width, y + height),
+            (x, y, x, y + height),
+            (x + width, y, x + width, y + height),
+        ] {
+            prims.push(Primitive::Line(LinePrimitive {
+                x1: px(x1),
+                y1: px(y1),
+                x2: px(x2),
+                y2: px(y2),
+                stroke_width: px(1.0),
+                color: "#000000".to_owned(),
+                attrs: attrs.clone(),
+                ..LinePrimitive::contract_defaults()
+            }));
+        }
+    }
 }
 
 /// paragraph borders as line primitives (role 'border'): top only when the

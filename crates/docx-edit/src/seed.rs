@@ -1318,6 +1318,13 @@ fn run_content_to_units(
             None,
             1,
         )],
+        "horizontalRule" => vec![embed_unit(
+            "horizontalRule",
+            map_from_value(json!({"rule": field(Some(content), "rule")})),
+            marks,
+            comment_id,
+            1,
+        )],
         "shape" => vec![embed_unit(
             "shape",
             shape_payload(

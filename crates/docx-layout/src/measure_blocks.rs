@@ -488,18 +488,75 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
-    if !content_width.is_finite() || content_width <= 0.0 {
-        return Ok(synthetic_paragraph_extent(paragraph, content_width));
+    let mut extent = if !content_width.is_finite() || content_width <= 0.0 {
+        synthetic_paragraph_extent(paragraph, content_width)
+    } else {
+        crate::typed_measure::measure_paragraph(
+            paragraph,
+            content_width,
+            config,
+            floating_zones,
+            cumulative_y,
+        )
+        .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
+    };
+    measure_horizontal_rules(paragraph, &mut extent);
+    Ok(extent)
+}
+
+fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
+    let Some(attrs) = paragraph
+        .attrs
+        .as_ref()
+        .filter(|attrs| !attrs.horizontal_rules.is_empty())
+    else {
+        return;
+    };
+    if attrs
+        .spacing
+        .as_ref()
+        .and_then(|spacing| spacing.line_rule.as_deref())
+        == Some("exact")
+    {
+        return;
     }
-    match crate::typed_measure::measure_paragraph(
-        paragraph,
-        content_width,
-        config,
-        floating_zones,
-        cumulative_y,
-    ) {
-        Some(extent) => Ok(extent),
-        None => Ok(synthetic_paragraph_extent(paragraph, content_width)),
+    for line in &mut extent.lines {
+        let mut height = 0.0_f64;
+        let mut standalone = true;
+        for (index, run) in paragraph
+            .runs
+            .iter()
+            .enumerate()
+            .take(line.tail_run + 1)
+            .skip(line.head_run)
+        {
+            if index == line.tail_run && line.tail_char == 0 {
+                continue;
+            }
+            if let Some(rule) = attrs
+                .horizontal_rules
+                .iter()
+                .find(|rule| run.pm_start() == Some(rule.pm_start))
+            {
+                height = height.max(rule.height + 1.0);
+            } else if !matches!(run, crate::types::Run::Text(text) if text.text.is_empty()) {
+                standalone = false;
+            }
+        }
+        if height <= 0.0 {
+            continue;
+        }
+        let original_height = line.line_height;
+        if standalone {
+            line.line_height = line.line_height.max(height);
+            line.ascent = line.line_height;
+            line.descent = 0.0;
+        } else if height > line.ascent {
+            let extra = height - line.ascent;
+            line.ascent += extra;
+            line.line_height += extra;
+        }
+        extent.total_height += line.line_height - original_height;
     }
 }
 
@@ -654,7 +711,9 @@ fn synthetic_paragraph_extent(paragraph: &ParagraphBlock, content_width: f64) ->
         match run {
             Run::Text(text) => {
                 font_px = font_px.max(synthetic_font_px(&text.fmt, default_font_size));
-                line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                if text.text != "\u{200b}" {
+                    line_width += synthetic_text_width(&text.text, &text.fmt, default_font_size);
+                }
             }
             Run::Tab(tab) => {
                 font_px = font_px.max(synthetic_font_px(&tab.fmt, default_font_size));

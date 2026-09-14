@@ -26,6 +26,75 @@ const MAX_SAFE_EMU: f64 = 1_000_000_000_000.0;
 pub type VmlStyle = IndexMap<String, String>;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HorizontalRule {
+    pub width: Option<f64>,
+    pub width_percent: Option<f64>,
+    pub height: f64,
+    pub alignment: String,
+    pub no_shade: bool,
+    pub color: String,
+    pub xml: String,
+}
+
+pub fn parse_horizontal_rule(picture: &XmlElement) -> Option<HorizontalRule> {
+    let mut shapes = Vec::new();
+    collect_vml_shapes(picture, 0, &mut shapes);
+    let [shape] = shapes.as_slice() else {
+        return None;
+    };
+    if shape.name != "v:rect"
+        || direct_image_data(shape).is_some()
+        || !matches!(shape.attribute(Some("o"), "hr"), Some("t" | "true" | "1"))
+    {
+        return None;
+    }
+    let style = parse_style_attr(shape.attribute(None, "style"));
+    let standard = matches!(
+        shape.attribute(Some("o"), "hrstd"),
+        Some("t" | "true" | "1")
+    );
+    let width = (!standard)
+        .then(|| css_length_to_px(style.get("width").map(String::as_str)))
+        .flatten()
+        .filter(|value| *value > 0.0)
+        .and_then(pixels_to_emu);
+    if width.is_some() {
+        return None;
+    }
+    let width_percent = shape
+        .attribute(Some("o"), "hrpct")
+        .and_then(js_number)
+        .filter(|value| *value > 0.0 && *value <= 1000.0)
+        .map(|value| value / 10.0);
+    if !standard && width_percent.is_some() {
+        return None;
+    }
+    let height = css_length_to_px(style.get("height").map(String::as_str))
+        .filter(|value| *value > 0.0)
+        .and_then(pixels_to_emu)
+        .unwrap_or(19_050.0);
+    Some(HorizontalRule {
+        width,
+        width_percent,
+        height,
+        alignment: match (standard, shape.attribute(Some("o"), "hralign")) {
+            (true, _) => "left",
+            (_, Some("left")) => "left",
+            (_, Some("right")) => "right",
+            _ => "center",
+        }
+        .to_owned(),
+        no_shade: matches!(
+            shape.attribute(Some("o"), "hrnoshade"),
+            Some("t" | "true" | "1")
+        ),
+        color: normalize_color(shape.attribute(None, "fillcolor")),
+        xml: picture.to_raw_inline_xml(),
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Watermark {
     Text {
@@ -787,6 +856,72 @@ mod tests {
             .root()
             .unwrap()
             .clone()
+    }
+
+    #[test]
+    fn horizontal_rule_retains_relative_width_and_raw_vml() {
+        let xml = r##"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o"><v:rect style="width:0pt;height:1.5pt" o:hr="t" o:hrstd="t" o:hralign="center" fillcolor="#A0A0A0" stroked="f"/></w:pict>"##;
+        let rule = parse_horizontal_rule(&root(xml)).unwrap();
+        assert_eq!(rule.width, None);
+        assert_eq!(rule.width_percent, None);
+        assert_eq!(rule.height, 19_050.0);
+        assert_eq!(rule.alignment, "left");
+        assert!(!rule.no_shade);
+        assert_eq!(rule.color, "#A0A0A0");
+        let run = crate::inline::Run {
+            node_type: crate::inline::RunType::Run,
+            formatting: None,
+            property_changes: None,
+            content: vec![crate::inline::RunContent::HorizontalRule {
+                rule: Box::new(rule.clone()),
+            }],
+        };
+        let mut context =
+            crate::serializer::SerializerContext::new(&crate::serializer::SerializerDeterminism {
+                seed: "0".repeat(64),
+                now: "2000-01-01T00:00:00.000Z".to_owned(),
+            })
+            .unwrap();
+        let saved = crate::serializer::serialize_run(&run, &mut context).unwrap();
+        assert_eq!(parse_horizontal_rule(&root(&saved)).unwrap().width, None);
+        assert!(saved.contains(&rule.xml));
+        assert_eq!(parse_horizontal_rule(&root(&rule.xml)), Some(rule));
+    }
+
+    #[test]
+    fn horizontal_rule_distinguishes_rectangles_and_authored_sizing() {
+        let xml = r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o"><v:rect style="width:72pt;height:3pt" o:hr="0"/></w:pict>"#;
+        assert!(parse_horizontal_rule(&root(xml)).is_none());
+        let xml = xml.replace(
+            "o:hr=\"0\"",
+            "o:hr=\"1\" o:hrpct=\"50\" o:hralign=\"right\" o:hrnoshade=\"true\"",
+        );
+        assert!(parse_horizontal_rule(&root(&xml)).is_none());
+        let xml = xml
+            .replace("width:72pt", "width:0pt")
+            .replace("o:hrpct=\"50\" ", "");
+        let rule = parse_horizontal_rule(&root(&xml)).unwrap();
+        assert_eq!(rule.width, None);
+        assert_eq!(rule.width_percent, None);
+        assert_eq!(rule.height, 38_100.0);
+        assert_eq!(rule.alignment, "right");
+        assert!(rule.no_shade);
+        let xml = xml.replace("o:hr=\"1\"", "o:hr=\"1\" o:hrstd=\"t\" o:hrpct=\"50\"");
+        assert_eq!(
+            parse_horizontal_rule(&root(&xml)).unwrap().width_percent,
+            Some(5.0)
+        );
+    }
+
+    #[test]
+    fn horizontal_rule_keeps_mixed_vml_picture_fallback() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:o="o" xmlns:r="r"><v:rect o:hr="t"/><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rId7"/></v:shape></w:pict>"#,
+        );
+        assert!(parse_horizontal_rule(&picture).is_none());
+        let image = parse_vml_image_content(&picture, None, None).unwrap();
+        assert_eq!(image.relationship_id, "rId7");
+        assert_eq!(image.size.width, 914_400.0);
     }
 
     #[test]

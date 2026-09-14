@@ -332,6 +332,10 @@ fn serialize_run_content(
         }
         RunContent::Drawing { image } => return serialize_drawing_content(image, context),
         RunContent::Shape { shape } => return serialize_shape_content(shape, context),
+        RunContent::HorizontalRule { rule } => {
+            validate_replayed_fragment(&rule.xml)?;
+            return Ok(rule.xml.clone());
+        }
         RunContent::CommentReference { id } => {
             writer.start_element("w:commentReference");
             if let Some(id) = id {
