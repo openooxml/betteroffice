@@ -34,30 +34,9 @@
           "toLine": 1,
           "width": 300,
           "x": 96
-        }
-      ],
-      "width": 816
-    },
-    {
-      "columnBounds": [
+        },
         {
-          "height": 864,
-          "width": 624,
-          "x": 96,
-          "y": 96
-        }
-      ],
-      "contentBounds": {
-        "height": 864,
-        "width": 624,
-        "x": 96,
-        "y": 96
-      },
-      "height": 1056,
-      "pageIndex": 1,
-      "primitives": [
-        {
-          "baselineY": 176,
+          "baselineY": 200,
           "blockId": 2,
           "color": "#000000",
           "docEnd": 43,
@@ -74,7 +53,7 @@
           "x": 96
         },
         {
-          "baselineY": 276,
+          "baselineY": 300,
           "blockId": 3,
           "color": "#000000",
           "docEnd": 55,
@@ -91,7 +70,7 @@
           "x": 96
         },
         {
-          "baselineY": 376,
+          "baselineY": 400,
           "blockId": 4,
           "color": "#000000",
           "docEnd": 67,
@@ -108,7 +87,7 @@
           "x": 96
         },
         {
-          "baselineY": 476,
+          "baselineY": 500,
           "blockId": 5,
           "color": "#000000",
           "docEnd": 79,
@@ -125,7 +104,7 @@
           "x": 96
         },
         {
-          "baselineY": 576,
+          "baselineY": 600,
           "blockId": 6,
           "color": "#000000",
           "docEnd": 91,
@@ -142,7 +121,7 @@
           "x": 96
         },
         {
-          "baselineY": 676,
+          "baselineY": 700,
           "blockId": 7,
           "color": "#000000",
           "docEnd": 103,
