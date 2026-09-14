@@ -1660,3 +1660,46 @@ fn shape_color_luminance_survives_import_and_reaches_display_paint() {
         assert_eq!(shape["fillPaint"]["color"], "#FFE699");
     }
 }
+
+#[test]
+fn shape_text_cached_theme_color_survives_import_without_a_second_shade() {
+    let text_box = r#"<wps:txbx><w:txbxContent><w:p><w:r><w:rPr><w:color w:val="833C0B" w:themeColor="accent2" w:themeShade="80"/></w:rPr><w:t>Cached theme text</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr/>"#;
+    for (fill, expected) in [
+        (
+            r#"<a:srgbClr val="204060"><a:shade val="50000"/></a:srgbClr>"#,
+            "#102030",
+        ),
+        (
+            r#"<a:schemeClr val="accent4"><a:tint val="40000"/></a:schemeClr>"#,
+            "#FFE699",
+        ),
+    ] {
+        let shape = SHAPE
+            .replace(r#"<a:srgbClr val="CCCCCC"/>"#, fill)
+            .replace("<wps:bodyPr/>", text_box);
+        let output = layout(&format!("<w:p>{shape}</w:p>"), 1);
+        let block = output["measured"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| &entry["block"])
+            .find(|block| block["kind"] == "shape")
+            .unwrap();
+        assert_eq!(block["innerText"][0]["runs"][0]["color"], "#833C0B");
+        assert_eq!(block["fill"]["color"], expected);
+        let display: Value = serde_json::from_str(
+            &docx_layout::display_list::build_display_list_json(&output.to_string()).unwrap(),
+        )
+        .unwrap();
+        let primitives = display["pages"][0]["primitives"].as_array().unwrap();
+        assert!(primitives.iter().any(|primitive| {
+            matches!(primitive["kind"].as_str(), Some("text" | "glyphRun"))
+                && primitive["color"] == "#833C0B"
+        }));
+        assert!(
+            primitives
+                .iter()
+                .all(|primitive| primitive["color"] != "#421E06")
+        );
+    }
+}

@@ -473,6 +473,15 @@ fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
         saturation_modulation: number_in(value, "saturationModulation"),
         ..ColorValue::default()
     };
+    if ["rgb", "themeColor"].iter().all(|key| {
+        value
+            .get(*key)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+    }) {
+        color.theme_tint = None;
+        color.theme_shade = None;
+    }
     if color == ColorValue::default() {
         return Some(base);
     }
@@ -969,6 +978,28 @@ mod tests {
             (json!({"rgb":"aabbcc","alpha":0.5}), Some("#aabbcc")),
         ] {
             assert_eq!(resolve_shape_color(Some(&color)).as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn shape_color_cached_theme_rgb_keeps_its_resolved_tint_and_shade() {
+        for (color, expected) in [
+            (
+                json!({"rgb":"833C0B","themeColor":"accent2","themeShade":"80"}),
+                "#833C0B",
+            ),
+            (
+                json!({"rgb":"B4C7E7","themeColor":"accent1","themeTint":"66"}),
+                "#B4C7E7",
+            ),
+            (json!({"rgb":"833C0B","themeShade":"80"}), "#421E06"),
+            (json!({"themeColor":"accent2","themeShade":"80"}), "#773F19"),
+            (
+                json!({"rgb":"833C0B","themeColor":"accent2","themeShade":"80","luminanceModulation":0.0,"luminanceOffset":1.0}),
+                "#FFFFFF",
+            ),
+        ] {
+            assert_eq!(resolve_shape_color(Some(&color)).as_deref(), Some(expected));
         }
     }
 
