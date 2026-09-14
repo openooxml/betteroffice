@@ -1,16 +1,13 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::Hasher;
 use std::time::Instant;
 
 use docx_edit::bridge::RenderEnv;
 use docx_edit::{EngineSession, seed_from_docx};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use yrs::{Map, ReadTxn, Transact};
 
 fn fingerprint(bytes: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    hasher.write(bytes);
-    format!("{:016x}", hasher.finish())
+    format!("{:x}", Sha256::digest(bytes))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -61,4 +58,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fingerprints_use_sha256() {
+        assert_eq!(
+            super::fingerprint(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 }

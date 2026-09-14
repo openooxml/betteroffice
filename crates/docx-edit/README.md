@@ -29,6 +29,7 @@ The first JSON line is a warm-up; the remaining lines are measured samples.
 stories without font measurement or pagination. File reads, state fingerprints,
 and block fingerprints are outside the timers. Compare the same build profile on
 an otherwise idle host, and use an external process deadline for large files.
-The fingerprints let before/after runs check that seeding and lowering agree.
+The SHA-256 fingerprints let before/after runs check that seeding and lowering
+agree across Rust toolchain versions.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

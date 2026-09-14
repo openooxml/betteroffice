@@ -40,3 +40,4 @@ js-sys = { version = "0.3", optional = true }
 
 [dev-dependencies]
 ooxml-opc.workspace = true
+sha2 = "0.10"
