@@ -387,6 +387,7 @@ fn layout_table_with_position(
 /// past the table plus its `w:bottomFromText` distance, since no line could
 /// wrap beside it. In a single column, text-anchored full-width tables that
 /// cross the bottom boundary use row fragmentation and retain their X position.
+/// Page-relative full-width tables advance when inline collisions cannot reflow.
 pub fn layout_floating_table(
     block: &TableBlock,
     measure: &TableExtent,
@@ -487,6 +488,35 @@ pub fn layout_floating_table(
     let left_space = exclusion_left - column_x;
     let right_space = column_x + column_width - exclusion_right;
     let full_width = left_space < 24.0 && right_space < 24.0;
+    let bottom = y + measure.total_height;
+    if full_width
+        && vertical == "page"
+        && floating.tblp_y.is_some_and(f64::is_finite)
+        && (content_width - column_width).abs() < f64::EPSILON
+        && y >= state.content_top
+        && bottom <= state.content_limit
+        && page.fragments.iter().any(|fragment| {
+            let Fragment::Table(previous) = fragment else {
+                return false;
+            };
+            previous.is_floating != Some(true)
+                && previous.carried_from_prev == Some(false)
+                && previous.carried_to_next == Some(false)
+                && previous.row_start == 0
+                && previous.clip_top.is_none()
+                && previous.clip_bottom.is_none()
+                && x < previous.x + previous.width
+                && x + measure.total_width > previous.x
+                && y < previous.y + previous.height
+                && bottom > previous.y
+                && bottom + finite(floating.bottom_from_text).max(0.0) + previous.height
+                    > state.content_limit
+        })
+    {
+        paginator.force_page_break();
+        let next_content_width = paginator.get_content_width();
+        return layout_floating_table(block, measure, paginator, next_content_width);
+    }
     if full_width
         && (content_width - column_width).abs() < f64::EPSILON
         && vertical == "text"
