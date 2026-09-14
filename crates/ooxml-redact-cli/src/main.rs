@@ -2,7 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use ooxml_redact_cli::{
-    DEFAULT_UPLOAD_URL, MAX_FILE_BYTES, redact_local, report_line, upload_redacted,
+    DEFAULT_UPLOAD_URL, MAX_FILE_BYTES, RedactionOptions, redact_local_with_options, report_line,
+    upload_redacted,
 };
 
 const USAGE: &str = "\
@@ -13,6 +14,7 @@ usage:
 
 options:
   -o, --output <path>    output path (default: <input>.redacted.<ext>)
+      --random-chars     replace text with independent random letters, preserving Japanese scripts
       --share            upload only the locally redacted bytes
       --endpoint <url>   upload endpoint (default: BETTEROFFICE_REDACT_UPLOAD_URL or BetterOffice)
   -h, --help             show this help
@@ -54,7 +56,12 @@ fn execute(options: Options) -> Result<(), String> {
     }
     let input = std::fs::read(&options.input)
         .map_err(|error| format!("reading {}: {error}", options.input.display()))?;
-    let redacted = redact_local(&input)?;
+    let redacted = redact_local_with_options(
+        &input,
+        &RedactionOptions {
+            random_characters: options.random_chars,
+        },
+    )?;
     println!("{}", report_line(redacted.report()));
 
     let output = options
@@ -91,6 +98,7 @@ struct Options {
     output: Option<PathBuf>,
     share: bool,
     endpoint: Option<String>,
+    random_chars: bool,
 }
 
 enum Command {
@@ -104,6 +112,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
     let mut output = None;
     let mut share = false;
     let mut endpoint = None;
+    let mut random_chars = false;
     let mut index = 0;
     while index < args.len() {
         match args[index].as_str() {
@@ -115,6 +124,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
                 ));
             }
             "--share" => share = true,
+            "--random-chars" => random_chars = true,
             "--endpoint" => {
                 index += 1;
                 endpoint = Some(args.get(index).ok_or("--endpoint needs a URL")?.to_owned());
@@ -137,6 +147,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Command, String>
         output,
         share,
         endpoint,
+        random_chars,
     }))
 }
 
@@ -182,7 +193,19 @@ mod tests {
         assert_eq!(options.input, PathBuf::from("secret.docx"));
         assert_eq!(options.output, Some(PathBuf::from("safe.docx")));
         assert!(options.share);
+        assert!(!options.random_chars);
         assert_eq!(options.endpoint.as_deref(), Some("http://127.0.0.1/upload"));
+    }
+
+    #[test]
+    fn random_characters_are_opt_in_and_do_not_enable_uploads() {
+        let Command::Run(options) =
+            parse_args(["japanese.docx", "--random-chars"].map(str::to_owned)).unwrap()
+        else {
+            panic!("expected run command");
+        };
+        assert!(options.random_chars);
+        assert!(!options.share);
     }
 
     #[test]

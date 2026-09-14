@@ -1,3 +1,4 @@
+pub use ooxml_redact::RedactionOptions;
 use ooxml_redact::{Format, RedactionReport};
 use serde::Deserialize;
 
@@ -30,9 +31,17 @@ pub struct ShareResponse {
 }
 
 pub fn redact_local(input: &[u8]) -> Result<RedactedFile, String> {
+    redact_local_with_options(input, &RedactionOptions::default())
+}
+
+pub fn redact_local_with_options(
+    input: &[u8],
+    options: &RedactionOptions,
+) -> Result<RedactedFile, String> {
     enforce_size(input.len(), "input")?;
     let (bytes, report) =
-        ooxml_redact::redact_with_report(input, Format::Auto).map_err(|error| error.to_string())?;
+        ooxml_redact::redact_with_report_and_options(input, Format::Auto, options)
+            .map_err(|error| error.to_string())?;
     enforce_size(bytes.len(), "redacted output")?;
     Ok(RedactedFile { bytes, report })
 }
@@ -97,6 +106,34 @@ mod tests {
     use super::*;
 
     const SECRET: &str = "CLI_SECRET_CONTENT";
+
+    #[test]
+    fn local_random_mode_uses_the_options_without_changing_the_default() {
+        let input = fixture();
+        let default = redact_local(&input).unwrap();
+        let explicit_default =
+            redact_local_with_options(&input, &RedactionOptions::default()).unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(default.bytes()).unwrap(),
+            ooxml_opc::unzip_parts(explicit_default.bytes()).unwrap()
+        );
+        let random = redact_local_with_options(
+            &input,
+            &RedactionOptions {
+                random_characters: true,
+            },
+        )
+        .unwrap();
+        let parts = ooxml_opc::unzip_parts(random.bytes()).unwrap();
+        let document = parts
+            .iter()
+            .find(|(path, _)| path == "word/document.xml")
+            .unwrap();
+        let text = String::from_utf8_lossy(&document.1);
+        assert!(!text.contains(SECRET));
+        assert!(!text.contains(&"x".repeat(SECRET.len())));
+        assert_eq!(random.report().format, Format::Docx);
+    }
 
     #[test]
     fn local_redaction_removes_secret_before_upload() {

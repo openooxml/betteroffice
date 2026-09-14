@@ -254,9 +254,11 @@ dependencies = [
  "betteroffice-opc",
  "betteroffice-pptx-parse",
  "betteroffice-xlsx-parse",
+ "getrandom 0.3.4",
  "image",
  "quick-xml",
  "thiserror",
+ "unicode-script",
 ]
 
 [[package]]

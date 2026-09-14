@@ -39,6 +39,7 @@ let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
+const pendingOffscreenPageIds = new Set<string>();
 let activeOffscreenPageIds = new Set<string>();
 let offscreenDpr = 1;
 let offscreenZoom = 1;
@@ -269,6 +270,7 @@ function destroySession(): void {
   glyphCache = null;
   offscreenCanvases.clear();
   offscreenBackBuffers.clear();
+  pendingOffscreenPageIds.clear();
   activeOffscreenPageIds.clear();
   caretPaintRect = null;
   paintedCaretPageId = null;
@@ -296,6 +298,7 @@ async function replyFrame(
   paintCaret = false
 ): Promise<void> {
   retainedFrame = applyFrameDeltaOwned(retainedFrame, decodeFrameDelta(bytes));
+  for (const pageId of retainedFrame.damagedPageIds) pendingOffscreenPageIds.add(pageId.toString());
   // The decoder's primitive-id arrays are zero-copy views into `bytes`. The
   // FrameDelta buffer is transferred to the main thread below, so retain only
   // these compact identity arrays in worker-owned memory before detaching it.
@@ -319,6 +322,9 @@ async function replyFrame(
   // elements unmounted main-side); off-window pages are only zeroed, so this
   // is the sole place a live document's canvas reference is dropped.
   const livePageIds = new Set(retainedFrame.pages.map((page) => page.pageId.toString()));
+  for (const pageId of pendingOffscreenPageIds) {
+    if (!livePageIds.has(pageId)) pendingOffscreenPageIds.delete(pageId);
+  }
   for (const pageId of offscreenCanvases.keys()) {
     if (!livePageIds.has(pageId)) {
       offscreenCanvases.delete(pageId);
@@ -356,6 +362,10 @@ async function replyFrame(
 async function replayOffscreen(
   force: boolean | Set<string>
 ): Promise<{ replayedPages: number; caretPainted: boolean }> {
+  const forcedPageIds = force === true ? activeOffscreenPageIds : force;
+  if (forcedPageIds) {
+    for (const pageId of forcedPageIds) pendingOffscreenPageIds.add(pageId);
+  }
   if (!retainedFrame || offscreenCanvases.size === 0) {
     return { replayedPages: 0, caretPainted: false };
   }
@@ -364,8 +374,6 @@ async function replayOffscreen(
       provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
     });
   }
-  const forceAll = force === true;
-  const forcedPageIds = force instanceof Set ? force : null;
   const caretTarget =
     caretPaintRect && activeOffscreenPageIds.has(caretPaintRect.pageId) ? caretPaintRect : null;
   const caretDevice = caretTarget
@@ -388,10 +396,7 @@ async function replayOffscreen(
     // Off-window pages hold no pixels; they re-raster through the forced set
     // when they re-enter the window.
     if (!activeOffscreenPageIds.has(pageIdString)) continue;
-    const damaged =
-      forceAll ||
-      forcedPageIds?.has(pageIdString) === true ||
-      retainedFrame.damagedPageIds.has(retainedPage.pageId);
+    const damaged = pendingOffscreenPageIds.has(pageIdString);
     // Beyond damage, a page presents only for caret compositing: the page
     // gaining the painted line and the page losing it.
     const gainsCaret =
@@ -424,7 +429,10 @@ async function replayOffscreen(
       ).then(() => ({ canvas, buffer: resolvedBuffer, pageId }))
     );
   }
-  const prepared = await Promise.all(preparations);
+  const prepared = await Promise.all(preparations).catch(async (error) => {
+    await Promise.allSettled(preparations);
+    throw error;
+  });
   let caretPainted =
     caretTarget !== null && paintedCaretPageId === caretTarget.pageId && paintedCaretKey === caretKey;
   // Present only after the entire damaged frame is ready. This loop is
@@ -448,6 +456,7 @@ async function replayOffscreen(
         paintedCaretKey = null;
       }
     }
+    pendingOffscreenPageIds.delete(pageId);
   }
   return { replayedPages: prepared.length, caretPainted };
 }

@@ -34,6 +34,332 @@ const PPTX_SECRETS: &[&str] = &[
 ];
 
 #[test]
+fn application_versions_use_a_fixed_valid_value_in_both_masking_modes() {
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",
+                "http://purl.oclc.org/ooxml/officeDocument/extendedProperties",
+            ] {
+                for content in [
+                    "16.0000",
+                    "<![CDATA[16.0000]]>",
+                    "&#49;6.<!-- private -->0000",
+                    "",
+                ] {
+                    let source = format!(
+                        r#"<ep:Properties xmlns:ep="{namespace}" xmlns:other="urn:foreign"><ep:AppVersion>{content}</ep:AppVersion><ep:AppVersion/><other:AppVersion>16.0000</other:AppVersion><ep:Company>PRIVATE_COMPANY</ep:Company><ep:Pages>7</ep:Pages></ep:Properties>"#
+                    );
+                    let output = xml::redact_xml_with_styles(
+                        format,
+                        "docProps/app.xml",
+                        source.as_bytes(),
+                        &mut RedactionReport::default(),
+                        &StyleMap::default(),
+                        &mut TextMasker::new(&RedactionOptions { random_characters }),
+                    )
+                    .unwrap();
+                    let output = String::from_utf8(output).unwrap();
+                    assert_eq!(
+                        output
+                            .matches("<ep:AppVersion>0.0000</ep:AppVersion>")
+                            .count(),
+                        2
+                    );
+                    assert!(!output.contains("<other:AppVersion>0.0000"));
+                    assert!(!output.contains("16.0000"));
+                    assert!(!output.contains("PRIVATE_COMPANY"));
+                    assert!(!output.contains("private"));
+                    assert!(output.contains("<ep:Pages>7</ep:Pages>"));
+                    assert!(output.contains(&format!("xmlns:ep=\"{namespace}\"")));
+                    assert!(output.contains("xmlns:other=\"urn:foreign\""));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn fixed_application_versions_do_not_skip_xml_security_validation() {
+    let input = br#"<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"><AppVersion><!DOCTYPE private>16.0000</AppVersion></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/app.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn typed_custom_numbers_use_valid_neutral_values() {
+    let cases = [
+        ("i1", "-128", "127"),
+        ("i2", "-32768", "32767"),
+        ("i4", "-2147483648", "2147483647"),
+        ("i8", "-9223372036854775808", "9223372036854775807"),
+        ("int", "-2147483648", "2147483647"),
+        ("ui1", "0", "255"),
+        ("ui2", "0", "65535"),
+        ("ui4", "0", "4294967295"),
+        ("ui8", "0", "18446744073709551615"),
+        ("uint", "0", "4294967295"),
+        ("r4", "-1.17549435E-38", "3.4028235E38"),
+        ("r8", "-2.2250738585072014E-308", "1.7976931348623157E308"),
+        ("decimal", "-12345678901234567890.123456789", "0.123456789"),
+    ];
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        for random_characters in [false, true] {
+            for namespace in [
+                "http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",
+                "http://purl.oclc.org/ooxml/officeDocument/docPropsVTypes",
+            ] {
+                for (kind, minimum, maximum) in cases {
+                    for value in [minimum, maximum, "&#49;<![CDATA[23]]>", ""] {
+                        let source = format!(
+                            r#"<p:Properties xmlns:p="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:t="{namespace}" xmlns:other="urn:foreign"><p:property name="PRIVATE_NUMBER" pid="2"><t:{kind}>{value}</t:{kind}></p:property><p:property name="PRIVATE_EMPTY" pid="3"><t:{kind}/></p:property><other:i4>123</other:i4><p:property name="PRIVATE_TEXT" pid="4"><t:lpwstr>PRIVATE_VALUE</t:lpwstr></p:property></p:Properties>"#
+                        );
+                        let output = xml::redact_xml_with_styles(
+                            format,
+                            "docprops/custom.xml",
+                            source.as_bytes(),
+                            &mut RedactionReport::default(),
+                            &StyleMap::default(),
+                            &mut TextMasker::new(&RedactionOptions { random_characters }),
+                        )
+                        .unwrap();
+                        let output = String::from_utf8(output).unwrap();
+                        assert_eq!(
+                            output.matches(&format!("<t:{kind}>0</t:{kind}>")).count(),
+                            2
+                        );
+                        assert!(output.contains("<other:i4>888</other:i4>"));
+                        assert!(output.contains(&format!("xmlns:t=\"{namespace}\"")));
+                        assert!(!output.contains("PRIVATE_"));
+                        assert!(output.contains("name=\"RedactedProperty3\" pid=\"4\""));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn typed_custom_number_replacement_is_scoped_and_rejects_dtds() {
+    let input = br#"<root xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4>123</vt:i4></root>"#;
+    for path in ["word/document.xml", "docProps/app.xml"] {
+        assert_eq!(
+            xml::redact_xml(Format::Docx, path, input, &mut RedactionReport::default()).unwrap(),
+            input
+        );
+    }
+    let input = br#"<Properties xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes"><vt:i4><!DOCTYPE private>123</vt:i4></Properties>"#;
+    assert!(
+        xml::redact_xml(
+            Format::Docx,
+            "docprops/custom.xml",
+            input,
+            &mut RedactionReport::default()
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn random_characters_preserve_each_office_format() {
+    let options = RedactionOptions {
+        random_characters: true,
+    };
+    for (format, source, secrets, media, text_part) in [
+        (
+            Format::Docx,
+            docx_fixture(),
+            DOCX_SECRETS,
+            "word/media/image1.png",
+            "word/document.xml",
+        ),
+        (
+            Format::Xlsx,
+            xlsx_fixture(),
+            XLSX_SECRETS,
+            "xl/media/image1.png",
+            "xl/sharedStrings.xml",
+        ),
+        (
+            Format::Pptx,
+            pptx_fixture(),
+            PPTX_SECRETS,
+            "ppt/media/image1.png",
+            "ppt/slides/slide1.xml",
+        ),
+    ] {
+        let (output, report) = redact_with_report_and_options(&source, format, &options).unwrap();
+        assert_eq!(report.format, format);
+        assert_fixture_properties(&source, &output, secrets, media);
+        assert_text_lengths(&source, &output, text_part, "t");
+        let output_parts = ooxml_opc::unzip_parts(&output).unwrap();
+        match format {
+            Format::Docx => {
+                parse_docx_s9_wire(&output, S9ParseOptions::default()).unwrap();
+            }
+            Format::Xlsx => {
+                xlsx_parse::parse_workbook(&output_parts).unwrap();
+            }
+            Format::Pptx => {
+                pptx_parse::parse_pptx(&output).unwrap();
+            }
+            Format::Auto => unreachable!(),
+        }
+        let default = redact(&source, format).unwrap();
+        let explicit_default = redact_with_options(&source, format, &Default::default()).unwrap();
+        assert_eq!(
+            ooxml_opc::unzip_parts(&default).unwrap(),
+            ooxml_opc::unzip_parts(&explicit_default).unwrap()
+        );
+        let again = redact_with_options(&source, format, &options).unwrap();
+        assert_ne!(
+            part(&output_parts, text_part),
+            part(&ooxml_opc::unzip_parts(&again).unwrap(), text_part)
+        );
+    }
+}
+
+#[test]
+fn random_characters_redact_japanese_text_cdata_and_entities_without_changing_namespaces() {
+    use unicode_script::{Script, UnicodeScript};
+    for (format, path, namespace) in [
+        (
+            Format::Docx,
+            "word/document.xml",
+            "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+        ),
+        (
+            Format::Pptx,
+            "ppt/slides/slide1.xml",
+            "http://schemas.openxmlformats.org/drawingml/2006/main",
+        ),
+        (
+            Format::Xlsx,
+            "xl/sharedStrings.xml",
+            "http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+        ),
+    ] {
+        let source = format!(
+            r#"<alias:root xmlns:alias="{namespace}" xmlns:kept="urn:private:namespace"><alias:t xml:space="preserve">日本語 ひらがな カタカナ</alias:t><alias:t><![CDATA[秘密。123]]></alias:t><alias:t>&#x65E5;&#x3042;&#x30A2;&#32;&amp;</alias:t></alias:root>"#
+        );
+        let output = xml::redact_xml_with_styles(
+            format,
+            path,
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        let xml = String::from_utf8(output).unwrap();
+        assert!(xml.contains(&format!("xmlns:alias=\"{namespace}\"")));
+        assert!(xml.contains("xmlns:kept=\"urn:private:namespace\""));
+        assert!(xml.contains("xml:space=\"preserve\""));
+        let mut reader = Reader::from_str(&xml);
+        let mut values = Vec::new();
+        loop {
+            match reader.read_event().unwrap() {
+                Event::Text(text) => values.push(text.decode().unwrap().into_owned()),
+                Event::CData(text) => values.push(text.decode().unwrap().into_owned()),
+                Event::Eof => break,
+                _ => {}
+            }
+        }
+        let first = &values[0];
+        for (source, output) in "日本語 ひらがな カタカナ".chars().zip(first.chars()) {
+            if source.is_whitespace() {
+                assert_eq!(output, source);
+            } else {
+                assert_eq!(output.script(), source.script());
+            }
+        }
+        assert!(
+            values[1]
+                .chars()
+                .all(|character| character.script() == Script::Han)
+        );
+        let entities: String = values[2..].concat();
+        let chars: Vec<_> = entities.chars().collect();
+        assert_eq!(chars.len(), 5);
+        assert_eq!(chars[0].script(), Script::Han);
+        assert_eq!(chars[1].script(), Script::Hiragana);
+        assert_eq!(chars[2].script(), Script::Katakana);
+        assert_eq!(chars[3], ' ');
+        assert!(chars[4].is_ascii_alphabetic());
+    }
+}
+
+#[test]
+fn random_characters_keep_schema_numeric_date_and_formula_masks() {
+    let source = r#"<root><i4>123</i4><r8>-1.25e2</r8><bool>true</bool><filetime>2026-09-14T00:00:00Z</filetime><lpwstr>PRIVATE_LABEL</lpwstr></root>"#;
+    for format in [Format::Docx, Format::Xlsx, Format::Pptx] {
+        let output = xml::redact_xml_with_styles(
+            format,
+            "docprops/custom.xml",
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        for expected in [
+            "<i4>888</i4>",
+            "<r8>-8.88e8</r8>",
+            "<bool>false</bool>",
+            "<filetime>1970-01-01T00:00:00Z</filetime>",
+        ] {
+            assert!(text.contains(expected));
+        }
+        assert!(!text.contains("PRIVATE_LABEL"));
+    }
+    for (format, path, source, expected) in [
+        (
+            Format::Docx,
+            "word/document.xml",
+            "<root><instrText>MERGEFIELD PRIVATE</instrText></root>",
+            "<instrText>0</instrText>",
+        ),
+        (
+            Format::Xlsx,
+            "xl/worksheets/sheet1.xml",
+            "<root><c><f>PRIVATE!A1</f><v>123</v></c></root>",
+            "<f>0</f><v>888</v>",
+        ),
+        (
+            Format::Pptx,
+            "ppt/charts/chart1.xml",
+            "<root><f>PRIVATE!A1</f><v>123</v></root>",
+            "<f>0</f><v>888</v>",
+        ),
+    ] {
+        let output = xml::redact_xml_with_styles(
+            format,
+            path,
+            source.as_bytes(),
+            &mut RedactionReport::default(),
+            &StyleMap::default(),
+            &mut TextMasker::new(&RedactionOptions {
+                random_characters: true,
+            }),
+        )
+        .unwrap();
+        assert!(String::from_utf8(output).unwrap().contains(expected));
+    }
+}
+
+#[test]
 fn custom_property_placeholders_are_unique_and_preserve_types() {
     let input = br#"<cp:Properties xmlns:cp="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties" xmlns:vt="http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes" xmlns:other="urn:other"><other:property name="Secret"/><cp:property name="ClientA" pid="2" fmtid="{D5CDD505-2E9C-101B-9397-08002B2CF9AE}"><vt:lpwstr>Confidential</vt:lpwstr></cp:property><cp:property name="ClientB" pid="3"><vt:i4>123</vt:i4></cp:property><cp:property name="ClientA" pid="4"><vt:bool>true</vt:bool></cp:property><cp:property name="RedactedProperty1" pid="5"/></cp:Properties>"#;
     for format in [Format::Docx, Format::Pptx, Format::Xlsx] {
@@ -55,7 +381,7 @@ fn custom_property_placeholders_are_unique_and_preserve_types() {
         assert!(!text.contains("Client"));
         assert!(!text.contains("Confidential"));
         assert!(text.contains("pid=\"2\" fmtid=\"{D5CDD505-2E9C-101B-9397-08002B2CF9AE}\""));
-        assert!(text.contains("<vt:i4>888</vt:i4>"));
+        assert!(text.contains("<vt:i4>0</vt:i4>"));
         assert!(text.contains("<vt:bool>false</vt:bool>"));
     }
 }

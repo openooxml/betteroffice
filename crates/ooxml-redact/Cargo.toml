@@ -12,10 +12,12 @@ description = "Structure-preserving redaction for DOCX, XLSX, and PPTX packages.
 name = "ooxml_redact"
 
 [dependencies]
+getrandom = "0.3"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "bmp", "tiff"] }
 ooxml-opc.workspace = true
 quick-xml = "0.41"
 thiserror = "2"
+unicode-script = "0.5"
 
 [dev-dependencies]
 docx-parse.workspace = true

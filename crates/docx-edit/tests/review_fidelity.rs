@@ -75,6 +75,29 @@ fn universal_section_measures_match_canonical_twip_layout() {
 }
 
 #[test]
+fn literal_text_line_feeds_keep_authoritative_wrapping_and_pagination() {
+    let text = format!(
+        "Question\n\u{a0}\n{}",
+        "Long answers must wrap within the page and continue onto later pages. ".repeat(75)
+    );
+    let body = paragraph(&text);
+    let output = layout(&body, 1);
+    let normalized = layout(&body.replace('\n', " "), 1);
+    let lines = output["measured"][0]["measure"]["lines"]
+        .as_array()
+        .unwrap();
+    assert!(lines.len() > 1);
+    for line in lines {
+        assert_ne!(line["syntheticFallback"], true);
+        assert!(line["clusterAdvances"].as_array().is_some());
+        assert!(line["width"].as_f64().unwrap() <= 625.0);
+    }
+    assert!(output["layout"]["pages"].as_array().unwrap().len() > 1);
+    assert_eq!(output["measured"], normalized["measured"]);
+    assert_eq!(output["layout"], normalized["layout"]);
+}
+
+#[test]
 fn semantic_toc_styles_preserve_direct_and_custom_hyperlink_formatting() {
     let fixture: Value = serde_json::from_str(include_str!("fixtures/toc_styles.json")).unwrap();
     let body = fixture["paragraphStyles"]
