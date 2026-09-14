@@ -111,6 +111,8 @@ api.oraclePage = async (index: number) => {
       context.fillRect(0, 0, output.width, output.height);
       context.drawImage(canvas, 0, 0);
       const value = output.toDataURL('image/png');
+      output.width = 0;
+      output.height = 0;
       equal = value === previous ? equal + 1 : 0;
       if (equal >= 2) {
         pageExtents[index] = extent;
