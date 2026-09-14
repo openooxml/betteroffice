@@ -1907,6 +1907,12 @@ fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
         (json!({ "horzAnchor": "text", "tblpX": 20.0 }), 77.0),
         (json!({ "tblpX": 0.0 }), 57.0),
         (json!({ "horzAnchor": "text", "tblpX": -5.0 }), 52.0),
+        (json!({ "tblpXSpec": "left", "tblpX": 30.0 }), 57.0),
+        (json!({ "tblpXSpec": "center", "tblpX": 30.0 }), 110.0),
+        (json!({ "tblpXSpec": "right" }), 163.0),
+        (json!({ "horzAnchor": "page", "tblpXSpec": "center" }), 67.0),
+        (json!({ "tblpXSpec": "inside" }), 67.0),
+        (json!({ "tblpXSpec": "outside" }), 67.0),
         (serde_json::Value::Null, 67.0),
     ] {
         let nested_measure = json!({ "kind": "table", "columnWidths": [80.0], "totalHeight": 40.0,

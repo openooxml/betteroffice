@@ -1928,36 +1928,7 @@ pub(crate) struct TableBlockIn {
     pub(crate) floating: Option<FloatingTablePositionIn>,
 }
 
-#[derive(Deserialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct FloatingTablePositionIn {
-    #[serde(default)]
-    pub(crate) horz_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_x: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_x_spec: Option<String>,
-    #[serde(default)]
-    pub(crate) vert_anchor: Option<String>,
-    #[serde(default)]
-    pub(crate) tblp_y: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) tblp_y_spec: Option<String>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) top_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) right_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) bottom_from_text: Option<f64>,
-    #[serde(default)]
-    #[allow(dead_code)]
-    pub(crate) left_from_text: Option<f64>,
-}
+pub(crate) type FloatingTablePositionIn = crate::types::FloatingTablePosition;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -8419,22 +8390,13 @@ pub(crate) fn table_total_width(measure: &TableExtentIn) -> f64 {
 }
 
 fn nested_table_x_offset(block: &TableBlockIn, measure: &TableExtentIn, content_width: f64) -> f64 {
-    if let Some(floating) = &block.floating
-        && matches!(
-            floating.horz_anchor.as_deref(),
-            None | Some("margin" | "text")
-        )
-        && floating.tblp_x_spec.is_none()
-        && let Some(offset) = floating.tblp_x.filter(|offset| offset.is_finite())
-    {
-        return offset;
-    }
-    let table_width = table_total_width(measure);
-    match block.justification.as_deref() {
-        Some("center") => ((content_width - table_width) / 2.0).max(0.0),
-        Some("right") => (content_width - table_width).max(0.0),
-        _ => block.indent.unwrap_or(0.0).max(0.0),
-    }
+    crate::cell_layout::nested_table_horizontal_offset(
+        block.floating.as_ref(),
+        block.justification.as_deref(),
+        block.indent,
+        table_total_width(measure),
+        content_width,
+    )
 }
 
 fn clip_number(value: &Option<Number>) -> f64 {
@@ -9062,6 +9024,7 @@ fn emit_cell_content(
     let mut block_tops: Vec<f64> = Vec::with_capacity(cell.blocks.len());
     let mut stack_cursor = 0.0_f64;
     let mut prev_after = 0.0_f64;
+    let mut float_bottom = 0.0_f64;
     for (i, blk) in cell.blocks.iter().enumerate() {
         match (blk, cell_measure.blocks.get(i)) {
             (BlockIn::Paragraph(pb), Some(MeasureIn::Paragraph(pm))) => {
@@ -9077,10 +9040,17 @@ fn emit_cell_content(
                     .sum::<f64>();
                 prev_after = after;
             }
-            (BlockIn::Table(_), Some(MeasureIn::Table(tm))) => {
+            (BlockIn::Table(table), Some(MeasureIn::Table(tm))) => {
                 stack_cursor += prev_after;
-                block_tops.push(stack_cursor);
-                stack_cursor += tm.total_height;
+                if let Some(offset) =
+                    crate::cell_layout::nested_table_float_offset(table.floating.as_ref())
+                {
+                    block_tops.push(stack_cursor + offset);
+                    float_bottom = float_bottom.max(stack_cursor + offset + tm.total_height);
+                } else {
+                    block_tops.push(stack_cursor);
+                    stack_cursor += tm.total_height;
+                }
                 prev_after = 0.0;
             }
             (BlockIn::Image(_), Some(MeasureIn::Image(image))) => {
@@ -9106,7 +9076,7 @@ fn emit_cell_content(
         }
     }
     // a trailing spacing.after becomes the content box's padding-bottom
-    let content_height = stack_cursor + prev_after;
+    let content_height = (stack_cursor + prev_after).max(float_bottom);
 
     // Content that fills or overflows the cell remains top-aligned.
     let v_offset = crate::cell_layout::cell_vertical_offset(
