@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { GlyphCache, RetainedFrame } from '@betteroffice/docx/layout/render';
+import { applyFrameDeltaOwned } from '../../../../docx/src/layout/render/frameDelta';
 import {
   CanvasReplayState,
   presentCanvasReplay,
@@ -107,7 +108,79 @@ describe('CanvasReplayState', () => {
     expect(state.prepare(canvas(), 1n, environments.at(-1)!)).not.toBeNull();
   });
 
-  test('skipped frames and document changes cannot hide unobserved damage', () => {
+  test('consecutive edits preserve untouched pages when the document epoch advances', () => {
+    const state = new CanvasReplayState();
+    const initial = frame(1);
+    const surfaces = ids.map(canvas);
+    state.updateFrame(initial);
+    for (const [index, surface] of surfaces.entries()) {
+      state.didPresent(state.prepare(surface, ids[index], environment)!);
+    }
+    const changed = initial.pages[0];
+    const edited = applyFrameDeltaOwned(initial, {
+      protocolVersion: 1,
+      full: false,
+      docEpoch: 3,
+      layoutEpoch: 2,
+      frameEpoch: 2,
+      baseFrameEpoch: 1,
+      pageCount: ids.length,
+      operations: [
+        {
+          ...changed,
+          kind: 'upsert',
+          fingerprint: 2n,
+          page: { ...changed.page, background: '#ffeeee' },
+        },
+      ],
+      bytes: new Uint8Array(),
+    });
+    expect([...edited.damagedPageIds]).toEqual([1n]);
+    expect(edited.pages[1]).toBe(initial.pages[1]);
+    state.updateFrame(edited);
+    const rastered = surfaces.flatMap((surface, index) => {
+      const presentation = state.prepare(surface, ids[index], environment);
+      if (!presentation) return [];
+      state.didPresent(presentation);
+      return [ids[index]];
+    });
+    expect(rastered).toEqual([1n]);
+  });
+
+  test('full document replacement repaints reused page IDs even with consecutive epochs', () => {
+    const state = new CanvasReplayState();
+    const initial = frame(1);
+    const surfaces = ids.map(canvas);
+    state.updateFrame(initial);
+    for (const [index, surface] of surfaces.entries()) {
+      state.didPresent(state.prepare(surface, ids[index], environment)!);
+    }
+    const replacement = applyFrameDeltaOwned(null, {
+      protocolVersion: 1,
+      full: true,
+      docEpoch: 0,
+      layoutEpoch: 1,
+      frameEpoch: 2,
+      baseFrameEpoch: 0,
+      pageCount: ids.length,
+      operations: initial.pages.map((page) => ({
+        ...page,
+        kind: 'upsert',
+        fingerprint: 3n,
+        page: { ...page.page, background: '#eeeeff' },
+      })),
+      bytes: new Uint8Array(),
+    });
+    expect(replacement.pages[0].page).not.toBe(initial.pages[0].page);
+    expect(replacement.pages[0].fingerprint).not.toBe(initial.pages[0].fingerprint);
+    expect([...replacement.damagedPageIds]).toEqual(ids);
+    state.updateFrame(replacement);
+    for (const [index, surface] of surfaces.entries()) {
+      expect(state.prepare(surface, ids[index], environment)).not.toBeNull();
+    }
+  });
+
+  test('skipped or reset frame sequences cannot hide unobserved damage', () => {
     const state = new CanvasReplayState();
     const surface = canvas();
     state.updateFrame(frame(1));
@@ -116,7 +189,18 @@ describe('CanvasReplayState', () => {
     const skipped = state.prepare(surface, 1n, environment);
     expect(skipped).not.toBeNull();
     state.didPresent(skipped!);
-    state.updateFrame({ ...frame(4, []), docEpoch: 2 });
+    state.updateFrame(frame(1, []));
+    expect(state.prepare(surface, 1n, environment)).not.toBeNull();
+  });
+
+  test('an explicit reset forgets pixels even when page IDs and epochs are reused', () => {
+    const state = new CanvasReplayState();
+    const initial = frame(1);
+    const surface = canvas();
+    state.updateFrame(initial);
+    state.didPresent(state.prepare(surface, 1n, environment)!);
+    state.updateFrame(null);
+    state.updateFrame(initial);
     expect(state.prepare(surface, 1n, environment)).not.toBeNull();
   });
 

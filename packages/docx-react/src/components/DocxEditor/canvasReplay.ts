@@ -23,9 +23,7 @@ export class CanvasReplayState {
   updateFrame(frame: RetainedFrame | null | undefined): void {
     if (this.frame === frame) return;
     const missedFrame = Boolean(
-      frame &&
-        this.frame &&
-        (frame.docEpoch !== this.frame.docEpoch || frame.frameEpoch !== this.frame.frameEpoch + 1)
+      frame && this.frame && frame.frameEpoch !== this.frame.frameEpoch + 1
     );
     this.frame = frame;
     this.revision += 1;
