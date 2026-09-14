@@ -1022,13 +1022,11 @@ impl Renderer {
                 "non-finite text metrics".into(),
             ));
         }
-        let page = package
-            .page_part_ids
+        let lookup = package
+            .page_contents
             .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .or_else(|| package.page_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
-        let tokens = resolver.resolve_text_in_context(shape, page, resolved)?;
+        let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
             rich_paragraphs(self, package, references, resolved, shape.id, &tokens);
         if paragraphs.iter().all(|paragraph| paragraph.runs.is_empty()) {
@@ -4496,6 +4494,49 @@ mod tests {
     }
 
     #[test]
+    fn group_subshapes_render_master_geometry_and_text_with_page_formatting() {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/group-master-shape.vsdx"
+        ))
+        .unwrap();
+        let page = &package.page_part_paths[0];
+        let renderer = Renderer::default();
+        let list = renderer.layout_page(&package, page).unwrap();
+        let mut boxes = BTreeMap::new();
+        text_boxes_by_id(&list.primitives, &mut boxes);
+        assert_eq!(boxes.len(), 2);
+        for id in [2, 4] {
+            let Primitive::TextBox {
+                width,
+                height,
+                paragraphs,
+                ..
+            } = boxes[&format!("{page}:{id}")]
+            else {
+                panic!("missing text box")
+            };
+            assert_eq!((*width, *height), (2.0, 1.0));
+            let runs = paragraphs
+                .iter()
+                .flat_map(|paragraph| &paragraph.runs)
+                .collect::<Vec<_>>();
+            assert_eq!(runs.len(), 1);
+            assert_eq!(runs[0].text, "group label");
+            assert_eq!(runs[0].size_in, 0.25);
+        }
+        let mut rendered = std::collections::BTreeSet::new();
+        assert_resolved_text(
+            &renderer,
+            &package,
+            page,
+            &list.primitives,
+            &mut rendered,
+            &mut TextCorpusStats::default(),
+        );
+        assert_eq!(rendered.len(), 2);
+    }
+
+    #[test]
     fn text_accounting_fixture_covers_resolved_text_sources() {
         let package = vsdx_parse::parse_vsdx(include_bytes!(
             "../../vsdx-parse/tests/fixtures/text-accounting.vsdx"
@@ -4719,11 +4760,6 @@ mod tests {
         stats: &mut TextCorpusStats,
     ) {
         let contents = &package.page_contents[page_part];
-        let page = package
-            .page_part_ids
-            .get(page_part)
-            .and_then(|id| package.page_sheets.get(id))
-            .unwrap_or(contents);
         let resolver = Resolver::new(package);
         let references = PageShapeReferences::new(&resolver, page_part).ok();
         let mut text_boxes = BTreeMap::new();
@@ -4734,7 +4770,7 @@ mod tests {
                 package,
                 &resolver,
                 references.as_ref(),
-                page,
+                contents,
                 page_part,
                 shape,
                 &text_boxes,
@@ -4750,7 +4786,7 @@ mod tests {
         package: &VsdxPackage,
         resolver: &Resolver<'_>,
         references: Option<&PageShapeReferences>,
-        page: &Sheet,
+        lookup: &Sheet,
         page_part: &str,
         shape: &Shape,
         text_boxes: &BTreeMap<String, &Primitive>,
@@ -4764,7 +4800,7 @@ mod tests {
             return;
         }
         let tokens = resolver
-            .resolve_text_in_context(shape, page, &resolved)
+            .resolve_text_in_context(shape, lookup, &resolved)
             .unwrap();
         if tokens.iter().all(|token| {
             matches!(
@@ -4852,7 +4888,7 @@ mod tests {
         }
         for child in shape.shapes() {
             assert_shape_text(
-                renderer, package, resolver, references, page, page_part, child, text_boxes,
+                renderer, package, resolver, references, lookup, page_part, child, text_boxes,
                 rendered, stats,
             );
         }

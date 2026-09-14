@@ -400,7 +400,7 @@ fn seed_shape(
     page_id: &str,
     parent_id: Option<&str>,
     page_path: &str,
-    page: &vsdx_parse::Sheet,
+    lookup: &vsdx_parse::Sheet,
     shape: &vsdx_parse::Shape,
     resolver: &Resolver<'_>,
     resolved: &vsdx_resolve::ResolvedShape,
@@ -477,7 +477,7 @@ fn seed_shape(
         }
     }
     let text = resolver
-        .resolve_text(shape, page)
+        .resolve_text_in_context(shape, lookup, resolved)
         .map_err(|error| EditError::InvalidState(error.to_string()))?;
     stories.insert(
         txn,
@@ -498,7 +498,7 @@ fn seed_shape(
             page_id,
             Some(id),
             page_path,
-            page,
+            lookup,
             child,
             resolver,
             &child_resolved,

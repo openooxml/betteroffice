@@ -52,14 +52,14 @@ impl<'a> Resolver<'a> {
             .get(page_part)
             .and_then(|id| self.package.page_sheets.get(id))
             .unwrap_or(page_contents);
-        self.resolve_shape_ref(shape, page)
+        self.resolve_shape_ref(shape, page, page_contents)
     }
     pub fn resolve_shape_in_sheet(
         &self,
         shape: &Shape,
         sheet: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
-        self.resolve_shape_ref(shape, sheet)
+        self.resolve_shape_ref(shape, sheet, sheet)
     }
     /// Resolves a page or document ShapeSheet with document-level inheritance.
     pub fn resolve_sheet(&self, sheet: &Sheet) -> Result<ResolvedShape, ResolveError> {
@@ -85,7 +85,7 @@ impl<'a> Resolver<'a> {
             del: false,
             other_attrs: Vec::new(),
         };
-        self.resolve_shape_ref(&shape, sheet)
+        self.resolve_shape_ref(&shape, sheet, sheet)
     }
     pub fn resolve_page_shapes(
         &self,
@@ -104,7 +104,7 @@ impl<'a> Resolver<'a> {
             .unwrap_or(page_contents);
         let mut shapes = BTreeMap::new();
         for shape in page_contents.shapes() {
-            self.resolve_page_shape_tree(shape, page, &mut shapes)?;
+            self.resolve_page_shape_tree(shape, page, page_contents, &mut shapes)?;
         }
         Ok(shapes)
     }
@@ -112,29 +112,23 @@ impl<'a> Resolver<'a> {
         &self,
         shape: &Shape,
         page: &Sheet,
+        lookup: &Sheet,
         shapes: &mut BTreeMap<u32, ResolvedShape>,
     ) -> Result<(), ResolveError> {
-        shapes.insert(shape.id, self.resolve_shape_ref(shape, page)?);
+        shapes.insert(shape.id, self.resolve_shape_ref(shape, page, lookup)?);
         for child in shape.shapes() {
-            self.resolve_page_shape_tree(child, page, shapes)?;
+            self.resolve_page_shape_tree(child, page, lookup, shapes)?;
         }
         Ok(())
     }
-    pub fn resolve_text(
-        &self,
-        shape: &Shape,
-        page: &Sheet,
-    ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let resolved = self.resolve_shape_ref(shape, page)?;
-        self.resolve_text_in_context(shape, page, &resolved)
-    }
+    /// `lookup` locates enclosing groups for `MasterShape=` resolution.
     pub fn resolve_text_in_context(
         &self,
         shape: &Shape,
-        page: &Sheet,
+        lookup: &Sheet,
         resolved: &ResolvedShape,
     ) -> Result<Vec<ResolvedTextToken>, ResolveError> {
-        let masters = self.master_chain(shape, page)?;
+        let masters = self.master_chain(shape, lookup)?;
         let tokens = shape
             .text()
             .or_else(|| masters.iter().find_map(|(_, master)| master.text()));
@@ -162,10 +156,12 @@ impl<'a> Resolver<'a> {
             })
             .collect())
     }
+    /// `page` supplies inherited cell values, `lookup` locates enclosing groups.
     fn resolve_shape_ref(
         &self,
         shape: &Shape,
         page: &Sheet,
+        lookup: &Sheet,
     ) -> Result<ResolvedShape, ResolveError> {
         if shape.del {
             return Ok(ResolvedShape {
@@ -173,7 +169,7 @@ impl<'a> Resolver<'a> {
                 ..Default::default()
             });
         }
-        let masters = self.master_chain(shape, page)?;
+        let masters = self.master_chain(shape, lookup)?;
         let styles = self.style_chains(shape, &masters)?;
         let mut names = HashSet::new();
         for source in std::iter::once(shape as &dyn HasCells)
@@ -231,14 +227,15 @@ impl<'a> Resolver<'a> {
         }
         Ok(out)
     }
+    /// `lookup` is the shape-lookup sheet holding `shape` for group traversal.
     fn master_chain(
         &self,
         shape: &Shape,
-        source_sheet: &'a Sheet,
+        lookup: &Sheet,
     ) -> Result<Vec<(Provenance, &'a Shape)>, ResolveError> {
         let mut out = Vec::new();
         let mut current = shape;
-        let mut current_sheet = source_sheet;
+        let mut current_sheet = lookup;
         let mut seen = HashSet::new();
         for depth in 0..MAX_INHERITANCE_DEPTH {
             let (master_id, master_shape, own_master) = match (current.master, current.master_shape)

@@ -1570,6 +1570,78 @@ mod tests {
     }
 
     #[test]
+    fn continuous_column_bands_follow_the_deepest_column_and_restore_page_room() {
+        for (reservation, page, y) in [(0.0, 1, 350.0), (200.0, 2, 100.0)] {
+            let input = json!({
+                "measured": [
+                    measured_paragraph_with_line_height(0, 1, 50.0),
+                    {"block":{"kind":"sectionBreak","id":1,"type":"continuous",
+                        "columns":{"count":1,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                    measured_paragraph_with_line_height(2, 1, 100.0),
+                    measured_paragraph_with_line_height(3, 1, 100.0),
+                    measured_paragraph_with_line_height(4, 1, 100.0),
+                    {"block":{"kind":"sectionBreak","id":5,"type":"continuous",
+                        "columns":{"count":2,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                    measured_paragraph_with_line_height(6, 1, 500.0),
+                ],
+                "options": {
+                    "pageSize":{"w":800,"h":1000},
+                    "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                    "bodyBreakType":"continuous","columns":{"count":1,"gap":20},
+                    "footnoteReservedHeights":{"1":reservation},
+                }
+            });
+            let layout = crate::compute_layout(&input.to_string()).unwrap();
+            assert_eq!(layout.pages.len(), page as usize);
+            assert_eq!(
+                placements(&layout),
+                vec![
+                    (1, 100.0, 100.0),
+                    (1, 100.0, 150.0),
+                    (1, 100.0, 250.0),
+                    (1, 410.0, 150.0),
+                    (page, 100.0, y),
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn continuous_column_bands_keep_current_page_margins_until_overflow() {
+        let input = json!({
+            "measured": [
+                measured_paragraph_with_line_height(0, 1, 100.0),
+                measured_paragraph_with_line_height(1, 1, 100.0),
+                measured_paragraph_with_line_height(2, 1, 100.0),
+                {"block":{"kind":"sectionBreak","id":3,"type":"continuous",
+                    "columns":{"count":2,"gap":20}},"measure":{"kind":"sectionBreak"}},
+                measured_paragraph_with_line_height(4, 1, 550.0),
+                measured_paragraph_with_line_height(5, 1, 100.0),
+            ],
+            "options": {
+                "pageSize":{"w":800,"h":1000},
+                "margins":{"top":100,"right":100,"bottom":100,"left":100},
+                "bodyBreakType":"continuous","columns":{"count":1,"gap":20},
+                "finalMargins":{"top":150,"right":100,"bottom":200,"left":100},
+            }
+        });
+        let layout = crate::compute_layout(&input.to_string()).unwrap();
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(
+            placements(&layout),
+            vec![
+                (1, 100.0, 100.0),
+                (1, 100.0, 200.0),
+                (1, 410.0, 100.0),
+                (1, 100.0, 300.0),
+                (2, 100.0, 150.0),
+            ]
+        );
+        assert_eq!(layout.pages[0].margins.bottom, 100.0);
+        assert_eq!(layout.pages[1].margins.bottom, 200.0);
+    }
+
+    #[test]
     fn next_column_section_does_not_inherit_the_outgoing_balance_limit() {
         let mut measured = vec![
             measured_paragraph_with_line_height(0, 2, 100.0),

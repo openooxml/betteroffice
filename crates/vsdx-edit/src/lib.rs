@@ -1807,6 +1807,86 @@ mod tests {
     }
 
     #[test]
+    fn group_subshape_snapshot_and_story_match_render_resolution() {
+        let source = include_bytes!("../../vsdx-parse/tests/fixtures/group-master-shape.vsdx");
+        let package = vsdx_parse::parse_vsdx(source).unwrap();
+        let page = &package.page_part_paths[0];
+        let resolver = vsdx_resolve::Resolver::new(&package);
+        let resolved = resolver.resolve_page_shapes(page).unwrap();
+        let session = DiagramSession::open(source, 7).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let group = &snapshot.pages[0].shapes[0];
+        let source_group = package.page_contents[page].shapes().next().unwrap();
+        let mut source_children = source_group.shapes();
+        let direct = source_children.next().unwrap();
+        let nested = source_children.next().unwrap().shapes().next().unwrap();
+        let txn = session.doc.transact();
+        let stories = txn.get_map(STORIES).unwrap();
+        for (child, shape) in [
+            (&group.children[0], direct),
+            (&group.children[1].children[0], nested),
+        ] {
+            for (name, expected) in [("PinX", "1"), ("Width", "2"), ("PageValue", "23")] {
+                let cell = child
+                    .cells
+                    .iter()
+                    .find(|cell| cell.name == name && cell.locator.section.is_none())
+                    .unwrap();
+                assert_eq!(cell.value.as_deref(), Some(expected));
+                let vsdx_resolve::Lookup::Found(render_cell) =
+                    &resolved[&child.source_id].cells[name]
+                else {
+                    panic!("missing {name}")
+                };
+                assert_eq!(cell.value, render_cell.cell.value);
+            }
+            let Some(yrs::Out::Any(Any::String(story))) = stories.get(&txn, &child.id) else {
+                panic!("missing story")
+            };
+            let tokens: Vec<vsdx_resolve::ResolvedTextToken> =
+                serde_json::from_str(&story).unwrap();
+            let vsdx_resolve::ResolvedTextToken::CharacterRun { properties, .. } = &tokens[0]
+            else {
+                panic!("missing character run")
+            };
+            let vsdx_resolve::Lookup::Found(size) = &properties["Size"] else {
+                panic!("missing font size")
+            };
+            assert_eq!(size.cell.value.as_deref(), Some("0.25"));
+            assert_eq!(size.provenance, vsdx_resolve::Provenance::Page);
+            let snapshot_size = child
+                .cells
+                .iter()
+                .find(|cell| {
+                    cell.name == "Size" && cell.locator.section.as_deref() == Some("Character")
+                })
+                .unwrap();
+            assert_eq!(snapshot_size.value, size.cell.value);
+            assert_eq!(
+                tokens,
+                resolver
+                    .resolve_text_in_context(
+                        shape,
+                        &package.page_contents[page],
+                        &resolved[&child.source_id]
+                    )
+                    .unwrap()
+            );
+            assert_eq!(
+                tokens[1],
+                vsdx_resolve::ResolvedTextToken::Literal("group label".into())
+            );
+        }
+        let renderer = vsdx_render::Renderer::default();
+        assert_eq!(
+            renderer.layout_page(&package, page).unwrap(),
+            renderer
+                .layout_page(&session.package().unwrap(), page)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn grouped_child_cells_are_addressable_from_snapshots() {
         let session = DiagramSession::open(
             include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
