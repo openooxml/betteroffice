@@ -243,7 +243,7 @@ pub struct TextRun {
     #[serde(skip)]
     pub(crate) case: i32,
     pub color: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub diagnostics: Vec<Diagnostic>,
     #[serde(skip)]
     pub(crate) tab: Option<super::TabStop>,
@@ -349,4 +349,37 @@ pub struct CaretStop {
 }
 fn is_false(value: &bool) -> bool {
     !*value
+}
+
+#[cfg(test)]
+mod text_run_contract {
+    use super::TextRun;
+
+    /// The TypeScript `TextRun` declares `diagnostics` as required, so an empty
+    /// vector must still reach the wire or every consumer spreads `undefined`.
+    #[test]
+    fn empty_diagnostics_still_serialise() {
+        let run = TextRun {
+            text: String::new(),
+            family: String::new(),
+            size_in: 0.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            small_caps: false,
+            superscript: false,
+            subscript: false,
+            letter_spacing: 0.0,
+            case: 0,
+            color: String::new(),
+            diagnostics: Vec::new(),
+            tab: None,
+            diagnosed_face: None,
+        };
+        let json = serde_json::to_string(&run).expect("serialise");
+        assert!(
+            json.contains("\"diagnostics\":[]"),
+            "diagnostics must always be present: {json}"
+        );
+    }
 }

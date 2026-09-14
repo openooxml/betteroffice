@@ -16,3 +16,15 @@ test('collects structured diagnostics without matching their text', () => {
     { category: 'fidelity', code: 'font-substituted', detail: '' },
   ]);
 });
+
+test('tolerates a run whose diagnostics key the engine omitted', () => {
+  const { diagnostics: _omitted, ...run } = (frame.primitives[0] as Extract<
+    PageDisplayList['primitives'][number],
+    { kind: 'textBox' }
+  >).paragraphs[0].runs[0];
+  const omitted = {
+    ...frame,
+    primitives: [{ ...frame.primitives[0], paragraphs: [{ runs: [run] }] }],
+  } as PageDisplayList;
+  expect(collectDiagnostics(omitted)).toEqual([]);
+});
