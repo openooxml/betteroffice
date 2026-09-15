@@ -12,13 +12,11 @@
 //! is a paragraph's first line, a table's initial header/body slice, the height of an
 //! image or text box, and nothing at all for any other follower kind.
 //!
-//! Spacing is read through the shared paragraph-spacing helpers, which suppress
-//! style-inherited spacing on empty paragraphs, so a chain of blank paragraphs
-//! does not inflate the budget with spacing that never paints.
+//! Spacing follows the shared paragraph-spacing helpers used by placement.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
 use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock};
 
@@ -154,7 +152,16 @@ pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[Measu
         else {
             continue;
         };
-        budget += get_spacing_before(block) + measure.total_height + get_spacing_after(block);
+        let height = if is_empty_paragraph(block) {
+            measure
+                .lines
+                .iter()
+                .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+                .sum()
+        } else {
+            measure.total_height
+        };
+        budget += get_spacing_before(block) + height + get_spacing_after(block);
     }
 
     budget
@@ -235,8 +242,6 @@ mod tests {
         })
     }
 
-    // empty keepNext paragraph whose spacing is style-inherited (spacingExplicit
-    // unset) — placement drops this spacing, so the group estimate must too
     fn make_empty_spaced_paragraph(
         spacing: (f64, f64),
         spacing_explicit: Option<(bool, bool)>,
@@ -272,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_style_inherited_spacing_on_an_empty_member_like_placement_does() {
+    fn counts_inherited_after_spacing_on_an_empty_member_like_placement_does() {
         let blocks = vec![
             make_paragraph_block("Heading", true),
             make_empty_spaced_paragraph((150.0, 150.0), None),
@@ -289,10 +294,9 @@ mod tests {
         let group = scan.groups_by_head.get(&0);
         assert!(group.is_some());
 
-        // heading line (20) + empty member (0, spacing suppressed) + follower first line (20)
         assert_eq!(
             measure_keep_with_next_group(group.unwrap(), &measured),
-            40.0
+            190.0
         );
     }
 
@@ -322,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_advance_a_group_that_fits_once_inherited_empty_paragraph_spacing_is_dropped() {
+    fn does_not_advance_a_group_that_fits_with_inherited_empty_after_spacing() {
         let blocks = vec![
             make_paragraph_block("Filler", false),
             make_paragraph_block("Heading", true),
@@ -346,7 +350,7 @@ mod tests {
         assert_eq!(group.follower, Some(3));
 
         let group_height = measure_keep_with_next_group(group, &measured);
-        assert_eq!(group_height, 40.0);
+        assert_eq!(group_height, 190.0);
 
         // content height 864 (1056 - 2*96); the 620px filler leaves 244 available
         assert!(!keep_with_next_group_must_advance(KeepWithNextFit {

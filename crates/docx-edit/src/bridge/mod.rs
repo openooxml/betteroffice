@@ -1134,6 +1134,7 @@ fn lower_image_values(
         crop_right: map_number(values, "cropRight"),
         crop_bottom: map_number(values, "cropBottom"),
         crop_left: map_number(values, "cropLeft"),
+        shape_type: map_string(values, "shapeType"),
         opacity: map_number(values, "opacity"),
         rotation_deg,
         flip_h,

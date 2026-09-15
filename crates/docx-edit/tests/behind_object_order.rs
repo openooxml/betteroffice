@@ -97,6 +97,53 @@ fn index(primitives: &[Value], label: &str) -> usize {
 }
 
 #[test]
+fn imported_picture_presets_survive_inline_and_anchored_layout() {
+    for preset in ["rect", "ellipse", "roundRect"] {
+        for inline in [false, true] {
+            let mut parts =
+                ooxml_opc::unzip_parts(&document(None, None, true, true, true)).unwrap();
+            let (_, xml) = parts
+                .iter_mut()
+                .find(|(name, _)| name == "word/document.xml")
+                .unwrap();
+            let mut text = String::from_utf8(xml.clone()).unwrap().replace(
+                r#"<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr>"#,
+                &format!(r#"<a:prstGeom prst="{preset}"><a:avLst/></a:prstGeom></pic:spPr>"#),
+            );
+            if inline {
+                let picture = text.find(r#"<wp:docPr id="2""#).unwrap();
+                let start = text[..picture].rfind("<wp:anchor").unwrap();
+                let extent = start + text[start..].find("<wp:extent").unwrap();
+                let end = picture + text[picture..].find("</wp:anchor>").unwrap();
+                let content = text[extent..end].replace("<wp:wrapNone/>", "");
+                text.replace_range(
+                    start..end + "</wp:anchor>".len(),
+                    &format!("<wp:inline>{content}</wp:inline>"),
+                );
+            }
+            *xml = text.into_bytes();
+            let (output, primitives) = layout(&ooxml_opc::rezip_parts(&parts).unwrap());
+            let image = output["measured"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|block| block["block"]["runs"].as_array())
+                .flatten()
+                .find(|run| run["kind"] == "image")
+                .unwrap();
+            let expected = (preset != "rect").then_some(preset);
+            assert_eq!(image["shapeType"].as_str(), expected);
+            assert_eq!(
+                primitives[index(&primitives, "IMAGE")]["shapeType"].as_str(),
+                expected
+            );
+            assert_eq!(image["width"], 192.0);
+            assert_eq!(image["height"], 96.0);
+        }
+    }
+}
+
+#[test]
 fn imported_behind_images_and_shapes_follow_relative_height() {
     for shape_first in [false, true] {
         for (shape_rank, image_rank) in [(10, 20), (20, 10), (0, 4_294_967_295)] {

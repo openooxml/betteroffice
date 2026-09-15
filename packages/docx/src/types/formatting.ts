@@ -324,8 +324,7 @@ export interface ParagraphFormatting {
   afterAutospacing?: boolean;
   /**
    * Per-side flags marking which `<w:spacing>` attrs came from this
-   * paragraph's own pPr (vs inherited). Word collapses style-inherited
-   * spacing on empty paragraphs but honors the explicit values.
+   * paragraph's own pPr (vs inherited).
    */
   spacingExplicit?: SpacingExplicit;
 

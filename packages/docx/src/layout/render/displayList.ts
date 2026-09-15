@@ -532,6 +532,7 @@ export interface PageBorderPrimitive {
 
 export interface ImagePrimitive extends DocAttrs {
   kind: 'image';
+  shapeType?: string;
   relId: string;
   x: number;
   y: number;

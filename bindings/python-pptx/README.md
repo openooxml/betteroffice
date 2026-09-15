@@ -283,11 +283,15 @@ edits that merge across replicas, that is the gap this fills.
 | `deck.media()` | embedded images and other binary parts |
 | `insert_slide` / `delete_slide` / `move_slide` | slide order |
 | `add_text_box` / `add_shape` / `remove_shape` | shape lifecycle |
-| `move_shape` / `resize_shape` | shape geometry |
+| `move_shape` / `resize_shape` / `set_shape_rect` | shape geometry |
 | `set_shape_fill` / `set_shape_stroke` / `set_shape_adjust` | shape styling |
 | `insert_text` / `delete_text` / `format_text` | text editing |
 | `insert_paragraph_break` | split a paragraph |
-| `register_font` / `render_slide` | layout |
+| `add_comment` / `reply_to_comment` / `set_comment_status` / `remove_comment` | comment threads |
+| `comments` / `comment_flavor` / `set_comment_flavor` | read comments, pick the comment system |
+| `propose` / `proposals` / `preview_proposal` / `render_proposal` | stage and preview agent edits |
+| `accept_proposal` / `reject_proposal` | apply or drop a proposal |
+| `register_font` / `render_slide` / `render_png` | layout and PNG export |
 | `diff` / `apply_update` / `state_vector` / `state_as_update` | Yrs replicas |
 | `deck.is_collaborative` / `deck.client_id` | whether this deck may exchange updates, and as whom |
 | `deck.is_edited` | whether the engine has accepted an edit since open |
@@ -296,7 +300,7 @@ edits that merge across replicas, that is the gap this fills.
 
 Errors raise `PptxError` or a more specific subclass: `ParseError`,
 `RangeError`, `RenderError`, `InvalidUpdateError`, `CollaborativeStateError`,
-`NotCollaborativeError`.
+`NotCollaborativeError`, `StaleProposalError`.
 An unknown slide, shape, or story ID raises `KeyError`; a bad argument — an
 unsupported geometry, an out-of-range client ID, an unknown parse limit —
 raises `ValueError`.
@@ -342,12 +346,13 @@ drop each deck inside one thread, and break any cycle holding it before that
 thread finishes.
 
 The heavy operations release the GIL while they run — `open`, `open_path`,
-`render_slide`, `save`, `save_path`, `register_font`, and `apply_update` — as do
-the file writes in `Media.write` and `DisplayList.write`.
+`open_collaborative`, `render_slide`, `render_png`, `save`, `save_path`,
+`register_font`, and `apply_update` — as do the file writes in `Media.write`,
+`DisplayList.write`, and `Png.write`. `render_proposal` holds the GIL.
 
 ## Status
 
-`0.0.x`, and the API may change before `0.1.0`. `save` writes edits back at the
+`0.1.x`: the API may change before `1.0`. `save` writes edits back at the
 XML level and copies untouched parts through byte for byte; the container is
 rebuilt, so output is not byte-identical to the source — see *Writing*.
 
