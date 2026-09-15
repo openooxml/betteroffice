@@ -1586,7 +1586,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       };
     }, [displayListQueries, onRenderedDomContextReady, canvasHostRef, zoom]);
 
-    // Re-layout triggers: web-font load complete + header/footer content changes.
+    // Re-layout triggers: web-font load complete + header/footer content + render-env changes.
     useLayoutTriggers({
       runLayoutPipeline,
       updateSelectionOverlay,
@@ -1594,6 +1594,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       footerContent,
       firstPageHeaderContent,
       firstPageFooterContent,
+      renderEnv: yrsRenderEnv,
     });
 
     // Imperative-handle setup — exposes PagedEditorRef + mirrors via onReady.

@@ -10,10 +10,10 @@ import type { Layout } from '@betteroffice/docx/layout/pagination';
 import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import { preloadEditWasm } from '@betteroffice/docx/wasm/edit';
 import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
-import { PagedEditor, type PagedEditorRef } from './PagedEditor';
+import { PagedEditor } from './PagedEditor';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { cleanup, render, waitFor } = await import('@testing-library/react');
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -68,12 +68,8 @@ function measuredText(layout: Layout): string {
 test('showHiddenText reveals vanished runs in the paged layout', async () => {
   const layouts: Layout[] = [];
   const errors: Error[] = [];
-  let ref: PagedEditorRef | null = null;
   const view = render(
     <PagedEditor
-      ref={(instance) => {
-        ref = instance;
-      }}
       document={null}
       yrsCore={yrsCore()}
       measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
@@ -91,9 +87,6 @@ test('showHiddenText reveals vanished runs in the paged layout', async () => {
 
     view.rerender(
       <PagedEditor
-        ref={(instance) => {
-          ref = instance;
-        }}
         document={null}
         yrsCore={yrsCore()}
         measurementFontProvider={{ resolve: () => () => Promise.resolve(fontBytes) }}
@@ -106,9 +99,6 @@ test('showHiddenText reveals vanished runs in the paged layout', async () => {
         }}
       />
     );
-    act(() => {
-      ref!.relayout();
-    });
 
     await waitFor(() => expect(measuredText(layouts.at(-1)!)).toContain('"AXZ"'));
   } finally {
