@@ -13,7 +13,7 @@ import { createYrsSession, type YrsSession } from '@betteroffice/docx/yrs';
 import { PagedEditor } from './PagedEditor';
 import type { YrsCoreSession } from './hooks/useYrsCoreSession';
 
-const { cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, render } = await import('@testing-library/react');
 
 const WASM = resolve(import.meta.dir, '../../../../docx/src/wasm/generated/edit/docx_edit_bg.wasm');
 const FONT = resolve(
@@ -65,6 +65,17 @@ function measuredText(layout: Layout): string {
   return JSON.stringify(kernel?.measured ?? null);
 }
 
+async function settleLayoutsUntil(done: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2000;
+  while (!done()) {
+    if (Date.now() >= deadline) break;
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    });
+  }
+  expect(done()).toBe(true);
+}
+
 test('showHiddenText reveals vanished runs in the paged layout', async () => {
   const layouts: Layout[] = [];
   const errors: Error[] = [];
@@ -82,7 +93,7 @@ test('showHiddenText reveals vanished runs in the paged layout', async () => {
     />
   );
   try {
-    await waitFor(() => expect(layouts.length).toBeGreaterThan(0));
+    await settleLayoutsUntil(() => layouts.length > 0);
     expect(measuredText(layouts.at(-1)!)).not.toContain('"AXZ"');
 
     view.rerender(
@@ -100,7 +111,9 @@ test('showHiddenText reveals vanished runs in the paged layout', async () => {
       />
     );
 
-    await waitFor(() => expect(measuredText(layouts.at(-1)!)).toContain('"AXZ"'));
+    await settleLayoutsUntil(
+      () => layouts.length > 0 && measuredText(layouts.at(-1)!).includes('"AXZ"')
+    );
   } finally {
     if (layouts.length === 0) console.log('layout errors:', errors.map(String));
     view.unmount();
