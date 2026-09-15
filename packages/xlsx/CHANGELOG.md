@@ -1,5 +1,31 @@
 # @betteroffice/xlsx
 
+## 0.2.0
+
+### Minor Changes
+
+- fb06233: Add font-aware range printing with device-specific grid geometry and optional print gridlines. Paint cell and preview fonts at their declared point size in print and raster output, and scale on-screen canvas text by the same points-to-pixels factor, so default-zoom cell text grows by roughly a third and pixel-based consumer tests shift, with consistent text alignment across canvas and raster rendering.
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- d926fb0: Correct tint proportions in shared OOXML color resolution so lighter theme colors blend toward white as authored.
+- cae162d: Drop redundant buffer copies around the wasm boundary and per collaboration update.
+- 8a27bb7: Keep unmodeled row, column, and cell markup on edited sheets. A save now
+  patches only the cells, rows, and columns an edit changed instead of
+  reserializing the sheet, so the rest of the sheet survives byte for byte. Sheets
+  whose rows or cells lack `r` attributes or arrive out of order, and sheets replayed
+  from collaboration updates, are still reserialized.
+- 7f062e0: Render print ranges with hidden default columns while preserving explicitly visible column widths.
+- 0c5c4fc: Use workbook-specific indexed color palettes for cell fills, text, borders and formatting controls, preserving them through collaboration and XLSX saves.
+
+  Preserve empty palette entries and reject invalid model colors before saving.
+
+- 5798031: Load Excel shared formulas by expanding followers into plain cells with correct absolute and relative references, so they evaluate and save with correct values. Shared-formula markup is not written back: an edited sheet writes each follower as its own formula.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(..., S:V, ...)` with limits: narrow hits evaluate without materialising the column, but wide aggregates such as `SUM(A:XFD)` return `#NUM!`, and every lookup miss scans the full column height against the shared per-recalculation budget, so a workbook with many misses can turn later formulas `#NUM!`.
+- e8c4f5b: Fix opening large workbooks and workbooks with high-precision theme colors while preserving collaboration update limits.
+
 ## 0.1.0
 
 ### Minor Changes

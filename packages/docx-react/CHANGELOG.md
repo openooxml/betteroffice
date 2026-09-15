@@ -1,5 +1,77 @@
 # @betteroffice/docx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- 295f42f: Keep one local undo history across document stories, group rapid keystrokes in WebAssembly, and preserve native undo in other inputs. Replace story-scoped history helpers with session-wide tracking and changed-story reporting.
+
+  Migrate each removed API as follows: `historyStory()` returns the changed stories via `historyStories()` (sorted, empty before the first local edit instead of `null`); `undoDepth()` and `redoDepth()` are gone, query `canUndo()` and `canRedo()` instead; `markUndoGroup(startDepth)` is gone, rapid keystrokes now coalesce in WebAssembly with no host bookkeeping; `applyLocalUpdate(update, story)` drops its story argument and becomes `applyLocalUpdate(update)`; `beginUndoCapture(story, includeTableStories?)` drops its arguments and becomes `beginUndoCapture()`; `computeLayout()` no longer returns `blocks` and `measures`, read them lazily from `getLayoutKernelInputs(computation.layout)` as `measured` and `options`.
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- 0b0a90a: Reuse successfully painted pages while scrolling and release temporary canvas buffers after replay.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 1efec27: Improve DOCX fidelity with Word's 10 pt fallback for undeclared font sizes, short-paragraph widow control, and corrected table padding, minimum row heights, repeated headers, and rotated image sizing. Align automatic and wrapped tabs to the page grid, keep wrapped text metrics on their own lines, and hide list markers on page-break-only paragraphs. Preserve authored formatting and document state.
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+- b1f5c91: Render embedded TIFF pictures in browser documents by converting them to PNG inside the DOCX parse WASM boundary. Uncompressed, LZW, PackBits and deflate sources are supported, including grayscale, RGB, palette and CMYK images; other compressions are skipped.
+- 846b5d6: Fall back to the main-thread engine when the resident worker crashes, times out, or answers corruptly mid-input so typing survives worker failures. Replay the pending keystroke on the main-thread engine and keep genuine engine-level input rejections surfacing as errors.
+- 0019657: Recover from resident worker crashes, WebAssembly traps, and unanswered requests so the editor can fall back to the main-thread engine. Reset retained worker frames and queries when switching engines so fresh main-thread frames render immediately.
+- Updated dependencies [93971b5]
+- Updated dependencies [b351bbe]
+- Updated dependencies [2061849]
+- Updated dependencies [4511b9a]
+- Updated dependencies [4bf205b]
+- Updated dependencies [0664bd3]
+- Updated dependencies [5c04bc4]
+- Updated dependencies [2c56acd]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [a958376]
+- Updated dependencies [cb2c6fe]
+- Updated dependencies [356f67a]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [2c658b6]
+- Updated dependencies [297f43d]
+- Updated dependencies [43fad65]
+- Updated dependencies [6393137]
+- Updated dependencies [4cc8dc0]
+- Updated dependencies [1efec27]
+- Updated dependencies [9281f7e]
+- Updated dependencies [6779738]
+- Updated dependencies [c1f9684]
+- Updated dependencies [4d27f1e]
+- Updated dependencies [b2ca63b]
+- Updated dependencies [bd69e9e]
+- Updated dependencies [20e913c]
+- Updated dependencies [1d830df]
+- Updated dependencies [6ce2439]
+- Updated dependencies [e42ff8d]
+- Updated dependencies [036f83e]
+- Updated dependencies [a117530]
+- Updated dependencies [9e4656f]
+- Updated dependencies [1dc0e41]
+- Updated dependencies [295f42f]
+- Updated dependencies [56c3ca4]
+- Updated dependencies [6f0e36d]
+- Updated dependencies [284f0c4]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [8adcd04]
+- Updated dependencies [d4f4b85]
+- Updated dependencies [b1f5c91]
+- Updated dependencies [2ee434c]
+- Updated dependencies [1a5ef23]
+- Updated dependencies [1d0f41d]
+- Updated dependencies [846b5d6]
+- Updated dependencies [0019657]
+- Updated dependencies [73cea54]
+- Updated dependencies [d926fb0]
+- Updated dependencies [c9b72bf]
+- Updated dependencies [1e46a6f]
+  - @betteroffice/docx@0.2.0
+  - @betteroffice/docx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

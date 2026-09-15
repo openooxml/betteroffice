@@ -1,5 +1,20 @@
 # @betteroffice/python-pptx
 
+## 0.1.0
+
+### Minor Changes
+
+- d6ba9da: Add session-local PPTX agent proposals with atomic acceptance, stale-target checks, rendered previews, and one-step Undo. Expose the workflow in Rust, TypeScript, and Python. Show inline text diffs and previous/proposed shape bounds on the React slide canvas, with proposal selection, accept/reject controls, and a review panel for before/after previews.
+- 387f239: Add PPTX-to-PNG export for Rust, Python, and browsers, plus an Export PNG button
+  in the React editor.
+
+  Rust: enable the `raster` feature; exhaustive `Error` matches must handle the new
+  `Raster` variant.
+
+### Patch Changes
+
+- 4bcc61f: Release the GIL during python-pptx open, render, save, font registration and update application, without copying the input bytes to do it.
+
 ## 0.0.2
 
 ### Patch Changes
