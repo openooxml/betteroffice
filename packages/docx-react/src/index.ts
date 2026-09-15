@@ -7,7 +7,9 @@
  * @public
  */
 
-export const VERSION = '0.0.2';
+import { version as packageVersion } from '../package.json';
+
+export const VERSION: string = packageVersion;
 
 // Main editor contract
 export {

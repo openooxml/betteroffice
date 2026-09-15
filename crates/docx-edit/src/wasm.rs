@@ -892,7 +892,8 @@ fn parse_change_target(doc: &EditingDoc, target_json: &str) -> Result<ChangeTarg
 
 /// Parses the render bridge's host context from JSON:
 /// `{ "themeColors": {name: hex}, "defaultTabStopTwips": number|null,
-/// "pageContentHeight": number|null, "numericIds": {yrsId: number} }`.
+/// "pageContentHeight": number|null, "numericIds": {yrsId: number},
+/// "showHiddenText": bool }`.
 fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue> {
     let value: Value = serde_json::from_str(env_json).map_err(js_err)?;
     let mut env = crate::bridge::RenderEnv::default();
@@ -909,6 +910,10 @@ fn parse_render_env(env_json: &str) -> Result<crate::bridge::RenderEnv, JsValue>
     }
     env.default_tab_stop_twips = value.get("defaultTabStopTwips").and_then(Value::as_f64);
     env.page_content_height = value.get("pageContentHeight").and_then(Value::as_f64);
+    env.show_hidden_text = value
+        .get("showHiddenText")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if let Some(Value::Object(ids)) = value.get("numericIds") {
         for (key, entry) in ids {
             if let Some(id) = entry.as_f64() {
@@ -3295,7 +3300,7 @@ impl EditSession {
     /// document-level values lowering cannot read off the story:
     /// `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
     /// "pageContentHeight":number|null,"numericIds":{yrsId: number},
-    /// "tocStyleIds":[styleId]}`, all
+    /// "tocStyleIds":[styleId],"showHiddenText":bool}`, all
     /// optional. Errors when the story does not end in a pilcrow, holds a
     /// malformed table, references itself through a cell story, or contains an
     /// embed lowering does not support.

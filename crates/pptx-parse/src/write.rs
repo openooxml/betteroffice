@@ -1249,7 +1249,7 @@ fn patch_slide(
     elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
-    let mut next_shape_id = max_shape_id(root) + 1;
+    let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
@@ -1314,6 +1314,16 @@ fn max_shape_id(root: &XmlElement) -> u32 {
         .unwrap_or(1)
 }
 
+fn alloc_shape_id(next_shape_id: &mut Option<u32>, part: &str) -> Result<u32, PptxError> {
+    let shape_id =
+        next_shape_id.ok_or_else(|| write_error(part, "the shape id space is exhausted"))?;
+    if shape_id == 0 {
+        return Err(write_error(part, "the shape id space is exhausted"));
+    }
+    *next_shape_id = shape_id.checked_add(1);
+    Ok(shape_id)
+}
+
 /// A parsed shape's source element: a direct child of the tree, or one the
 /// `mc:AlternateContent` at `position` contributes through `path`.
 struct ShapeSlot {
@@ -1327,7 +1337,7 @@ struct ShapeSlot {
 fn patch_shape_children(
     parent: &mut XmlElement,
     writes: &[ShapeWrite],
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -1598,7 +1608,7 @@ fn emit_sibling_slots(
 fn patch_shape(
     element: &mut XmlElement,
     patch: &ShapePatch,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -1617,7 +1627,7 @@ fn patch_shape(
     }
     if let Some(adjust_values) = &patch.adjust_values {
         let properties = shape_properties_mut(element, part)?;
-        set_adjust_values(properties, adjust_values, prefixes);
+        set_adjust_values(properties, adjust_values, prefixes, part)?;
     }
     for text in &patch.texts {
         patch_text(element, text, theme, prefixes, part)?;
@@ -1996,10 +2006,13 @@ fn set_adjust_values(
     properties: &mut XmlElement,
     adjust_values: &BTreeMap<String, f64>,
     prefixes: &Prefixes,
-) {
-    // Only preset geometries carry an editable adjustment list.
+    part: &str,
+) -> Result<(), PptxError> {
     let Some(geometry) = properties.child_mut("prstGeom") else {
-        return;
+        return Err(write_error(
+            part,
+            "cannot write adjustments onto a shape without preset geometry",
+        ));
     };
     let list_name = prefixes.drawing("avLst");
     if geometry.child_mut("avLst").is_none() {
@@ -2028,6 +2041,7 @@ fn set_adjust_values(
             )),
         }
     }
+    Ok(())
 }
 
 // --- text -------------------------------------------------------------------
@@ -2899,7 +2913,7 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
 
 fn shape_element(
     add: &ShapeAdd,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<XmlElement, PptxError> {
@@ -2909,8 +2923,7 @@ fn shape_element(
             format!("unsupported geometry {:?} for a new shape", add.geometry),
         ));
     }
-    let shape_id = *next_shape_id;
-    *next_shape_id += 1;
+    let shape_id = alloc_shape_id(next_shape_id, part)?;
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
@@ -3010,7 +3023,7 @@ fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<
                 .with_child(XmlElement::new(prefixes.presentation("nvPr"))),
         )
         .with_child(XmlElement::new(prefixes.presentation("grpSpPr")).with_child(group_transform));
-    let mut next_shape_id = 2;
+    let mut next_shape_id = Some(2);
     for shape in shapes {
         tree = tree.with_child(shape_element(shape, &mut next_shape_id, &prefixes, part)?);
     }
@@ -3415,6 +3428,38 @@ mod tests {
         assert!(
             !xml.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r>"#),
             "{xml}"
+        );
+    }
+
+    #[test]
+    fn adjustments_without_preset_geometry_error_instead_of_no_opting() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="custom"/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+
+        let error = patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    adjust_values: Some(BTreeMap::from([("adj".to_owned(), 0.25)])),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            part,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, crate::PptxError::Write { ref message, .. } if message.contains("preset geometry")),
+            "{error:?}"
         );
     }
 }

@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{CommentFlavor, DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{
+    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -968,6 +970,158 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     session.insert_slide(&context(), 2, None).unwrap();
     let error = session.save().unwrap_err();
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
+}
+
+const CUSTOM_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Custom"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path w="21600" h="21600"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="21600" y="0"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Custom</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+fn cust_geom_fixture() -> Vec<u8> {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace("</p:spTree>", &format!("{CUSTOM_SHAPE}</p:spTree>"));
+        }
+    }
+    zip(part_list)
+}
+
+#[test]
+fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
+    let session = DeckSession::open(&cust_geom_fixture(), 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Custom")
+        .unwrap();
+    assert_eq!(shape.geometry, "custom");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &shape.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn adjust_edits_on_shapes_without_preset_geometry_are_refused() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let missing = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap();
+    assert_eq!(missing.geometry, "rect");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &missing.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+
+    let preset = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap();
+    assert_eq!(preset.geometry, "roundRect");
+    session
+        .set_shape_adjust(&context(), &slide.id, &preset.id, &adjustments)
+        .unwrap();
+}
+
+#[test]
+fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(matches!(error, EditError::Write(message) if message.contains("shape id")));
+}
+
+#[test]
+fn an_exhausted_shape_id_space_still_saves_edits_that_allocate_nothing() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list.clone()), 11).unwrap();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 0, "X", &TextStyle::default())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>X</a:t>"), "{slide}");
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    assert_eq!(
+        reopened
+            .story(&tracked_story(&reopened))
+            .unwrap()
+            .plain_text(),
+        "XWideCaps"
+    );
+
+    let session = DeckSession::open(&zip(part_list), 12).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(
+        matches!(error, EditError::Write(ref message) if message.contains("shape id space is exhausted")),
+        "{error:?}"
+    );
 }
 
 #[test]

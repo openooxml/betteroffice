@@ -1096,7 +1096,7 @@ fn part_reference(
     })
 }
 
-fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError> {
+pub(crate) fn attributes(element: &BytesStart<'_>) -> Result<Vec<XmlAttribute>, ParseError> {
     element
         .attributes()
         .map(|attribute| {

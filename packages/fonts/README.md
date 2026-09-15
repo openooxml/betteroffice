@@ -97,7 +97,7 @@ import { configureDefaultFonts } from '@betteroffice/docx/layout';
 configureDefaultFonts({ load: () => import('@betteroffice/fonts/cdn') });
 ```
 
-This entry fetches faces lazily from version-pinned jsDelivr URLs for `@betteroffice/fonts@0.1.0` and `@betteroffice/fonts-cjk@0.1.0`. Japanese documents can load the CJK faces without installing the CJK package. Each download has a 30-second deadline and omits cookies and referrers; failed or truncated downloads can be retried. The bundled entry retains its existing request behavior and remains available for offline applications.
+This entry fetches faces lazily from version-pinned jsDelivr URLs that follow the installed `@betteroffice/fonts` and `@betteroffice/fonts-cjk` package versions, so the CDN revision always matches the installed code. Japanese documents can load the CJK faces without installing the CJK package. Each download has a 30-second deadline and omits cookies and referrers; failed or truncated downloads can be retried. The bundled entry retains its existing request behavior and remains available for offline applications.
 
 To use your own CDN, pass a provider to the editor:
 

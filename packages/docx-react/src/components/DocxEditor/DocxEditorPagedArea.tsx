@@ -74,6 +74,7 @@ export function DocxEditorPagedArea({
   // Editor
   zoom,
   readOnly,
+  showHiddenText = false,
   onYrsContentChange,
   onYrsHistoryChange,
   onPagedSelectionChange,
@@ -152,6 +153,7 @@ export function DocxEditorPagedArea({
   onBodyClick: () => void;
   zoom: number;
   readOnly: boolean;
+  showHiddenText?: boolean;
   onYrsContentChange: () => void;
   onYrsHistoryChange: (canUndo: boolean, canRedo: boolean) => void;
   onPagedSelectionChange: () => void;
@@ -432,6 +434,7 @@ export function DocxEditorPagedArea({
         rustFontChainsProviderRef={rustFontChainsProviderRef}
         zoom={zoom}
         readOnly={readOnly}
+        showHiddenText={showHiddenText}
         onYrsContentChange={onYrsContentChange}
         onYrsHistoryChange={onYrsHistoryChange}
         onSelectionChange={onPagedSelectionChange}

@@ -134,6 +134,9 @@ fn seed_shape(
         ShapeNode::Shape(shape) => {
             shape_map.insert(txn, "kind", "shape");
             shape_map.insert(txn, "geometry", shape.geometry.as_str());
+            if !shape.has_preset_geometry {
+                shape_map.insert(txn, "hasPresetGeometry", false);
+            }
             let mut adjust_values = preset_geometry_default_adjustments(&shape.geometry)
                 .into_iter()
                 .collect::<BTreeMap<_, _>>();
@@ -588,6 +591,16 @@ impl DeckSession {
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let geometry = required_string(&shape, &txn, "geometry")?;
+        if geometry == "custom" {
+            return Err(EditError::InvalidGeometry(
+                "custom geometry does not support shape adjustments".to_owned(),
+            ));
+        }
+        if !map_bool(&shape, &txn, "hasPresetGeometry").unwrap_or(true) {
+            return Err(EditError::InvalidGeometry(
+                "shape without preset geometry does not support shape adjustments".to_owned(),
+            ));
+        }
         let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_else(BTreeMap::new);
         let mut after = BTreeMap::new();
         for (name, value) in adjustments {

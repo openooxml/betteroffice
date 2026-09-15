@@ -4,6 +4,7 @@
     "label": null,
     "save": "שמירה",
     "exportPng": null,
+    "present": "הצג",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "הצגת שקופיות",
+    "exit": "צא מההצגה (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "השקופית הקודמת",
+    "nextSlide": "השקופית הבאה"
+  },
+  "notes": {
+    "panelLabel": "הערות דובר",
+    "placeholder": "הוסף הערות דובר…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "הצעות הסוכן",
+    "close": "סגור",
+    "empty": "אין שינויים הממתינים לבדיקה.",
+    "preview": "תצוגה מקדימה של השינויים",
+    "previewTitle": "בדוק את השינויים המוצעים",
+    "before": "השקופית הנוכחית",
+    "after": "השקופית המוצעת",
+    "accept": "אשר הצעה",
+    "reject": "דחה",
+    "force": "החל הצעה מעודכנת",
+    "blank": "ריק",
+    "target": "שקופית {slide} · {name}",
+    "targetLabel": "שינוי",
+    "targetMissing": "היעד כבר אינו זמין",
+    "stale": "אובייקטים אלה השתנו לאחר יצירת ההצעה. בדוק את השינויים הנוכחיים לפני ההחלה.",
+    "stalePreview": "תצוגה מקדימה זו משתמשת בשקופית המעודכנת. ההחלה תדרוס את היעדים שהשתנו.",
+    "geometry": "מיקום וגודל (x, y, רוחב, גובה)",
+    "appearance": "המראה או עיצוב הטקסט השתנו",
+    "changedAgain": "היעד השתנה שוב. בדוק את התצוגה המקדימה המעודכנת לפני ההחלה.",
+    "canvasTitle": "שינויים בשקופית זו",
+    "editSlide": "ערוך שקופית",
+    "showDiff": "הצג שינויים",
+    "details": "פרטי הבדיקה",
+    "removed": "הוסר",
+    "added": "נוסף",
+    "reviewHint": "מצב בדיקה · שינויים יוחלו לאחר אישור",
+    "canvasStale": "היעדים השתנו. פתח את פרטי הבדיקה כדי לבדוק את התצוגה המעודכנת לפני ההחלה.",
+    "previousPosition": "קודם",
+    "proposedPosition": "מוצע",
+    "loadingDiff": "טוען שינויים…"
   }
 }

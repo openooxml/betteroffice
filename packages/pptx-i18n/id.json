@@ -4,6 +4,7 @@
     "label": null,
     "save": "Simpan",
     "exportPng": null,
+    "present": "Presentasikan",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Presentasi slide",
+    "exit": "Keluar dari presentasi (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Slide sebelumnya",
+    "nextSlide": "Slide berikutnya"
+  },
+  "notes": {
+    "panelLabel": "Catatan pembicara",
+    "placeholder": "Tambahkan catatan pembicara…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Usulan agen",
+    "close": "Tutup",
+    "empty": "Tidak ada perubahan yang menunggu peninjauan.",
+    "preview": "Pratinjau perubahan",
+    "previewTitle": "Tinjau perubahan yang diusulkan",
+    "before": "Slide saat ini",
+    "after": "Slide yang diusulkan",
+    "accept": "Terima usulan",
+    "reject": "Tolak",
+    "force": "Terapkan usulan yang diperbarui",
+    "blank": "Kosong",
+    "target": "Slide {slide} · {name}",
+    "targetLabel": "Perubahan",
+    "targetMissing": "Target tidak lagi tersedia",
+    "stale": "Objek-objek ini berubah setelah usulan dibuat. Pratinjau perubahan saat ini sebelum menerapkannya.",
+    "stalePreview": "Pratinjau ini menggunakan slide yang diperbarui. Menerapkannya akan menimpa target yang berubah.",
+    "geometry": "Posisi dan ukuran (x, y, lebar, tinggi)",
+    "appearance": "Tampilan atau pemformatan teks berubah",
+    "changedAgain": "Target berubah lagi. Tinjau pratinjau yang dimuat ulang sebelum menerapkannya.",
+    "canvasTitle": "Perubahan pada slide ini",
+    "editSlide": "Edit slide",
+    "showDiff": "Tampilkan perubahan",
+    "details": "Detail peninjauan",
+    "removed": "Dihapus",
+    "added": "Ditambahkan",
+    "reviewHint": "Mode peninjauan · perubahan diterapkan setelah diterima",
+    "canvasStale": "Target berubah. Buka detail peninjauan untuk memeriksa pratinjau terbaru sebelum menerapkannya.",
+    "previousPosition": "Sebelumnya",
+    "proposedPosition": "Diusulkan",
+    "loadingDiff": "Memuat perubahan…"
   }
 }
