@@ -121,6 +121,7 @@ export const serialize_docx_s10: (a: number, b: number) => [number, number, numb
 export const serialize_docx_s11: (a: number, b: number) => [number, number, number, number];
 export const serialize_docx_s12: (a: number, b: number) => [number, number, number, number];
 export const write_docx_s13_wasm: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const write_docx_s13_wasm_with_warnings: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const build_display_list_json: (a: number, b: number) => [number, number, number, number];
 export const hit_test_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const hit_test_regions_by_handle: (a: number, b: number, c: number, d: number) => [number, number, number, number];

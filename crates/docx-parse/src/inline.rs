@@ -2219,21 +2219,7 @@ fn assign_marker_offsets(content: &mut [InlineNode]) {
 
 fn inline_content_length(node: &InlineNode) -> usize {
     match node {
-        InlineNode::Run(run) => run
-            .content
-            .iter()
-            .map(|content| match content {
-                RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-                    // Text offsets count UTF-16 code units.
-                    text.encode_utf16().count()
-                }
-                RunContent::Tab
-                | RunContent::SoftHyphen
-                | RunContent::NoBreakHyphen
-                | RunContent::Symbol { .. } => 1,
-                _ => 0,
-            })
-            .sum(),
+        InlineNode::Run(run) => run.content.iter().map(run_content_length).sum(),
         InlineNode::Hyperlink(hyperlink) => hyperlink
             .children
             .iter()
@@ -2255,12 +2241,40 @@ fn inline_content_length(node: &InlineNode) -> usize {
             .map(|node| inline_content_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_content_length).sum(),
-        InlineNode::Math(math) => math
-            .plain_text
-            .as_deref()
-            .map(|text| text.encode_utf16().count())
-            .unwrap_or(0),
+        InlineNode::Math(_) => 1,
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) | InlineNode::RawXml(_) => 0,
+    }
+}
+
+/// Story width of one run atom: text in UTF-16 units, every live embed one.
+pub(crate) fn run_content_length(content: &RunContent) -> usize {
+    match content {
+        RunContent::Text { text, .. } | RunContent::InstrText { text } => {
+            text.encode_utf16().count()
+        }
+        RunContent::Tab
+        | RunContent::SoftHyphen
+        | RunContent::NoBreakHyphen
+        | RunContent::Symbol { .. }
+        | RunContent::FootnoteRef { .. }
+        | RunContent::EndnoteRef { .. }
+        | RunContent::CommentReference { .. }
+        | RunContent::Drawing { .. }
+        | RunContent::Shape { .. }
+        | RunContent::HorizontalRule { .. }
+        | RunContent::Chart { .. }
+        | RunContent::OpaqueDrawing { .. } => 1,
+        RunContent::Break { break_type, .. } => {
+            if break_type
+                .as_deref()
+                .is_none_or(|kind| kind == "textWrapping")
+            {
+                1
+            } else {
+                0
+            }
+        }
+        _ => 0,
     }
 }
 

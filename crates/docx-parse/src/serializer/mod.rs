@@ -43,7 +43,7 @@ pub use s11::{S11SerializeRequest, S11SerializeResponse, serialize_s11_wire};
 pub use s12::{S12SerializeRequest, S12SerializeResponse, serialize_s12_wire};
 pub use s13::{
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, build_patched_document_xml,
-    update_core_properties, write_docx_s13,
+    update_core_properties, write_docx_s13, write_docx_s13_with_warnings,
 };
 pub use sdt::{serialize_block_content, serialize_block_sdt};
 pub use section::serialize_section_properties;

@@ -12,7 +12,7 @@ use crate::inline::{
     ContentPosition, Hyperlink, InlineNode, InlineSdt, InlineSdtType, MathEquation, MathType,
     OpenComplexField, Run, RunContent, SimpleField, SimpleFieldType, StructuredFieldContent,
     StructuredFieldTree, parse_bookmark_end, parse_bookmark_start, parse_field_type,
-    parse_hyperlink, parse_run, parse_sdt_properties,
+    parse_hyperlink, parse_run, parse_sdt_properties, run_content_length,
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
@@ -293,6 +293,7 @@ pub fn parse_paragraph(
         drawing,
         depth,
         false,
+        in_header_footer,
     )?;
     apply_list_rendering(&mut paragraph, properties, styles, numbering);
     Ok(paragraph)
@@ -436,6 +437,7 @@ fn parse_paragraph_contents(
     mut drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
     deletion: bool,
+    in_header_footer: bool,
 ) -> Result<Vec<ParagraphContent>, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let tracked_context = if deletion {
@@ -463,6 +465,7 @@ fn parse_paragraph_contents(
                     doc_defaults,
                     budget,
                     drawing.as_deref_mut(),
+                    in_header_footer,
                 )?;
                 process_field_run(run, &mut fields, &mut output, part)?;
             }
@@ -477,6 +480,7 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_header_footer,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     let runs: Vec<Run> = hyperlink
@@ -519,6 +523,7 @@ fn parse_paragraph_contents(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_header_footer,
                 )?;
                 if let Some(active) = fields.last_mut() {
                     let runs = field.content.clone();
@@ -542,6 +547,7 @@ fn parse_paragraph_contents(
                         drawing.as_deref_mut(),
                         depth + 1,
                         tracked_context == TrackedContext::Deletion,
+                        in_header_footer,
                     )?;
                     output.push(ParagraphContent::Inline(InlineNode::InlineSdt(Box::new(
                         InlineSdt {
@@ -569,6 +575,7 @@ fn parse_paragraph_contents(
                     drawing.as_deref_mut(),
                     depth + 1,
                     is_deletion,
+                    in_header_footer,
                 )?;
                 let content = content
                     .into_iter()
@@ -706,6 +713,7 @@ fn parse_simple_field_composed(
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
+    in_header_footer: bool,
 ) -> Result<SimpleField, ParseError> {
     let instruction = element
         .attribute(Some("w"), "instr")
@@ -722,6 +730,7 @@ fn parse_simple_field_composed(
         drawing,
         depth,
         false,
+        in_header_footer,
     )?);
     let content = result
         .iter()
@@ -765,6 +774,7 @@ fn parse_hyperlink_composed(
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
+    in_header_footer: bool,
 ) -> Result<Hyperlink, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     let mut hyperlink = parse_hyperlink(
@@ -788,6 +798,7 @@ fn parse_hyperlink_composed(
                 doc_defaults,
                 budget,
                 drawing.as_deref_mut(),
+                in_header_footer,
             )?)),
             "bookmarkStart" => Some(InlineNode::BookmarkStart(parse_bookmark_start(child))),
             "bookmarkEnd" => Some(InlineNode::BookmarkEnd(parse_bookmark_end(child))),
@@ -802,6 +813,7 @@ fn parse_hyperlink_composed(
                     budget,
                     drawing.as_deref_mut(),
                     depth + 1,
+                    in_header_footer,
                 )?,
             ))),
             "sdt" => parse_inline_sdt_composed(
@@ -815,6 +827,7 @@ fn parse_hyperlink_composed(
                 drawing.as_deref_mut(),
                 depth + 1,
                 false,
+                in_header_footer,
             )?
             .map(|sdt| InlineNode::InlineSdt(Box::new(sdt))),
             "oMath" | "oMathPara" => Some(InlineNode::Math(parse_math(child))),
@@ -850,6 +863,7 @@ fn parse_inline_sdt_composed(
     drawing: Option<&mut DrawingContext<'_>>,
     depth: usize,
     property_theme: bool,
+    in_header_footer: bool,
 ) -> Result<Option<InlineSdt>, ParseError> {
     let Some(container) = element.child("w", "sdtContent") else {
         return Ok(None);
@@ -865,6 +879,7 @@ fn parse_inline_sdt_composed(
         drawing,
         depth,
         false,
+        in_header_footer,
     )?);
     Ok(Some(InlineSdt {
         node_type: InlineSdtType::InlineSdt,
@@ -969,6 +984,7 @@ pub(crate) fn parse_run_composed(
     doc_defaults: Option<&DocDefaults>,
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut DrawingContext<'_>>,
+    in_header_footer: bool,
 ) -> Result<Run, ParseError> {
     let mut run = parse_run(element, theme, styles, doc_defaults).run;
     let mut replacements = Vec::new();
@@ -979,10 +995,28 @@ pub(crate) fn parse_run_composed(
                 relationships,
                 budget,
                 drawing.as_deref_mut(),
+                in_header_footer,
             )?),
-            "AlternateContent" if contains_drawing_owned_content(child) => replacements.push(
-                parse_alternate_content(child, relationships, budget, drawing.as_deref_mut())?,
-            ),
+            "AlternateContent" if contains_drawing_owned_content(child) => {
+                let parsed = parse_alternate_content(
+                    child,
+                    relationships,
+                    budget,
+                    drawing.as_deref_mut(),
+                    in_header_footer,
+                )?;
+                let modeled = parsed
+                    .iter()
+                    .any(|content| !matches!(content, RunContent::OpaqueDrawing { .. }));
+                if !modeled && !alternate_content_has_text_box(child) {
+                    replacements.push(vec![RunContent::OpaqueDrawing {
+                        kind: "alternateContent".to_owned(),
+                        xml: child.to_raw_inline_xml(),
+                    }]);
+                } else {
+                    replacements.push(parsed);
+                }
+            }
             _ => {}
         }
     }
@@ -1004,6 +1038,7 @@ fn parse_drawing_owned(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     drawing: Option<&mut DrawingContext<'_>>,
+    in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
     if matches!(element.local_name(), "pict" | "object") {
         if let Some(rule) = parse_horizontal_rule(element) {
@@ -1011,13 +1046,25 @@ fn parse_drawing_owned(
                 rule: Box::new(rule),
             }]);
         }
+        if has_ole_object(element, 0) {
+            return Ok(vec![RunContent::OpaqueDrawing {
+                kind: element.local_name().to_owned(),
+                xml: element.to_raw_inline_xml(),
+            }]);
+        }
         let media = drawing.as_ref().map(|context| context.media);
-        return Ok(parse_vml_image_content(element, relationships, media)
-            .map(|image| RunContent::Drawing {
+        if let Some(image) = parse_vml_image_content(element, relationships, media) {
+            return Ok(vec![RunContent::Drawing {
                 image: Box::new(image),
-            })
-            .into_iter()
-            .collect());
+            }]);
+        }
+        if !has_vml_image_data(element, 0) || !in_header_footer {
+            return Ok(vec![RunContent::OpaqueDrawing {
+                kind: element.local_name().to_owned(),
+                xml: element.to_raw_inline_xml(),
+            }]);
+        }
+        return Ok(Vec::new());
     }
     if is_text_box_drawing(element) {
         return Ok(Vec::new());
@@ -1078,26 +1125,43 @@ fn parse_alternate_content(
     relationships: Option<&RelationshipMap>,
     budget: &mut ParseBudget<'_>,
     mut drawing: Option<&mut DrawingContext<'_>>,
+    in_header_footer: bool,
 ) -> Result<Vec<RunContent>, ParseError> {
+    let mut saw_text_box = false;
     for branch_name in ["Choice", "Fallback"] {
         for branch in element
             .child_elements()
             .filter(|branch| branch.local_name() == branch_name)
         {
             let mut parsed = Vec::new();
+            let mut branch_text_box = false;
             for child in branch.child_elements() {
+                if child.local_name() == "drawing" && is_text_box_drawing(child) {
+                    branch_text_box = true;
+                }
                 if matches!(child.local_name(), "drawing" | "pict" | "object") {
                     parsed.extend(parse_drawing_owned(
                         child,
                         relationships,
                         budget,
                         drawing.as_deref_mut(),
+                        in_header_footer,
                     )?);
                 }
             }
             if !parsed.is_empty() {
+                if saw_text_box {
+                    parsed.retain(|content| {
+                        !matches!(
+                            content,
+                            RunContent::OpaqueDrawing { kind, .. }
+                                if kind == "pict" || kind == "object"
+                        )
+                    });
+                }
                 return Ok(parsed);
             }
+            saw_text_box |= branch_text_box;
         }
     }
     Ok(Vec::new())
@@ -1107,6 +1171,33 @@ fn contains_drawing_owned_content(element: &XmlElement) -> bool {
     element.child_elements().any(|child| {
         matches!(child.local_name(), "drawing" | "pict" | "object")
             || contains_drawing_owned_content(child)
+    })
+}
+
+fn has_vml_image_data(element: &XmlElement, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    element
+        .child_elements()
+        .any(|child| child.local_name() == "imagedata" || has_vml_image_data(child, depth + 1))
+}
+
+fn has_ole_object(element: &XmlElement, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    element
+        .child_elements()
+        .any(|child| child.local_name() == "OLEObject" || has_ole_object(child, depth + 1))
+}
+
+fn alternate_content_has_text_box(element: &XmlElement) -> bool {
+    element.child_elements().any(|branch| {
+        matches!(branch.local_name(), "Choice" | "Fallback")
+            && branch
+                .child_elements()
+                .any(|child| child.local_name() == "drawing" && is_text_box_drawing(child))
     })
 }
 
@@ -1206,20 +1297,7 @@ fn paragraph_content_length(content: &ParagraphContent) -> usize {
 fn inline_node_length(node: &InlineNode) -> usize {
     match node {
         InlineNode::RawXml(_) => 0,
-        InlineNode::Run(run) => run
-            .content
-            .iter()
-            .map(|content| match content {
-                RunContent::Text { text, .. } | RunContent::InstrText { text } => {
-                    text.encode_utf16().count()
-                }
-                RunContent::Tab
-                | RunContent::SoftHyphen
-                | RunContent::NoBreakHyphen
-                | RunContent::Symbol { .. } => 1,
-                _ => 0,
-            })
-            .sum(),
+        InlineNode::Run(run) => run.content.iter().map(run_content_length).sum(),
         InlineNode::Hyperlink(hyperlink) => hyperlink
             .children
             .iter()
@@ -1241,11 +1319,7 @@ fn inline_node_length(node: &InlineNode) -> usize {
             .map(|node| inline_node_length(&node))
             .sum(),
         InlineNode::InlineSdt(sdt) => sdt.content.iter().map(inline_node_length).sum(),
-        InlineNode::Math(math) => math
-            .plain_text
-            .as_deref()
-            .map(|text| text.encode_utf16().count())
-            .unwrap_or(0),
+        InlineNode::Math(_) => 1,
         InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => 0,
     }
 }
@@ -1534,6 +1608,103 @@ mod tests {
     }
 
     #[test]
+    fn unmodeled_drawings_survive_as_opaque_drawings() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:v="urn:schemas-microsoft-com:vml">
+              <w:r><w:object><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1"/></w:object></w:r>
+              <w:r><mc:AlternateContent><mc:Choice Requires="wps"><w:pict><v:rect style="width:10pt;height:10pt"/></w:pict></mc:Choice><mc:Fallback><w:pict><v:rect style="width:10pt;height:10pt"/></w:pict></mc:Fallback></mc:AlternateContent></w:r>
+            </w:p>"#,
+        );
+        let kinds: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .flat_map(|run| run.content.iter())
+            .filter_map(|content| match content {
+                RunContent::OpaqueDrawing { kind, xml } => Some((kind.as_str(), xml.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds[0].0, "object");
+        assert!(kinds[0].1.contains("OLEObject"));
+        assert_eq!(kinds[1].0, "alternateContent");
+        assert!(kinds[1].1.contains("AlternateContent"));
+    }
+
+    #[test]
+    fn ole_objects_and_unresolved_picts_stay_opaque() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="r">
+              <w:r><w:object><v:shape style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1" r:id="rIdOle"/></w:object></w:r>
+              <w:r><w:pict><v:shape id="PowerPlusWaterMarkObject1" style="width:72pt;height:36pt"><v:imagedata r:id="rIdImg"/></v:shape></w:pict></w:r>
+              <w:r><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id=""/></v:shape></w:pict></w:r>
+            </w:p>"#,
+        );
+        let opaques: Vec<_> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => Some(run),
+                _ => None,
+            })
+            .map(|run| {
+                run.content
+                    .iter()
+                    .filter_map(|content| match content {
+                        RunContent::OpaqueDrawing { kind, xml } => {
+                            Some((kind.as_str(), xml.as_str()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(opaques.len(), 3);
+        assert_eq!(opaques[0].len(), 1);
+        assert_eq!(opaques[0][0].0, "object");
+        assert!(opaques[0][0].1.contains("OLEObject"));
+        assert_eq!(opaques[1].len(), 1);
+        assert_eq!(opaques[1][0].0, "pict");
+        assert!(opaques[1][0].1.contains("imagedata"));
+        assert_eq!(opaques[2].len(), 1);
+        assert_eq!(opaques[2][0].0, "pict");
+    }
+
+    #[test]
+    fn imageless_picts_stay_opaque_while_textbox_drawings_stay_dropped() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w" xmlns:v="urn:schemas-microsoft-com:vml" xmlns:r="r" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+              <w:r><w:pict><v:shape style="width:72pt;height:36pt"><v:imagedata r:id=""/></v:shape></w:pict></w:r>
+              <w:r><w:drawing><wp:inline><wp:extent cx="914400" cy="457200"/><wp:docPr id="41" name="Text Box 41"/><a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"><wps:wsp><wps:cNvSpPr txBox="1"/><wps:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></wps:spPr><wps:txbx><w:txbxContent><w:p><w:r><w:t>inner</w:t></w:r></w:p></w:txbxContent></wps:txbx><wps:bodyPr rot="0" vert="horz"/></wps:wsp></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>
+            </w:p>"#,
+        );
+        let ParagraphContent::Inline(InlineNode::Run(pict)) = &paragraph.content[0] else {
+            panic!("expected pict run");
+        };
+        assert!(
+            pict.content.iter().any(|content| matches!(
+                content,
+                RunContent::OpaqueDrawing { kind, .. } if kind == "pict"
+            )),
+            "imageless picts round-trip verbatim instead of vanishing"
+        );
+        let ParagraphContent::Inline(InlineNode::Run(textbox)) = &paragraph.content[1] else {
+            panic!("expected textbox run");
+        };
+        assert!(
+            textbox
+                .content
+                .iter()
+                .all(|content| !matches!(content, RunContent::OpaqueDrawing { .. })),
+            "textbox drawings keep their existing owners"
+        );
+    }
+
+    #[test]
     fn pins_paragraph_mark_changes_and_inline_section_properties() {
         let paragraph = parse(
             r#"<w:p xmlns:w="w" xmlns:r="r">
@@ -1606,6 +1777,39 @@ mod tests {
             panic!("bookmark end")
         };
         assert_eq!(end.position.as_ref().unwrap().offset, Some(5.0));
+    }
+
+    #[test]
+    fn embeds_count_as_one_unit_in_marker_offsets() {
+        let paragraph = parse(
+            r#"<w:p xmlns:w="w" xmlns:o="urn:schemas-microsoft-com:office:office">
+              <w:r><w:t>ab</w:t></w:r>
+              <w:r><w:object><o:OLEObject Type="Embed" ProgID="Equation.DSMT4" ShapeID="_1" DrawAspect="Content" ObjectID="_1"/></w:object></w:r>
+              <w:r><w:t>cd</w:t></w:r>
+              <w:bookmarkStart w:id="7" w:name="afterOpaque"/>
+              <w:r><w:t>ef</w:t></w:r>
+              <w:bookmarkEnd w:id="7"/>
+              <w:commentRangeStart w:id="9"/>
+              <w:r><w:footnoteReference w:id="2"/></w:r>
+              <w:r><w:br/></w:r>
+              <w:commentRangeEnd w:id="9"/>
+            </w:p>"#,
+        );
+        let offsets: Vec<f64> = paragraph
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                ParagraphContent::Inline(InlineNode::BookmarkStart(bookmark)) => {
+                    bookmark.position.as_ref()?.offset
+                }
+                ParagraphContent::Inline(InlineNode::BookmarkEnd(bookmark)) => {
+                    bookmark.position.as_ref()?.offset
+                }
+                ParagraphContent::CommentRange(marker) => marker.offset,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(offsets, [5.0, 7.0, 7.0, 9.0]);
     }
 
     fn run_texts(paragraph: &Paragraph) -> Vec<&str> {

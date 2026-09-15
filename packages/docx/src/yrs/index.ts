@@ -17,6 +17,7 @@
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
+import { normalizeSeedError } from './documentToYrs';
 import type {
   CollaborationCursor,
   CollaborationReplica,
@@ -38,6 +39,12 @@ export {
   type ResidentCaretPaintStyle,
 } from './residentCaret';
 export { documentToYrs } from './documentToYrs';
+export {
+  OPAQUE_SEED_BUDGET_BYTES,
+  OpaqueSeedBudgetError,
+  assertOpaqueSeedBudget,
+  normalizeSeedError,
+} from './documentToYrs';
 export { yrsToDocument } from './yrsToDocument';
 
 export interface YrsDocxHost {
@@ -1081,7 +1088,12 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 
   const openDocx = (bytes: Uint8Array, seedStories: boolean): YrsDocxHost => {
     const source = bytes.slice();
-    const json = mutate(() => session.open_docx(source, seedStories));
+    let json: string;
+    try {
+      json = mutate(() => session.open_docx(source, seedStories));
+    } catch (error) {
+      throw normalizeSeedError(error);
+    }
     const host = decodeDocxHost(json, source);
     docxSource = source;
     return host;

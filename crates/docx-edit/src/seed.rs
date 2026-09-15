@@ -230,6 +230,41 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
+/// Aggregate cap, in xml bytes, for opaque drawing payloads copied into yrs
+/// state while seeding. Opaque markup replays verbatim through JSON raw ops
+/// and yrs map values, so uncapped documents multiply memory once per layer.
+/// Both seeders enforce this constant and refuse over-budget documents
+/// instead of silently dropping content.
+pub const OPAQUE_SEED_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
+
+pub fn opaque_seed_budget_exceeded(total: u64) -> String {
+    format!(
+        "opaque drawing seed budget exceeded ({} bytes of opaque xml, budget {} bytes)",
+        total, OPAQUE_SEED_BUDGET_BYTES
+    )
+}
+
+pub fn is_opaque_seed_budget_error(message: &str) -> bool {
+    message.starts_with("opaque drawing seed budget exceeded")
+}
+
+fn opaque_xml_bytes(value: &Value) -> u64 {
+    match value {
+        Value::Array(items) => items.iter().map(opaque_xml_bytes).sum(),
+        Value::Object(map) => {
+            let own = match map.get("type").and_then(Value::as_str) {
+                Some("opaqueDrawing") => map
+                    .get("xml")
+                    .and_then(Value::as_str)
+                    .map_or(0, |xml| xml.len() as u64),
+                _ => 0,
+            };
+            own + map.values().map(opaque_xml_bytes).sum::<u64>()
+        }
+        _ => 0,
+    }
+}
+
 fn ordered_object(
     entries: impl IntoIterator<Item = (impl Into<String>, Value)>,
 ) -> Vec<(String, Value)> {
@@ -1256,13 +1291,6 @@ fn note_ref_unit(
     )
 }
 
-fn hidden_marks(marks: &[Mark]) -> &[Mark] {
-    marks
-        .iter()
-        .find(|mark| mark.name == "hidden")
-        .map_or(&[], std::slice::from_ref)
-}
-
 fn run_content_to_units(
     content: &Value,
     marks: &[Mark],
@@ -1336,8 +1364,8 @@ fn run_content_to_units(
         "drawing" => vec![embed_unit(
             "image",
             image_payload(field(Some(content), "image").unwrap_or(&Value::Null)),
-            hidden_marks(marks),
-            None,
+            marks,
+            comment_id,
             1,
         )],
         "horizontalRule" => vec![embed_unit(
@@ -1353,8 +1381,8 @@ fn run_content_to_units(
                 field(Some(content), "shape").unwrap_or(&Value::Null),
                 source,
             ),
-            hidden_marks(marks),
-            None,
+            marks,
+            comment_id,
             1,
         )],
         "chart" => vec![embed_unit(
@@ -1363,8 +1391,18 @@ fn run_content_to_units(
                 field(Some(content), "chart").unwrap_or(&Value::Null),
                 source,
             ),
-            hidden_marks(marks),
-            None,
+            marks,
+            comment_id,
+            1,
+        )],
+        "opaqueDrawing" => vec![embed_unit(
+            "opaqueDrawing",
+            map_from_value(json!({
+                "kind": field(Some(content), "kind").cloned().unwrap_or(Value::Null),
+                "xml": field(Some(content), "xml").cloned().unwrap_or(Value::Null),
+            })),
+            marks,
+            comment_id,
             1,
         )],
         "footnoteRef" => field(Some(content), "id")
@@ -1402,6 +1440,7 @@ fn hyperlink_to_units(
     style_formatting: Option<&Value>,
     styles: &StyleResolver,
     extra_marks: &[Mark],
+    comment_id: Option<String>,
     source: &BTreeMap<String, String>,
 ) -> Vec<InlineUnit> {
     let mut units = Vec::new();
@@ -1417,7 +1456,12 @@ fn hyperlink_to_units(
                     .chain(std::iter::once(link.clone()))
                     .collect();
                 for content in array(field(Some(child), "content")) {
-                    units.extend(run_content_to_units(content, &marks, None, source));
+                    units.extend(run_content_to_units(
+                        content,
+                        &marks,
+                        comment_id.clone(),
+                        source,
+                    ));
                 }
             }
             "simpleField" | "complexField" => {
@@ -1427,7 +1471,7 @@ fn hyperlink_to_units(
                     .chain(extra_marks.iter().cloned())
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("field", payload, &marks, None, 1));
+                units.push(embed_unit("field", payload, &marks, comment_id.clone(), 1));
             }
             "mathEquation" => {
                 let marks: Vec<Mark> = extra_marks
@@ -1435,7 +1479,13 @@ fn hyperlink_to_units(
                     .cloned()
                     .chain(std::iter::once(link.clone()))
                     .collect();
-                units.push(embed_unit("math", math_payload(child), &marks, None, 1));
+                units.push(embed_unit(
+                    "math",
+                    math_payload(child),
+                    &marks,
+                    comment_id.clone(),
+                    1,
+                ));
             }
             _ => {}
         }
@@ -1479,7 +1529,9 @@ fn field_to_units(
     let mut children = Vec::new();
     for (index, child) in projected_children {
         let mut projected = match string(field(Some(child), "type")) {
-            Some("hyperlink") => hyperlink_to_units(child, style_formatting, styles, &[], source),
+            Some("hyperlink") => {
+                hyperlink_to_units(child, style_formatting, styles, &[], None, source)
+            }
             Some("simpleField") => {
                 let (payload, marks) = field_payload(child, style_formatting, source);
                 vec![embed_unit("field", payload, &marks, None, 1)]
@@ -1562,19 +1614,14 @@ fn tracked_to_units(
                 source,
             ));
         } else {
-            let mut linked = hyperlink_to_units(
+            units.extend(hyperlink_to_units(
                 child,
                 style_formatting,
                 styles,
                 std::slice::from_ref(&marker),
+                comment_id.clone(),
                 source,
-            );
-            if let Some(comment_id) = &comment_id {
-                for unit in &mut linked {
-                    unit.comment_id = Some(comment_id.clone());
-                }
-            }
-            units.extend(linked);
+            ));
         }
     }
     units
@@ -1648,7 +1695,7 @@ fn sdt_payload(
                 }
             }
             "hyperlink" => {
-                for unit in hyperlink_to_units(child, style_formatting, styles, &[], source) {
+                for unit in hyperlink_to_units(child, style_formatting, styles, &[], None, source) {
                     append(&mut content, unit);
                 }
             }
@@ -2111,6 +2158,7 @@ fn paragraph_units(
                     style_formatting.as_ref(),
                     styles,
                     &[],
+                    comment_id,
                     source,
                 ));
             }
@@ -3328,6 +3376,10 @@ pub(crate) fn seed_parsed_docx(
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
     let parsed = serde_json::to_value(&envelope.document).map_err(|error| error.to_string())?;
+    let opaque_total = opaque_xml_bytes(&parsed);
+    if opaque_total > OPAQUE_SEED_BUDGET_BYTES {
+        return Err(opaque_seed_budget_exceeded(opaque_total));
+    }
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if needs_source_json(&parsed) {
         let serialized =
@@ -3533,6 +3585,68 @@ mod tests {
                 .unwrap()
                 .contains("structuredResult")
         );
+    }
+
+    #[test]
+    fn tracked_embeds_keep_revision_marks_and_comment_ids() {
+        let info = json!({"id": 11, "author": "Ada", "date": "2024-01-01T00:00:00Z"});
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let tracked = |node_type: &str, child: Value| json!({"type": node_type, "info": info, "content": [child]});
+        let opaque = || json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"});
+        let paragraph = json!({"content": [
+            tracked("insertion", run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            tracked("insertion", run(json!({"type": "shape", "shape": {"shapeType": "rect"}}))),
+            tracked("insertion", run(json!({"type": "chart", "chart": {"chartType": "bar"}}))),
+            tracked("insertion", run(opaque())),
+            tracked("deletion", run(opaque())),
+            {"type": "commentRangeStart", "id": 3},
+            run(opaque()),
+            {"type": "commentRangeEnd", "id": 3},
+        ]});
+        let styles = StyleResolver::new(None);
+        let (units, _) = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 6);
+        for (unit, kind) in
+            units[..5]
+                .iter()
+                .zip(["image", "shape", "chart", "opaqueDrawing", "opaqueDrawing"])
+        {
+            let UnitContent::Embed { kind: actual, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert_eq!(actual, kind);
+        }
+        for unit in &units[..4] {
+            assert_eq!(unit.attrs["ins"]["author"], json!("Ada"));
+        }
+        assert_eq!(units[4].attrs["del"]["author"], json!("Ada"));
+        assert_eq!(units[5].comment_id.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn hyperlinks_keep_embeds_and_comment_ids() {
+        let run = |content: Value| json!({"type": "run", "content": [content]});
+        let link = |child: Value| json!({"type": "hyperlink", "href": "https://example.com", "children": [child]});
+        let paragraph = json!({"content": [
+            {"type": "commentRangeStart", "id": 5},
+            link(run(json!({"type": "drawing", "image": {"wrap": {"type": "inline"}}}))),
+            link(run(json!({"type": "opaqueDrawing", "kind": "object", "xml": "<w:object/>"}))),
+            {"type": "commentRangeEnd", "id": 5},
+        ]});
+        let styles = StyleResolver::new(None);
+        let (units, _) = paragraph_units(&paragraph, &styles, None, &BTreeMap::new());
+        assert_eq!(units.len(), 2);
+        for unit in &units {
+            let UnitContent::Embed { kind, .. } = &unit.content else {
+                panic!("expected embed unit");
+            };
+            assert!(kind == "image" || kind == "opaqueDrawing");
+            assert_eq!(
+                unit.attrs["hyperlink"]["href"],
+                json!("https://example.com")
+            );
+            assert_eq!(unit.comment_id.as_deref(), Some("5"));
+        }
     }
 
     #[test]
@@ -3846,6 +3960,68 @@ mod tests {
         assert_eq!(boundaries[0]["text"], "A\t\u{00ad}");
         assert_eq!(boundaries[0]["marksKey"], "bold:{}");
         assert_eq!(boundaries[1]["text"], "12");
+    }
+
+    #[test]
+    fn opaque_drawings_seed_one_opaque_unit_and_lower_without_a_run() {
+        let styles = StyleResolver::new(None);
+        let xml = "<w:object><o:OLEObject/></w:object>";
+        let (units, _) = paragraph_units(
+            &json!({"content": [{
+                "type": "run",
+                "content": [
+                    {"type": "text", "text": "A"},
+                    {"type": "opaqueDrawing", "kind": "object", "xml": xml},
+                ],
+            }]}),
+            &styles,
+            None,
+            &BTreeMap::new(),
+        );
+        assert_eq!(units.len(), 2);
+        let UnitContent::Embed { kind, payload } = &units[1].content else {
+            panic!("opaque drawing must seed an embed unit");
+        };
+        assert_eq!(kind, "opaqueDrawing");
+        assert_eq!(payload["kind"], json!("object"));
+        assert_eq!(payload["xml"], json!(xml));
+        assert_eq!(units[1].pm_size, 1);
+
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            &[json!({"type":"paragraph","paraId":"opaque","content": [{
+                "type": "run",
+                "content": [{"type": "opaqueDrawing", "kind": "object", "xml": xml}],
+            }]})],
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: false,
+                seed_comments: false,
+            },
+        );
+        let document = EditingDoc::new(74102);
+        let (story, ops, _) = seed_plan(context.plans.pop().unwrap()).unwrap();
+        document.create_empty_stories(&[story.clone()]).unwrap();
+        document
+            .apply_raw_story_batches(
+                vec![(story, ops)],
+                &EditCtx::local(String::new(), String::new()),
+            )
+            .unwrap();
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            &document,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        assert_eq!(blocks.len(), 1);
     }
 
     #[test]

@@ -99,7 +99,10 @@ pub use queries::{
 };
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
-pub use seed::seed_from_docx;
+pub use seed::{
+    OPAQUE_SEED_BUDGET_BYTES, is_opaque_seed_budget_error, opaque_seed_budget_exceeded,
+    seed_from_docx,
+};
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
 
 #[cfg(feature = "wasm")]

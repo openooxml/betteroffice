@@ -1,7 +1,7 @@
 /** Typed TypeScript boundary for the Rust package writer. */
 
 import type { BlockContent, Document, Hyperlink, Image, Run } from '../types/document';
-import { preloadParseWasm, writeDocxS13Wire } from './parseWasm';
+import { preloadParseWasm, writeDocxS13WithWarningsWire } from './parseWasm';
 import { collectParts, headerFooterFilename, partText } from './rezip/parts';
 import { preloadOpcWasm, unzipContainer } from './wasm';
 
@@ -22,6 +22,7 @@ export interface RustSelectiveSave {
 export interface RustSaveResult {
   buffer: ArrayBuffer;
   determinism: RustSaveDeterminism;
+  warnings: string[];
 }
 
 async function sha256Hex(bytes: Uint8Array): Promise<string> {
@@ -68,10 +69,13 @@ export async function writeDocumentWithRust(
       : { selective: { changedParaIds: [...selective.changedParaIds] } }),
   };
   assertSafeSaveTree(request, 'save');
-  const bytes = writeDocxS13Wire(JSON.stringify(request), new Uint8Array(originalBuffer));
+  const { bytes, warnings } = writeDocxS13WithWarningsWire(
+    JSON.stringify(request),
+    new Uint8Array(originalBuffer)
+  );
   const buffer = exactArrayBuffer(bytes);
   if (!selective) applyRustSaveMutations(document, originalBuffer, buffer);
-  return { buffer, determinism: fixed };
+  return { buffer, determinism: fixed, warnings: [...(document.warnings ?? []), ...warnings] };
 }
 
 /** Applies saved relationship IDs to bound model nodes. */

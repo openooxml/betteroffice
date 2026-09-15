@@ -348,7 +348,7 @@ mod tests {
         let InlineNode::BookmarkEnd(end) = projection.paragraph_inlines[0].last().unwrap() else {
             panic!("bookmark end")
         };
-        assert_eq!(end.position.as_ref().unwrap().offset, Some(3.0));
+        assert_eq!(end.position.as_ref().unwrap().offset, Some(4.0));
     }
 
     #[test]

@@ -344,11 +344,27 @@ fn serialize_run_content(
             writer.end_element();
         }
         RunContent::Chart { chart } => {
-            let xml = chart.drawing_xml.as_deref().ok_or_else(|| {
-                ParseError::Canonical("chart run carries no drawing to replay".to_owned())
-            })?;
-            validate_raw_subtree(xml, "w", "drawing")?;
-            return Ok(xml.to_owned());
+            if let Some(xml) = chart.drawing_xml.as_deref() {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            if let Some(xml) = chart
+                .relationship_id
+                .as_deref()
+                .and_then(|id| context.chart_drawing(id))
+            {
+                validate_raw_subtree(xml, "w", "drawing")?;
+                return Ok(xml.to_owned());
+            }
+            context.warn(format!(
+                "chart run carries no drawing to replay{}; keeping the run out of the output",
+                chart
+                    .relationship_id
+                    .as_deref()
+                    .map(|id| format!(" (rId {id})"))
+                    .unwrap_or_default()
+            ));
+            return Ok(String::new());
         }
         RunContent::OpaqueDrawing { xml, .. } => {
             validate_replayed_fragment(xml)?;

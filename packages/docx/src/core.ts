@@ -29,7 +29,8 @@ export {
   serializeDocumentBody,
   serializeSectionProperties,
 } from './docx/serializer';
-export { repackDocx, createDocx, updateMultipleFiles } from './docx/rezip';
+export { repackDocx, repackDocxWithWarnings, createDocx, updateMultipleFiles } from './docx/rezip';
+export type { RepackResult } from './docx/rezip';
 export { attemptSelectiveSave } from './docx/selectiveSave';
 
 // ============================================================================

@@ -1,5 +1,7 @@
 //! Deterministic recursive serializer state.
 
+use std::collections::HashMap;
+
 use crate::paragraph::HexIdAllocator;
 use crate::xml::ParseError;
 
@@ -12,6 +14,8 @@ pub struct SerializerContext {
     ids: HexIdAllocator,
     now: String,
     rendered_page_breaks: Vec<bool>,
+    chart_drawings: HashMap<String, String>,
+    warnings: Vec<String>,
 }
 
 impl SerializerContext {
@@ -21,7 +25,30 @@ impl SerializerContext {
             ids: HexIdAllocator::from_sha256(&determinism.seed)?,
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
+            chart_drawings: HashMap::new(),
+            warnings: Vec::new(),
         })
+    }
+
+    /// Authored `w:drawing` placements for one story part, keyed by chart
+    /// relationship id. Sessions seeded before drawings were replayed carry
+    /// chart runs without one; the source part still names their placement.
+    pub fn set_chart_drawings(&mut self, drawings: HashMap<String, String>) {
+        self.chart_drawings = drawings;
+    }
+
+    pub(crate) fn chart_drawing(&self, relationship_id: &str) -> Option<&str> {
+        self.chart_drawings.get(relationship_id).map(String::as_str)
+    }
+
+    /// Records a non-fatal save diagnostic for the caller to report.
+    pub fn warn(&mut self, warning: impl Into<String>) {
+        self.warnings.push(warning.into());
+    }
+
+    /// Drains the diagnostics recorded so far.
+    pub fn take_warnings(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn allocate_hex_id(&mut self) -> String {

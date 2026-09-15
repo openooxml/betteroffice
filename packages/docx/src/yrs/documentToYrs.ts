@@ -56,6 +56,64 @@ import {
 
 type Attrs = Record<string, unknown>;
 
+/**
+ * Aggregate cap, in xml bytes, for opaque drawing payloads copied into yrs
+ * state while seeding. Opaque markup replays verbatim through raw ops and
+ * yrs map values, so uncapped documents multiply memory once per layer.
+ * Both seeders enforce this constant and refuse over-budget documents
+ * instead of silently dropping content.
+ */
+export const OPAQUE_SEED_BUDGET_BYTES = 8 * 1024 * 1024;
+
+const OPAQUE_SEED_BUDGET_MESSAGE = 'opaque drawing seed budget exceeded';
+
+export class OpaqueSeedBudgetError extends Error {
+  readonly total: number;
+  readonly budget = OPAQUE_SEED_BUDGET_BYTES;
+  constructor(total: number) {
+    super(`${OPAQUE_SEED_BUDGET_MESSAGE} (${total} bytes of opaque xml, budget ${OPAQUE_SEED_BUDGET_BYTES} bytes)`);
+    this.name = 'OpaqueSeedBudgetError';
+    this.total = total;
+  }
+}
+
+export function normalizeSeedError(error: unknown): unknown {
+  if (error instanceof OpaqueSeedBudgetError) return error;
+  const message =
+    typeof error === 'string' ? error : error instanceof Error ? error.message : undefined;
+  if (message?.startsWith(OPAQUE_SEED_BUDGET_MESSAGE)) {
+    const total = /(\d+) bytes of opaque xml/.exec(message)?.[1];
+    return new OpaqueSeedBudgetError(total === undefined ? 0 : Number(total));
+  }
+  return error;
+}
+
+const textEncoder = new TextEncoder();
+
+function opaqueXmlBytes(value: unknown): number {
+  if (typeof value === 'string') return 0;
+  if (Array.isArray(value)) return value.reduce<number>((sum, entry) => sum + opaqueXmlBytes(entry), 0);
+  if (value instanceof Map) {
+    let sum = 0;
+    for (const entry of value.values()) sum += opaqueXmlBytes(entry);
+    return sum;
+  }
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const own =
+      record.type === 'opaqueDrawing' && typeof record.xml === 'string'
+        ? textEncoder.encode(record.xml).length
+        : 0;
+    return own + Object.values(record).reduce<number>((sum, entry) => sum + opaqueXmlBytes(entry), 0);
+  }
+  return 0;
+}
+
+export function assertOpaqueSeedBudget(document: Document): void {
+  const total = opaqueXmlBytes(document);
+  if (total > OPAQUE_SEED_BUDGET_BYTES) throw new OpaqueSeedBudgetError(total);
+}
+
 interface MarkDescriptor {
   name: string;
   /** Complete schema attrs, including non-null defaults. */
@@ -621,13 +679,15 @@ function runContentToUnits(
         }),
       ];
     case 'drawing':
-      return [embedUnit('image', imagePayload(content.image))];
+      return [embedUnit('image', imagePayload(content.image), marks, commentId)];
     case 'horizontalRule':
       return [embedUnit('horizontalRule', { rule: content.rule }, marks, commentId)];
     case 'shape':
-      return [embedUnit('shape', shapePayload(content.shape))];
+      return [embedUnit('shape', shapePayload(content.shape), marks, commentId)];
     case 'chart':
-      return [embedUnit('chart', chartPayload(content.chart))];
+      return [embedUnit('chart', chartPayload(content.chart), marks, commentId)];
+    case 'opaqueDrawing':
+      return [embedUnit('opaqueDrawing', { kind: content.kind, xml: content.xml }, marks, commentId)];
     case 'footnoteRef':
       return [noteRefUnit(content.id, 'footnote', marks, commentId)];
     case 'endnoteRef':
@@ -652,19 +712,20 @@ function hyperlinkToUnits(
   hyperlink: Hyperlink,
   styleFormatting: TextFormatting | undefined,
   styleResolver: StyleResolver | null,
-  extraMarks: readonly MarkDescriptor[] = []
+  extraMarks: readonly MarkDescriptor[] = [],
+  commentId?: number
 ): InlineUnit[] {
   const units: InlineUnit[] = [];
   const link = hyperlinkMark(hyperlink);
   for (const child of hyperlink.structuredChildren ?? hyperlink.children) {
     if (child.type === 'run') {
       const marks = [...runMarks(child, styleFormatting, styleResolver), ...extraMarks, link];
-      for (const content of child.content) units.push(...runContentToUnits(content, marks));
+      for (const content of child.content) units.push(...runContentToUnits(content, marks, commentId));
     } else if (child.type === 'simpleField' || child.type === 'complexField') {
       const field = fieldPayload(child, styleFormatting);
-      units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link]));
+      units.push(embedUnit('field', field.payload, [...field.marks, ...extraMarks, link], commentId));
     } else if (child.type === 'mathEquation') {
-      units.push(embedUnit('math', mathPayload(child), [...extraMarks, link]));
+      units.push(embedUnit('math', mathPayload(child), [...extraMarks, link], commentId));
     }
   }
   return units;
@@ -703,11 +764,7 @@ function trackedToUnits(
     if (child.type === 'run') {
       units.push(...runToUnits(child, styleFormatting, styleResolver, commentId, [mark]));
     } else {
-      const linked = hyperlinkToUnits(child, styleFormatting, styleResolver, [mark]);
-      for (const unit of linked) {
-        if (commentId !== undefined) unit.commentId = commentId;
-      }
-      units.push(...linked);
+      units.push(...hyperlinkToUnits(child, styleFormatting, styleResolver, [mark], commentId));
     }
   }
   return units;
@@ -1022,7 +1079,7 @@ function paragraphUnits(
       units.push(...runToUnits(content, styleFormatting, styleResolver, commentId));
     } else if (content.type === 'hyperlink') {
       boundaries = undefined;
-      units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver));
+      units.push(...hyperlinkToUnits(content, styleFormatting, styleResolver, [], commentId));
     } else if (content.type === 'simpleField' || content.type === 'complexField') {
       boundaries = undefined;
       units.push(...fieldToUnits(content, styleFormatting, styleResolver, contentIndex));
@@ -1622,6 +1679,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(session: YrsSession, document: Document): void {
+  assertOpaqueSeedBudget(document);
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
