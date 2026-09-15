@@ -546,6 +546,72 @@ fn overlapping_column_declarations_keep_source_order_on_unrelated_edit() {
 }
 
 #[test]
+fn prefixed_sheet_binds_generated_cells_to_the_sheet_namespace() {
+    let original = strict_prefixed_fixture();
+    let strict_main = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "=1+2",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "hello",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 2,
+                width: Some(20.0),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let sheet = String::from_utf8(package_map(&saved)["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        sheet.contains(&format!(r#"<s:sheetData xmlns="{strict_main}">"#)),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<c r="A1"><f>1+2</f><v>3</v></c>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<row r="2"><c r="B2" t="inlineStr"><is><t xml:space="preserve">hello</t></is></c></row>"#
+        ),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(&format!(r#"<cols xmlns="{strict_main}"><col min="3""#)),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    let sheet_model = reopened.model().sheet(SheetId(0)).unwrap().clone();
+    assert_eq!(
+        sheet_model.cell(cell("A1")).unwrap().formula.as_deref(),
+        Some("1+2")
+    );
+    assert_eq!(
+        sheet_model.cell(cell("B2")).unwrap().value,
+        CellValue::Text {
+            value: "hello".to_owned()
+        }
+    );
+    assert_eq!(sheet_model.col_widths.get(&2), Some(&20.0));
+}
+
+#[test]
 fn row_insert_carries_preserved_markup_to_shifted_rows() {
     let original = markup_round_trip_fixture();
     let mut workbook = Workbook::open(&original).unwrap();
