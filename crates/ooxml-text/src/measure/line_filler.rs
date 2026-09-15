@@ -123,6 +123,7 @@ struct LineContribution {
     logical_order: u32,
     shaped_cluster: bool,
     is_space: bool,
+    is_fit_space: bool,
 }
 
 /// Fill state: the paragraph's finished lines, the line in progress, and the
@@ -558,6 +559,7 @@ impl Filler<'_> {
             logical_order: run_index.saturating_mul(1_000_000),
             shaped_cluster: false,
             is_space: false,
+            is_fit_space: false,
         });
     }
 
@@ -590,6 +592,7 @@ impl Filler<'_> {
                     .saturating_add(cluster.logical_order),
                 shaped_cluster: true,
                 is_space: cluster.is_space,
+                is_fit_space: cluster.is_fit_space,
             });
         }
     }
@@ -605,7 +608,7 @@ impl Filler<'_> {
                 .cur
                 .contributions
                 .iter()
-                .rposition(|part| !part.is_space)
+                .rposition(|part| !part.is_fit_space)
                 .map_or(0, |i| i + 1);
             let parts = &mut self.cur.contributions[..end];
             let visible_width = parts.iter().map(|part| part.advance).sum::<f32>();

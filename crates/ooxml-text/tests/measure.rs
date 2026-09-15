@@ -268,6 +268,57 @@ fn justified_text_does_not_compress_ideographic_spaces() {
 }
 
 #[test]
+fn justified_mixed_ascii_and_trailing_ideographic_keeps_spaces_uncompressed() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * SP;
+    for trailing in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let count = trailing.chars().count() as f64;
+        let text = format!("000 000 000 000{trailing}");
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":text}],"attrs":{"alignment":"justify"}},
+            "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            1,
+            "trailing {count}"
+        );
+        let line = &measured["lines"][0];
+        approx(
+            line["width"].as_f64().unwrap(),
+            natural + count * W_IDEO,
+            "full width retained",
+        );
+        for idx in [3, 7, 11] {
+            approx(
+                line["clusterAdvances"][idx]["advance"].as_f64().unwrap(),
+                SP,
+                "ascii space uncompressed",
+            );
+        }
+        approx(
+            line["clusterAdvances"][0]["advance"].as_f64().unwrap(),
+            W0,
+            "unchanged glyph advance",
+        );
+        let base = 15;
+        for offset in 0..count as usize {
+            approx(
+                line["clusterAdvances"][base + offset]["advance"]
+                    .as_f64()
+                    .unwrap(),
+                W_IDEO,
+                "trailing ideographic advance",
+            );
+        }
+    }
+}
+
+#[test]
 fn ideographic_space_only_run_measures_like_empty_paragraph() {
     for text in ["\u{3000}", "\u{3000}\u{3000}"] {
         let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
