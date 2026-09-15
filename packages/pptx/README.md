@@ -33,6 +33,8 @@ sizeCanvasForSlide(canvas, frame, devicePixelRatio);
 await paintSlide(canvas.getContext('2d')!, frame, devicePixelRatio);
 ```
 
+`initWasm()` with no argument only works where `fetch` of a same-origin URL works (browsers); Node and SSR must pass the wasm bytes.
+
 All parsing, edits, collaboration state, text shaping, layout, hit-testing, and
 display-list emission stay in Rust. The package decodes the typed boundary and
 replays the resulting primitives on canvas. Font bytes are supplied by the host

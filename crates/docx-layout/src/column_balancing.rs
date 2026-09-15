@@ -20,7 +20,7 @@
 //! when the content cannot fit the region even across all columns, or when the
 //! snapped height is not actually shorter than the region.
 
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::types::{BlockExtent, ColumnLayout, LayoutBlock, MeasuredBlock};
 
 /// Page-flow operations required by column balancing.
@@ -68,7 +68,9 @@ fn get_balanced_section_height(
                     legal_breaks.push(total_height);
                 }
             }
-            total_height += (measure.total_height - measured_line_height).max(0.0);
+            if !is_empty_paragraph(block) {
+                total_height += (measure.total_height - measured_line_height).max(0.0);
+            }
             total_height += get_spacing_after(block);
             if block.attrs.as_ref().and_then(|attrs| attrs.keep_next) != Some(true) {
                 legal_breaks.push(total_height);
@@ -317,7 +319,34 @@ mod tests {
     }
 
     #[test]
-    fn empty_paragraph_spacing_collapses_unless_explicit() {
+    fn empty_paragraph_after_spacing_is_counted_once_when_measured() {
+        let block = para_block(
+            vec![],
+            Some(ParagraphAttrs {
+                spacing: Some(ParagraphSpacing {
+                    after: Some(12.0),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        );
+        let measured = vec![MeasuredBlock {
+            block: LayoutBlock::Paragraph(block),
+            measure: BlockExtent::Paragraph(ParagraphExtent {
+                lines: vec![TypesetRow {
+                    line_height: 16.0,
+                    ..Default::default()
+                }],
+                total_height: 28.0,
+            }),
+        }];
+        let mut paginator = MockPaginator::new(2.0, 100.0, 400.0);
+        balance_terminal_continuous_text_columns(&measured, &mut paginator, 0, measured.len());
+        assert_eq!(paginator.set_calls, vec![128.0]);
+    }
+
+    #[test]
+    fn empty_paragraph_after_spacing_preserves_inherited_values() {
         let empty = para_block(
             vec![text_run("")],
             Some(ParagraphAttrs {
@@ -330,7 +359,7 @@ mod tests {
             }),
         );
         assert_eq!(get_spacing_before(&empty), 0.0);
-        assert_eq!(get_spacing_after(&empty), 0.0);
+        assert_eq!(get_spacing_after(&empty), 12.0);
 
         let explicit = para_block(
             vec![],
@@ -348,7 +377,7 @@ mod tests {
             }),
         );
         assert_eq!(get_spacing_before(&explicit), 12.0);
-        assert_eq!(get_spacing_after(&explicit), 0.0);
+        assert_eq!(get_spacing_after(&explicit), 12.0);
 
         // multi-run paragraphs are never "empty"
         let multi = para_block(
