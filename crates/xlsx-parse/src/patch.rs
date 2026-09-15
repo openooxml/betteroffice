@@ -153,7 +153,7 @@ impl SheetPatch<'_> {
         let Some((element, cols)) = scan_cols(source)? else {
             return self.generated_cols();
         };
-        let mut entries: Vec<(u32, Vec<u8>)> = Vec::new();
+        let mut entries: Vec<(u32, Vec<u8>, bool)> = Vec::new();
         let mut covered = BTreeSet::new();
         for col in &cols {
             let (name, attributes) = start_tag(&source[col.tag.clone()])?;
@@ -191,7 +191,7 @@ impl SheetPatch<'_> {
                     }
                 }
                 covered.extend(piece.range.clone());
-                entries.push((piece.range.start, bytes));
+                entries.push((piece.range.start, bytes, false));
             }
         }
         for (&col, &width) in &self.sheet.col_widths {
@@ -200,14 +200,17 @@ impl SheetPatch<'_> {
             }
             let mut writer = Writer::new(Vec::new());
             write_col(&mut writer, col, width).map_err(xml_err)?;
-            entries.push((col, writer.into_inner()));
+            let at = entries
+                .iter()
+                .position(|(min, _, generated)| !generated && *min > col)
+                .unwrap_or(entries.len());
+            entries.insert(at, (col, writer.into_inner(), true));
         }
         if entries.is_empty() {
             return Ok(None);
         }
-        entries.sort_by_key(|(min, _)| *min);
         let mut out = element.prefix;
-        for (_, bytes) in entries {
+        for (_, bytes, _) in entries {
             out.extend_from_slice(&bytes);
         }
         let tail = cols

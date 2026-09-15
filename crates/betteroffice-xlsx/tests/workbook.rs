@@ -509,6 +509,43 @@ fn edited_sheet_keeps_unmodeled_row_column_and_cell_markup() {
 }
 
 #[test]
+fn overlapping_column_declarations_keep_source_order_on_unrelated_edit() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="3" width="20" customWidth="1"/><col min="1" max="2" width="10" customWidth="1" hidden="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook
+        .model()
+        .sheet(SheetId(0))
+        .unwrap()
+        .col_widths
+        .clone();
+    assert_eq!(before.get(&0), Some(&0.0));
+    assert_eq!(before.get(&1), Some(&0.0));
+    assert_eq!(before.get(&2), Some(&20.0));
+    workbook
+        .edit_cell(SheetId(0), cell("D1"), "7", CalculationOptions::default())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let sheet = String::from_utf8(package_map(&saved)["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        sheet.find(r#"min="2""#).unwrap() < sheet.find(r#"min="1""#).unwrap(),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheet(SheetId(0)).unwrap().col_widths,
+        before
+    );
+}
+
+#[test]
 fn row_insert_carries_preserved_markup_to_shifted_rows() {
     let original = markup_round_trip_fixture();
     let mut workbook = Workbook::open(&original).unwrap();
