@@ -1095,7 +1095,8 @@ fn image_payload(image: &Value) -> JsonObject {
         "distRight": number(field(wrap, "distR")).map(emu_to_pixels),
         "position": position.map(|_| json!({
             "horizontal": axis(horizontal),
-            "vertical": axis(vertical)
+            "vertical": axis(vertical),
+            "relativeHeight": nullish(field(position, "relativeHeight"))
         })),
         "borderWidth": border_width,
         "borderColor": border_color,
@@ -1106,6 +1107,7 @@ fn image_payload(image: &Value) -> JsonObject {
         "cropRight": nullish(field(field(Some(image), "crop"), "right")),
         "cropBottom": nullish(field(field(Some(image), "crop"), "bottom")),
         "cropLeft": nullish(field(field(Some(image), "crop"), "left")),
+        "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
             .filter(|value| *value != 0.0)

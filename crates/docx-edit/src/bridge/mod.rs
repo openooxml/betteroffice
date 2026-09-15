@@ -1098,7 +1098,23 @@ fn lower_image_values(
     let position = values
         .get("position")
         .and_then(any_json)
-        .and_then(|value| serde_json::from_value::<ImageRunPosition>(value).ok());
+        .and_then(|mut value| {
+            if let Some(position) = value.as_object_mut()
+                && let Some(height) = position.remove("relativeHeight")
+                && let Some(height) = height.as_f64().filter(|height| {
+                    height.is_finite()
+                        && *height >= 0.0
+                        && *height <= u32::MAX as f64
+                        && height.fract() == 0.0
+                })
+            {
+                position.insert(
+                    "relativeHeight".to_owned(),
+                    serde_json::json!(height as u64),
+                );
+            }
+            serde_json::from_value::<ImageRunPosition>(value).ok()
+        });
 
     ImageRun {
         src: map_string(values, "src").unwrap_or_default(),
@@ -1118,6 +1134,7 @@ fn lower_image_values(
         crop_right: map_number(values, "cropRight"),
         crop_bottom: map_number(values, "cropBottom"),
         crop_left: map_number(values, "cropLeft"),
+        shape_type: map_string(values, "shapeType"),
         opacity: map_number(values, "opacity"),
         rotation_deg,
         flip_h,

@@ -123,6 +123,6 @@ asymmetry is which failures leave a signal a caller can act on.
   artifact on the pipeline the Rust crates can produce end to end. `DisplayList`
   deserializes, so a binding hands over the JSON its layout pass already emits.
 
-`0.0.x`: the API may change before `0.1.0`.
+`0.2.x`: the API may change before `1.0`.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

@@ -31,7 +31,7 @@
 
 DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
 
-Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving.
+Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported.
 
 ### Spreadsheets — `.xlsx`
 
@@ -91,7 +91,7 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.6487 | 64/64 | [bd6fd032](https://github.com/openooxml/betteroffice/commit/bd6fd032769a6b20521194b2fe4c1add344d4871) | 0.7415 | 64/64 |
+| DOCX | [0.1.0](https://www.npmjs.com/package/@betteroffice/docx/v/0.1.0) | 0.6487 | 64/64 | [32a03981](https://github.com/openooxml/betteroffice/commit/32a03981c7bd26322c44a443b2267d53d3cb074f) | 0.7474 | 64/64 |
 | PPTX | [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) | 0.8478 | 9/9 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.8769 | 9/9 |
 | XLSX | [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) | 0.7163 | 4/8 | [a35d4baa](https://github.com/openooxml/betteroffice/commit/a35d4baa1f5415f557d7dc9bae179f159afd5591) | 0.7695 | 8/8 |
 

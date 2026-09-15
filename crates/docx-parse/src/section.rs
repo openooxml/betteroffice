@@ -459,6 +459,30 @@ mod tests {
     }
 
     #[test]
+    fn negative_page_margins_round_trip_through_save() {
+        let limits = ParseLimits::default();
+        let document = parse_xml(
+            br#"<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="-1438" w:right="1797" w:bottom="1440" w:left="1797" w:header="709" w:footer="709"/></w:sectPr>"#,
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        let properties = parse_section_properties(document.root());
+        assert_eq!(properties.margin_top, Some(-1438.0));
+        assert_eq!(properties.margin_bottom, Some(1440.0));
+        assert_eq!(properties.header_distance, Some(709.0));
+        let saved = crate::serializer::serialize_section_properties(Some(&properties));
+        assert!(saved.contains(r#"w:top="-1438""#));
+        let reopened = parse_xml(
+            saved.as_bytes(),
+            "word/document.xml",
+            &mut ParseBudget::new(&limits),
+        )
+        .unwrap();
+        assert_eq!(parse_section_properties(reopened.root()), properties);
+    }
+
+    #[test]
     fn malformed_section_measures_do_not_become_integer_prefixes() {
         let limits = ParseLimits::default();
         let document = parse_xml(

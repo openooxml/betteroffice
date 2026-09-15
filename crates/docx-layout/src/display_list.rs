@@ -361,6 +361,8 @@ pub struct DocAttrs {
     pub image_flip_h: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "flipV")]
     pub image_flip_v: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "shapeType")]
+    pub image_shape_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_frame: Option<ContentFrame>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1668,6 +1670,8 @@ struct ImageRunIn {
     #[serde(default)]
     alt: Option<String>,
     #[serde(default)]
+    shape_type: Option<String>,
+    #[serde(default)]
     transform: Option<String>,
     #[serde(default)]
     wrap_type: Option<String>,
@@ -1748,6 +1752,8 @@ struct AnchorPosIn {
     horizontal: Option<AnchorAxisIn>,
     #[serde(default)]
     vertical: Option<AnchorAxisIn>,
+    #[serde(default)]
+    relative_height: Option<u64>,
 }
 
 /// one axis of an anchor: an OOXML `relativeFrom` band plus either an `align`
@@ -2017,6 +2023,8 @@ pub(crate) struct ImageBlockIn {
     /// Alternative text from `wp:docPr` `descr`.
     #[serde(default)]
     pub(crate) alt: Option<String>,
+    #[serde(default)]
+    pub(crate) shape_type: Option<String>,
     #[serde(default)]
     pub(crate) transform: Option<String>,
     #[serde(default)]
@@ -2705,6 +2713,8 @@ pub(crate) struct PageIn {
     section_page_number: Option<u64>,
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
+    #[serde(default)]
+    pub(crate) parity_filler: Option<bool>,
     #[serde(default)]
     background: Option<String>,
     #[serde(default)]
@@ -3651,6 +3661,7 @@ fn stamp_image_run_attrs(attrs: &mut DocAttrs, run: &ImageRunIn, x: f64, y: f64)
         || transform_has_flip(run.transform.as_deref(), 'y'))
     .then_some(true);
     attrs.content_frame = content_frame(x, y, run.width, run.height, run.rotation_bounds.as_ref());
+    attrs.image_shape_type = run.shape_type.clone();
     attrs.effects = run.effects.clone();
     attrs.border = run.outline.clone();
     if run.is_insertion == Some(true) || run.is_deletion == Some(true) {
@@ -3687,6 +3698,7 @@ fn stamp_image_block_attrs(attrs: &mut DocAttrs, block: &ImageBlockIn, x: f64, y
         block.height,
         block.rotation_bounds.as_ref(),
     );
+    attrs.image_shape_type = block.shape_type.clone();
     attrs.effects = block.effects.clone();
     attrs.border = block.outline.clone();
 }
@@ -4919,13 +4931,56 @@ fn build_display_list_selected(
             content_height: page.size.h - page.margins.top - page.margins.bottom,
         };
 
-        // Behind-document floating images paint before body content.
-        for frag in &page.fragments {
-            if let FragmentIn::Paragraph(pf) = frag
-                && let Some(mb) = by_id.get(&block_key(&pf.block_id))
-                && let BlockIn::Paragraph(block) = &mb.block
-            {
-                emit_paragraph_floating_images(&mut prims, block, pf.y, &float_geom, true);
+        let mut behind_objects = Vec::new();
+        for fragment in &page.fragments {
+            match fragment {
+                FragmentIn::Paragraph(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    let BlockIn::Paragraph(block) = &measured.block else {
+                        continue;
+                    };
+                    for run in &block.runs {
+                        if let RunIn::Image(image) = run
+                            && image.wrap_type.as_deref() == Some("behind")
+                            && is_floating_image_run(image)
+                        {
+                            behind_objects.push(BehindObject::Image {
+                                block,
+                                image,
+                                fragment_y: fragment.y,
+                            });
+                        }
+                    }
+                }
+                FragmentIn::Shape(fragment) => {
+                    let Some(measured) = by_id.get(&block_key(&fragment.block_id)) else {
+                        continue;
+                    };
+                    if let BlockIn::Shape(block) = &measured.block
+                        && block.position.is_some()
+                        && block.behind_doc.unwrap_or(false)
+                    {
+                        behind_objects.push(BehindObject::Shape { fragment, block });
+                    }
+                }
+                _ => {}
+            }
+        }
+        behind_objects.sort_by_key(BehindObject::relative_height);
+        for object in behind_objects {
+            match object {
+                BehindObject::Image {
+                    block,
+                    image,
+                    fragment_y,
+                } => {
+                    emit_floating_image(&mut prims, block, image, fragment_y, &float_geom);
+                }
+                BehindObject::Shape { fragment, block } => {
+                    emit_shape_fragment(&mut prims, fragment, block, &ctx);
+                }
             }
         }
 
@@ -5038,7 +5093,9 @@ fn build_display_list_selected(
                     let BlockIn::Shape(block) = &mb.block else {
                         continue;
                     };
-                    emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    if block.position.is_none() || !block.behind_doc.unwrap_or(false) {
+                        emit_shape_fragment(&mut prims, sf, block, &ctx);
+                    }
                 }
                 FragmentIn::Chart(cf) => {
                     prev_para_borders = None;
@@ -7555,6 +7612,28 @@ fn resolve_anchored_position(
     (x, y)
 }
 
+enum BehindObject<'a> {
+    Image {
+        block: &'a ParagraphBlockIn,
+        image: &'a ImageRunIn,
+        fragment_y: f64,
+    },
+    Shape {
+        fragment: &'a ShapeFragmentIn,
+        block: &'a ShapeBlockIn,
+    },
+}
+
+impl BehindObject<'_> {
+    fn relative_height(&self) -> u64 {
+        match self {
+            Self::Image { image, .. } => image.position.as_ref().and_then(|p| p.relative_height),
+            Self::Shape { block, .. } => block.relative_height,
+        }
+        .unwrap_or(0)
+    }
+}
+
 /// Emits a paragraph's floating image runs at their resolved page rectangles.
 /// `want_behind` selects the pass: behind-document floats paint before body
 /// content, the rest after.
@@ -7565,9 +7644,6 @@ fn emit_paragraph_floating_images(
     geom: &PageFloatGeom,
     want_behind: bool,
 ) {
-    let block_ref = BlockRef::of(&block.id);
-    // Float anchors resolve against the content area, not the page.
-    let fragment_content_y = frag_y - geom.margin_top;
     for run in &block.runs {
         let RunIn::Image(imr) = run else { continue };
         if !is_floating_image_run(imr) {
@@ -7577,36 +7653,46 @@ fn emit_paragraph_floating_images(
         if is_behind != want_behind {
             continue;
         }
-        let (x, y) = resolve_anchored_position(imr, fragment_content_y, geom);
-        // Content-relative back to page-local.
-        let page_x = geom.margin_left + x;
-        let page_y = geom.margin_top + y;
-        let rot = imr
-            .rotation_deg
-            .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
-        let layout_width = image_layout_width(imr);
-        let layout_height = image_layout_height(imr);
-        let mut attrs = block_ref.attrs();
-        attrs.doc_start = imr.pm_start;
-        attrs.doc_end = imr.pm_end;
-        stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
-        attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
-        attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
-        prims.push(Primitive::Image(ImagePrimitive {
-            rel_id: imr.src.clone(),
-            x: px(page_x),
-            y: px(page_y),
-            w: px(layout_width),
-            h: px(layout_height),
-            rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
-            opacity: imr.opacity.map(px),
-            filter: None,
-            decorative: imr.decorative.unwrap_or(false),
-            crop: crop_of(imr),
-            alt_text: capped_alt_text(imr.alt.as_deref()),
-            attrs,
-        }));
+        emit_floating_image(prims, block, imr, frag_y, geom);
     }
+}
+
+fn emit_floating_image(
+    prims: &mut Vec<Primitive>,
+    block: &ParagraphBlockIn,
+    imr: &ImageRunIn,
+    frag_y: f64,
+    geom: &PageFloatGeom,
+) {
+    let block_ref = BlockRef::of(&block.id);
+    let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
+    let page_x = geom.margin_left + x;
+    let page_y = geom.margin_top + y;
+    let rot = imr
+        .rotation_deg
+        .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
+    let layout_width = image_layout_width(imr);
+    let layout_height = image_layout_height(imr);
+    let mut attrs = block_ref.attrs();
+    attrs.doc_start = imr.pm_start;
+    attrs.doc_end = imr.pm_end;
+    stamp_image_run_attrs(&mut attrs, imr, page_x, page_y);
+    attrs.sdt = sdt_attrs_from_groups(&block.sdt_groups);
+    attrs.sdt_path = sdt_path_from_groups(&block.sdt_groups);
+    prims.push(Primitive::Image(ImagePrimitive {
+        rel_id: imr.src.clone(),
+        x: px(page_x),
+        y: px(page_y),
+        w: px(layout_width),
+        h: px(layout_height),
+        rotation_deg: if rot != 0.0 { Some(px(rot)) } else { None },
+        opacity: imr.opacity.map(px),
+        filter: None,
+        decorative: imr.decorative.unwrap_or(false),
+        crop: crop_of(imr),
+        alt_text: capped_alt_text(imr.alt.as_deref()),
+        attrs,
+    }));
 }
 
 /// paint one DrawingML shape fragment: a page-placed path primitive carrying
@@ -10612,6 +10698,76 @@ mod tests {
                 .collect();
             assert_eq!(ys, expected, "{kind} {height}");
         }
+    }
+
+    #[test]
+    fn parity_filler_suppresses_header_footer_with_page_fields() {
+        let band = |id: &str, label: &str| {
+            json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [
+                    {"kind": "text", "text": label},
+                    {"kind": "field", "fieldType": "PAGE", "fallback": "0"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [
+                    {"headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+                        "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16}
+                ]}
+            })
+        };
+        let page = |number: u64, filler: bool| {
+            let mut page = json!({
+                "number": number,
+                "size": {"w": 300, "h": 500},
+                "margins": {"top": 80, "right": 20, "bottom": 80, "left": 20,
+                    "header": 40, "footer": 40},
+                "fragments": []
+            });
+            if filler {
+                page["parityFiller"] = json!(true);
+            }
+            page
+        };
+        let input = json!({
+            "measured": [], "options": {},
+            "headersFooters": {"variants": [
+                {"rId": "hdr", "kind": "header", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-hdr", "HDR ")]},
+                {"rId": "ftr", "kind": "footer", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-ftr", "FTR ")]}
+            ]},
+            "layout": {"pages": [page(1, false), page(2, true), page(3, false), page(4, false)]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let pages = output["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 4);
+        for (index, expected) in [(0, "1"), (2, "3"), (3, "4")] {
+            let header = pages[index]["header"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its header"));
+            assert!(
+                header.iter().any(|p| p["text"] == "HDR "),
+                "page {index} header text"
+            );
+            let field = header
+                .iter()
+                .find(|p| p["text"] == expected)
+                .unwrap_or_else(|| panic!("page {index} header PAGE field"));
+            assert_eq!(field["field"]["category"], "PAGE");
+            let footer = pages[index]["footer"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its footer"));
+            assert!(
+                footer.iter().any(|p| p["text"] == "FTR "),
+                "page {index} footer text"
+            );
+            assert!(
+                footer.iter().any(|p| p["text"] == expected),
+                "page {index} footer PAGE"
+            );
+        }
+        assert!(pages[1]["header"].is_null(), "filler suppresses header");
+        assert!(pages[1]["footer"].is_null(), "filler suppresses footer");
     }
 
     #[test]
