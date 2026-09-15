@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { Affine, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, CellLocator, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { Ribbon } from './components/ribbon/Ribbon';
@@ -9,6 +9,7 @@ import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
 import { RibbonCommandsProvider, findShapePlacement, isHandleResizeBlocked, numericCellValue, useRibbonCommands } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { STENCIL_DRAG_MIME, ShapesPanel } from './components/shapes/ShapesPanel';
+import { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 import { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 import type { StandardShape } from './components/shapes/shapeLibrary';
 import { StatusBar, clampZoom } from './components/statusbar';
@@ -37,12 +38,13 @@ export interface VsdxEditorProps {
   onChange?: () => void;
   onError?: (error: Error) => void;
   leftPanel?: ReactNode;
+  rightPanel?: ReactNode;
   statusBar?: ReactNode;
 }
 
 interface EditorModel { snapshot: DiagramSnapshot | null; pageIndex: number; frame: PageDisplayList | null; }
 
-export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, statusBar }: VsdxEditorProps) {
+export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, className, onReady, onChange, onError, leftPanel, rightPanel, statusBar }: VsdxEditorProps) {
   const strings = useMemo(() => deepMerge(en, i18n) as typeof en, [i18n]);
   const t = useMemo(() => createT(strings), [strings]);
   const handleRef = useRef<DiagramHandle | null>(null);
@@ -587,6 +589,23 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     if (!handle) return;
     try { handle.reorderPage(pageId, toIndex); refresh(toIndex, true); } catch (value) { reportError(value); }
   }, [refresh, reportError]);
+  const commitShapeData = useCallback((row: ShapeDataRow, formula: string) => {
+    const handle = handleRef.current; const selected = selectionRef.current;
+    if (!handle || !selected) return;
+    const locator: CellLocator = {
+      cellName: 'Value',
+      section: 'Property',
+      ...(row.sectionIndex !== undefined ? { sectionIndex: row.sectionIndex } : {}),
+      ...(row.rowName !== null ? { rowName: row.rowName } : { rowIndex: row.rowIndex ?? 0 }),
+    };
+    handle.setCellFormula(selected.pageId, selected.shapeId, locator, formula);
+    refresh(undefined, true);
+  }, [refresh]);
+  const selectedShape = (() => {
+    const page = model.snapshot?.pages[model.pageIndex];
+    if (!page || !selection || selection.pageId !== page.id) return null;
+    return findShapePlacement(page.shapes, selection.shapeId)?.shape ?? null;
+  })();
   const fitToWindow = useCallback(() => {
     const frame = modelRef.current.frame; const workspace = workspaceRef.current;
     if (!frame || !workspace || frame.width <= 0 || frame.height <= 0) return;
@@ -636,6 +655,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       {fidelity.length > 0 && <details style={styles.fidelity}><summary>{t('diagnostics.fidelityHeading')}</summary>{fidelity.map((item, index) => <div key={`${item.code}-${index}`}>{diagnosticMessage(t, item.category, item.code)}</div>)}</details>}
       {error && <div role="alert" style={styles.error}>{error}</div>}
     </main>
+    {rightPanel === undefined ? <ShapeDataPanel shape={selectedShape} onCommit={commitShapeData} onError={reportError} t={t} /> : rightPanel}
     </div>
     {statusBar === undefined ? <StatusBar pages={model.snapshot?.pages ?? []} activeIndex={model.pageIndex} onSelectPage={(index) => refresh(index)} onReorderPage={reorderPage} zoom={zoom} onZoomChange={setZoom} onFitToWindow={fitToWindow} t={t} /> : statusBar}
     </RibbonCommandsProvider>

@@ -6,7 +6,13 @@ use vsdx_eval::{
 pub use vsdx_parse::StructuralEdit;
 use vsdx_parse::{Cell, ParseLimits, Shape, VsdxError, VsdxPackage};
 pub use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture, SemanticCellEdit};
-use vsdx_resolve::{PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver};
+pub use vsdx_resolve::{
+    PROPERTY_SECTION, ShapeDataProperty, ShapeDataType, ShapeDataValue,
+    shape_data as resolve_shape_data,
+};
+use vsdx_resolve::{
+    PageConnectivity, PageContainers, ResolveError, ResolvedShape, Resolver, shape_data,
+};
 
 #[derive(Debug)]
 pub enum Error {
@@ -450,6 +456,9 @@ impl<'a> ShapeView<'a> {
     pub fn resolved(&self) -> Result<ResolvedShape> {
         Ok(Resolver::new(&self.page.diagram.package)
             .resolve_shape(self.page.part, self.shape.id)?)
+    }
+    pub fn shape_data(&self) -> Result<Vec<ShapeDataProperty>> {
+        Ok(shape_data(&self.resolved()?))
     }
 }
 

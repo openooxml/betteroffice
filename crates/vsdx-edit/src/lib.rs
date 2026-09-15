@@ -1416,6 +1416,110 @@ mod tests {
     }
 
     #[test]
+    fn property_value_edits_write_through_the_edit_session() {
+        let session = session();
+        let row = CellRow::Name("Device".to_owned());
+        add_cell_at(
+            &session,
+            "Label",
+            Some("Property"),
+            Some(row.clone()),
+            None,
+            Some("Device name"),
+        );
+        add_cell_at(
+            &session,
+            "Value",
+            Some("Property"),
+            Some(row.clone()),
+            Some("\"Old\""),
+            Some("Old"),
+        );
+        let locator = CellLocator {
+            sheet: CellSheet::Page(1),
+            shape_id: Some(1),
+            section: Some("Property".to_owned()),
+            section_index: None,
+            row: Some(row),
+            cell_name: "Value".to_owned(),
+        };
+        let receipt = session
+            .set_cell_formula_at(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                locator.clone(),
+                "\"New\"",
+            )
+            .unwrap();
+        assert_eq!(receipt.cell_name, "Value");
+        let snapshot = session.snapshot().unwrap();
+        let cells = &snapshot.pages[0].shapes[0].cells;
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.locator == locator)
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("\"New\"")
+        );
+        assert_eq!(
+            cells
+                .iter()
+                .find(|cell| cell.name == "Label"
+                    && cell.locator.section.as_deref() == Some("Property"))
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("Device name")
+        );
+    }
+
+    #[test]
+    fn guarded_property_value_refuses_edits() {
+        let session = session();
+        let row = CellRow::Name("Serial".to_owned());
+        add_cell_at(
+            &session,
+            "Value",
+            Some("Property"),
+            Some(row.clone()),
+            Some("GUARD(\"ABC\")"),
+            Some("ABC"),
+        );
+        let locator = CellLocator {
+            sheet: CellSheet::Page(1),
+            shape_id: Some(1),
+            section: Some("Property".to_owned()),
+            section_index: None,
+            row: Some(row),
+            cell_name: "Value".to_owned(),
+        };
+        let error = session
+            .set_cell_formula_at(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                locator.clone(),
+                "\"XYZ\"",
+            )
+            .expect_err("guarded shape-data values must refuse edits");
+        assert!(error.to_string().contains("GUARD"));
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(
+            snapshot.pages[0].shapes[0]
+                .cells
+                .iter()
+                .find(|cell| cell.locator == locator)
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("GUARD(\"ABC\")")
+        );
+    }
+
+    #[test]
     fn setatref_writes_only_the_resolved_target() {
         let session = session();
         add_cell(&session, "Width", Some("SETATREF(Target)"), None);

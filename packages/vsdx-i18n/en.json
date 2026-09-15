@@ -71,5 +71,11 @@
       "star7": "7-Point Star",
       "star16": "16-Point Star"
     }
+  },
+  "shapeData": {
+    "title": "Shape Data",
+    "noSelection": "Select a shape to see its data.",
+    "empty": "This shape has no visible data.",
+    "valueLabel": "Value"
   }
 }
