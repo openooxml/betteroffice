@@ -1,6 +1,6 @@
 import { expect, test } from 'bun:test';
-import type { PageDisplayList } from '@betteroffice/vsdx';
-import { collectDiagnostics } from './VsdxEditor';
+import type { DiagramSnapshot, PageDisplayList, PageLayer, PageSnapshot } from '@betteroffice/vsdx';
+import { collectDiagnostics, selectionHiddenByLayers, stillSelectable } from './VsdxEditor';
 
 const frame: PageDisplayList = {
   contractVersion: 4,
@@ -49,4 +49,41 @@ test('collects diagnostics alongside runs that omit them', () => {
   const mixed = withoutDiagnostics();
   textBox(mixed).paragraphs[0].runs.push({ ...textBox(frame).paragraphs[0].runs[0], diagnostics: [{ category: 'fidelity', code: 'font-substituted', detail: '' }] });
   expect(collectDiagnostics(mixed)).toEqual([{ category: 'fidelity', code: 'font-substituted', detail: '' }]);
+});
+
+const layerPage: PageSnapshot = {
+  id: 'page:1',
+  sourcePartPath: 'visio/pages/page1.xml',
+  name: null,
+  shapes: [{ id: 'page:1:shape:1', sourceId: 1, name: null, cells: [{ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: 'LayerMember' }, name: 'LayerMember', formula: null, value: '1' }], children: [] }],
+};
+
+const layerSnapshot: DiagramSnapshot = { pages: [layerPage] };
+
+function testLayers(): PageLayer[] {
+  return [
+    { index: 0, name: 'Trussing', visible: true, print: true, lock: false, active: false, color: '255', status: '0' },
+    { index: 1, name: 'Lighting', visible: false, print: true, lock: false, active: false, color: '255', status: '0' },
+  ];
+}
+
+test('a selection hidden by its layer is no longer selectable', () => {
+  const selection = { pageId: 'page:1', shapeId: 'page:1:shape:1', hit: { kind: 'shape' as const, shapeId: 'x' } };
+  expect(stillSelectable(layerSnapshot, 0, selection, testLayers())).toBe(false);
+  expect(stillSelectable(layerSnapshot, 0, selection, testLayers().map((layer) => ({ ...layer, visible: true })))).toBe(true);
+});
+
+test('selection layer visibility matches the engine rule, including hidden groups', () => {
+  const selection = { pageId: 'page:1', shapeId: 'page:1:shape:1', hit: { kind: 'shape' as const, shapeId: 'x' } };
+  expect(selectionHiddenByLayers(layerPage, testLayers(), selection)).toBe(true);
+  expect(selectionHiddenByLayers(layerPage, [], selection)).toBe(false);
+  const grouped: PageSnapshot = {
+    ...layerPage,
+    shapes: [{
+      id: 'page:1:shape:9', sourceId: 9, name: null,
+      cells: [{ locator: { sheet: { page: 1 }, shapeId: 9, section: null, row: null, cellName: 'LayerMember' }, name: 'LayerMember', formula: null, value: '1' }],
+      children: [{ id: 'page:1:shape:1', sourceId: 1, name: null, cells: [], children: [] }],
+    }],
+  };
+  expect(selectionHiddenByLayers(grouped, testLayers(), selection)).toBe(true);
 });

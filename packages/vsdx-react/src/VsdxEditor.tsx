@@ -133,7 +133,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       modelRef.current = { snapshot: current, pageIndex, frame, layers };
       setModel(modelRef.current);
       setDiagnostics(frame ? collectDiagnostics(frame) : []);
-      setSelection((existing) => existing && stillSelectable(current, pageIndex, existing) ? existing : null);
+      setSelection((existing) => existing && stillSelectable(current, pageIndex, existing, layers) ? existing : null);
       const open = editingRef.current;
       if (open) {
         const committed = handle.shapeText(open.pageId, open.shapeId);
@@ -255,7 +255,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
     const snapshot = model.snapshot;
     const page = snapshot?.pages[model.pageIndex];
-    if (selection && page) {
+    if (selection && page && !selectionHiddenByLayers(page, model.layers, selection)) {
       try {
         const corners = selectionCorners(page, frame, selection);
         const placement = findShapePlacement(page.shapes, selection.shapeId);
@@ -314,7 +314,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
     context.clearRect(0, 0, overlay.width, overlay.height);
-    if (currentSelection && page) {
+    if (currentSelection && page && !selectionHiddenByLayers(page, current.layers, currentSelection)) {
       try {
         const corners = selectionCorners(page, frame, currentSelection);
         const placement = findShapePlacement(page.shapes, currentSelection.shapeId);
@@ -333,7 +333,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     try {
       const point = canvasPointerPosition(event, frame);
       const active = selectionRef.current;
-      if (active && active.pageId === page.id) {
+      if (active && active.pageId === page.id && !selectionHiddenByLayers(page, modelRef.current.layers, active)) {
         try {
           const corners = selectionCorners(page, frame, active);
           if (corners) {
@@ -386,7 +386,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         const current = modelRef.current; const frame = current.frame;
         const page = current.snapshot?.pages[current.pageIndex];
         const active = selectionRef.current;
-        if (!frame || !page || !active || active.pageId !== page.id) { event.currentTarget.style.cursor = ''; return; }
+        if (!frame || !page || !active || active.pageId !== page.id || selectionHiddenByLayers(page, current.layers, active)) { event.currentTarget.style.cursor = ''; return; }
         const corners = selectionCorners(page, frame, active);
         if (!corners) { event.currentTarget.style.cursor = ''; return; }
         const point = canvasPointerPosition(event, frame);
@@ -726,9 +726,36 @@ function textPrimitiveId(snapshot: DiagramSnapshot, pageIndex: number, pageId: s
   return placement ? `${page.sourcePartPath}:${placement.shape.sourceId}` : null;
 }
 
-export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection): boolean {
+export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, selection: VsdxShapeSelection, layers?: readonly PageLayer[]): boolean {
   const page = snapshot.pages[pageIndex];
-  return Boolean(page && page.id === selection.pageId && findShapePlacement(page.shapes, selection.shapeId));
+  if (!page || page.id !== selection.pageId || !findShapePlacement(page.shapes, selection.shapeId)) return false;
+  return !layers || !selectionHiddenByLayers(page, layers, selection);
+}
+
+export function selectionHiddenByLayers(page: PageSnapshot, layers: readonly PageLayer[], selection: VsdxShapeSelection): boolean {
+  return shapeSubtreeHidden(page.shapes, layers, selection.shapeId, false) ?? false;
+}
+
+function shapeSubtreeHidden(shapes: readonly ShapeSnapshot[], layers: readonly PageLayer[], shapeId: string, ancestorHidden: boolean): boolean | null {
+  for (const shape of shapes) {
+    const hiddenHere = ancestorHidden || shapeHiddenByLayers(shape, layers);
+    if (shape.id === shapeId) return hiddenHere;
+    const nested = shapeSubtreeHidden(shape.children, layers, shapeId, hiddenHere);
+    if (nested !== null) return nested;
+  }
+  return null;
+}
+
+function shapeHiddenByLayers(shape: ShapeSnapshot, layers: readonly PageLayer[]): boolean {
+  const indices = layerMemberIndices(shape);
+  return indices.length > 0 && indices.every((index) => layers.some((layer) => layer.index === index && !layer.visible));
+}
+
+function layerMemberIndices(shape: ShapeSnapshot): number[] {
+  const cell = shape.cells.find((entry) => entry.name === 'LayerMember');
+  const raw = cell?.value ?? cell?.formula ?? '';
+  const indices = raw.split(';').map((part) => Number(part.trim())).filter((index) => Number.isInteger(index) && index >= 0);
+  return [...new Set(indices)].sort((left, right) => left - right);
 }
 
 function shapeDragStart(page: { id: string; shapes: readonly ShapeSnapshot[]; sourcePartPath: string }, shape: ShapeSnapshot, frame: PageDisplayList, handle?: DiagramHandle): Omit<DragStart, 'canvas' | 'model' | 'resize' | 'pointerId' | 'startX' | 'startY'> {
