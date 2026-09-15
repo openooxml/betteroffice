@@ -387,12 +387,11 @@ pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
 // One inch at 96 DPI.
 const DEFAULT_MARGIN_PX: f64 = 96.0;
 
-/// Fills missing body margins with one inch and defaults the header/footer
-/// distances to the resolved top/bottom body margins.
+/// Missing margins default to one inch; negative top/bottom resolve to absolute distance.
 pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
-    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top);
+    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top.abs());
     let right = requested.map_or(DEFAULT_MARGIN_PX, |m| m.right);
-    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom);
+    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom.abs());
     let left = requested.map_or(DEFAULT_MARGIN_PX, |m| m.left);
     PageMargins {
         top,
@@ -779,6 +778,32 @@ mod tests {
         assert_eq!(zero.top, 0.0);
         assert_eq!(zero.header, Some(0.0));
         assert_eq!(zero.footer, Some(96.0));
+    }
+
+    #[test]
+    fn resolve_page_margins_absorbs_negative_body_distances() {
+        let top_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(709.0 / 15.0),
+            footer: Some(48.0),
+            ..margins(-1438.0 / 15.0, 96.0, 96.0, 96.0)
+        }));
+        assert_eq!(top_only.top, 1438.0 / 15.0);
+        assert_eq!(top_only.bottom, 96.0);
+        assert_eq!(top_only.header, Some(709.0 / 15.0));
+
+        let bottom_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(48.0),
+            footer: Some(48.0),
+            ..margins(96.0, 96.0, -1440.0 / 15.0, 96.0)
+        }));
+        assert_eq!(bottom_only.top, 96.0);
+        assert_eq!(bottom_only.bottom, 1440.0 / 15.0);
+
+        let both = resolve_page_margins(Some(&margins(-1438.0 / 15.0, 96.0, -1440.0 / 15.0, 96.0)));
+        assert_eq!(both.top, 1438.0 / 15.0);
+        assert_eq!(both.bottom, 1440.0 / 15.0);
+        assert_eq!(both.header, Some(1438.0 / 15.0));
+        assert_eq!(both.footer, Some(1440.0 / 15.0));
     }
 
     #[test]
