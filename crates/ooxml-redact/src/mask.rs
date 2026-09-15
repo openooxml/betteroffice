@@ -1,17 +1,22 @@
+use std::collections::HashMap;
+
 use unicode_script::{Script, UnicodeScript};
 
 use crate::{RedactError, RedactionOptions};
 
 const KANJI: &str = "日月火水木金土山川田人大小中上下左右前後東西南北本年時分毎今先生学校子女子男女父母友白赤青黒春夏秋冬朝昼夜空雨雪風花草竹林森海池魚鳥犬猫馬牛車電気天文音楽光家店町村国道駅門外内高長新古多少早明広近遠強弱心力手足目耳口首体食飲読書話聞見行来帰入出休立歩走買売思知作使持待会合開閉動止色形円角紙糸米麦茶肉石玉王正直百千万一二三四五六七八九十";
 
+/// Masks text, keeping one replacement per source string in random mode.
 pub(crate) struct TextMasker {
     random: Option<RandomCharacters>,
+    memo: HashMap<String, String>,
 }
 
 impl TextMasker {
     pub(crate) fn new(options: &RedactionOptions) -> Self {
         Self {
             random: options.random_characters.then(RandomCharacters::new),
+            memo: HashMap::new(),
         }
     }
 
@@ -20,6 +25,18 @@ impl TextMasker {
     }
 
     pub(crate) fn replace(&mut self, text: &str) -> Result<String, RedactError> {
+        if self.random.is_none() {
+            return Ok(placeholder(text));
+        }
+        if let Some(cached) = self.memo.get(text) {
+            return Ok(cached.clone());
+        }
+        let replacement = self.replace_uncached(text)?;
+        self.memo.insert(text.to_owned(), replacement.clone());
+        Ok(replacement)
+    }
+
+    fn replace_uncached(&mut self, text: &str) -> Result<String, RedactError> {
         let Some(random) = &mut self.random else {
             return Ok(placeholder(text));
         };
@@ -142,7 +159,7 @@ mod tests {
     }
 
     #[test]
-    fn replacements_preserve_scripts_and_whitespace_without_a_substitution_map() {
+    fn replacements_preserve_scripts_and_whitespace_with_stable_mapping() {
         let mut masker = deterministic();
         let source = "ABC éßø ひらがな カタカナ 日本語 \t\r\n\u{3000}";
         let output = masker.replace(source).unwrap();
@@ -155,7 +172,6 @@ mod tests {
             }
         }
         let first = masker.replace(&"a".repeat(64)).unwrap();
-        let second = masker.replace(&"a".repeat(64)).unwrap();
         assert!(
             first
                 .chars()
@@ -163,7 +179,8 @@ mod tests {
                 .len()
                 > 20
         );
-        assert_ne!(first, second);
+        assert_eq!(first, masker.replace(&"a".repeat(64)).unwrap());
+        assert_ne!(first, masker.replace(&"b".repeat(64)).unwrap());
         let japanese = masker.replace("日本語！123🙂").unwrap();
         assert_eq!(japanese.chars().count(), 8);
         assert!(

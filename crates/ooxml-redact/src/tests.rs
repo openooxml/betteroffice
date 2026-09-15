@@ -1027,6 +1027,85 @@ fn xlsx_tables_slicers_and_rich_data_keep_labels_masked() {
 }
 
 #[test]
+fn random_masks_keep_pivot_and_slicer_names_consistent() {
+    let shared = "SHARED_PIVOT_NAME_SECRET";
+    let patched: Vec<(String, Vec<u8>)> = ooxml_opc::unzip_parts(&xlsx_fixture())
+        .unwrap()
+        .into_iter()
+        .map(|(path, bytes)| {
+            let bytes = if path == "xl/pivotTables/pivotTable1.xml" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("XLSX_SECRET_PIVOT", shared)
+                    .into_bytes()
+            } else if path == "xl/slicerCaches/slicerCache1.xml" {
+                String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("XLSX_SECRET_SLICERPIVOT", shared)
+                    .into_bytes()
+            } else {
+                bytes
+            };
+            (path, bytes)
+        })
+        .collect();
+    let source = ooxml_opc::rezip_parts(&patched).unwrap();
+    let options = RedactionOptions {
+        random_characters: true,
+    };
+    let (output, _) = redact_with_report_and_options(&source, Format::Xlsx, &options).unwrap();
+    let out = ooxml_opc::unzip_parts(&output).unwrap();
+    let pivot = String::from_utf8_lossy(part(&out, "xl/pivotTables/pivotTable1.xml")).into_owned();
+    let cache =
+        String::from_utf8_lossy(part(&out, "xl/slicerCaches/slicerCache1.xml")).into_owned();
+    assert!(!pivot.contains(shared) && !cache.contains(shared));
+    assert_eq!(
+        pivot_name(&pivot),
+        slicer_pivot_name(&cache),
+        "pivot/slicer names diverged: {pivot} vs {cache}"
+    );
+    xlsx_parse::parse_workbook(&out).unwrap();
+}
+
+fn pivot_name(xml: &str) -> String {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start)
+                if start.name().local_name().as_ref() == b"pivotTableDefinition" =>
+            {
+                for attribute in start.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == b"name" {
+                        return String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                    }
+                }
+            }
+            Event::Eof => panic!("pivotTableDefinition name missing in {xml}"),
+            _ => {}
+        }
+    }
+}
+
+fn slicer_pivot_name(xml: &str) -> String {
+    let mut reader = Reader::from_str(xml);
+    loop {
+        match reader.read_event().unwrap() {
+            Event::Start(start) | Event::Empty(start)
+                if start.name().local_name().as_ref() == b"pivotTable" =>
+            {
+                for attribute in start.attributes().flatten() {
+                    if attribute.key.local_name().as_ref() == b"name" {
+                        return String::from_utf8_lossy(attribute.value.as_ref()).into_owned();
+                    }
+                }
+            }
+            Event::Eof => panic!("slicer pivotTable name missing in {xml}"),
+            _ => {}
+        }
+    }
+}
+
+#[test]
 fn redacts_xlsx_without_changing_structure() {
     let source = xlsx_fixture();
     let (output, report) = redact_with_report(&source, Format::Xlsx).unwrap();
