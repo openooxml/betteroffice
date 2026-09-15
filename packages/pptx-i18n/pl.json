@@ -4,6 +4,7 @@
     "label": null,
     "save": "Zapisz",
     "exportPng": null,
+    "present": "Prezentuj",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Prezentacja slajdów",
+    "exit": "Zakończ prezentację (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Poprzedni slajd",
+    "nextSlide": "Następny slajd"
+  },
+  "notes": {
+    "panelLabel": "Notatki prelegenta",
+    "placeholder": "Dodaj notatki prelegenta…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Propozycje agenta",
+    "close": "Zamknij",
+    "empty": "Brak zmian oczekujących na sprawdzenie.",
+    "preview": "Podgląd zmian",
+    "previewTitle": "Sprawdź proponowane zmiany",
+    "before": "Bieżący slajd",
+    "after": "Proponowany slajd",
+    "accept": "Zaakceptuj propozycję",
+    "reject": "Odrzuć",
+    "force": "Zastosuj zaktualizowaną propozycję",
+    "blank": "Pusty",
+    "target": "Slajd {slide} · {name}",
+    "targetLabel": "Zmiana",
+    "targetMissing": "Element docelowy jest już niedostępny",
+    "stale": "Te obiekty zmieniły się po utworzeniu propozycji. Przed zastosowaniem sprawdź bieżące zmiany w podglądzie.",
+    "stalePreview": "Ten podgląd używa zaktualizowanego slajdu. Zastosowanie nadpisze zmienione elementy docelowe.",
+    "geometry": "Położenie i rozmiar (x, y, szerokość, wysokość)",
+    "appearance": "Zmieniono wygląd lub formatowanie tekstu",
+    "changedAgain": "Element docelowy zmienił się ponownie. Przed zastosowaniem sprawdź odświeżony podgląd.",
+    "canvasTitle": "Zmiany na tym slajdzie",
+    "editSlide": "Edytuj slajd",
+    "showDiff": "Pokaż zmiany",
+    "details": "Szczegóły sprawdzenia",
+    "removed": "Usunięto",
+    "added": "Dodano",
+    "reviewHint": "Tryb sprawdzania · zmiany zostaną zastosowane po zaakceptowaniu",
+    "canvasStale": "Elementy docelowe uległy zmianie. Otwórz szczegóły sprawdzenia, aby przed zastosowaniem przejrzeć zaktualizowany podgląd.",
+    "previousPosition": "Poprzedni",
+    "proposedPosition": "Proponowany",
+    "loadingDiff": "Ładowanie zmian…"
   }
 }

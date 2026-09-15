@@ -4,6 +4,7 @@
     "label": null,
     "save": "Salvar",
     "exportPng": null,
+    "present": "Apresentar",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Apresentação de slides",
+    "exit": "Sair da apresentação (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Slide anterior",
+    "nextSlide": "Próximo slide"
+  },
+  "notes": {
+    "panelLabel": "Notas do apresentador",
+    "placeholder": "Adicionar notas do apresentador…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Propostas do agente",
+    "close": "Fechar",
+    "empty": "Nenhuma alteração aguardando revisão.",
+    "preview": "Visualizar alterações",
+    "previewTitle": "Revisar alterações propostas",
+    "before": "Slide atual",
+    "after": "Slide proposto",
+    "accept": "Aceitar proposta",
+    "reject": "Rejeitar",
+    "force": "Aplicar proposta atualizada",
+    "blank": "Vazio",
+    "target": "Slide {slide} · {name}",
+    "targetLabel": "Alteração",
+    "targetMissing": "O destino não está mais disponível",
+    "stale": "Estes objetos foram alterados após a criação da proposta. Visualize as alterações atuais antes de aplicar.",
+    "stalePreview": "Esta visualização usa o slide atualizado. Aplicar substituirá os destinos alterados.",
+    "geometry": "Posição e tamanho (x, y, largura, altura)",
+    "appearance": "Aparência ou formatação do texto alterada",
+    "changedAgain": "O destino mudou novamente. Revise a visualização atualizada antes de aplicar.",
+    "canvasTitle": "Alterações neste slide",
+    "editSlide": "Editar slide",
+    "showDiff": "Mostrar alterações",
+    "details": "Detalhes da revisão",
+    "removed": "Removido",
+    "added": "Adicionado",
+    "reviewHint": "Modo de revisão · as alterações se aplicam quando aceitas",
+    "canvasStale": "Destinos alterados. Abra os detalhes da revisão para inspecionar a visualização atualizada antes de aplicar.",
+    "previousPosition": "Anterior",
+    "proposedPosition": "Proposto",
+    "loadingDiff": "Carregando alterações…"
   }
 }
