@@ -574,6 +574,8 @@ pub struct ParagraphAttrs {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_style_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub contextual_spacing: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bidi: Option<bool>,

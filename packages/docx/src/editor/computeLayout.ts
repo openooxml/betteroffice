@@ -107,6 +107,7 @@ export function buildResidentRegionLayoutRequest(
     notes: { contents },
     renderEnv: {
       ...renderEnv,
+      ...defaultParagraphStyleEnv(document, renderEnv),
       tocStyleIds: [...new Set([
         ...(renderEnv.tocStyleIds ?? []),
         ...(document?.package.styles?.styles ?? [])
@@ -116,6 +117,23 @@ export function buildResidentRegionLayoutRequest(
       ])],
     },
   };
+}
+
+function defaultParagraphStyleEnv(
+  document: Document | null,
+  renderEnv: YrsRenderEnv
+): Pick<YrsRenderEnv, 'defaultParagraphStyleId'> {
+  if (renderEnv.defaultParagraphStyleId) return {};
+  const styles = document?.package.styles?.styles ?? [];
+  const explicit = styles.find(
+    (style) => style.type === 'paragraph' && style.default && style.styleId
+  )?.styleId;
+  if (explicit) return { defaultParagraphStyleId: explicit };
+  const normal = styles.some(
+    (style) => style.type === 'paragraph' && style.styleId === 'Normal'
+  );
+  if (normal) return { defaultParagraphStyleId: 'Normal' };
+  return {};
 }
 
 export function getLayoutKernelInputs(layout: Layout):

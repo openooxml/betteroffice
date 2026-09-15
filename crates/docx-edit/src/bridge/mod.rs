@@ -82,6 +82,8 @@ pub struct RenderEnv {
     pub show_hidden_text: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_paragraph_style_id: Option<String>,
 }
 
 impl RenderEnv {
@@ -2853,6 +2855,16 @@ fn lower_paragraph_attrs(
         style_id: paragraph_style_id(values),
         ..ParagraphAttrs::default()
     };
+    let raw_missing = result
+        .style_id
+        .as_deref()
+        .is_none_or(|style| style.is_empty());
+    if raw_missing {
+        result.effective_style_id = env
+            .default_paragraph_style_id
+            .clone()
+            .filter(|style| !style.is_empty());
+    }
     lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);

@@ -21,7 +21,19 @@ fn styles_xml() -> String {
     r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="240" w:line="240" w:lineRule="exact"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Different"><w:name w:val="Different"/><w:basedOn w:val="Normal"/></w:style></w:styles>"#.to_owned()
 }
 
+fn styles_xml_custom_default() -> String {
+    r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:before="0" w:after="240" w:line="240" w:lineRule="exact"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="BodyDefault"><w:name w:val="BodyDefault"/></w:style><w:style w:type="paragraph" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Different"><w:name w:val="Different"/><w:basedOn w:val="Normal"/></w:style></w:styles>"#.to_owned()
+}
+
 fn document(header: Option<(String, String)>, footer: Option<(String, String)>) -> Vec<u8> {
+    document_with_styles(header, footer, styles_xml())
+}
+
+fn document_with_styles(
+    header: Option<(String, String)>,
+    footer: Option<(String, String)>,
+    styles: String,
+) -> Vec<u8> {
     let body = r#"<w:p><w:pPr><w:spacing w:before="0" w:after="0" w:line="240" w:lineRule="exact"/></w:pPr><w:r><w:rPr><w:rFonts w:ascii="Arial" w:hAnsi="Arial"/><w:sz w:val="24"/></w:rPr><w:t>BODY</w:t></w:r></w:p>"#;
     let (header_ref, header_part, header_types, header_rel) = match &header {
         Some((first, second)) => (
@@ -71,7 +83,7 @@ fn document(header: Option<(String, String)>, footer: Option<(String, String)>) 
                 r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body>{body}{sect}</w:body></w:document>"#
             ),
         ),
-        ("word/styles.xml".to_owned(), styles_xml()),
+        ("word/styles.xml".to_owned(), styles),
     ];
     if header.is_some() {
         parts.push(("word/header1.xml".to_owned(), header_part));
@@ -89,6 +101,10 @@ fn document(header: Option<(String, String)>, footer: Option<(String, String)>) 
 }
 
 fn layout(bytes: &[u8]) -> (String, Value) {
+    layout_with_default(bytes, None)
+}
+
+fn layout_with_default(bytes: &[u8], default_style: Option<&str>) -> (String, Value) {
     let font = docx_layout::register_measure_font(FONT).unwrap();
     let package = docx_parse::parse_docx_s9_wire(bytes, Default::default())
         .unwrap()
@@ -96,10 +112,14 @@ fn layout(bytes: &[u8]) -> (String, Value) {
         .package;
     let engine = EngineSession::new(76401);
     seed_from_docx(engine.doc(), bytes).unwrap();
+    let render_env = match default_style {
+        Some(style) => json!({"defaultParagraphStyleId": style}),
+        None => json!({}),
+    };
     let output = engine
         .layout_document_with_regions_json(
             &json!({
-                "bodyStory": "body", "renderEnv": {},
+                "bodyStory": "body", "renderEnv": render_env,
                 "regions": {"sections": [{"properties": package.document.final_section_properties}], "settings": package.settings},
                 "measurement": {"fontChains": {"arial|0|0": [font]}, "defaults": {"fontFamily": "Arial", "fontSize": 12}}
             })
@@ -108,6 +128,38 @@ fn layout(bytes: &[u8]) -> (String, Value) {
         .unwrap();
     let value: Value = serde_json::from_str(&output).unwrap();
     (output, value)
+}
+
+fn block_style_id(output: &Value, kind: &str, index: usize) -> Option<String> {
+    variant(output, kind)["measured"][index]["block"]["attrs"]["styleId"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn block_effective_style_id(output: &Value, kind: &str, index: usize) -> Option<String> {
+    variant(output, kind)["measured"][index]["block"]["attrs"]["effectiveStyleId"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn header_story_paragraph_styles(bytes: &[u8]) -> Vec<Option<String>> {
+    let engine = EngineSession::new(76403);
+    seed_from_docx(engine.doc(), bytes).unwrap();
+    engine
+        .doc()
+        .paragraphs("hf:rIdHeader")
+        .unwrap()
+        .into_iter()
+        .map(|paragraph| {
+            paragraph
+                .properties
+                .get("pStyle")
+                .and_then(|style| match style {
+                    yrs::Any::String(style) => Some(style.to_string()),
+                    _ => None,
+                })
+        })
+        .collect()
 }
 
 fn variant<'a>(output: &'a Value, kind: &str) -> &'a Value {
@@ -290,4 +342,103 @@ fn footer_same_style_contextual_collapses_gap_and_bottom_margin() {
         .as_f64()
         .unwrap();
     assert!((retained_bottom - collapsed_bottom - 16.0).abs() < 0.01);
+}
+
+#[test]
+fn header_implicit_and_explicit_default_collapse_both_orders() {
+    let implicit_first = document(
+        Some((
+            hf_para("FIRST", None, EXPLICIT, true),
+            hf_para("SECOND", Some("Normal"), EXPLICIT, true),
+        )),
+        None,
+    );
+    let explicit_first = document(
+        Some((
+            hf_para("FIRST", Some("Normal"), EXPLICIT, true),
+            hf_para("SECOND", None, EXPLICIT, true),
+        )),
+        None,
+    );
+    let (_, implicit_first_out) = layout_with_default(&implicit_first, Some("Normal"));
+    let (_, explicit_first_out) = layout_with_default(&explicit_first, Some("Normal"));
+    assert_eq!(first_after(&implicit_first_out, "header"), 0.0);
+    assert_eq!(first_after(&explicit_first_out, "header"), 0.0);
+    assert_eq!(block_style_id(&implicit_first_out, "header", 0), None);
+    assert_eq!(
+        block_style_id(&implicit_first_out, "header", 1).as_deref(),
+        Some("Normal")
+    );
+    assert_eq!(
+        block_effective_style_id(&implicit_first_out, "header", 0).as_deref(),
+        Some("Normal")
+    );
+    assert_eq!(
+        block_style_id(&explicit_first_out, "header", 0).as_deref(),
+        Some("Normal")
+    );
+    assert_eq!(block_style_id(&explicit_first_out, "header", 1), None);
+    assert_eq!(
+        block_effective_style_id(&explicit_first_out, "header", 1).as_deref(),
+        Some("Normal")
+    );
+    let (_, implicit_first_legacy) = layout(&implicit_first);
+    assert!((first_after(&implicit_first_legacy, "header") - 16.0).abs() < 0.01);
+    assert_eq!(
+        header_story_paragraph_styles(&implicit_first),
+        vec![None, Some("Normal".to_owned())]
+    );
+}
+
+#[test]
+fn header_custom_default_keeps_explicit_normal_distinct() {
+    let implicit_normal = document_with_styles(
+        Some((
+            hf_para("FIRST", None, EXPLICIT, true),
+            hf_para("SECOND", Some("Normal"), EXPLICIT, true),
+        )),
+        None,
+        styles_xml_custom_default(),
+    );
+    let implicit_body_default = document_with_styles(
+        Some((
+            hf_para("FIRST", None, EXPLICIT, true),
+            hf_para("SECOND", Some("BodyDefault"), EXPLICIT, true),
+        )),
+        None,
+        styles_xml_custom_default(),
+    );
+    let explicit_body_default_first = document_with_styles(
+        Some((
+            hf_para("FIRST", Some("BodyDefault"), EXPLICIT, true),
+            hf_para("SECOND", None, EXPLICIT, true),
+        )),
+        None,
+        styles_xml_custom_default(),
+    );
+    let implicit_different = document_with_styles(
+        Some((
+            hf_para("FIRST", None, EXPLICIT, true),
+            hf_para("SECOND", Some("Different"), EXPLICIT, true),
+        )),
+        None,
+        styles_xml_custom_default(),
+    );
+    let (_, normal_out) = layout_with_default(&implicit_normal, Some("BodyDefault"));
+    let (_, default_out) = layout_with_default(&implicit_body_default, Some("BodyDefault"));
+    let (_, reversed_out) = layout_with_default(&explicit_body_default_first, Some("BodyDefault"));
+    let (_, different_out) = layout_with_default(&implicit_different, Some("BodyDefault"));
+    assert!((first_after(&normal_out, "header") - 16.0).abs() < 0.01);
+    assert_eq!(first_after(&default_out, "header"), 0.0);
+    assert_eq!(first_after(&reversed_out, "header"), 0.0);
+    assert!((first_after(&different_out, "header") - 16.0).abs() < 0.01);
+    assert_eq!(block_style_id(&normal_out, "header", 0), None);
+    assert_eq!(
+        block_style_id(&normal_out, "header", 1).as_deref(),
+        Some("Normal")
+    );
+    assert_eq!(
+        block_effective_style_id(&normal_out, "header", 0).as_deref(),
+        Some("BodyDefault")
+    );
 }

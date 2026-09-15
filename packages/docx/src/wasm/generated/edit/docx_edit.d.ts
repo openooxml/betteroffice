@@ -811,7 +811,8 @@ export class EditSession {
      * document-level values lowering cannot read off the story:
      * `{"themeColors":{slot: hex},"defaultTabStopTwips":number|null,
      * "pageContentHeight":number|null,"numericIds":{yrsId: number},
-     * "tocStyleIds":[styleId],"showHiddenText":bool}`, all
+     * "tocStyleIds":[styleId],"showHiddenText":bool,
+     * "defaultParagraphStyleId":string}`, all
      * optional. Errors when the story does not end in a pilcrow, holds a
      * malformed table, references itself through a cell story, or contains an
      * embed lowering does not support.

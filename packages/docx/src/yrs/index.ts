@@ -350,6 +350,7 @@ export type YrsRawOp =
 export interface YrsRenderEnv {
   tocStyleIds?: string[];
   paragraphSpacingLinePx?: number;
+  defaultParagraphStyleId?: string;
   /** Theme color name → hex (`accent1` → `4472C4`), for theme-color resolution. */
   themeColors?: Record<string, string>;
   /** The document default tab stop in twips. */
