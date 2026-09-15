@@ -796,6 +796,37 @@ fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
 }
 
 #[test]
+fn adjust_edits_on_shapes_without_preset_geometry_are_refused() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let missing = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap();
+    assert_eq!(missing.geometry, "rect");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &missing.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+
+    let preset = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap();
+    assert_eq!(preset.geometry, "roundRect");
+    session
+        .set_shape_adjust(&context(), &slide.id, &preset.id, &adjustments)
+        .unwrap();
+}
+
+#[test]
 fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
     let mut part_list = fixture_parts(256);
     for (path, body) in part_list.iter_mut() {

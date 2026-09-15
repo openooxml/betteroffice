@@ -259,6 +259,11 @@ pub struct Shape {
     #[serde(flatten)]
     pub base: ShapeBase,
     pub geometry: String,
+    #[serde(
+        default = "has_preset_geometry_default",
+        skip_serializing_if = "is_preset_geometry"
+    )]
+    pub has_preset_geometry: bool,
     /// Custom paths in shape-relative coordinates.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<CustomGeometryPath>,
@@ -332,6 +337,14 @@ fn rect_geometry() -> String {
 
 fn is_rect(geometry: &str) -> bool {
     geometry == "rect"
+}
+
+fn has_preset_geometry_default() -> bool {
+    true
+}
+
+fn is_preset_geometry(value: &bool) -> bool {
+    *value
 }
 
 /// Bitmap effects with unresolved colours.
