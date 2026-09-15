@@ -87,13 +87,15 @@ jobs:
         run: |
           if [ -n "$TOKEN" ]; then
             echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "CRATES_IO_BOOTSTRAP_TOKEN is set: crates missing from crates.io will be created with it."
           else
             echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "CRATES_IO_BOOTSTRAP_TOKEN is unset: every crate must already exist on crates.io."
           fi
 
       - name: Authenticate to crates.io
         id: crates-auth
-        if: steps.pending.outputs.publishing == 'true' && steps.crates-bootstrap.outputs.enabled != 'true'
+        if: steps.pending.outputs.publishing == 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
       # Both registries are checked before the first upload: a guard that fails
@@ -114,7 +116,8 @@ jobs:
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true'
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN || steps.crates-auth.outputs.token }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-auth.outputs.token }}
+          CRATES_IO_BOOTSTRAP_TOKEN: ${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}
         run: bun run publish:crates
 
       # changesets does not rewrite the workspace: protocol here, so pin it to

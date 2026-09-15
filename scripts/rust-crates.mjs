@@ -40,11 +40,11 @@ export function rustReleaseVersion() {
   return JSON.parse(readFileSync(RUST_RELEASE_MANIFEST, 'utf8')).version;
 }
 
-export function run(command, args, { capture = false, allowFailure = false } = {}) {
+export function run(command, args, { capture = false, allowFailure = false, env } = {}) {
   const result = spawnSync(command, args, {
     encoding: capture ? 'utf8' : undefined,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    env: process.env
+    env: env ? { ...process.env, ...env } : process.env
   });
   if (result.error) throw result.error;
   if (result.status !== 0 && !allowFailure) {
