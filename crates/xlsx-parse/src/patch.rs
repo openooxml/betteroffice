@@ -1,7 +1,4 @@
 //! Lexical patching of a preserved worksheet's `<cols>` and `<sheetData>`.
-//! Rows, columns and cells the edit did not touch are emitted byte for byte,
-//! so the markup the model does not represent survives; only what changed is
-//! rewritten from the model.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::Peekable;
@@ -82,8 +79,7 @@ struct SourceCol {
     range: Range<u32>,
 }
 
-/// Shared-formula groups and array masters that must be rewritten whole
-/// because a cell they cover changed or their range no longer moves as one.
+/// Shared-formula groups and array masters to rewrite whole.
 struct DirtyFormulas {
     groups: HashSet<u32>,
     masters: HashSet<(u32, u32)>,
@@ -95,8 +91,7 @@ struct WidthPiece {
 }
 
 impl SheetPatch<'_> {
-    /// The `<sheetData>` element with only the changed rows and cells
-    /// rewritten, or `None` when the source cannot be patched cell by cell.
+    /// Patched `<sheetData>`; `None` when the source resists cell-by-cell patching.
     pub(crate) fn sheet_data(&self, source: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
         let Some((element, rows)) = scan_sheet_data(source)? else {
             return Ok(None);
@@ -144,8 +139,7 @@ impl SheetPatch<'_> {
         Ok(Some(out))
     }
 
-    /// The `<cols>` element with only the changed columns rewritten. `None`
-    /// removes the element; a source that cannot be patched is regenerated.
+    /// Patched `<cols>`; `None` removes the element.
     pub(crate) fn cols(&self, source: Option<&[u8]>) -> Result<Option<Vec<u8>>, ParseError> {
         let Some(source) = source else {
             return self.generated_cols();
@@ -227,8 +221,7 @@ impl SheetPatch<'_> {
             .transpose()
     }
 
-    /// Splits a surviving span of columns wherever the model width parted from
-    /// the source width.
+    /// Splits a column span wherever the model width parted from the source.
     fn width_pieces(&self, range: Range<u32>) -> Vec<WidthPiece> {
         let mut pieces: Vec<WidthPiece> = Vec::new();
         for col in range {
@@ -498,8 +491,7 @@ impl SheetPatch<'_> {
         }
     }
 
-    /// Source addresses whose cell is gone, moved onto a different value or
-    /// gained a value the source did not hold.
+    /// Source addresses whose cell changed, moved, or is gone.
     fn changed_source_cells(&self) -> BTreeSet<(u32, u32)> {
         let mut changed = BTreeSet::new();
         for (at, cell) in self.original.iter_cells() {
@@ -668,9 +660,7 @@ fn expanded_empty(
     })
 }
 
-/// Locates every row and cell of a `<sheetData>` element. `None` when the
-/// markup cannot be patched cell by cell: an element without an address, or
-/// rows and cells out of order.
+/// Rows and cells of a `<sheetData>`; `None` when unpatchable cell by cell.
 fn scan_sheet_data(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceRow>)>, ParseError> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().expand_empty_elements = false;
@@ -866,8 +856,7 @@ fn formula_markup(
     })
 }
 
-/// Locates every `<col>` of a `<cols>` element. `None` when one lacks a
-/// readable span.
+/// Every `<col>` of a `<cols>`; `None` when one lacks a readable span.
 fn scan_cols(data: &[u8]) -> Result<Option<(SourceElement, Vec<SourceCol>)>, ParseError> {
     let mut reader = Reader::from_reader(data);
     reader.config_mut().expand_empty_elements = false;

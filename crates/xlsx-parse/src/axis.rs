@@ -1,6 +1,4 @@
-//! Where a preserved sheet's source rows and columns sit after the row and
-//! column edits made since it was read. The model carries the cells at their
-//! current addresses; this carries which source address each came from.
+//! Source-to-current row and column addresses for a preserved sheet.
 
 use std::ops::Range;
 
@@ -42,8 +40,7 @@ impl AxisMap {
             }]
     }
 
-    /// The current index of a source index; `None` once deleted or pushed past
-    /// the axis limit.
+    /// Current index of a source index; `None` when deleted or past the limit.
     pub fn current(&self, source: u32) -> Option<u32> {
         let index = self
             .segments
@@ -61,9 +58,7 @@ impl AxisMap {
         (current >= segment.current).then(|| segment.source + (current - segment.current))
     }
 
-    /// The current spans a source span survives as, in order. Spans split by a
-    /// deleted or inserted gap stay split: merging them would claim a mapping
-    /// the deleted indices do not have.
+    /// Current spans of a source span, in order; gaps stay split.
     pub fn current_ranges(&self, source: Range<u32>) -> Vec<Range<u32>> {
         let mut ranges: Vec<Range<u32>> = Vec::new();
         let mut cursor = source.start;
@@ -167,8 +162,7 @@ impl AxisMap {
         self.segments = segments;
     }
 
-    /// Appends a segment clipped to the axis limit, merging it into the previous
-    /// one when both axes continue without a gap.
+    /// Appends a segment clipped to the limit, merging gapless neighbors.
     fn push(&self, segments: &mut Vec<Segment>, mut segment: Segment) {
         if segment.current >= self.limit {
             return;
