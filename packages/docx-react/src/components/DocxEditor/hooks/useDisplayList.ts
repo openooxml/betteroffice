@@ -439,6 +439,7 @@ export function useRustDisplayList(
         const paintToken = paintedCaretMachine.token();
         residentPaintInflightRef.current += 1;
         let result;
+        let workerDelta: ReturnType<typeof decodeFrameDelta> | undefined;
         try {
           result =
             operation.kind === 'insert'
@@ -456,6 +457,15 @@ export function useRustDisplayList(
                   false,
                   paintCaret
                 );
+          if (result.applied) {
+            try {
+              workerDelta = decodeFrameDelta(result.frame);
+            } catch (error) {
+              throw new ResidentWorkerFailureError(
+                `Resident engine worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          }
         } catch (error) {
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
           console.error(
@@ -472,7 +482,7 @@ export function useRustDisplayList(
           residentPaintInflightRef.current -= 1;
         }
         if (!result.applied) return null;
-        const delta = decodeFrameDelta(result.frame);
+        const delta = workerDelta ?? decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);

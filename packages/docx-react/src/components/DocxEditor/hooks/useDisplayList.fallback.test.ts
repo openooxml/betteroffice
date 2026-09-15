@@ -141,6 +141,16 @@ class InputFakeWorker {
       id: input.id, ok: false, error: message,
     } } as MessageEvent<ResidentEngineWorkerResponse>);
   }
+  replyInputCorruptFrame(payload: Uint8Array): void {
+    const input = [...this.posted]
+      .reverse()
+      .find((request) => request.type === 'applyInput' || request.type === 'applyDelete');
+    if (!input) throw new Error('worker never received an input request');
+    this.onmessage?.({ data: {
+      id: input.id, ok: true, frame: payload.slice().buffer,
+      caret: { frameEpoch: 100, caretRect: null }, selection: null, layoutRevision: 1,
+    } } as MessageEvent<ResidentEngineWorkerResponse>);
+  }
   crash(): void {
     this.onerror?.({ message: 'worker crashed' } as ErrorEvent);
   }
@@ -287,6 +297,78 @@ test('surfaces an engine-level input rejection instead of falling back', async (
     expect(JSON.stringify(result.current.displayList ?? '')).not.toContain('QUACK');
     expect(worker!.terminated).toBe(false);
     expect(result.current.workerSurfacesActive).toBe(true);
+    unmount();
+  } finally {
+    errors.mockRestore();
+    native.free();
+  }
+});
+
+test('falls back to the main thread and keeps the keystroke when the worker returns a corrupt frame', async () => {
+  const native = createEditSession(9204);
+  native.create_story('body', 'Fallback text', 'Normal', 'left');
+  const inputs = JSON.parse(native.layout_document_with_regions_json(JSON.stringify({
+    bodyStory: 'body',
+    regions: { sections: [{ sectionId: 'main', properties: {} }] },
+    measurement: { defaults: { fontSize: 11, fontFamily: 'Calibri' } },
+    renderEnv: {},
+  })));
+  const frame = native.build_display_list_frame(JSON.stringify(inputs), 0);
+  new DataView(frame.buffer, frame.byteOffset, frame.byteLength).setBigUint64(32, 100n, true);
+  const paragraphs = JSON.parse(native.paragraphs('body')) as Array<{ paraId: string; text: string }>;
+  const para = paragraphs[0]!;
+  native.set_selection('body', para.paraId, para.text.length, para.paraId, para.text.length);
+  let worker: InputFakeWorker | null = null;
+  class FakeWorker extends InputFakeWorker {
+    constructor() {
+      super(frame);
+      worker = this;
+    }
+  }
+  globalThis.Worker = FakeWorker as unknown as typeof Worker;
+  const engine = {
+    buildDisplayListJson: (input: string) => native.build_display_list_json(input),
+    buildDisplayListFrame: (input: string, epoch: number) =>
+      native.build_display_list_frame(input, epoch),
+    applyInput: (text: string, epoch: number) => native.apply_input(text, epoch),
+    residentCaretSnapshot: () => JSON.parse(native.resident_caret_snapshot_json()),
+    residentWorkerProbe: () => ({ layoutRevision: 1 }),
+    residentWorkerSnapshot: () => ({ state: new Uint8Array(), fonts: [], fontsRevision: 0 }),
+    onUpdate: () => () => {},
+    selection: () => JSON.parse(native.selection()) as YrsSelection,
+    applyUpdate: () => null,
+  } as unknown as YrsSession;
+  const overrides = { getInputs: () => inputs };
+  const errors = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { result, unmount } = renderHook(
+      ({ layout }) => useRustDisplayList(layout, overrides, undefined, undefined, engine),
+      { initialProps: { layout: inputs.layout as Layout } }
+    );
+    await act(async () => {
+      worker!.replyBootstrap();
+    });
+    await waitFor(() => {
+      if (result.current.error) throw result.current.error;
+      expect(result.current.frame?.frameEpoch).toBe(100);
+    });
+    let outcome: ResidentFrameApplyResult | null | undefined;
+    await act(async () => {
+      const pending = result.current.applyInput('QUACK');
+      await flushInputRequest(worker!);
+      worker!.replyInputCorruptFrame(new Uint8Array([1, 2, 3, 4]));
+      outcome = await pending;
+    });
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(outcome?.frameEpoch).not.toBeNull();
+    expect(result.current.displayList).not.toBeNull();
+    expect(JSON.stringify(result.current.displayList)).toContain('QUACK');
+    expect(result.current.loading).toBe(false);
+    expect(result.current.workerSurfacesActive).toBe(false);
+    expect(worker!.terminated).toBe(true);
+    expect(
+      errors.mock.calls.some(([message]) => String(message).includes('falling back to the main-thread engine'))
+    ).toBe(true);
     unmount();
   } finally {
     errors.mockRestore();
