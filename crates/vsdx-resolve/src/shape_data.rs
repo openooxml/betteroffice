@@ -52,9 +52,7 @@ pub struct ShapeDataProperty {
     pub ask: bool,
 }
 
-/// Typed Shape Data rows in `SortKey` order, document order when it is absent.
-/// Invisible rows are included with their flag set: hidden values still feed
-/// `Field` formulas, so filtering is the caller's decision.
+/// Returns typed Shape Data rows in display order, including invisible rows.
 pub fn shape_data(shape: &ResolvedShape) -> Vec<ShapeDataProperty> {
     let mut sections: Vec<_> = shape
         .sections

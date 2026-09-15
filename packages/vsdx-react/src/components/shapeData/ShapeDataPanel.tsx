@@ -1,4 +1,4 @@
-import { formatOptions, shapeDataValueFormula, visibleShapeDataRows } from '@betteroffice/vsdx';
+import { formatOptions, isShapeDataValueEditable, shapeDataValueFormula, visibleShapeDataRows } from '@betteroffice/vsdx';
 import type { ShapeDataRow, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { TFunction } from '@betteroffice/vsdx-i18n';
 import { useState } from 'react';
@@ -52,6 +52,7 @@ export function ShapeDataPanel({ shape, onCommit, onError, t, className }: Shape
 
 function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow; onCommit: (row: ShapeDataRow, formula: string) => void; onError: (error: unknown) => void; t: TFunction }) {
   const id = `shape-data-${row.rowName ?? `ix-${row.rowIndex}`}`;
+  const editable = isShapeDataValueEditable(row.formula);
   const commit = (formula: string) => {
     try { onCommit(row, formula); }
     catch (error) { onError(error); }
@@ -60,7 +61,7 @@ function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow;
     const checked = row.displayValue !== '' && row.displayValue !== '0' && !/^false$/i.test(row.displayValue);
     return (
       <span style={styles.checkRow}>
-        <input id={id} type="checkbox" aria-label={t('shapeData.valueLabel')} checked={checked} onChange={(event) => commit(event.target.checked ? '1' : '0')} />
+        <input id={id} type="checkbox" aria-label={t('shapeData.valueLabel')} checked={checked} disabled={!editable} onChange={(event) => commit(event.target.checked ? '1' : '0')} />
       </span>
     );
   }
@@ -72,6 +73,7 @@ function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow;
         id={id}
         aria-label={t('shapeData.valueLabel')}
         value={known ? row.displayValue : ''}
+        disabled={!editable}
         onChange={(event) => commit(shapeDataValueFormula(row.type, event.target.value))}
         style={styles.input}
       >
@@ -80,13 +82,19 @@ function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow;
       </select>
     );
   }
-  return <ShapeDataTextInput key={`${row.rowName ?? row.rowIndex}:${row.displayValue}`} id={id} row={row} onCommit={commit} t={t} />;
+  return <ShapeDataTextInput key={`${row.rowName ?? row.rowIndex}:${row.displayValue}`} id={id} row={row} editable={editable} onCommit={onCommit} onError={onError} t={t} />;
 }
 
-function ShapeDataTextInput({ id, row, onCommit, t }: { id: string; row: ShapeDataRow; onCommit: (formula: string) => void; t: TFunction }) {
+function ShapeDataTextInput({ id, row, editable, onCommit, onError, t }: { id: string; row: ShapeDataRow; editable: boolean; onCommit: (row: ShapeDataRow, formula: string) => void; onError: (error: unknown) => void; t: TFunction }) {
   const [draft, setDraft] = useState(row.displayValue);
   const commitIfChanged = () => {
-    if (draft !== row.displayValue) onCommit(shapeDataValueFormula(row.type, draft));
+    if (draft === row.displayValue) return;
+    try {
+      onCommit(row, shapeDataValueFormula(row.type, draft));
+    } catch (error) {
+      setDraft(row.displayValue);
+      onError(error);
+    }
   };
   const onKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === 'Enter') (event.target as HTMLInputElement).blur();
@@ -98,6 +106,7 @@ function ShapeDataTextInput({ id, row, onCommit, t }: { id: string; row: ShapeDa
       type="text"
       aria-label={t('shapeData.valueLabel')}
       value={draft}
+      disabled={!editable}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={commitIfChanged}
       onKeyDown={onKeyDown}

@@ -1,6 +1,6 @@
 export { canvasPointToModel, modelPointToCanvas, paintPage, sizeCanvasForPage } from './render/canvas';
 export type { CanvasImageResolver, ModelPoint, PageCanvasLike, PaintPageOptions } from './render/canvas';
-export { formatOptions, quoteShapeDataValue, shapeDataRows, shapeDataTypeFromValue, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
+export { formatOptions, isShapeDataValueEditable, quoteShapeDataValue, shapeDataRows, shapeDataTypeFromValue, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
 export type { ShapeDataRow, ShapeDataType } from './shapeData';
 export { CollaborationError, CollaborationProvider } from './collaboration';
 export type { CollaborationErrorCode, CollaborationErrorListener, CollaborationProviderOptions, CollaborationReplica, CollaborationStatus, CollaborationStatusChange, CollaborationStatusListener, CollaborationTransport, CollaborationTransportEvent, CollaborationUser, VsdxPresence, VsdxPresenceCursor, VsdxPresenceListener, VsdxPresencePeer, VsdxPresenceState, VsdxPresenceUser } from './collaboration';

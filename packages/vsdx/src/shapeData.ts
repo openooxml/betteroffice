@@ -74,6 +74,13 @@ export function quoteShapeDataValue(text: string): string {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
+export function isShapeDataValueEditable(formula: string | null | undefined): boolean {
+  if (!formula) return true;
+  if (/\bGUARD\s*\(/i.test(formula)) return false;
+  if (/\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula)) return false;
+  return true;
+}
+
 export function formatOptions(format: string | null | undefined): string[] {
   if (!format) return [];
   return format.split(';').map((option) => option.trim()).filter((option) => option !== '');
@@ -121,7 +128,11 @@ export function shapeDataRows(shape: ShapeSnapshot | null | undefined): ShapeDat
       ask: truthyOf(byName(cells, 'Ask')) || truthyOf(byName(cells, 'Verify')),
     });
   }
-  rows.sort((left, right) => (left.sortKey ?? '').localeCompare(right.sortKey ?? ''));
+  rows.sort((left, right) => {
+    const a = left.sortKey ?? '';
+    const b = right.sortKey ?? '';
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   return rows;
 }
 
