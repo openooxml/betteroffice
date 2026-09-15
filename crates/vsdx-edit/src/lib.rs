@@ -2310,6 +2310,114 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_carries_master_inherited_layer_member() {
+        use vsdx_parse::{
+            Cell, Row, RowChild, Section, SectionChild, Shape, ShapeChild, ShapesChild, Sheet,
+            SheetChild,
+        };
+        fn cell(name: &str, value: &str) -> Cell {
+            Cell {
+                name: name.into(),
+                formula: None,
+                value: Some(value.into()),
+                unit: None,
+                del: false,
+                other_attrs: Vec::new(),
+            }
+        }
+        let mut package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../vsdx-parse/tests/fixtures/foundation.vsdx"
+        ))
+        .unwrap();
+        let page = package.page_part_paths[0].clone();
+        let page_id = package.page_part_ids[&page];
+        let contents = package.page_contents.get_mut(&page).unwrap();
+        let mut shape_id = 0;
+        for child in &mut contents.children {
+            if let SheetChild::Shapes(shapes) = child
+                && let Some(ShapesChild::Shape(shape)) = shapes.first_mut()
+            {
+                assert!(shape.cells().all(|cell| cell.name != "LayerMember"));
+                shape.master = Some(999);
+                shape_id = shape.id;
+                break;
+            }
+        }
+        assert_ne!(shape_id, 0);
+        package
+            .page_sheets
+            .entry(page_id)
+            .or_insert_with(|| Sheet {
+                id: Some(page_id),
+                children: Vec::new(),
+                other_attrs: Vec::new(),
+            })
+            .children
+            .push(SheetChild::Section(Section {
+                name: "Layer".into(),
+                index: None,
+                del: false,
+                children: vec![SectionChild::Row(Row {
+                    index: Some(1),
+                    name: None,
+                    local_name: None,
+                    row_type: None,
+                    del: false,
+                    children: vec![
+                        RowChild::Cell(cell("Name", "Lighting")),
+                        RowChild::Cell(cell("Visible", "0")),
+                    ],
+                    other_attrs: Vec::new(),
+                })],
+                other_attrs: Vec::new(),
+            }));
+        package
+            .master_part_ids
+            .insert("visio/masters/master999.xml".into(), 999);
+        package.master_contents.insert(
+            "visio/masters/master999.xml".into(),
+            Sheet {
+                id: None,
+                children: vec![SheetChild::Shapes(vec![ShapesChild::Shape(Shape {
+                    id: 1,
+                    name: None,
+                    name_u: None,
+                    shape_type: None,
+                    master: None,
+                    master_shape: None,
+                    line_style: None,
+                    fill_style: None,
+                    text_style: None,
+                    children: vec![ShapeChild::Cell(cell("LayerMember", "1"))],
+                    del: false,
+                    other_attrs: Vec::new(),
+                })])],
+                other_attrs: Vec::new(),
+            },
+        );
+        let resolved = vsdx_resolve::Resolver::new(&package)
+            .resolve_shape(&page, shape_id)
+            .unwrap();
+        assert!(vsdx_resolve::shape_hidden_by_layers(
+            &resolved,
+            &vsdx_resolve::page_layers(&package, &page),
+        ));
+        let session = DiagramSession::from_package(package, 7).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let shape = snapshot.pages[0]
+            .shapes
+            .iter()
+            .find(|shape| shape.source_id == shape_id)
+            .unwrap();
+        let member = shape
+            .cells
+            .iter()
+            .find(|candidate| candidate.name == "LayerMember")
+            .expect("seeded snapshot carries the master-inherited member");
+        assert_eq!(member.value.as_deref(), Some("1"));
+    }
+
+    #[test]
     fn grouped_child_cells_are_addressable_from_snapshots() {
         let session = DiagramSession::open(
             include_bytes!("../../vsdx-parse/tests/fixtures/nested-groups.vsdx"),
