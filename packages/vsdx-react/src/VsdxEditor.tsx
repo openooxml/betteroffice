@@ -754,7 +754,7 @@ function shapeHiddenByLayers(shape: ShapeSnapshot, layers: readonly PageLayer[])
 function layerMemberIndices(shape: ShapeSnapshot): number[] {
   const cell = shape.cells.find((entry) => entry.name === 'LayerMember');
   const raw = cell?.value ?? cell?.formula ?? '';
-  const indices = raw.split(';').map((part) => Number(part.trim())).filter((index) => Number.isInteger(index) && index >= 0);
+  const indices = raw.split(';').map((part) => part.trim()).filter((part) => /^\+?\d+$/.test(part)).map((part) => Number(part)).filter((index) => index <= 4294967295);
   return [...new Set(indices)].sort((left, right) => left - right);
 }
 

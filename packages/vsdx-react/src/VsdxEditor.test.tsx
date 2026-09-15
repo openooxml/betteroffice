@@ -87,3 +87,12 @@ test('selection layer visibility matches the engine rule, including hidden group
   };
   expect(selectionHiddenByLayers(grouped, testLayers(), selection)).toBe(true);
 });
+
+test('a shape on no layer stays selectable when layer zero is hidden', () => {
+  const page: PageSnapshot = { ...layerPage, shapes: [{ id: 'page:1:shape:1', sourceId: 1, name: null, cells: [], children: [] }] };
+  const snapshot: DiagramSnapshot = { pages: [page] };
+  const selection = { pageId: 'page:1', shapeId: 'page:1:shape:1', hit: { kind: 'shape' as const, shapeId: 'x' } };
+  const layers = testLayers().map((layer) => (layer.index === 0 ? { ...layer, visible: false } : layer));
+  expect(selectionHiddenByLayers(page, layers, selection)).toBe(false);
+  expect(stillSelectable(snapshot, 0, selection, layers)).toBe(true);
+});
