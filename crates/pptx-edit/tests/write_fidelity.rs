@@ -830,6 +830,60 @@ fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
 }
 
 #[test]
+fn an_exhausted_shape_id_space_still_saves_edits_that_allocate_nothing() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list.clone()), 11).unwrap();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 0, "X", &TextStyle::default())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>X</a:t>"), "{slide}");
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    assert_eq!(
+        reopened
+            .story(&tracked_story(&reopened))
+            .unwrap()
+            .plain_text(),
+        "XWideCaps"
+    );
+
+    let session = DeckSession::open(&zip(part_list), 12).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(
+        matches!(error, EditError::Write(ref message) if message.contains("shape id space is exhausted")),
+        "{error:?}"
+    );
+}
+
+#[test]
 fn a_colour_write_replaces_an_existing_no_fill() {
     let session = open();
     let snapshot = session.snapshot().unwrap();

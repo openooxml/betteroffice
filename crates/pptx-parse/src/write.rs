@@ -1248,9 +1248,7 @@ fn patch_slide(
     elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
-    let mut next_shape_id = max_shape_id(root)
-        .checked_add(1)
-        .ok_or_else(|| write_error(part, "the shape id space is exhausted"))?;
+    let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
@@ -1315,12 +1313,13 @@ fn max_shape_id(root: &XmlElement) -> u32 {
         .unwrap_or(1)
 }
 
-fn alloc_shape_id(next_shape_id: &mut u32, part: &str) -> Result<u32, PptxError> {
-    let shape_id = *next_shape_id;
+fn alloc_shape_id(next_shape_id: &mut Option<u32>, part: &str) -> Result<u32, PptxError> {
+    let shape_id =
+        next_shape_id.ok_or_else(|| write_error(part, "the shape id space is exhausted"))?;
     if shape_id == 0 {
         return Err(write_error(part, "the shape id space is exhausted"));
     }
-    *next_shape_id = shape_id.wrapping_add(1);
+    *next_shape_id = shape_id.checked_add(1);
     Ok(shape_id)
 }
 
@@ -1337,7 +1336,7 @@ struct ShapeSlot {
 fn patch_shape_children(
     parent: &mut XmlElement,
     writes: &[ShapeWrite],
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -1608,7 +1607,7 @@ fn emit_sibling_slots(
 fn patch_shape(
     element: &mut XmlElement,
     patch: &ShapePatch,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -2671,7 +2670,7 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
 
 fn shape_element(
     add: &ShapeAdd,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<XmlElement, PptxError> {
@@ -2781,7 +2780,7 @@ fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<
                 .with_child(XmlElement::new(prefixes.presentation("nvPr"))),
         )
         .with_child(XmlElement::new(prefixes.presentation("grpSpPr")).with_child(group_transform));
-    let mut next_shape_id = 2;
+    let mut next_shape_id = Some(2);
     for shape in shapes {
         tree = tree.with_child(shape_element(shape, &mut next_shape_id, &prefixes, part)?);
     }
