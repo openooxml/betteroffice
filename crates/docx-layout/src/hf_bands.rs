@@ -313,7 +313,7 @@ fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
         .sum()
 }
 
-/// Resolves both bands for one page.
+/// Resolves both bands for one page. Automatic parity fillers stay blank.
 ///
 /// `page_number` is the layout's own 1-based `Page.number` (falling back to
 /// `page_index + 1`) and drives both variant selection and PAGE field text, so
@@ -325,6 +325,9 @@ pub(crate) fn compose_page_regions<'a>(
     total_pages: u64,
     shape: Option<&'a ShapeFonts<'a>>,
 ) -> (Option<HfRegion>, Option<HfRegion>) {
+    if page.parity_filler == Some(true) {
+        return (None, None);
+    }
     let page_number = page.number.unwrap_or(page_index as u64 + 1);
     let header = resolve_variant(hf, page, HfKind::Header, page_number).map(|v| {
         compose_region(

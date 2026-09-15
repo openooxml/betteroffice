@@ -81,3 +81,17 @@ directory; those files are the authoritative copies for redistribution.
 
 Both are static `SubsetOTF` Regulars from
 https://github.com/notofonts/noto-cjk. `LICENSES/OFL-NotoCJK.txt`.
+
+---
+
+## yrs (vendored copy for the macOS app)
+
+`apps/native-viewer/vendor/yrs` is the `yrs` 0.27.3 crate from crates.io
+(upstream https://github.com/y-crdt/y-crdt), byte-identical apart from three
+call sites that replace `from_utf8_unchecked` with checked decoding (see issue
+#224). `apps/native-viewer` substitutes it for the registry crate via
+`[patch.crates-io]`, so it is compiled into the macOS app only.
+
+Copyright (c) 2020 Bartosz Sypytkowski, Kevin Jahns.
+
+License: MIT (`apps/native-viewer/vendor/yrs/LICENSE`).

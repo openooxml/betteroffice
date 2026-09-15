@@ -429,6 +429,7 @@ function imagePayload(image: Image): Attrs {
     cropRight: image.crop?.right ?? null,
     cropBottom: image.crop?.bottom ?? null,
     cropLeft: image.crop?.left ?? null,
+    shapeType: image.shapeType ?? null,
     opacity: image.opacity ?? null,
     effectExtentTop: image.padding?.top ? emuToPixels(image.padding.top) : null,
     effectExtentBottom: image.padding?.bottom ? emuToPixels(image.padding.bottom) : null,

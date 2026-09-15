@@ -33,7 +33,7 @@
 use crate::LayoutError;
 use crate::hooks;
 use crate::page_flow::{PageFlowGeometry, Paginator};
-use crate::paragraph_spacing::{get_spacing_after, get_spacing_before};
+use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::prescan::{LayoutPlan, SectionLayoutConfig, default_columns, prescan};
 use crate::resolve_lines::{ResolvedLine, resolve_line_segments, utf16_len};
 use crate::section_breaks::resolve_page_margins;
@@ -193,8 +193,24 @@ fn is_floating_text_box_block(block: &TextBoxBlock) -> bool {
 
 /// Suppresses spacing between adjacent same-style contextual paragraphs.
 fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
-    let (LayoutBlock::Paragraph(c), LayoutBlock::Paragraph(n)) = (curr, next) else {
+    let LayoutBlock::Paragraph(c) = curr else {
         return;
+    };
+    let next_is_table = matches!(next, LayoutBlock::Table(_));
+    let n = match next {
+        LayoutBlock::Paragraph(paragraph) => paragraph,
+        LayoutBlock::Table(table) if table.floating.is_none() && is_empty_paragraph(c) => {
+            let Some(LayoutBlock::Paragraph(paragraph)) = table
+                .rows
+                .first_mut()
+                .and_then(|row| row.cells.first_mut())
+                .and_then(|cell| cell.blocks.first_mut())
+            else {
+                return;
+            };
+            paragraph
+        }
+        _ => return,
     };
     let same_style = c
         .attrs
@@ -214,7 +230,8 @@ fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutBlock) {
     {
         spacing.after = Some(0.0);
     }
-    if let Some(na) = &mut n.attrs
+    if !next_is_table
+        && let Some(na) = &mut n.attrs
         && na.contextual_spacing.unwrap_or(false)
         && let Some(spacing) = &mut na.spacing
     {
@@ -299,12 +316,13 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
     // group height must see contextual-spacing suppression (§17.3.1.9)
     apply_contextual_spacing_measured(measured);
 
-    let plan = prescan(
+    let mut plan = prescan(
         measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
 
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
 
@@ -317,6 +335,9 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
             .unwrap_or_else(default_columns),
         options.footnote_reserved_heights.clone(),
     )?;
+    if let Some(Some(restart)) = plan.section_page_restarts.first() {
+        paginator.restart_page_numbering(restart.start);
+    }
 
     let placement = place(
         measured,
@@ -391,12 +412,13 @@ pub fn layout_document_incremental(
         columns: options.columns.clone(),
     };
     apply_contextual_spacing_measured(&mut input.measured);
-    let plan = prescan(
+    let mut plan = prescan(
         &input.measured,
         &body_config,
         final_config,
         options.body_break_type,
     )?;
+    plan.section_page_restarts = options.section_page_restarts.clone().unwrap_or_default();
     let initial_config = plan.section_configs.first().cloned().unwrap_or(body_config);
     let resume = previous_checkpoints
         .iter()
@@ -657,14 +679,41 @@ fn place(
                 // use the NEXT section's columns; for break type, prefer the
                 // next section's but fall back to the current break's
                 let next_type = break_type_after_section(plan, section_idx);
+                let restart = plan
+                    .section_page_restarts
+                    .get(section_idx + 1)
+                    .copied()
+                    .flatten();
                 let next_section_config = plan
                     .section_configs
                     .get(section_idx + 1)
                     .cloned()
                     .unwrap_or_else(|| initial_config.clone());
+                let restart_starts_page = restart.is_some()
+                    && crate::section_breaks::restart_starts_page(
+                        paginator,
+                        &next_section_config,
+                        next_type,
+                    );
+                let next_type = match (next_type, restart) {
+                    (Some(SectionBreakType::OddPage | SectionBreakType::EvenPage), _) => next_type,
+                    (_, Some(restart)) if restart.align_parity && restart_starts_page => {
+                        Some(if paginator.physical_parity_is_odd(restart.start) {
+                            SectionBreakType::OddPage
+                        } else {
+                            SectionBreakType::EvenPage
+                        })
+                    }
+                    _ => next_type,
+                };
                 let opened_column_region =
                     hooks::handle_section_break(block, paginator, &next_section_config, next_type)?;
                 paginator.set_section_index(section_idx + 1);
+                if let Some(restart) = restart
+                    && restart_starts_page
+                {
+                    paginator.restart_page_numbering(restart.start);
+                }
 
                 let next_break_index = plan.break_indices.get(section_idx + 1).copied();
                 if opened_column_region
