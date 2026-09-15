@@ -99,10 +99,10 @@ export class ResidentEngineWorkerClient {
       else pending.reject(residentWorkerError(response.error, response.residentUnavailable));
     };
     this.worker.onerror = (event) => {
-      this.fail(new Error(`Resident engine worker failed: ${event.message}`));
+      this.fail(new ResidentWorkerFailureError(`Resident engine worker failed: ${event.message}`));
     };
     this.worker.onmessageerror = () => {
-      this.fail(new Error('Resident engine worker returned an unreadable message'));
+      this.fail(new ResidentWorkerFailureError('Resident engine worker returned an unreadable message'));
     };
   }
 
@@ -263,7 +263,7 @@ export class ResidentEngineWorkerClient {
     const id = this.nextId++;
     const message: ResidentEngineWorkerRequest = { id, type: 'destroy' };
     this.worker.postMessage(message);
-    this.fail(new Error('Resident engine worker was destroyed'));
+    this.fail(new ResidentWorkerFailureError('Resident engine worker was destroyed'));
   }
 
   private request(
@@ -276,7 +276,9 @@ export class ResidentEngineWorkerClient {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.fail(
-          new Error(`Resident engine worker did not answer ${request.type} within ${timeoutMs}ms`)
+          new ResidentWorkerFailureError(
+            `Resident engine worker did not answer ${request.type} within ${timeoutMs}ms`
+          )
         );
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timeout });
@@ -307,6 +309,9 @@ export class ResidentEngineWorkerClient {
 
 class ResidentWorkerUnavailableError extends Error {}
 
+/** The worker itself failed (crash, timeout, torn-down, corrupt reply). */
+export class ResidentWorkerFailureError extends Error {}
+
 function residentWorkerError(message: string, unavailable = false): Error {
   return unavailable ? new ResidentWorkerUnavailableError(message) : new Error(message);
 }
@@ -318,10 +323,12 @@ function snapshotTransfers(snapshot: YrsResidentWorkerSnapshot): Transferable[] 
 function frameResult(
   response: ResidentEngineWorkerResponse & { ok: true }
 ): ResidentEngineWorkerFrame {
-  if (!response.frame) throw new Error('Resident engine worker response omitted its FrameDelta');
-  if (!response.caret) throw new Error('Resident engine worker response omitted its caret snapshot');
+  if (!response.frame)
+    throw new ResidentWorkerFailureError('Resident engine worker response omitted its FrameDelta');
+  if (!response.caret)
+    throw new ResidentWorkerFailureError('Resident engine worker response omitted its caret snapshot');
   if (response.selection === undefined) {
-    throw new Error('Resident engine worker response omitted its selection');
+    throw new ResidentWorkerFailureError('Resident engine worker response omitted its selection');
   }
   return {
     frame: new Uint8Array(response.frame),
