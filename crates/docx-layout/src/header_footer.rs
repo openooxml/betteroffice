@@ -3,6 +3,7 @@ use std::borrow::Cow;
 use serde::Serialize;
 
 use crate::measure_blocks::{MeasurementConfig, extent_height, measure_blocks, measure_paragraph};
+use crate::paragraph_spacing::apply_contextual_spacing_blocks;
 use crate::types::{
     BlockExtent, BlockId, FieldRun, ImageRun, Layout, LayoutBlock, MeasuredBlock, PageMargins,
     ParagraphBlock, Run, RunFormatting, Size,
@@ -117,6 +118,7 @@ pub fn measure_header_footer(
         return Ok(None);
     }
     let mut blocks = blocks;
+    apply_contextual_spacing_blocks(&mut blocks);
     let measures = measure_blocks(&mut blocks, content_width, config)?;
     let height = measures.iter().map(extent_height).sum();
     let mut flow = HeaderFooterFlow::default();
