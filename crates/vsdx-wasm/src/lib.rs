@@ -62,6 +62,31 @@ impl VsdxRenderer {
         Ok(json)
     }
 
+    #[wasm_bindgen(js_name = pageLayersJson)]
+    pub fn page_layers_json(
+        &self,
+        document: &VsdxDocument,
+        page_index: u32,
+    ) -> Result<String, JsValue> {
+        let package = document.session().package().map_err(js_error)?;
+        let page_part = package
+            .page_part_paths
+            .get(page_index as usize)
+            .ok_or_else(|| JsValue::from_str("page index is outside the document"))?;
+        let layers = self.renderer.effective_page_layers(&package, page_part);
+        serde_json::to_string(&layers).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setLayerVisible)]
+    pub fn set_layer_visible(&mut self, page_part: &str, index: u32, visible: bool) {
+        self.renderer.set_layer_override(page_part, index, visible);
+    }
+
+    #[wasm_bindgen(js_name = clearLayerVisibility)]
+    pub fn clear_layer_visibility(&mut self) {
+        self.renderer.clear_layer_overrides();
+    }
+
     #[wasm_bindgen(js_name = hitTestJson)]
     pub fn hit_test_json(&self, x: f32, y: f32) -> Result<String, JsValue> {
         let result = self
@@ -354,5 +379,21 @@ mod tests {
             live,
             reopened_renderer.layout_page_json(&reopened, 0).unwrap()
         );
+    }
+
+    #[test]
+    fn page_layers_json_lists_effective_visibility() {
+        let document = VsdxDocument::open_collaborative(
+            include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx"),
+            1.0,
+        )
+        .unwrap();
+        let mut renderer = VsdxRenderer::new();
+        let layers: serde_json::Value =
+            serde_json::from_str(&renderer.page_layers_json(&document, 0).unwrap()).unwrap();
+        assert_eq!(layers, serde_json::Value::Array(Vec::new()));
+        renderer.set_layer_visible("visio/pages/page1.xml", 0, false);
+        renderer.layout_page_json(&document, 0).unwrap();
+        renderer.clear_layer_visibility();
     }
 }

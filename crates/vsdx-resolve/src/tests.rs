@@ -803,6 +803,109 @@ fn add_page(package: &mut VsdxPackage, value: Shape) {
     );
 }
 
+fn add_page_sheet(package: &mut VsdxPackage, rows: Vec<Row>) {
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Section(section("Layer", rows))]),
+    );
+}
+
+fn layer_row(index: u32, name: &str, visible: &str) -> Row {
+    row(
+        index,
+        vec![
+            cell("Name", name),
+            cell("Color", "255"),
+            cell("Status", "0"),
+            cell("Visible", visible),
+            cell("Print", "1"),
+            cell("Active", "0"),
+            cell("Lock", "0"),
+        ],
+    )
+}
+
+#[test]
+fn layer_section_resolves_named_rows_with_visibility() {
+    let mut package = package();
+    add_page_sheet(
+        &mut package,
+        vec![
+            layer_row(0, "Trussing", "1"),
+            layer_row(1, "Lighting", "0"),
+            deleted_row(2),
+        ],
+    );
+    let layers = crate::page_layers(&package, "page");
+    assert_eq!(layers.len(), 2);
+    assert_eq!(
+        layers[0],
+        crate::PageLayer {
+            index: 0,
+            name: "Trussing".into(),
+            visible: true,
+            print: true,
+            lock: false,
+            active: false,
+            color: "255".into(),
+            status: "0".into(),
+        }
+    );
+    assert_eq!(layers[1].name, "Lighting");
+    assert!(!layers[1].visible);
+    assert!(crate::page_layers(&package, "missing").is_empty());
+}
+
+#[test]
+fn layer_section_missing_means_no_layers() {
+    let package = package();
+    assert!(crate::page_layers(&package, "page").is_empty());
+}
+
+#[test]
+fn layer_member_lists_membership_indices() {
+    for (member, expected) in [
+        ("0;2", vec![0, 2]),
+        ("1;0;1", vec![0, 1]),
+        (" 2 ; 9 ", vec![2, 9]),
+        ("", vec![]),
+        ("a;3", vec![3]),
+    ] {
+        let mut package = package();
+        add_page(
+            &mut package,
+            shape(10, vec![ShapeChild::Cell(cell("LayerMember", member))]),
+        );
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        assert_eq!(crate::shape_layer_indices(&resolved), expected, "{member}");
+    }
+}
+
+#[test]
+fn hidden_by_layers_requires_every_layer_invisible() {
+    let mut layer_package = package();
+    add_page_sheet(
+        &mut layer_package,
+        vec![layer_row(0, "Trussing", "1"), layer_row(1, "Lighting", "0")],
+    );
+    let layers = crate::page_layers(&layer_package, "page");
+    for (member, expected) in [("1", true), ("0;1", false), ("7", false), ("", false)] {
+        let mut member_package = package();
+        add_page(
+            &mut member_package,
+            shape(10, vec![ShapeChild::Cell(cell("LayerMember", member))]),
+        );
+        let resolved = Resolver::new(&member_package)
+            .resolve_shape("page", 10)
+            .unwrap();
+        assert_eq!(
+            crate::shape_hidden_by_layers(&resolved, &layers),
+            expected,
+            "{member}"
+        );
+    }
+}
 fn add_master(package: &mut VsdxPackage, id: u32, value: Shape) {
     let path = format!("master{id}");
     package.master_part_ids.insert(path.clone(), id);

@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectorGlue, DiagramSnapshot, FormulaShapeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeReceipt, TextReceipt, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -11,6 +11,9 @@ export interface DiagramHandle {
   registerFont(face: VsdxFontFace): number;
   layoutPage(pageIndex: number): PageDisplayList;
   exportPdf(): Uint8Array;
+  pageLayers(pageIndex: number): PageLayer[];
+  setLayerVisible(pagePartPath: string, layerIndex: number, visible: boolean): void;
+  clearLayerVisibility(): void;
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
@@ -113,6 +116,9 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
   return {
     clientId: doc.clientId, snapshot: () => json(() => doc.snapshotJson()),
     registerFont: face => wasm(() => renderer.registerFont(face.family, face.bold ?? false, face.italic ?? false, face.bytes)),
+    pageLayers: pageIndex => json(() => renderer.pageLayersJson(doc, pageIndex)),
+    setLayerVisible: (pagePartPath, layerIndex, visible) => wasm(() => renderer.setLayerVisible(pagePartPath, layerIndex, visible)),
+    clearLayerVisibility: () => wasm(() => renderer.clearLayerVisibility()),
     layoutPage: pageIndex => {
       hitIds.clear();
       const list = json<PageDisplayList>(() => renderer.layoutPageJson(doc, pageIndex));

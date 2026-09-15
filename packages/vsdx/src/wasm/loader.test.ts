@@ -650,6 +650,31 @@ describe('VSDX wasm boundary', () => {
     diagram.dispose();
   });
 
+  test('lists page layers and hides shapes on invisible layers', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='1'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='0'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9052 });
+    try {
+      expect(diagram.pageLayers(0)).toEqual([
+        { index: 0, name: 'Trussing', visible: true, print: true, lock: false, active: false, color: '255', status: '0' },
+        { index: 1, name: 'Lighting', visible: false, print: true, lock: false, active: false, color: '255', status: '0' },
+      ]);
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.setLayerVisible(part, 1, true);
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: true }));
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(true);
+      diagram.setLayerVisible(part, 1, false);
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.clearLayerVisibility();
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: false }));
+    } finally { diagram.dispose(); }
+  });
+
   test('does not reenter update listeners before the outer call unwinds', () => {
     const diagram = openDiagram(foundation, { clientId: 9007 });
     const sequence: string[] = [];
