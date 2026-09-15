@@ -1616,7 +1616,7 @@ fn patch_shape(
     }
     if let Some(adjust_values) = &patch.adjust_values {
         let properties = shape_properties_mut(element, part)?;
-        set_adjust_values(properties, adjust_values, prefixes);
+        set_adjust_values(properties, adjust_values, prefixes, part)?;
     }
     for text in &patch.texts {
         patch_text(element, text, theme, prefixes, part)?;
@@ -1995,10 +1995,13 @@ fn set_adjust_values(
     properties: &mut XmlElement,
     adjust_values: &BTreeMap<String, f64>,
     prefixes: &Prefixes,
-) {
-    // Only preset geometries carry an editable adjustment list.
+    part: &str,
+) -> Result<(), PptxError> {
     let Some(geometry) = properties.child_mut("prstGeom") else {
-        return;
+        return Err(write_error(
+            part,
+            "cannot write adjustments onto a shape without preset geometry",
+        ));
     };
     let list_name = prefixes.drawing("avLst");
     if geometry.child_mut("avLst").is_none() {
@@ -2027,6 +2030,7 @@ fn set_adjust_values(
             )),
         }
     }
+    Ok(())
 }
 
 // --- text -------------------------------------------------------------------
@@ -3002,5 +3006,37 @@ mod tests {
         for local in ["sp", "pic", "graphicFrame", "grpSp"] {
             assert!(ShapeElements::WithoutConnectors.contains(local));
         }
+    }
+
+    #[test]
+    fn adjustments_without_preset_geometry_error_instead_of_no_opting() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="custom"/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+
+        let error = patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    adjust_values: Some(BTreeMap::from([("adj".to_owned(), 0.25)])),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            part,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, crate::PptxError::Write { ref message, .. } if message.contains("preset geometry")),
+            "{error:?}"
+        );
     }
 }

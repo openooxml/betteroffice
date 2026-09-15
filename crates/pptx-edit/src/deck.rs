@@ -588,6 +588,11 @@ impl DeckSession {
         let shape = shape_ref(&txn, shape_id)?;
         require_shape_kind(&shape, &txn)?;
         let geometry = required_string(&shape, &txn, "geometry")?;
+        if geometry == "custom" {
+            return Err(EditError::InvalidGeometry(
+                "custom geometry does not support shape adjustments".to_owned(),
+            ));
+        }
         let before = optional_json(&shape, &txn, "adjustValuesJson")?.unwrap_or_else(BTreeMap::new);
         let mut after = BTreeMap::new();
         for (name, value) in adjustments {

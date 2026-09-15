@@ -760,6 +760,39 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
 }
 
+const CUSTOM_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Custom"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path w="21600" h="21600"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="21600" y="0"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Custom</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+fn cust_geom_fixture() -> Vec<u8> {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace("</p:spTree>", &format!("{CUSTOM_SHAPE}</p:spTree>"));
+        }
+    }
+    zip(part_list)
+}
+
+#[test]
+fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
+    let session = DeckSession::open(&cust_geom_fixture(), 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Custom")
+        .unwrap();
+    assert_eq!(shape.geometry, "custom");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &shape.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
 #[test]
 fn a_colour_write_replaces_an_existing_no_fill() {
     let session = open();
