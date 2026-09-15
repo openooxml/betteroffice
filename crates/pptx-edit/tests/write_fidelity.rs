@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{CommentFlavor, DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{
+    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -791,6 +793,40 @@ fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
         .unwrap_err();
     assert!(matches!(error, EditError::InvalidGeometry(_)));
     assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(matches!(error, EditError::Write(message) if message.contains("shape id")));
 }
 
 #[test]

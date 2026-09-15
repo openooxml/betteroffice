@@ -1248,7 +1248,9 @@ fn patch_slide(
     elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
-    let mut next_shape_id = max_shape_id(root) + 1;
+    let mut next_shape_id = max_shape_id(root)
+        .checked_add(1)
+        .ok_or_else(|| write_error(part, "the shape id space is exhausted"))?;
     let tree = root
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
@@ -1311,6 +1313,15 @@ fn max_shape_id(root: &XmlElement) -> u32 {
         .filter_map(|element| element.attribute("id")?.parse::<u32>().ok())
         .max()
         .unwrap_or(1)
+}
+
+fn alloc_shape_id(next_shape_id: &mut u32, part: &str) -> Result<u32, PptxError> {
+    let shape_id = *next_shape_id;
+    if shape_id == 0 {
+        return Err(write_error(part, "the shape id space is exhausted"));
+    }
+    *next_shape_id = shape_id.wrapping_add(1);
+    Ok(shape_id)
 }
 
 /// A parsed shape's source element: a direct child of the tree, or one the
@@ -2670,8 +2681,7 @@ fn shape_element(
             format!("unsupported geometry {:?} for a new shape", add.geometry),
         ));
     }
-    let shape_id = *next_shape_id;
-    *next_shape_id += 1;
+    let shape_id = alloc_shape_id(next_shape_id, part)?;
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
