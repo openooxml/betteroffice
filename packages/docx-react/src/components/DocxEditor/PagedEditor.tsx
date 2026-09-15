@@ -197,6 +197,8 @@ export interface PagedEditorProps {
   pageGap?: number;
   /** Zoom level (1 = 100%). */
   zoom?: number;
+  /** Reveal hidden text in the layout instead of hiding it. */
+  showHiddenText?: boolean;
   /** Callback when Yrs content changes. */
   onYrsContentChange?: () => void;
   /** Callback when the native Yrs undo/redo availability changes. */
@@ -438,6 +440,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       readOnly = false,
       pageGap = DEFAULT_PAGE_GAP,
       zoom = 1,
+      showHiddenText = false,
       onYrsContentChange,
       onYrsHistoryChange,
       onSelectionChange,
@@ -523,8 +526,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         themeColors,
         defaultTabStopTwips: document?.package.settings?.defaultTabStop ?? null,
         numericIds: {},
+        showHiddenText,
       };
-    }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop]);
+    }, [_theme?.colorScheme, document?.package.settings?.defaultTabStop, showHiddenText]);
     const activeYrsRootStory = partEditStory(partEdit);
     const yrsInputPositionMap = useCallback(
       (storyId = activeYrsRootStory) => yrsCore.inputPositionMap(storyId),
