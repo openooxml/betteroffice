@@ -157,6 +157,7 @@ jobs:
           cargo test -p betteroffice-docx --all-features
           cargo test -p betteroffice-pptx --all-features
           cargo test -p betteroffice-vsdx-edit --features wasm
+          cargo test -p betteroffice-docx-edit --features wasm
 
       - name: Package publishable crates
         if: steps.ws.outputs.present == 'true'

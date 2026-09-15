@@ -1,5 +1,25 @@
 use serde_json::{Value, json};
 
+#[test]
+fn image_geometry_changes_invalidate_run_equality() {
+    let image = |preset: &str| {
+        serde_json::from_value::<docx_layout::types::ImageRun>(json!({
+            "src": "picture", "width": 100, "height": 50, "shapeType": preset,
+        }))
+        .unwrap()
+    };
+    assert_ne!(image("ellipse"), image("rect"));
+    assert_eq!(image("ellipse"), image("ellipse"));
+    let block = |preset: &str| {
+        serde_json::from_value::<docx_layout::types::ImageBlock>(json!({
+            "id": "image", "src": "picture", "width": 100, "height": 50, "shapeType": preset,
+        }))
+        .unwrap()
+    };
+    assert_ne!(block("ellipse"), block("rect"));
+    assert_eq!(block("ellipse"), block("ellipse"));
+}
+
 fn input() -> Value {
     json!({
         "measured":[

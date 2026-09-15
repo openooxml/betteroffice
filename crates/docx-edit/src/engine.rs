@@ -336,9 +336,20 @@ fn extend_input_for_header_footer(
                 .page_size
                 .clone()
                 .unwrap_or_else(|| fallback_size.clone());
-            let margins = docx_layout::section_breaks::resolve_page_margins(
-                section.margins.as_ref().or(Some(&fallback_margins)),
-            );
+            let requested = section.margins.as_ref().or(input.options.margins.as_ref());
+            let margins = match requested {
+                Some(signed) => {
+                    let mut base = signed.clone();
+                    if base.header.is_none() {
+                        base.header = Some(signed.top.abs());
+                    }
+                    if base.footer.is_none() {
+                        base.footer = Some(signed.bottom.abs());
+                    }
+                    base
+                }
+                None => fallback_margins.clone(),
+            };
             let header_height = variants
                 .iter()
                 .filter(|variant| {
@@ -4140,5 +4151,173 @@ mod tests {
         assert_eq!(paragraph_slices(&off, 1)[0], (0, 0, 1));
         assert!(paragraph_slices(&on, 1).iter().all(|(page, ..)| *page > 0));
         assert_eq!(paragraph_slices(&on, 1)[0].1, 0);
+    }
+
+    #[test]
+    fn negative_top_margin_suppresses_header_expansion_in_resident_regions() {
+        use docx_layout::regions::{DocumentRegions, RegionSection};
+        let regions = DocumentRegions {
+            sections: vec![RegionSection {
+                page_size: Some(docx_layout::types::Size {
+                    w: 816.0,
+                    h: 1056.0,
+                }),
+                margins: Some(docx_layout::types::PageMargins {
+                    top: -1438.0 / 15.0,
+                    right: 1797.0 / 15.0,
+                    bottom: 96.0,
+                    left: 1797.0 / 15.0,
+                    header: Some(709.0 / 15.0),
+                    footer: Some(48.0),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut input: LayoutInput = LayoutInput {
+            measured: Vec::new(),
+            options: Default::default(),
+        };
+        let variants = vec![HeaderFooterVariant {
+            r_id: "rId1".to_owned(),
+            kind: HeaderFooterKind::Header,
+            hf_type: HeaderFooterType::Default,
+            section_index: 0,
+            measured: Vec::new(),
+            height: 100.0,
+            flow_height: 100.0,
+            visual_top: 0.0,
+            visual_bottom: 100.0,
+            field_widths: Vec::new(),
+        }];
+        extend_input_for_header_footer(&mut input, &regions, &variants);
+        let margins = input.options.margins.expect("extended margins");
+        assert_eq!(margins.top, 1438.0 / 15.0);
+        assert_eq!(margins.bottom, 96.0);
+    }
+
+    #[test]
+    fn negative_page_margins_archive_keeps_absolute_geometry_and_signed_save() {
+        docx_layout::clear_measure_fonts();
+        let font_id = docx_layout::register_measure_font(LIBERATION).unwrap();
+        let document_body = concat!(
+            r#"<w:p><w:r><w:t>Hello negative margins</w:t></w:r></w:p>"#,
+            r#"<w:sectPr><w:pgSz w:w="12240" w:h="15840"/>"#,
+            r#"<w:pgMar w:top="-1438" w:right="1797" w:bottom="1440" w:left="1797" w:header="709" w:footer="709"/></w:sectPr>"#
+        );
+        let bytes = docx_bytes("", document_body);
+        let envelope = crate::seed::parse_docx_for_edit(&bytes).unwrap();
+        let final_props = envelope
+            .document
+            .package
+            .document
+            .final_section_properties
+            .clone()
+            .expect("final sectPr");
+        assert_eq!(final_props.margin_top, Some(-1438.0));
+        assert_eq!(final_props.header_distance, Some(709.0));
+        let engine = EngineSession::new(911);
+        crate::seed::seed_from_docx(engine.doc(), &bytes).unwrap();
+        let properties = serde_json::to_value(&final_props).unwrap();
+        let request = serde_json::json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{"sectionId": "main", "properties": properties}]},
+            "measurement": {
+                "fontChains": {"liberation sans|0|0": [font_id]},
+                "defaults": {"fontSize": 11, "fontFamily": "Liberation Sans"},
+                "authoritativeShaping": true
+            },
+            "renderEnv": {}
+        })
+        .to_string();
+        let expected_top = 1438.0 / 15.0;
+        let fresh: serde_json::Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        assert_eq!(
+            fresh["layout"]["pages"][0]["margins"]["top"]
+                .as_f64()
+                .unwrap(),
+            expected_top
+        );
+        let fresh_y = fresh["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap();
+        assert!(fresh_y >= 0.0);
+        assert!((fresh_y - expected_top).abs() < 0.05);
+        let extras =
+            serde_json::json!({"fontChains": {"liberation sans|0|0": [font_id]}}).to_string();
+        engine.build_display_list_frame(&extras, 0).unwrap();
+        let epoch = engine.display.borrow().binary_frame_epoch;
+        engine
+            .doc()
+            .insert_text(
+                &crate::EditCtx::local("", ""),
+                crate::Position::new("body", 5),
+                " edited",
+                crate::FormatPolicy::Inherit,
+            )
+            .unwrap();
+        engine.apply_and_layout("body", epoch).unwrap();
+        let incremental = engine.pagination.borrow();
+        let incremental_layout = incremental.layout.as_ref().unwrap();
+        assert_eq!(incremental_layout.pages[0].margins.top, expected_top);
+        let incremental_y = match &incremental_layout.pages[0].fragments[0] {
+            docx_layout::types::Fragment::Paragraph(fragment) => fragment.y,
+            other => panic!("expected paragraph fragment, got {other:?}"),
+        };
+        assert!((incremental_y - expected_top).abs() < 0.05);
+        drop(incremental);
+        let refreshed: serde_json::Value =
+            serde_json::from_str(&engine.layout_document_with_regions_json(&request).unwrap())
+                .unwrap();
+        let refreshed_top = refreshed["layout"]["pages"][0]["margins"]["top"]
+            .as_f64()
+            .unwrap();
+        let refreshed_y = refreshed["layout"]["pages"][0]["fragments"][0]["y"]
+            .as_f64()
+            .unwrap();
+        assert_eq!(refreshed_top, expected_top);
+        assert!((refreshed_y - incremental_y).abs() < 0.001);
+        assert!((refreshed_y - expected_top).abs() < 0.05);
+        let content = serde_json::to_value(&envelope.document.package.document.content).unwrap();
+        let final_json = serde_json::to_value(&final_props).unwrap();
+        let relationships =
+            serde_json::to_value(&envelope.document.package.relationship_entries).unwrap();
+        let save_request: docx_parse::S13SaveRequest = serde_json::from_value(serde_json::json!({
+            "determinism": {
+                "seed": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "now": "2030-01-02T03:04:05.006Z"
+            },
+            "document": {"content": content, "finalSectionProperties": final_json},
+            "relationshipEntries": relationships,
+            "options": {"updateModifiedDate": false}
+        }))
+        .unwrap();
+        let saved = docx_parse::write_docx_s13(save_request, &bytes).unwrap();
+        let parts = ooxml_opc::unzip_parts(&saved).unwrap();
+        let document_xml = String::from_utf8(
+            parts
+                .iter()
+                .find(|(path, _)| path == "word/document.xml")
+                .unwrap()
+                .1
+                .clone(),
+        )
+        .unwrap();
+        assert!(document_xml.contains(r#"w:top="-1438""#));
+        let reopened = crate::seed::parse_docx_for_edit(&saved).unwrap();
+        assert_eq!(
+            reopened
+                .document
+                .package
+                .document
+                .final_section_properties
+                .as_ref()
+                .unwrap()
+                .margin_top,
+            Some(-1438.0)
+        );
+        docx_layout::clear_measure_fonts();
     }
 }

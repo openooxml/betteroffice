@@ -313,6 +313,8 @@ pub struct ImageRun {
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -899,6 +901,8 @@ pub struct ImageBlock {
     pub height: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub alt: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub transform: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1235,6 +1239,7 @@ impl PartialEq for ImageRun {
             width: _,
             height: _,
             alt: _,
+            shape_type: _,
             transform: _,
             position: _,
             wrap_type: _,
@@ -1274,6 +1279,7 @@ impl PartialEq for ImageRun {
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
+            && self.shape_type == other.shape_type
             && self.transform == other.transform
             && self.position == other.position
             && self.wrap_type == other.wrap_type
@@ -1407,6 +1413,7 @@ impl PartialEq for ImageBlock {
             width: _,
             height: _,
             alt: _,
+            shape_type: _,
             transform: _,
             opacity: _,
             rotation_deg: _,
@@ -1429,6 +1436,7 @@ impl PartialEq for ImageBlock {
             && self.width == other.width
             && self.height == other.height
             && self.alt == other.alt
+            && self.shape_type == other.shape_type
             && self.transform == other.transform
             && self.opacity == other.opacity
             && self.rotation_deg == other.rotation_deg
@@ -1837,8 +1845,17 @@ pub struct LayoutOptions {
     pub even_and_odd_headers: Option<bool>,
     pub footnote_reserved_heights: Option<BTreeMap<String, f64>>,
     pub body_break_type: Option<SectionBreakType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub section_page_restarts: Option<Vec<Option<SectionPageRestart>>>,
     #[serde(default)]
     pub sections: Option<Vec<SectionLayoutContract>>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SectionPageRestart {
+    pub start: u64,
+    pub align_parity: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2126,6 +2143,9 @@ pub struct Page {
     pub vertical_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_areas: Option<Vec<NoteAreaContract>>,
+    /// Automatic parity filler: suppress header/footer bands, keep the sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parity_filler: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
