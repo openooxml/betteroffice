@@ -15,24 +15,29 @@ crates.io before each upload, so rerunning a partial release resumes safely.
 
 ## Initial crates.io release
 
-The first publication requires a crates.io API token because Trusted
-Publishing can only be configured after a crate exists.
+Trusted Publishing can only be configured after a crate exists, so a crate
+that is not on crates.io yet cannot be created with OIDC. Every release
+obtains an OIDC token via `rust-lang/crates-io-auth-action` and publishes
+OIDC-first: crates already on crates.io always publish with that token, and
+only a crate that does not exist yet is created with
+`CRATES_IO_BOOTSTRAP_TOKEN`. `scripts/publish-crates.mjs` picks the token per
+crate and passes it only to that crate's `cargo publish`.
 
 1. Create a short-lived crates.io token authorized to publish new crates.
 2. Add it to the repository as `CRATES_IO_BOOTSTRAP_TOKEN` before merging the
-   initial release PR.
+   release PR that introduces the new crate names.
 3. Merge the release PR and confirm every crate was published.
-4. Add a GitHub Trusted Publisher to each crate with owner `openooxml`,
-   repository `betteroffice`, and workflow `release.yml`.
-5. Remove the GitHub secret and revoke the bootstrap token.
-
-Subsequent releases use `rust-lang/crates-io-auth-action` and GitHub OIDC to
-obtain a short-lived crates.io token.
+4. Add a GitHub Trusted Publisher to each newly created crate with owner
+   `openooxml`, repository `betteroffice`, and workflow `release.yml`, before
+   its next release.
+5. Remove the GitHub secret and revoke the bootstrap token once no crate is
+   missing. The release lists every crate it created with the bootstrap token
+   in the step summary.
 
 `scripts/check-publish-targets.mjs --crates` runs before the crates publish and
 fails the release, naming every crate that is not on crates.io yet — unless
-`CRATES_IO_BOOTSTRAP_TOKEN` is set, which is the one credential that can create
-a crate.
+`CRATES_IO_BOOTSTRAP_TOKEN` is set, in which case it reports the missing
+crates as "will be created with the bootstrap token" and passes.
 
 ## Initial npm release of a new package
 

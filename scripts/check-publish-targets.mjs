@@ -116,12 +116,12 @@ async function checkNpm() {
 
 async function checkCrates() {
   const audit = await auditCrates(RUST_PUBLISH_CRATES.map((crate) => crate.name));
-  // Mirrors release.yml's `Detect crates.io bootstrap token`: a token can create a crate.
+  // publish-crates.mjs publishes present crates with OIDC and creates each missing one with this token.
   const bootstrap = Boolean(process.env.CRATES_IO_BOOTSTRAP_TOKEN);
   for (const { name, state } of audit) {
     if (state === 'present') console.log(`${name} is on crates.io.`);
     if (state === 'missing' && bootstrap) {
-      console.log(`${name} is not on crates.io; CRATES_IO_BOOTSTRAP_TOKEN can create it.`);
+      console.log(`${name} is not on crates.io; will be created with the bootstrap token.`);
     }
   }
 
@@ -129,10 +129,10 @@ async function checkCrates() {
   if (missing.length === 0) return 0;
   for (const { name } of missing) console.error(`${name} is not on crates.io.`);
   console.error(
-    'The OIDC token from crates-io-auth-action cannot create a crate, and the crates publish stops at the first failure.'
+    'The OIDC token from crates-io-auth-action cannot create a crate; publish-crates.mjs publishes present crates with OIDC and creates each missing one with CRATES_IO_BOOTSTRAP_TOKEN, stopping at the first failure.'
   );
   console.error(
-    'Set CRATES_IO_BOOTSTRAP_TOKEN, or publish each by hand first: RELEASING.md, "Initial crates.io release".'
+    'Set CRATES_IO_BOOTSTRAP_TOKEN so the missing crates are created with it, or publish each by hand first: RELEASING.md, "Initial crates.io release".'
   );
   return 1;
 }
