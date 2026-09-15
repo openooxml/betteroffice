@@ -259,7 +259,9 @@ touch are copied through byte for byte. The stylesheet is left alone unless
 styles actually change.
 
 A sheet you *do* edit keeps its unmodeled row, column, and cell markup: only the
-cells, rows, and columns the edit actually changed are rewritten. Its autofilter,
+cells, rows, and columns the edit actually changed are rewritten; a sheet whose rows
+or cells lack `r` attributes or arrive out of order, or that was replayed from
+collaboration updates, is reserialized from the model instead. Its autofilter,
 data-validation, conditional-formatting, table, and sparkline ranges stay at
 their source coordinates. Collaborative sessions compare only the modeled workbook, so two
 peers holding the same cells but different macros or custom XML still accept

@@ -35,7 +35,9 @@ pivot tables, comments, macros, custom XML and their relationships — are kept,
 and sheets an edit did not touch are copied through byte for byte. A sheet you do
 edit keeps its unmodeled row, column, and cell markup: only the cells, rows, and
 columns the edit actually changed are rewritten, and the rest of the sheet is
-kept byte for byte.
+kept byte for byte. A sheet whose rows or cells lack `r` attributes or arrive out of
+order, or that was replayed from collaboration updates, is reserialized from the
+model instead.
 
 DOCX and PPTX have the same shape:
 
