@@ -23,6 +23,83 @@ const XLSX_SECRETS: &[&str] = &[
     "XLSX_SECRET_AUTHOR",
     "XLSX_SECRET_COMPANY",
     "https://secret.example/xlsx",
+    "XLSX_SECRET_PERSON",
+    "XLSX_SECRET_UPN@example.com",
+    "XLSX_SECRET_THREAD",
+    "2031-02-03T04:05:06",
+    "XLSX_SECRET_REF_SHEET",
+    "XLSX_SECRET_FIELD",
+    "XLSX_SECRET_FCAP",
+    "XLSX_SECRET_SHARED",
+    "918273645",
+    "2031-04-05T06:07:08",
+    "#DIV/0!",
+    "XLSX_SECRET_RECORD",
+    "462782",
+    "XLSX_SECRET_PIVOT",
+    "XLSX_SECRET_DATACAP",
+    "XLSX_SECRET_GTOTAL",
+    "XLSX_SECRET_ROWHEAD",
+    "XLSX_SECRET_COLHEAD",
+    "XLSX_SECRET_ERRCAP",
+    "XLSX_SECRET_MISSCAP",
+    "XLSX_SECRET_SUBTOTAL",
+    "XLSX_SECRET_DATAFIELD",
+    "XLSX_SECRET_CALCITEM",
+    "XLSX_SECRET_CALCMEM",
+    "XLSX_SECRET_CUBE",
+    "XLSX_SECRET_MDX",
+    "XLSX_SECRET_CONN",
+    "XLSX_SECRET_CONNDESC",
+    "XLSX_SECRET_CONNSTR",
+    "XLSX_SECRET_SQL",
+    "XLSX_SECRET_PARAM",
+    "XLSX_SECRET_PROMPT",
+    "XLSX_SECRET_PARAMVAL",
+    "XLSX_SECRET_SOURCE",
+    "XLSX_SECRET_URL",
+    "XLSX_SECRET_POST",
+    "XLSX_SECRET_XSHEET",
+    "XLSX_SECRET_XCACHE",
+    "13579",
+    "XLSX_SECRET_XNAME",
+    "XLSX_SECRET_XREF",
+    "XLSX_SECRET_DDESVC",
+    "XLSX_SECRET_DDETOP",
+    "XLSX_SECRET_DDEITEM",
+    "XLSX_SECRET_DDEVAL",
+    "XLSX_SECRET_OPROG",
+    "XLSX_SECRET_OLEITEM",
+    "XLSX_SECRET_OLEPROG",
+    "XLSX_SECRET_OLELINK",
+    "XLSX_SECRET_CTRL",
+    "XLSX_SECRET_CUSTFILT",
+    "XLSX_SECRET_CFTEXT",
+    "XLSX_SECRET_SCEN",
+    "XLSX_SECRET_SCENUSER",
+    "XLSX_SECRET_SCENCOMMENT",
+    "XLSX_SECRET_WPTITLE",
+    "XLSX_SECRET_WPDEST",
+    "XLSX_SECRET_SHEET2",
+    "XLSX_SECRET_TABLE",
+    "XLSX_SECRET_TCOMMENT",
+    "XLSX_SECRET_TCOL",
+    "XLSX_SECRET_TOTLABEL",
+    "XLSX_SECRET_TCFORM",
+    "XLSX_SECRET_QUERY",
+    "XLSX_SECRET_QFIELD",
+    "XLSX_SECRET_SLICER",
+    "XLSX_SECRET_SLICERCAP",
+    "XLSX_SECRET_SLICERCACHE",
+    "XLSX_SECRET_SLICERPIVOT",
+    "XLSX_SECRET_SITEM",
+    "XLSX_SECRET_TL",
+    "XLSX_SECRET_TLCAP",
+    "XLSX_SECRET_RICHV",
+    "24680",
+    "XLSX_SECRET_RICHKEY",
+    "U0VDUkVUX1NFQ1JFVF9SSUNIQkxPQg",
+    "XLSX_SECRET_METAV",
 ];
 const PPTX_SECRETS: &[&str] = &[
     "PPTX_SECRET_TEXT",
@@ -654,6 +731,299 @@ fn redacts_docx_without_changing_structure() {
     assert_fixture_properties(&source, &output, DOCX_SECRETS, "word/media/image1.png");
     assert_text_lengths(&source, &output, "word/document.xml", "t");
     parse_docx_s9_wire(&output, S9ParseOptions::default()).unwrap();
+}
+
+#[test]
+fn xlsx_persons_and_threaded_comments_mask_identity_but_keep_links() {
+    let persons = r#"<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="Jane Doe" id="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}" userId="jane@example.com" providerId="AD"/></personList>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/persons/person.xml",
+        persons.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Jane Doe"));
+    assert!(!text.contains("jane@example.com"));
+    assert!(text.contains(r#"id="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}""#));
+    assert!(text.contains(r#"providerId="AD""#));
+
+    let thread = r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="A1" dT="2031-02-03T04:05:06" personId="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}" id="{E722680E-88F9-4806-84CE-A0C8E0F639CB}" parentId="{D0285282-5A03-4F7B-8130-876841640E88}" done="0"><text>Secret reply</text></threadedComment></ThreadedComments>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/threadedComments/threadedComment1.xml",
+        thread.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret reply"));
+    assert!(!text.contains("2031-02-03"));
+    assert!(text.contains("1970-01-01T00:00:00Z"));
+    for kept in [
+        r#"ref="A1""#,
+        r#"personId="{8D9DB2FF-51B5-4863-B4CB-D5001D7B3245}""#,
+        r#"id="{E722680E-88F9-4806-84CE-A0C8E0F639CB}""#,
+        r#"parentId="{D0285282-5A03-4F7B-8130-876841640E88}""#,
+        r#"done="0""#,
+    ] {
+        assert!(text.contains(kept), "link lost: {kept} in {text}");
+    }
+}
+
+#[test]
+fn xlsx_pivot_caches_mask_values_and_keep_shared_indexes() {
+    let definition = r##"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B2" sheet="Secret Sheet"/></cacheSource><cacheFields count="1"><cacheField name="Secret Field" caption="Secret Caption" numFmtId="0"><sharedItems count="6"><s v="Secret Shared"/><n v="918273645"/><d v="2031-04-05T06:07:08"/><e v="#DIV/0!"/><b v="1"/><x v="2"/></sharedItems></cacheField></cacheFields></pivotCacheDefinition>"##;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotCache/pivotCacheDefinition1.xml",
+        definition.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Field",
+        "Secret Caption",
+        "Secret Shared",
+        "918273645",
+        "2031-04-05",
+        "#DIV/0!",
+        "Secret Sheet",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"n v="888888888""#));
+    assert!(text.contains("1970-01-01T00:00:00Z"));
+    assert!(text.contains(r##"e v="#N/A""##));
+    assert!(text.contains(r#"b v="false""#));
+    for kept in [
+        r#"ref="A1:B2""#,
+        r#"numFmtId="0""#,
+        r#"x v="2""#,
+        r#"type="worksheet""#,
+    ] {
+        assert!(text.contains(kept), "structure lost: {kept} in {text}");
+    }
+
+    let records = r#"<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><s v="Secret Record"/><n v="462782"/><x v="0"/><m/></r></pivotCacheRecords>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotCache/pivotCacheRecords1.xml",
+        records.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Record"));
+    assert!(!text.contains("462782"));
+    assert!(text.contains(r#"n v="888888""#));
+    assert!(text.contains(r#"x v="0""#));
+    assert!(text.contains("<m/>"));
+}
+
+#[test]
+fn xlsx_pivot_tables_connections_and_external_links_are_masked() {
+    let table = r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="Secret Pivot" cacheId="7" dataCaption="Secret Values" grandTotalCaption="Secret Total" rowHeaderCaption="Secret Rows" colHeaderCaption="Secret Cols" errorCaption="Secret Err" missingCaption="Secret Missing"><pivotFields count="1"><pivotField subtotalCaption="Secret Subtotal"><items count="2"><item x="0"/><item t="default"/></items></pivotField></pivotFields><dataFields count="1"><dataField name="Sum of Secret" fld="0"/></dataFields><calculatedItems count="1"><calculatedItem formula="SecretField+1"><pivotArea><references count="0"/></pivotArea></calculatedItem></calculatedItems></pivotTableDefinition>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/pivotTables/pivotTable1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Pivot",
+        "Secret Values",
+        "Secret Total",
+        "Secret Rows",
+        "Secret Cols",
+        "Secret Err",
+        "Secret Missing",
+        "Secret Subtotal",
+        "Sum of Secret",
+        "SecretField",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"formula="0""#));
+    for kept in [
+        r#"cacheId="7""#,
+        r#"fld="0""#,
+        r#"item x="0""#,
+        r#"t="default""#,
+    ] {
+        assert!(text.contains(kept), "structure lost: {kept} in {text}");
+    }
+
+    let connections = r#"<connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="Secret Conn" description="Secret Desc" type="1"><dbPr connection="Server=secret;Pwd=hunter2" command="SELECT secret FROM t" commandType="2"/><parameters count="1"><parameter name="Secret Param" prompt="Secret Prompt"><v>Secret Default</v></parameter></parameters></connection><connection id="2" name="T" type="4"><webPr xml="1" url="https://secret.example/x" post="secret=1"/></connection></connections>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/connections.xml",
+        connections.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Conn",
+        "Secret Desc",
+        "Server=secret",
+        "hunter2",
+        "SELECT secret",
+        "Secret Param",
+        "Secret Prompt",
+        "Secret Default",
+        "secret.example",
+        "secret=1",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"id="1""#));
+    assert!(text.contains(r#"commandType="2""#));
+
+    let dde = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ddeLink ddeService="Secret Svc" ddeTopic="[Secret.xls]Sheet1"><ddeItems><ddeItem name="Secret Item" advise="1"><values rows="1" cols="1"><value><val><v>Secret Cached</v></val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink1.xml",
+        dde.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["Secret Svc", "Secret.xls", "Secret Item", "Secret Cached"] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"advise="1""#));
+
+    let ole = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><oleLink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1" progId="Secret.App"><oleItems><oleItem name="Secret Object" icon="0" advise="0" preferPict="0"/></oleItems></oleLink></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink2.xml",
+        ole.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret.App"));
+    assert!(!text.contains("Secret Object"));
+    assert!(text.contains(r#"r:id="rId1""#));
+
+    let book = r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><sheetNames><sheetName val="Secret Sheet"/></sheetNames><sheetDataSet><sheetData sheetId="0"><row r="1"><cell r="A1" t="str"><v>Secret Cached</v></cell></row></sheetData></sheetDataSet><definedNames><definedName name="Secret Name" refersTo="SecretSheet!$A$1" sheetId="0"/></definedNames></externalBook></externalLink>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/externalLinks/externalLink3.xml",
+        book.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Sheet",
+        "Secret Cached",
+        "Secret Name",
+        "SecretSheet",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"sheetId="0""#));
+    assert!(text.contains(r#"r="A1""#));
+}
+
+#[test]
+fn xlsx_tables_slicers_and_rich_data_keep_labels_masked() {
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="Secret Table" displayName="Secret Table" comment="Secret Comment" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="Secret Col" totalsRowLabel="Secret Total"><calculatedColumnFormula>SecretCol+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/tables/table1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in [
+        "Secret Table",
+        "Secret Comment",
+        "Secret Col",
+        "Secret Total",
+        "SecretCol",
+    ] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains("<calculatedColumnFormula>0</calculatedColumnFormula>"));
+    assert!(text.contains(r#"ref="A1:B2""#));
+
+    let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData/><oleObjects><oleObject progId="Secret.Prog" link="C:\Users\secret\book.xlsx" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="Secret Control"/></controls></worksheet>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/worksheets/sheet9.xml",
+        sheet.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["Secret.Prog", "secret\\book", "Secret Control"] {
+        assert!(
+            !text.contains(secret),
+            "secret survived: {secret} in {text}"
+        );
+    }
+    assert!(text.contains(r#"shapeId="1025""#));
+    assert!(text.contains(r#"r:id="rId9""#));
+
+    let rich = r#"<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="1"><rv s="0"><v>Secret Rich</v></rv></rvData>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/richData/rdrichvalue.xml",
+        rich.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    assert!(!String::from_utf8(output).unwrap().contains("Secret Rich"));
+
+    let keys = r#"<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata2" count="1"><s t="keep"><k n="Secret Key" t="s"/></s></rvStructures>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/richData/rdRichValueStructure.xml",
+        keys.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Key"));
+    assert!(text.contains(r#"t="keep""#));
+
+    let metadata = r#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><valueMetadata count="1"><bk><rc t="1" v="0"><v>Secret Meta</v></rc></bk></valueMetadata></metadata>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/metadata.xml",
+        metadata.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains("Secret Meta"));
+    assert!(text.contains(r#"rc t="1" v="0""#));
 }
 
 #[test]
@@ -2133,6 +2503,114 @@ fn xlsx_fixture() -> Vec<u8> {
             "xl/comments1.xml",
             xml(
                 r#"<comments xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><authors><author>XLSX_SECRET_AUTHOR</author></authors><commentList/></comments>"#,
+            ),
+        ),
+        (
+            "xl/persons/person.xml",
+            xml(
+                r#"<personList xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><person displayName="XLSX_SECRET_PERSON" id="{11111111-1111-1111-1111-111111111111}" userId="XLSX_SECRET_UPN@example.com" providerId="AD"/></personList>"#,
+            ),
+        ),
+        (
+            "xl/threadedComments/threadedComment1.xml",
+            xml(
+                r#"<ThreadedComments xmlns="http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments"><threadedComment ref="A1" dT="2031-02-03T04:05:06" personId="{11111111-1111-1111-1111-111111111111}" id="{22222222-2222-2222-2222-222222222222}"><text>XLSX_SECRET_THREAD</text></threadedComment></ThreadedComments>"#,
+            ),
+        ),
+        (
+            "xl/pivotCache/pivotCacheDefinition1.xml",
+            xml(
+                r##"<pivotCacheDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cacheSource type="worksheet"><worksheetSource ref="A1:B2" sheet="XLSX_SECRET_REF_SHEET"/></cacheSource><cacheFields count="1"><cacheField name="XLSX_SECRET_FIELD" caption="XLSX_SECRET_FCAP" numFmtId="0"><sharedItems count="6"><s v="XLSX_SECRET_SHARED"/><n v="918273645"/><d v="2031-04-05T06:07:08"/><e v="#DIV/0!"/><b v="1"/><x v="0"/></sharedItems></cacheField></cacheFields></pivotCacheDefinition>"##,
+            ),
+        ),
+        (
+            "xl/pivotCache/pivotCacheRecords1.xml",
+            xml(
+                r#"<pivotCacheRecords xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1"><r><s v="XLSX_SECRET_RECORD"/><n v="462782"/><x v="0"/><m/></r></pivotCacheRecords>"#,
+            ),
+        ),
+        (
+            "xl/pivotTables/pivotTable1.xml",
+            xml(
+                r#"<pivotTableDefinition xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="XLSX_SECRET_PIVOT" cacheId="1" dataCaption="XLSX_SECRET_DATACAP" grandTotalCaption="XLSX_SECRET_GTOTAL" rowHeaderCaption="XLSX_SECRET_ROWHEAD" colHeaderCaption="XLSX_SECRET_COLHEAD" errorCaption="XLSX_SECRET_ERRCAP" missingCaption="XLSX_SECRET_MISSCAP"><pivotFields count="1"><pivotField subtotalCaption="XLSX_SECRET_SUBTOTAL"><items count="1"><item x="0"/></items></pivotField></pivotFields><dataFields count="1"><dataField name="XLSX_SECRET_DATAFIELD" fld="0"/></dataFields><pageFields count="1"><pageField fld="0"/></pageFields><calculatedItems count="1"><calculatedItem formula="XLSX_SECRET_CALCITEM+1"><pivotArea><references count="1"><reference field="0"><x v="0"/></reference></references></pivotArea></calculatedItem></calculatedItems><calculatedMembers count="1"><calculatedMember name="XLSX_SECRET_CALCMEM" mname="[XLSX_SECRET_CUBE].[XLSX_SECRET_CALCMEM]" mdx="XLSX_SECRET_MDX"/></calculatedMembers></pivotTableDefinition>"#,
+            ),
+        ),
+        (
+            "xl/connections.xml",
+            xml(
+                r#"<connections xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><connection id="1" name="XLSX_SECRET_CONN" description="XLSX_SECRET_CONNDESC" type="1"><dbPr connection="XLSX_SECRET_CONNSTR" command="XLSX_SECRET_SQL" commandType="2"/><parameters count="1"><parameter name="XLSX_SECRET_PARAM" sqlType="-9" parameterType="prompt" refreshOnChange="1" prompt="XLSX_SECRET_PROMPT" boolean="0" persistent="0"><v>XLSX_SECRET_PARAMVAL</v></parameter></parameters></connection><connection id="2" name="TextConn" type="4"><textPr prompt="0" fileType="1" sourceFile="XLSX_SECRET_SOURCE"/></connection><connection id="3" name="WebConn" type="4"><webPr xml="1" url="https://XLSX_SECRET_URL.example/x" post="XLSX_SECRET_POST"/></connection></connections>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink1.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><externalBook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1"><sheetNames><sheetName val="XLSX_SECRET_XSHEET"/></sheetNames><sheetDataSet><sheetData sheetId="0" refreshError="0"><row r="1"><cell r="A1" t="str"><v>XLSX_SECRET_XCACHE</v></cell><cell r="B1"><v>13579</v></cell></row></sheetData></sheetDataSet><definedNames><definedName name="XLSX_SECRET_XNAME" refersTo="XLSX_SECRET_XREF!$A$1" sheetId="0"/></definedNames></externalBook></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink2.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ddeLink ddeService="XLSX_SECRET_DDESVC" ddeTopic="XLSX_SECRET_DDETOP"><ddeItems><ddeItem name="XLSX_SECRET_DDEITEM" advise="1"><values rows="1" cols="1"><value><val><v>XLSX_SECRET_DDEVAL</v></val></value></values></ddeItem></ddeItems></ddeLink></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/externalLinks/externalLink3.xml",
+            xml(
+                r#"<externalLink xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><oleLink xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="rId1" progId="XLSX_SECRET_OPROG"><oleItems><oleItem name="XLSX_SECRET_OLEITEM" icon="0" advise="0" preferPict="0"/></oleItems></oleLink></externalLink>"#,
+            ),
+        ),
+        (
+            "xl/worksheets/sheet2.xml",
+            xml(
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECRET_SHEET2</t></is></c></row></sheetData><oleObjects><oleObject progId="XLSX_SECRET_OLEPROG" dvAspect="DVASPECT_CONTENT" link="XLSX_SECRET_OLELINK" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="XLSX_SECRET_CTRL"/></controls><autoFilter ref="A1:A2"><filterColumn colId="0"><customFilters><customFilter operator="equal" val="XLSX_SECRET_CUSTFILT"/></customFilters></filterColumn></autoFilter><conditionalFormatting sqref="A1:A2"><cfRule type="containsText" operator="containsText" text="XLSX_SECRET_CFTEXT" priority="1"/></conditionalFormatting><scenarios><scenario name="XLSX_SECRET_SCEN" user="XLSX_SECRET_SCENUSER" comment="XLSX_SECRET_SCENCOMMENT"><inputCells r="A1">1</inputCells></scenario></scenarios><webPublishItems count="1"><webPublishItem id="1" divId="x" sourceType="sheet" sourceRef="A1" destinationFile="XLSX_SECRET_WPDEST" title="XLSX_SECRET_WPTITLE" autoRepublish="0"/></webPublishItems></worksheet>"#,
+            ),
+        ),
+        (
+            "xl/tables/table1.xml",
+            xml(
+                r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="XLSX_SECRET_TABLE" displayName="XLSX_SECRET_TABLE" comment="XLSX_SECRET_TCOMMENT" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="XLSX_SECRET_TCOL" totalsRowLabel="XLSX_SECRET_TOTLABEL"><calculatedColumnFormula>XLSX_SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#,
+            ),
+        ),
+        (
+            "xl/queryTables/queryTable1.xml",
+            xml(
+                r#"<queryTable xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" name="XLSX_SECRET_QUERY" connectionId="1"><queryTableRefresh><queryTableFields count="1"><queryTableField id="1" name="XLSX_SECRET_QFIELD" tableColumnId="1"/></queryTableFields></queryTableRefresh></queryTable>"#,
+            ),
+        ),
+        (
+            "xl/slicers/slicer1.xml",
+            xml(
+                r#"<slicer xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" name="XLSX_SECRET_SLICER" cache="rId1" caption="XLSX_SECRET_SLICERCAP"/>"#,
+            ),
+        ),
+        (
+            "xl/slicerCaches/slicerCache1.xml",
+            xml(
+                r#"<slicerCacheDefinition xmlns="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" name="XLSX_SECRET_SLICERCACHE"><pivotTables><pivotTable tabId="0" name="XLSX_SECRET_SLICERPIVOT"/></pivotTables><data><tabular><items count="1"><i x="0" c="XLSX_SECRET_SITEM"/></items></tabular></data></slicerCacheDefinition>"#,
+            ),
+        ),
+        (
+            "xl/timelines/timeline1.xml",
+            xml(
+                r#"<timeline xmlns="http://schemas.microsoft.com/office/spreadsheetml/2010/11/main" name="XLSX_SECRET_TL" cache="rId1" caption="XLSX_SECRET_TLCAP"/>"#,
+            ),
+        ),
+        (
+            "xl/richData/rdrichvalue.xml",
+            xml(
+                r#"<rvData xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" count="3"><rv s="0"><v>XLSX_SECRET_RICHV</v></rv><rv s="0"><v>24680</v></rv><rvb i="0">U0VDUkVUX1NFQ1JFVF9SSUNIQkxPQg==</rvb></rvData>"#,
+            ),
+        ),
+        (
+            "xl/richData/rdRichValueStructure.xml",
+            xml(
+                r#"<rvStructures xmlns="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata2" count="1"><s t="XLSX_RICH_TYPE"><k n="XLSX_SECRET_RICHKEY" t="s"/></s></rvStructures>"#,
+            ),
+        ),
+        (
+            "xl/metadata.xml",
+            xml(
+                r#"<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><valueMetadata count="1"><bk><rc t="1" v="0"><v>XLSX_SECRET_METAV</v></rc></bk></valueMetadata></metadata>"#,
             ),
         ),
         (

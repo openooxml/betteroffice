@@ -357,9 +357,16 @@ fn rewrite_start(
                 )
             } else if !key.starts_with("xmlns")
                 && !(schema && is_unqualified(&key) && schema::preserve_attribute(element, local))
-                && sensitive_attribute(format, path, element, local, &value)
+                && let Some(kind) = sensitive_attribute_kind(format, path, element, local, &value)
             {
-                Some(state.masker.replace(&value)?)
+                Some(match kind {
+                    Replacement::Text => state.masker.replace(&value)?,
+                    Replacement::Number => numeric_placeholder(&value),
+                    Replacement::Formula => "0".to_owned(),
+                    Replacement::Date => "1970-01-01T00:00:00Z".to_owned(),
+                    Replacement::Boolean => "false".to_owned(),
+                    Replacement::Error => "#N/A".to_owned(),
+                })
             } else {
                 None
             };
@@ -530,9 +537,11 @@ fn replacement_kind(
             }),
         Format::Pptx => matches!(element, "t" | "text").then_some(Replacement::Text),
         Format::Xlsx => match element {
-            "t" | "author" | "oddHeader" | "oddFooter" | "evenHeader" | "evenFooter"
-            | "firstHeader" | "firstFooter" => Some(Replacement::Text),
-            "f" | "formula1" | "formula2" | "definedName" => Some(Replacement::Formula),
+            "t" | "author" | "text" | "rvb" | "oddHeader" | "oddFooter" | "evenHeader"
+            | "evenFooter" | "firstHeader" | "firstFooter" => Some(Replacement::Text),
+            "f" | "formula1" | "formula2" | "definedName" | "calculatedColumnFormula" => {
+                Some(Replacement::Formula)
+            }
             "v" if cell_type == Some("s") => None,
             "v" if matches!(cell_type, Some("str" | "inlineStr")) => Some(Replacement::Text),
             "v" if cell_type == Some("e") => Some(Replacement::Error),
@@ -561,59 +570,122 @@ fn replace_text(
     })
 }
 
-fn sensitive_attribute(
+fn sensitive_attribute_kind(
     format: Format,
     path: &str,
     element: &str,
     attribute: &str,
     value: &str,
-) -> bool {
+) -> Option<Replacement> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".rels") {
-        return false;
+        return None;
     }
     if lower == "docprops/custom.xml" && attribute == "name" {
-        return true;
+        return Some(Replacement::Text);
     }
     if lower.starts_with("customxml/") && !lower.contains("itemprops") {
-        return !matches!(attribute, "id" | "Id");
+        return (!matches!(attribute, "id" | "Id")).then_some(Replacement::Text);
     }
     if matches!(element, "docPr" | "cNvPr") && matches!(attribute, "name" | "descr" | "title") {
-        return true;
+        return Some(Replacement::Text);
     }
     if element == "textpath" && attribute == "string" {
-        return true;
+        return Some(Replacement::Text);
     }
     match format {
-        Format::Docx => {
-            matches!(attribute, "author" | "initials")
-                || element == "fldSimple" && attribute == "instr"
-                || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
-                || matches!(element, "alias" | "tag" | "docVar")
-                    && matches!(attribute, "name" | "val")
-        }
+        Format::Docx => (matches!(attribute, "author" | "initials")
+            || element == "fldSimple" && attribute == "instr"
+            || element == "hyperlink" && matches!(attribute, "tooltip" | "tgtFrame")
+            || matches!(element, "alias" | "tag" | "docVar")
+                && matches!(attribute, "name" | "val"))
+        .then_some(Replacement::Text),
         Format::Xlsx => {
-            element == "sheet" && attribute == "name"
+            if element == "definedName" && attribute == "refersTo"
+                || element == "calculatedItem" && attribute == "formula"
+            {
+                return Some(Replacement::Formula);
+            }
+            if element == "threadedComment" && attribute == "dT" {
+                return Some(Replacement::Date);
+            }
+            if matches!(element, "s" | "n" | "d" | "e" | "b") && attribute == "v" {
+                return Some(match element {
+                    "n" => Replacement::Number,
+                    "d" => Replacement::Date,
+                    "e" => Replacement::Error,
+                    "b" => Replacement::Boolean,
+                    _ => Replacement::Text,
+                });
+            }
+            (element == "sheet" && attribute == "name"
                 || element == "definedName" && attribute == "name" && !value.starts_with("_xlnm.")
                 || matches!(element, "table" | "tableColumn")
                     && matches!(attribute, "name" | "displayName")
+                || element == "table" && attribute == "comment"
+                || element == "tableColumn" && attribute == "totalsRowLabel"
+                || element == "queryTable" && attribute == "name"
+                || element == "queryTableField" && attribute == "name"
                 || element == "dataValidation"
                     && matches!(attribute, "prompt" | "promptTitle" | "error" | "errorTitle")
-                || element == "hyperlink" && matches!(attribute, "display" | "tooltip" | "location")
-                || element == "filter" && attribute == "val"
+                || element == "hyperlink"
+                    && matches!(attribute, "display" | "tooltip" | "location")
+                || matches!(element, "filter" | "customFilter") && attribute == "val"
+                || element == "cfRule" && attribute == "text"
+                || element == "person" && matches!(attribute, "displayName" | "userId")
+                || element == "cacheField" && matches!(attribute, "name" | "caption")
+                || element == "cacheHierarchy" && attribute == "caption"
+                || element == "sharedItems" && attribute == "caption"
+                || element == "pivotTableDefinition"
+                    && matches!(
+                        attribute,
+                        "name"
+                            | "dataCaption"
+                            | "grandTotalCaption"
+                            | "rowHeaderCaption"
+                            | "colHeaderCaption"
+                            | "errorCaption"
+                            | "missingCaption"
+                    )
+                || element == "pivotTable" && attribute == "name"
+                || element == "slicerCacheDefinition" && attribute == "name"
+                || element == "dataField" && attribute == "name"
+                || element == "pivotField" && matches!(attribute, "name" | "subtotalCaption")
+                || element == "pageField" && matches!(attribute, "name" | "cap")
+                || element == "calculatedMember" && matches!(attribute, "name" | "mname" | "mdx")
+                || element == "i" && attribute == "c"
+                || element == "k" && attribute == "n"
+                || element == "connection" && matches!(attribute, "name" | "description")
+                || element == "dbPr" && matches!(attribute, "connection" | "command")
+                || element == "textPr" && attribute == "sourceFile"
+                || element == "webPr" && matches!(attribute, "url" | "post")
+                || element == "parameter" && matches!(attribute, "name" | "prompt")
+                || element == "rangePr" && attribute == "sourceName"
+                || element == "worksheetSource" && attribute == "sheet"
+                || element == "sheetName" && attribute == "val"
+                || element == "ddeLink" && matches!(attribute, "ddeService" | "ddeTopic")
+                || element == "ddeItem" && attribute == "name"
+                || element == "oleLink" && attribute == "progId"
+                || element == "oleItem" && attribute == "name"
+                || element == "oleObject" && matches!(attribute, "progId" | "link")
+                || element == "control" && attribute == "name"
+                || element == "slicer" && matches!(attribute, "name" | "caption")
+                || element == "timeline" && matches!(attribute, "name" | "caption")
+                || element == "scenario" && matches!(attribute, "name" | "comment" | "user")
+                || element == "webPublishItem" && matches!(attribute, "title" | "destinationFile"))
+            .then_some(Replacement::Text)
         }
-        Format::Pptx => {
-            element == "cSld" && attribute == "name"
-                || element == "sldLayout" && attribute == "matchingName"
-                || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
-                    && attribute == "name"
-                || element == "tblStyle" && attribute == "styleName"
-                || element == "cmAuthor" && matches!(attribute, "name" | "initials")
-                || element == "author" && matches!(attribute, "name" | "initials" | "userId")
-                || element == "tag" && matches!(attribute, "name" | "val")
-                || element == "custShow" && attribute == "name"
-        }
-        Format::Auto => false,
+        Format::Pptx => (element == "cSld" && attribute == "name"
+            || element == "sldLayout" && attribute == "matchingName"
+            || matches!(element, "theme" | "clrScheme" | "fontScheme" | "fmtScheme")
+                && attribute == "name"
+            || element == "tblStyle" && attribute == "styleName"
+            || element == "cmAuthor" && matches!(attribute, "name" | "initials")
+            || element == "author" && matches!(attribute, "name" | "initials" | "userId")
+            || element == "tag" && matches!(attribute, "name" | "val")
+            || element == "custShow" && attribute == "name")
+            .then_some(Replacement::Text),
+        Format::Auto => None,
     }
 }
 
