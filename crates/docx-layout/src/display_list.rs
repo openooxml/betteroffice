@@ -4045,8 +4045,10 @@ pub(crate) type FieldWidthMap = HashMap<i64, FieldWidthEntry>;
 /// to the header/footer variant being composed.
 pub(crate) struct RenderCtx<'a> {
     pub(crate) page_number: u64,
+    /// Formatted PAGE label; `None` falls back to `page_number`.
+    pub(crate) page_label: Option<String>,
     /// Zero-based key into per-page field-width arrays.
-    /// Distinct from `page_number`, which restarts per section.
+    /// Distinct from `page_label`, which restarts per section.
     pub(crate) page_index: usize,
     pub(crate) total_pages: u64,
     /// Shaping fonts for glyph-run emission.
@@ -4670,6 +4672,7 @@ fn recompose_hf_region(
         .collect();
     let ctx = RenderCtx {
         page_number: page.number.unwrap_or(page_index as u64 + 1),
+        page_label: page.page_label.clone(),
         page_index,
         total_pages,
         shape,
@@ -4898,6 +4901,7 @@ fn build_display_list_selected(
         }
         let ctx = RenderCtx {
             page_number: page.number.unwrap_or(page_index as u64 + 1),
+            page_label: page.page_label.clone(),
             page_index,
             total_pages,
             shape: shape_fonts.as_ref(),
@@ -7087,7 +7091,9 @@ fn try_emit_glyph_runs(
 /// DATE/TIME deliberately resolve to the stored fallback for determinism)
 fn field_text(f: &FieldRunIn, ctx: &RenderCtx<'_>) -> String {
     match f.field_type.as_deref() {
-        Some("PAGE") => ctx.page_number.to_string(),
+        Some("PAGE") => {
+            crate::regions::page_field_text(ctx.page_label.as_deref(), ctx.page_number).into_owned()
+        }
         Some("NUMPAGES") => ctx.total_pages.to_string(),
         _ => f.fallback.clone().unwrap_or_default(),
     }

@@ -2338,6 +2338,181 @@ fn centered_hf_field_line_recenters_per_page() {
     );
 }
 
+/// PAGE paints the section label; NUMPAGES paints the document total.
+#[test]
+fn page_fields_paint_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 },
+                { "kind": "field", "fieldType": "NUMPAGES", "fallback": "1", "pmStart": 7 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+              "width": 20.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, Some("5")), (2, Some("6")), (3, None), (4, Some("9"))]
+        .iter()
+        .map(|(number, label)| {
+            let mut page = serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            });
+            if let Some(label) = label {
+                page["pageLabel"] = serde_json::json!(label);
+            }
+            page
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 15.0] },
+            { "pmStart": 7, "fallbackWidth": 10.0, "perPage": [14.0, 14.0, 14.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    let expected = ["5", "6", "3", "9"];
+    let page_widths = [11.0, 12.0, 13.0, 15.0];
+
+    for (page_idx, want) in expected.iter().enumerate() {
+        assert_eq!(
+            dl.pages[page_idx].page_label.as_deref(),
+            if page_idx == 2 { None } else { Some(*want) },
+        );
+        let mut body_prims = text_prims(&dl.pages[page_idx].primitives);
+        body_prims.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            body_prims.len(),
+            2,
+            "page {page_idx} body paints PAGE and NUMPAGES: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body PAGE paints label {want}: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[1].0, "4",
+            "page {page_idx} body NUMPAGES paints total 4: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let mut footer_texts = text_prims(&footer.primitives);
+        footer_texts.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+        assert_eq!(
+            footer_texts.len(),
+            2,
+            "page {page_idx} footer paints PAGE and NUMPAGES: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer PAGE paints {want}: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[0].2 - page_widths[page_idx]).abs() < 0.01,
+            "page {page_idx} reserved width {} (want {})",
+            footer_texts[0].2,
+            page_widths[page_idx]
+        );
+        assert_eq!(
+            footer_texts[1].0, "4",
+            "page {page_idx} footer NUMPAGES paints total 4: {footer_texts:?}"
+        );
+        assert!(
+            (footer_texts[1].2 - 14.0).abs() < 0.01,
+            "page {page_idx} footer NUMPAGES width {} (want 14)",
+            footer_texts[1].2
+        );
+    }
+}
+
+/// A `w:fmt="lowerRoman"` section paints roman labels across its pages.
+#[test]
+fn page_fields_paint_roman_section_labels() {
+    let body = serde_json::json!({
+        "block": { "kind": "paragraph", "id": 1, "pmStart": 0, "pmEnd": 10,
+            "runs": [
+                { "kind": "field", "fieldType": "PAGE", "fallback": "1", "pmStart": 6 }
+            ] },
+        "measure": { "kind": "paragraph", "totalHeight": 20.0, "lines": [
+            { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 1,
+              "width": 10.0, "ascent": 12.0, "descent": 4.0, "lineHeight": 20.0 }] }
+    });
+    let pages: Vec<serde_json::Value> = [(1, "i", 0), (2, "ii", 0), (3, "iii", 1), (4, "iv", 1)]
+        .iter()
+        .map(|(number, label, section)| {
+            serde_json::json!({
+                "size": { "w": 200.0, "h": 300.0 },
+                "margins": { "left": 0.0, "right": 0.0, "footer": 20.0 },
+                "number": number,
+                "pageLabel": label,
+                "sectionIndex": section,
+                "fragments": [{
+                    "kind": "paragraph", "blockId": 1, "x": 0.0, "y": 50.0,
+                    "width": 200.0, "height": 20.0,
+                    "fromLine": 0, "toLine": 1, "pmStart": 0, "pmEnd": 10
+                }]
+            })
+        })
+        .collect();
+
+    let footer_variant = serde_json::json!({
+        "rId": "rId9", "kind": "footer", "type": "default", "height": 20.0,
+        "measured": [body.clone()],
+        "fieldWidths": [
+            { "pmStart": 6, "fallbackWidth": 10.0, "perPage": [11.0, 12.0, 13.0, 14.0] }
+        ]
+    });
+
+    let input = serde_json::json!({
+        "measured": [body], "options": {},
+        "layout": { "pages": pages },
+        "headersFooters": { "variants": [footer_variant] }
+    })
+    .to_string();
+
+    let dl = build_dl(&input);
+    for (page_idx, want) in ["i", "ii", "iii", "iv"].iter().enumerate() {
+        assert_eq!(dl.pages[page_idx].page_label.as_deref(), Some(*want));
+        let body_prims = text_prims(&dl.pages[page_idx].primitives);
+        assert_eq!(
+            body_prims.len(),
+            1,
+            "page {page_idx} body paints one PAGE field: {body_prims:?}"
+        );
+        assert_eq!(
+            body_prims[0].0, *want,
+            "page {page_idx} body paints {want}: {body_prims:?}"
+        );
+        let footer = dl.pages[page_idx].footer.as_ref().expect("footer region");
+        let footer_texts = text_prims(&footer.primitives);
+        assert_eq!(
+            footer_texts.len(),
+            1,
+            "page {page_idx} footer paints one PAGE field: {footer_texts:?}"
+        );
+        assert_eq!(
+            footer_texts[0].0, *want,
+            "page {page_idx} footer paints {want}: {footer_texts:?}"
+        );
+    }
+}
+
 /// a paragraph's stable `paraId` is stamped on every primitive it emits (the
 /// a11y mirror reads it to expose `data-para-id`); a paragraph without one emits
 /// no `paraId` field, keeping the wire form byte-identical to before.

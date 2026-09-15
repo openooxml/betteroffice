@@ -9,8 +9,10 @@ PyPI.
 
 VSDX is available from source and is not yet published on npm or crates.io. Its framework-free core parses, resolves,
 renders, round-trips, and transactionally edits `.vsdx` packages. A React editor
-and live demo are available: it can move, resize with Shift-drag, add, and delete shapes, set fill
-and line colours, and save. It does not provide text editing, stencils, resize-handle UI, or connector-drag/routing UI.
+and live demo are available: it can move, resize and rotate shapes with the selection
+handles, add shapes from the stencil panel by click or drag, edit a shape's text in place,
+delete shapes, set fill and line colours, and save. It does not provide connector drawing
+or routing UI.
 Added shapes are always top-level, and their VSDX IDs are allocated by the editor.
 Shape drafts accept formulas only; cached cell values and nested added shapes are rejected.
 

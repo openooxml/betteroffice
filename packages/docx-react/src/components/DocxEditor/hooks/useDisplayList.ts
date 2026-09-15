@@ -23,6 +23,7 @@ import {
   canUseResidentEngineWorker,
   residentCaretSnapshotForFrame,
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
@@ -365,6 +366,68 @@ export function useRustDisplayList(
 
   const applyResidentInput = useCallback(
     (operation: ResidentInputOperation): Promise<ResidentFrameApplyResult | null> => {
+      const replayInputOnMainThread = async (
+        pending: ResidentInputOperation,
+        hostEngine: YrsSession,
+        frameEpoch: number,
+        paintToken: number
+      ): Promise<ResidentFrameApplyResult | null> => {
+        if (workerFallbackEngineRef.current !== hostEngine) {
+          queryEpochGate.clear();
+          workerFallbackEngineRef.current = hostEngine;
+        }
+        if (workerRef.current?.engine === hostEngine) {
+          workerRef.current.client.destroy();
+          workerRef.current = null;
+        }
+        setWorkerSurfacesActive(false);
+        setWorkerPresentationActive(false);
+        let encoded: Uint8Array;
+        suppressWorkerInvalidationRef.current += 1;
+        try {
+          encoded =
+            pending.kind === 'insert'
+              ? hostEngine.applyInput(pending.text, frameEpoch)
+              : hostEngine.applyDelete(pending.direction, frameEpoch);
+        } catch (error) {
+          suppressWorkerInvalidationRef.current -= 1;
+          if (
+            error instanceof Error &&
+            error.message.includes('resident input state is not ready')
+          ) {
+            return null;
+          }
+          throw error;
+        }
+        suppressWorkerInvalidationRef.current -= 1;
+        const delta = decodeFrameDelta(encoded);
+        const previous = snapshotRef.current;
+        const nextFrame = delta.full
+          ? applyFrameDeltaOwned(null, delta)
+          : applyFrameDeltaOwned(previous.frame, delta);
+        const hostSelection = hostEngine.selection();
+        const caret = residentCaretForSelection(
+          hostEngine.residentCaretSnapshot(),
+          hostSelection,
+          hostSelection,
+          nextFrame
+        );
+        const nextSnapshot = createRustDisplayListSnapshot(
+          nextFrame.displayList,
+          nextFrame,
+          caret,
+          null,
+          { ...previous, queries: null }
+        );
+        generationRef.current += 1;
+        snapshotRef.current = nextSnapshot;
+        publishQuerySnapshot(nextSnapshot, contentEpochRef.current);
+        setSnapshot(nextSnapshot);
+        setError(null);
+        setLoading(false);
+        applyPaintedCaretReply(false, paintToken);
+        return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
+      };
       const run = async (): Promise<ResidentFrameApplyResult | null> => {
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
@@ -376,6 +439,7 @@ export function useRustDisplayList(
         const paintToken = paintedCaretMachine.token();
         residentPaintInflightRef.current += 1;
         let result;
+        let workerDelta: ReturnType<typeof decodeFrameDelta> | undefined;
         try {
           result =
             operation.kind === 'insert'
@@ -393,11 +457,32 @@ export function useRustDisplayList(
                   false,
                   paintCaret
                 );
+          if (result.applied) {
+            try {
+              workerDelta = decodeFrameDelta(result.frame);
+            } catch (error) {
+              throw new ResidentWorkerFailureError(
+                `Resident engine worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+          }
+        } catch (error) {
+          if (!(error instanceof ResidentWorkerFailureError)) throw error;
+          console.error(
+            '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
+            error
+          );
+          return replayInputOnMainThread(
+            operation,
+            worker.engine,
+            currentFrame.frameEpoch,
+            paintToken
+          );
         } finally {
           residentPaintInflightRef.current -= 1;
         }
         if (!result.applied) return null;
-        const delta = decodeFrameDelta(result.frame);
+        const delta = workerDelta ?? decodeFrameDelta(result.frame);
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);

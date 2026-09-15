@@ -27,6 +27,7 @@ import type {
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   canUseResidentEngineWorker,
   type ResidentEngineWorkerApplyResult,
   type ResidentEngineWorkerFrame,

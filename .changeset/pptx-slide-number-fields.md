@@ -5,6 +5,6 @@
 
 Evaluate slide-number fields on masters and layouts, counting from the presentation's first slide number.
 
-Collaboration snapshots use deck schema v4. Older snapshots migrate through the
-existing v3 connector migration before the v4 slide-number migration; missing
-starting numbers default to one. Readers supporting only v3 reject v4 snapshots.
+Collaboration snapshots use deck schema 2.1. Older snapshots migrate to deck
+schema 2.1; missing starting numbers default to one. Readers supporting only
+older schemas reject 2.1 snapshots.

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import type { YrsResidentWorkerSnapshot, YrsSelection } from './index';
 import {
   ResidentEngineWorkerClient,
+  ResidentWorkerFailureError,
   type ResidentEngineWorkerPort,
 } from './residentEngineWorkerClient';
 import type {
@@ -118,7 +119,12 @@ describe('watchdog', () => {
     const { worker, client } = setup();
     const frame = client.buildFrame('', 0);
     expireTimers();
-    await expect(frame).rejects.toThrow('did not answer buildFrame');
+    const failure = await frame.then(
+      () => { throw new Error('unanswered request resolved'); },
+      (error: Error) => error
+    );
+    expect(failure.message).toContain('did not answer buildFrame');
+    expect(failure).toBeInstanceOf(ResidentWorkerFailureError);
     expect(worker.terminated).toBe(true);
     await expect(client.buildFrame('', 0)).rejects.toThrow('did not answer buildFrame');
     expect(worker.posted).toHaveLength(1);
@@ -151,6 +157,40 @@ describe('worker failure', () => {
     expect(client.isReady()).toBe(false);
     await expect(client.buildFrame('', 0)).rejects.toThrow('worker failed: boom');
     expect(worker.posted).toHaveLength(2);
+  });
+
+  test('a worker crash rejects input with a failure error, not an op error', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const input = client.applyInput('a', selection, 0);
+    worker.onerror?.({ message: 'boom' } as ErrorEvent);
+    const failure = await input.then(
+      () => { throw new Error('crashed input resolved'); },
+      (error: Error) => error
+    );
+    expect(failure).toBeInstanceOf(ResidentWorkerFailureError);
+  });
+
+  test('an engine-level input rejection stays a plain error', async () => {
+    const { worker, client } = setup();
+    const bootstrap = client.bootstrap(snapshot, '');
+    worker.reply(frameReply(worker.lastId()));
+    await bootstrap;
+    const input = client.applyInput('a', selection, 0);
+    worker.reply({
+      id: worker.lastId(),
+      ok: false,
+      error: 'apply_input requires a collapsed selection',
+    });
+    const failure = await input.then(
+      () => { throw new Error('rejected input resolved'); },
+      (error: Error) => error
+    );
+    expect(failure.message).toContain('collapsed selection');
+    expect(failure).not.toBeInstanceOf(ResidentWorkerFailureError);
+    expect(worker.terminated).toBe(false);
   });
 
   test('onmessageerror is terminal too', async () => {

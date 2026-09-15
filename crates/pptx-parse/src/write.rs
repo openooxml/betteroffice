@@ -3,6 +3,7 @@
 //! unmodeled markup survives.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 
 use ooxml_drawingml::{
     ColorValue, GradientFill, ShapeFill, ShapeOutline, Theme, resolve_color_value_to_hex_with_theme,
@@ -1248,7 +1249,7 @@ fn patch_slide(
     elements: ShapeElements,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
-    let mut next_shape_id = max_shape_id(root) + 1;
+    let mut next_shape_id = max_shape_id(root).checked_add(1);
     let tree = root
         .child_mut("cSld")
         .and_then(|common| common.child_mut("spTree"))
@@ -1313,6 +1314,16 @@ fn max_shape_id(root: &XmlElement) -> u32 {
         .unwrap_or(1)
 }
 
+fn alloc_shape_id(next_shape_id: &mut Option<u32>, part: &str) -> Result<u32, PptxError> {
+    let shape_id =
+        next_shape_id.ok_or_else(|| write_error(part, "the shape id space is exhausted"))?;
+    if shape_id == 0 {
+        return Err(write_error(part, "the shape id space is exhausted"));
+    }
+    *next_shape_id = shape_id.checked_add(1);
+    Ok(shape_id)
+}
+
 /// A parsed shape's source element: a direct child of the tree, or one the
 /// `mc:AlternateContent` at `position` contributes through `path`.
 struct ShapeSlot {
@@ -1326,7 +1337,7 @@ struct ShapeSlot {
 fn patch_shape_children(
     parent: &mut XmlElement,
     writes: &[ShapeWrite],
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -1597,7 +1608,7 @@ fn emit_sibling_slots(
 fn patch_shape(
     element: &mut XmlElement,
     patch: &ShapePatch,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
     part: &str,
@@ -1616,7 +1627,7 @@ fn patch_shape(
     }
     if let Some(adjust_values) = &patch.adjust_values {
         let properties = shape_properties_mut(element, part)?;
-        set_adjust_values(properties, adjust_values, prefixes);
+        set_adjust_values(properties, adjust_values, prefixes, part)?;
     }
     for text in &patch.texts {
         patch_text(element, text, theme, prefixes, part)?;
@@ -1995,10 +2006,13 @@ fn set_adjust_values(
     properties: &mut XmlElement,
     adjust_values: &BTreeMap<String, f64>,
     prefixes: &Prefixes,
-) {
-    // Only preset geometries carry an editable adjustment list.
+    part: &str,
+) -> Result<(), PptxError> {
     let Some(geometry) = properties.child_mut("prstGeom") else {
-        return;
+        return Err(write_error(
+            part,
+            "cannot write adjustments onto a shape without preset geometry",
+        ));
     };
     let list_name = prefixes.drawing("avLst");
     if geometry.child_mut("avLst").is_none() {
@@ -2027,6 +2041,7 @@ fn set_adjust_values(
             )),
         }
     }
+    Ok(())
 }
 
 // --- text -------------------------------------------------------------------
@@ -2197,13 +2212,20 @@ fn build_paragraph(
     }
     let segments = run_segments(&write.runs);
     let mut front = 0;
+    let mut back = 0;
     while front < source_runs.len()
         && front < segments.len()
         && segment_matches(&source_runs[front], &segments[front], theme)
     {
+        let steals = front + 1 < source_runs.len() - back
+            && segment_matches(&source_runs[front + 1], &segments[front], theme)
+            && source_span_len(&source_runs, front + 1..source_runs.len() - back)
+                > target_span_len(&segments, front + 1..segments.len() - back);
+        if steals {
+            break;
+        }
         front += 1;
     }
-    let mut back = 0;
     while back < source_runs.len() - front
         && back < segments.len() - front
         && segment_matches(
@@ -2212,17 +2234,21 @@ fn build_paragraph(
             theme,
         )
     {
+        let src = source_runs.len() - 1 - back;
+        let seg = segments.len() - 1 - back;
+        let steals = src > front
+            && segment_matches(&source_runs[src - 1], &segments[seg], theme)
+            && source_span_len(&source_runs, front..src) > target_span_len(&segments, front..seg);
+        if steals {
+            break;
+        }
         back += 1;
     }
     let tail_start = source_runs.len() - back;
-    // An edit contained in a single source run keeps that run's unmodeled
-    // markup (hyperlink, strike, spacing) by rebuilding onto its rPr.
-    let template = (tail_start - front == 1 && source_runs[front].local_name() == "r")
-        .then(|| source_runs[front].child("rPr").cloned())
-        .flatten();
-    let rebuilt = gradient_segment_elements(
+    let rebuilt = span_elements(
         &segments[front..segments.len() - back],
-        &source_runs[front..tail_start],
+        &source_runs,
+        front..tail_start,
         theme,
         prefixes,
     );
@@ -2231,18 +2257,7 @@ fn build_paragraph(
     for element in source_runs.by_ref().take(front) {
         runs.push(XmlNode::Element(element));
     }
-    if let Some(rebuilt) = rebuilt {
-        runs.extend(rebuilt);
-    } else {
-        for segment in &segments[front..segments.len() - back] {
-            runs.push(XmlNode::Element(segment_element(
-                segment,
-                template.as_ref(),
-                theme,
-                prefixes,
-            )));
-        }
-    }
+    runs.extend(rebuilt);
     for element in source_runs.skip(tail_start - front) {
         runs.push(XmlNode::Element(element));
     }
@@ -2257,43 +2272,138 @@ fn build_paragraph(
     paragraph
 }
 
-fn gradient_segment_elements(
+/// Target slice rebuilt onto one source run.
+struct TargetRange {
+    end: usize,
+    source: usize,
+    /// Source text kept unchanged, in order.
+    verbatim: bool,
+    /// Intact `a:fld` kept as a field.
+    field: bool,
+}
+
+/// Rebuilds the span onto source runs, preserving unmodeled markup.
+fn span_elements(
     segments: &[RunSegment<'_>],
     source_runs: &[XmlElement],
+    span: Range<usize>,
     theme: Option<&Theme>,
     prefixes: &Prefixes,
-) -> Option<Vec<XmlNode>> {
-    if !source_runs
-        .iter()
-        .all(|run| matches!(run.local_name(), "r" | "br"))
-        || !source_runs.iter().any(|run| {
-            run.child("rPr")
-                .and_then(|properties| properties.child("gradFill"))
-                .is_some()
-        })
-    {
-        return None;
+) -> Vec<XmlNode> {
+    if source_runs.is_empty() {
+        return segments
+            .iter()
+            .map(|segment| XmlNode::Element(segment_element(segment, None, theme, prefixes)))
+            .collect();
     }
-    let mut source_text = String::new();
-    let mut source_ends = Vec::with_capacity(source_runs.len());
-    for run in source_runs {
-        if run.local_name() == "br" {
-            source_text.push('\n');
-        } else if let Some(text) = run.child("t") {
-            source_text.push_str(&text.text_content());
+    let ranges = align_span(segments, source_runs, span);
+    let mut output = Vec::new();
+    let mut offset = 0;
+    let mut range_index = 0;
+    let mut range_start = 0;
+    for segment in segments {
+        let mut remaining = segment.text;
+        loop {
+            while ranges[range_index].end <= offset {
+                range_start = ranges[range_index].end;
+                range_index += 1;
+            }
+            let range = &ranges[range_index];
+            let source = &source_runs[range.source];
+            if segment.line_break {
+                output.push(XmlNode::Element(segment_element(
+                    segment,
+                    source.child("rPr"),
+                    theme,
+                    prefixes,
+                )));
+                offset += 1;
+                break;
+            }
+            let length = remaining.len().min(range.end - offset);
+            let piece = RunSegment {
+                text: &remaining[..length],
+                ..*segment
+            };
+            let element = if range.field && offset == range_start && offset + length == range.end {
+                field_element(source, &piece, theme, prefixes)
+            } else {
+                segment_element(&piece, source.child("rPr"), theme, prefixes)
+            };
+            output.push(XmlNode::Element(element));
+            offset += length;
+            remaining = &remaining[length..];
+            if remaining.is_empty() {
+                break;
+            }
         }
+    }
+    output
+}
+
+fn run_text(run: &XmlElement) -> String {
+    if run.local_name() == "br" {
+        return "\n".to_owned();
+    }
+    run.child("t")
+        .map(XmlElement::text_content)
+        .unwrap_or_default()
+}
+
+fn segment_text<'a>(segment: &RunSegment<'a>) -> &'a str {
+    if segment.line_break {
+        "\n"
+    } else {
+        segment.text
+    }
+}
+
+fn source_span_len(runs: &[XmlElement], span: Range<usize>) -> usize {
+    runs[span].iter().map(|run| run_text(run).len()).sum()
+}
+
+fn target_span_len(segments: &[RunSegment<'_>], span: Range<usize>) -> usize {
+    segments[span]
+        .iter()
+        .map(|segment| segment_text(segment).len())
+        .sum()
+}
+
+fn push_range(ranges: &mut Vec<TargetRange>, end: usize, source: usize, verbatim: bool) {
+    if end <= ranges.last().map_or(0, |last| last.end) {
+        return;
+    }
+    match ranges.last_mut() {
+        Some(last) if last.source == source && last.verbatim == verbatim => last.end = end,
+        _ => ranges.push(TargetRange {
+            end,
+            source,
+            verbatim,
+            field: false,
+        }),
+    }
+}
+
+fn align_span(
+    segments: &[RunSegment<'_>],
+    source_runs: &[XmlElement],
+    span: Range<usize>,
+) -> Vec<TargetRange> {
+    let runs = &source_runs[span.clone()];
+    let mut source_text = String::new();
+    let mut source_ends = Vec::with_capacity(runs.len());
+    for run in runs {
+        source_text.push_str(&run_text(run));
         source_ends.push(source_text.len());
     }
-    let target_text: String = segments
-        .iter()
-        .map(|segment| {
-            if segment.line_break {
-                "\n"
-            } else {
-                segment.text
-            }
-        })
-        .collect();
+    let target_text: String = segments.iter().map(segment_text).collect();
+    let run_at = |offset: usize| {
+        span.start
+            + source_ends
+                .iter()
+                .position(|&end| end > offset)
+                .unwrap_or(source_ends.len().saturating_sub(1))
+    };
     let prefix: usize = source_text
         .chars()
         .zip(target_text.chars())
@@ -2309,75 +2419,207 @@ fn gradient_segment_elements(
         .sum();
     let source_end = source_text.len() - suffix;
     let target_end = target_text.len() - suffix;
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    let mut push_range = |end: usize, index: usize| {
-        if let Some(last) = ranges.last_mut() {
-            if end <= last.0 {
-                return;
-            }
-            if last.1 == index {
-                last.0 = end;
-                return;
-            }
-        }
-        if end > 0 {
-            ranges.push((end, index));
-        }
-    };
+
+    let mut ranges: Vec<TargetRange> = Vec::new();
     for (index, &end) in source_ends.iter().enumerate() {
-        push_range(end.min(prefix), index);
+        push_range(&mut ranges, end.min(prefix), span.start + index, true);
     }
-    if target_end > prefix {
-        let index = source_ends
-            .iter()
-            .position(|&end| end > prefix)
-            .unwrap_or(source_runs.len() - 1);
-        push_range(target_end, index);
+    let seed = span.start.saturating_sub(1);
+    let (mut source_offset, mut target_offset) = (prefix, prefix);
+    let mut replaced: Option<usize> = None;
+    for op in char_diff(
+        &source_text[prefix..source_end],
+        &target_text[prefix..target_end],
+    ) {
+        match op {
+            DiffOp::Match(length) => {
+                let mut done = 0;
+                while done < length {
+                    let run = run_at(source_offset + done);
+                    let piece =
+                        (source_ends[run - span.start] - (source_offset + done)).min(length - done);
+                    push_range(&mut ranges, target_offset + done + piece, run, true);
+                    done += piece;
+                }
+                source_offset += length;
+                target_offset += length;
+                replaced = None;
+            }
+            DiffOp::Delete(length) => {
+                if replaced.is_none() {
+                    replaced = Some(run_at(source_offset));
+                }
+                source_offset += length;
+            }
+            DiffOp::Insert(length) => {
+                let source = replaced
+                    .take()
+                    .or_else(|| ranges.last().map(|range| range.source))
+                    .unwrap_or(seed);
+                push_range(&mut ranges, target_offset + length, source, false);
+                target_offset += length;
+            }
+        }
     }
     for (index, &end) in source_ends.iter().enumerate() {
         if end > source_end {
-            push_range(target_end + end - source_end, index);
+            push_range(
+                &mut ranges,
+                target_end + end - source_end,
+                span.start + index,
+                true,
+            );
         }
     }
-    let mut output = Vec::new();
-    let mut offset = 0;
-    let mut range_index = 0;
-    for segment in segments {
-        if segment.line_break {
-            while ranges[range_index].0 <= offset {
-                range_index += 1;
-            }
-            output.push(XmlNode::Element(segment_element(
-                segment,
-                source_runs[ranges[range_index].1].child("rPr"),
-                theme,
-                prefixes,
-            )));
-            offset += 1;
+    let mut kept = vec![false; runs.len()];
+    for range in &ranges {
+        if range.verbatim {
+            kept[range.source - span.start] = true;
+        }
+    }
+    for field_idx in 0..runs.len() {
+        if runs[field_idx].local_name() != "fld" || kept[field_idx] {
             continue;
         }
-        let mut remaining = segment.text;
-        while !remaining.is_empty() {
-            while ranges[range_index].0 <= offset {
-                range_index += 1;
+        let field_text = run_text(&runs[field_idx]);
+        if field_text.is_empty() {
+            continue;
+        }
+        let mut donor: Option<usize> = None;
+        for candidate in [
+            field_idx.checked_sub(1),
+            field_idx.checked_add(1).filter(|next| *next < runs.len()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if runs[candidate].local_name() == "r"
+                && kept[candidate]
+                && run_text(&runs[candidate]) == field_text
+            {
+                donor = Some(candidate);
+                break;
             }
-            let (end, source_index) = ranges[range_index];
-            let length = remaining.len().min(end - offset);
-            let piece = RunSegment {
-                text: &remaining[..length],
-                ..*segment
-            };
-            output.push(XmlNode::Element(segment_element(
-                &piece,
-                source_runs[source_index].child("rPr"),
-                theme,
-                prefixes,
-            )));
-            offset += length;
-            remaining = &remaining[length..];
+        }
+        if let Some(donor) = donor {
+            for range in &mut ranges {
+                if range.verbatim && range.source == span.start + donor {
+                    range.source = span.start + field_idx;
+                }
+            }
+            kept[donor] = false;
+            kept[field_idx] = true;
         }
     }
-    Some(output)
+
+    let mut verbatim_ranges = vec![0usize; runs.len()];
+    for range in ranges.iter().filter(|range| range.verbatim) {
+        verbatim_ranges[range.source - span.start] += 1;
+    }
+    let mut merged: Vec<TargetRange> = Vec::with_capacity(ranges.len());
+    let mut start = 0;
+    for mut range in ranges {
+        range.field = range.verbatim && {
+            let relative = range.source - span.start;
+            let run_start = relative
+                .checked_sub(1)
+                .map_or(0, |previous| source_ends[previous]);
+            runs[relative].local_name() == "fld"
+                && verbatim_ranges[relative] == 1
+                && range.end - start == source_ends[relative] - run_start
+        };
+        start = range.end;
+        match merged.last_mut() {
+            Some(last) if last.source == range.source && !last.field && !range.field => {
+                last.end = range.end
+            }
+            _ => merged.push(range),
+        }
+    }
+    merged
+}
+
+/// Diff step in bytes.
+enum DiffOp {
+    Match(usize),
+    Delete(usize),
+    Insert(usize),
+}
+
+const DIFF_CELL_LIMIT: usize = 1 << 20;
+
+fn push_op(ops: &mut Vec<DiffOp>, op: DiffOp) {
+    match (ops.last_mut(), op) {
+        (Some(DiffOp::Match(last)), DiffOp::Match(length))
+        | (Some(DiffOp::Delete(last)), DiffOp::Delete(length))
+        | (Some(DiffOp::Insert(last)), DiffOp::Insert(length)) => *last += length,
+        (_, op) => ops.push(op),
+    }
+}
+
+/// LCS alignment; ties delete first, oversized counts as replacement.
+fn char_diff(source: &str, target: &str) -> Vec<DiffOp> {
+    let source_chars: Vec<char> = source.chars().collect();
+    let target_chars: Vec<char> = target.chars().collect();
+    let (rows, columns) = (source_chars.len(), target_chars.len());
+    let mut ops = Vec::new();
+    if rows == 0 || columns == 0 || rows.saturating_mul(columns) > DIFF_CELL_LIMIT {
+        if rows > 0 {
+            push_op(&mut ops, DiffOp::Delete(source.len()));
+        }
+        if columns > 0 {
+            push_op(&mut ops, DiffOp::Insert(target.len()));
+        }
+        return ops;
+    }
+    let width = columns + 1;
+    let mut table = vec![0u16; (rows + 1) * width];
+    for row in (0..rows).rev() {
+        for column in (0..columns).rev() {
+            table[row * width + column] = if source_chars[row] == target_chars[column] {
+                table[(row + 1) * width + column + 1] + 1
+            } else {
+                table[(row + 1) * width + column].max(table[row * width + column + 1])
+            };
+        }
+    }
+    let (mut row, mut column) = (0, 0);
+    while row < rows && column < columns {
+        if source_chars[row] == target_chars[column] {
+            push_op(&mut ops, DiffOp::Match(source_chars[row].len_utf8()));
+            row += 1;
+            column += 1;
+        } else if table[(row + 1) * width + column] >= table[row * width + column + 1] {
+            push_op(&mut ops, DiffOp::Delete(source_chars[row].len_utf8()));
+            row += 1;
+        } else {
+            push_op(&mut ops, DiffOp::Insert(target_chars[column].len_utf8()));
+            column += 1;
+        }
+    }
+    for value in &source_chars[row..] {
+        push_op(&mut ops, DiffOp::Delete(value.len_utf8()));
+    }
+    for value in &target_chars[column..] {
+        push_op(&mut ops, DiffOp::Insert(value.len_utf8()));
+    }
+    ops
+}
+
+fn segment_properties(
+    segment: &RunSegment<'_>,
+    template: Option<&XmlElement>,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> Option<XmlElement> {
+    match template.filter(|template| !segment.line_break || template.child("gradFill").is_some()) {
+        Some(template) => {
+            let mut base = template.clone();
+            apply_run_properties(&mut base, segment.properties, theme, prefixes);
+            Some(base)
+        }
+        None => run_properties_element(segment.properties, prefixes),
+    }
 }
 
 fn segment_element(
@@ -2386,19 +2628,9 @@ fn segment_element(
     theme: Option<&Theme>,
     prefixes: &Prefixes,
 ) -> XmlElement {
-    let properties = match template
-        .filter(|template| !segment.line_break || template.child("gradFill").is_some())
-    {
-        Some(template) => {
-            let mut base = template.clone();
-            apply_run_properties(&mut base, segment.properties, theme, prefixes);
-            Some(base)
-        }
-        None => run_properties_element(segment.properties, prefixes),
-    };
     let mut element =
         XmlElement::new(prefixes.drawing(if segment.line_break { "br" } else { "r" }));
-    if let Some(properties) = properties {
+    if let Some(properties) = segment_properties(segment, template, theme, prefixes) {
         element = element.with_child(properties);
     }
     if segment.line_break {
@@ -2406,6 +2638,31 @@ fn segment_element(
     } else {
         element.with_child(XmlElement::new(prefixes.drawing("t")).with_text(segment.text))
     }
+}
+
+/// Intact `a:fld` keeps its binding.
+fn field_element(
+    source: &XmlElement,
+    segment: &RunSegment<'_>,
+    theme: Option<&Theme>,
+    prefixes: &Prefixes,
+) -> XmlElement {
+    let mut element = XmlElement::new(source.name.clone());
+    element.attributes = source.attributes.clone();
+    if let Some(properties) = segment_properties(segment, source.child("rPr"), theme, prefixes) {
+        element.children.push(XmlNode::Element(properties));
+    }
+    element.children.extend(
+        source
+            .child_elements()
+            .filter(|child| !matches!(child.local_name(), "rPr" | "t"))
+            .cloned()
+            .map(XmlNode::Element),
+    );
+    element.children.push(XmlNode::Element(
+        XmlElement::new(prefixes.drawing("t")).with_text(segment.text),
+    ));
+    element
 }
 
 const POST_LATIN_ELEMENTS: [&str; 7] = [
@@ -2656,7 +2913,7 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
 
 fn shape_element(
     add: &ShapeAdd,
-    next_shape_id: &mut u32,
+    next_shape_id: &mut Option<u32>,
     prefixes: &Prefixes,
     part: &str,
 ) -> Result<XmlElement, PptxError> {
@@ -2666,8 +2923,7 @@ fn shape_element(
             format!("unsupported geometry {:?} for a new shape", add.geometry),
         ));
     }
-    let shape_id = *next_shape_id;
-    *next_shape_id += 1;
+    let shape_id = alloc_shape_id(next_shape_id, part)?;
     let non_visual = XmlElement::new(prefixes.presentation("nvSpPr"))
         .with_child(
             XmlElement::new(prefixes.presentation("cNvPr"))
@@ -2767,7 +3023,7 @@ fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<
                 .with_child(XmlElement::new(prefixes.presentation("nvPr"))),
         )
         .with_child(XmlElement::new(prefixes.presentation("grpSpPr")).with_child(group_transform));
-    let mut next_shape_id = 2;
+    let mut next_shape_id = Some(2);
     for shape in shapes {
         tree = tree.with_child(shape_element(shape, &mut next_shape_id, &prefixes, part)?);
     }
@@ -3002,5 +3258,208 @@ mod tests {
         for local in ["sp", "pic", "graphicFrame", "grpSp"] {
             assert!(ShapeElements::WithoutConnectors.contains(local));
         }
+    }
+
+    const LINKED_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US" dirty="0"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r></a:p>"#;
+    const LINK_PROPERTIES: &str =
+        r#"<a:rPr lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+    const FIELD_PARAGRAPH: &[u8] = br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t> of </a:t></a:r><a:fld id="{B}" type="datetime1"><a:rPr lang="en-US"/><a:t>2024</a:t></a:fld></a:p>"#;
+
+    fn rebuilt_paragraph(xml: &[u8], runs: &[(&str, RunProperties)]) -> String {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut root = parse_xml(xml, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        let prefixes = Prefixes::from_root(&mut root);
+        let write = ParagraphWrite {
+            source_index: Some(0),
+            rebuild: true,
+            properties_changed: false,
+            alignment: None,
+            level: 0,
+            bullet: None,
+            runs: runs
+                .iter()
+                .map(|(text, properties)| RunWrite {
+                    text: (*text).to_owned(),
+                    properties: properties.clone(),
+                })
+                .collect(),
+        };
+        let paragraph = build_paragraph(&write, Some(root), None, &prefixes);
+        String::from_utf8(serialize_xml(&paragraph)).unwrap()
+    }
+
+    #[test]
+    fn an_edit_spanning_several_runs_keeps_each_survivor_on_its_source_run() {
+        let xml = rebuilt_paragraph(
+            LINKED_PARAGRAPH,
+            &[("Seethe doc now", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See</a:t></a:r>"#),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(&format!("<a:r>{LINK_PROPERTIES}<a:t>the doc</a:t></a:r>")),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(r#"<a:r><a:rPr lang="en-US"/><a:t> now</a:t></a:r>"#),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<a:r>").count(), 3, "{xml}");
+    }
+
+    #[test]
+    fn a_line_break_inside_the_span_keeps_the_runs_around_it_aligned() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><a:r><a:rPr lang="en-US"/><a:t>First</a:t></a:r><a:br/><a:r><a:rPr><a:hlinkClick r:id="rId2"/></a:rPr><a:t>Second</a:t></a:r></a:p>"#,
+            &[("Firs\nSecond!", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:r><a:rPr lang="en-US"/><a:t>Firs</a:t></a:r><a:br/><a:r><a:rPr><a:hlinkClick r:id="rId2"/></a:rPr><a:t>Second!</a:t></a:r>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_field_survives_an_edit_around_it_and_degrades_once_its_text_changes() {
+        let xml = rebuilt_paragraph(
+            FIELD_PARAGRAPH,
+            &[("1 out of 2025", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t> out of </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t>2025</a:t></a:r>"#
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("datetime1"), "{xml}");
+
+        let xml = rebuilt_paragraph(FIELD_PARAGRAPH, &[("1X of 2024", RunProperties::default())]);
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> of </a:t></a:r><a:fld id="{B}" type="datetime1"><a:rPr lang="en-US"/><a:t>2024</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn text_typed_at_the_end_of_a_link_stays_inside_it() {
+        let xml = rebuilt_paragraph(
+            LINKED_PARAGRAPH,
+            &[("See the docsX today", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(&format!("<a:r>{LINK_PROPERTIES}<a:t>the docsX</a:t></a:r>")),
+            "{xml}"
+        );
+
+        let bold = RunProperties {
+            bold: Some(true),
+            ..RunProperties::default()
+        };
+        let xml = rebuilt_paragraph(
+            LINKED_PARAGRAPH,
+            &[
+                ("See ", RunProperties::default()),
+                ("the docs", RunProperties::default()),
+                ("X", bold),
+                (" today", RunProperties::default()),
+            ],
+        );
+        assert!(
+            xml.contains(&format!(
+                r#"<a:r>{LINK_PROPERTIES}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US" strike="sngStrike"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r>"#
+            )),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn deleting_a_linked_run_drops_its_link() {
+        let xml = rebuilt_paragraph(
+            LINKED_PARAGRAPH,
+            &[("See  today", RunProperties::default())],
+        );
+        assert!(!xml.contains("hlinkClick"), "{xml}");
+        assert!(
+            xml.contains(
+                r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r>"#
+            ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_plain_duplicate_at_the_front_does_not_steal_the_field() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p>"#,
+            &[("1", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<a:r>").count(), 0, "{xml}");
+    }
+
+    #[test]
+    fn a_plain_duplicate_at_the_back_does_not_steal_the_field() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>X</a:t></a:r><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r></a:p>"#,
+            &[
+                ("X", RunProperties::default()),
+                ("1", RunProperties::default()),
+            ],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<a:r>").count(), 1, "{xml}");
+        assert!(
+            !xml.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r>"#),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn adjustments_without_preset_geometry_error_instead_of_no_opting() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let part = "ppt/slides/slide1.xml";
+        let mut root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id="2" name="custom"/></p:nvSpPr><p:spPr><a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr></p:sp></p:spTree></p:cSld></p:sld>"#,
+            part,
+            &mut budget,
+        )
+        .unwrap();
+
+        let error = patch_slide(
+            &mut root,
+            &[ShapeWrite::Patch {
+                source_index: 0,
+                patch: Box::new(ShapePatch {
+                    adjust_values: Some(BTreeMap::from([("adj".to_owned(), 0.25)])),
+                    ..ShapePatch::default()
+                }),
+            }],
+            None,
+            part,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, crate::PptxError::Write { ref message, .. } if message.contains("preset geometry")),
+            "{error:?}"
+        );
     }
 }

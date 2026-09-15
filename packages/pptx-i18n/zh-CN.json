@@ -4,6 +4,7 @@
     "label": null,
     "save": "保存",
     "exportPng": null,
+    "present": "放映",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "幻灯片放映",
+    "exit": "退出放映(Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "上一张幻灯片",
+    "nextSlide": "下一张幻灯片"
+  },
+  "notes": {
+    "panelLabel": "演讲者备注",
+    "placeholder": "添加演讲者备注…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "智能体提议",
+    "close": "关闭",
+    "empty": "没有待审阅的更改",
+    "preview": "预览更改",
+    "previewTitle": "审阅提议的更改",
+    "before": "当前幻灯片",
+    "after": "提议的幻灯片",
+    "accept": "接受提议",
+    "reject": "拒绝",
+    "force": "应用更新后的提议",
+    "blank": "空白",
+    "target": "幻灯片 {slide} · {name}",
+    "targetLabel": "更改",
+    "targetMissing": "目标已不可用",
+    "stale": "提议创建后这些对象发生了变化，请在应用前预览当前更改",
+    "stalePreview": "此预览使用更新后的幻灯片，应用后将覆盖已更改的目标",
+    "geometry": "位置和大小 (x, y, 宽度, 高度)",
+    "appearance": "外观或文本格式已更改",
+    "changedAgain": "目标再次发生了变化，请在应用前查看更新后的预览",
+    "canvasTitle": "此幻灯片上的更改",
+    "editSlide": "编辑幻灯片",
+    "showDiff": "显示更改",
+    "details": "审阅详情",
+    "removed": "已删除",
+    "added": "已添加",
+    "reviewHint": "审阅模式 · 接受后应用更改",
+    "canvasStale": "目标已更改，请在应用前打开审阅详情查看更新后的预览",
+    "previousPosition": "之前",
+    "proposedPosition": "提议",
+    "loadingDiff": "正在加载更改…"
   }
 }

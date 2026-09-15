@@ -166,6 +166,8 @@ export interface DocxEditorProps {
   rulerUnit?: 'inch' | 'cm';
   /** Initial zoom level (default: 1.0) */
   initialZoom?: number;
+  /** Whether to show hidden (vanished) text in the layout (default: false) */
+  showHiddenText?: boolean;
   /** Whether the editor is read-only. When true, hides toolbar and rulers */
   readOnly?: boolean;
   /**
@@ -574,6 +576,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     showRuler = false,
     rulerUnit = 'inch',
     initialZoom = 1.0,
+    showHiddenText = false,
     readOnly: readOnlyProp = false,
     disableFindReplaceShortcuts = false,
     toolbarExtra,
@@ -1867,6 +1870,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
               onBodyClick={handleBodyClick}
               zoom={state.zoom}
               readOnly={readOnly}
+              showHiddenText={showHiddenText}
               isSuggesting={editingMode === 'suggesting'}
               author={author}
               measurementFontProvider={measurementFontProvider}

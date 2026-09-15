@@ -316,8 +316,8 @@ fn stacked_height(measured: &[MeasuredBlockIn]) -> f64 {
 /// Resolves both bands for one page. Automatic parity fillers stay blank.
 ///
 /// `page_number` is the layout's own 1-based `Page.number` (falling back to
-/// `page_index + 1`) and drives both variant selection and PAGE field text, so
-/// it restarts wherever a section restarts numbering.
+/// `page_index + 1`) and drives variant selection; PAGE field text resolves
+/// from the page's `pageLabel` with that number as fallback.
 pub(crate) fn compose_page_regions<'a>(
     hf: &HeadersFootersIn,
     page: &PageIn,
@@ -421,6 +421,7 @@ fn compose_region(
     let field_widths = field_width_map(v);
     let ctx = RenderCtx {
         page_number,
+        page_label: page.page_label.clone(),
         page_index,
         total_pages,
         shape,

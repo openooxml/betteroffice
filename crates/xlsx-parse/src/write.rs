@@ -9,7 +9,7 @@ use std::iter::Peekable;
 
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
-use xlsx_model::addr::RowId;
+use xlsx_model::addr::{ColId, RowId};
 use xlsx_model::styles::{Alignment, Border, BorderEdge, Color, Fill, Font, Stylesheet, Xf};
 use xlsx_model::{
     Cell, CellRef, CellValue, ChartAnchor, ChartRef, DateSystem, Sheet, SheetChart, SheetId,
@@ -17,11 +17,13 @@ use xlsx_model::{
 };
 
 use crate::ParseError;
+use crate::axis::SheetAxes;
 use crate::package::{
     ContentTypeEntry, PartReference, PreservedPackage, PreservedSheet, Relationship, XmlAttribute,
     XmlTemplate, attributes_from_fragment, effective_content_type, normalized_part_name,
     parse_relationships, relationship_part_path, remove_attribute, set_attribute,
 };
+use crate::patch::SheetPatch;
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
 
@@ -211,11 +213,13 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
     shared_string_cells: &[SharedStringCells],
     edits: SaveEdits,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
-    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+    let axes = vec![Some(SheetAxes::default()); wb.sheets.len()];
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
         wb,
         package,
         origins,
         shared_string_cells,
+        &axes,
         edits,
         package.active_sheet,
     )
@@ -227,6 +231,32 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
     package: &PreservedPackage,
     origins: &[Option<usize>],
     shared_string_cells: &[SharedStringCells],
+    edits: SaveEdits,
+    active_sheet: SheetId,
+) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+    let axes = vec![Some(SheetAxes::default()); wb.sheets.len()];
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+        wb,
+        package,
+        origins,
+        shared_string_cells,
+        &axes,
+        edits,
+        active_sheet,
+    )
+}
+
+/// `sheet_axes` carries, per current sheet, where its source rows and columns
+/// sit after the row and column edits made since the package was read. Sheets
+/// without one (`None`) are reserialized from the model, as are sheets whose
+/// source cannot be patched cell by cell.
+#[doc(hidden)]
+pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+    wb: &Workbook,
+    package: &PreservedPackage,
+    origins: &[Option<usize>],
+    shared_string_cells: &[SharedStringCells],
+    sheet_axes: &[Option<SheetAxes>],
     edits: SaveEdits,
     active_sheet: SheetId,
 ) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
@@ -349,6 +379,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
             .origin
             .and_then(|origin| package.original_workbook.sheets.get(origin));
         let provenance = shared_string_cells.get(index).unwrap_or(&empty_provenance);
+        let axes = sheet_axes.get(index).and_then(|axes| axes.as_ref());
         let output = match source {
             Some(source) if source.is_worksheet() => {
                 if shared_strings_stable
@@ -364,6 +395,7 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
                     package,
                     provenance,
                     shared_string_plan.as_ref(),
+                    axes,
                 )?
             }
             Some(_) => continue,
@@ -1350,7 +1382,7 @@ where
     Ok(w.into_inner())
 }
 
-fn fragment<F>(f: F) -> Result<Vec<u8>, ParseError>
+pub(crate) fn fragment<F>(f: F) -> Result<Vec<u8>, ParseError>
 where
     F: FnOnce(&mut Writer<Vec<u8>>) -> io::Result<()>,
 {
@@ -2253,14 +2285,14 @@ fn shared_strings_xml_with_template(
     )
 }
 
-struct SharedStringPlan {
+pub(crate) struct SharedStringPlan {
     retained: Vec<Option<usize>>,
     source_to_output: HashMap<usize, usize>,
     generated: HashMap<String, usize>,
 }
 
 impl SharedStringPlan {
-    fn new(
+    pub(crate) fn new(
         original: &[String],
         source_count: usize,
         wb: &Workbook,
@@ -2357,7 +2389,12 @@ impl SharedStringPlan {
         })
     }
 
-    fn index_for(&self, value: &str, source: Option<usize>, values: &[String]) -> Option<usize> {
+    pub(crate) fn index_for(
+        &self,
+        value: &str,
+        source: Option<usize>,
+        values: &[String],
+    ) -> Option<usize> {
         source
             .and_then(|source| self.source_to_output.get(&source).copied())
             .filter(|output| values.get(*output).is_some_and(|stored| stored == value))
@@ -2411,8 +2448,57 @@ struct WorksheetOutput {
     relationships: Option<Vec<Relationship>>,
 }
 
+/// The `<cols>` and `<sheetData>` elements with only the changed columns, rows
+/// and cells rewritten and every other byte kept verbatim. `None` when the
+/// source cannot be patched cell by cell, which reserializes from the model.
+fn patched_grid(
+    sheet: &Sheet,
+    wb: &Workbook,
+    original: &Sheet,
+    source: &PreservedSheet,
+    axes: &SheetAxes,
+    shared_string_cells: &SharedStringCells,
+    shared_string_plan: Option<&SharedStringPlan>,
+) -> Option<(Option<Vec<u8>>, Vec<u8>)> {
+    let mut sst_index: HashMap<&str, usize> = HashMap::with_capacity(wb.shared_strings.len());
+    if shared_string_plan.is_none() {
+        for (index, value) in wb.shared_strings.iter().enumerate() {
+            sst_index.entry(value.as_str()).or_insert(index);
+        }
+    }
+    let patch = SheetPatch {
+        sheet,
+        original,
+        axes,
+        workbook: wb,
+        sst_index: &sst_index,
+        retained: shared_string_cells,
+        plan: shared_string_plan,
+    };
+    let columns = patch
+        .cols(
+            source
+                .template
+                .child("cols")
+                .map(|child| child.bytes.as_slice()),
+        )
+        .ok()?;
+    let sheet_data = match source.template.child("sheetData") {
+        Some(child) => patch.sheet_data(&child.bytes).ok()?,
+        None => None,
+    }
+    .or_else(|| {
+        fragment(|writer| {
+            write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
+        })
+        .ok()
+    })?;
+    Some((columns, sheet_data))
+}
+
 /// Preserved fragments (filters, validations, anchors) keep their source
 /// geometry: valid XML, but stale after a row or column edit.
+#[allow(clippy::too_many_arguments)]
 fn worksheet_xml_with_template(
     sheet: &Sheet,
     wb: &Workbook,
@@ -2421,14 +2507,32 @@ fn worksheet_xml_with_template(
     package: &PreservedPackage,
     shared_string_cells: &SharedStringCells,
     shared_string_plan: Option<&SharedStringPlan>,
+    sheet_axes: Option<&SheetAxes>,
 ) -> Result<WorksheetOutput, ParseError> {
     let template = &source.template;
-    let columns = (!sheet.col_widths.is_empty())
-        .then(|| fragment(|writer| write_cols(writer, sheet)))
-        .transpose()?;
-    let sheet_data = Some(fragment(|writer| {
-        write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
-    })?);
+    let patched = match (original, sheet_axes) {
+        (Some(original), Some(axes)) => patched_grid(
+            sheet,
+            wb,
+            original,
+            source,
+            axes,
+            shared_string_cells,
+            shared_string_plan,
+        ),
+        _ => None,
+    };
+    let (columns, sheet_data) = match patched {
+        Some((columns, sheet_data)) => (columns, Some(sheet_data)),
+        None => (
+            (!sheet.col_widths.is_empty())
+                .then(|| fragment(|writer| write_cols(writer, sheet)))
+                .transpose()?,
+            Some(fragment(|writer| {
+                write_sheet_data(writer, sheet, wb, shared_string_cells, shared_string_plan)
+            })?),
+        ),
+    };
     let merges = (!sheet.merges.is_empty())
         .then(|| fragment(|writer| write_merges(writer, sheet)))
         .transpose()?;
@@ -2706,31 +2810,36 @@ fn active_pane(rows: u32, cols: u32) -> &'static str {
     }
 }
 
-fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
+pub(crate) fn write_cols(w: &mut Writer<Vec<u8>>, sheet: &Sheet) -> io::Result<()> {
     if sheet.col_widths.is_empty() {
         return Ok(());
     }
     w.create_element("cols").write_inner_content(|w| {
         for (&col, &width) in &sheet.col_widths {
-            let n = (col as u64 + 1).to_string();
-            let width = fmt_num(width);
-            let mut element = BytesStart::new("col");
-            element.push_attribute(("min", n.as_str()));
-            element.push_attribute(("max", n.as_str()));
-            element.push_attribute(("width", width.as_str()));
-            element.push_attribute(("customWidth", "1"));
-            if width == "0" {
-                element.push_attribute(("hidden", "1"));
-            }
-            w.write_event(Event::Empty(element))?;
+            write_col(w, col, width)?;
         }
         Ok(())
     })?;
     Ok(())
 }
 
+pub(crate) fn write_col(w: &mut Writer<Vec<u8>>, col: ColId, width: f64) -> io::Result<()> {
+    let n = (u64::from(col) + 1).to_string();
+    let width = fmt_num(width);
+    let mut element = BytesStart::new("col");
+    element.push_attribute(("min", n.as_str()));
+    element.push_attribute(("max", n.as_str()));
+    element.push_attribute(("width", width.as_str()));
+    element.push_attribute(("customWidth", "1"));
+    if width == "0" {
+        element.push_attribute(("hidden", "1"));
+    }
+    w.write_event(Event::Empty(element))?;
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
-fn write_row<'a, I>(
+pub(crate) fn write_row<'a, I>(
     w: &mut Writer<Vec<u8>>,
     sheet: &Sheet,
     row: RowId,
@@ -2756,25 +2865,38 @@ where
     }
     w.write_event(Event::Start(start))?;
     while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
-        let source = retained.get(&(addr.row, addr.col)).copied();
-        let retained = match (&cell.value, shared_string_plan) {
-            (CellValue::Text { value }, Some(plan)) => {
-                plan.index_for(value, source, &wb.shared_strings)
-            }
-            (CellValue::Text { value }, None) => source
-                .filter(|index| wb.shared_strings.get(*index) == Some(value))
-                .or_else(|| sst_index.get(value.as_str()).copied()),
-            _ => None,
-        };
+        let retained = shared_string_index(cell, addr, wb, sst_index, retained, shared_string_plan);
         write_cell(w, addr, cell, sst_index, retained)?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
     Ok(())
 }
 
+/// The shared-string index a cell serializes against: its authored entry when
+/// it still holds it, else the output table.
+pub(crate) fn shared_string_index(
+    cell: &Cell,
+    at: CellRef,
+    wb: &Workbook,
+    sst_index: &HashMap<&str, usize>,
+    retained: &SharedStringCells,
+    shared_string_plan: Option<&SharedStringPlan>,
+) -> Option<usize> {
+    let source = retained.get(&(at.row, at.col)).copied();
+    match (&cell.value, shared_string_plan) {
+        (CellValue::Text { value }, Some(plan)) => {
+            plan.index_for(value, source, &wb.shared_strings)
+        }
+        (CellValue::Text { value }, None) => source
+            .filter(|index| wb.shared_strings.get(*index) == Some(value))
+            .or_else(|| sst_index.get(value.as_str()).copied()),
+        _ => None,
+    }
+}
+
 /// serialize a single cell, choosing the `t` type and body from its value and
 /// whether it carries a formula.
-fn write_cell(
+pub(crate) fn write_cell(
     w: &mut Writer<Vec<u8>>,
     addr: CellRef,
     cell: &Cell,
@@ -3448,7 +3570,7 @@ fn write_stub_fmt_scheme(w: &mut Writer<Vec<u8>>) -> io::Result<()> {
 
 /// format a number the way excel writes cell values: integers without a
 /// trailing `.0`.
-fn fmt_num(n: f64) -> String {
+pub(crate) fn fmt_num(n: f64) -> String {
     if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 {
         return format!("{}", n as i64);
     }

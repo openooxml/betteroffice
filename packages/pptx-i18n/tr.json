@@ -4,6 +4,7 @@
     "label": null,
     "save": "Kaydet",
     "exportPng": null,
+    "present": "Sun",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Slayt gösterisi",
+    "exit": "Sunudan çık (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Önceki slayt",
+    "nextSlide": "Sonraki slayt"
+  },
+  "notes": {
+    "panelLabel": "Konuşmacı notları",
+    "placeholder": "Konuşmacı notu ekle…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Aracı önerileri",
+    "close": "Kapat",
+    "empty": "İncelenmeyi bekleyen değişiklik yok.",
+    "preview": "Değişiklikleri önizle",
+    "previewTitle": "Önerilen değişiklikleri incele",
+    "before": "Geçerli slayt",
+    "after": "Önerilen slayt",
+    "accept": "Öneriyi kabul et",
+    "reject": "Reddet",
+    "force": "Güncellenmiş öneriyi uygula",
+    "blank": "Boş",
+    "target": "Slayt {slide} · {name}",
+    "targetLabel": "Değişiklik",
+    "targetMissing": "Hedef artık kullanılamıyor",
+    "stale": "Öneri oluşturulduktan sonra bu nesneler değişti. Uygulamadan önce geçerli değişiklikleri önizle.",
+    "stalePreview": "Bu önizleme güncellenmiş slaydı kullanıyor. Uygulama, değişen hedeflerin üzerine yazacak.",
+    "geometry": "Konum ve boyut (x, y, genişlik, yükseklik)",
+    "appearance": "Görünüm veya metin biçimlendirmesi değişti",
+    "changedAgain": "Hedef yine değişti. Uygulamadan önce yenilenen önizlemeyi incele.",
+    "canvasTitle": "Bu slayttaki değişiklikler",
+    "editSlide": "Slaydı düzenle",
+    "showDiff": "Değişiklikleri göster",
+    "details": "İnceleme ayrıntıları",
+    "removed": "Kaldırıldı",
+    "added": "Eklendi",
+    "reviewHint": "İnceleme modu · değişiklikler kabul edilince uygulanır",
+    "canvasStale": "Hedefler değişti. Uygulamadan önce güncellenmiş önizlemeyi incelemek için inceleme ayrıntılarını aç.",
+    "previousPosition": "Önceki",
+    "proposedPosition": "Önerilen",
+    "loadingDiff": "Değişiklikler yükleniyor…"
   }
 }

@@ -32,17 +32,17 @@ that contains text.
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.
 
-`0.0.x`: the API may change before `0.1.0`.
+`0.2.x`: the API may change before `1.0`.
 
 ## Limits
 
-`save` re-zips the retained parts: every part's bytes survive unchanged, but the
-ZIP container is rebuilt, so the output is not byte-identical to the input. Yrs
-edits reach the deck snapshot and
-the rendered display lists but are not projected back into PresentationML, so
-added and removed slides and shapes stay live editing and collaboration state
-rather than something you can write to a file. Persisting edited deck state is
-a lower-engine follow-up.
+`save` writes Yrs edits back into PresentationML. Parts an edit did not touch
+keep their exact source bytes; edited slides, notes, and comment parts are
+patched at the XML level, so unmodeled markup — transitions, timing, hyperlinks,
+fields, unknown attributes — survives; inserted and removed slides rewrite
+`presentation.xml`, its relationships, and `[Content_Types].xml`. The ZIP
+container is rebuilt, so the output is not byte-identical to the input even
+without edits.
 
 ## Support matrix
 
@@ -53,6 +53,6 @@ a lower-engine follow-up.
 | Yrs v1 state vectors, diffs, updates, undo, and redo | Yes |
 | Slide display lists and hit testing | Yes |
 | Part-preserving package save | Yes |
-| Persist Yrs edits into PresentationML | Follow-up |
+| Persist Yrs edits into PresentationML | Yes |
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

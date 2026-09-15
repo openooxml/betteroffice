@@ -185,6 +185,7 @@ fn parse_shape(
             transform,
         ),
         geometry: parse_geometry(properties),
+        has_preset_geometry: properties.is_some_and(|value| value.child("prstGeom").is_some()),
         adjust_values: parse_adjust_values(properties, parse_shape_extent(transform)),
         fill: properties.and_then(parse_fill),
         picture_fill: properties

@@ -9,8 +9,9 @@ use xlsx_model::{
 
 use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
 use crate::{
-    ParseError, SaveEdits, SharedStringCells, parse_workbook, parse_workbook_with_package,
-    serialize_workbook,
+    ParseError, SaveEdits, SharedStringCells, SheetAxes, parse_workbook,
+    parse_workbook_with_package, serialize_workbook,
+    serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
 
 /// assemble a one-sheet package around a worksheet body and optional shared
@@ -1296,6 +1297,187 @@ fn keeps_worksheet_bytes_across_a_rename() {
             .unwrap()
             .contains(r#"name="Renamed""#)
     );
+}
+
+const MARKUP_COLS: &str = concat!(
+    r#"<cols>"#,
+    r#"<col min="1" max="2" width="12" customWidth="1" style="3" outlineLevel="1" bestFit="1" x:custom="keep"/>"#,
+    r#"<col min="3" max="3" width="9" hidden="1"/>"#,
+    r#"</cols>"#,
+);
+const MARKUP_ROW_1: &str = concat!(
+    r#"<row r="1" spans="1:4" s="2" customFormat="1" ht="20" customHeight="1" thickTop="1" thickBot="1" ph="1" x14ac:dyDescent="0.25">"#,
+    r#"<c r="A1" s="1" cm="1" vm="2"><f t="array" ref="A1">ROW()</f><v>1</v></c>"#,
+    r#"<c r="B1" t="inlineStr" ph="1"><is><r><rPr><b/></rPr><t>Rich</t></r><r><t xml:space="preserve"> text</t></r><rPh sb="0" eb="4"><t>Furigana</t></rPh></is></c>"#,
+    r#"<c r="D1" x:pin="1"><v>4</v><extLst><ext uri="{cell}"><x:marker/></ext></extLst></c>"#,
+    r#"</row>"#,
+);
+const MARKUP_ROW_2: &str = concat!(
+    r#"<row r="2" hidden="1" outlineLevel="2" collapsed="1">"#,
+    r#"<c r="A2"><f t="shared" si="0" ref="A2:A3">2*2</f><v>4</v></c>"#,
+    r#"<c r="B2" t="s"><v>0</v></c>"#,
+    r#"<extLst><ext uri="{row}"><x:rowMarker/></ext></extLst>"#,
+    r#"</row>"#,
+);
+const MARKUP_ROW_3: &str =
+    r#"<row r="3"><c r="A3"><f t="shared" si="0"/><v>4</v></c><c r="D3" s="4"/></row>"#;
+const MARKUP_SHEETDATA_EXT: &str = r#"<extLst><ext uri="{sheetData}"><x:marker/></ext></extLst>"#;
+
+/// Two sheets whose first carries every row, column and cell attribute and
+/// child the model does not represent.
+fn markup_package() -> Vec<(String, Vec<u8>)> {
+    let root = concat!(
+        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" "#,
+        r#"xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" "#,
+        r#"xmlns:x="urn:fixture-extension">"#,
+    );
+    let first = format!(
+        "{root}{MARKUP_COLS}<sheetData>{MARKUP_ROW_1}{MARKUP_ROW_2}{MARKUP_ROW_3}{MARKUP_SHEETDATA_EXT}</sheetData></worksheet>"
+    );
+    let mut parts = two_sheet_package("", r#"<sheetData><row r="1" hidden="1"/></sheetData>"#);
+    parts[2].1 = first.into_bytes();
+    parts.push((
+        "xl/sharedStrings.xml".to_owned(),
+        br#"<sst><si><t>Total</t></si></sst>"#.to_vec(),
+    ));
+    parts
+}
+
+fn set_number(workbook: &mut Workbook, sheet: usize, address: &str, value: f64) {
+    workbook.sheets[sheet].set_cell(
+        CellRef::parse_a1(address).unwrap(),
+        Cell {
+            value: CellValue::Number { value },
+            ..Cell::default()
+        },
+    );
+}
+
+fn sheet_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+    String::from_utf8(part_bytes(parts, path)).unwrap()
+}
+
+/// An edit to one cell rewrites that cell; every other row, column and cell
+/// keeps the markup the model does not represent, byte for byte.
+#[test]
+fn edited_sheet_keeps_unmodeled_row_column_and_cell_markup() {
+    let parts = markup_package();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    set_number(&mut workbook, 0, "D2", 7.0);
+    workbook.sheets[0].row_heights.insert(2, 30.0);
+    let saved = serialize_workbook_with_package(&workbook, &parsed.package).unwrap();
+
+    let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains(MARKUP_COLS), "{sheet}");
+    assert!(sheet.contains(MARKUP_ROW_1), "{sheet}");
+    assert!(sheet.contains(MARKUP_SHEETDATA_EXT), "{sheet}");
+    let row_2 = MARKUP_ROW_2.replace(
+        r#"<c r="B2" t="s"><v>0</v></c>"#,
+        r#"<c r="B2" t="s"><v>0</v></c><c r="D2"><v>7</v></c>"#,
+    );
+    assert!(sheet.contains(&row_2), "{sheet}");
+    let row_3 = MARKUP_ROW_3.replace(r#"<row r="3">"#, r#"<row r="3" ht="30" customHeight="1">"#);
+    assert!(sheet.contains(&row_3), "{sheet}");
+    assert_eq!(
+        part_bytes(&saved, "xl/worksheets/sheet2.xml"),
+        part_bytes(&parts, "xl/worksheets/sheet2.xml")
+    );
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "D2").value,
+        CellValue::Number { value: 7.0 }
+    );
+    assert_eq!(cell_at(&reopened, "A3").formula.as_deref(), Some("2*2"));
+    assert_eq!(reopened.sheets[0].row_heights.get(&2), Some(&30.0));
+    assert_eq!(reopened.sheets[0].col_widths.get(&2), Some(&0.0));
+    for address in ["A1", "B1", "D1", "A2", "B2", "A3", "D3"] {
+        assert_eq!(cell_at(&reopened, address), cell_at(&workbook, address));
+    }
+}
+
+/// A row insert shifts preserved rows down: their unmodeled markup moves with
+/// them while only `r` (and the array `ref` tied to it) is rewritten.
+#[test]
+fn row_insert_shifts_preserved_row_and_cell_markup() {
+    let parts = markup_package();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let mut workbook = parsed.workbook.clone();
+    let cells: Vec<(CellRef, Cell)> = workbook.sheets[0]
+        .iter_cells()
+        .map(|(at, cell)| (at, cell.clone()))
+        .collect();
+    for (at, _) in &cells {
+        workbook.sheets[0].set_cell(*at, Cell::default());
+    }
+    for (at, cell) in cells {
+        workbook.sheets[0].set_cell(CellRef::new(at.row + 1, at.col), cell);
+    }
+    let heights: Vec<(u32, f64)> = workbook.sheets[0]
+        .row_heights
+        .iter()
+        .map(|(&row, &height)| (row, height))
+        .collect();
+    workbook.sheets[0].row_heights.clear();
+    for (row, height) in heights {
+        workbook.sheets[0].row_heights.insert(row + 1, height);
+    }
+    let mut provenance = vec![SharedStringCells::new(); 2];
+    for ((row, col), index) in parsed.package.source_shared_string_cells(0) {
+        provenance[0].insert((row + 1, col), index);
+    }
+    let mut axes = vec![Some(SheetAxes::default()), Some(SheetAxes::default())];
+    axes[0].as_mut().unwrap().rows.insert(0, 1);
+    let saved = serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+        &workbook,
+        &parsed.package,
+        &[Some(0), Some(1)],
+        &provenance,
+        &axes,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+        SheetId(0),
+    )
+    .unwrap();
+
+    let sheet = sheet_text(&saved, "xl/worksheets/sheet1.xml");
+    assert!(sheet.contains(MARKUP_COLS), "{sheet}");
+    assert!(sheet.contains(MARKUP_SHEETDATA_EXT), "{sheet}");
+    assert!(!sheet.contains(r#"<row r="1""#), "{sheet}");
+    let row_1 = MARKUP_ROW_1
+        .replace(r#"<row r="1""#, r#"<row r="2""#)
+        .replace(r#"r="A1""#, r#"r="A2""#)
+        .replace(r#"ref="A1""#, r#"ref="A2""#)
+        .replace(r#"r="B1""#, r#"r="B2""#)
+        .replace(r#"r="D1""#, r#"r="D2""#);
+    assert!(sheet.contains(&row_1), "{sheet}");
+    let row_2 = MARKUP_ROW_2
+        .replace(r#"<row r="2""#, r#"<row r="3""#)
+        .replace(r#"r="A2""#, r#"r="A3""#)
+        .replace(r#"ref="A2:A3""#, r#"ref="A3:A4""#)
+        .replace(r#"r="B2""#, r#"r="B3""#);
+    assert!(sheet.contains(&row_2), "{sheet}");
+    let row_3 = MARKUP_ROW_3
+        .replace(r#"<row r="3""#, r#"<row r="4""#)
+        .replace(r#"r="A3""#, r#"r="A4""#)
+        .replace(r#"r="D3""#, r#"r="D4""#);
+    assert!(sheet.contains(&row_3), "{sheet}");
+    assert_eq!(
+        part_bytes(&saved, "xl/worksheets/sheet2.xml"),
+        part_bytes(&parts, "xl/worksheets/sheet2.xml")
+    );
+
+    let reopened = parse_workbook(&saved).unwrap();
+    assert_eq!(
+        cell_at(&reopened, "A2").value,
+        CellValue::Number { value: 1.0 }
+    );
+    assert_eq!(cell_at(&reopened, "A3").formula.as_deref(), Some("2*2"));
+    assert_eq!(cell_at(&reopened, "A4").formula.as_deref(), Some("2*2"));
+    assert_eq!(reopened.sheets[0].row_heights.get(&1), Some(&20.0));
 }
 
 /// Several local `_xlnm.Print_Area` entries are normal, and the model has no

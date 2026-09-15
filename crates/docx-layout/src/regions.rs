@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -634,6 +635,14 @@ pub fn effective_header_footer_refs(
     .then_some(effective)
 }
 
+/// Resolved PAGE field text for one page.
+pub(crate) fn page_field_text(page_label: Option<&str>, page_number: u64) -> Cow<'_, str> {
+    match page_label {
+        Some(label) => Cow::Borrowed(label),
+        None => Cow::Owned(page_number.to_string()),
+    }
+}
+
 pub(crate) fn format_number(number: i64, format: &str) -> String {
     match format {
         "decimalZero" => format!("{number:02}"),
@@ -782,7 +791,7 @@ mod tests {
                 w: 816.0,
                 h: 1056.0,
             },
-            pages: vec![page(1, 0), page(2, 0), page(3, 1)],
+            pages: vec![page(1, 0), page(2, 0), page(3, 1), page(4, 2)],
             columns: None,
             headers: None,
             footers: None,
@@ -808,6 +817,10 @@ mod tests {
                     footer_distance: Some(18.0),
                     ..RegionSection::default()
                 },
+                RegionSection {
+                    section_id: Some("c".to_owned()),
+                    ..RegionSection::default()
+                },
             ],
             ..DocumentRegions::default()
         };
@@ -821,6 +834,62 @@ mod tests {
         assert_eq!(layout.pages[2].section_page_index, Some(0));
         assert_eq!(layout.pages[2].page_label.as_deref(), Some("a"));
         assert_eq!(layout.pages[2].footer_distance, Some(18.0));
+        assert_eq!(layout.pages[3].section_page_index, Some(0));
+        assert_eq!(layout.pages[3].section_page_number, None);
+        assert_eq!(layout.pages[3].page_label, None);
+        assert_eq!(
+            page_field_text(
+                layout.pages[3].page_label.as_deref(),
+                layout.pages[3].number as u64
+            )
+            .as_ref(),
+            "4"
+        );
+    }
+
+    #[test]
+    fn restart_and_roman_labels_match_pg_num_type() {
+        let mut layout = Layout {
+            page_size: Size {
+                w: 816.0,
+                h: 1056.0,
+            },
+            pages: vec![page(1, 0), page(2, 0), page(3, 1), page(4, 1)],
+            columns: None,
+            headers: None,
+            footers: None,
+            page_gap: Some(20.0),
+        };
+        let regions = DocumentRegions {
+            sections: vec![
+                RegionSection {
+                    section_id: Some("a".to_owned()),
+                    page_numbering: Some(PageNumbering {
+                        start: Some(5),
+                        format: Some("decimal".to_owned()),
+                    }),
+                    ..RegionSection::default()
+                },
+                RegionSection {
+                    section_id: Some("b".to_owned()),
+                    page_numbering: Some(PageNumbering {
+                        start: None,
+                        format: Some("lowerRoman".to_owned()),
+                    }),
+                    ..RegionSection::default()
+                },
+            ],
+            ..DocumentRegions::default()
+        };
+
+        apply_document_regions(&mut layout, &regions);
+
+        assert_eq!(layout.pages[0].section_page_number, Some(5));
+        assert_eq!(layout.pages[0].page_label.as_deref(), Some("5"));
+        assert_eq!(layout.pages[1].page_label.as_deref(), Some("6"));
+        assert_eq!(layout.pages[2].section_page_number, Some(1));
+        assert_eq!(layout.pages[2].page_label.as_deref(), Some("i"));
+        assert_eq!(layout.pages[3].page_label.as_deref(), Some("ii"));
     }
 
     #[test]

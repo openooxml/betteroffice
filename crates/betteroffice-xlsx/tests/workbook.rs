@@ -432,6 +432,230 @@ fn saved_sheet_text(workbook: &Workbook) -> String {
         .unwrap()
 }
 
+/// A first sheet carrying every row, column and cell attribute and child the
+/// model does not represent, beside a plain second sheet.
+fn markup_round_trip_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    model.sheets.push(Sheet::new("Other"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="12" customWidth="1" style="1" outlineLevel="1"/><col min="3" max="3" width="9" hidden="1"/></cols><sheetData><row r="1" spans="1:3" s="1" customFormat="1" ht="20" customHeight="1" x14ac:dyDescent="0.25" xmlns:x14ac="http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac"><c r="A1" cm="1" vm="2"><v>1</v></c><c r="B1" t="inlineStr" ph="1"><is><r><rPr><b/></rPr><t>Rich</t></r></is></c><c r="C1"><v>3</v><extLst><ext uri="{cell}"><x:marker xmlns:x="urn:fixture-extension"/></ext></extLst></c></row><row r="2" hidden="1" outlineLevel="1"><c r="A2"><v>4</v></c><extLst><ext uri="{row}"/></extLst></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+#[test]
+fn edited_sheet_keeps_unmodeled_row_column_and_cell_markup() {
+    let original = markup_round_trip_fixture();
+    let before = package_map(&original);
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(SheetId(0), cell("C1"), "30", CalculationOptions::default())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let after = package_map(&saved);
+    let sheet = String::from_utf8(after["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        sheet.contains(
+            r#"<col min="1" max="1" width="12" customWidth="1" style="1" outlineLevel="1"/>"#
+        ),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<col min="3" max="3" width="9" hidden="1"/>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<row r="1" spans="1:3" s="1" customFormat="1""#),
+        "{sheet}"
+    );
+    assert!(sheet.contains(r#"x14ac:dyDescent="0.25""#), "{sheet}");
+    assert!(
+        sheet.contains(r#"<c r="A1" cm="1" vm="2"><v>1</v></c>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<c r="B1" t="inlineStr" ph="1"><is><r><rPr><b/></rPr><t>Rich</t></r></is></c>"#
+        ),
+        "{sheet}"
+    );
+    assert!(sheet.contains(r#"<c r="C1"><v>30</v></c>"#), "{sheet}");
+    assert!(
+        sheet.contains(
+            r#"<row r="2" hidden="1" outlineLevel="1"><c r="A2"><v>4</v></c><extLst><ext uri="{row}"/></extLst></row>"#
+        ),
+        "{sheet}"
+    );
+    assert_eq!(
+        after["xl/worksheets/sheet2.xml"],
+        before["xl/worksheets/sheet2.xml"]
+    );
+
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened
+            .model()
+            .sheet(SheetId(0))
+            .unwrap()
+            .cell(cell("C1"))
+            .unwrap()
+            .value,
+        CellValue::Number { value: 30.0 }
+    );
+}
+
+#[test]
+fn overlapping_column_declarations_keep_source_order_on_unrelated_edit() {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="2" max="3" width="20" customWidth="1"/><col min="1" max="2" width="10" customWidth="1" hidden="1"/></cols><sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData></worksheet>"#.to_vec(),
+    );
+    let original = ooxml_opc::rezip_parts(&parts).unwrap();
+    let mut workbook = Workbook::open(&original).unwrap();
+    let before = workbook
+        .model()
+        .sheet(SheetId(0))
+        .unwrap()
+        .col_widths
+        .clone();
+    assert_eq!(before.get(&0), Some(&0.0));
+    assert_eq!(before.get(&1), Some(&0.0));
+    assert_eq!(before.get(&2), Some(&20.0));
+    workbook
+        .edit_cell(SheetId(0), cell("D1"), "7", CalculationOptions::default())
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let sheet = String::from_utf8(package_map(&saved)["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        sheet.find(r#"min="2""#).unwrap() < sheet.find(r#"min="1""#).unwrap(),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    assert_eq!(
+        reopened.model().sheet(SheetId(0)).unwrap().col_widths,
+        before
+    );
+}
+
+#[test]
+fn prefixed_sheet_binds_generated_cells_to_the_sheet_namespace() {
+    let original = strict_prefixed_fixture();
+    let strict_main = "http://purl.oclc.org/ooxml/spreadsheetml/main";
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("A1"),
+            "=1+2",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .edit_cell(
+            SheetId(0),
+            cell("B2"),
+            "hello",
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::SetColWidth {
+                sheet: SheetId(0),
+                col: 2,
+                width: Some(20.0),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let saved = workbook.save().unwrap();
+    let sheet = String::from_utf8(package_map(&saved)["xl/worksheets/sheet1.xml"].clone()).unwrap();
+    assert!(
+        sheet.contains(&format!(r#"<s:sheetData xmlns="{strict_main}">"#)),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<c r="A1"><f>1+2</f><v>3</v></c>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<row r="2"><c r="B2" t="inlineStr"><is><t xml:space="preserve">hello</t></is></c></row>"#
+        ),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(&format!(r#"<cols xmlns="{strict_main}"><col min="3""#)),
+        "{sheet}"
+    );
+    let reopened = Workbook::open(&saved).unwrap();
+    let sheet_model = reopened.model().sheet(SheetId(0)).unwrap().clone();
+    assert_eq!(
+        sheet_model.cell(cell("A1")).unwrap().formula.as_deref(),
+        Some("1+2")
+    );
+    assert_eq!(
+        sheet_model.cell(cell("B2")).unwrap().value,
+        CellValue::Text {
+            value: "hello".to_owned()
+        }
+    );
+    assert_eq!(sheet_model.col_widths.get(&2), Some(&20.0));
+}
+
+#[test]
+fn row_insert_carries_preserved_markup_to_shifted_rows() {
+    let original = markup_round_trip_fixture();
+    let mut workbook = Workbook::open(&original).unwrap();
+    workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    let sheet = saved_sheet_text(&workbook);
+    assert!(!sheet.contains(r#"<row r="1""#), "{sheet}");
+    assert!(
+        sheet.contains(r#"<row r="2" spans="1:3" s="1" customFormat="1""#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(r#"<c r="A2" cm="1" vm="2"><v>1</v></c>"#),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<c r="C2"><v>3</v><extLst><ext uri="{cell}"><x:marker xmlns:x="urn:fixture-extension"/></ext></extLst></c>"#
+        ),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<row r="3" hidden="1" outlineLevel="1"><c r="A3"><v>4</v></c><extLst><ext uri="{row}"/></extLst></row>"#
+        ),
+        "{sheet}"
+    );
+    assert!(
+        sheet.contains(
+            r#"<col min="1" max="1" width="12" customWidth="1" style="1" outlineLevel="1"/>"#
+        ),
+        "{sheet}"
+    );
+    Workbook::open(&workbook.save().unwrap()).unwrap();
+}
+
 fn set_test_part(parts: &mut [(String, Vec<u8>)], path: &str, bytes: Vec<u8>) {
     parts.iter_mut().find(|(name, _)| name == path).unwrap().1 = bytes;
 }
@@ -4469,14 +4693,12 @@ fn strict_prefixed_templates_keep_namespaces_relationships_and_mc_order() {
     let worksheet = String::from_utf8(parts["xl/worksheets/sheet1.xml"].clone()).unwrap();
     assert!(worksheet.contains(r#"<x:sheetData marker="keep"/>"#));
     assert!(
-        worksheet.find("<mc:AlternateContent").unwrap()
-            < worksheet
-                .find(&format!("<sheetData {strict_main}"))
-                .unwrap()
+        worksheet.find("<mc:AlternateContent").unwrap() < worksheet.find("sheetData>").unwrap()
     );
-    assert!(worksheet.contains("<row r=\"1\""));
-    assert!(worksheet.contains("<c r=\"A1\""));
-    assert!(!worksheet.contains("<s:sheetData"));
+    assert!(worksheet.contains("row r=\"1\""));
+    assert!(worksheet.contains("c r=\"A1\""));
+    assert!(worksheet.contains("<v>2</v>"));
+    assert!(worksheet.contains("<s:sheetData"));
     let relationships = String::from_utf8(parts["xl/_rels/workbook.xml.rels"].clone()).unwrap();
     assert_eq!(
         relationships

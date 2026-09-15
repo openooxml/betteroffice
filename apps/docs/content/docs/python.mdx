@@ -60,8 +60,11 @@ so they run in parallel across threads instead of serializing your workers.
 `save()` returns bytes and `save_path()` writes a file. The parts the model does
 not represent — charts, pivot tables, comments, macros, custom XML — are kept,
 and sheets an edit did not touch are copied through byte for byte. A sheet you do
-edit is reserialized from the model, so unmodeled markup on that one sheet is
-lost.
+edit keeps its unmodeled row, column, and cell markup: only the cells, rows, and
+columns the edit actually changed are rewritten, and the rest of the sheet is
+kept byte for byte. A sheet whose rows or cells lack `r` attributes or arrive out of
+order, or that was replayed from collaboration updates, is reserialized from the
+model instead.
 
 ## Collaboration and agent proposals
 

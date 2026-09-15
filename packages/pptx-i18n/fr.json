@@ -4,6 +4,7 @@
     "label": null,
     "save": "Enregistrer",
     "exportPng": null,
+    "present": "Présenter",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Présentation",
+    "exit": "Quitter la présentation (Échap)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Diapositive précédente",
+    "nextSlide": "Diapositive suivante"
+  },
+  "notes": {
+    "panelLabel": "Notes du présentateur",
+    "placeholder": "Ajouter des notes du présentateur…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Propositions de l'agent",
+    "close": "Fermer",
+    "empty": "Aucune modification en attente de révision.",
+    "preview": "Prévisualiser les modifications",
+    "previewTitle": "Vérifier les modifications proposées",
+    "before": "Diapositive actuelle",
+    "after": "Diapositive proposée",
+    "accept": "Accepter la proposition",
+    "reject": "Refuser",
+    "force": "Appliquer la proposition mise à jour",
+    "blank": "Vide",
+    "target": "Diapositive {slide} · {name}",
+    "targetLabel": "Modification",
+    "targetMissing": "La cible n'est plus disponible",
+    "stale": "Ces objets ont été modifiés après la création de la proposition. Vérifiez les modifications actuelles avant de les appliquer.",
+    "stalePreview": "Cet aperçu utilise la diapositive mise à jour. L'application remplacera les cibles modifiées.",
+    "geometry": "Position et taille (x, y, largeur, hauteur)",
+    "appearance": "Apparence ou mise en forme du texte modifiée",
+    "changedAgain": "La cible a encore changé. Vérifiez l'aperçu actualisé avant d'appliquer.",
+    "canvasTitle": "Modifications sur cette diapositive",
+    "editSlide": "Modifier la diapositive",
+    "showDiff": "Afficher les modifications",
+    "details": "Détails de la révision",
+    "removed": "Supprimé",
+    "added": "Ajouté",
+    "reviewHint": "Mode révision · les modifications s'appliquent une fois acceptées",
+    "canvasStale": "Cibles modifiées. Ouvrez les détails de la révision pour inspecter l'aperçu mis à jour avant d'appliquer.",
+    "previousPosition": "Avant",
+    "proposedPosition": "Proposé",
+    "loadingDiff": "Chargement des modifications…"
   }
 }

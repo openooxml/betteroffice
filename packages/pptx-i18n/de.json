@@ -4,6 +4,7 @@
     "label": null,
     "save": "Speichern",
     "exportPng": null,
+    "present": "Präsentieren",
     "historyLabel": null,
     "undo": null,
     "redo": null,
@@ -96,7 +97,50 @@
   "objects": {
     "defaultTextBoxName": null
   },
+  "presentation": {
+    "label": "Präsentation",
+    "exit": "Präsentation beenden (Esc)",
+    "slideCounter": "{current} / {total}",
+    "previousSlide": "Vorherige Folie",
+    "nextSlide": "Nächste Folie"
+  },
+  "notes": {
+    "panelLabel": "Sprechernotizen",
+    "placeholder": "Sprechernotizen hinzufügen…"
+  },
   "errors": {
     "decodeSlideImage": null
+  },
+  "proposals": {
+    "title": "Agent-Vorschläge",
+    "close": "Schließen",
+    "empty": "Keine Änderungen zur Überprüfung.",
+    "preview": "Vorschau der Änderungen",
+    "previewTitle": "Vorgeschlagene Änderungen überprüfen",
+    "before": "Aktuelle Folie",
+    "after": "Vorgeschlagene Folie",
+    "accept": "Vorschlag annehmen",
+    "reject": "Ablehnen",
+    "force": "Aktualisierten Vorschlag übernehmen",
+    "blank": "Leer",
+    "target": "Folie {slide} · {name}",
+    "targetLabel": "Änderung",
+    "targetMissing": "Das Ziel ist nicht mehr verfügbar",
+    "stale": "Diese Objekte wurden geändert, nachdem der Vorschlag erstellt wurde. Sehen Sie sich vor dem Übernehmen die aktuellen Änderungen an.",
+    "stalePreview": "Diese Vorschau verwendet die aktualisierte Folie. Beim Übernehmen werden die geänderten Ziele überschrieben.",
+    "geometry": "Position und Größe (x, y, Breite, Höhe)",
+    "appearance": "Darstellung oder Textformatierung geändert",
+    "changedAgain": "Das Ziel hat sich erneut geändert. Prüfen Sie vor dem Übernehmen die aktualisierte Vorschau.",
+    "canvasTitle": "Änderungen auf dieser Folie",
+    "editSlide": "Folie bearbeiten",
+    "showDiff": "Änderungen anzeigen",
+    "details": "Details zur Überprüfung",
+    "removed": "Entfernt",
+    "added": "Hinzugefügt",
+    "reviewHint": "Überprüfungsmodus · Änderungen werden beim Annehmen übernommen",
+    "canvasStale": "Ziele haben sich geändert. Öffnen Sie die Details zur Überprüfung, um die aktualisierte Vorschau vor dem Übernehmen zu prüfen.",
+    "previousPosition": "Vorher",
+    "proposedPosition": "Vorgeschlagen",
+    "loadingDiff": "Änderungen werden geladen…"
   }
 }

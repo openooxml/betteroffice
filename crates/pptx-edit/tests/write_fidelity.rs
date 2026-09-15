@@ -4,7 +4,9 @@
 
 use std::collections::BTreeMap;
 
-use pptx_edit::{CommentFlavor, DeckSession, EditCtx, EditError, TextStyle};
+use pptx_edit::{
+    CommentFlavor, DeckSession, EditCtx, EditError, PresetShapeDraft, ShapeRect, TextStyle,
+};
 
 const CONTENT_TYPES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
@@ -57,6 +59,9 @@ const SLIDE1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sp><p:nvSpPr><p:cNvPr id="7" name="Tracked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm></p:spPr>
 <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr spc="300"/><a:t>Wide</a:t></a:r><a:r><a:rPr spc="300" b="1"/><a:t>Caps</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="8" name="Linked"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="3000" cy="400"/></a:xfrm></p:spPr>
+<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>the docs</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r><a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p></p:txBody></p:sp>
 </p:spTree></p:cSld></p:sld>"#;
 
 const SLIDE1_RELS: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -685,6 +690,213 @@ fn an_edit_spanning_two_runs_keeps_both_baselines() {
     );
 }
 
+const LINK_RUN: &str = r#"<a:r><a:rPr lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr>"#;
+const SLIDE_NUMBER_FIELD: &str = r#"<a:fld id="{5C2A3F1E-8B7D-4C6A-9E0F-1A2B3C4D5E6F}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#;
+
+fn linked_story(session: &DeckSession) -> String {
+    session.snapshot().unwrap().slides[0]
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Linked")
+        .unwrap()
+        .text_stories[0]
+        .id
+        .clone()
+}
+
+fn linked_shape_xml(saved: &[u8]) -> String {
+    part_text(&parts(saved), "ppt/slides/slide1.xml")
+        .split(r#"name="Linked""#)
+        .nth(1)
+        .unwrap()
+        .split("</p:sp>")
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn linked_runs(saved: &[u8]) -> Vec<(String, Option<String>, Option<bool>)> {
+    let package = pptx_parse::parse_pptx(saved).unwrap();
+    let shape = package.slides[0]
+        .shapes
+        .iter()
+        .find_map(|node| match node {
+            pptx_parse::ShapeNode::Shape(shape) if shape.base.name == "Linked" => Some(shape),
+            _ => None,
+        })
+        .unwrap();
+    shape.text.as_ref().unwrap().paragraphs[0]
+        .runs
+        .iter()
+        .map(|run| {
+            (
+                run.text.clone(),
+                run.properties.hyperlink_relationship_id.clone(),
+                run.properties.bold,
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn an_edit_spanning_plain_and_linked_runs_keeps_the_link_and_the_field() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 3, 4).unwrap();
+    session.delete_text(&context(), &story_id, 10, 11).unwrap();
+    session.delete_text(&context(), &story_id, 11, 16).unwrap();
+    session
+        .insert_text(&context(), &story_id, 11, "now", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>See</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the doc</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t> now </a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See".to_owned(), None, None),
+            ("the doc".to_owned(), Some("rId2".to_owned()), None),
+            (" now ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "Seethe doc now 1"
+    );
+}
+
+#[test]
+fn a_field_in_an_edited_span_keeps_its_binding_until_its_text_changes() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 13, 18).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>  </a:t></a:r>"#),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs  1"
+    );
+
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 19, 20).unwrap();
+    session
+        .insert_text(&context(), &story_id, 19, "2", &TextStyle::default())
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("<a:fld"), "{shape}");
+    assert!(
+        shape.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>2</a:t></a:r>"#),
+        "{shape}"
+    );
+    assert!(
+        shape.contains(&format!("{LINK_RUN}<a:t>the docs</a:t></a:r>")),
+        "{shape}"
+    );
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docs today 2"
+    );
+}
+
+#[test]
+fn text_typed_at_the_end_of_a_link_stays_linked() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session
+        .insert_text(
+            &context(),
+            &story_id,
+            12,
+            "X",
+            &TextStyle {
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+        )
+        .unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(
+        shape.contains(&format!(
+            r#"{LINK_RUN}<a:t>the docs</a:t></a:r><a:r><a:rPr b="1" lang="en-US"><a:hlinkClick r:id="rId2"/></a:rPr><a:t>X</a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        )),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+    assert_eq!(
+        linked_runs(&saved),
+        vec![
+            ("See ".to_owned(), None, None),
+            ("the docs".to_owned(), Some("rId2".to_owned()), None),
+            ("X".to_owned(), Some("rId2".to_owned()), Some(true)),
+            (" today ".to_owned(), None, None),
+            ("1".to_owned(), None, None),
+        ]
+    );
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See the docsX today 1"
+    );
+}
+
+#[test]
+fn deleting_a_linked_run_drops_its_link() {
+    let session = open();
+    let story_id = linked_story(&session);
+    session.delete_text(&context(), &story_id, 4, 12).unwrap();
+
+    let saved = session.save().unwrap();
+    let shape = linked_shape_xml(&saved);
+    assert!(!shape.contains("hlinkClick"), "{shape}");
+    assert!(
+        shape.contains(
+            r#"<a:r><a:rPr lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today </a:t></a:r>"#
+        ),
+        "{shape}"
+    );
+    assert!(shape.contains(SLIDE_NUMBER_FIELD), "{shape}");
+
+    let reopened = DeckSession::open(&saved, 12).unwrap();
+    assert_eq!(
+        reopened.story(&story_id).unwrap().plain_text(),
+        "See  today 1"
+    );
+}
+
 #[test]
 fn deleting_a_slide_prunes_its_notes_and_custom_show_entry() {
     let session = open();
@@ -758,6 +970,158 @@ fn an_exhausted_slide_id_space_errors_instead_of_panicking() {
     session.insert_slide(&context(), 2, None).unwrap();
     let error = session.save().unwrap_err();
     assert!(matches!(error, EditError::Write(message) if message.contains("slide id")));
+}
+
+const CUSTOM_SHAPE: &str = r#"<p:sp><p:nvSpPr><p:cNvPr id="8" name="Custom"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="10" y="20"/><a:ext cx="300" cy="400"/></a:xfrm><a:custGeom><a:avLst/><a:gdLst/><a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="21600" b="21600"/><a:pathLst><a:path w="21600" h="21600"><a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="21600" y="0"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Custom</a:t></a:r></a:p></p:txBody></p:sp>"#;
+
+fn cust_geom_fixture() -> Vec<u8> {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace("</p:spTree>", &format!("{CUSTOM_SHAPE}</p:spTree>"));
+        }
+    }
+    zip(part_list)
+}
+
+#[test]
+fn adjust_edits_on_custom_geometry_are_refused_and_leave_state_untouched() {
+    let session = DeckSession::open(&cust_geom_fixture(), 11).unwrap();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let shape = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Custom")
+        .unwrap();
+    assert_eq!(shape.geometry, "custom");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &shape.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+}
+
+#[test]
+fn adjust_edits_on_shapes_without_preset_geometry_are_refused() {
+    let session = open();
+    let snapshot = session.snapshot().unwrap();
+    let slide = &snapshot.slides[0];
+    let missing = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Tracked")
+        .unwrap();
+    assert_eq!(missing.geometry, "rect");
+    let before = session.snapshot().unwrap();
+    let mut adjustments = BTreeMap::new();
+    adjustments.insert("adj".to_owned(), 0.25);
+    let error = session
+        .set_shape_adjust(&context(), &slide.id, &missing.id, &adjustments)
+        .unwrap_err();
+    assert!(matches!(error, EditError::InvalidGeometry(_)));
+    assert_eq!(session.snapshot().unwrap(), before);
+
+    let preset = slide
+        .shapes
+        .iter()
+        .find(|shape| shape.name == "Box")
+        .unwrap();
+    assert_eq!(preset.geometry, "roundRect");
+    session
+        .set_shape_adjust(&context(), &slide.id, &preset.id, &adjustments)
+        .unwrap();
+}
+
+#[test]
+fn an_exhausted_shape_id_space_errors_instead_of_panicking() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list), 11).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(matches!(error, EditError::Write(message) if message.contains("shape id")));
+}
+
+#[test]
+fn an_exhausted_shape_id_space_still_saves_edits_that_allocate_nothing() {
+    let mut part_list = fixture_parts(256);
+    for (path, body) in part_list.iter_mut() {
+        if path == "ppt/slides/slide1.xml" {
+            *body = body.replace(
+                r#"<p:cNvPr id="7" name="Tracked""#,
+                r#"<p:cNvPr id="4294967295" name="Tracked""#,
+            );
+        }
+    }
+    let session = DeckSession::open(&zip(part_list.clone()), 11).unwrap();
+    let story_id = tracked_story(&session);
+    session
+        .insert_text(&context(), &story_id, 0, "X", &TextStyle::default())
+        .unwrap();
+    let saved = session.save().unwrap();
+    let slide = part_text(&parts(&saved), "ppt/slides/slide1.xml");
+    assert!(slide.contains("<a:t>X</a:t>"), "{slide}");
+    let reopened = DeckSession::open(&saved, 13).unwrap();
+    assert_eq!(
+        reopened
+            .story(&tracked_story(&reopened))
+            .unwrap()
+            .plain_text(),
+        "XWideCaps"
+    );
+
+    let session = DeckSession::open(&zip(part_list), 12).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    session
+        .add_shape(
+            &context(),
+            &slide_id,
+            &PresetShapeDraft {
+                name: "Overflow".to_owned(),
+                geometry: "rect".to_owned(),
+                rect: ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                fill: None,
+            },
+        )
+        .unwrap();
+    let error = session.save().unwrap_err();
+    assert!(
+        matches!(error, EditError::Write(ref message) if message.contains("shape id space is exhausted")),
+        "{error:?}"
+    );
 }
 
 #[test]
