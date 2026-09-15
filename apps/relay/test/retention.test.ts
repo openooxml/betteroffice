@@ -1,4 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
+import { MAX_AWARENESS_PAYLOAD_BYTES } from "../../../shared/collaboration-limits";
 import { decodeMessages } from "../../../packages/docx/src/collaboration/protocol";
 import { RetainedUpdateLog, classifyFrame } from "../src/retention";
 
@@ -235,6 +236,23 @@ describe("RetainedUpdateLog", () => {
     expect(log.snapshot()).toEqual([second, third]);
   });
 
+  test("caps join replay to the replay budget, oldest first", () => {
+    const first = syncFrame(2, Uint8Array.of(30));
+    const second = syncFrame(2, Uint8Array.of(31));
+    const third = syncFrame(2, Uint8Array.of(32));
+    const log = new RetainedUpdateLog(512, 1024);
+    log.retain(first);
+    log.retain(second);
+    log.retain(third);
+
+    const replayed: Uint8Array[] = [];
+    log.replay(
+      (update) => replayed.push(update),
+      first.byteLength + second.byteLength,
+    );
+    expect(replayed).toEqual([first, second]);
+  });
+
   test("replays nothing after clear and restarts sequence numbers", () => {
     const document = syncFrame(2, Uint8Array.of(33));
     const log = new RetainedUpdateLog(512, 1024);
@@ -251,33 +269,70 @@ describe("RetainedUpdateLog", () => {
 describe("classifyFrame", () => {
   test("reports frames carrying document state as document", () => {
     const document = syncFrame(2, Uint8Array.of(1));
-    expect(classifyFrame(document)).toBe("document");
+    expect(classifyFrame(document)).toEqual({
+      kind: "document",
+      hasAwareness: false,
+      awarenessBytes: 0,
+    });
     expect(
       classifyFrame(frame(document, awarenessFrame(Uint8Array.of(2)))),
-    ).toBe("document");
+    ).toEqual({ kind: "document", hasAwareness: true, awarenessBytes: 1 });
   });
 
   test("reports valid but unretained frames as transient", () => {
-    expect(classifyFrame(awarenessFrame(Uint8Array.of(2)))).toBe("transient");
-    expect(classifyFrame(encodeVarUint(3))).toBe("transient");
-    expect(classifyFrame(syncFrame(0, Uint8Array.of(3)))).toBe("transient");
+    expect(classifyFrame(awarenessFrame(Uint8Array.of(2)))).toEqual({
+      kind: "transient",
+      hasAwareness: true,
+      awarenessBytes: 1,
+    });
+    expect(classifyFrame(encodeVarUint(3)).kind).toBe("transient");
+    expect(classifyFrame(encodeVarUint(3)).hasAwareness).toBe(false);
+    expect(classifyFrame(syncFrame(0, Uint8Array.of(3))).kind).toBe(
+      "transient",
+    );
   });
 
   test("reports auth-bearing frames as auth even alongside sync", () => {
     const denial = authFrame(Uint8Array.of(104, 105));
-    expect(classifyFrame(denial)).toBe("auth");
-    expect(classifyFrame(frame(syncFrame(2, Uint8Array.of(1)), denial))).toBe(
-      "auth",
-    );
+    expect(classifyFrame(denial).kind).toBe("auth");
+    expect(
+      classifyFrame(frame(syncFrame(2, Uint8Array.of(1)), denial)).kind,
+    ).toBe("auth");
   });
 
   test("reports truncated or unknown frames as invalid", () => {
-    expect(classifyFrame(new Uint8Array())).toBe("invalid");
-    expect(classifyFrame(Uint8Array.of(0))).toBe("invalid");
-    expect(classifyFrame(Uint8Array.of(0x80))).toBe("invalid");
-    expect(classifyFrame(Uint8Array.of(0x80, 0))).toBe("invalid");
-    expect(classifyFrame(Uint8Array.of(0, 3, 0))).toBe("invalid");
-    expect(classifyFrame(encodeVarUint(128))).toBe("invalid");
-    expect(classifyFrame(authFrame(Uint8Array.of(0xff)))).toBe("invalid");
+    expect(classifyFrame(new Uint8Array()).kind).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0)).kind).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0x80)).kind).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0x80, 0)).kind).toBe("invalid");
+    expect(classifyFrame(Uint8Array.of(0, 3, 0)).kind).toBe("invalid");
+    expect(classifyFrame(encodeVarUint(128)).kind).toBe("invalid");
+    expect(classifyFrame(authFrame(Uint8Array.of(0xff))).kind).toBe("invalid");
+  });
+
+  test("flags awareness payloads above the relay cap as oversize", () => {
+    const payload = new Uint8Array(MAX_AWARENESS_PAYLOAD_BYTES + 1);
+    const oversize = frame(
+      encodeVarUint(1),
+      encodeVarUint(payload.byteLength),
+      payload,
+    );
+    expect(classifyFrame(oversize).kind).toBe("oversize-awareness");
+  });
+
+  test("flags oversize awareness inside a mixed document frame", () => {
+    const document = syncFrame(2, Uint8Array.of(1));
+    const payload = new Uint8Array(MAX_AWARENESS_PAYLOAD_BYTES + 1);
+    const mixed = frame(
+      document,
+      encodeVarUint(1),
+      encodeVarUint(payload.byteLength),
+      payload,
+    );
+    expect(classifyFrame(mixed)).toEqual({
+      kind: "oversize-awareness",
+      hasAwareness: true,
+      awarenessBytes: payload.byteLength,
+    });
   });
 });
