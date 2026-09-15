@@ -5,4 +5,4 @@
 
 Stroke a chart series' line at the width its own `c:ser/c:spPr/a:ln` declares instead of a fixed 2px, and draw no line at all when that outline is `a:noFill`.
 
-Migrate collaboration snapshots to schema 21, importing series lines from a reattached source.
+Migrate collaboration snapshots to deck schema 2.1, importing series lines from a reattached source.
