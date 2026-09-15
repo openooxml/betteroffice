@@ -2198,13 +2198,20 @@ fn build_paragraph(
     }
     let segments = run_segments(&write.runs);
     let mut front = 0;
+    let mut back = 0;
     while front < source_runs.len()
         && front < segments.len()
         && segment_matches(&source_runs[front], &segments[front], theme)
     {
+        let steals = front + 1 < source_runs.len() - back
+            && segment_matches(&source_runs[front + 1], &segments[front], theme)
+            && source_span_len(&source_runs, front + 1..source_runs.len() - back)
+                > target_span_len(&segments, front + 1..segments.len() - back);
+        if steals {
+            break;
+        }
         front += 1;
     }
-    let mut back = 0;
     while back < source_runs.len() - front
         && back < segments.len() - front
         && segment_matches(
@@ -2213,6 +2220,14 @@ fn build_paragraph(
             theme,
         )
     {
+        let src = source_runs.len() - 1 - back;
+        let seg = segments.len() - 1 - back;
+        let steals = src > front
+            && segment_matches(&source_runs[src - 1], &segments[seg], theme)
+            && source_span_len(&source_runs, front..src) > target_span_len(&segments, front..seg);
+        if steals {
+            break;
+        }
         back += 1;
     }
     let tail_start = source_runs.len() - back;
@@ -2331,6 +2346,17 @@ fn segment_text<'a>(segment: &RunSegment<'a>) -> &'a str {
     }
 }
 
+fn source_span_len(runs: &[XmlElement], span: Range<usize>) -> usize {
+    runs[span].iter().map(|run| run_text(run).len()).sum()
+}
+
+fn target_span_len(segments: &[RunSegment<'_>], span: Range<usize>) -> usize {
+    segments[span]
+        .iter()
+        .map(|segment| segment_text(segment).len())
+        .sum()
+}
+
 fn push_range(ranges: &mut Vec<TargetRange>, end: usize, source: usize, verbatim: bool) {
     if end <= ranges.last().map_or(0, |last| last.end) {
         return;
@@ -2431,6 +2457,57 @@ fn align_span(
                 span.start + index,
                 true,
             );
+        }
+    }
+    let mut kept = vec![false; runs.len()];
+    for range in &ranges {
+        if range.verbatim {
+            kept[range.source - span.start] = true;
+        }
+    }
+    for field_idx in 0..runs.len() {
+        if runs[field_idx].local_name() != "fld" || kept[field_idx] {
+            continue;
+        }
+        let field_text = run_text(&runs[field_idx]);
+        if field_text.is_empty() {
+            continue;
+        }
+        let mut donor: Option<usize> = None;
+        for candidate in [
+            field_idx.checked_sub(1),
+            field_idx.checked_add(1).filter(|next| *next < runs.len()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if runs[candidate].local_name() == "r"
+                && kept[candidate]
+                && run_text(&runs[candidate]) == field_text
+            {
+                donor = Some(candidate);
+                break;
+            }
+        }
+        if donor.is_none() {
+            for candidate in 0..runs.len() {
+                if runs[candidate].local_name() == "r"
+                    && kept[candidate]
+                    && run_text(&runs[candidate]) == field_text
+                {
+                    donor = Some(candidate);
+                    break;
+                }
+            }
+        }
+        if let Some(donor) = donor {
+            for range in &mut ranges {
+                if range.verbatim && range.source == span.start + donor {
+                    range.source = span.start + field_idx;
+                }
+            }
+            kept[donor] = false;
+            kept[field_idx] = true;
         }
     }
 
@@ -3314,6 +3391,43 @@ mod tests {
             xml.contains(
                 r#"<a:r><a:rPr dirty="0" lang="en-US"/><a:t>See </a:t></a:r><a:r><a:rPr lang="en-US"/><a:t> today</a:t></a:r>"#
             ),
+            "{xml}"
+        );
+    }
+
+    #[test]
+    fn a_plain_duplicate_at_the_front_does_not_steal_the_field() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld></a:p>"#,
+            &[("1", RunProperties::default())],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<a:r>").count(), 0, "{xml}");
+    }
+
+    #[test]
+    fn a_plain_duplicate_at_the_back_does_not_steal_the_field() {
+        let xml = rebuilt_paragraph(
+            br#"<a:p xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:r><a:rPr lang="en-US"/><a:t>X</a:t></a:r><a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld><a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r></a:p>"#,
+            &[
+                ("X", RunProperties::default()),
+                ("1", RunProperties::default()),
+            ],
+        );
+        assert!(
+            xml.contains(
+                r#"<a:fld id="{A}" type="slidenum"><a:rPr lang="en-US"/><a:t>1</a:t></a:fld>"#
+            ),
+            "{xml}"
+        );
+        assert_eq!(xml.matches("<a:r>").count(), 1, "{xml}");
+        assert!(
+            !xml.contains(r#"<a:r><a:rPr lang="en-US"/><a:t>1</a:t></a:r>"#),
             "{xml}"
         );
     }
