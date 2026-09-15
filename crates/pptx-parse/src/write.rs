@@ -2364,7 +2364,7 @@ fn align_span(
             + source_ends
                 .iter()
                 .position(|&end| end > offset)
-                .unwrap_or_default()
+                .unwrap_or(source_ends.len().saturating_sub(1))
     };
     let prefix: usize = source_text
         .chars()
