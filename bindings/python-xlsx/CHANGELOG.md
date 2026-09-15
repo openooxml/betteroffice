@@ -1,5 +1,13 @@
 # @betteroffice/python-xlsx
 
+## 0.0.3
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 5798031: Load Excel shared formulas by expanding followers into plain cells with correct absolute and relative references, so they evaluate and save with correct values. Shared-formula markup is not written back: an edited sheet writes each follower as its own formula.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(..., S:V, ...)` with limits: narrow hits evaluate without materialising the column, but wide aggregates such as `SUM(A:XFD)` return `#NUM!`, and every lookup miss scans the full column height against the shared per-recalculation budget, so a workbook with many misses can turn later formulas `#NUM!`.
+
 ## 0.0.2
 
 ### Patch Changes

@@ -1,5 +1,16 @@
 # @betteroffice/pptx-i18n
 
+## 0.1.0
+
+### Minor Changes
+
+- d6ba9da: Add session-local PPTX agent proposals with atomic acceptance, stale-target checks, rendered previews, and one-step Undo. Expose the workflow in Rust, TypeScript, and Python. Show inline text diffs and previous/proposed shape bounds on the React slide canvas, with proposal selection, accept/reject controls, and a review panel for before/after previews.
+
+### Patch Changes
+
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- 915dbaa: Translate the 0.1.0 toolbar, presentation, speaker-notes, and agent-proposal strings for every shipped locale so non-English users no longer see English fallback on the new controls.
+
 ## 0.0.4
 
 ### Patch Changes
