@@ -186,10 +186,10 @@ pub fn resolve_header_footer_field_widths(
                         let text: Cow<'_, str> = if field.field_type == "NUMPAGES" {
                             Cow::Borrowed(total_pages.as_str())
                         } else {
-                            page.page_label
-                                .as_deref()
-                                .map(Cow::Borrowed)
-                                .unwrap_or_else(|| Cow::Owned(page.number.to_string()))
+                            crate::regions::page_field_text(
+                                page.page_label.as_deref(),
+                                u64::from(page.number),
+                            )
                         };
                         measure_field_text(field, &text, config)
                     })
