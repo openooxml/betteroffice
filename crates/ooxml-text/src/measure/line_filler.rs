@@ -889,7 +889,7 @@ fn utf16_at(t: &PreparedText, i: usize) -> u32 {
 fn visible_span_width(chars: &[CharAdv], letter_spacing: f32) -> f32 {
     let end = chars
         .iter()
-        .rposition(|cluster| !cluster.is_space)
+        .rposition(|cluster| !cluster.is_fit_space)
         .map_or(0, |i| i + 1);
     span_width(&chars[..end], letter_spacing)
 }
@@ -1009,6 +1009,7 @@ mod tests {
                     utf16_len: 1,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 0,
                     font_size_pt: 12.0,
@@ -1020,6 +1021,7 @@ mod tests {
                     utf16_len: 2,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 1,
                     font_size_pt: 12.0,
@@ -1031,6 +1033,7 @@ mod tests {
                     utf16_len: 1,
                     advance: 10.0,
                     is_space: false,
+                    is_fit_space: false,
                     level: 0,
                     logical_order: 2,
                     font_size_pt: 12.0,

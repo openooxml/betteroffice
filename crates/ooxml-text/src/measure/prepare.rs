@@ -56,6 +56,8 @@ pub(super) struct CharAdv {
     pub utf16_len: u32,
     pub advance: f32,
     pub is_space: bool,
+    /// ASCII space or U+3000: trailing instances ignore wrap fit, never justify-compressed.
+    pub is_fit_space: bool,
     pub level: u8,
     pub logical_order: u32,
     pub font_size_pt: f32,
@@ -935,6 +937,12 @@ fn prepare_text_run(
                 is_space: plan[start..end]
                     .iter()
                     .all(|item| matches!(item.shaped, ShapedChars::One(' '))),
+                is_fit_space: plan[start..end].iter().all(|item| {
+                    matches!(
+                        item.shaped,
+                        ShapedChars::One(' ') | ShapedChars::One('\u{3000}')
+                    )
+                }),
                 level: pc.level,
                 logical_order: pc.source_index as u32,
                 font_size_pt: pc.line_font_size_pt,

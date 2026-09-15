@@ -182,6 +182,101 @@ fn trailing_spaces_can_overhang_without_wrapping_the_word() {
 }
 
 #[test]
+fn trailing_ideographic_spaces_overhang_like_ascii_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(json!([{ "kind": "text", "text": "00\u{3000}" }]), 2.0 * W0).unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "retained ideographic advance",
+    );
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}\u{3000}\u{3000}" }]),
+        2.0 * W0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 5)]);
+    approx(
+        value["lines"][0]["width"].as_f64().unwrap(),
+        2.0 * W0 + 3.0 * W_IDEO,
+        "retained ideographic advances",
+    );
+}
+
+#[test]
+fn ideographic_space_breaks_words_keeping_full_advance() {
+    const W_IDEO: f64 = 16.0;
+    let value = measure(
+        json!([{ "kind": "text", "text": "00\u{3000}00" }]),
+        2.0 * W0 + 1.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&value), vec![(0, 0, 0, 3), (0, 3, 0, 5)]);
+    let lines = value["lines"].as_array().unwrap();
+    approx(
+        lines[0]["width"].as_f64().unwrap(),
+        2.0 * W0 + W_IDEO,
+        "first line keeps the trailing ideographic advance",
+    );
+    approx(
+        lines[1]["width"].as_f64().unwrap(),
+        2.0 * W0,
+        "second line width",
+    );
+}
+
+#[test]
+fn justified_text_does_not_compress_ideographic_spaces() {
+    const W_IDEO: f64 = 16.0;
+    let natural = 12.0 * W0 + 3.0 * W_IDEO;
+    let minimum = natural - 0.25 * 3.0 * W_IDEO;
+    for (alignment, width, expected_lines) in [
+        ("justify", natural, 1),
+        ("justify", minimum, 2),
+        ("left", minimum, 2),
+    ] {
+        let input = json!({
+            "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}],"attrs":{"alignment":alignment}},
+            "maxWidth":width,"fontChains":{"liberation sans|0|0":[0]},
+            "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+        });
+        let measured: Value =
+            serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+                .unwrap();
+        assert_eq!(
+            measured["lines"].as_array().unwrap().len(),
+            expected_lines,
+            "{alignment} at {width}"
+        );
+    }
+    let input = json!({
+        "block":{"kind":"paragraph","runs":[{"kind":"text","text":"000\u{3000}000\u{3000}000\u{3000}000"}]},
+        "maxWidth":natural,"fontChains":{"liberation sans|0|0":[0]},
+        "defaults":{"fontFamily":"Liberation Sans","fontSize":12},"authoritativeShaping":true
+    });
+    let measured: Value =
+        serde_json::from_str(&measure_paragraph_json(&store(), &input.to_string()).unwrap())
+            .unwrap();
+    approx(
+        measured["lines"][0]["clusterAdvances"][3]["advance"]
+            .as_f64()
+            .unwrap(),
+        W_IDEO,
+        "ideographic advance uncompressed",
+    );
+}
+
+#[test]
+fn ideographic_space_only_run_measures_like_empty_paragraph() {
+    for text in ["\u{3000}", "\u{3000}\u{3000}"] {
+        let v = measure(json!([{ "kind": "text", "text": text }]), 200.0).unwrap();
+        assert_eq!(spans(&v), vec![(0, 0, 0, 0)]);
+        assert_eq!(v["lines"][0]["width"].as_f64().unwrap(), 0.0);
+    }
+}
+
+#[test]
 fn justified_text_compresses_spaces_before_wrapping() {
     let natural = 12.0 * W0 + 3.0 * SP;
     let minimum = natural - 0.25 * 3.0 * SP;
