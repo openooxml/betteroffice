@@ -1,3 +1,5 @@
+import { version as fontsVersion } from '../package.json';
+import { version as fontsCjkVersion } from '../../fonts-cjk/package.json';
 import { loadFontBytes } from './bytes';
 import { fontProvider, type BundledFontSource } from './provider';
 
@@ -6,10 +8,8 @@ export interface CdnFontOptions {
   cjkBaseUrl?: string | URL;
 }
 
-const BASE_URL =
-  'https://cdn.jsdelivr.net/npm/@betteroffice/fonts@0.1.0/assets/';
-const CJK_BASE_URL =
-  'https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@0.1.0/assets/';
+const BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/assets/`;
+const CJK_BASE_URL = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/`;
 
 function assetBase(value: string | URL): URL {
   const href = String(value);
