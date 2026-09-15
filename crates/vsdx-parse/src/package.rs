@@ -162,7 +162,12 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         load_relationships(&document_path, &parts, &mut relationships, &mut budget)?;
     let pages_part_path = target_by_type(document_relationships, relationship_types::PAGES);
     let masters_part_path = target_by_type(document_relationships, relationship_types::MASTERS);
-    let theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    let mut theme_part_paths = targets_by_type(document_relationships, relationship_types::THEME);
+    for path in targets_by_type(document_relationships, relationship_types::THEME_OOX) {
+        if !theme_part_paths.contains(&path) {
+            theme_part_paths.push(path);
+        }
+    }
     let windows_part_path = target_by_type(document_relationships, relationship_types::WINDOWS);
     let mut page_part_paths = Vec::new();
     if let Some(path) = &pages_part_path {
@@ -257,16 +262,19 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
     });
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
-    let themes = theme_part_paths
-        .iter()
-        .enumerate()
-        .map(|(index, path)| {
-            let root = xml_parts
-                .get(path)
-                .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
-            Ok(((index + 1) as u32, parse_theme(root, path)?))
-        })
-        .collect::<Result<_, VsdxError>>()?;
+    let mut themes: BTreeMap<u32, Theme> = BTreeMap::new();
+    for (index, path) in theme_part_paths.iter().enumerate() {
+        let root = xml_parts
+            .get(path)
+            .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
+        let theme = parse_theme(root, path)?;
+        themes.insert((index + 1) as u32, theme.clone());
+        if let Some(id) = theme_scheme_enum(root)
+            && !themes.contains_key(&id)
+        {
+            themes.insert(id, theme);
+        }
+    }
     let sheet_part_paths: HashSet<&str> = std::iter::once(document_path.as_str())
         .chain(pages_part_path.iter().map(String::as_str))
         .chain(masters_part_path.iter().map(String::as_str))
@@ -346,6 +354,23 @@ fn parse_theme(root: &XmlElement, part: &str) -> Result<Theme, VsdxError> {
         theme.color_scheme.set(slot, value.to_owned());
     }
     Ok(theme)
+}
+
+fn theme_scheme_enum(root: &XmlElement) -> Option<u32> {
+    let elements = root.children_named("themeElements").next()?;
+    let scheme = elements.children_named("clrScheme").next()?;
+    let list = scheme.children_named("extLst").next()?;
+    for ext in list.children_named("ext") {
+        for id in ext.children_named("schemeID") {
+            if let Some(value) = id
+                .attribute("schemeEnum")
+                .and_then(|value| value.parse().ok())
+            {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 fn catalog_part_ids(

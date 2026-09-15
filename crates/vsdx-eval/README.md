@@ -23,8 +23,10 @@ The following residual categories are intentionally outside this profile:
   graph, so resolving these values would manufacture results, and inheritance chains
   that exhaust before reaching a concrete value — including the `DocLangID` locale
   cells — have nothing to return.
-- `THEMEVAL` without host context or a theme (306): theme values require both to be
+- `THEMEVAL` without host context or a theme (2): theme values require both to be
   meaningful.
+- `THEMEVAL` values outside the resolvable colour slots (238): non-colour theme
+  data and variation-dependent colours stay unsupported rather than guessed.
 - `SHADE` and `LUMDIFF`: their Visio semantics are undocumented, so they remain
   unsupported rather than guessed.
 

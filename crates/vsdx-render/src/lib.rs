@@ -4148,6 +4148,37 @@ mod tests {
         );
     }
 
+    /// Theme fills resolve through the package theme instead of placeholdering.
+    #[test]
+    fn themed_fills_paint_from_the_package_theme() {
+        let mut named = shape(1, 1.0, 1.0);
+        named.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
+        );
+        named.children.push(ShapeChild::Cell(formula(
+            "FillForegnd",
+            "THEMEVAL(\"AccentColor1\")",
+        )));
+        let mut host = shape(2, 2.0, 1.0);
+        host.children.retain(
+            |child| !matches!(child, ShapeChild::Cell(Cell { name, .. }) if name == "FillForegnd"),
+        );
+        host.children
+            .push(ShapeChild::Cell(formula("FillForegnd", "THEMEVAL()")));
+        let mut package = package(vec![named, host]);
+        let mut theme = ooxml_drawingml::Theme::default();
+        theme.color_scheme.accent1 = "112233".into();
+        package.themes.insert(1, theme);
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(list.primitives.len(), 2);
+        for primitive in &list.primitives {
+            assert!(
+                matches!(primitive, Primitive::Shape { fill: Some(Paint::Solid { color }), .. } if color == "#112233"),
+                "{primitive:?}"
+            );
+        }
+    }
+
     #[test]
     fn invalid_page_dimensions_are_rejected_before_pixel_conversion() {
         for (width, height) in [("0", "8"), ("-1", "8"), ("1e100", "8")] {
