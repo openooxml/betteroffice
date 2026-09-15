@@ -332,6 +332,7 @@ impl Paginator {
             watermark: None,
             vertical_align: None,
             note_areas: None,
+            parity_filler: None,
         };
 
         let state = FlowState {
@@ -492,6 +493,13 @@ impl Paginator {
         self.create_new_page()
     }
 
+    /// Marks the current page as an automatic parity filler.
+    pub fn mark_parity_filler(&mut self) {
+        let idx = self.get_current();
+        let page_index = self.states[idx].page_index;
+        self.pages[page_index].parity_filler = Some(true);
+    }
+
     /// Moves to the next column, or the next page from the last column.
     pub fn force_column_break(&mut self) -> usize {
         let idx = self.get_current();
@@ -627,6 +635,10 @@ impl crate::section_breaks::SectionBreakPaginator for Paginator {
     fn insert_blank_page(&mut self) -> u32 {
         let idx = Paginator::insert_blank_page(self);
         self.pages[self.states[idx].page_index].number
+    }
+
+    fn mark_parity_filler(&mut self) {
+        Paginator::mark_parity_filler(self);
     }
 
     fn current_page_size(&mut self) -> Size {

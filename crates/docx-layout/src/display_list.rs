@@ -2706,6 +2706,8 @@ pub(crate) struct PageIn {
     #[serde(default)]
     pub(crate) header_footer_refs: Option<PageHeaderFooterRefsIn>,
     #[serde(default)]
+    pub(crate) parity_filler: Option<bool>,
+    #[serde(default)]
     background: Option<String>,
     #[serde(default)]
     columns: Option<ColumnLayoutIn>,
@@ -10612,6 +10614,76 @@ mod tests {
                 .collect();
             assert_eq!(ys, expected, "{kind} {height}");
         }
+    }
+
+    #[test]
+    fn parity_filler_suppresses_header_footer_with_page_fields() {
+        let band = |id: &str, label: &str| {
+            json!({
+                "block": {"kind": "paragraph", "id": id, "runs": [
+                    {"kind": "text", "text": label},
+                    {"kind": "field", "fieldType": "PAGE", "fallback": "0"}
+                ]},
+                "measure": {"kind": "paragraph", "totalHeight": 16, "lines": [
+                    {"headRun": 0, "headChar": 0, "tailRun": 1, "tailChar": 1,
+                        "width": 60, "ascent": 11, "descent": 3, "lineHeight": 16}
+                ]}
+            })
+        };
+        let page = |number: u64, filler: bool| {
+            let mut page = json!({
+                "number": number,
+                "size": {"w": 300, "h": 500},
+                "margins": {"top": 80, "right": 20, "bottom": 80, "left": 20,
+                    "header": 40, "footer": 40},
+                "fragments": []
+            });
+            if filler {
+                page["parityFiller"] = json!(true);
+            }
+            page
+        };
+        let input = json!({
+            "measured": [], "options": {},
+            "headersFooters": {"variants": [
+                {"rId": "hdr", "kind": "header", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-hdr", "HDR ")]},
+                {"rId": "ftr", "kind": "footer", "type": "default",
+                    "height": 32, "flowHeight": 32, "measured": [band("hf-ftr", "FTR ")]}
+            ]},
+            "layout": {"pages": [page(1, false), page(2, true), page(3, false), page(4, false)]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let pages = output["pages"].as_array().unwrap();
+        assert_eq!(pages.len(), 4);
+        for (index, expected) in [(0, "1"), (2, "3"), (3, "4")] {
+            let header = pages[index]["header"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its header"));
+            assert!(
+                header.iter().any(|p| p["text"] == "HDR "),
+                "page {index} header text"
+            );
+            let field = header
+                .iter()
+                .find(|p| p["text"] == expected)
+                .unwrap_or_else(|| panic!("page {index} header PAGE field"));
+            assert_eq!(field["field"]["category"], "PAGE");
+            let footer = pages[index]["footer"]["primitives"]
+                .as_array()
+                .unwrap_or_else(|| panic!("page {index} keeps its footer"));
+            assert!(
+                footer.iter().any(|p| p["text"] == "FTR "),
+                "page {index} footer text"
+            );
+            assert!(
+                footer.iter().any(|p| p["text"] == expected),
+                "page {index} footer PAGE"
+            );
+        }
+        assert!(pages[1]["header"].is_null(), "filler suppresses header");
+        assert!(pages[1]["footer"].is_null(), "filler suppresses footer");
     }
 
     #[test]

@@ -1483,6 +1483,8 @@ export type Page = {
   noteAreas?: NoteAreaContract[];
   /** Column layout for this page (if multi-column). */
   columns?: ColumnLayout;
+  /** Automatic parity filler: suppress header/footer, keep physical page. */
+  parityFiller?: boolean;
 };
 
 /**

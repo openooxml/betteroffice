@@ -2135,6 +2135,9 @@ pub struct Page {
     pub vertical_align: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_areas: Option<Vec<NoteAreaContract>>,
+    /// Automatic parity filler: suppress header/footer bands, keep the sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parity_filler: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]

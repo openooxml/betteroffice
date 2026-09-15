@@ -771,6 +771,7 @@ mod tests {
             watermark: None,
             vertical_align: None,
             note_areas: None,
+            parity_filler: None,
         }
     }
 
@@ -974,6 +975,64 @@ mod tests {
     }
 
     #[test]
+    fn parity_filler_marks_only_the_mismatch_sheet() {
+        for (headers, restart, preceding, section_type, filler) in [
+            (true, Some(1), 1, None, Some(1)),
+            (true, Some(2), 2, None, Some(2)),
+            (false, None, 1, Some("oddPage"), Some(1)),
+            (false, None, 2, Some("evenPage"), Some(2)),
+            (true, Some(2), 1, None, None),
+            (true, None, 1, None, None),
+        ] {
+            let layout = restart_parity_layout(headers, restart, preceding, section_type);
+            let context = format!(
+                "headers={headers}, restart={restart:?}, preceding={preceding}, type={section_type:?}"
+            );
+            assert_eq!(
+                layout.pages.len(),
+                preceding + 1 + usize::from(filler.is_some()),
+                "{context}"
+            );
+            let following = layout
+                .pages
+                .iter()
+                .find(|page| {
+                    page.fragments.iter().any(|fragment| {
+                        matches!(fragment,
+                    crate::types::Fragment::Paragraph(paragraph)
+                        if paragraph.block_id == crate::types::BlockId::Str("following".into()))
+                    })
+                })
+                .expect("following content page");
+            assert_ne!(following.parity_filler, Some(true), "{context}");
+            assert_eq!(following.region_section_index, 1, "{context}");
+            if let Some(index) = filler {
+                let filler = &layout.pages[index];
+                assert!(filler.fragments.is_empty(), "{context}");
+                assert_eq!(filler.parity_filler, Some(true), "{context}");
+                assert_eq!(filler.region_section_index, 0, "{context}");
+                let wire = serde_json::to_value(&layout).expect("layout serializes");
+                assert_eq!(
+                    wire["pages"][index]["parityFiller"],
+                    serde_json::json!(true),
+                    "{context}"
+                );
+                assert!(
+                    wire["pages"][index + 1]["parityFiller"].is_null(),
+                    "{context}"
+                );
+            } else {
+                for (index, page) in layout.pages.iter().enumerate() {
+                    assert_ne!(page.parity_filler, Some(true), "{context} page {index}");
+                }
+            }
+            if let Some(restart) = restart {
+                assert_eq!(following.section_page_number, Some(restart), "{context}");
+            }
+        }
+    }
+
+    #[test]
     fn section_restart_parity_does_not_insert_a_leading_or_continuous_page() {
         let first = restart_parity_layout(true, Some(2), 0, None);
         assert_eq!(first.pages.len(), 1);
@@ -1026,6 +1085,12 @@ mod tests {
             serde_json::to_value(&incremental.layout).unwrap(),
             serde_json::to_value(&full.layout).unwrap()
         );
+        for layout in [&incremental.layout, &full.layout] {
+            assert_eq!(layout.pages.len(), 4);
+            assert_eq!(layout.pages[2].parity_filler, Some(true));
+            assert!(layout.pages[2].fragments.is_empty());
+            assert_ne!(layout.pages[3].parity_filler, Some(true));
+        }
     }
 
     #[test]

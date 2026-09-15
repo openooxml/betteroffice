@@ -121,6 +121,8 @@ pub trait SectionBreakPaginator {
     fn advance_to_next_column(&mut self) -> bool;
     /// Create a new page even when the current page is pristine.
     fn insert_blank_page(&mut self) -> u32;
+    /// Marks the current page as an automatic parity filler.
+    fn mark_parity_filler(&mut self) {}
     /// Returns the current page size, creating the first page if needed.
     fn current_page_size(&mut self) -> Size;
     fn current_columns(&self) -> ColumnLayout;
@@ -436,8 +438,8 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::EvenPage => {
             let page_number = paginator.force_page_break();
-            // If landed on odd page, add another page
             if page_number % 2 != 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
             paginator.update_page_layout(page_size, margins, true)?;
@@ -445,8 +447,8 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::OddPage => {
             let page_number = paginator.force_page_break();
-            // If landed on even page, add another page
             if page_number % 2 == 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
             paginator.update_page_layout(page_size, margins, true)?;
@@ -810,6 +812,9 @@ mod tests {
         InsertBlankPage {
             new_page_number: u32,
         },
+        MarkParityFiller {
+            page_number: u32,
+        },
         AdvanceColumn(ColumnLanding),
         UpdateColumns {
             count: f64,
@@ -937,6 +942,12 @@ mod tests {
                 new_page_number: self.page_number,
             });
             self.page_number
+        }
+
+        fn mark_parity_filler(&mut self) {
+            self.calls.push(Call::MarkParityFiller {
+                page_number: self.page_number,
+            });
         }
 
         fn advance_to_next_column(&mut self) -> bool {
@@ -1174,6 +1185,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
+    }
+
+    #[test]
+    fn parity_mismatch_marks_the_current_sheet_before_inserting() {
+        for (break_type, start, mismatch, content) in [
+            (SectionBreakType::OddPage, 1, 2, 3),
+            (SectionBreakType::EvenPage, 2, 3, 4),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, content);
+            let breaks: Vec<_> = paginator
+                .calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        Call::ForcePageBreak { .. }
+                            | Call::MarkParityFiller { .. }
+                            | Call::InsertBlankPage { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                breaks,
+                [
+                    &Call::ForcePageBreak {
+                        new_page_number: mismatch
+                    },
+                    &Call::MarkParityFiller {
+                        page_number: mismatch
+                    },
+                    &Call::InsertBlankPage {
+                        new_page_number: content
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn parity_match_marks_no_sheet() {
+        for (break_type, start, landed) in [
+            (SectionBreakType::OddPage, 2, 3),
+            (SectionBreakType::EvenPage, 1, 2),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, landed);
+            assert!(!paginator.calls.iter().any(|call| matches!(
+                call,
+                Call::MarkParityFiller { .. } | Call::InsertBlankPage { .. }
+            )));
+        }
     }
 
     #[test]

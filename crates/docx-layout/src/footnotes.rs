@@ -852,6 +852,7 @@ mod tests {
             watermark: None,
             vertical_align: None,
             note_areas: None,
+            parity_filler: None,
         }
     }
 
