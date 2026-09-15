@@ -65,6 +65,8 @@ pub struct DocumentSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_fields: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub even_and_odd_headers: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub track_revisions: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub do_not_track_moves: Option<bool>,
@@ -86,6 +88,7 @@ impl Default for DocumentSettings {
             theme_font_lang: None,
             compatibility_flags: CompatibilityFlags::default(),
             update_fields: None,
+            even_and_odd_headers: None,
             track_revisions: None,
             do_not_track_moves: None,
             do_not_track_formatting: None,
@@ -157,6 +160,7 @@ pub fn parse_settings_element(root: Option<&XmlElement>) -> DocumentSettings {
         theme_font_lang,
         compatibility_flags: parse_compatibility_flags(root),
         update_fields,
+        even_and_odd_headers: root.child("w", "evenAndOddHeaders").map(boolean_element),
         track_revisions,
         do_not_track_moves,
         do_not_track_formatting,

@@ -2,7 +2,10 @@
 
 use crate::LayoutError;
 use crate::hooks::{self, KeepWithNextScan};
-use crate::types::{ColumnLayout, LayoutBlock, MeasuredBlock, PageMargins, SectionBreakType, Size};
+use crate::types::{
+    ColumnLayout, LayoutBlock, MeasuredBlock, PageMargins, SectionBreakType, SectionPageRestart,
+    Size,
+};
 
 /// Page-flow geometry for one section.
 #[derive(Debug, Clone)]
@@ -64,6 +67,7 @@ pub struct LayoutPlan {
     pub break_indices: Vec<usize>,
     /// Break type entering section `i + 1`; trailing entry is the body's.
     pub section_break_types: Vec<Option<SectionBreakType>>,
+    pub section_page_restarts: Vec<Option<SectionPageRestart>>,
     /// Keep-with-next groups keyed by head, plus their interior-member set.
     pub keep_with_next: KeepWithNextScan,
 }
@@ -90,6 +94,7 @@ pub fn prescan(
         section_configs,
         break_indices,
         section_break_types,
+        section_page_restarts: Vec::new(),
         keep_with_next,
     })
 }

@@ -277,6 +277,7 @@ export type ImageRun = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   /** Position for floating/anchored images */
@@ -677,6 +678,7 @@ export type ImageBlock = {
   width: number;
   height: number;
   alt?: string;
+  shapeType?: string;
   /** CSS transform string (rotation, flip) */
   transform?: string;
   opacity?: number;
@@ -1483,6 +1485,8 @@ export type Page = {
   noteAreas?: NoteAreaContract[];
   /** Column layout for this page (if multi-column). */
   columns?: ColumnLayout;
+  /** Automatic parity filler: suppress header/footer, keep physical page. */
+  parityFiller?: boolean;
 };
 
 /**

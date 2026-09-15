@@ -121,6 +121,8 @@ pub trait SectionBreakPaginator {
     fn advance_to_next_column(&mut self) -> bool;
     /// Create a new page even when the current page is pristine.
     fn insert_blank_page(&mut self) -> u32;
+    /// Marks the current page as an automatic parity filler.
+    fn mark_parity_filler(&mut self) {}
     /// Returns the current page size, creating the first page if needed.
     fn current_page_size(&mut self) -> Size;
     fn current_columns(&self) -> ColumnLayout;
@@ -145,6 +147,25 @@ fn js_math_round(x: f64) -> f64 {
 fn page_size_differs(current: &Size, next: &Size) -> bool {
     js_math_round(next.w) != js_math_round(current.w)
         || js_math_round(next.h) != js_math_round(current.h)
+}
+
+pub(crate) fn restart_starts_page<P: SectionBreakPaginator>(
+    paginator: &mut P,
+    next: &SectionLayoutConfig,
+    section_type: Option<SectionBreakType>,
+) -> bool {
+    match section_type {
+        Some(SectionBreakType::Continuous) => {
+            page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        Some(SectionBreakType::NextColumn) => {
+            let columns = paginator.current_columns().count;
+            columns == 1.0
+                || next.columns.as_ref().map_or(1.0, |next| next.count) != columns
+                || page_size_differs(&paginator.current_page_size(), &next.page_size)
+        }
+        _ => true,
+    }
 }
 
 // JS Math.max(a, b): NaN-propagating (Rust's f64::max ignores NaN).
@@ -366,12 +387,11 @@ pub fn resolve_next_columns(tracker: &SectionLayoutTracker) -> ColumnLayout {
 // One inch at 96 DPI.
 const DEFAULT_MARGIN_PX: f64 = 96.0;
 
-/// Fills missing body margins with one inch and defaults the header/footer
-/// distances to the resolved top/bottom body margins.
+/// Missing margins default to one inch; negative top/bottom resolve to absolute distance.
 pub fn resolve_page_margins(requested: Option<&PageMargins>) -> PageMargins {
-    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top);
+    let top = requested.map_or(DEFAULT_MARGIN_PX, |m| m.top.abs());
     let right = requested.map_or(DEFAULT_MARGIN_PX, |m| m.right);
-    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom);
+    let bottom = requested.map_or(DEFAULT_MARGIN_PX, |m| m.bottom.abs());
     let left = requested.map_or(DEFAULT_MARGIN_PX, |m| m.left);
     PageMargins {
         top,
@@ -417,8 +437,8 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::EvenPage => {
             let page_number = paginator.force_page_break();
-            // If landed on odd page, add another page
             if page_number % 2 != 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
             paginator.update_page_layout(page_size, margins, true)?;
@@ -426,8 +446,8 @@ pub fn handle_section_break<P: SectionBreakPaginator>(
 
         SectionBreakType::OddPage => {
             let page_number = paginator.force_page_break();
-            // If landed on even page, add another page
             if page_number % 2 == 0 {
+                paginator.mark_parity_filler();
                 paginator.insert_blank_page();
             }
             paginator.update_page_layout(page_size, margins, true)?;
@@ -761,6 +781,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_page_margins_absorbs_negative_body_distances() {
+        let top_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(709.0 / 15.0),
+            footer: Some(48.0),
+            ..margins(-1438.0 / 15.0, 96.0, 96.0, 96.0)
+        }));
+        assert_eq!(top_only.top, 1438.0 / 15.0);
+        assert_eq!(top_only.bottom, 96.0);
+        assert_eq!(top_only.header, Some(709.0 / 15.0));
+
+        let bottom_only = resolve_page_margins(Some(&PageMargins {
+            header: Some(48.0),
+            footer: Some(48.0),
+            ..margins(96.0, 96.0, -1440.0 / 15.0, 96.0)
+        }));
+        assert_eq!(bottom_only.top, 96.0);
+        assert_eq!(bottom_only.bottom, 1440.0 / 15.0);
+
+        let both = resolve_page_margins(Some(&margins(-1438.0 / 15.0, 96.0, -1440.0 / 15.0, 96.0)));
+        assert_eq!(both.top, 1438.0 / 15.0);
+        assert_eq!(both.bottom, 1440.0 / 15.0);
+        assert_eq!(both.header, Some(1438.0 / 15.0));
+        assert_eq!(both.footer, Some(1440.0 / 15.0));
+    }
+
+    #[test]
     fn js_math_round_matches_js_semantics() {
         assert_eq!(js_math_round(0.5), 1.0);
         assert_eq!(js_math_round(-0.5), 0.0); // JS: -0, ties toward +infinity
@@ -790,6 +836,9 @@ mod tests {
         },
         InsertBlankPage {
             new_page_number: u32,
+        },
+        MarkParityFiller {
+            page_number: u32,
         },
         AdvanceColumn(ColumnLanding),
         UpdateColumns {
@@ -918,6 +967,12 @@ mod tests {
                 new_page_number: self.page_number,
             });
             self.page_number
+        }
+
+        fn mark_parity_filler(&mut self) {
+            self.calls.push(Call::MarkParityFiller {
+                page_number: self.page_number,
+            });
         }
 
         fn advance_to_next_column(&mut self) -> bool {
@@ -1155,6 +1210,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(paginator.page_number, 3);
+    }
+
+    #[test]
+    fn parity_mismatch_marks_the_current_sheet_before_inserting() {
+        for (break_type, start, mismatch, content) in [
+            (SectionBreakType::OddPage, 1, 2, 3),
+            (SectionBreakType::EvenPage, 2, 3, 4),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, content);
+            let breaks: Vec<_> = paginator
+                .calls
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        Call::ForcePageBreak { .. }
+                            | Call::MarkParityFiller { .. }
+                            | Call::InsertBlankPage { .. }
+                    )
+                })
+                .collect();
+            assert_eq!(
+                breaks,
+                [
+                    &Call::ForcePageBreak {
+                        new_page_number: mismatch
+                    },
+                    &Call::MarkParityFiller {
+                        page_number: mismatch
+                    },
+                    &Call::InsertBlankPage {
+                        new_page_number: content
+                    },
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn parity_match_marks_no_sheet() {
+        for (break_type, start, landed) in [
+            (SectionBreakType::OddPage, 2, 3),
+            (SectionBreakType::EvenPage, 1, 2),
+        ] {
+            let mut paginator = MockPaginator::new(PORTRAIT, start);
+            handle_section_break(
+                &empty_break(),
+                &mut paginator,
+                &config(PORTRAIT, None),
+                Some(break_type),
+            )
+            .unwrap();
+            assert_eq!(paginator.page_number, landed);
+            assert!(!paginator.calls.iter().any(|call| matches!(
+                call,
+                Call::MarkParityFiller { .. } | Call::InsertBlankPage { .. }
+            )));
+        }
     }
 
     #[test]

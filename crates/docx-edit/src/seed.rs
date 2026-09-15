@@ -1107,6 +1107,7 @@ fn image_payload(image: &Value) -> JsonObject {
         "cropRight": nullish(field(field(Some(image), "crop"), "right")),
         "cropBottom": nullish(field(field(Some(image), "crop"), "bottom")),
         "cropLeft": nullish(field(field(Some(image), "crop"), "left")),
+        "shapeType": nullish(field(Some(image), "shapeType")),
         "opacity": nullish(field(Some(image), "opacity")),
         "effectExtentTop": number(field(field(Some(image), "padding"), "top"))
             .filter(|value| *value != 0.0)
