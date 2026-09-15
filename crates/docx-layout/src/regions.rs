@@ -1277,4 +1277,38 @@ mod tests {
         assert!(regions.even_and_odd_headers);
         assert_eq!(regions.note_settings.footnote.num_start, Some(3));
     }
+
+    #[test]
+    fn authored_negative_margins_preserve_sign_for_overlap() {
+        let request: RegionLayoutInput = serde_json::from_value(json!({
+            "bodyStory": "body",
+            "regions": {"sections": [{
+                "sectionId": "main",
+                "properties": {
+                    "pageWidth": 12240,
+                    "pageHeight": 15840,
+                    "marginTop": -1438,
+                    "marginBottom": 1440,
+                    "marginLeft": 1797,
+                    "marginRight": 1797,
+                    "headerDistance": 709,
+                    "footerDistance": 709
+                }
+            }]},
+            "renderEnv": {}
+        }))
+        .unwrap();
+
+        let (mut input, regions, _, _, _, _) = request.split();
+        let section = &regions.sections[0];
+        assert_eq!(section.margins.as_ref().unwrap().top, -1438.0 / 15.0);
+        assert_eq!(section.margins.as_ref().unwrap().bottom, 1440.0 / 15.0);
+        assert_eq!(section.header_distance, Some(709.0 / 15.0));
+
+        apply_section_geometry(&mut input, &regions);
+        assert_eq!(input.options.margins.as_ref().unwrap().top, -1438.0 / 15.0);
+        let resolved = crate::section_breaks::resolve_page_margins(input.options.margins.as_ref());
+        assert_eq!(resolved.top, 1438.0 / 15.0);
+        assert_eq!(resolved.bottom, 1440.0 / 15.0);
+    }
 }

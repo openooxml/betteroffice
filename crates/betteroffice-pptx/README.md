@@ -32,7 +32,7 @@ that contains text.
 `pptx-edit` keeps the wasm surface for JavaScript clients. This facade exposes
 the same engine operations without its JSON argument and result wrappers.
 
-`0.0.x`: the API may change before `0.1.0`.
+`0.2.x`: the API may change before `1.0`.
 
 ## Limits
 

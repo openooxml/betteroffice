@@ -411,12 +411,18 @@ pub fn extend_body_margins(
 ) -> PageMargins {
     let header_distance = margins.header.unwrap_or(DEFAULT_HF_DISTANCE_PX);
     let footer_distance = margins.footer.unwrap_or(DEFAULT_HF_DISTANCE_PX);
+    let suppress_header = margins.top < 0.0;
+    let suppress_footer = margins.bottom < 0.0;
+    let effective_top = margins.top.abs();
+    let effective_bottom = margins.bottom.abs();
     let mut output = margins.clone();
-    if header_height > margins.top - header_distance {
-        output.top = margins.top.max(header_distance + header_height);
+    output.top = effective_top;
+    output.bottom = effective_bottom;
+    if !suppress_header && header_height > effective_top - header_distance {
+        output.top = effective_top.max(header_distance + header_height);
     }
-    if footer_height > margins.bottom - footer_distance {
-        output.bottom = margins.bottom.max(footer_distance + footer_height);
+    if !suppress_footer && footer_height > effective_bottom - footer_distance {
+        output.bottom = effective_bottom.max(footer_distance + footer_height);
     }
     let maximum = (page_size.h - MIN_CONTENT_HEIGHT_PX).max(0.0);
     if output.top + output.bottom > maximum {
@@ -535,6 +541,117 @@ mod tests {
         let extended = extend_body_margins(&page_size, &margins, 140.0, 100.0);
         assert_eq!(extended.top + extended.bottom, 176.0);
         assert_eq!(extended.bottom, 0.0);
+    }
+
+    #[test]
+    fn negative_top_uses_absolute_origin_and_ignores_header() {
+        let margins = PageMargins {
+            top: -1438.0 / 15.0,
+            right: 1797.0 / 15.0,
+            bottom: 96.0,
+            left: 1797.0 / 15.0,
+            header: Some(709.0 / 15.0),
+            footer: Some(48.0),
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let extended = extend_body_margins(&page_size, &margins, 100.0, 0.0);
+        assert_eq!(extended.top, 1438.0 / 15.0);
+        assert_eq!(extended.bottom, 96.0);
+    }
+
+    #[test]
+    fn negative_bottom_uses_absolute_origin_and_ignores_footer() {
+        let margins = PageMargins {
+            top: 96.0,
+            right: 96.0,
+            bottom: -1440.0 / 15.0,
+            left: 96.0,
+            header: Some(48.0),
+            footer: Some(48.0),
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let extended = extend_body_margins(&page_size, &margins, 0.0, 100.0);
+        assert_eq!(extended.top, 96.0);
+        assert_eq!(extended.bottom, 1440.0 / 15.0);
+    }
+
+    #[test]
+    fn both_negative_use_absolute_origins_without_expansion() {
+        let margins = PageMargins {
+            top: -1438.0 / 15.0,
+            right: 96.0,
+            bottom: -1440.0 / 15.0,
+            left: 96.0,
+            header: Some(709.0 / 15.0),
+            footer: Some(709.0 / 15.0),
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let extended = extend_body_margins(&page_size, &margins, 100.0, 100.0);
+        assert_eq!(extended.top, 1438.0 / 15.0);
+        assert_eq!(extended.bottom, 1440.0 / 15.0);
+    }
+
+    #[test]
+    fn positive_margins_expand_for_header_overflow() {
+        let margins = PageMargins {
+            top: 40.0,
+            right: 40.0,
+            bottom: 40.0,
+            left: 40.0,
+            header: Some(20.0),
+            footer: Some(20.0),
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let extended = extend_body_margins(&page_size, &margins, 50.0, 0.0);
+        assert_eq!(extended.top, 70.0);
+        assert_eq!(extended.bottom, 40.0);
+    }
+
+    #[test]
+    fn negative_margins_without_headers_keep_absolute_origin() {
+        let margins = PageMargins {
+            top: -60.0,
+            right: 96.0,
+            bottom: -70.0,
+            left: 96.0,
+            header: None,
+            footer: None,
+        };
+        let page_size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let extended = extend_body_margins(&page_size, &margins, 0.0, 0.0);
+        assert_eq!(extended.top, 60.0);
+        assert_eq!(extended.bottom, 70.0);
+    }
+
+    #[test]
+    fn negative_margins_respect_page_capacity() {
+        let margins = PageMargins {
+            top: -140.0,
+            right: 96.0,
+            bottom: 100.0,
+            left: 96.0,
+            header: Some(48.0),
+            footer: Some(48.0),
+        };
+        let page_size = Size { w: 816.0, h: 200.0 };
+        let extended = extend_body_margins(&page_size, &margins, 0.0, 0.0);
+        assert_eq!(extended.top, 140.0);
+        assert_eq!(extended.bottom, 36.0);
     }
 
     #[test]

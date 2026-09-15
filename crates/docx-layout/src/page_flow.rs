@@ -72,6 +72,14 @@ fn calculate_column_width(
     (content_width - total_gaps) / columns.count
 }
 
+fn effective_margins(margins: PageMargins) -> PageMargins {
+    PageMargins {
+        top: margins.top.abs(),
+        bottom: margins.bottom.abs(),
+        ..margins
+    }
+}
+
 /// The page/column cursor and the pages it has produced so far.
 pub struct Paginator {
     suppress_leading_spacing: bool,
@@ -100,6 +108,7 @@ impl Paginator {
         columns: ColumnLayout,
         footnote_reserved_heights: Option<std::collections::BTreeMap<String, f64>>,
     ) -> Result<Self, LayoutError> {
+        let margins = effective_margins(margins);
         let content_height = (page_size.h - margins.bottom) - margins.top;
         if content_height <= 0.0 {
             return Err(LayoutError::Invalid(
@@ -561,7 +570,7 @@ impl Paginator {
                 self.pending_page_size = Some(size);
             }
             if let Some(margins) = new_margins {
-                self.pending_margins = Some(margins);
+                self.pending_margins = Some(effective_margins(margins));
             }
             return Ok(());
         }
@@ -569,7 +578,7 @@ impl Paginator {
             self.page_size = size;
         }
         if let Some(margins) = new_margins {
-            self.margins = margins;
+            self.margins = effective_margins(margins);
         }
         if (self.page_size.h - self.margins.bottom) - self.margins.top <= 0.0 {
             return Err(LayoutError::Invalid(
@@ -677,5 +686,68 @@ impl crate::column_balancing::ColumnBalancePaginator for Paginator {
     fn set_content_limit(&mut self, value: f64) {
         let idx = self.get_current();
         self.states[idx].content_limit = value;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn margins(top: f64, bottom: f64) -> PageMargins {
+        PageMargins {
+            top,
+            right: 96.0,
+            bottom,
+            left: 96.0,
+            header: Some(48.0),
+            footer: Some(48.0),
+        }
+    }
+
+    fn columns() -> ColumnLayout {
+        ColumnLayout {
+            count: 1.0,
+            gap: 0.0,
+            equal_width: None,
+            separator: None,
+            columns: None,
+        }
+    }
+
+    #[test]
+    fn paginator_normalizes_negative_margins_to_effective_origins() {
+        let size = Size {
+            w: 816.0,
+            h: 1056.0,
+        };
+        let mut paginator = Paginator::new(
+            size.clone(),
+            margins(-1438.0 / 15.0, -1440.0 / 15.0),
+            columns(),
+            None,
+        )
+        .unwrap();
+        let idx = paginator.get_current();
+        assert_eq!(paginator.pages[idx].margins.top, 1438.0 / 15.0);
+        assert_eq!(paginator.pages[idx].margins.bottom, 1440.0 / 15.0);
+        assert_eq!(paginator.state(idx).content_top, 1438.0 / 15.0);
+
+        paginator
+            .update_page_layout(None, Some(margins(-60.0, 96.0)), true)
+            .unwrap();
+        let idx = paginator.get_current();
+        assert_eq!(paginator.pages[idx].margins.top, 60.0);
+
+        paginator
+            .update_page_layout(None, Some(margins(96.0, -70.0)), false)
+            .unwrap();
+        assert_eq!(
+            paginator
+                .snapshot_geometry()
+                .pending_margins
+                .unwrap()
+                .bottom,
+            70.0
+        );
     }
 }
