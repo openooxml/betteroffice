@@ -2487,17 +2487,6 @@ fn align_span(
                 break;
             }
         }
-        if donor.is_none() {
-            for candidate in 0..runs.len() {
-                if runs[candidate].local_name() == "r"
-                    && kept[candidate]
-                    && run_text(&runs[candidate]) == field_text
-                {
-                    donor = Some(candidate);
-                    break;
-                }
-            }
-        }
         if let Some(donor) = donor {
             for range in &mut ranges {
                 if range.verbatim && range.source == span.start + donor {
