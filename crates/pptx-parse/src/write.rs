@@ -2258,19 +2258,17 @@ fn build_paragraph(
     paragraph
 }
 
-/// A stretch of the target text and the source run whose `rPr` it is rebuilt onto.
+/// Target slice rebuilt onto one source run.
 struct TargetRange {
     end: usize,
     source: usize,
-    /// The text is the source run's own, unchanged and in order.
+    /// Source text kept unchanged, in order.
     verbatim: bool,
-    /// The whole range is an `a:fld` whose text survived intact.
+    /// Intact `a:fld` kept as a field.
     field: bool,
 }
 
-/// Rebuilds the edited span. Target text is aligned back onto the source runs
-/// it came from so unmodeled `rPr` markup survives; inserted text extends the
-/// run before it, replaced text takes the first run it replaced.
+/// Rebuilds the span onto source runs, preserving unmodeled markup.
 fn span_elements(
     segments: &[RunSegment<'_>],
     source_runs: &[XmlElement],
@@ -2538,7 +2536,7 @@ fn align_span(
     merged
 }
 
-/// One step of a character alignment, in bytes.
+/// Diff step in bytes.
 enum DiffOp {
     Match(usize),
     Delete(usize),
@@ -2556,8 +2554,7 @@ fn push_op(ops: &mut Vec<DiffOp>, op: DiffOp) {
     }
 }
 
-/// Longest-common-subsequence alignment of two texts. Ties delete before they
-/// insert; a stretch too large for the table counts as one replacement.
+/// LCS alignment; ties delete first, oversized counts as replacement.
 fn char_diff(source: &str, target: &str) -> Vec<DiffOp> {
     let source_chars: Vec<char> = source.chars().collect();
     let target_chars: Vec<char> = target.chars().collect();
@@ -2640,7 +2637,7 @@ fn segment_element(
     }
 }
 
-/// An `a:fld` whose text survived intact keeps its binding.
+/// Intact `a:fld` keeps its binding.
 fn field_element(
     source: &XmlElement,
     segment: &RunSegment<'_>,
