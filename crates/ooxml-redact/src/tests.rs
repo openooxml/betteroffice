@@ -86,6 +86,10 @@ const XLSX_SECRETS: &[&str] = &[
     "XLSX_SECRET_TCOL",
     "XLSX_SECRET_TOTLABEL",
     "XLSX_SECRET_TCFORM",
+    "XLSX_SECRET_TOTFORM",
+    "XLSX_SECRET_CFFORM",
+    "XLSX_SECRET_DVFORM1",
+    "XLSX_SECRET_DVFORM2",
     "XLSX_SECRET_QUERY",
     "XLSX_SECRET_QFIELD",
     "XLSX_SECRET_SLICER",
@@ -945,6 +949,44 @@ fn xlsx_pivot_tables_connections_and_external_links_are_masked() {
     }
     assert!(text.contains(r#"sheetId="0""#));
     assert!(text.contains(r#"r="A1""#));
+}
+
+#[test]
+fn xlsx_table_totals_and_cf_formulas_are_masked() {
+    let table = r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="T" displayName="T" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="C" totalsRowFunction="sum" totalsRowFormula="SECRET_TOTFORM+1"><calculatedColumnFormula>SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/tables/table1.xml",
+        table.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    assert!(
+        !text.contains("SECRET_TOTFORM"),
+        "totals formula survived: {text}"
+    );
+    assert!(text.contains(r#"totalsRowFormula="0""#));
+    assert!(text.contains(r#"totalsRowFunction="sum""#));
+
+    let sheet = r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><conditionalFormatting sqref="A1:A2"><cfRule type="expression" priority="1"><formula>SECRET_CFFORM+A1</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>SECRET_DVFORM1</formula1><formula2>SECRET_DVFORM2</formula2></dataValidation></dataValidations></worksheet>"#;
+    let output = xml::redact_xml(
+        Format::Xlsx,
+        "xl/worksheets/sheet1.xml",
+        sheet.as_bytes(),
+        &mut RedactionReport::default(),
+    )
+    .unwrap();
+    let text = String::from_utf8(output).unwrap();
+    for secret in ["SECRET_CFFORM", "SECRET_DVFORM1", "SECRET_DVFORM2"] {
+        assert!(
+            !text.contains(secret),
+            "worksheet formula survived: {secret} in {text}"
+        );
+    }
+    assert_eq!(text.matches("<formula>0</formula>").count(), 1);
+    assert_eq!(text.matches("<formula1>0</formula1>").count(), 1);
+    assert_eq!(text.matches("<formula2>0</formula2>").count(), 1);
 }
 
 #[test]
@@ -2641,13 +2683,13 @@ fn xlsx_fixture() -> Vec<u8> {
         (
             "xl/worksheets/sheet2.xml",
             xml(
-                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECRET_SHEET2</t></is></c></row></sheetData><oleObjects><oleObject progId="XLSX_SECRET_OLEPROG" dvAspect="DVASPECT_CONTENT" link="XLSX_SECRET_OLELINK" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="XLSX_SECRET_CTRL"/></controls><autoFilter ref="A1:A2"><filterColumn colId="0"><customFilters><customFilter operator="equal" val="XLSX_SECRET_CUSTFILT"/></customFilters></filterColumn></autoFilter><conditionalFormatting sqref="A1:A2"><cfRule type="containsText" operator="containsText" text="XLSX_SECRET_CFTEXT" priority="1"/></conditionalFormatting><scenarios><scenario name="XLSX_SECRET_SCEN" user="XLSX_SECRET_SCENUSER" comment="XLSX_SECRET_SCENCOMMENT"><inputCells r="A1">1</inputCells></scenario></scenarios><webPublishItems count="1"><webPublishItem id="1" divId="x" sourceType="sheet" sourceRef="A1" destinationFile="XLSX_SECRET_WPDEST" title="XLSX_SECRET_WPTITLE" autoRepublish="0"/></webPublishItems></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>XLSX_SECRET_SHEET2</t></is></c></row></sheetData><oleObjects><oleObject progId="XLSX_SECRET_OLEPROG" dvAspect="DVASPECT_CONTENT" link="XLSX_SECRET_OLELINK" shapeId="1025" r:id="rId9"/></oleObjects><controls><control shapeId="1026" r:id="rId10" name="XLSX_SECRET_CTRL"/></controls><autoFilter ref="A1:A2"><filterColumn colId="0"><customFilters><customFilter operator="equal" val="XLSX_SECRET_CUSTFILT"/></customFilters></filterColumn></autoFilter><conditionalFormatting sqref="A1:A2"><cfRule type="containsText" operator="containsText" text="XLSX_SECRET_CFTEXT" priority="1"><formula>XLSX_SECRET_CFFORM</formula></cfRule></conditionalFormatting><dataValidations count="1"><dataValidation type="list" sqref="A1"><formula1>XLSX_SECRET_DVFORM1</formula1><formula2>XLSX_SECRET_DVFORM2</formula2></dataValidation></dataValidations><scenarios><scenario name="XLSX_SECRET_SCEN" user="XLSX_SECRET_SCENUSER" comment="XLSX_SECRET_SCENCOMMENT"><inputCells r="A1">1</inputCells></scenario></scenarios><webPublishItems count="1"><webPublishItem id="1" divId="x" sourceType="sheet" sourceRef="A1" destinationFile="XLSX_SECRET_WPDEST" title="XLSX_SECRET_WPTITLE" autoRepublish="0"/></webPublishItems></worksheet>"#,
             ),
         ),
         (
             "xl/tables/table1.xml",
             xml(
-                r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="XLSX_SECRET_TABLE" displayName="XLSX_SECRET_TABLE" comment="XLSX_SECRET_TCOMMENT" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="XLSX_SECRET_TCOL" totalsRowLabel="XLSX_SECRET_TOTLABEL"><calculatedColumnFormula>XLSX_SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#,
+                r#"<table xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" id="1" name="XLSX_SECRET_TABLE" displayName="XLSX_SECRET_TABLE" comment="XLSX_SECRET_TCOMMENT" ref="A1:B2"><tableColumns count="1"><tableColumn id="1" name="XLSX_SECRET_TCOL" totalsRowFunction="sum" totalsRowLabel="XLSX_SECRET_TOTLABEL" totalsRowFormula="XLSX_SECRET_TOTFORM+1"><calculatedColumnFormula>XLSX_SECRET_TCFORM+1</calculatedColumnFormula></tableColumn></tableColumns></table>"#,
             ),
         ),
         (

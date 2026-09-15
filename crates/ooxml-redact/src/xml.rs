@@ -539,9 +539,12 @@ fn replacement_kind(
         Format::Xlsx => match element {
             "t" | "author" | "text" | "rvb" | "oddHeader" | "oddFooter" | "evenHeader"
             | "evenFooter" | "firstHeader" | "firstFooter" => Some(Replacement::Text),
-            "f" | "formula1" | "formula2" | "definedName" | "calculatedColumnFormula" => {
-                Some(Replacement::Formula)
-            }
+            "f"
+            | "formula"
+            | "formula1"
+            | "formula2"
+            | "definedName"
+            | "calculatedColumnFormula" => Some(Replacement::Formula),
             "v" if cell_type == Some("s") => None,
             "v" if matches!(cell_type, Some("str" | "inlineStr")) => Some(Replacement::Text),
             "v" if cell_type == Some("e") => Some(Replacement::Error),
@@ -603,6 +606,7 @@ fn sensitive_attribute_kind(
         Format::Xlsx => {
             if element == "definedName" && attribute == "refersTo"
                 || element == "calculatedItem" && attribute == "formula"
+                || element == "tableColumn" && attribute == "totalsRowFormula"
             {
                 return Some(Replacement::Formula);
             }
