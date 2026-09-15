@@ -3,10 +3,11 @@ title: JavaScript
 description: The npm packages — React editors, framework-free cores, and locale strings
 ---
 
-Every format ships three packages under the `@betteroffice` scope: a
+Every format ships browser packages under the `@betteroffice` scope: a
 framework-free core, a React editor built on it, and that editor's locale
-strings. There is no Vue package — React and framework-free JavaScript are the
-supported entry points.
+strings. DOCX, XLSX, and PPTX also ship a `-native` package that calls the native
+Rust facade. There is no Vue package — React, framework-free JavaScript, and
+native Node.js and Bun are the supported entry points.
 
 ```bash
 npm install @betteroffice/docx-react @betteroffice/docx react react-dom
@@ -58,6 +59,43 @@ a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. Aroun
 the handle the core exports what a custom grid needs — hit-testing, viewport
 math, an accessibility tree, and TSV clipboard helpers.
 
+## Run natively in Node.js and Bun
+
+```bash
+npm install @betteroffice/xlsx-native
+```
+
+```ts
+import { readFile } from "node:fs/promises";
+import { openWorkbook } from "@betteroffice/xlsx-native";
+
+const workbook = await openWorkbook(await readFile("report.xlsx"));
+await workbook.set(0, "B10", "=SUM(B1:B9)");
+const png = await workbook.renderSheet({ sheet: 0, range: "A1:F20" });
+const saved = await workbook.save();
+```
+
+```ts
+import { openWorkbook } from "@betteroffice/xlsx-native";
+
+const workbook = await openWorkbook(Buffer.from(await Bun.file("report.xlsx").arrayBuffer()));
+await Bun.write("out.xlsx", await workbook.save());
+```
+
+The native packages accept and return `Buffer`, expose ordinary camel-cased
+objects, and run facade operations asynchronously in call order without blocking
+the JavaScript event loop. Platform binaries are optional dependencies selected by npm, so
+installing needs no Rust toolchain and downloads no executable at install time.
+The packages run under Node.js and Bun.
+Use `@betteroffice/docx-native`, `@betteroffice/xlsx-native`, or
+`@betteroffice/pptx-native` for the corresponding Rust facade.
+
+The unsuffixed `@betteroffice/<format>` packages remain the portable
+WebAssembly core, which also runs in Node.js; the `-native` packages execute
+the same underlying Rust engine as prebuilt native binaries instead. Headless parsing
+and editing work in both runtimes without a browser or canvas — the native
+packages additionally render PNGs without one.
+
 ## Every package
 
 | Package | What it is |
@@ -65,12 +103,15 @@ math, an accessibility tree, and TSV clipboard helpers.
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips the original package, so untouched parts survive. |
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
+| `@betteroffice/docx-native` | Native Node.js/Bun binding for DOCX inspection, editing, layout, PNG rendering, and saving. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
+| `@betteroffice/xlsx-native` | Native Node.js/Bun binding for XLSX calculation, editing, collaboration, proposals, PNG rendering, and saving. |
 | `@betteroffice/pptx` | Framework-free PPTX core: PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing, comments, collaboration, and saving are live; untouched slides keep their exact source part bytes on save. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |
 | `@betteroffice/pptx-i18n` | UI locale strings and types for the PPTX React editor. |
+| `@betteroffice/pptx-native` | Native Node.js/Bun binding for PPTX inspection, editing, collaboration, proposals, PNG rendering, and saving. |
 
 Connecting any of the three editors to a relay is the same shape in each:
 see [Collaboration](./collaboration).

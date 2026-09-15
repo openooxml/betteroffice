@@ -1,5 +1,6 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
+import { NODE_BINDINGS } from './node-bindings.mjs';
 import {
   RUST_CRATES,
   WORKSPACE_MANIFEST,
@@ -89,6 +90,9 @@ const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
 const pythonBefore = new Map(
   PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
 );
+const nodeBefore = new Map(
+  NODE_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
+);
 
 for (const binding of PYTHON_BINDINGS) {
   const marker = pythonBefore.get(binding);
@@ -97,8 +101,17 @@ for (const binding of PYTHON_BINDINGS) {
     throw new Error(`${binding} changeset marker is ${marker}, but Cargo is ${locked}`);
   }
 }
+for (const binding of NODE_BINDINGS) {
+  const marker = nodeBefore.get(binding);
+  const locked = packageVersion(binding, readFileSync(cargoManifest(binding), 'utf8'));
+  if (locked !== marker) {
+    throw new Error(`${binding} changeset marker is ${marker}, but Cargo is ${locked}`);
+  }
+}
 if (workspaceVersion(cargoBefore) !== before) {
-  throw new Error(`Rust changeset marker is ${before}, but Cargo is ${workspaceVersion(cargoBefore)}`);
+  throw new Error(
+    `Rust changeset marker is ${before}, but Cargo is ${workspaceVersion(cargoBefore)}`
+  );
 }
 
 if (checkOnly) {
@@ -118,11 +131,26 @@ if (checkOnly) {
       throw new Error(`${binding} version synchronization failed`);
     }
   }
+  for (const binding of NODE_BINDINGS) {
+    const source = readFileSync(cargoManifest(binding), 'utf8');
+    const simulatedNode = synchronizePythonVersion(
+      binding,
+      source,
+      nodeBefore.get(binding),
+      '999.999.999'
+    );
+    if (packageVersion(binding, simulatedNode) !== '999.999.999') {
+      throw new Error(`${binding} version synchronization failed`);
+    }
+  }
   validate(before, true);
   cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
   console.log(`Rust release train is synchronized at ${before}.`);
   for (const binding of PYTHON_BINDINGS) {
     console.log(`${binding} is synchronized at ${pythonBefore.get(binding)}.`);
+  }
+  for (const binding of NODE_BINDINGS) {
+    console.log(`${binding} is synchronized at ${nodeBefore.get(binding)}.`);
   }
   console.log('bindings/Cargo.lock is current.');
   process.exit(0);
@@ -142,6 +170,7 @@ if (after !== before) {
 const pythonAfter = new Map(
   PYTHON_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)])
 );
+const nodeAfter = new Map(NODE_BINDINGS.map((binding) => [binding, pythonReleaseVersion(binding)]));
 for (const binding of PYTHON_BINDINGS) {
   const from = pythonBefore.get(binding);
   const to = pythonAfter.get(binding);
@@ -151,12 +180,30 @@ for (const binding of PYTHON_BINDINGS) {
     synchronizePythonVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
   );
 }
+for (const binding of NODE_BINDINGS) {
+  const from = nodeBefore.get(binding);
+  const to = nodeAfter.get(binding);
+  if (to !== from) {
+    writeFileSync(
+      cargoManifest(binding),
+      synchronizePythonVersion(binding, readFileSync(cargoManifest(binding), 'utf8'), from, to)
+    );
+  }
+  run('bunx', ['napi', 'version', '--cwd', binding]);
+}
 
 validate(after, true);
 synchronizeBindingsLock();
 for (const binding of PYTHON_BINDINGS) {
   const from = pythonBefore.get(binding);
   const to = pythonAfter.get(binding);
+  console.log(
+    to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
+  );
+}
+for (const binding of NODE_BINDINGS) {
+  const from = nodeBefore.get(binding);
+  const to = nodeAfter.get(binding);
   console.log(
     to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
   );

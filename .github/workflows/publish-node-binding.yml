@@ -1,0 +1,90 @@
+name: Publish a Node native binding
+
+run-name: Publish @betteroffice/${{ inputs.binding }}-native @ ${{ inputs.sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      binding:
+        description: The bindings/node-<binding> package to publish.
+        required: true
+        type: choice
+        options:
+          - docx
+          - pptx
+          - xlsx
+      sha:
+        description: The commit to build and publish.
+        required: true
+        type: string
+      dry_run:
+        description: Build and validate the packages without uploading.
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  dist:
+    name: Build ${{ inputs.binding }}
+    uses: ./.github/workflows/node-dist.yml
+    with:
+      binding: ${{ inputs.binding }}
+      sha: ${{ inputs.sha }}
+    permissions:
+      contents: read
+
+  publish:
+    name: Publish @betteroffice/${{ inputs.binding }}-native
+    needs: dist
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm-${{ inputs.binding }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.sha }}
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - uses: actions/setup-node@v7.0.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: node-${{ inputs.binding }}.*
+          path: bindings/node-${{ inputs.binding }}/artifacts
+          merge-multiple: true
+
+      - name: Assemble packages
+        run: bunx napi artifacts --cwd bindings/node-${{ inputs.binding }}
+
+      - name: Refuse an npm token
+        env:
+          TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -n "$TOKEN" ]; then
+            echo "::error::NPM_TOKEN is set. This workflow publishes through Trusted Publishing only."
+            exit 1
+          fi
+
+      - name: Validate packages
+        if: inputs.dry_run
+        run: bunx napi pre-publish --cwd bindings/node-${{ inputs.binding }} --tag-style npm --dry-run
+
+      - name: Publish packages
+        if: ${{ !inputs.dry_run }}
+        working-directory: bindings/node-${{ inputs.binding }}
+        env:
+          NPM_CONFIG_PROVENANCE: "true"
+        run: npm publish --access public

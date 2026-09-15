@@ -9,7 +9,8 @@ the runtime you call them from and how much of the pipeline is exposed.
 
 | Runtime | Install | Guide |
 | --- | --- | --- |
-| Browser, React, or Node | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
+| Browser or React | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
+| Native Node.js/Bun | `npm install @betteroffice/docx-native` | [JavaScript](./javascript#run-natively-in-nodejs-and-bun) |
 | Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
 | Python | `pip install betteroffice-docx` | [Python](./python) |
 
@@ -17,9 +18,9 @@ the runtime you call them from and how much of the pipeline is exposed.
 
 | Format | npm | crates.io | PyPI |
 | --- | --- | --- | --- |
-| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | `betteroffice-docx` |
-| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
-| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
+| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react`, `@betteroffice/docx-native` | `betteroffice-docx` | `betteroffice-docx` |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react`, `@betteroffice/xlsx-native` | `betteroffice-xlsx` | `betteroffice-xlsx` |
+| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react`, `@betteroffice/pptx-native` | `betteroffice-pptx` | `betteroffice-pptx` |
 
 All three registries carry DOCX, XLSX, and PPTX. The core, React, and locale
 packages for each format are released together. Version numbers differ between
@@ -65,6 +66,8 @@ both are declared optional peers.
   canvas, selection, keyboard, and review UI.
 - **Your own UI in the browser** — the framework-free cores. Same engine, no
   React: display lists, hit-testing, and a document handle.
+- **A server, CLI, or Electron app in Node.js or Bun** — the `-native` packages. They
+  call the native Rust facades directly and need no browser, canvas, or WASM runtime.
 - **A server, a CLI, or a pipeline in Rust** — the three facade crates.
 - **A server, a notebook, or an agent in Python** — the three `betteroffice-*`
   distributions on PyPI.

@@ -1,6 +1,6 @@
 # BetterOffice
 
-> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship three ways — compiled to WebAssembly for the browser packages, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
+> BetterOffice is an Apache-2.0 office suite from the OpenOOXML project: Word-faithful DOCX, Excel-faithful XLSX, and PowerPoint-faithful PPTX editors and viewers. The OOXML engines are written in Rust, in-house, and ship four ways — compiled to WebAssembly for the browser packages, exposed through native Node.js modules, published to crates.io as native crates for servers, and compiled into Python wheels on PyPI. Files are edited in their own format, with no conversion to an intermediate model on open or save. Real-time collaboration is a Yrs CRDT inside the engine rather than a server-side merge, and every engine also runs headless for server-side and agent pipelines.
 
 DOCX, XLSX, and PPTX are available today as full editors or read-only viewers.
 
@@ -8,19 +8,22 @@ For current versions, use the linked registries and [release notes](https://gith
 
 ## npm packages
 
-DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free cores for custom UIs and headless use.
+DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free portable WebAssembly cores, also Node-capable; the `-native` packages supply native Rust execution and rendering for servers, CLIs, and Electron, under Node.js or Bun.
 
 - [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package so untouched parts are preserved. Standard legacy VML horizontal rules render and retain their source XML through editing and saving. DrawingML plus shapes render with their authored adjustments. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported. Layout omits hidden content by default; `showHiddenText: true` in `YrsRenderEnv` reveals it without changing the document's hidden formatting.
 - [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes.
 - [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n): UI locale strings for the DOCX React editor.
+- [@betteroffice/docx-native](https://www.npmjs.com/package/@betteroffice/docx-native): native Node.js/Bun binding for DOCX inspection, editing, layout, PNG rendering, and saving, without a browser or WASM runtime.
 - [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled metric-compatible Latin fonts plus Hebrew and Arabic coverage faces for deterministic document measurement.
 - [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional CJK coverage faces for Chinese, Japanese, and Korean documents.
 - [@betteroffice/xlsx](https://www.npmjs.com/package/@betteroffice/xlsx): framework-free XLSX core — SpreadsheetML parse/serialize, formula recalculation, grid display lists, hit-testing, PNG export, and agent proposals a human accepts or rejects.
 - [@betteroffice/xlsx-react](https://www.npmjs.com/package/@betteroffice/xlsx-react): the spreadsheet editor and viewer as a React component.
 - [@betteroffice/xlsx-i18n](https://www.npmjs.com/package/@betteroffice/xlsx-i18n): UI locale strings for the XLSX React editor.
+- [@betteroffice/xlsx-native](https://www.npmjs.com/package/@betteroffice/xlsx-native): native Node.js/Bun binding for XLSX calculation, editing, collaboration, proposals, PNG rendering, and saving.
 - [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx): framework-free PPTX core — PresentationML parse, deck model, masters and layouts, slide display lists, canvas rendering. Editing, collaboration, and saving are live; untouched slides keep their exact source part bytes on save.
 - [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component.
 - [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
+- [@betteroffice/pptx-native](https://www.npmjs.com/package/@betteroffice/pptx-native): native Node.js/Bun binding for PPTX inspection, editing, collaboration, proposals, PNG rendering, and saving.
 
 The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
 

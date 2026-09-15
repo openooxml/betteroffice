@@ -1,0 +1,42 @@
+{
+  "name": "@betteroffice/xlsx-native-linux-x64-gnu",
+  "version": "0.0.1",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-xlsx-native.linux-x64-gnu.node",
+  "files": [
+    "betteroffice-xlsx-native.linux-x64-gnu.node"
+  ],
+  "description": "Native Rust bindings for the BetterOffice XLSX engine in Node.js and Bun.",
+  "keywords": [
+    "xlsx",
+    "excel",
+    "spreadsheet",
+    "ooxml",
+    "nodejs",
+    "node-api",
+    "bun",
+    "native",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/node-xlsx"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

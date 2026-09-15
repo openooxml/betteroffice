@@ -1,0 +1,42 @@
+{
+  "name": "@betteroffice/pptx-native-linux-arm64-gnu",
+  "version": "0.0.1",
+  "cpu": [
+    "arm64"
+  ],
+  "main": "betteroffice-pptx-native.linux-arm64-gnu.node",
+  "files": [
+    "betteroffice-pptx-native.linux-arm64-gnu.node"
+  ],
+  "description": "Native Rust bindings for the BetterOffice PPTX engine in Node.js and Bun.",
+  "keywords": [
+    "pptx",
+    "powerpoint",
+    "presentation",
+    "ooxml",
+    "nodejs",
+    "node-api",
+    "bun",
+    "native",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/node-pptx"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

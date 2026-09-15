@@ -16,7 +16,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     name: Release
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 150
     outputs:
       publishing: ${{ steps.pending.outputs.publishing }}
     permissions:
@@ -110,6 +110,37 @@ jobs:
       - name: Check npm publish targets
         if: steps.pending.outputs.publishing == 'true'
         run: node scripts/check-publish-targets.mjs --npm
+
+      - name: Publish Node native bindings
+        if: steps.pending.outputs.publishing == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          status=0
+          runs=""
+          for binding in $(node scripts/node-bindings.mjs --pending | jq -r '.[]'); do
+            if run=$(gh api --method POST -H "X-GitHub-Api-Version: 2026-03-10" \
+              "repos/$GH_REPO/actions/workflows/publish-node-binding.yml/dispatches" \
+              -f ref=main -f "inputs[binding]=$binding" -f "inputs[sha]=$SHA" \
+              -F "inputs[dry_run]=false" --jq '.workflow_run_id') && [ -n "$run" ]; then
+              runs="$runs $binding:$run"
+            else
+              echo "::error::Dispatching @betteroffice/$binding-native failed."
+              status=1
+            fi
+          done
+
+          for entry in $runs; do
+            binding=${entry%%:*}
+            run=${entry#*:}
+            if ! gh run watch "$run" --exit-status; then
+              echo "::error::@betteroffice/$binding-native did not publish: $GITHUB_SERVER_URL/$GH_REPO/actions/runs/$run"
+              status=1
+            fi
+          done
+          exit $status
 
       - name: Publish Rust crates
         if: steps.pending.outputs.publishing == 'true'
