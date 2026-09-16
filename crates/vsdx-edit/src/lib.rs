@@ -865,6 +865,33 @@ mod tests {
     }
 
     #[test]
+    fn converging_redirects_refuse_the_batch_without_writing() {
+        for (source, target) in [("PinX", "Width"), ("Width", "Height")] {
+            let session = session();
+            for cell in ["PinX", "PinY", "Width", "Height"] {
+                add_cell(&session, cell, Some("1"), None);
+            }
+            add_cell(&session, source, Some(&format!("SETATREF({target})")), None);
+            let before = session.snapshot().unwrap();
+            let vector = session.encode_state_vector_v1();
+            assert_eq!(
+                session
+                    .set_shape_bounds(
+                        &EditCtx::local("a"),
+                        "page:1",
+                        "page:1:shape:1",
+                        ["2", "3", "4", "5"].map(str::to_owned)
+                    )
+                    .unwrap_err()
+                    .to_string(),
+                format!("invalid diagram state: redirects converge on {target} more than once")
+            );
+            assert_eq!(session.snapshot().unwrap(), before);
+            assert_eq!(session.encode_state_vector_v1(), vector);
+        }
+    }
+
+    #[test]
     fn shape_bounds_undo_restores_all_four_cells() {
         let session = session();
         for cell in ["PinX", "PinY", "Width", "Height"] {
