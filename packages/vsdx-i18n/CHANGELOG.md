@@ -1,5 +1,11 @@
 # @betteroffice/vsdx-i18n
 
+## 0.0.3
+
+### Patch Changes
+
+- 16d33a7: Fix locale declarations for TypeScript consumers with `skipLibCheck: false` and update React editors to depend on the corrected i18n packages.
+
 ## 0.0.2
 
 ### Patch Changes

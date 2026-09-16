@@ -1,5 +1,17 @@
 # @betteroffice/desktop
 
+## 0.1.2
+
+### Patch Changes
+
+- Updated dependencies [16d33a7]
+  - @betteroffice/docx-react@0.2.1
+  - @betteroffice/xlsx-react@0.2.1
+  - @betteroffice/pptx-react@0.1.1
+  - @betteroffice/pptx@0.1.1
+  - @betteroffice/xlsx@0.2.1
+  - @betteroffice/docx@0.2.1
+
 ## 0.1.1
 
 ### Patch Changes

@@ -1,6 +1,6 @@
 {
   "name": "@betteroffice/vsdx-i18n",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "description": "Shared UI locale strings and types for the @betteroffice/vsdx React editor.",
   "sideEffects": false,

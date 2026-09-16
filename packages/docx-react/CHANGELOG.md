@@ -1,5 +1,14 @@
 # @betteroffice/docx-react
 
+## 0.2.1
+
+### Patch Changes
+
+- 16d33a7: Fix locale declarations for TypeScript consumers with `skipLibCheck: false` and update React editors to depend on the corrected i18n packages.
+- Updated dependencies [16d33a7]
+  - @betteroffice/docx-i18n@0.2.1
+  - @betteroffice/docx@0.2.1
+
 ## 0.2.0
 
 ### Minor Changes

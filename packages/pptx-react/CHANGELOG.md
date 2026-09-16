@@ -1,5 +1,14 @@
 # @betteroffice/pptx-react
 
+## 0.1.1
+
+### Patch Changes
+
+- 16d33a7: Fix locale declarations for TypeScript consumers with `skipLibCheck: false` and update React editors to depend on the corrected i18n packages.
+- Updated dependencies [16d33a7]
+  - @betteroffice/pptx-i18n@0.1.1
+  - @betteroffice/pptx@0.1.1
+
 ## 0.1.0
 
 ### Minor Changes
