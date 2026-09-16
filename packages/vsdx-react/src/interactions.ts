@@ -88,7 +88,15 @@ const yDownHandle = (handle: ResizeHandle): ResizeHandle => {
   return handle;
 };
 export const snapRotationAngle = (angle: number, snap: boolean): number => snap ? Math.round(angle / ROTATION_SNAP_STEP) * ROTATION_SNAP_STEP : angle;
-const locPinInches = (start: DragStart, size = start.size): ModelPoint => (size.width > 0 && size.height > 0 ? start.locPinAtSize?.(size.width, size.height) : undefined) ?? {
+/** The engine refuses a LocPin it cannot evaluate; the stored value is what the renderer falls back to. */
+const probedLocPin = (start: DragStart, size: { width: number; height: number }): ModelPoint | undefined => {
+  if (!(size.width > 0) || !(size.height > 0)) return undefined;
+  try {
+    const probed = start.locPinAtSize?.(size.width, size.height);
+    return probed && Number.isFinite(probed.x) && Number.isFinite(probed.y) ? probed : undefined;
+  } catch { return undefined; }
+};
+const locPinInches = (start: DragStart, size = start.size): ModelPoint => probedLocPin(start, size) ?? {
   x: start.locPin?.x ?? size.width / 2,
   y: start.locPin?.y ?? size.height / 2,
 };

@@ -35,6 +35,20 @@ test('previewOutline skips the engine LocPin lookup for a shape with no height',
   const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 0 }, locPinAtSize: () => { throw new Error('invalid resize dimensions'); } };
   expect(previewOutline(start, { x: 1, y: 0 }, identity)).toEqual([{ x: 1, y: 3 }, { x: 5, y: 3 }, { x: 5, y: 3 }, { x: 1, y: 3 }]);
 });
+test('an engine LocPin refusal leaves the gesture on the stored LocPin', () => {
+  const refuse = () => { throw new Error('cannot evaluate LocPinX for resize'); };
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 2, y: 3 }, locPin: { x: 1, y: 2.5 }, size: { width: 2, height: 5 }, locPinAtSize: refuse };
+  const geometry = resolveDragGeometry(start, { x: 1, y: 0 });
+  expect(geometry.width).toBeCloseTo(3, 10);
+  expect(geometry.x - 1).toBeCloseTo(1, 10);
+  expect(() => previewOutline(start, { x: 1, y: 0 }, identity)).not.toThrow();
+});
+test('a non-finite engine LocPin leaves the gesture on the stored LocPin', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, handle: 'e' as const, pin: { x: 2, y: 3 }, locPin: { x: 1, y: 2.5 }, size: { width: 2, height: 5 }, locPinAtSize: () => ({ x: Number.NaN, y: 2.5 }) };
+  const corners = previewOutline(start, { x: 1, y: 0 }, identity);
+  expect(corners.every((corner) => Number.isFinite(corner.x) && Number.isFinite(corner.y))).toBe(true);
+  expect(resolveDragGeometry(start, { x: 1, y: 0 }).x).toBeCloseTo(2, 10);
+});
 test('previewOutline maps the box through the group transform forward', () => {
   const start = { canvas: { x: 0, y: 0 }, model: { x: 10, y: 20 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 2, c: -2, d: 0, e: 10, f: 20 }] };
   expect(previewOutline(start, { x: 8, y: 24 }, identity)).toEqual([{ x: 7, y: 24 }, { x: 7, y: 32 }, { x: -3, y: 32 }, { x: -3, y: 24 }]);
