@@ -674,6 +674,9 @@ describe('VSDX wasm boundary', () => {
       const saved = await JSZip.loadAsync(diagram.save()).then(zip => zip.file('visio/pages/page1.xml')!.async('string'));
       expect(saved).toContain(`<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' F='&quot;New&quot;'/></Row>`);
       expect(saved).toContain(`<Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/>`);
+    } finally { diagram.dispose(); }
+  });
+
   test('lists page layers and hides shapes on invisible layers', async () => {
     const archive = await JSZip.loadAsync(foundation);
     const pages = await archive.file('visio/pages/pages.xml')!.async('string');
