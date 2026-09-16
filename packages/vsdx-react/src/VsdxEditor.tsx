@@ -265,7 +265,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     }
     const start = pointerRef.current; const release = dragPreviewRef.current;
     if (start && release) {
-      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform), dpr, zoom); } catch { void 0; }
+      try { paintDragPreview(context, previewOutline(start, release, frame.paintTransform, dragSnapRef.current), dpr, zoom); } catch { void 0; }
     }
   }, [model.frame, model.snapshot, model.pageIndex, selection, zoom]);
 
