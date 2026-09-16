@@ -74,10 +74,14 @@ export function quoteShapeDataValue(text: string): string {
   return `"${text.replace(/"/g, '""')}"`;
 }
 
-export function isShapeDataValueEditable(formula: string | null | undefined): boolean {
-  if (!formula) return true;
-  if (/\bGUARD\s*\(/i.test(formula)) return false;
-  if (/\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula)) return false;
+const NUMERIC_LITERAL = /^=?\s*[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?\s*$/;
+
+/** True when the panel can encode this row's value without changing its meaning. */
+export function isShapeDataValueEditable(row: Pick<ShapeDataRow, 'type' | 'formula'>): boolean {
+  const formula = row.formula;
+  if (formula && (/\bGUARD\s*\(/i.test(formula) || /\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula))) return false;
+  if (row.type === 'date' || row.type === 'duration' || row.type === 'currency') return false;
+  if (row.type === 'number') return !formula || NUMERIC_LITERAL.test(formula);
   return true;
 }
 

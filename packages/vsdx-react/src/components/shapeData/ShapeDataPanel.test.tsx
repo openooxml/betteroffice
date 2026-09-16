@@ -96,4 +96,26 @@ test('reports commit failures instead of throwing', () => {
   fireEvent.blur(input);
   expect(errors.length).toBe(1);
   expect(String(errors[0])).toContain('GUARD');
+  expect((input as HTMLInputElement).value).toBe('Amp');
+});
+
+test('refuses to edit values it cannot encode back into the cell', () => {
+  const view = panel(shape([
+    cell('Property', 'When', 'Label', null, 'When'),
+    cell('Property', 'When', 'Type', null, '5'),
+    cell('Property', 'When', 'Value', 'DATETIME("1/1/2008")', '39448'),
+    cell('Property', 'Len', 'Label', null, 'Length'),
+    cell('Property', 'Len', 'Type', null, '2'),
+    cell('Property', 'Len', 'Value', '5 mm', '0.1968503937007874'),
+    cell('Property', 'Plain', 'Label', null, 'Plain'),
+    cell('Property', 'Plain', 'Type', null, '2'),
+    cell('Property', 'Plain', 'Value', '3', '3'),
+  ]));
+  expect((view.getByDisplayValue('39448') as HTMLInputElement).disabled).toBe(true);
+  expect((view.getByDisplayValue('0.1968503937007874') as HTMLInputElement).disabled).toBe(true);
+  const plain = view.getByDisplayValue('3') as HTMLInputElement;
+  expect(plain.disabled).toBe(false);
+  fireEvent.change(plain, { target: { value: '4' } });
+  fireEvent.blur(plain);
+  expect(view.commits).toEqual([{ row: expect.objectContaining({ rowName: 'Plain' }), formula: '4' }]);
 });

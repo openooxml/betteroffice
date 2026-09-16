@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { VsdxDocument, VsdxRenderer } from './generated/vsdx_wasm.js';
-import { initWasm, openDiagram } from '../index';
+import { initWasm, openDiagram, shapeDataRows, shapeDataValueFormula, visibleShapeDataRows } from '../index';
 import type { FormulaShapeDraft } from '../types';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -648,6 +648,33 @@ describe('VSDX wasm boundary', () => {
     expect(x?.formula).toBe('2');
     expect(x?.locator).toEqual(expect.objectContaining({ section: 'Geometry', row: { index: 0 }, cellName: 'X' }));
     diagram.dispose();
+  });
+
+  test('commits a shape-data edit through the mutation policy', async () => {
+    const section = `<Section N='Property'>`
+      + `<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' V='Old' F='&quot;Old&quot;'/></Row>`
+      + `<Row N='Serial'><Cell N='Label' V='Serial'/><Cell N='Type' V='0'/><Cell N='SortKey' V='A'/><Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/></Row>`
+      + `<Row N='Hidden'><Cell N='Label' V='Hidden'/><Cell N='Invisible' V='1'/><Cell N='Value' V='H' F='&quot;H&quot;'/></Row>`
+      + `</Section>`;
+    const archive = await JSZip.loadAsync(foundation);
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'>${section}`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9054 });
+    try {
+      const page = diagram.snapshot().pages[0];
+      const shape = page.shapes[0];
+      expect(shapeDataRows(shape).map(row => row.rowName)).toEqual(['Hidden', 'Serial', 'Device']);
+      expect(visibleShapeDataRows(shape).map(row => row.rowName)).toEqual(['Serial', 'Device']);
+      const locate = (rowName: string) => ({ cellName: 'Value', section: 'Property', rowName });
+      const receipt = diagram.setCellFormula(page.id, shape.id, locate('Device'), shapeDataValueFormula('string', 'New'));
+      expect(receipt).toEqual({ pageId: page.id, shapeId: shape.id, cellName: 'Value', before: '"Old"', after: '"New"' });
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Device')!.displayValue).toBe('New');
+      expect(() => diagram.setCellFormula(page.id, shape.id, locate('Serial'), '"XYZ"')).toThrow();
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Serial')!.formula).toBe('GUARD("ABC")');
+      const saved = await JSZip.loadAsync(diagram.save()).then(zip => zip.file('visio/pages/page1.xml')!.async('string'));
+      expect(saved).toContain(`<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' F='&quot;New&quot;'/></Row>`);
+      expect(saved).toContain(`<Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/>`);
+    } finally { diagram.dispose(); }
   });
 
   test('does not reenter update listeners before the outer call unwinds', () => {

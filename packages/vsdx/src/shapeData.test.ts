@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { formatOptions, quoteShapeDataValue, shapeDataRows, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
+import { formatOptions, isShapeDataValueEditable, quoteShapeDataValue, shapeDataRows, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
 import type { CellSnapshot, ShapeSnapshot } from './types';
 
 function cell(section: string, row: string, name: string, formula: string | null, value: string | null): CellSnapshot {
@@ -97,4 +97,20 @@ test('quotes values and builds typed formulas', () => {
 test('splits list formats into options', () => {
   expect(formatOptions('Sequence Flow;Message Flow;Association')).toEqual(['Sequence Flow', 'Message Flow', 'Association']);
   expect(formatOptions(null)).toEqual([]);
+});
+
+test('only offers editing where the panel can encode the value back', () => {
+  expect(isShapeDataValueEditable({ type: 'string', formula: '"Amp"' })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'string', formula: null })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'boolean', formula: '1' })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'fixed-list', formula: 'INDEX(0,Prop.Use.Format)' })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'string', formula: 'GUARD("Amp")' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'string', formula: 'SETATREFEXPR(Prop.Other)' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'number', formula: '2.5' })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'number', formula: null })).toBe(true);
+  expect(isShapeDataValueEditable({ type: 'number', formula: '5 mm' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'number', formula: 'Width*2' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'date', formula: 'DATETIME("1/1/2008")' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'duration', formula: 'DURATION(1)' })).toBe(false);
+  expect(isShapeDataValueEditable({ type: 'currency', formula: 'CY(3)' })).toBe(false);
 });

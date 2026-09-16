@@ -52,7 +52,7 @@ export function ShapeDataPanel({ shape, onCommit, onError, t, className }: Shape
 
 function ShapeDataValueInput({ row, onCommit, onError, t }: { row: ShapeDataRow; onCommit: (row: ShapeDataRow, formula: string) => void; onError: (error: unknown) => void; t: TFunction }) {
   const id = `shape-data-${row.rowName ?? `ix-${row.rowIndex}`}`;
-  const editable = isShapeDataValueEditable(row.formula);
+  const editable = isShapeDataValueEditable(row);
   const commit = (formula: string) => {
     try { onCommit(row, formula); }
     catch (error) { onError(error); }
