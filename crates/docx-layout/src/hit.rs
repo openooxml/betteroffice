@@ -826,16 +826,36 @@ fn over_selectable_image(prims: &[Primitive], x: f64, y: f64) -> bool {
     prims
         .iter()
         .rev()
-        .filter_map(|p| match p {
-            Primitive::Image(img) => Some(img),
-            _ => None,
+        .find(|primitive| match primitive {
+            Primitive::Image(img) => {
+                let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+                let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+                x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    return false;
+                }
+                if shape.attrs.doc_start.is_none() {
+                    return false;
+                }
+                let (sx, sy) = (
+                    shape.x.as_f64().unwrap_or(0.0),
+                    shape.y.as_f64().unwrap_or(0.0),
+                );
+                let (sw, sh) = (
+                    shape.w.as_f64().unwrap_or(0.0),
+                    shape.h.as_f64().unwrap_or(0.0),
+                );
+                x >= sx && x <= sx + sw && y >= sy && y <= sy + sh
+            }
+            _ => false,
         })
-        .find(|img| {
-            let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
-            let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-            x >= ix && x <= ix + iw && y >= iy && y <= iy + ih
+        .is_some_and(|primitive| match primitive {
+            Primitive::Image(img) => img.attrs.doc_start.is_some(),
+            Primitive::Shape(shape) => shape.attrs.doc_start.is_some(),
+            _ => false,
         })
-        .is_some_and(|img| img.attrs.doc_start.is_some())
 }
 
 /// The shared point resolver over one primitive list — a page body or a single
@@ -879,17 +899,43 @@ fn resolve_point(prims: &[Primitive], typeable: bool, x: f64, y: f64) -> PointRe
     // Only the topmost image decides the target, so an unselectable one over
     // this leaves the area's answer standing.
     for p in prims {
-        let Primitive::Image(img) = p else { continue };
-        let Some(ds) = img.attrs.doc_start else {
-            continue;
-        };
-        let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
-        let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
-        if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
-            return PointResolution {
-                pos: Some(ds),
-                target,
-            };
+        match p {
+            Primitive::Image(img) => {
+                let Some(ds) = img.attrs.doc_start else {
+                    continue;
+                };
+                let (ix, iy) = (img.x.as_f64().unwrap_or(0.0), img.y.as_f64().unwrap_or(0.0));
+                let (iw, ih) = (img.w.as_f64().unwrap_or(0.0), img.h.as_f64().unwrap_or(0.0));
+                if x >= ix && x <= ix + iw && y >= iy && y <= iy + ih {
+                    return PointResolution {
+                        pos: Some(ds),
+                        target,
+                    };
+                }
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    continue;
+                }
+                let Some(ds) = shape.attrs.doc_start else {
+                    continue;
+                };
+                let (sx, sy) = (
+                    shape.x.as_f64().unwrap_or(0.0),
+                    shape.y.as_f64().unwrap_or(0.0),
+                );
+                let (sw, sh) = (
+                    shape.w.as_f64().unwrap_or(0.0),
+                    shape.h.as_f64().unwrap_or(0.0),
+                );
+                if x >= sx && x <= sx + sw && y >= sy && y <= sy + sh {
+                    return PointResolution {
+                        pos: Some(ds),
+                        target,
+                    };
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1229,20 +1275,42 @@ fn collect_range_rects(
     merge_line_rects(pending, out);
 
     for p in prims {
-        let Primitive::Image(img) = p else { continue };
-        let (Some(ds), Some(de)) = (img.attrs.doc_start, img.attrs.doc_end) else {
-            continue;
-        };
-        if de <= from || ds >= to {
-            continue;
+        match p {
+            Primitive::Image(img) => {
+                let (Some(ds), Some(de)) = (img.attrs.doc_start, img.attrs.doc_end) else {
+                    continue;
+                };
+                if de <= from || ds >= to {
+                    continue;
+                }
+                out.push(RangeRect {
+                    page_index,
+                    x: img.x.as_f64().unwrap_or(0.0),
+                    y: img.y.as_f64().unwrap_or(0.0),
+                    width: img.w.as_f64().unwrap_or(0.0),
+                    height: img.h.as_f64().unwrap_or(0.0),
+                });
+            }
+            Primitive::Shape(shape) => {
+                if shape.attrs.inline_shape_atom != Some(true) {
+                    continue;
+                }
+                let (Some(ds), Some(de)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                    continue;
+                };
+                if de <= from || ds >= to {
+                    continue;
+                }
+                out.push(RangeRect {
+                    page_index,
+                    x: shape.x.as_f64().unwrap_or(0.0),
+                    y: shape.y.as_f64().unwrap_or(0.0),
+                    width: shape.w.as_f64().unwrap_or(0.0),
+                    height: shape.h.as_f64().unwrap_or(0.0),
+                });
+            }
+            _ => {}
         }
-        out.push(RangeRect {
-            page_index,
-            x: img.x.as_f64().unwrap_or(0.0),
-            y: img.y.as_f64().unwrap_or(0.0),
-            width: img.w.as_f64().unwrap_or(0.0),
-            height: img.h.as_f64().unwrap_or(0.0),
-        });
     }
 }
 
@@ -1374,6 +1442,25 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
                 height: image.h.as_f64().unwrap_or(0.0),
             });
         }
+        if let Some(shape) = page.primitives.iter().find_map(|primitive| {
+            let Primitive::Shape(shape) = primitive else {
+                return None;
+            };
+            if shape.attrs.inline_shape_atom != Some(true) {
+                return None;
+            }
+            let (Some(start), Some(end)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                return None;
+            };
+            (pos >= start && pos < end).then_some(shape)
+        }) {
+            return Some(CaretRect {
+                page_index,
+                x: shape.x.as_f64().unwrap_or(0.0),
+                y: shape.y.as_f64().unwrap_or(0.0),
+                height: shape.h.as_f64().unwrap_or(0.0),
+            });
+        }
     }
     for (page_index, page) in dl.pages.iter().enumerate().rev() {
         if let Some(image) = page.primitives.iter().rev().find_map(|primitive| {
@@ -1390,6 +1477,25 @@ pub fn caret_rect(dl: &DisplayList, pos: i64) -> Option<CaretRect> {
                 x: image.x.as_f64().unwrap_or(0.0) + image.w.as_f64().unwrap_or(0.0),
                 y: image.y.as_f64().unwrap_or(0.0),
                 height: image.h.as_f64().unwrap_or(0.0),
+            });
+        }
+        if let Some(shape) = page.primitives.iter().rev().find_map(|primitive| {
+            let Primitive::Shape(shape) = primitive else {
+                return None;
+            };
+            if shape.attrs.inline_shape_atom != Some(true) {
+                return None;
+            }
+            let (Some(start), Some(end)) = (shape.attrs.doc_start, shape.attrs.doc_end) else {
+                return None;
+            };
+            (pos > start && pos <= end).then_some(shape)
+        }) {
+            return Some(CaretRect {
+                page_index,
+                x: shape.x.as_f64().unwrap_or(0.0) + shape.w.as_f64().unwrap_or(0.0),
+                y: shape.y.as_f64().unwrap_or(0.0),
+                height: shape.h.as_f64().unwrap_or(0.0),
             });
         }
         if let Some(hit) = page.primitives.iter().rev().find_map(|primitive| {
@@ -2111,5 +2217,170 @@ mod tests {
             "grouping compared line owners {compares} times for {PRIMITIVES_PER_PAGE} \
              primitives per page"
         );
+    }
+
+    fn inline_shape_primitive(
+        x: f64,
+        y: f64,
+        w: f64,
+        h: f64,
+        doc_start: i64,
+        block_key: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "shape",
+            "x": x, "y": y, "w": w, "h": h,
+            "geometryPath": [
+                {"type": "move", "x": 0, "y": 0},
+                {"type": "line", "x": 1, "y": 1}
+            ],
+            "docStart": doc_start,
+            "docEnd": doc_start + 1,
+            "blockKey": block_key,
+            "inlineShapeAtom": true
+        })
+    }
+
+    fn text_atom(
+        text: &str,
+        x: f64,
+        baseline: f64,
+        width: f64,
+        doc_start: i64,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "kind": "text",
+            "text": text,
+            "x": x,
+            "baselineY": baseline,
+            "width": width,
+            "font": "400 16px Calibri",
+            "color": "#000000",
+            "docStart": doc_start,
+            "docEnd": doc_start + 1,
+            "blockId": 1,
+            "lineIndex": 0
+        })
+    }
+
+    #[test]
+    fn inline_shape_atom_hits_caret_and_range_without_images() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let dl = page(
+            content,
+            vec![inline_shape_primitive(
+                100.0,
+                200.0,
+                60.0,
+                18.0,
+                2,
+                "shape:inline-test",
+            )],
+        );
+        assert!(dl.pages[0].primitives.iter().all(|primitive| !matches!(
+            primitive,
+            crate::display_list::Primitive::Image(img) if img.rel_id.is_empty()
+        )));
+        let hit = hit_test_regions(&dl, 0, 130.0, 209.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert_eq!(rects.len(), 1);
+        assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
+        assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
+        let before = caret_rect(&dl, 2).unwrap();
+        assert_eq!((before.x, before.y, before.height), (100.0, 200.0, 18.0));
+        let after = caret_rect(&dl, 3).unwrap();
+        assert_eq!((after.x, after.y, after.height), (160.0, 200.0, 18.0));
+    }
+
+    #[test]
+    fn inline_shape_between_text_keeps_atom_caret_at_edges() {
+        let content = serde_json::json!({"x": 60, "y": 80, "width": 400, "height": 340});
+        let dl = page(
+            content,
+            vec![
+                text_atom("A", 80.0, 100.0, 10.0, 1),
+                inline_shape_primitive(90.0, 82.0, 60.0, 18.0, 2, "shape:inline-test"),
+                text_atom("B", 150.0, 100.0, 10.0, 3),
+            ],
+        );
+        let hit = hit_test_regions(&dl, 0, 120.0, 91.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert!(
+            rects
+                .iter()
+                .any(|rect| rect.x == 90.0 && rect.width == 60.0)
+        );
+        let before = caret_rect(&dl, 2).unwrap();
+        assert_eq!((before.x, before.y), (90.0, 82.0));
+        let end = caret_rect(&dl, 3).unwrap();
+        assert_eq!(end.x, 150.0);
+    }
+
+    #[test]
+    fn standalone_shape_without_atom_flag_stays_unselectable() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let mut standalone = inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 9, "shape:block");
+        standalone
+            .as_object_mut()
+            .unwrap()
+            .remove("inlineShapeAtom");
+        let dl = page(content, vec![standalone]);
+        let hit = hit_test_regions(&dl, 0, 130.0, 209.0).unwrap();
+        assert_ne!(hit.target, HoverTarget::Image);
+        assert!(range_rects(&dl, 9, 10).is_empty());
+    }
+
+    #[test]
+    fn unselectable_image_on_top_blocks_selectable_image_and_shape() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let covered_image = page(
+            content.clone(),
+            vec![image(100.0, 200.0, Some(10)), image(100.0, 200.0, None)],
+        );
+        assert_eq!(target(&covered_image, 130.0, 209.0), HoverTarget::None);
+        let covered_shape = page(
+            content.clone(),
+            vec![
+                inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test"),
+                image(100.0, 200.0, None),
+            ],
+        );
+        assert_eq!(target(&covered_shape, 130.0, 209.0), HoverTarget::None);
+        let shape_on_top = page(
+            content,
+            vec![
+                image(100.0, 200.0, None),
+                inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test"),
+            ],
+        );
+        assert_eq!(target(&shape_on_top, 130.0, 209.0), HoverTarget::Image);
+    }
+
+    #[test]
+    fn grouped_child_without_doc_stays_parent_only_atom() {
+        let content = serde_json::json!({"x": 80, "y": 80, "width": 340, "height": 340});
+        let parent = inline_shape_primitive(100.0, 200.0, 60.0, 18.0, 2, "shape:inline-test");
+        let child = serde_json::json!({
+            "kind": "shape",
+            "x": 105.0, "y": 204.0, "w": 10.0, "h": 8.0,
+            "geometryPath": [
+                {"type": "move", "x": 0, "y": 0},
+                {"type": "line", "x": 1, "y": 1}
+            ],
+            "blockKey": "shape:inline-test:child:0",
+            "inlineShapeAtom": true
+        });
+        let dl = page(content, vec![parent, child]);
+        let hit = hit_test_regions(&dl, 0, 110.0, 208.0).unwrap();
+        assert_eq!(hit.pos, Some(2));
+        assert_eq!(hit.target, HoverTarget::Image);
+        let rects = range_rects(&dl, 2, 3);
+        assert_eq!(rects.len(), 1);
+        assert_eq!((rects[0].x, rects[0].y), (100.0, 200.0));
+        assert_eq!((rects[0].width, rects[0].height), (60.0, 18.0));
     }
 }

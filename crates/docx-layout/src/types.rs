@@ -369,6 +369,8 @@ pub struct ImageRun {
     pub decorative: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hyperlink: Option<HyperlinkInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_shape: Option<Box<ShapeBlock>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_insertion: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1269,6 +1271,7 @@ impl PartialEq for ImageRun {
             outline: _,
             decorative: _,
             hyperlink: _,
+            inline_shape: _,
             is_insertion: _,
             is_deletion: _,
             change_author: _,
@@ -1309,6 +1312,7 @@ impl PartialEq for ImageRun {
             && self.outline == other.outline
             && self.decorative == other.decorative
             && self.hyperlink == other.hyperlink
+            && self.inline_shape == other.inline_shape
             && self.is_insertion == other.is_insertion
             && self.is_deletion == other.is_deletion
             && self.change_author == other.change_author

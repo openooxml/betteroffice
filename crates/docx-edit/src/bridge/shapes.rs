@@ -22,6 +22,77 @@ pub(super) fn lower_shape_json(
     lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
 }
 
+pub(super) fn inline_native_shape(shape: &ShapeBlock) -> bool {
+    if shape.position.is_some() || shape.wrap_type.is_some() {
+        return false;
+    }
+    if shape.shape_type == "textBox" {
+        return false;
+    }
+    if !(shape.width.is_finite() && shape.height.is_finite()) {
+        return false;
+    }
+    if !(shape.width > 0.0 && shape.height > 0.0) {
+        return false;
+    }
+    if !shape_bbox_finite(shape) {
+        return false;
+    }
+    shape_textless(shape)
+}
+
+fn shape_bbox_finite(shape: &ShapeBlock) -> bool {
+    for value in &shape.geometry_path {
+        if let Some(object) = value.as_object() {
+            for (_, number) in object {
+                if let Some(number) = number.as_f64()
+                    && !number.is_finite()
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    for child in &shape.children {
+        if let Some(x) = child.x
+            && !x.is_finite()
+        {
+            return false;
+        }
+        if let Some(y) = child.y
+            && !y.is_finite()
+        {
+            return false;
+        }
+        if !(child.width.is_finite() && child.height.is_finite()) {
+            return false;
+        }
+        if !shape_bbox_finite(child) {
+            return false;
+        }
+    }
+    true
+}
+
+fn shape_textless(shape: &ShapeBlock) -> bool {
+    if shape.shape_type == "textBox" {
+        return false;
+    }
+    if shape
+        .inner_text
+        .as_ref()
+        .is_some_and(|paragraphs| !paragraphs.is_empty())
+    {
+        return false;
+    }
+    shape.children.iter().all(|child| {
+        if child.shape_type == "textBox" {
+            return false;
+        }
+        shape_textless(child)
+    })
+}
+
 fn lower_shape(
     shape: &Value,
     block_id: String,
@@ -1305,5 +1376,167 @@ mod tests {
         });
         let block = lower_shape_json(&shape, 531, &RenderEnv::default()).unwrap();
         assert_eq!(block.geometry_path, authored);
+    }
+
+    #[test]
+    fn inline_textless_shape_qualifies_with_full_payload() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": {"rgb": "112233"}},
+            "outline": {"color": {"rgb": "445566"}, "width": 19050},
+            "transform": {"rotation": 12, "flipH": true},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        let block = lower_shape_json(&shape, 600, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        assert_eq!(block.geometry_path.len(), 3);
+        assert_eq!(block.children.len(), 1);
+        assert!(block.fill.is_some());
+        assert!(block.stroke.is_some());
+    }
+
+    #[test]
+    fn anchored_text_and_textbox_shapes_stay_blocks() {
+        let anchored = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": 0},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+            },
+            "wrap": {"type": "square"}
+        });
+        let block = lower_shape_json(&anchored, 601, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let textbox = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "textBody": {"content": [{
+                "paraId": "p1",
+                "content": [{
+                    "type": "run",
+                    "content": [{"type": "text", "text": "hi"}]
+                }]
+            }]}
+        });
+        let block = lower_shape_json(&textbox, 602, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let child_text = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}},
+                {
+                    "shapeType": "rect",
+                    "size": {"width": 91440, "height": 91440},
+                    "textBody": {"content": [{
+                        "paraId": "p2",
+                        "content": [{
+                            "type": "run",
+                            "content": [{"type": "text", "text": "no"}]
+                        }]
+                    }]}
+                }
+            ]
+        });
+        let block = lower_shape_json(&child_text, 603, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+        let textbox_kind = json!({
+            "shapeType": "textBox",
+            "size": {"width": 914400, "height": 457200}
+        });
+        let block = lower_shape_json(&textbox_kind, 604, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block));
+    }
+
+    #[test]
+    fn tab_break_and_empty_paragraphs_stay_blocks() {
+        for (name, content) in [
+            (
+                "tab",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "tab"}]
+                    }]
+                }]),
+            ),
+            (
+                "break",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "break"}]
+                    }]
+                }]),
+            ),
+            (
+                "empty",
+                json!([{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": []
+                    }]
+                }]),
+            ),
+        ] {
+            let shape = json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": content}
+            });
+            let block = lower_shape_json(&shape, 606, &RenderEnv::default()).unwrap();
+            assert!(
+                block
+                    .inner_text
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty()),
+                "{name} has paragraph collection"
+            );
+            assert!(!inline_native_shape(&block), "{name}");
+        }
+        let nested_textbox = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "children": [{
+                "shapeType": "textBox",
+                "size": {"width": 91440, "height": 91440}
+            }]
+        });
+        let block = lower_shape_json(&nested_textbox, 607, &RenderEnv::default()).unwrap();
+        assert!(!inline_native_shape(&block), "recursive textBox");
+    }
+
+    #[test]
+    fn nonfinite_bbox_never_qualifies_inline() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.0, "y": 0.0},
+                {"type": "line", "x": 1.0, "y": 1.0}
+            ],
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        let mut block = lower_shape_json(&shape, 605, &RenderEnv::default()).unwrap();
+        assert!(inline_native_shape(&block));
+        block.width = f64::INFINITY;
+        assert!(!inline_native_shape(&block));
+        block.width = 96.0;
+        block.children[0].width = f64::NAN;
+        assert!(!inline_native_shape(&block));
     }
 }

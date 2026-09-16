@@ -394,6 +394,8 @@ pub struct DocAttrs {
     pub modern_effects: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub table: Option<TableMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_shape_atom: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
@@ -1712,6 +1714,8 @@ struct ImageRunIn {
     decorative: Option<bool>,
     #[serde(default)]
     hyperlink: Option<HyperlinkIn>,
+    #[serde(default)]
+    inline_shape: Option<Value>,
     #[serde(default)]
     is_insertion: Option<bool>,
     #[serde(default)]
@@ -6319,6 +6323,60 @@ fn emit_line(
                 } else {
                     baseline - layout_height
                 };
+                if let Some(inline_value) = imr.inline_shape.as_ref()
+                    && let Ok(shape_block) =
+                        serde_json::from_value::<ShapeBlockIn>(inline_value.clone())
+                {
+                    let stamp_from = prims.len();
+                    let fragment = ShapeFragmentIn {
+                        block_id: shape_block.id.clone(),
+                        x: pen_x,
+                        y,
+                        width: layout_width,
+                        height: layout_height,
+                        doc_start: *pm_start,
+                        doc_end: *pm_end,
+                        pm_start: *pm_start,
+                        pm_end: *pm_end,
+                        is_anchored: None,
+                        z_index: None,
+                    };
+                    emit_shape_fragment(prims, &fragment, &shape_block, ctx);
+                    for primitive in &mut prims[stamp_from..] {
+                        if let Some(attrs) = doc_attrs_mut(primitive) {
+                            attrs.inline_shape_atom = Some(true);
+                            stamp_hyperlink_attrs(
+                                attrs,
+                                imr.hyperlink.as_ref(),
+                                imr.hlink_href.as_deref(),
+                            );
+                            attrs.logical_order = attrs.logical_order.or(*logical_order);
+                            attrs.bidi_level =
+                                attrs.bidi_level.or_else(|| logical_order.map(|_| *level));
+                            if imr.is_insertion == Some(true) || imr.is_deletion == Some(true) {
+                                attrs.revision = Some(Revision {
+                                    author: imr.change_author.clone().unwrap_or_default(),
+                                    date: imr.change_date.clone().unwrap_or_default(),
+                                    revision_id: imr
+                                        .change_revision_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_default(),
+                                    kind: if imr.is_insertion == Some(true) {
+                                        RevisionKind::Ins
+                                    } else {
+                                        RevisionKind::Del
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    if imr.display_mode.as_deref() != Some("block")
+                        && imr.wrap_type.as_deref() != Some("topAndBottom")
+                    {
+                        pen_x += layout_width;
+                    }
+                    continue;
+                }
                 let rot = imr
                     .rotation_deg
                     .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
@@ -11355,5 +11413,119 @@ mod tests {
             ..Default::default()
         };
         assert!(plot_labels_from(None, Some(&series_only)).is_none());
+    }
+
+    #[test]
+    fn inline_shape_paints_native_geometry_children_and_paint() {
+        let inline_shape = json!({
+            "id": "shape:inline-test",
+            "shapeType": "rect",
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": "#112233"},
+            "stroke": {"color": "#445566", "width": 2.5, "dash": "dash"},
+            "transform": {"rotation": 12.0, "flipH": true},
+            "width": 60.0,
+            "height": 18.0,
+            "children": [{
+                "id": "shape:inline-test:child:0",
+                "shapeType": "ellipse",
+                "geometryPath": [
+                    {"type": "move", "x": 0.0, "y": 0.0},
+                    {"type": "line", "x": 1.0, "y": 1.0}
+                ],
+                "width": 10.0,
+                "height": 8.0,
+                "x": 5.0,
+                "y": 4.0
+            }],
+            "title": "Oval callout",
+            "pmStart": 2,
+            "pmEnd": 3
+        });
+        let input = json!({
+            "contractVersion": 1,
+            "measured": [{
+                "block": {
+                    "kind": "paragraph",
+                    "id": "inline-para",
+                    "runs": [
+                        {"kind": "text", "text": "A", "pmStart": 1, "pmEnd": 2},
+                        {
+                            "kind": "image",
+                            "src": "",
+                            "width": 60.0,
+                            "height": 18.0,
+                            "wrapType": "inline",
+                            "displayMode": "inline",
+                            "cssFloat": "none",
+                            "pmStart": 2,
+                            "pmEnd": 3,
+                            "inlineShape": inline_shape
+                        },
+                        {"kind": "text", "text": "B", "pmStart": 3, "pmEnd": 4}
+                    ],
+                    "pmStart": 0,
+                    "pmEnd": 5
+                },
+                "measure": {
+                    "kind": "paragraph",
+                    "totalHeight": 22,
+                    "lines": [{
+                        "headRun": 0, "headChar": 0, "tailRun": 2, "tailChar": 1,
+                        "width": 120, "ascent": 16, "descent": 6, "lineHeight": 22
+                    }]
+                }
+            }],
+            "options": {},
+            "layout": {"pages": [{"number": 1, "size": {"w": 400, "h": 400},
+                "margins": {"top": 20, "right": 20, "bottom": 20, "left": 20},
+                "fragments": [{"kind": "paragraph", "blockId": "inline-para", "x": 20, "y": 20,
+                    "width": 360, "height": 22, "fromLine": 0, "toLine": 1,
+                    "pmStart": 0, "pmEnd": 5}]
+            }]}
+        });
+        let output: Value =
+            serde_json::from_str(&build_display_list_json(&input.to_string()).unwrap()).unwrap();
+        let primitives = output["pages"][0]["primitives"].as_array().unwrap();
+        assert!(
+            !primitives
+                .iter()
+                .any(|primitive| primitive["kind"] == "image" && primitive["relId"] == ""),
+            "no empty placeholder image"
+        );
+        let shapes: Vec<_> = primitives
+            .iter()
+            .filter(|primitive| primitive["kind"] == "shape")
+            .collect();
+        assert_eq!(
+            shapes.len(),
+            2,
+            "parent plus one child, not first-child only"
+        );
+        let parent = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test")
+            .expect("parent shape with original id");
+        assert_eq!(parent["fill"], "#112233");
+        assert_eq!(parent["stroke"]["color"], "#445566");
+        assert_eq!(parent["ariaLabel"], "Oval callout");
+        assert_eq!(parent["docStart"], 2);
+        assert_eq!(parent["docEnd"], 3);
+        let path = parent["geometryPath"].as_array().unwrap();
+        assert_eq!(path.len(), 3, "custom path preserved, not preset rect");
+        assert_eq!(path[0]["type"], "move");
+        assert_eq!(path[1]["type"], "line");
+        assert_eq!(path[2]["type"], "close");
+        assert!(parent["transform"]["flipH"] == true);
+        let child = shapes
+            .iter()
+            .find(|primitive| primitive["blockKey"] == "shape:inline-test:child:0")
+            .expect("child shape with original id");
+        assert!(child.get("docStart").is_none());
+        assert!(child.get("docEnd").is_none());
     }
 }

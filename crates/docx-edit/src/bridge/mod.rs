@@ -635,11 +635,67 @@ fn lower_story<T: ReadTxn>(
                             index: story_index,
                         });
                     };
-                    paragraph_drawings.push(DrawingMarker {
-                        pm_offset,
-                        block: LayoutBlock::Shape(block),
-                        hidden: mark_bool(attributes, "hidden") == Some(true),
-                    });
+                    let formatting = lower_run_formatting(attributes, env);
+                    if shapes::inline_native_shape(&block) {
+                        let image = ImageRun {
+                            src: String::new(),
+                            width: block.width,
+                            height: block.height,
+                            alt: block.description.clone().or_else(|| block.title.clone()),
+                            shape_type: Some(block.shape_type.clone()),
+                            transform: None,
+                            position: None,
+                            wrap_type: Some("inline".to_owned()),
+                            display_mode: Some("inline".to_owned()),
+                            css_float: Some("none".to_owned()),
+                            dist_top: None,
+                            dist_bottom: None,
+                            dist_left: None,
+                            dist_right: None,
+                            crop_top: None,
+                            crop_right: None,
+                            crop_bottom: None,
+                            crop_left: None,
+                            opacity: None,
+                            rotation_deg: None,
+                            flip_h: None,
+                            flip_v: None,
+                            rotation_bounds: None,
+                            wrap_text: None,
+                            wrap_polygon: None,
+                            allow_overlap: None,
+                            layout_in_cell: None,
+                            effect_extent: None,
+                            effects: None,
+                            outline: None,
+                            decorative: block.decorative,
+                            hyperlink: formatting.hyperlink.clone(),
+                            inline_shape: Some(Box::new(block)),
+                            is_insertion: formatting.is_insertion,
+                            is_deletion: formatting.is_deletion,
+                            change_author: formatting.change_author.clone(),
+                            change_date: formatting.change_date.clone(),
+                            change_revision_id: formatting.change_revision_id,
+                            pm_start: None,
+                            pm_end: None,
+                        };
+                        paragraph_runs.push(RawRun {
+                            kind: RawRunKind::Image(image),
+                            formatting,
+                            story_start: story_index,
+                            story_end: story_index + 1,
+                            pm_start: pm_offset,
+                            pm_end: pm_offset + 1,
+                            inherited_hyperlink: inherited_hyperlink_style(attributes),
+                            inline_sdt_widget: None,
+                        });
+                    } else {
+                        paragraph_drawings.push(DrawingMarker {
+                            pm_offset,
+                            block: LayoutBlock::Shape(block),
+                            hidden: mark_bool(attributes, "hidden") == Some(true),
+                        });
+                    }
                     story_index += 1;
                     paragraph_pm_units += 1;
                     at_block_boundary = false;
@@ -1151,6 +1207,7 @@ fn lower_image_values(
         outline: None,
         decorative: None,
         hyperlink: None,
+        inline_shape: None,
         is_insertion: formatting.is_insertion,
         is_deletion: formatting.is_deletion,
         change_author: formatting.change_author.clone(),
@@ -4239,6 +4296,207 @@ mod tests {
             assert_eq!(blocks[1]["attrs"]["listMarker"], "■");
             assert_ne!(blocks[1]["attrs"]["listMarkerHidden"], true);
         }
+    }
+
+    #[test]
+    fn inline_textless_shape_stays_one_paragraph_with_native_payload() {
+        let doc = EditingDoc::new(60);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200},
+            "geometryPath": [
+                {"type": "move", "x": 0.1, "y": 0.2},
+                {"type": "line", "x": 0.9, "y": 0.8},
+                {"type": "close"}
+            ],
+            "fill": {"type": "solid", "color": {"rgb": "112233"}},
+            "outline": {"color": {"rgb": "445566"}, "width": 19050},
+            "transform": {"rotation": 12, "flipH": true},
+            "children": [
+                {"shapeType": "ellipse", "size": {"width": 91440, "height": 91440}}
+            ]
+        });
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!("expected single paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 3);
+        let Run::Text(before) = &paragraph.runs[0] else {
+            panic!("expected leading text");
+        };
+        assert_eq!(before.text, "A");
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!("expected inline shape image");
+        };
+        assert_eq!(image.wrap_type.as_deref(), Some("inline"));
+        assert_eq!(image.display_mode.as_deref(), Some("inline"));
+        let inline = image.inline_shape.as_ref().expect("native payload");
+        assert_eq!(inline.geometry_path.len(), 3);
+        assert_eq!(inline.geometry_path[0]["x"], 0.1);
+        assert_eq!(inline.fill.as_ref().unwrap()["color"], "#112233");
+        assert_eq!(inline.stroke.as_ref().unwrap()["color"], "#445566");
+        assert_eq!(inline.transform.as_ref().unwrap()["flipH"], true);
+        assert_eq!(inline.children.len(), 1);
+        assert_eq!((image.width, image.height), (96.0, 48.0));
+        assert_eq!((image.pm_start, image.pm_end), (Some(2.0), Some(3.0)));
+        let Run::Text(after) = &paragraph.runs[2] else {
+            panic!("expected trailing text");
+        };
+        assert_eq!(after.text, "B");
+        assert_eq!((after.pm_start, after.pm_end), (Some(3.0), Some(4.0)));
+    }
+
+    #[test]
+    fn anchored_and_text_shapes_split_paragraph() {
+        for (name, shape) in [
+            (
+                "anchored",
+                json!({
+                    "shapeType": "rect",
+                    "size": {"width": 914400, "height": 457200},
+                    "position": {
+                        "horizontal": {"relativeTo": "column", "posOffset": 0},
+                        "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                    },
+                    "wrap": {"type": "square"}
+                }),
+            ),
+            (
+                "text",
+                json!({
+                    "shapeType": "rect",
+                    "size": {"width": 914400, "height": 457200},
+                    "textBody": {"content": [{
+                        "paraId": "p1",
+                        "content": [{
+                            "type": "run",
+                            "content": [{"type": "text", "text": "hi"}]
+                        }]
+                    }]}
+                }),
+            ),
+        ] {
+            let doc = EditingDoc::new(61);
+            doc.create_story("body", "AB", "Normal", "left").unwrap();
+            doc.apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: Attrs::new(),
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+            assert_eq!(blocks.len(), 3, "{name}");
+            assert!(matches!(blocks[0], LayoutBlock::Paragraph(_)));
+            assert!(matches!(blocks[1], LayoutBlock::Shape(_)));
+            assert!(matches!(blocks[2], LayoutBlock::Paragraph(_)));
+        }
+    }
+
+    #[test]
+    fn inline_shape_preserves_pm_revision_and_hidden() {
+        let shape = json!({
+            "shapeType": "rect",
+            "size": {"width": 914400, "height": 457200}
+        });
+        let doc = EditingDoc::new(62);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        let mut revision_attrs = Attrs::new();
+        revision_attrs.insert(
+            Arc::from("ins"),
+            any_map([
+                ("id", Any::Number(7.0)),
+                ("author", Any::from("Ada")),
+                ("date", Any::from(DATE)),
+            ]),
+        );
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: revision_attrs,
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 1);
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        let Run::Image(image) = &paragraph.runs[1] else {
+            panic!();
+        };
+        assert_eq!(image.is_insertion, Some(true));
+        assert_eq!(image.change_author.as_deref(), Some("Ada"));
+        assert!(image.inline_shape.is_some());
+        let hidden_doc = EditingDoc::new(63);
+        hidden_doc
+            .create_story("body", "AB", "Normal", "left")
+            .unwrap();
+        let mut hidden_attrs = Attrs::new();
+        hidden_attrs.insert(Arc::from("hidden"), Any::Bool(true));
+        hidden_doc
+            .apply_raw_ops(
+                "body",
+                vec![RawOp::InsertEmbed {
+                    index: 1,
+                    kind: "shape".to_owned(),
+                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                    attrs: hidden_attrs,
+                }],
+                &EditCtx::local("", DATE),
+            )
+            .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&hidden_doc, "body", &RenderEnv::default()).unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &blocks[0] else {
+            panic!();
+        };
+        assert!(
+            !paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "hidden inline shape filtered"
+        );
+        let shown = yrs_doc_to_layout_blocks(
+            &hidden_doc,
+            "body",
+            &RenderEnv {
+                show_hidden_text: true,
+                ..RenderEnv::default()
+            },
+        )
+        .unwrap();
+        let LayoutBlock::Paragraph(paragraph) = &shown[0] else {
+            panic!();
+        };
+        assert!(
+            paragraph
+                .runs
+                .iter()
+                .any(|run| matches!(run, Run::Image(_))),
+            "show_hidden_text keeps inline shape"
+        );
     }
 
     #[test]

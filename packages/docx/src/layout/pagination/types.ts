@@ -338,6 +338,8 @@ export type ImageRun = {
   changeRevisionId?: number;
   pmStart?: number;
   pmEnd?: number;
+  /** Native inline DrawingML payload; present only for textless inline shapes. */
+  inlineShape?: unknown;
 };
 
 /** Run for an explicit w:br — ends the line, not the paragraph. */
