@@ -4282,6 +4282,76 @@ mod tests {
         assert_eq!(jump_path(&list, 2).len(), 2);
     }
 
+    fn nested_shape(
+        primitives: &[Primitive],
+        id: &str,
+        ancestors: Affine,
+    ) -> Option<(Vec<GeometryPathCommand>, Affine)> {
+        primitives.iter().find_map(|primitive| match primitive {
+            Primitive::Shape {
+                id: actual,
+                path,
+                transform,
+                ..
+            } if actual == id => Some((path.clone(), ancestors.compose(*transform))),
+            Primitive::Group {
+                primitives,
+                transform,
+                ..
+            } => nested_shape(primitives, id, ancestors.compose(*transform)),
+            _ => None,
+        })
+    }
+
+    fn page_jump_apexes(list: &VsdxDisplayList, id: u32) -> Vec<(f32, f32)> {
+        let (path, matrix) =
+            nested_shape(&list.primitives, &format!("page:{id}"), Affine::identity()).unwrap();
+        path.iter()
+            .filter_map(|command| match *command {
+                GeometryPathCommand::Quad { x, y, .. } => {
+                    Some(matrix.apply_point(x as f32, y as f32))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn grouped_crossing_package(
+        angle: &str,
+        local: ((f64, f64), (f64, f64)),
+        code: &str,
+    ) -> VsdxPackage {
+        let mut host = group(10, 2.0, 2.0, vec![free_connector(2, local.0, local.1)]);
+        with_cell(&mut host, "Angle", angle);
+        jump_package(
+            vec![free_connector(1, (0.0, 1.0), (4.0, 1.0)), host],
+            &[("LineJumpCode", code)],
+            &[],
+        )
+    }
+
+    #[test]
+    fn line_jump_crosses_a_grouped_connector_in_page_space() {
+        let package = grouped_crossing_package("0", ((0.0, -1.5), (0.0, 0.5)), "1");
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(apex(jump_path(&list, 1), 'y', 1.025), Some((2.0, 1.025)));
+        assert!(page_jump_apexes(&list, 2).is_empty());
+    }
+
+    #[test]
+    fn line_jump_on_a_connector_inside_a_rotated_group_lands_in_page_space() {
+        let package = grouped_crossing_package(
+            &std::f64::consts::FRAC_PI_2.to_string(),
+            ((-1.5, 0.0), (0.5, 0.0)),
+            "2",
+        );
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(jump_path(&list, 1).len(), 2);
+        let apexes = page_jump_apexes(&list, 2);
+        assert_eq!(apexes.len(), 2, "{apexes:?}");
+        assert_point_close(apexes[0], (1.975, 1.0));
+    }
+
     #[test]
     fn connector_route_styles_bend_or_run_straight() {
         use GeometryPathCommand::{Line, Move};
