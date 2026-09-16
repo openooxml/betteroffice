@@ -3847,7 +3847,7 @@ mod tests {
                 .unwrap()
                 .clone();
             serde_json::to_value(
-                &docx_parse::parse_paragraph_properties(Some(&root), None).unwrap(),
+                docx_parse::parse_paragraph_properties(Some(&root), None).unwrap(),
             )
             .unwrap()
         }
