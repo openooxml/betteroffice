@@ -49,7 +49,7 @@ import zhCNJson from '../zh-CN.json';
  *
  * @public
  */
-export type LocaleStrings = typeof enJson;
+export type LocaleStrings = typeof en;
 
 /**
  * Every locale code shipped from this package. Pass to `locales[code]`
@@ -63,7 +63,7 @@ export type LocaleStrings = typeof enJson;
 export type LocaleCode = 'en' | 'de' | 'fr' | 'he' | 'hi' | 'id' | 'pl' | 'pt-BR' | 'tr' | 'zh-CN';
 
 /** English (`en`) — the source of truth, 100% covered. @public */
-export const en: LocaleStrings = enJson;
+export const en = enJson;
 
 /** German (`de`). Community-maintained; null leaves fall back to English. @public */
 export const de: PartialLocaleStrings = deJson;

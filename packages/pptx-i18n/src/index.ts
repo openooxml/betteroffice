@@ -16,10 +16,10 @@ import ptBRJson from '../pt-BR.json';
 import trJson from '../tr.json';
 import zhCNJson from '../zh-CN.json';
 
-export type LocaleStrings = typeof enJson;
+export type LocaleStrings = typeof en;
 export type LocaleCode = 'en' | 'de' | 'fr' | 'he' | 'hi' | 'id' | 'pl' | 'pt-BR' | 'tr' | 'zh-CN';
 
-export const en: LocaleStrings = enJson;
+export const en = enJson;
 export const de: PartialLocaleStrings = deJson;
 export const fr: PartialLocaleStrings = frJson;
 export const he: PartialLocaleStrings = heJson;
