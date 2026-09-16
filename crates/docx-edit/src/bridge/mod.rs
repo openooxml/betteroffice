@@ -2891,14 +2891,25 @@ fn lower_paragraph_attrs(
     result.list_marker_hidden = true_property(values, "listMarkerHidden");
     result.list_marker_font_family = value_string(values.get("listMarkerFontFamily"));
     result.list_marker_font_size = value_number(values.get("listMarkerFontSize"));
-    if result.list_marker.is_some()
-        && let Some(Any::Map(formatting)) = values.get("defaultTextFormatting")
-    {
-        result.list_marker_bold = map_bool(formatting, "bold");
-        result.list_marker_italic = map_bool(formatting, "italic");
-        result.list_marker_color = formatting
-            .get("color")
+    if result.list_marker.is_some() {
+        let explicit_bold = values.get("listMarkerBold").and_then(any_bool);
+        let explicit_italic = values.get("listMarkerItalic").and_then(any_bool);
+        let explicit_color = values
+            .get("listMarkerColor")
             .and_then(|color| resolve_color(color, env));
+        if let Some(Any::Map(formatting)) = values.get("defaultTextFormatting") {
+            result.list_marker_bold = explicit_bold.or_else(|| map_bool(formatting, "bold"));
+            result.list_marker_italic = explicit_italic.or_else(|| map_bool(formatting, "italic"));
+            result.list_marker_color = explicit_color.or_else(|| {
+                formatting
+                    .get("color")
+                    .and_then(|color| resolve_color(color, env))
+            });
+        } else {
+            result.list_marker_bold = explicit_bold;
+            result.list_marker_italic = explicit_italic;
+            result.list_marker_color = explicit_color;
+        }
     }
     result.list_marker_suffix = value_string(values.get("listMarkerSuffix"));
     result.default_tab_stop_twips = env.default_tab_stop_twips;
@@ -3786,6 +3797,66 @@ mod tests {
         assert_eq!(attrs.list_marker_font_family.as_deref(), Some("Arial"));
         assert_eq!(attrs.list_marker_bold, Some(true));
         assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
+    }
+
+    #[test]
+    fn list_marker_level_off_overrides_paragraph_on() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(false)),
+            ("listMarkerItalic".to_owned(), Any::Bool(false)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("000000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(true)),
+                    ("italic", Any::Bool(true)),
+                    ("color", any_map([("rgb", Any::String("FF0000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(false));
+        assert_eq!(attrs.list_marker_italic, Some(false));
+        assert_eq!(attrs.list_marker_color.as_deref(), Some("#000000"));
+    }
+
+    #[test]
+    fn list_marker_level_on_overrides_body_off() {
+        let values = BTreeMap::from([
+            ("listMarker".to_owned(), Any::String("1.".into())),
+            ("listMarkerBold".to_owned(), Any::Bool(true)),
+            ("listMarkerItalic".to_owned(), Any::Bool(true)),
+            (
+                "listMarkerColor".to_owned(),
+                any_map([("rgb", Any::String("FF0000".into()))]),
+            ),
+            (
+                "defaultTextFormatting".to_owned(),
+                any_map([
+                    ("bold", Any::Bool(false)),
+                    ("italic", Any::Bool(false)),
+                    ("color", any_map([("rgb", Any::String("000000".into()))])),
+                ]),
+            ),
+        ]);
+        let attrs = lower_paragraph_attrs(
+            &values,
+            None,
+            &RenderEnv::default(),
+            &mut ListState::default(),
+        );
+        assert_eq!(attrs.list_marker_bold, Some(true));
+        assert_eq!(attrs.list_marker_italic, Some(true));
         assert_eq!(attrs.list_marker_color.as_deref(), Some("#FF0000"));
     }
 

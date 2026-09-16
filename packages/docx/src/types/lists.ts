@@ -5,6 +5,7 @@
  */
 
 import type { TextFormatting, ParagraphFormatting } from './formatting';
+import type { ColorValue } from './colors';
 
 // ============================================================================
 // LISTS & NUMBERING
@@ -196,6 +197,12 @@ export interface ListRendering {
   markerFontFamily?: string;
   /** Marker font size from numbering level rPr, in points */
   markerFontSize?: number;
+  /** Marker bold from numbering level rPr, explicit false preserves Word normal */
+  markerBold?: boolean;
+  /** Marker italic from numbering level rPr */
+  markerItalic?: boolean;
+  /** Marker color from numbering level rPr */
+  markerColor?: ColorValue;
   /**
    * Suffix character placed after the marker before body text (§17.9.25).
    * Default is `tab`; `space` inserts a single space; `nothing` no gap.

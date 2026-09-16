@@ -1793,6 +1793,9 @@ fn paragraph_attrs(
         "listMarkerHidden": truthy(field(list, "markerHidden")).then(|| field(list, "markerHidden").cloned()).flatten(),
         "listMarkerFontFamily": string(field(list, "markerFontFamily")).filter(|value| !value.is_empty()),
         "listMarkerFontSize": number(field(list, "markerFontSize")).filter(|value| *value != 0.0),
+        "listMarkerBold": nullish(field(list, "markerBold")),
+        "listMarkerItalic": nullish(field(list, "markerItalic")),
+        "listMarkerColor": nullish(field(list, "markerColor")),
         "listMarkerSuffix": string(field(list, "markerSuffix")).filter(|value| !value.is_empty()),
         "listLevelNumFmts": truthy(field(list, "levelNumFmts")).then(|| field(list, "levelNumFmts").cloned()).flatten(),
         "listAbstractNumId": nullish(field(list, "abstractNumId")),
@@ -3652,6 +3655,24 @@ mod tests {
             assert_eq!(properties["indentFirstLine"], json!(240));
             assert_eq!(properties["hangingIndent"], json!(false));
         }
+    }
+
+    #[test]
+    fn numbering_level_marker_format_preserves_explicit_off() {
+        let styles = StyleResolver::new(None);
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"marker":"1.","numFmt":"decimal","markerBold":false,"markerItalic":false,"markerColor":{"rgb":"000000"},"markerFontFamily":"Times New Roman","markerFontSize":12.0},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["listMarker"], json!("1."));
+        assert_eq!(properties["listMarkerBold"], json!(false));
+        assert_eq!(properties["listMarkerItalic"], json!(false));
+        assert_eq!(properties["listMarkerColor"], json!({"rgb":"000000"}));
+        assert_eq!(properties["listMarkerFontFamily"], json!("Times New Roman"));
+        assert_eq!(properties["listMarkerFontSize"], json!(12.0));
     }
 
     use super::*;

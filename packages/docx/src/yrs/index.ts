@@ -198,6 +198,9 @@ export interface YrsParagraphAttrs {
   listMarkerHidden?: boolean | null;
   listMarkerFontFamily?: string | null;
   listMarkerFontSize?: number | null;
+  listMarkerBold?: boolean | null;
+  listMarkerItalic?: boolean | null;
+  listMarkerColor?: import('../types/colors').ColorValue | null;
   listMarkerSuffix?: 'tab' | 'space' | 'nothing' | null;
   listLevelNumFmts?: readonly string[] | null;
   listAbstractNumId?: number | null;
