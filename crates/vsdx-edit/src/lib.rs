@@ -29,6 +29,7 @@ pub(crate) const CONNECTS: &str = "vsdx:connects";
 pub(crate) const STORIES: &str = "vsdx:stories";
 pub(crate) const REMOTE_ORIGIN: &str = "vsdx:remote";
 pub(crate) const HYDRATE_ORIGIN: &str = "vsdx:hydrate";
+pub(crate) const MIGRATE_ORIGIN: &str = "vsdx:migrate";
 const BOOTSTRAP_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 pub const MAX_SAFE_CLIENT_ID: u64 = BOOTSTRAP_CLIENT_ID - 1;
 pub const MAX_UPDATE_BYTES: usize = 64 * 1024 * 1024;
@@ -94,6 +95,7 @@ impl DiagramSession {
         }
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
+        diagram::migrate_doc(&doc)?;
         diagram::validate_doc(&doc)?;
         let undo = DiagramUndoManager::new(&doc, client_id)?;
         Ok(Self {
@@ -294,7 +296,7 @@ mod tests {
         let doc = doc_with_client_id(7);
         let mut txn = doc.transact_mut_with(HYDRATE_ORIGIN);
         let meta = txn.get_or_insert_map(META);
-        meta.insert(&mut txn, "schemaVersion", 1.0);
+        meta.insert(&mut txn, "schemaVersion", 2.0);
         meta.insert(&mut txn, "fingerprint", "test");
         meta.insert(
             &mut txn,

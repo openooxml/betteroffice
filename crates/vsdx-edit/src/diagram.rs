@@ -24,7 +24,9 @@ use crate::{
 mod connect;
 mod containers;
 
-const SCHEMA_VERSION: f64 = 1.0;
+const SCHEMA_VERSION: f64 = 2.0;
+/// Stories held resolved text tokens as JSON before this version.
+const TOKEN_STORY_SCHEMA_VERSION: f64 = 1.0;
 pub(crate) const MAX_SHAPE_NESTING: usize = 256;
 type SectionRows<'a> = Vec<(
     (String, Option<u32>),
@@ -1231,6 +1233,36 @@ fn validate_shape_draft(draft: &ShapeDraft) -> EditResult<()> {
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     validate_schema(doc)?;
     serializable_doc(doc)
+}
+
+/// Carries a stored document forward; an unknown version is left for [`validate_schema`].
+pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
+    let rewrites = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        if map_number(&meta, &txn, "schemaVersion") != Some(TOKEN_STORY_SCHEMA_VERSION) {
+            return Ok(());
+        }
+        let stories = required_map(&txn, STORIES)?;
+        stories
+            .iter(&txn)
+            .filter_map(|(key, value)| {
+                let Out::Any(Any::String(value)) = value else {
+                    return None;
+                };
+                serde_json::from_str::<Vec<vsdx_resolve::ResolvedTextToken>>(&value)
+                    .ok()
+                    .map(|tokens| (key.to_owned(), plain_text(&tokens)))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut txn = doc.transact_mut_with(crate::MIGRATE_ORIGIN);
+    let stories = required_map(&txn, STORIES)?;
+    for (key, text) in &rewrites {
+        stories.insert(&mut txn, key.as_str(), text.as_str());
+    }
+    required_map(&txn, META)?.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
+    Ok(())
 }
 
 fn validate_schema(doc: &Doc) -> EditResult<()> {
@@ -3451,6 +3483,90 @@ mod tests {
             .part_bytes(path)
             .unwrap()
             .to_vec()
+    }
+
+    fn story_values(doc: &Doc) -> std::collections::BTreeMap<String, String> {
+        let txn = doc.transact();
+        txn.get_map(STORIES)
+            .unwrap()
+            .iter(&txn)
+            .map(|(id, value)| {
+                let Out::Any(Any::String(text)) = value else {
+                    panic!("story {id} is not a string");
+                };
+                (id.to_owned(), text.to_string())
+            })
+            .collect()
+    }
+
+    fn stamp_token_stories(
+        session: &DiagramSession,
+        stories: &std::collections::BTreeMap<String, String>,
+    ) {
+        let mut txn = session.doc.transact_mut_with(crate::HYDRATE_ORIGIN);
+        let map = txn.get_or_insert_map(STORIES);
+        for (id, text) in stories {
+            let tokens = if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![vsdx_resolve::ResolvedTextToken::Literal(text.clone())]
+            };
+            let json = serde_json::to_string(&tokens).unwrap();
+            map.insert(&mut txn, id.as_str(), json.as_str());
+        }
+        txn.get_or_insert_map(META)
+            .insert(&mut txn, "schemaVersion", TOKEN_STORY_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_token_stories_migrate_to_plain_text_on_open() {
+        let session = DiagramSession::open(GROUP_MASTER_TEXT, 3).unwrap();
+        let expected = story_values(&session.doc);
+        assert!(expected.values().any(|text| text == "group label"));
+        assert!(expected.values().any(String::is_empty));
+        stamp_token_stories(&session, &expected);
+        assert!(
+            story_values(&session.doc)
+                .values()
+                .all(|text| text.starts_with('['))
+        );
+
+        let reopened =
+            DiagramSession::open_from_update(&session.encode_state_as_update_v1(), 4).unwrap();
+        assert_eq!(story_values(&reopened.doc), expected);
+        assert_eq!(
+            reopened.shape_text("page:1", SUB_SHAPE).unwrap(),
+            "group label"
+        );
+        let txn = reopened.doc.transact();
+        assert_eq!(
+            map_number(&required_map(&txn, META).unwrap(), &txn, "schemaVersion"),
+            Some(SCHEMA_VERSION)
+        );
+        drop(txn);
+        assert!(semantic_text_edits(&reopened.doc).unwrap().is_empty());
+        assert!(!reopened.can_undo());
+        assert_eq!(
+            reopened.save().unwrap(),
+            vsdx_parse::write_vsdx(&vsdx_parse::parse_vsdx(GROUP_MASTER_TEXT).unwrap()).unwrap()
+        );
+    }
+
+    #[test]
+    fn remote_update_cannot_downgrade_the_schema_version() {
+        let live = DiagramSession::open(GROUP_MASTER_TEXT, 5).unwrap();
+        let peer = DiagramSession::open(GROUP_MASTER_TEXT, 6).unwrap();
+        let expected = story_values(&live.doc);
+        stamp_token_stories(&peer, &expected);
+
+        let error = live
+            .apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap_err();
+        assert!(
+            matches!(&error, EditError::InvalidState(reason) if reason.contains("schema version")),
+            "unexpected error {error:?}"
+        );
+        assert_eq!(story_values(&live.doc), expected);
     }
 
     #[test]
