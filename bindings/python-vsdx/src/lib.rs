@@ -16,6 +16,7 @@ fn map_error(error: CoreError) -> PyErr {
     match error {
         CoreError::Parse(error) => ParseError::new_err(error.to_string()),
         CoreError::Resolve(error) => RenderError::new_err(error.to_string()),
+        CoreError::Render(reason) => RenderError::new_err(reason),
         CoreError::Policy(error) => RangeError::new_err(error),
     }
 }
