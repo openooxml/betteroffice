@@ -254,6 +254,7 @@ dependencies = [
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
  "betteroffice-vsdx-resolve",
 ]
 
@@ -305,6 +306,20 @@ dependencies = [
  "betteroffice-vsdx",
  "betteroffice-vsdx-parse",
  "pyo3",
+]
+
+[[package]]
+name = "betteroffice-vsdx-render"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-vsdx-eval",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]
