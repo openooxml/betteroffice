@@ -67,7 +67,7 @@ test('derives every polygon preview and geometry from shared vertices', () => {
   for (const [id, vertices] of Object.entries(polygonVertices)) {
     const shape = standardShapes.find((candidate) => candidate.id === id)!;
     const cells = shape.draft(0, 0, 1, 1).cells.filter((cell) => cell.name === 'X' || cell.name === 'Y').slice(0, vertices.length * 2);
-    if (id !== 'rectangle') expect(shape.preview.startsWith(previewPathForVertices(vertices))).toBe(true);
+    expect(shape.preview.startsWith(previewPathForVertices(vertices, shape.defaultSize.width / shape.defaultSize.height))).toBe(true);
     expect(cells.map((cell) => cell.formula)).toEqual(vertices.flatMap(([x, y]) => [`Width*${x}`, `Height*${y}`]));
   }
 });
@@ -97,6 +97,53 @@ test('gives every master a one-inch-tall default box at the ratio its draft writ
   expect(standardShapes.find((shape) => shape.id === 'ellipse')?.defaultSize).toEqual({ width: 1.5, height: 1 });
   expect(standardShapes.find((shape) => shape.id === 'rectangle')?.defaultSize.width).toBeCloseTo(4 / 3, 10);
   expect(standardShapes.find((shape) => shape.id === 'circle')?.defaultSize).toEqual({ width: 1, height: 1 });
+});
+
+test('builds the cube as a 4:3 box whose inner edges meet at the front corner', () => {
+  const cube = defaultSize('cube');
+  expect(cube.width / cube.height).toBeCloseTo(4 / 3, 10);
+  const corners = standardShapes.find((shape) => shape.id === 'cube')!.draft(0, 0, 1, 1).cells
+    .filter((cell) => cell.locator.section === 'Geometry' && (cell.name === 'X' || cell.name === 'Y'))
+    .map((cell) => cell.formula);
+  expect(corners).toEqual([
+    'Width*0', 'Height*0',
+    'Width*0.75', 'Height*0',
+    'Width*1', 'Height*0.25',
+    'Width*1', 'Height*1',
+    'Width*0.25', 'Height*1',
+    'Width*0', 'Height*0.75',
+    'Width*0.75', 'Height*0',
+    'Width*0.75', 'Height*0.75',
+    'Width*0', 'Height*0.75',
+    'Width*0.75', 'Height*0.75',
+    'Width*1', 'Height*1',
+  ]);
+});
+
+function subpathAreas(shapeId: string): number[] {
+  const cells = standardShapes.find((shape) => shape.id === shapeId)!.draft(0, 0, 1, 1).cells
+    .filter((cell) => cell.locator.section === 'Geometry' && (cell.name === 'X' || cell.name === 'Y'));
+  const areas: number[] = [];
+  let points: Array<[number, number]> = [];
+  const close = () => {
+    if (points.length > 2) areas.push(points.reduce((sum, [x, y], index) => {
+      const [nextX, nextY] = points[(index + 1) % points.length];
+      return sum + x * nextY - nextX * y;
+    }, 0));
+    points = [];
+  };
+  for (let index = 0; index < cells.length; index += 2) {
+    if (cells[index].locator.rowType === 'MoveTo') close();
+    points.push([Number(cells[index].formula!.split('*')[1]), Number(cells[index + 1].formula!.split('*')[1])]);
+  }
+  close();
+  return areas;
+}
+
+test('winds the cube inner edges with its outline so a filled cube has no hole', () => {
+  const [outline, ...inner] = subpathAreas('cube');
+  expect(inner.length).toBeGreaterThan(0);
+  for (const area of inner) expect(Math.sign(area)).toBe(Math.sign(outline));
 });
 
 test('follows the Visio gallery order', () => {
