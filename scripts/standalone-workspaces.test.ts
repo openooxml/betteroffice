@@ -1,32 +1,52 @@
 import { describe, expect, test } from 'bun:test';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { STANDALONE_WORKSPACES } from './rust-crates.mjs';
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
-const skipped = new Set(['target', 'node_modules', 'vendor']);
+const crates = resolve(repository, 'crates');
 
-function manifests(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
-    if (entry.isDirectory()) return skipped.has(entry.name) ? [] : manifests(join(dir, entry.name));
-    return entry.name === 'Cargo.toml' ? [join(dir, entry.name)] : [];
-  });
+function capture(command: string, args: string[]): string {
+  const result = spawnSync(command, args, { cwd: repository, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')}: ${result.stderr}`);
+  return result.stdout;
+}
+
+function committedLockfiles(): string[] {
+  return capture('git', ['ls-files', '--', '*Cargo.lock'])
+    .split('\n')
+    .filter((path) => path && !path.includes('/vendor/'));
+}
+
+function workspaceMembers(workspace: string) {
+  const manifest = `${workspace}/Cargo.toml`;
+  const json = capture('cargo', ['metadata', '--format-version', '1', '--no-deps', '--manifest-path', manifest]);
+  return JSON.parse(json).packages as {
+    name: string;
+    dependencies: { name: string; req: string; path?: string }[];
+  }[];
+}
+
+function pinsWorkspaceCrate(dependency: { req: string; path?: string }): boolean {
+  if (!dependency.path || dependency.req === '*') return false;
+  return !relative(crates, dependency.path).startsWith('..');
 }
 
 describe('standalone Cargo workspaces', () => {
-  for (const workspace of STANDALONE_WORKSPACES) {
-    test(`${workspace} commits the lockfile the release script refreshes`, () => {
-      expect(existsSync(join(repository, workspace, 'Cargo.lock'))).toBe(true);
-    });
+  test('every committed lockfile belongs to the root or a listed workspace', () => {
+    const expected = ['Cargo.lock', ...STANDALONE_WORKSPACES.map((workspace) => `${workspace}/Cargo.lock`)];
+    expect(committedLockfiles().sort()).toEqual(expected.sort());
+  });
 
+  for (const workspace of STANDALONE_WORKSPACES) {
     test(`${workspace} depends on workspace crates by path alone`, () => {
-      for (const manifest of manifests(join(repository, workspace))) {
-        const pinned = readFileSync(manifest, 'utf8')
-          .split('\n')
-          .filter((line) => /path = "[^"]*crates\//.test(line) && /\bversion = /.test(line));
-        expect({ manifest, pinned }).toEqual({ manifest, pinned: [] });
-      }
+      const pinned = workspaceMembers(workspace).flatMap((member) =>
+        member.dependencies
+          .filter(pinsWorkspaceCrate)
+          .map((dependency) => `${member.name} -> ${dependency.name} ${dependency.req}`)
+      );
+      expect(pinned).toEqual([]);
     });
   }
 });

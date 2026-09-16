@@ -109,9 +109,9 @@ carry a `Cargo.lock` that records the workspace crates by version, so every bump
 invalidates them and CI's `cargo clippy --locked` would fail.
 `scripts/rust-crates.mjs` lists them in `STANDALONE_WORKSPACES`;
 `scripts/version-packages.mjs` regenerates each lock after writing the new
-versions, and the release commit carries them alongside the manifests. Their path
-dependencies on workspace crates carry no `version`, which
-`scripts/standalone-workspaces.test.ts` pins.
+versions, and the release commit carries them alongside the manifests.
+`scripts/standalone-workspaces.test.ts` fails when a committed lockfile is not on
+that list or a path dependency on a workspace crate carries a `version`.
 
 Each entry carries a `publish` flag. Every registered binding is versioned by
 Changesets and installed and tested by the CI gate; only a flagged one is built
