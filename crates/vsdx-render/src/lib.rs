@@ -593,9 +593,6 @@ impl Renderer {
                 &mut cache,
             )?;
         }
-        for primitive in &mut state.primitives {
-            bake_group_transform(primitive, Affine::identity());
-        }
         line_jumps::apply_line_jumps(
             &mut state.primitives,
             &state.jump_overrides,
@@ -1504,62 +1501,6 @@ impl Renderer {
         Ok(())
     }
 }
-fn bake_group_transform(primitive: &mut Primitive, matrix: Affine) {
-    match primitive {
-        Primitive::Shape {
-            path, transform, ..
-        } => {
-            for command in path {
-                transform_affine(command, matrix);
-            }
-            *transform = Affine::identity();
-        }
-        Primitive::Image { transform, .. } => *transform = matrix.compose(*transform),
-        Primitive::TextBox { transform, .. } => *transform = matrix.compose(*transform),
-        Primitive::Placeholder {
-            x,
-            y,
-            width,
-            height,
-            ..
-        } => transform_rect(x, y, width, height, matrix),
-        Primitive::Group {
-            primitives,
-            transform,
-            ..
-        } => {
-            let matrix = matrix.compose(*transform);
-            for child in primitives {
-                bake_group_transform(child, matrix);
-            }
-            *transform = Affine::identity();
-        }
-    }
-}
-fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, matrix: Affine) {
-    let corners = [
-        matrix.apply_point(*x, *y),
-        matrix.apply_point(*x + *width, *y),
-        matrix.apply_point(*x, *y + *height),
-        matrix.apply_point(*x + *width, *y + *height),
-    ];
-    let (min_x, max_x) = corners
-        .iter()
-        .map(|(x, _)| *x)
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
-            (min.min(value), max.max(value))
-        });
-    let (min_y, max_y) = corners
-        .iter()
-        .map(|(_, y)| *y)
-        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
-            (min.min(value), max.max(value))
-        });
-    *x = min_x;
-    *y = min_y;
-    *width = max_x - min_x;
-    *height = max_y - min_y;
-}
 fn affine(transform: vsdx_resolve::SceneAffine) -> Affine {
     Affine {
         a: transform.a as f32,
@@ -1963,18 +1904,31 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
     }
     .invert()?;
     let (x, y) = inverse.apply_point(x, y);
-    fn collect<'a>(primitives: &'a [Primitive], output: &mut Vec<&'a Primitive>) {
+    fn collect<'a>(
+        primitives: &'a [Primitive],
+        ancestors: Affine,
+        output: &mut Vec<(&'a Primitive, Affine)>,
+    ) {
         for primitive in primitives {
-            output.push(primitive);
-            if let Primitive::Group { primitives, .. } = primitive {
-                collect(primitives, output);
+            match primitive {
+                Primitive::Group {
+                    primitives,
+                    transform,
+                    ..
+                } => collect(primitives, ancestors.compose(*transform), output),
+                Primitive::Shape { transform, .. }
+                | Primitive::Image { transform, .. }
+                | Primitive::TextBox { transform, .. } => {
+                    output.push((primitive, ancestors.compose(*transform)))
+                }
+                Primitive::Placeholder { .. } => output.push((primitive, ancestors)),
             }
         }
     }
     let mut primitives = Vec::new();
-    collect(&list.primitives, &mut primitives);
-    primitives.sort_by_key(|primitive| std::cmp::Reverse(z_order(primitive)));
-    for primitive in primitives {
+    collect(&list.primitives, Affine::identity(), &mut primitives);
+    primitives.sort_by_key(|(primitive, _)| std::cmp::Reverse(z_order(primitive)));
+    for (primitive, matrix) in primitives {
         match primitive {
             Primitive::TextBox {
                 id,
@@ -1983,11 +1937,10 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                 width,
                 height,
                 lines,
-                transform,
                 ..
             } => {
                 if let Some(position) =
-                    text_caret_at((*left, *top, *width, *height), lines, *transform, (x, y))
+                    text_caret_at((*left, *top, *width, *height), lines, matrix, (x, y))
                 {
                     return Some(HitTestResult::Text {
                         shape_id: id.clone(),
@@ -2000,11 +1953,10 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                 path,
                 fill,
                 stroke,
-                transform,
                 ..
             } if path_hit(
                 path,
-                *transform,
+                matrix,
                 fill.is_some(),
                 stroke.as_ref().map_or(0.0, |stroke| stroke.width),
                 x,
@@ -2021,9 +1973,8 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                 y: top,
                 width,
                 height,
-                transform,
                 ..
-            } if point_in_transformed_rect(*left, *top, *width, *height, *transform, x, y) => {
+            } if point_in_transformed_rect(*left, *top, *width, *height, matrix, x, y) => {
                 return Some(HitTestResult::Shape {
                     shape_id: id.clone(),
                 });
@@ -2035,7 +1986,7 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
                 width,
                 height,
                 ..
-            } if x >= *left && x <= left + width && y >= *top && y <= top + height => {
+            } if point_in_transformed_rect(*left, *top, *width, *height, matrix, x, y) => {
                 return Some(HitTestResult::Shape {
                     shape_id: id.clone(),
                 });
@@ -2223,7 +2174,12 @@ mod tests {
             &std::f64::consts::FRAC_PI_4.to_string(),
         );
         let list = render(vec![parent]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: group,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
         let Primitive::TextBox {
@@ -2243,20 +2199,22 @@ mod tests {
             b: std::f32::consts::FRAC_1_SQRT_2,
             c: -std::f32::consts::FRAC_1_SQRT_2,
             d: std::f32::consts::FRAC_1_SQRT_2,
-            e: 10.707_107,
-            f: 17.878_68,
+            e: 10.0,
+            f: 20.0,
         };
-        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
-        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
-        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
+        assert_point_close((group.a, group.b), (matrix.a, matrix.b));
+        assert_point_close((group.c, group.d), (matrix.c, matrix.d));
+        assert_point_close((group.e, group.f), (matrix.e, matrix.f));
+        assert_eq!(*transform, Affine::identity());
         assert_point_close((*x, *y), (1.0, 2.0));
         assert_point_close((*width, *height), (1.0, 1.0));
+        let page = group.compose(*transform);
         assert_point_close(
-            transform.apply_point(lines[0].x, lines[0].y),
+            page.apply_point(lines[0].x, lines[0].y),
             matrix.apply_point(1.0, 2.0),
         );
         assert_point_close(
-            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            page.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             matrix.apply_point(1.5, 2.0),
         );
     }
@@ -3236,23 +3194,52 @@ mod tests {
     }
 
     #[test]
-    fn group_child_extent_origin_maps_to_the_group_lower_left_corner() {
-        let matrix = affine(vsdx_resolve::bounds_affine(
-            vsdx_resolve::ShapeBounds {
-                x: 10.0,
-                y: 20.0,
-                width: 8.0,
-                height: 12.0,
-                loc_pin_x: 4.0,
-                loc_pin_y: 6.0,
-                angle: 0.0,
-                flip_x: false,
-                flip_y: false,
-            },
-            Some((2.0, 3.0, 4.0, 6.0)),
-        ));
-        assert_point_close(matrix.apply_point(2.0, 3.0), (10.0, 20.0));
-        assert_point_close(matrix.apply_point(6.0, 9.0), (18.0, 32.0));
+    fn group_local_origin_maps_to_the_group_box_corner() {
+        let matrix = affine(vsdx_resolve::bounds_affine(vsdx_resolve::ShapeBounds {
+            x: 10.0,
+            y: 20.0,
+            width: 8.0,
+            height: 12.0,
+            loc_pin_x: 4.0,
+            loc_pin_y: 6.0,
+            angle: 0.0,
+            flip_x: false,
+            flip_y: false,
+        }));
+        assert_point_close(matrix.apply_point(0.0, 0.0), (10.0, 20.0));
+        assert_point_close(matrix.apply_point(4.0, 6.0), (14.0, 26.0));
+        assert_point_close(matrix.apply_point(8.0, 12.0), (18.0, 32.0));
+    }
+
+    fn transform_rect(
+        x: &mut f32,
+        y: &mut f32,
+        width: &mut f32,
+        height: &mut f32,
+        matrix: Affine,
+    ) {
+        let corners = [
+            matrix.apply_point(*x, *y),
+            matrix.apply_point(*x + *width, *y),
+            matrix.apply_point(*x, *y + *height),
+            matrix.apply_point(*x + *width, *y + *height),
+        ];
+        let (min_x, max_x) = corners
+            .iter()
+            .map(|(x, _)| *x)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+        let (min_y, max_y) = corners
+            .iter()
+            .map(|(_, y)| *y)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), value| {
+                (min.min(value), max.max(value))
+            });
+        *x = min_x;
+        *y = min_y;
+        *width = max_x - min_x;
+        *height = max_y - min_y;
     }
 
     #[test]
@@ -3312,7 +3299,12 @@ mod tests {
             ShapeChild::Shapes(vec![ShapesChild::Shape(child)]),
         ]);
         let list = render(vec![group]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: group,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
         let Primitive::Shape {
@@ -3323,7 +3315,17 @@ mod tests {
         };
         assert_eq!(*transform, Affine::identity());
         assert!(
-            matches!(path[0], GeometryPathCommand::Move { x, y } if (x - 10.0).abs() < 1e-9 && (y - 20.0).abs() < 1e-9)
+            matches!(path[0], GeometryPathCommand::Move { x, y } if (x - 1.0).abs() < 1e-9 && y.abs() < 1e-9)
+        );
+        assert_point_close((group.a, group.b), (0.0, -1.0));
+        assert_point_close((group.c, group.d), (-1.0, 0.0));
+        assert_point_close((group.e, group.f), (10.0, 20.0));
+        let GeometryPathCommand::Move { x, y } = path[0] else {
+            unreachable!()
+        };
+        assert_point_close(
+            group.compose(*transform).apply_point(x as f32, y as f32),
+            (10.0, 19.0),
         );
     }
 
@@ -3407,61 +3409,6 @@ mod tests {
     }
 
     #[test]
-    fn forty_five_degree_group_transforms_all_text_corners_lines_and_caret_stops() {
-        let mut child = shape(2, 1.0, 2.0);
-        child
-            .children
-            .push(ShapeChild::Text(vec![TextToken::Literal("ab".into())]));
-        child.children.push(text_section(
-            "Character",
-            vec![row(0, "", vec![cell("Size", "1")])],
-        ));
-        let mut parent = group(1, 10.0, 20.0, vec![child]);
-        with_cell(
-            &mut parent,
-            "Angle",
-            &std::f64::consts::FRAC_PI_4.to_string(),
-        );
-        let list = render(vec![parent]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
-            unreachable!()
-        };
-        let Primitive::TextBox {
-            x,
-            y,
-            width,
-            height,
-            lines,
-            transform,
-            ..
-        } = &primitives[1]
-        else {
-            unreachable!()
-        };
-        let matrix = Affine {
-            a: std::f32::consts::FRAC_1_SQRT_2,
-            b: std::f32::consts::FRAC_1_SQRT_2,
-            c: -std::f32::consts::FRAC_1_SQRT_2,
-            d: std::f32::consts::FRAC_1_SQRT_2,
-            e: 10.707_107,
-            f: 17.878_68,
-        };
-        assert_point_close((transform.a, transform.b), (matrix.a, matrix.b));
-        assert_point_close((transform.c, transform.d), (matrix.c, matrix.d));
-        assert_point_close((transform.e, transform.f), (matrix.e, matrix.f));
-        assert_point_close((*x, *y), (1.0, 2.0));
-        assert_point_close((*width, *height), (1.0, 1.0));
-        assert_point_close(
-            transform.apply_point(lines[0].x, lines[0].y),
-            matrix.apply_point(1.0, 2.0),
-        );
-        assert_point_close(
-            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            matrix.apply_point(1.5, 2.0),
-        );
-    }
-
-    #[test]
     fn rotated_text_hit_testing_rejects_axis_aligned_bounds_and_follows_caret_geometry() {
         let mut child = shape(2, 1.0, 2.0);
         child
@@ -3474,7 +3421,12 @@ mod tests {
             &std::f64::consts::FRAC_PI_4.to_string(),
         );
         let list = render(vec![parent]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: group,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
         let Primitive::TextBox {
@@ -3491,13 +3443,14 @@ mod tests {
             unreachable!()
         };
         let canvas = |(x, y): (f32, f32)| hit_test(&list, x * 96.0, 768.0 - y * 96.0);
+        let page = group.compose(*transform);
         let (mut left, mut top, mut bounds_width, mut bounds_height) = (*x, *y, *width, *height);
         transform_rect(
             &mut left,
             &mut top,
             &mut bounds_width,
             &mut bounds_height,
-            *transform,
+            page,
         );
         let outside = (left + bounds_width * 0.05, top + bounds_height * 0.05);
         assert!(
@@ -3509,7 +3462,7 @@ mod tests {
         assert_eq!(canvas(outside), None);
         let stop = lines[0].caret_stops[1];
         assert_eq!(
-            canvas(transform.apply_point(stop.x, stop.y + height * 0.25)),
+            canvas(page.apply_point(stop.x, stop.y + height * 0.25)),
             Some(HitTestResult::Text {
                 shape_id: id.clone(),
                 position: stop.position,
@@ -3619,7 +3572,12 @@ mod tests {
         );
         package.add_part("image.png", vec![0]);
         let list = Renderer::default().layout_page(&package, "page").unwrap();
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: group,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
         let Primitive::Image {
@@ -3634,17 +3592,18 @@ mod tests {
             unreachable!()
         };
         assert_eq!((*x, *y, *width, *height), (0.0, 0.0, 1.0, 1.0));
-        assert!((transform.b - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        assert!((group.b - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
+        let page = group.compose(*transform);
         let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
-            .map(|(x, y)| transform.apply_point(x, y));
+            .map(|(x, y)| page.apply_point(x, y));
         let expected = [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| {
             Affine {
                 a: std::f32::consts::FRAC_1_SQRT_2,
                 b: std::f32::consts::FRAC_1_SQRT_2,
                 c: -std::f32::consts::FRAC_1_SQRT_2,
                 d: std::f32::consts::FRAC_1_SQRT_2,
-                e: 10.707_107,
-                f: 17.878_68,
+                e: 10.0,
+                f: 20.0,
             }
             .apply_point(x, y)
         });
@@ -3671,10 +3630,20 @@ mod tests {
         );
         with_cell(&mut outer, "FlipY", "1");
         let list = render(vec![outer]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: outer_transform,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
-        let Primitive::Group { primitives, .. } = &primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: inner_transform,
+            ..
+        } = &primitives[0]
+        else {
             unreachable!()
         };
         let Primitive::Shape { path, .. } = &primitives[0] else {
@@ -3688,8 +3657,8 @@ mod tests {
             b: 1.0,
             c: 1.0,
             d: 0.0,
-            e: 7.0,
-            f: 18.0,
+            e: 10.0,
+            f: 20.0,
         };
         let inner = Affine {
             a: 0.0,
@@ -3697,18 +3666,26 @@ mod tests {
             c: -1.0,
             d: 0.0,
             e: 2.0,
-            f: 4.0,
+            f: 3.0,
         };
-        let expected = outer.compose(inner).apply_point(1.0, 0.0);
-        assert_point_close((x as f32, y as f32), expected);
+        assert_point_close((outer_transform.a, outer_transform.b), (outer.a, outer.b));
+        assert_point_close((outer_transform.c, outer_transform.d), (outer.c, outer.d));
+        assert_point_close((outer_transform.e, outer_transform.f), (outer.e, outer.f));
+        assert_point_close((inner_transform.a, inner_transform.b), (inner.a, inner.b));
+        assert_point_close((inner_transform.c, inner_transform.d), (inner.c, inner.d));
+        assert_point_close((inner_transform.e, inner_transform.f), (inner.e, inner.f));
+        assert_point_close((x as f32, y as f32), (1.0, 0.0));
+        let page = outer_transform.compose(*inner_transform);
+        assert_point_close(
+            page.apply_point(x as f32, y as f32),
+            outer.compose(inner).apply_point(1.0, 0.0),
+        );
     }
 
-    #[test]
-    fn group_non_uniformly_scales_children_before_rotation_and_flip() {
-        let child = shape(2, 0.0, 0.0);
-        let mut group = group(1, 10.0, 20.0, vec![child]);
-        with_cell(&mut group, "Width", "4");
-        with_cell(&mut group, "Height", "3");
+    fn group_child_page_path(width: &str, height: &str, children: Vec<Shape>) -> Vec<(f32, f32)> {
+        let mut group = group(1, 10.0, 20.0, children);
+        with_cell(&mut group, "Width", width);
+        with_cell(&mut group, "Height", height);
         with_cell(
             &mut group,
             "Angle",
@@ -3716,16 +3693,41 @@ mod tests {
         );
         with_cell(&mut group, "FlipX", "1");
         let list = render(vec![group]);
-        let Primitive::Group { primitives, .. } = &list.primitives[0] else {
+        let Primitive::Group {
+            primitives,
+            transform: group,
+            ..
+        } = &list.primitives[0]
+        else {
             unreachable!()
         };
-        let Primitive::Shape { path, .. } = &primitives[0] else {
+        let Primitive::Shape { path, transform, .. } = &primitives[0] else {
             unreachable!()
         };
-        let GeometryPathCommand::Line { x, y } = path[1] else {
-            unreachable!()
-        };
-        assert_point_close((x as f32, y as f32), (10.0, 16.0));
+        let page = group.compose(*transform);
+        path.iter()
+            .filter_map(|command| match command {
+                GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                    Some(page.apply_point(*x as f32, *y as f32))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_groups_own_size_never_scales_its_children() {
+        let narrow = group_child_page_path("4", "3", vec![shape(2, 0.0, 0.0)]);
+        let wide = group_child_page_path("9", "7", vec![shape(2, 0.0, 0.0)]);
+        assert_eq!(narrow, wide);
+        assert_point_close(narrow[1], (10.0, 19.0));
+    }
+
+    #[test]
+    fn removing_a_sibling_leaves_the_remaining_child_where_it_was() {
+        let both = group_child_page_path("4", "3", vec![shape(2, 0.0, 0.0), shape(3, 5.0, 6.0)]);
+        let alone = group_child_page_path("4", "3", vec![shape(2, 0.0, 0.0)]);
+        assert_eq!(both, alone);
     }
 
     #[test]
@@ -3944,7 +3946,7 @@ mod tests {
         );
         let list = render(vec![parent]);
         assert_eq!(
-            hit_test(&list, 96.0 * 4.5, 768.0 - 96.0 * 5.5),
+            hit_test(&list, 96.0 * 4.5, 768.0 - 96.0 * 6.5),
             Some(HitTestResult::Shape {
                 shape_id: "page:2".into()
             })
@@ -5080,17 +5082,22 @@ mod tests {
             .layout_page(&package, &package.page_part_paths[0])
             .unwrap();
         let Primitive::Group {
-            primitives: outer, ..
+            primitives: outer,
+            transform: outer_transform,
+            ..
         } = &list.primitives[0]
         else {
             unreachable!()
         };
         let Primitive::Group {
-            primitives: inner, ..
+            primitives: inner,
+            transform: inner_transform,
+            ..
         } = &outer[0]
         else {
             unreachable!()
         };
+        let group = outer_transform.compose(*inner_transform);
         assert!(matches!(&inner[0], Primitive::Shape { id, .. } if id.ends_with(":3")));
         assert!(
             matches!(&inner[1], Primitive::TextBox { id, lines, .. } if id.ends_with(":3") && lines.len() == 2)
@@ -5107,11 +5114,15 @@ mod tests {
         let GeometryPathCommand::Move { x, y } = path[0] else {
             unreachable!()
         };
-        // These values were calculated by hand from the composed outer and inner affine,
-        // M = [[-0.94190204, 1.8844845, 9.487798], [-1.1970047, 0.27151108, 10.472947]].
-        // Each expected AABB is min/max(M(corner)) for the original source rectangle;
-        // the image corners and text caret are direct substitutions into that same affine.
-        assert_point_close((x as f32, y as f32), (9.487798, 10.472947));
+        // The composed group affine M = outer * inner was calculated by hand as
+        // [[-0.258819, 0.9659258, 8.224235], [-0.9659258, -0.258819, 10.3686084]].
+        // Children stay in group-local coordinates; every page-space expectation below is
+        // a direct substitution into M.
+        assert_point_close((group.a, group.b), (-0.258819, -0.9659258));
+        assert_point_close((group.c, group.d), (0.9659258, -0.258819));
+        assert_point_close((group.e, group.f), (8.224235, 10.368608));
+        assert_point_close((x as f32, y as f32), (0.0, 0.0));
+        assert_point_close(group.apply_point(x as f32, y as f32), (8.224235, 10.368608));
         let Primitive::TextBox {
             x,
             y,
@@ -5125,20 +5136,16 @@ mod tests {
             unreachable!()
         };
         // The text box's own x/y/width/height stay in the shape's local, pre-transform frame;
-        // `transform` is the same composed outer/inner affine M documented above, and carries
-        // the local text box, its lines and its caret stops into scene coordinates.
+        // composing the group chain with the primitive's own transform carries the local text
+        // box, its lines and its caret stops into scene coordinates.
+        let page = group.compose(*transform);
         assert_point_close((*x, *y), (0.0, 0.0));
         assert_point_close((*width, *height), (1.0, 1.0));
-        assert_point_close((transform.a, transform.b), (-0.94190204, -1.1970047));
-        assert_point_close((transform.c, transform.d), (1.8844845, 0.27151108));
-        assert_point_close((transform.e, transform.f), (9.487798, 10.472947));
+        assert_eq!(*transform, Affine::identity());
+        assert_point_close(page.apply_point(lines[0].x, lines[0].y), (8.429537, 9.975697));
         assert_point_close(
-            transform.apply_point(lines[0].x, lines[0].y),
-            (9.745717, 10.163713),
-        );
-        assert_point_close(
-            transform.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
-            (9.680307, 10.080587),
+            page.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
+            (8.411563, 9.908618),
         );
         let Primitive::Image {
             x,
@@ -5151,16 +5158,17 @@ mod tests {
         else {
             unreachable!()
         };
+        let page = group.compose(*transform);
         let corners = [
-            transform.apply_point(*x, *y),
-            transform.apply_point(*x + *width, *y),
-            transform.apply_point(*x, *y + *height),
-            transform.apply_point(*x + *width, *y + *height),
+            page.apply_point(*x, *y),
+            page.apply_point(*x + *width, *y),
+            page.apply_point(*x, *y + *height),
+            page.apply_point(*x + *width, *y + *height),
         ];
-        assert_point_close(corners[0], (9.488478, 8.350449));
-        assert_point_close(corners[1], (8.546576, 7.153444));
-        assert_point_close(corners[2], (13.257447, 8.893471));
-        assert_point_close(corners[3], (12.315545, 7.696466));
+        assert_point_close(corners[0], (8.672523, 8.177938));
+        assert_point_close(corners[1], (8.413704, 7.212012));
+        assert_point_close(corners[2], (10.604374, 7.6603));
+        assert_point_close(corners[3], (10.345555, 6.694374));
         let Primitive::Placeholder {
             x,
             y,
@@ -5171,12 +5179,13 @@ mod tests {
         else {
             unreachable!()
         };
-        assert_point_close((*x, *y), (13.257447, 8.893471));
-        assert_point_close((*width, *height), (2.8263874, 1.4685163));
+        assert_point_close((*x, *y), (1.0, 3.0));
+        assert_point_close((*width, *height), (1.0, 1.0));
         let z_orders = inner.iter().map(z_order).collect::<Vec<_>>();
         assert_eq!(z_orders, vec![2, 3, 4, 5]);
+        let inside = group.apply_point(0.05, 0.05);
         assert_eq!(
-            hit_test(&list, 9.487798 * 96.0, (11.0 - 10.472947) * 96.0),
+            hit_test(&list, inside.0 * 96.0, (11.0 - inside.1) * 96.0),
             Some(HitTestResult::Text {
                 shape_id: "visio/pages/page1.xml:3".into(),
                 position: 0,

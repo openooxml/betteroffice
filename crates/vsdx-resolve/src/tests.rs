@@ -586,16 +586,16 @@ fn grouped_glue_connection_points_use_scene_transforms() {
         })
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    // Target 11: rotate the local (0.5, 0.5) by +90° and scale by 2 around (10, 10):
-    // (-1, 1) + (10, 10) = (9, 11). Target 21 scales (0.5, 0.5) by (2, 2) at
-    // (20, 10) = (21, 11). Target 32 is scaled by 2 in each nested group: (0.5, 0.5)
-    // becomes (2, 2), then the outer group's origin maps it to (32, 2).
-    assert_eq!(points[&11].x, 9.0);
-    assert_eq!(points[&11].y, 11.0);
-    assert_eq!(points[&21].x, 21.0);
-    assert_eq!(points[&21].y, 11.0);
-    assert_eq!(points[&32].x, 32.0);
-    assert_eq!(points[&32].y, 2.0);
+    // A group's box never rescales its children, so each connection point is only rotated,
+    // flipped and translated. Target 11: rotate the local (0.5, 0.5) by +90° about (10, 10)
+    // gives (9.5, 10.5). Target 21 translates (0.5, 0.5) to (20.5, 10.5). Target 32 is
+    // translated by each nested group: (0.5, 0.5) + (1, 1) + (30, 0) = (31.5, 1.5).
+    assert_eq!(points[&11].x, 9.5);
+    assert_eq!(points[&11].y, 10.5);
+    assert_eq!(points[&21].x, 20.5);
+    assert_eq!(points[&21].y, 10.5);
+    assert_eq!(points[&32].x, 31.5);
+    assert_eq!(points[&32].y, 1.5);
 
     let direct_pins = connectivity.connectors[&1]
         .glue
@@ -613,7 +613,7 @@ fn grouped_glue_connection_points_use_scene_transforms() {
     // A target pin is its local LocPin transformed through every containing group.
     assert_eq!(direct_pins[&11], crate::ScenePoint { x: 10.0, y: 10.0 });
     assert_eq!(direct_pins[&21], crate::ScenePoint { x: 20.0, y: 10.0 });
-    assert_eq!(direct_pins[&32], crate::ScenePoint { x: 30.0, y: 0.0 });
+    assert_eq!(direct_pins[&32], crate::ScenePoint { x: 31.0, y: 1.0 });
 }
 
 #[test]
