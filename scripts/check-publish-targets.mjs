@@ -116,7 +116,6 @@ async function checkNpm() {
 
 async function checkCrates() {
   const audit = await auditCrates(RUST_PUBLISH_CRATES.map((crate) => crate.name));
-  // publish-crates.mjs publishes present crates with OIDC and creates each missing one with this token.
   const bootstrap = Boolean(process.env.CRATES_IO_BOOTSTRAP_TOKEN);
   for (const { name, state } of audit) {
     if (state === 'present') console.log(`${name} is on crates.io.`);

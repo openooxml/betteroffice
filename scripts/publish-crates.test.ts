@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -239,7 +239,7 @@ describe('attemptPublishWithFallback', () => {
     expect(tracker.calls).toHaveLength(2);
   });
 
-  test('an OIDC upload already accepted is not retried with bootstrap', async () => {
+  test('a version visible after a failed OIDC attempt skips fallback without attributing it', async () => {
     const tracker = publishTracker([{ token: FAKE_OIDC, status: 1 }]);
     const result = await attemptPublishWithFallback({
       name: 'betteroffice-xlsx',
@@ -250,7 +250,7 @@ describe('attemptPublishWithFallback', () => {
       checkVersion: async () => ({ vers: '0.1.0', yanked: false } as never),
       runPublish: tracker.runPublish
     });
-    expect(result).toEqual({ source: 'oidc' });
+    expect(result).toEqual({ source: 'unknown' });
     expect(tracker.calls).toHaveLength(1);
   });
 
@@ -348,6 +348,55 @@ describe('formatBootstrapSummary', () => {
 });
 
 describe('publishOneCrate', () => {
+  test.each([false, true])(
+    'delayed visibility after a failed fallback stays unattributed (registry wait fails: %s)',
+    async (waitFails) => {
+      const dir = mkdtempSync(join(tmpdir(), 'crates-auth-'));
+      const summaryFile = join(dir, 'summary.md');
+      const previous = process.env.GITHUB_STEP_SUMMARY;
+      process.env.GITHUB_STEP_SUMMARY = summaryFile;
+      try {
+        const tracker = publishTracker([
+          { token: FAKE_OIDC, status: 1 },
+          { token: FAKE_BOOTSTRAP, status: 1 }
+        ]);
+        let checks = 0;
+        let waited = false;
+        const publication = publishOneCrate({
+          name: 'delayed-crate',
+          version: '0.1.0',
+          exists: true,
+          oidcToken: FAKE_OIDC,
+          bootstrapToken: FAKE_BOOTSTRAP,
+          checkVersion: async () => (++checks === 1 ? null : { yanked: false }),
+          runPublish: tracker.runPublish,
+          waitRegistry: async () => {
+            waited = true;
+            expect(readFileSync(summaryFile, 'utf8')).toContain('credential could not be confirmed');
+            if (waitFails) throw new Error('registry wait failed');
+          }
+        });
+        if (waitFails) await expect(publication).rejects.toThrow('registry wait failed');
+        else expect(await publication).toEqual({ source: 'unknown' });
+        expect(checks).toBe(2);
+        expect(waited).toBe(true);
+        expect(tracker.calls).toEqual([
+          { token: FAKE_OIDC, source: 'oidc' },
+          { token: FAKE_BOOTSTRAP, source: 'bootstrap-fallback' }
+        ]);
+        const summary = readFileSync(summaryFile, 'utf8');
+        expect(summary).toContain('delayed-crate@0.1.0');
+        expect(summary).toContain('credential could not be confirmed');
+        expect(summary).not.toContain('CRATES_IO_BOOTSTRAP_TOKEN');
+        expect(summary).not.toContain('Trusted Publisher');
+      } finally {
+        if (previous === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+        else process.env.GITHUB_STEP_SUMMARY = previous;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
   test('a failing registry wait retains the already recorded fallback use', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'crates-auth-'));
     const summaryFile = join(dir, 'summary.md');

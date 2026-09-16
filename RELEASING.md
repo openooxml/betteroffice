@@ -28,6 +28,9 @@ OIDC token is unavailable or the publish fails. The choice is independent per cr
 from every cargo child environment), rechecks the target version after a
 failed OIDC upload before falling back, and records each bootstrap use in the
 step summary before the registry wait for that crate can fail.
+If a failed attempt is followed by a visible registry version, the summary
+reports an unconfirmed publishing credential without attributing it to either
+token. Only a successful Cargo publish confirms the credential used.
 
 1. Create a short-lived crates.io token authorized to publish new crates and
    any existing crates that may need the fallback.

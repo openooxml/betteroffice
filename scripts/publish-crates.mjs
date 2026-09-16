@@ -41,7 +41,6 @@ async function fetchRegistry(url) {
   throw lastError;
 }
 
-/** Initial token choice per crate. Fallback after an OIDC failure is orchestrated separately. */
 export function selectPublishToken({ name, exists, oidcToken, bootstrapToken }) {
   if (exists) {
     if (oidcToken) return { token: oidcToken, source: 'oidc' };
@@ -58,7 +57,6 @@ export function selectPublishToken({ name, exists, oidcToken, bootstrapToken }) 
   return { token: bootstrapToken, source: 'bootstrap' };
 }
 
-/** Child env for `cargo publish`: only the selected token, under both aliases. */
 export function cargoPublishEnv(selectedToken) {
   return {
     CARGO_REGISTRY_TOKEN: selectedToken,
@@ -67,7 +65,6 @@ export function cargoPublishEnv(selectedToken) {
   };
 }
 
-/** Child env for cargo invocations that need no credentials. */
 export function cargoNoAuthEnv() {
   return {
     CARGO_REGISTRY_TOKEN: undefined,
@@ -84,7 +81,6 @@ function appendStepSummary(text) {
 const TRUSTED_PUBLISHER_REMINDER =
   'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.';
 
-/** Bootstrap summary for created and fallback crates, each with its reminder. */
 export function formatBootstrapSummary(created, fallback = []) {
   const lines = [];
   if (created.length > 0) {
@@ -106,9 +102,6 @@ export function recordBootstrapUse(name, kind) {
   );
 }
 
-/**
- * Publish one crate OIDC-first with one bootstrap retry. Throws on lookup errors.
- */
 export async function attemptPublishWithFallback({
   name,
   version,
@@ -132,7 +125,7 @@ export async function attemptPublishWithFallback({
     const found = await checkVersion();
     if (found) {
       if (found.yanked) throw new Error(`${name}@${version} is yanked`);
-      return { source: attempt.source };
+      return { source: 'unknown' };
     }
     if (!last) continue;
     if (attempts.length > 1) {
@@ -154,7 +147,6 @@ export async function attemptPublishWithFallback({
   }
 }
 
-/** Run attempt, record bootstrap use, then wait. Records only on success. */
 export async function publishOneCrate({
   name,
   version,
@@ -177,6 +169,11 @@ export async function publishOneCrate({
   });
   if (source === 'bootstrap') recordUse(name, 'bootstrap');
   else if (source === 'bootstrap-fallback') recordUse(name, 'bootstrap-fallback');
+  else if (source === 'unknown') {
+    appendStepSummary(
+      `${name}@${version} is visible on crates.io after a failed publish attempt; the publishing credential could not be confirmed.`
+    );
+  }
   await waitRegistry();
   return { source };
 }
