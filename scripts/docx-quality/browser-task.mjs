@@ -2,6 +2,7 @@ import { chromium } from 'playwright';
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { basename, extname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { isAllowedFontRequest } from './network-policy.mjs';
 
 const [file, out, fontMode = 'cdn', base = 'http://127.0.0.1:4178'] =
   process.argv.slice(2);
@@ -74,17 +75,7 @@ try {
       cookie: request.headers().cookie ?? null,
     };
     externalRequests.push(record);
-    const font =
-      /^https:\/\/cdn\.jsdelivr\.net\/npm\/@betteroffice\/fonts(?:-cjk)?@0\.1\.0\/assets\/[A-Za-z0-9-]+\.(?:ttf|otf)$/.test(
-        url.href
-      );
-    if (
-      !font ||
-      record.method !== 'GET' ||
-      record.bodyBytes !== 0 ||
-      record.referer ||
-      record.cookie
-    ) {
+    if (!isAllowedFontRequest(record)) {
       networkViolations.push(record);
       await route.abort();
       return;
