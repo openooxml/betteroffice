@@ -17,11 +17,17 @@ crates.io before each upload, so rerunning a partial release resumes safely.
 
 Trusted Publishing can only be configured after a crate exists, so a crate
 that is not on crates.io yet cannot be created with OIDC. Every release
-obtains an OIDC token via `rust-lang/crates-io-auth-action` and publishes
-OIDC-first: crates already on crates.io always publish with that token, and
-only a crate that does not exist yet is created with
-`CRATES_IO_BOOTSTRAP_TOKEN`. `scripts/publish-crates.mjs` picks the token per
-crate and passes it only to that crate's `cargo publish`.
+obtains an OIDC token via `rust-lang/crates-io-auth-action` (pinned to the
+official v1 commit) and publishes per crate: a crate that does not exist yet
+goes straight to `CRATES_IO_BOOTSTRAP_TOKEN`, while a crate that already
+exists tries OIDC first and falls back to the bootstrap token only if the
+OIDC publish is missing or fails. The choice is independent per crate.
+`scripts/publish-crates.mjs` passes only the selected token to that crate's
+`cargo publish` (under both `CARGO_REGISTRY_TOKEN` and
+`CARGO_REGISTRIES_CRATES_IO_TOKEN`, with `CRATES_IO_BOOTSTRAP_TOKEN` removed
+from every cargo child environment), rechecks the target version after a
+failed OIDC upload before falling back, and records each bootstrap use in the
+step summary before the registry wait for that crate can fail.
 
 1. Create a short-lived crates.io token authorized to publish new crates.
 2. Add it to the repository as `CRATES_IO_BOOTSTRAP_TOKEN` before merging the
@@ -30,14 +36,22 @@ crate and passes it only to that crate's `cargo publish`.
 4. Add a GitHub Trusted Publisher to each newly created crate with owner
    `openooxml`, repository `betteroffice`, and workflow `release.yml`, before
    its next release.
-5. Remove the GitHub secret and revoke the bootstrap token once no crate is
-   missing. The release lists every crate it created with the bootstrap token
-   in the step summary.
+5. Remove the GitHub secret and revoke the bootstrap token once OIDC works
+   for all crates, not just once all names exist. The release lists every
+   crate it created with the bootstrap token and every existing crate it
+   published with the bootstrap fallback separately in the step summary,
+   recording each use before that crate's registry wait runs.
 
 `scripts/check-publish-targets.mjs --crates` runs before the crates publish and
 fails the release, naming every crate that is not on crates.io yet — unless
 `CRATES_IO_BOOTSTRAP_TOKEN` is set, in which case it reports the missing
 crates as "will be created with the bootstrap token" and passes.
+
+`release.yml` always attempts the OIDC exchange on the publish path. That
+step may continue on failure only when the bootstrap token is detected, so an
+OIDC exchange that yields no token falls back per crate as above; without the
+bootstrap token an OIDC failure still fails the release. A registry lookup
+error fails the release instead of guessing a crate is new.
 
 ## Initial npm release of a new package
 

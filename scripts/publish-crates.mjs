@@ -41,11 +41,14 @@ async function fetchRegistry(url) {
   throw lastError;
 }
 
-/** Pick the publish token: OIDC for crates that exist, bootstrap for new ones. */
+/** Initial token choice per crate. Fallback after an OIDC failure is orchestrated separately. */
 export function selectPublishToken({ name, exists, oidcToken, bootstrapToken }) {
   if (exists) {
-    if (!oidcToken) throw new Error(`${name} is on crates.io but CARGO_REGISTRY_TOKEN is missing`);
-    return { token: oidcToken, source: 'oidc' };
+    if (oidcToken) return { token: oidcToken, source: 'oidc' };
+    if (bootstrapToken) return { token: bootstrapToken, source: 'bootstrap-fallback' };
+    throw new Error(
+      `${name} is on crates.io but CARGO_REGISTRY_TOKEN and CRATES_IO_BOOTSTRAP_TOKEN are both missing`
+    );
   }
   if (!bootstrapToken) {
     throw new Error(
@@ -55,20 +58,145 @@ export function selectPublishToken({ name, exists, oidcToken, bootstrapToken }) 
   return { token: bootstrapToken, source: 'bootstrap' };
 }
 
-/** Reminder that bootstrap-created crates still need a Trusted Publisher. */
-export function formatBootstrapSummary(names) {
-  return [
-    `Created with CRATES_IO_BOOTSTRAP_TOKEN: ${names.join(', ')}.`,
-    'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.',
-    'Remove CRATES_IO_BOOTSTRAP_TOKEN once no crate is missing.'
-  ].join('\n');
+/** Child env for `cargo publish`: only the selected token, under both aliases. */
+export function cargoPublishEnv(selectedToken) {
+  return {
+    CARGO_REGISTRY_TOKEN: selectedToken,
+    CARGO_REGISTRIES_CRATES_IO_TOKEN: selectedToken,
+    CRATES_IO_BOOTSTRAP_TOKEN: undefined
+  };
 }
 
-function reportBootstrapCrates(names) {
-  if (names.length === 0) return;
-  const summary = formatBootstrapSummary(names);
-  console.log(summary);
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+/** Child env for cargo invocations that need no credentials. */
+export function cargoNoAuthEnv() {
+  return {
+    CARGO_REGISTRY_TOKEN: undefined,
+    CARGO_REGISTRIES_CRATES_IO_TOKEN: undefined,
+    CRATES_IO_BOOTSTRAP_TOKEN: undefined
+  };
+}
+
+function appendStepSummary(text) {
+  console.log(text);
+  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
+}
+
+/** Reminder covering both bootstrap uses. Existing fallback is not a new crate. */
+export function formatBootstrapSummary(created, fallback = []) {
+  let createdNames;
+  let fallbackNames;
+  if (created && typeof created === 'object' && !Array.isArray(created)) {
+    createdNames = created.created ?? [];
+    fallbackNames = created.fallback ?? [];
+  } else {
+    createdNames = created ?? [];
+    fallbackNames = fallback ?? [];
+  }
+  const lines = [];
+  if (createdNames.length > 0) {
+    lines.push(`Created with CRATES_IO_BOOTSTRAP_TOKEN: ${createdNames.join(', ')}.`);
+  }
+  if (fallbackNames.length > 0) {
+    lines.push(
+      `Published with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crates, OIDC unavailable or failed): ${fallbackNames.join(', ')}.`
+    );
+  }
+  lines.push(
+    'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.'
+  );
+  lines.push(
+    'Remove CRATES_IO_BOOTSTRAP_TOKEN once OIDC works for all crates, not just once all names exist.'
+  );
+  return lines.join('\n');
+}
+
+export function recordBootstrapUse(name, kind) {
+  const text =
+    kind === 'bootstrap'
+      ? `Created ${name} with CRATES_IO_BOOTSTRAP_TOKEN.`
+      : `Published ${name} with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crate).`;
+  appendStepSummary(text);
+}
+
+function reportAuthSummary(created, fallback) {
+  if (created.length === 0 && fallback.length === 0) return;
+  appendStepSummary(formatBootstrapSummary(created, fallback));
+}
+
+/**
+ * Publish one crate, trying OIDC first for existing crates and falling back
+ * to the bootstrap token. New crates go straight to the bootstrap token.
+ * `checkVersion` must throw on registry lookup errors, never resolve missing.
+ */
+export async function attemptPublishWithFallback({
+  name,
+  version,
+  exists,
+  oidcToken,
+  bootstrapToken,
+  checkVersion,
+  runPublish
+}) {
+  if (!exists) {
+    if (!bootstrapToken) {
+      throw new Error(
+        `${name} is not on crates.io and CRATES_IO_BOOTSTRAP_TOKEN is missing: OIDC cannot create a crate`
+      );
+    }
+    const result = await runPublish(bootstrapToken, 'bootstrap');
+    if (result.status !== 0) {
+      const found = await checkVersion();
+      if (!found) throw new Error(`Failed to publish ${name}@${version} with the bootstrap token`);
+      if (found.yanked) throw new Error(`${name}@${version} is yanked`);
+      return { source: 'bootstrap' };
+    }
+    return { source: 'bootstrap' };
+  }
+
+  if (oidcToken) {
+    const oidcResult = await runPublish(oidcToken, 'oidc');
+    if (oidcResult.status === 0) return { source: 'oidc' };
+    const found = await checkVersion();
+    if (found) {
+      if (found.yanked) throw new Error(`${name}@${version} is yanked`);
+      return { source: 'oidc' };
+    }
+    if (!bootstrapToken) {
+      throw new Error(
+        `Failed to publish ${name}@${version} with OIDC and CRATES_IO_BOOTSTRAP_TOKEN is missing: cannot fall back`
+      );
+    }
+    const fallbackResult = await runPublish(bootstrapToken, 'bootstrap-fallback');
+    if (fallbackResult.status !== 0) {
+      const retried = await checkVersion();
+      if (!retried) {
+        throw new Error(
+          `Failed to publish ${name}@${version} with OIDC and with the bootstrap token fallback`
+        );
+      }
+      if (retried.yanked) throw new Error(`${name}@${version} is yanked`);
+      return { source: 'bootstrap-fallback' };
+    }
+    return { source: 'bootstrap-fallback' };
+  }
+
+  if (!bootstrapToken) {
+    throw new Error(
+      `${name} is on crates.io but CARGO_REGISTRY_TOKEN and CRATES_IO_BOOTSTRAP_TOKEN are both missing`
+    );
+  }
+  const direct = await runPublish(bootstrapToken, 'bootstrap-fallback');
+  if (direct.status !== 0) {
+    const found = await checkVersion();
+    if (!found) {
+      throw new Error(
+        `Failed to publish ${name}@${version} with the bootstrap token fallback (OIDC unavailable)`
+      );
+    }
+    if (found.yanked) throw new Error(`${name}@${version} is yanked`);
+    return { source: 'bootstrap-fallback' };
+  }
+  return { source: 'bootstrap-fallback' };
 }
 
 async function crateExists(name) {
@@ -136,26 +264,33 @@ async function waitForRegistry(name, version) {
   await waitFor(`${name}@${version} in the sparse index`, () => indexHasVersion(name, version));
 }
 
-function publishDryRun() {
+function publishDryRun(env) {
   for (const crate of RUST_PUBLISH_CRATES) {
-    run('cargo', [
-      'package',
-      '--no-verify',
-      '--exclude-lockfile',
-      '--allow-dirty',
-      '--locked',
-      '-p',
-      crate.name
-    ]);
+    run(
+      'cargo',
+      [
+        'package',
+        '--no-verify',
+        '--exclude-lockfile',
+        '--allow-dirty',
+        '--locked',
+        '-p',
+        crate.name
+      ],
+      { env }
+    );
   }
 }
 
 async function publish() {
+  const oidcToken = process.env.CARGO_REGISTRY_TOKEN;
+  const bootstrapToken = process.env.CRATES_IO_BOOTSTRAP_TOKEN;
+  const noAuthEnv = cargoNoAuthEnv();
   const version = rustReleaseVersion();
-  const packages = validateRustTrain(cargoMetadata(), version);
+  const packages = validateRustTrain(cargoMetadata({ env: noAuthEnv }), version);
 
   if (process.argv.includes('--dry-run')) {
-    publishDryRun();
+    publishDryRun(noAuthEnv);
     return;
   }
   if (version === '0.0.0') {
@@ -164,6 +299,7 @@ async function publish() {
   }
 
   const createdWithBootstrap = [];
+  const fallbackWithBootstrap = [];
   for (const crate of RUST_PUBLISH_CRATES) {
     const existing = await crateVersion(crate.name, version);
     if (existing) {
@@ -182,25 +318,31 @@ async function publish() {
       await waitForRegistry(dependency.name, version);
     }
 
-    const { token, source } = selectPublishToken({
+    const exists = await crateExists(crate.name);
+    const { source } = await attemptPublishWithFallback({
       name: crate.name,
-      exists: await crateExists(crate.name),
-      oidcToken: process.env.CARGO_REGISTRY_TOKEN,
-      bootstrapToken: process.env.CRATES_IO_BOOTSTRAP_TOKEN
+      version,
+      exists,
+      oidcToken,
+      bootstrapToken,
+      checkVersion: () => crateVersion(crate.name, version),
+      runPublish: (token) =>
+        run('cargo', ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name], {
+          allowFailure: true,
+          env: cargoPublishEnv(token)
+        })
     });
     console.log(`${crate.name}: publishing with ${source}.`);
-    const result = run(
-      'cargo',
-      ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name],
-      { allowFailure: true, env: { CARGO_REGISTRY_TOKEN: token } }
-    );
-    if (result.status !== 0 && !(await crateVersion(crate.name, version))) {
-      throw new Error(`Failed to publish ${crate.name}@${version}`);
+    if (source === 'bootstrap') {
+      createdWithBootstrap.push(crate.name);
+      recordBootstrapUse(crate.name, 'bootstrap');
+    } else if (source === 'bootstrap-fallback') {
+      fallbackWithBootstrap.push(crate.name);
+      recordBootstrapUse(crate.name, 'bootstrap-fallback');
     }
     await waitForRegistry(crate.name, version);
-    if (source === 'bootstrap') createdWithBootstrap.push(crate.name);
   }
-  reportBootstrapCrates(createdWithBootstrap);
+  reportAuthSummary(createdWithBootstrap, fallbackWithBootstrap);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

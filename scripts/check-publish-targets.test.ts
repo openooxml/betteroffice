@@ -180,8 +180,17 @@ describe('crates OIDC-first wiring', () => {
 
   test('the OIDC exchange always runs on the publish path', () => {
     const auth = named.get('Authenticate to crates.io');
-    expect(auth.uses).toBe('rust-lang/crates-io-auth-action@v1');
+    expect(auth.uses).toBe(
+      'rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18'
+    );
     expect(auth.if).toBe("steps.pending.outputs.publishing == 'true'");
+  });
+
+  test('an OIDC failure continues only when the bootstrap token is detected', () => {
+    const auth = named.get('Authenticate to crates.io');
+    expect(auth['continue-on-error']).toBe(
+      "${{ steps.crates-bootstrap.outputs.enabled == 'true' }}"
+    );
   });
 
   test('the crates publish gets the OIDC token and the bootstrap token separately', () => {

@@ -41,10 +41,18 @@ export function rustReleaseVersion() {
 }
 
 export function run(command, args, { capture = false, allowFailure = false, env } = {}) {
+  let childEnv = process.env;
+  if (env) {
+    childEnv = { ...process.env };
+    for (const [key, value] of Object.entries(env)) {
+      if (value === undefined) delete childEnv[key];
+      else childEnv[key] = value;
+    }
+  }
   const result = spawnSync(command, args, {
     encoding: capture ? 'utf8' : undefined,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
-    env: env ? { ...process.env, ...env } : process.env
+    env: childEnv
   });
   if (result.error) throw result.error;
   if (result.status !== 0 && !allowFailure) {
@@ -54,11 +62,11 @@ export function run(command, args, { capture = false, allowFailure = false, env 
   return result;
 }
 
-export function cargoMetadata({ locked = true, manifestPath } = {}) {
+export function cargoMetadata({ locked = true, manifestPath, env } = {}) {
   const args = ['metadata', '--format-version', '1'];
   if (manifestPath) args.push('--manifest-path', manifestPath);
   if (locked) args.push('--locked');
-  const result = run('cargo', args, { capture: true });
+  const result = run('cargo', args, { capture: true, ...(env ? { env } : {}) });
   return JSON.parse(result.stdout);
 }
 
