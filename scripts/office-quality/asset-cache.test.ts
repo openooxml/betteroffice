@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, test } from 'bun:test';
@@ -95,6 +95,36 @@ test('truncated cache is discarded and refetched', async () => {
     expect(calls).toBe(1);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('repairs change the archive key and unchanged restored assets keep it', async () => {
+  const directory = await scratch();
+  const restored = await scratch();
+  try {
+    const payload = Buffer.from('valid-payload');
+    const entry = entryFor(payload);
+    await writeCachedAsset(directory, entry, payload);
+    const original = await digestAssetCache(directory);
+    await writeFile(assetCachePath(directory, entry), Buffer.alloc(payload.length));
+    expect(await digestAssetCache(directory)).toBe(original);
+    const repaired = await fetchAsset(entry, sample, async () => payload, { cacheDir: directory, origin });
+    expect(repaired).toEqual(payload);
+    const repairedKey = await digestAssetCache(directory);
+    expect(repairedKey).not.toBe(original);
+    await cp(directory, restored, { recursive: true });
+    expect(await digestAssetCache(restored)).toBe(repairedKey);
+    const warm = await fetchAsset(entry, sample, async () => {
+      throw new Error('Unexpected network call');
+    }, { cacheDir: restored, origin });
+    expect(warm).toEqual(payload);
+    expect(await digestAssetCache(restored)).toBe(repairedKey);
+    await writeFile(assetCachePath(directory, entry), payload.subarray(0, 2));
+    await fetchAsset(entry, sample, async () => payload, { cacheDir: directory, origin });
+    expect(await digestAssetCache(directory)).not.toBe(repairedKey);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+    await rm(restored, { recursive: true, force: true });
   }
 });
 

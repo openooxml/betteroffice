@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export function resolveAssetCacheDir(environment = process.env) {
@@ -23,6 +23,7 @@ export async function readCachedAsset(directory, entry) {
   const path = assetCachePath(directory, entry);
   try {
     if ((await stat(path)).size !== entry.bytes) {
+      await writeCacheFile(directory, '.repair-generation', randomUUID());
       await unlink(path).catch(() => {});
       return null;
     }
@@ -31,6 +32,7 @@ export async function readCachedAsset(directory, entry) {
       bytes.length !== entry.bytes ||
       createHash('sha256').update(bytes).digest('hex') !== entry.sha256
     ) {
+      await writeCacheFile(directory, '.repair-generation', randomUUID());
       await unlink(path).catch(() => {});
       return null;
     }
@@ -40,18 +42,23 @@ export async function readCachedAsset(directory, entry) {
   }
 }
 
-export async function writeCachedAsset(directory, entry, bytes) {
+async function writeCacheFile(directory, name, bytes) {
   if (!directory) return;
   try {
     await mkdir(directory, { recursive: true });
     const staging = join(directory, `.tmp-${randomUUID()}`);
     try {
       await writeFile(staging, bytes);
-      await rename(staging, assetCachePath(directory, entry));
+      await rename(staging, join(directory, name));
     } catch {
       await unlink(staging).catch(() => {});
     }
   } catch {}
+}
+
+export async function writeCachedAsset(directory, entry, bytes) {
+  if (!directory) return;
+  await writeCacheFile(directory, basename(assetCachePath(directory, entry)), bytes);
 }
 
 export function isCacheBlobName(name) {
@@ -63,16 +70,23 @@ export function isCacheBlobName(name) {
   return /^[a-f0-9]{64}$/.test(sha) && /^[1-9][0-9]*$/.test(size);
 }
 
-export function digestCacheNames(names) {
+export function digestCacheNames(names, repairGeneration = '') {
   const valid = names.filter(isCacheBlobName).sort();
   if (!valid.length) return '';
-  return createHash('sha256').update(valid.join('\n')).digest('hex');
+  return createHash('sha256')
+    .update(valid.join('\n'))
+    .update(repairGeneration ? `\nrepair:${repairGeneration}` : '')
+    .digest('hex');
 }
 
 export async function digestAssetCache(directory) {
   try {
     const entries = await readdir(directory, { withFileTypes: true });
-    return digestCacheNames(entries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+    const generation = await readFile(join(directory, '.repair-generation'), 'utf8').catch(() => '');
+    return digestCacheNames(
+      entries.filter((entry) => entry.isFile()).map((entry) => entry.name),
+      generation
+    );
   } catch {
     return '';
   }
