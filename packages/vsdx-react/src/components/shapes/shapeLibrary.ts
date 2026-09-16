@@ -58,7 +58,7 @@ export const polygonVertices: Readonly<Record<string, readonly Point[]>> = {
   chevron: [[0, 0.2], [0.38, 0.2], [0.62, 0], [1, 0.5], [0.62, 1], [0.38, 0.8], [0, 0.8], [0.35, 0.5]],
   parallelogram: [[0.2, 0], [1, 0], [0.8, 1], [0, 1]],
   trapezoid: [[0, 0], [1, 0], [0.8, 1], [0.2, 1]],
-  cube: [[0.5, 1], [1, 0.75], [1, 0.25], [0.5, 0], [0, 0.25], [0, 0.75]],
+  cube: [[0, 0], [0.75, 0], [1, 0.25], [1, 1], [0.25, 1], [0, 0.75]],
 };
 
 function regularPolygon(sides: number): readonly Point[] {
@@ -107,8 +107,8 @@ function polygonPath(vertices: readonly Point[], extraRows: readonly GeometryRow
   return { rows, preview: `${previewPathForVertices(vertices)}${svgRows(extraRows)}` };
 }
 
-export function previewPathForVertices(vertices: readonly Point[]): string {
-  return `${vertices.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${numberFormula(x)} ${numberFormula(1 - y)}`).join(' ')} Z`;
+export function previewPathForVertices(vertices: readonly Point[], aspectRatio = 1): string {
+  return `${vertices.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${numberFormula(x)} ${numberFormula(0.5 + (0.5 - y) / aspectRatio)}`).join(' ')} Z`;
 }
 
 function svgRows(rows: readonly GeometryRow[], aspectRatio = 1): string {
@@ -255,11 +255,11 @@ const uprightConePath = conePath(false);
 const invertedConePath = conePath(true);
 
 const cubeEdges: readonly GeometryRow[] = [
-  { type: 'MoveTo', end: [0.5, 1] },
-  { type: 'LineTo', end: [0.5, 0.5] },
-  { type: 'LineTo', end: [1, 0.25] },
-  { type: 'MoveTo', end: [0.5, 0.5] },
-  { type: 'LineTo', end: [0, 0.25] },
+  { type: 'MoveTo', end: [0.75, 0] },
+  { type: 'LineTo', end: [0.75, 0.75] },
+  { type: 'LineTo', end: [0, 0.75] },
+  { type: 'MoveTo', end: [0.75, 0.75] },
+  { type: 'LineTo', end: [1, 1] },
 ];
 
 const pyramidEdges: readonly GeometryRow[] = [
@@ -291,7 +291,7 @@ export const standardShapes: readonly StandardShape[] = [
   polygonShape('diamond'),
   polygonShape('cross'),
   polygonShape('chevron'),
-  polygonShape('cube', cubeEdges),
+  polygonShape('cube', cubeEdges, false, 4 / 3),
   shapeFrom('teardrop', teardropPath),
   shapeFrom('semicircle', semicirclePath),
   shapeFrom('halfEllipse', halfEllipsePath),

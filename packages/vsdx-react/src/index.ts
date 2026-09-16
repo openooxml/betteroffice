@@ -13,6 +13,8 @@ export { ShapesPanel } from './components/shapes/ShapesPanel';
 export type { ShapesPanelProps } from './components/shapes/ShapesPanel';
 export { ShapeDataPanel } from './components/shapeData/ShapeDataPanel';
 export type { ShapeDataPanelProps } from './components/shapeData/ShapeDataPanel';
+export { LayersPanel } from './components/layers/LayersPanel';
+export type { LayersPanelProps } from './components/layers/LayersPanel';
 export { standardShapeById, standardShapes } from './components/shapes/shapeLibrary';
 export type { StandardShape } from './components/shapes/shapeLibrary';
 export { MAX_ZOOM, MIN_ZOOM, StatusBar, ZOOM_STOPS, clampZoom, sliderPositionForZoom, zoomForSliderPosition } from './components/statusbar';

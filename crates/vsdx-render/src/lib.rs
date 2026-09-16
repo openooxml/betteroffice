@@ -486,6 +486,7 @@ pub struct Renderer {
     fonts: ooxml_text::FontStore,
     font_bytes: usize,
     registered_fonts: BTreeMap<(String, bool, bool), ooxml_text::FontId>,
+    layer_overrides: BTreeMap<(String, u32), bool>,
 }
 impl Default for Renderer {
     fn default() -> Self {
@@ -499,7 +500,33 @@ impl Renderer {
             fonts: ooxml_text::FontStore::new(),
             font_bytes: 0,
             registered_fonts: BTreeMap::new(),
+            layer_overrides: BTreeMap::new(),
         }
+    }
+    /// Session-local layer visibility, shadowing the page sheet until cleared.
+    pub fn set_layer_override(&mut self, page_part: &str, index: u32, visible: bool) {
+        self.layer_overrides
+            .insert((page_part.to_owned(), index), visible);
+    }
+    pub fn clear_layer_overrides(&mut self) {
+        self.layer_overrides.clear();
+    }
+    /// Page layers with session overrides applied, in row-index order.
+    pub fn effective_page_layers(
+        &self,
+        package: &VsdxPackage,
+        page_part: &str,
+    ) -> Vec<vsdx_resolve::PageLayer> {
+        let mut layers = vsdx_resolve::page_layers(package, page_part);
+        for layer in &mut layers {
+            if let Some(visible) = self
+                .layer_overrides
+                .get(&(page_part.to_owned(), layer.index))
+            {
+                layer.visible = *visible;
+            }
+        }
+        layers
     }
     pub fn register_font(
         &mut self,
@@ -578,6 +605,7 @@ impl Renderer {
             jump_overrides: Vec::new(),
         };
         let mut cache = LayoutCache::default();
+        let layers = self.effective_page_layers(package, page_part);
         for shape in page.shapes() {
             self.layout_shape(
                 package,
@@ -586,6 +614,7 @@ impl Renderer {
                 references.as_ref(),
                 shapes,
                 &transforms,
+                &layers,
                 page_part,
                 shape,
                 0,
@@ -626,6 +655,7 @@ impl Renderer {
         references: Option<&PageShapeReferences>,
         shapes: &BTreeMap<u32, ResolvedShape>,
         transforms: &BTreeMap<u32, SceneTransform>,
+        layers: &[vsdx_resolve::PageLayer],
         page_part: &str,
         shape: &Shape,
         depth: usize,
@@ -653,6 +683,9 @@ impl Renderer {
             return Ok(());
         }
         if paint::number(resolved, "NoShow").is_some_and(|value| value != 0.0) {
+            return Ok(());
+        }
+        if vsdx_resolve::shape_hidden_by_layers(resolved, layers) {
             return Ok(());
         }
         let mut sections = resolved
@@ -748,6 +781,7 @@ impl Renderer {
                     references,
                     shapes,
                     transforms,
+                    layers,
                     page_part,
                     child,
                     depth + 1,
@@ -2515,6 +2549,7 @@ mod tests {
         }
     }
 
+    mod layers;
     mod section_controls;
 
     #[test]
@@ -5369,6 +5404,10 @@ mod tests {
                     .shapes()
                     .flat_map(|shape| shape_ids(page, shape))
                     .collect::<std::collections::BTreeSet<_>>();
+                let expected = expected
+                    .difference(&layer_hidden_shape_ids(&package, page))
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>();
                 let mut page_shapes = std::collections::BTreeSet::new();
                 let mut page_text = std::collections::BTreeSet::new();
                 let mut page_images = std::collections::BTreeSet::new();
@@ -5690,6 +5729,39 @@ mod tests {
             .collect()
     }
 
+    fn layer_hidden_shape_ids(
+        package: &VsdxPackage,
+        page: &str,
+    ) -> std::collections::BTreeSet<String> {
+        let resolver = Resolver::new(package);
+        let layers = vsdx_resolve::page_layers(package, page);
+        let mut hidden = std::collections::BTreeSet::new();
+        for shape in package.page_contents[page].shapes() {
+            collect_layer_hidden(&resolver, page, &layers, shape, false, &mut hidden);
+        }
+        hidden
+    }
+
+    fn collect_layer_hidden(
+        resolver: &Resolver<'_>,
+        page: &str,
+        layers: &[vsdx_resolve::PageLayer],
+        shape: &Shape,
+        ancestor_hidden: bool,
+        hidden: &mut std::collections::BTreeSet<String>,
+    ) {
+        let hidden_here = ancestor_hidden
+            || resolver
+                .resolve_shape(page, shape.id)
+                .is_ok_and(|resolved| vsdx_resolve::shape_hidden_by_layers(&resolved, layers));
+        if hidden_here {
+            hidden.insert(format!("{page}:{}", shape.id));
+        }
+        for child in shape.shapes() {
+            collect_layer_hidden(resolver, page, layers, child, hidden_here, hidden);
+        }
+    }
+
     fn expected_subcontent<'a>(
         shapes: impl Iterator<Item = &'a Shape>,
         page: &str,
@@ -5750,6 +5822,12 @@ mod tests {
         let resolved = resolver.resolve_shape(page_part, shape.id).unwrap();
         if resolved.deleted || paint::number(&resolved, "NoShow").is_some_and(|value| value != 0.0)
         {
+            return;
+        }
+        if vsdx_resolve::shape_hidden_by_layers(
+            &resolved,
+            &vsdx_resolve::page_layers(package, page_part),
+        ) {
             return;
         }
         let tokens = resolver
