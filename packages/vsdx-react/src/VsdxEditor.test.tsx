@@ -96,3 +96,17 @@ test('a shape on no layer stays selectable when layer zero is hidden', () => {
   expect(selectionHiddenByLayers(page, layers, selection)).toBe(false);
   expect(stillSelectable(snapshot, 0, selection, layers)).toBe(true);
 });
+
+test('layer membership parsing matches the engine table', () => {
+  const layers: PageLayer[] = [0, 1, 2, 3, 5, 9].map((index) => ({ index, name: `L${index}`, visible: false, print: true, lock: false, active: false, color: '', status: '' }));
+  const hidden = (member: string) => {
+    const page: PageSnapshot = {
+      ...layerPage,
+      shapes: [{ id: 'page:1:shape:1', sourceId: 1, name: null, cells: [{ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: 'LayerMember' }, name: 'LayerMember', formula: null, value: member }], children: [] }],
+    };
+    return selectionHiddenByLayers(page, layers, { pageId: 'page:1', shapeId: 'page:1:shape:1', hit: { kind: 'shape' as const, shapeId: 'x' } });
+  };
+  for (const [member, expected] of [['0;2', true], ['1;0;1', true], [' 2 ; 9 ', true], ['', false], ['a;3', true], ['3;', true], [';', false], ['-1;2', true], ['+1;2', true], ['4294967296;5', true], ['-1', false], ['a', false], ['4294967296', false], ['7', false]] as const) {
+    expect(hidden(member)).toBe(expected);
+  }
+});

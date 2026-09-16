@@ -871,6 +871,11 @@ fn layer_member_lists_membership_indices() {
         (" 2 ; 9 ", vec![2, 9]),
         ("", vec![]),
         ("a;3", vec![3]),
+        ("3;", vec![3]),
+        (";", vec![]),
+        ("-1;2", vec![2]),
+        ("+1;2", vec![1, 2]),
+        ("4294967296;5", vec![5]),
     ] {
         let mut package = package();
         add_page(
