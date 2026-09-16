@@ -157,3 +157,37 @@ fn layer_override_shadows_the_page_sheet() {
         ["page:2"]
     );
 }
+
+#[test]
+fn hidden_layer_shapes_are_not_hit_testable() {
+    let package = layer_package_two_layers(vec![membered(1, "1"), membered(2, "0")]);
+    let mut renderer = Renderer::default();
+    let centre = |id: u32| (f64::from(id) as f32 + 0.5) * 96.0;
+    let hidden = hit_test(
+        &renderer.layout_page(&package, "page").unwrap(),
+        centre(1),
+        (8.0 - 1.5) * 96.0,
+    );
+    assert_eq!(hidden, None);
+    assert_eq!(
+        hit_test(
+            &renderer.layout_page(&package, "page").unwrap(),
+            centre(2),
+            (8.0 - 1.5) * 96.0,
+        ),
+        Some(HitTestResult::Shape {
+            shape_id: "page:2".into()
+        })
+    );
+    renderer.set_layer_override("page", 1, true);
+    assert_eq!(
+        hit_test(
+            &renderer.layout_page(&package, "page").unwrap(),
+            centre(1),
+            (8.0 - 1.5) * 96.0,
+        ),
+        Some(HitTestResult::Shape {
+            shape_id: "page:1".into()
+        })
+    );
+}

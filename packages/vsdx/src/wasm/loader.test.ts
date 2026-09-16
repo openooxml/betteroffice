@@ -675,6 +675,27 @@ describe('VSDX wasm boundary', () => {
     } finally { diagram.dispose(); }
   });
 
+  test('layer visibility stays out of the saved package', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Visible' V='1'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Visible' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const bytes = await archive.generateAsync({ type: 'uint8array' });
+    const diagram = openDiagram(bytes, { clientId: 9053 });
+    try {
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const before = diagram.save();
+      diagram.setLayerVisible(part, 1, true);
+      diagram.layoutPage(0);
+      expect(diagram.save()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      const saved = await JSZip.loadAsync(diagram.save());
+      expect(await saved.file('visio/pages/pages.xml')!.async('string')).toBe(await JSZip.loadAsync(bytes).then(zip => zip.file('visio/pages/pages.xml')!.async('string')));
+    } finally { diagram.dispose(); }
+  });
+
   test('does not reenter update listeners before the outer call unwinds', () => {
     const diagram = openDiagram(foundation, { clientId: 9007 });
     const sequence: string[] = [];
