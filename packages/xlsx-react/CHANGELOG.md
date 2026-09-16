@@ -1,5 +1,25 @@
 # @betteroffice/xlsx-react
 
+## 0.2.0
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- Updated dependencies [5069ad2]
+- Updated dependencies [93971b5]
+- Updated dependencies [fb06233]
+- Updated dependencies [d926fb0]
+- Updated dependencies [cae162d]
+- Updated dependencies [8a27bb7]
+- Updated dependencies [7f062e0]
+- Updated dependencies [0c5c4fc]
+- Updated dependencies [5798031]
+- Updated dependencies [13016f2]
+- Updated dependencies [e8c4f5b]
+  - @betteroffice/xlsx@0.2.0
+  - @betteroffice/xlsx-i18n@0.2.0
+
 ## 0.1.0
 
 ### Minor Changes

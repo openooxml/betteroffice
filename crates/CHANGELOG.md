@@ -1,5 +1,161 @@
 # @betteroffice/rust-crates
 
+## 0.2.0
+
+### Minor Changes
+
+- 1d0f41d: Round-trip DOCX packages as a byte-stable fixed point that keeps the authored section properties, simple fields, drawing names, foreign markup, unknown attributes and custom root bindings (new public model fields and enum variants).
+- 8b9f363: The `betteroffice-opc` `wasm` feature is opt-in instead of default, so the crate itself no longer pulls wasm-bindgen and js-sys unless requested; wasm consumers enable it explicitly.
+- d6ba9da: Add session-local PPTX agent proposals with atomic acceptance, stale-target checks, rendered previews, and one-step Undo. Expose the workflow in Rust, TypeScript, and Python. Show inline text diffs and previous/proposed shape bounds on the React slide canvas, with proposal selection, accept/reject controls, and a review panel for before/after previews.
+- d6e6e91: Read, add, reply to, resolve and remove PowerPoint comments in both the legacy and modern formats, saved by patching the existing comment XML in place (deck schema 2.1; older clients reject new updates until upgraded).
+- bf84789: Set paragraph alignment from the presentation toolbar.
+- 387f239: Add PPTX-to-PNG export for Rust, Python, and browsers, plus an Export PNG button
+  in the React editor.
+
+  Rust: enable the `raster` feature; exhaustive `Error` matches must handle the new
+  `Raster` variant.
+
+- ef5cdee: Render DrawingML tables with styled cells, merged regions, borders, and text-driven row heights.
+- 187cebc: Intern styles through hash indexes instead of linear scans. `Stylesheet` gains private interning caches, which prevent exhaustive struct-literal construction downstream; the caches are internal state only and excluded from serialization and equality.
+
+### Patch Changes
+
+- 5069ad2: Keep accepted spreadsheet proposals undoable in collaborative sessions, preserve pending proposals through remote edits, and require a refreshed review when calculated previews change. Reject document suggestions that overlap partially tracked text. Existing public signatures and wire fields remain unchanged.
+- b351bbe: Keep vertically aligned table-cell text intact at page breaks by using its painted position when selecting row split points. Apply the same default vertical cell padding during measurement and rendering.
+- 2061849: Keep anchored shapes with unknown presets as positioned overlays with their authored size, using a rectangular fallback path instead of dropping to an inline placeholder.
+- 4bf205b: Charts now survive a save. The drawing that places a chart, and any drawing the parser does not model, is kept as its original markup and written back verbatim, so the chart part and its relationship stay referenced; the editor save path projects chart runs back from the session instead of dropping them.
+- 45798dd: Compare layout blocks structurally instead of fingerprinting serialized JSON.
+- a958376: Honor custom tab stops inside hanging indents so labels stay aligned and body text does not wrap prematurely.
+- 2c658b6: Improve DOCX pagination, list formatting, justified text, header and footer spacing, anchored shapes, content-control text, and table geometry to better match Word. Use Carlito as the related fallback for Calibri Light.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 1efec27: Improve DOCX fidelity with Word's 10 pt fallback for undeclared font sizes, short-paragraph widow control, and corrected table padding, minimum row heights, repeated headers, and rotated image sizing. Align automatic and wrapped tabs to the page grid, keep wrapped text metrics on their own lines, and hide list markers on page-break-only paragraphs. Preserve authored formatting and document state.
+- 4d27f1e: Paint PAGE fields with the section page label (restart value and number format) instead of the global page number, so restarted or roman-numbered folios match Word and the reserved header/footer width matches the ink.
+- bd69e9e: Draw DOCX plus presets as twelve-vertex crosses from the ECMA-376 arm guide instead of rectangular fallback, with default and missing-adjustment shapes sharing the same path.
+- cf9a2f5: Share glyph caches across pages and stop re-parsing fonts per run.
+- 295f42f: Keep one local undo history across document stories, group rapid keystrokes in WebAssembly, and preserve native undo in other inputs. Replace story-scoped history helpers with session-wide tracking and changed-story reporting.
+
+  Migrate each removed API as follows: `historyStory()` returns the changed stories via `historyStories()` (sorted, empty before the first local edit instead of `null`); `undoDepth()` and `redoDepth()` are gone, query `canUndo()` and `canRedo()` instead; `markUndoGroup(startDepth)` is gone, rapid keystrokes now coalesce in WebAssembly with no host bookkeeping; `applyLocalUpdate(update, story)` drops its story argument and becomes `applyLocalUpdate(update)`; `beginUndoCapture(story, includeTableStories?)` drops its arguments and becomes `beginUndoCapture()`; `computeLayout()` no longer returns `blocks` and `measures`, read them lazily from `getLayoutKernelInputs(computation.layout)` as `measured` and `options`.
+
+- 6f0e36d: Hide suppressed list-number placeholders while preserving literal labels.
+- 2ee434c: Parse runs, paragraphs, tables, rows and cells that Word wraps in `w:customXml`, `w:smartTag` or a row/cell `w:sdt`; their text was dropped on open and therefore on save.
+- 8ea2659: Preserve paragraph measurement values across the typed layout path.
+- 1fca3b6: Measure paragraphs through a typed path instead of serializing to JSON per call.
+- d926fb0: Correct tint proportions in shared OOXML color resolution so lighter theme colors blend toward white as authored.
+- 6ae0b92: Read the shapes an `mc:AlternateContent` contributes to a shape tree — the first `mc:Choice` whose `Requires` namespaces are implemented, otherwise the `mc:Fallback` — and keep edits, deletions and no-edit saves aligned with the branch that holds them.
+- 010865c: Measure block arrow heads from the shortest side while preserving shaft widths across aspect ratios.
+- 2877aba: Render automatic list numbers with bullet formatting, preserve explicit restarts when editing and saving, and migrate collaboration snapshots to deck schema 2.1.
+- 1f30ea0: Apply picture duotone, biLevel, grayscale and colour-change effects in Canvas, PNG exports and the native viewer, preserving alpha and migrating older collaboration snapshots.
+- abb1e2c: Apply a picture's `a:lum` brightness and contrast in Canvas, PNG exports and the native viewer.
+- 899aac5: Round an automatic value axis to whole `{1, 2, 5} x 10^k` steps and widen its unpinned ends to the next step, so a stacked bar no longer ends on the plot edge.
+- c4985a8: Respect explicit chart data label settings that disable every field.
+- bfc3231: Reserve space for top and bottom chart legends, wrap their entries to fit, and center PowerPoint chart titles.
+- 89a2134: Stroke a chart series' line at the width its own `c:ser/c:spPr/a:ln` declares instead of a fixed 2px, and draw no line at all when that outline is `a:noFill`.
+
+  Migrate collaboration snapshots to deck schema 2.1, importing series lines from a reattached source.
+
+- d2aaf9c: Paint a chart's own `c:chartSpace` fill instead of a white ground, and stroke each axis line with its own `a:ln` colour and width, or not at all under `a:noFill`.
+
+  Migrate collaboration snapshots to deck schema 2.1, importing chart-space fills and axis lines from a reattached source.
+
+- c9b72bf: Draw chart titles, axis labels, legends and data labels in the family, slant and character spacing their `c:txPr` declares, instead of the theme minor font upright and untracked. A chart title's own `c:rich` run properties now override the paragraph default they sit under, and a reattached source refreshes the text properties of a stored chart. A DOCX chart paints the tracking its text properties declare instead of only reserving room for it.
+- bc34dfc: Parse connector shapes and preserve legacy collaboration updates when editing and saving.
+- 0c9b52e: Render numeric custom geometry paths, including elliptical arcs and separate path fills and strokes. Preserve custom geometry in deck schema 2.1 collaboration snapshots.
+- 69167fe: Paint justified lines at their caret positions and keep editor gestures consistent.
+- 413499c: Preserve weight and slant when substituting missing presentation fonts, and choose
+  the nearest fallback style consistently regardless of face registration order.
+- 2044df7: Render gradient outlines across browser, raster, and native backends while preserving their paint through theme inheritance, width edits, and legacy snapshot migration.
+- 8b48e8d: Render unordered gradient stops correctly in slide display lists and raster output while preserving equal-position stop order and source XML.
+- 54fdaa0: Skip hidden slide shapes and hidden groups' descendants when painting and hit-testing.
+
+  Deck schema 2.1 migrates existing 1.0 and 2.0 documents by recovering hidden flags from stored package data. Older clients reject the new schema.
+
+  `ShapeSnapshot.hidden` is optional and omitted when false, preserving unchanged snapshot JSON. Only hidden shapes store a Yrs key; the schema stamp changes for all decks.
+
+- cca2618: Transpose horizontal bar chart axes, preserve category direction, and reserve space for category labels, axis titles, and secondary value ticks.
+- 2b639b9: Render triangle, open arrow, stealth, diamond, and oval line ends on the PPTX
+  canvas, preserving their independent width and length settings.
+- 2c90c17: Apply inherited list styles and render character bullets with their own formatting while preserving caret positions and migrating collaboration snapshots to deck schema 2.1.
+- a61781d: Replay EMF GRADIENTFILL records as shaded bands and the BITBLT raster operations that carry no source bitmap, instead of rejecting the whole metafile.
+- 25c7ea3: Render supported EMF and WMF vector pictures with crops, masks and fill rules, and preserve OLE fallback pictures through deck schema 2.1 collaboration updates.
+- d280c87: Keep hyperlinks, fields, and every other unmodeled run markup when a text edit spans several source runs. Surviving text is written back onto the run it came from, typed text extends the run before it, a field whose text changed becomes a plain run so PowerPoint does not overwrite it, and a run whose text is deleted takes its markup with it.
+- 22ce4e9: Parse `a:effectLst/a:outerShdw` and paint the drop shadow of filled and outlined shapes in Canvas and PNG exports.
+
+  Preserve shadow scale and alignment across deck schema 2.1 snapshots. Bound per-slide shadow work in Canvas and PNG exports.
+
+- 3d95068: Apply inherited paragraph line spacing, preserve baselines for expanded point spacing, and migrate collaboration snapshots to deck schema 2.1.
+- 088d177: Narrow a paragraph's wrap width by its right margin, inherited from the master text styles, a layout or shape `a:lstStyle`, or the paragraph itself, and recover it from an attached source for collaboration snapshots written before deck schema 2.1.
+- 875d556: Open the space a paragraph asks for with `a:spcBef` and `a:spcAft`, inherited from the master text styles, a layout or shape `a:lstStyle`, or the paragraph itself, and recover them from an attached source for collaboration snapshots written before deck schema 2.1.
+- 70e7394: Crop pictures to their `srcRect` and clip and outline their preset masks in Canvas, PNG exports, and the native viewer. Preserve JSON for uncropped rectangular pictures.
+- acab663: Paint a picture's outer shadow from the silhouette of its alpha in Canvas and PNG exports, and keep a picture-filled shape's shadow through the image rewrite.
+- 0824bff: Scale chevron and homePlate adjustments from the shortest side, allow their points to span the full width, and normalize DOCX preset guide values consistently.
+- 069e4d6: Render superscript and subscript runs at their shifted baselines and preserve their formatting through edits and saved decks.
+- 1e86217: Render gradient-filled text using its lowest valid stop and preserve authored gradients across text edits until their color changes.
+- 89f8f7b: Preserve each text run's colour, weight, italic, underline, and size while keeping identically styled adjacent runs grouped.
+- f5d9fd9: Render and preserve run character spacing through edits, collaboration snapshots, and saved presentations.
+- e5c4521: Collapse the never-released deck schema chain into a single 2.1 step, so a 1.0 or 2.0 snapshot still migrates and reopens exactly as before.
+- 5c015e9: Refuse shape adjustment edits on custom geometry instead of silently dropping them on save, and report an exhausted shape id space instead of overflowing it.
+- 9274a2b: Render stretched picture fills through shape geometry and retain their source data across collaboration snapshots.
+
+  Migrate collaboration snapshots to deck schema 2.1, preserving source imports and edited text.
+
+- 25d4ee4: Use shape font-reference colours above master text defaults while preserving run, paragraph, and placeholder colours.
+- 7fdc0ee: Evaluate slide-number fields on masters and layouts, counting from the presentation's first slide number.
+
+  Collaboration snapshots use deck schema 2.1. Older snapshots migrate to deck
+  schema 2.1; missing starting numbers default to one. Readers supporting only
+  older schemas reject 2.1 snapshots.
+
+- 21b48f3: Edit per-slide speaker notes that persist through saves and collaboration updates, and present slides fullscreen from the React editor with keyboard navigation.
+- 60113a3: Parse `a:tbl` into a real table model: the column grid, row heights, cell spans and merge continuations, direct cell fills and borders, and the `a:tblPr` style flags. A cell's `a:tcPr` anchoring, text direction and margins fold into its text body.
+
+  Recover a table's geometry and cell formatting from a reattached source, folded into the unreleased schema 2.1.
+
+- 253d680: Add the `table` display-list primitive, a container whose cells paint clipped to the table rectangle in every backend, and raise the display-list contract version to 2.
+- a139ae9: Stop a table's first cell painting as loose slide text on top of the graphic frame that holds it.
+- 051830e: Parse `ppt/tableStyles.xml` and resolve a cell through the table style cascade: `wholeTbl`, the row band, `firstCol`/`lastCol`, `firstRow`/`lastRow`, then the cell's own `a:tcPr`, with each part's borders applied against the sides of its own region and an `a:noFill` edge clearing what a lower part set. A reattached source restores the styles a stored package never carried.
+- 07d72ce: Keep shape text unmirrored and honor vertical text direction, insets, and caret positions without changing ordinary horizontal rotations.
+- 1af946f: Render overflowing text at its intended size and anchor across backends, preserve explicit clipping, and keep transformed text clickable while migrating collaboration snapshots to schema 16.
+- a3b2acd: Resolve DrawingML font references to the theme's major or minor script face, using its Latin face when the requested script slot is empty.
+- 2710a41: Resolve PPTX theme fill and line references, including background fills and placeholder colour transforms. Preserve explicit shape and placeholder formatting. Preserve font reference colours from the existing text-style resolver.
+
+  Migrate deck snapshots to deck schema 2.1, preserving edits, numbering and source ordinals.
+
+- b1f5c91: Render embedded TIFF pictures in browser presentations by converting them to PNG inside the PPTX WASM boundary. Uncompressed, LZW, PackBits and deflate sources are supported, including grayscale, RGB, palette and CMYK images; other compressions are skipped.
+- bbd80c5: Turn `eaVert` and `mongolianVert` text boxes the way `vert` turns, run Mongolian columns left to right, and stack `wordArtVert` and `wordArtVertRtl` one character to a line.
+- 863b70e: Reject a WMF picture whose MOVETO or LINETO record is too short to hold its point, instead of drawing it without that line.
+- 7202c79: Scrub unrecognized binary parts during redaction. A part is kept only when it is recognized media or XML; every other part is emptied, and it is removed outright — together with its owned relationship part, that part's exclusive targets and its content-type declaration — when no surviving relationship points at it. The XML rewriter and the scrubber now share one reading of relationship markup, so they cannot disagree about which targets leave the package, and a part is only removed when every surviving relationship resolves to a stored entry.
+- 188540f: Redact relationship targets that carry a URI scheme, are protocol-relative or name a UNC share even when TargetMode is missing or oddly spelled, and declare the mode on the rewritten relationship.
+- 2d1b9d0: Media placeholders are now a fixed 64x64 blank image instead of matching the source dimensions, and WMF/EMF parts become blank metafile stubs instead of failing the whole redaction.
+- 83dbc02: Mask threaded-comment persons, pivot caches and tables, connections, and external-link details during XLSX redaction. Person display names and user IDs, threaded-comment text and timestamps, pivot field names with shared-item and record values (numbers keep the numeric placeholder, dates use the epoch, errors use `#N/A`), pivot-table and slicer names and captions, connection strings with commands and URLs, external sheet names with cached values, DDE service/topic/item names, and OLE program IDs are now masked, while shared-item indexes, relationship IDs, and person GUID links keep resolving.
+- 1e46a6f: Ignore trailing ideographic spaces for line-wrap fit, matching ASCII spaces, while keeping their advance and excluding them from justification compression.
+- b59ba43: Resolve each font slot's fallback chain once per run during measurement.
+- a35d4ba: Close the path on a Visio `Close` geometry row instead of dropping the row, so stroked shapes no longer render a side short.
+- 5408e87: Add an engine API for creating glued VSDX connectors in one edit transaction. Preserve glue through collaboration and saving, and omit records whose shapes have been deleted.
+- 58c0f12: Open Visio `.vstx` templates as well as `.vsdx` drawings. Macro-enabled files and stencils stay rejected.
+- ee33b67: Draw a shape's geometry when a paint channel cannot be resolved: the fill or stroke falls back to the file's default foreground and the display list carries a diagnostic naming what failed.
+  The editor reports those diagnostics alongside its text notices.
+- 951eb90: Support VSDX drawing and VSTX template redaction and opt-in sharing. Mask private
+  Visio text and attributes independently of part paths, rename relationships and
+  named rows consistently, and preserve standard geometry and theme colors.
+  Validate inputs and redacted outputs with the Visio parser; refuse unsupported
+  macro-enabled files and stencils.
+- 78e3184: Honour Geometry section `NoFill`, `NoLine` and `NoShow` controls when rendering shapes and connectors.
+  Render visible geometry with only the paint channels it uses, while retaining diagnostics for unsupported controls.
+- 7d549fb: Add a selection frame with resize handles and a rotation grip. Commit handle resizes atomically and evaluate formula LocPins at the new size to keep the preview and opposite edge in place.
+- eda21ff: Add in-place shape text editing to the VSDX editor. Text edits run through the mutation policy with a typed receipt, are undoable and authorized on remote updates, and saving patches only the edited shape's `Text` element.
+- ab39ee3: Resolve inherited cells, geometry, and text for group sub-shapes that use `MasterShape` without their own `Master`.
+  Keep inherited text formatting consistent between rendering and edit sessions.
+- 8a27bb7: Keep unmodeled row, column, and cell markup on edited sheets. A save now
+  patches only the cells, rows, and columns an edit changed instead of
+  reserializing the sheet, so the rest of the sheet survives byte for byte. Sheets
+  whose rows or cells lack `r` attributes or arrive out of order, and sheets replayed
+  from collaboration updates, are still reserialized.
+- aacdacc: Cache tokenized number formats across renders.
+- 79db755: Reuse formula parses and shift cell maps in place during structural edits.
+- 5798031: Load Excel shared formulas by expanding followers into plain cells with correct absolute and relative references, so they evaluate and save with correct values. Shared-formula markup is not written back: an edited sheet writes each follower as its own formula.
+- b07afd7: Write sheetData in one pass instead of rescanning cells per row.
+- 13016f2: Support whole-column formula references such as `VLOOKUP(..., S:V, ...)` with limits: narrow hits evaluate without materialising the column, but wide aggregates such as `SUM(A:XFD)` return `#NUM!`, and every lookup miss scans the full column height against the shared per-recalculation budget, so a workbook with many misses can turn later formulas `#NUM!`.
+
 ## 0.1.0
 
 ### Minor Changes

@@ -1,5 +1,69 @@
 # @betteroffice/docx
 
+## 0.2.0
+
+### Minor Changes
+
+- 295f42f: Keep one local undo history across document stories, group rapid keystrokes in WebAssembly, and preserve native undo in other inputs. Replace story-scoped history helpers with session-wide tracking and changed-story reporting.
+
+  Migrate each removed API as follows: `historyStory()` returns the changed stories via `historyStories()` (sorted, empty before the first local edit instead of `null`); `undoDepth()` and `redoDepth()` are gone, query `canUndo()` and `canRedo()` instead; `markUndoGroup(startDepth)` is gone, rapid keystrokes now coalesce in WebAssembly with no host bookkeeping; `applyLocalUpdate(update, story)` drops its story argument and becomes `applyLocalUpdate(update)`; `beginUndoCapture(story, includeTableStories?)` drops its arguments and becomes `beginUndoCapture()`; `computeLayout()` no longer returns `blocks` and `measures`, read them lazily from `getLayoutKernelInputs(computation.layout)` as `measured` and `options`.
+
+- 1d0f41d: Round-trip DOCX packages as a byte-stable fixed point that keeps the authored section properties, simple fields, drawing names, foreign markup, unknown attributes and custom root bindings (new public model fields and enum variants).
+
+### Patch Changes
+
+- 93971b5: Remove outdated early-release warnings from package READMEs and link the JavaScript guide and changelogs.
+- b351bbe: Keep vertically aligned table-cell text intact at page breaks by using its painted position when selecting row split points. Apply the same default vertical cell padding during measurement and rendering.
+- 2061849: Keep anchored shapes with unknown presets as positioned overlays with their authored size, using a rectangular fallback path instead of dropping to an inline placeholder.
+- 4511b9a: Preserve image drawing ranks and paint behind-document images and shapes in their authored stacking order while keeping each shape's contents together.
+- 4bf205b: Charts now survive a save. The drawing that places a chart, and any drawing the parser does not model, is kept as its original markup and written back verbatim, so the chart part and its relationship stay referenced; the editor save path projects chart runs back from the session instead of dropping them.
+- 0664bd3: Keep continued table-cell content below repeated table headers.
+- 5c04bc4: Start continuous sections below the deepest preceding column and restore the remaining page space after column balancing.
+- 2c56acd: Preserve inherited spacing after empty paragraphs during pagination and count it once in keep groups and column balancing.
+- d4f4b85: Round page canvas dimensions up so fractional pixel edges remain visible at different zoom and display scales.
+- a958376: Honor custom tab stops inside hanging indents so labels stay aligned and body text does not wrap prematurely.
+- cb2c6fe: Collapse same-style contextual spacing between header and footer paragraphs, matching body rules, so consecutive header lines no longer keep an extra after-spacing gap and body margins use the collapsed height.
+- 356f67a: Vanished content is now hidden by default: hidden runs, drawings, and fully hidden paragraphs stay out of the document layout while preserving source content and edit positions. Pass the `showHiddenText` render option (including the new `showHiddenText` prop on `DocxEditor`) to reveal it with normal wrapping.
+- d4f4b85: Center and right-align the first line within its indented width, including hanging indents.
+- 2c658b6: Improve DOCX pagination, list formatting, justified text, header and footer spacing, anchored shapes, content-control text, and table geometry to better match Word. Use Carlito as the related fallback for Calibri Light.
+- 297f43d: Align standalone inline images to the text baseline without adding space above them.
+- 43fad65: Reduce large-document interaction cost with per-line selection bands, lazy Unicode caret stops, compact retained-page shift replay, revision-bound lazy measured inputs, and stable page rendering identities.
+- 6393137: Honor line-relative paragraph spacing and section grid pitch when laying out DOCX documents.
+- 4cc8dc0: Keep literal line endings inside imported text inline so paragraphs retain normal wrapping and pagination.
+- 1efec27: Improve DOCX fidelity with Word's 10 pt fallback for undeclared font sizes, short-paragraph widow control, and corrected table padding, minimum row heights, repeated headers, and rotated image sizing. Align automatic and wrapped tabs to the page grid, keep wrapped text metrics on their own lines, and hide list markers on page-break-only paragraphs. Preserve authored formatting and document state.
+- 9281f7e: Honor signed page margins for header/footer overlap. Negative top/bottom now resolve to absolute body distances and suppress header/footer expansion on that side only.
+- 6779738: Honor absolute text-relative vertical offsets of nested floating tables and wrap following cell text around their horizontal position or alignment.
+- c1f9684: Apply authored horizontal offsets to floating tables nested inside table cells.
+- 4d27f1e: Paint PAGE fields with the section page label (restart value and number format) instead of the global page number, so restarted or roman-numbered folios match Word and the reserved header/footer width matches the ink.
+- b2ca63b: Preserve picture preset geometry and clip elliptical pictures when rendering.
+- bd69e9e: Draw DOCX plus presets as twelve-vertex crosses from the ECMA-376 arm guide instead of rectangular fallback, with default and missing-adjustment shapes sharing the same path.
+- 20e913c: Continue full-width text-anchored tables onto later pages when their rows exceed the remaining page space.
+
+  Move full-width page-positioned tables to the next page when they collide with an inline table that cannot fit below them.
+
+- 1d830df: Add a CDN-only font provider, settle Japanese font preflight without retry loops, and preserve floating header shapes without inflating body margins. Load and save alternate main-document filenames through their package relationships, and forward layout failures through the editor error callback.
+- 6ce2439: Reuse lowered run content while seeding DOCX documents to reduce import work.
+- e42ff8d: Reserve superscript and subscript line height using the original run size so repeated script markers do not push content onto extra pages.
+- 036f83e: Parse physical units in DOCX section dimensions, margins, column spacing, and line-number distances.
+- a117530: Preserve the document-wide facing-page setting and honor page-number restart parity at next-page and promoted section breaks. Mark automatically inserted parity fillers and suppress their header/footer bands while keeping the physical sheet.
+- 9e4656f: Reduce document opening time by avoiding redundant media and story copies during seeding.
+- 1dc0e41: Recognize TOC styles by their names while preserving explicit hyperlink formatting through edits and save/reopen.
+- 56c3ca4: Apply DrawingML luminance, saturation, tint, and shade modifiers when painting DOCX shapes, preserving the resolved colors cached in Word text formatting.
+- 6f0e36d: Hide suppressed list-number placeholders while preserving literal labels.
+- 284f0c4: Suppress automatic paragraph spacing at table-cell boundaries while preserving explicit spacing and gaps between paragraphs.
+- d4f4b85: Keep table heading rows with their following rows when the group fits on a page, and prevent shorter fonts from adding extra leading below taller fonts on the same line.
+- 8adcd04: Apply table-style paragraph spacing before paragraph styles and direct formatting, including nested tables and content controls.
+- d4f4b85: Respect narrow text boundaries and preserve empty paragraphs after header and footer tables so wrapping and footer placement match Word.
+- b1f5c91: Render embedded TIFF pictures in browser documents by converting them to PNG inside the DOCX parse WASM boundary. Uncompressed, LZW, PackBits and deflate sources are supported, including grayscale, RGB, palette and CMYK images; other compressions are skipped.
+- 2ee434c: Parse runs, paragraphs, tables, rows and cells that Word wraps in `w:customXml`, `w:smartTag` or a row/cell `w:sdt`; their text was dropped on open and therefore on save.
+- 1a5ef23: Render legacy VML horizontal rules and preserve them when saving DOCX documents.
+- 846b5d6: Fall back to the main-thread engine when the resident worker crashes, times out, or answers corruptly mid-input so typing survives worker failures. Replay the pending keystroke on the main-thread engine and keep genuine engine-level input rejections surfacing as errors.
+- 0019657: Recover from resident worker crashes, WebAssembly traps, and unanswered requests so the editor can fall back to the main-thread engine. Reset retained worker frames and queries when switching engines so fresh main-thread frames render immediately.
+- 73cea54: Avoid repainting unchanged worker pages when scrolling or updating the caret, and preserve unpresented page damage for retries.
+- d926fb0: Correct tint proportions in shared OOXML color resolution so lighter theme colors blend toward white as authored.
+- c9b72bf: Draw chart titles, axis labels, legends and data labels in the family, slant and character spacing their `c:txPr` declares, instead of the theme minor font upright and untracked. A chart title's own `c:rich` run properties now override the paragraph default they sit under, and a reattached source refreshes the text properties of a stored chart. A DOCX chart paints the tracking its text properties declare instead of only reserving room for it.
+- 1e46a6f: Ignore trailing ideographic spaces for line-wrap fit, matching ASCII spaces, while keeping their advance and excluding them from justification compression.
+
 ## 0.1.0
 
 ### Minor Changes
