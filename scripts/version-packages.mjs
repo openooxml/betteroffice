@@ -2,14 +2,13 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { PYTHON_BINDINGS } from './python-bindings.mjs';
 import {
   RUST_CRATES,
+  STANDALONE_WORKSPACES,
   WORKSPACE_MANIFEST,
   cargoMetadata,
   run,
   rustReleaseVersion,
   validateRustTrain
 } from './rust-crates.mjs';
-
-const BINDINGS_MANIFEST = 'bindings/Cargo.toml';
 
 function releaseManifest(binding) {
   return `${binding}/package.json`;
@@ -76,11 +75,13 @@ function validate(version, locked) {
   validateRustTrain(metadata, version);
 }
 
-// Nothing else rewrites bindings/Cargo.lock, which pins every bumped crate by version.
-function synchronizeBindingsLock() {
-  cargoMetadata({ locked: false, manifestPath: BINDINGS_MANIFEST });
-  // Re-assert under `--locked`, the way CI reads the lock it just wrote.
-  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
+// Nothing else rewrites these lockfiles, which pin every bumped crate by version.
+function synchronizeStandaloneLocks() {
+  for (const workspace of STANDALONE_WORKSPACES) {
+    cargoMetadata({ locked: false, manifestPath: cargoManifest(workspace) });
+    // Re-assert under `--locked`, the way CI reads the lock it just wrote.
+    cargoMetadata({ manifestPath: cargoManifest(workspace) });
+  }
 }
 
 const checkOnly = process.argv.includes('--check');
@@ -119,12 +120,16 @@ if (checkOnly) {
     }
   }
   validate(before, true);
-  cargoMetadata({ manifestPath: BINDINGS_MANIFEST });
+  for (const workspace of STANDALONE_WORKSPACES) {
+    cargoMetadata({ manifestPath: cargoManifest(workspace) });
+  }
   console.log(`Rust release train is synchronized at ${before}.`);
   for (const binding of PYTHON_BINDINGS) {
     console.log(`${binding} is synchronized at ${pythonBefore.get(binding)}.`);
   }
-  console.log('bindings/Cargo.lock is current.');
+  for (const workspace of STANDALONE_WORKSPACES) {
+    console.log(`${workspace}/Cargo.lock is current.`);
+  }
   process.exit(0);
 }
 
@@ -153,7 +158,7 @@ for (const binding of PYTHON_BINDINGS) {
 }
 
 validate(after, true);
-synchronizeBindingsLock();
+synchronizeStandaloneLocks();
 for (const binding of PYTHON_BINDINGS) {
   const from = pythonBefore.get(binding);
   const to = pythonAfter.get(binding);
@@ -161,7 +166,9 @@ for (const binding of PYTHON_BINDINGS) {
     to === from ? `${binding} remains at ${to}.` : `Synchronized ${binding} ${from} -> ${to}.`
   );
 }
-console.log('Synchronized bindings/Cargo.lock.');
+for (const workspace of STANDALONE_WORKSPACES) {
+  console.log(`Synchronized ${workspace}/Cargo.lock.`);
+}
 console.log(
   after === before
     ? `Rust release train remains at ${after}.`

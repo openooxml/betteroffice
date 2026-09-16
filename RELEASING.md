@@ -104,10 +104,14 @@ command then.
 workflow read it at runtime — `release.yml` turns it into one publish dispatch
 per binding — so the list is never duplicated in a workflow.
 
-`bindings/Cargo.lock` pins the workspace crates by version, so every bump
-invalidates it and CI's `cargo clippy --locked` would fail.
-`scripts/version-packages.mjs` regenerates it after writing the new versions, and
-the release commit carries it alongside the manifests.
+The standalone workspaces `bindings/`, `fuzz/` and `apps/native-viewer/` each
+carry a `Cargo.lock` that records the workspace crates by version, so every bump
+invalidates them and CI's `cargo clippy --locked` would fail.
+`scripts/rust-crates.mjs` lists them in `STANDALONE_WORKSPACES`;
+`scripts/version-packages.mjs` regenerates each lock after writing the new
+versions, and the release commit carries them alongside the manifests. Their path
+dependencies on workspace crates carry no `version`, which
+`scripts/standalone-workspaces.test.ts` pins.
 
 Each entry carries a `publish` flag. Every registered binding is versioned by
 Changesets and installed and tested by the CI gate; only a flagged one is built

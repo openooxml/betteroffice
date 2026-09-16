@@ -10,9 +10,9 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-ooxml-opc = { package = "betteroffice-opc", version = "0.1.0", path = "../crates/ooxml-opc" }
-pptx-parse = { package = "betteroffice-pptx-parse", version = "0.1.0", path = "../crates/pptx-parse" }
-pptx-render = { package = "betteroffice-pptx-render", version = "0.1.0", path = "../crates/pptx-render", features = ["fuzzing"] }
+ooxml-opc = { package = "betteroffice-opc", path = "../crates/ooxml-opc" }
+pptx-parse = { package = "betteroffice-pptx-parse", path = "../crates/pptx-parse" }
+pptx-render = { package = "betteroffice-pptx-render", path = "../crates/pptx-render", features = ["fuzzing"] }
 
 [[bin]]
 name = "metafile-decode"

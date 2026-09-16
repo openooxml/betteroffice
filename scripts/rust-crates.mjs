@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 
 export const RUST_RELEASE_MANIFEST = 'crates/package.json';
 export const WORKSPACE_MANIFEST = 'Cargo.toml';
+export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 
 export const RUST_CRATES = [
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
@@ -52,6 +53,8 @@ export function run(command, args, { capture = false, allowFailure = false, env 
   const result = spawnSync(command, args, {
     encoding: capture ? 'utf8' : undefined,
     stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+    // cargo metadata output exceeds the 1 MiB default.
+    maxBuffer: 64 * 1024 * 1024,
     env: childEnv
   });
   if (result.error) throw result.error;

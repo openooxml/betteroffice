@@ -33,6 +33,7 @@ ignore = [
 [bans]
 multiple-versions = "warn"
 wildcards = "warn"
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
