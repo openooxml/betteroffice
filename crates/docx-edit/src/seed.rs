@@ -581,19 +581,17 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
         return target.cloned();
     };
     let mut result = object(target).cloned().unwrap_or_default();
-    for (value_key, hanging_key) in [
-        ("indentFirstLine", "hangingIndent"),
-        ("indentFirstLineChars", "hangingIndentChars"),
-    ] {
-        if let Some(value) = source.get(value_key).filter(|value| !value.is_null()) {
-            result.insert(value_key.to_owned(), value.clone());
-            match source.get(hanging_key).filter(|value| !value.is_null()) {
-                Some(hanging) => {
-                    result.insert(hanging_key.to_owned(), hanging.clone());
-                }
-                None => {
-                    result.remove(hanging_key);
-                }
+    if let Some(value) = source
+        .get("indentFirstLine")
+        .filter(|value| !value.is_null())
+    {
+        result.insert("indentFirstLine".to_owned(), value.clone());
+        match source.get("hangingIndent").filter(|value| !value.is_null()) {
+            Some(hanging) => {
+                result.insert("hangingIndent".to_owned(), hanging.clone());
+            }
+            None => {
+                result.remove("hangingIndent");
             }
         }
     }
@@ -607,10 +605,7 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
                 key.clone(),
                 merge_plain(result.get(key), Some(value)).unwrap_or_else(|| value.clone()),
             );
-        } else if matches!(
-            key.as_str(),
-            "indentFirstLine" | "hangingIndent" | "indentFirstLineChars" | "hangingIndentChars"
-        ) {
+        } else if matches!(key.as_str(), "indentFirstLine" | "hangingIndent") {
             continue;
         } else {
             result.insert(key.clone(), value.clone());
@@ -3805,7 +3800,7 @@ mod tests {
     }
 
     #[test]
-    fn indent_kind_pairs_merge_atomically_including_chars_and_zero() {
+    fn indent_kind_pairs_merge_atomically_including_zero() {
         let base = json!({"indentFirstLine":-730,"hangingIndent":true});
         let derived = json!({"indentFirstLine":200});
         let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
@@ -3815,15 +3810,6 @@ mod tests {
         let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
         assert_eq!(merged["indentFirstLine"], json!(0));
         assert!(merged.get("hangingIndent").is_none());
-        let base = json!({"indentFirstLineChars":-150,"hangingIndentChars":true});
-        let derived = json!({"indentFirstLineChars":200});
-        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
-        assert_eq!(merged["indentFirstLineChars"], json!(200));
-        assert!(merged.get("hangingIndentChars").is_none());
-        let derived = json!({"indentFirstLineChars":0});
-        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
-        assert_eq!(merged["indentFirstLineChars"], json!(0));
-        assert!(merged.get("hangingIndentChars").is_none());
         let base = json!({"indentFirstLine":200});
         let derived = json!({"hangingIndent":true});
         let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
