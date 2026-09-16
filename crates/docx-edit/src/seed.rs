@@ -3852,10 +3852,10 @@ mod tests {
             .unwrap()
         }
         let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
-        assert_eq!(style_ppr["indentFirstLine"], json!(-730));
+        assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
         assert_eq!(style_ppr["hangingIndent"], json!(true));
         let direct_ppr = ppr(r#"<w:pPr><w:ind w:left="2160" w:firstLine="720"/></w:pPr>"#);
-        assert_eq!(direct_ppr["indentFirstLine"], json!(720));
+        assert_eq!(direct_ppr["indentFirstLine"], json!(720.0));
         assert!(direct_ppr.get("hangingIndent").is_none());
         let styles = StyleResolver::new(Some(
             &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":style_ppr}]}),
@@ -3867,8 +3867,8 @@ mod tests {
             &[],
             None,
         );
-        assert_eq!(properties["indentLeft"], json!(2160));
-        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["indentLeft"], json!(2160.0));
+        assert_eq!(properties["indentFirstLine"], json!(720.0));
         assert_eq!(properties["hangingIndent"], json!(false));
     }
 
