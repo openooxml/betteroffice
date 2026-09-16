@@ -29,10 +29,6 @@
 | [`@betteroffice/docx-react`](https://www.npmjs.com/package/@betteroffice/docx-react) | npm | drop-in React .docx editor |
 | [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) | PyPI | Python API for reading, editing, laying out, and rasterizing DOCX documents |
 
-DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
-
-Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving. DrawingML plus shapes render with their authored adjustments. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported.
-
 ### Spreadsheets — `.xlsx`
 
 | package | registry | what it does |
@@ -50,8 +46,6 @@ Standard legacy VML horizontal rules render in DOCX and retain their source XML 
 | [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
-
-The browser React editor renders supported bitmap-only WMF wrappers. Custom browser image loaders can use `presentationImageBlob(bytes)` from `@betteroffice/pptx` for the same limited WMF support.
 
 ### Diagrams — `.vsdx`
 
