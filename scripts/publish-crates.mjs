@@ -81,52 +81,33 @@ function appendStepSummary(text) {
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${text}\n`);
 }
 
-/** Reminder covering both bootstrap uses. Existing fallback is not a new crate. */
+const TRUSTED_PUBLISHER_REMINDER =
+  'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.';
+
+/** Bootstrap summary for created and fallback crates, each with its reminder. */
 export function formatBootstrapSummary(created, fallback = []) {
-  let createdNames;
-  let fallbackNames;
-  if (created && typeof created === 'object' && !Array.isArray(created)) {
-    createdNames = created.created ?? [];
-    fallbackNames = created.fallback ?? [];
-  } else {
-    createdNames = created ?? [];
-    fallbackNames = fallback ?? [];
-  }
   const lines = [];
-  if (createdNames.length > 0) {
-    lines.push(`Created with CRATES_IO_BOOTSTRAP_TOKEN: ${createdNames.join(', ')}.`);
-  }
-  if (fallbackNames.length > 0) {
+  if (created.length > 0) {
     lines.push(
-      `Published with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crates, OIDC unavailable or failed): ${fallbackNames.join(', ')}.`
+      `Created with CRATES_IO_BOOTSTRAP_TOKEN: ${created.join(', ')}. ${TRUSTED_PUBLISHER_REMINDER}`
     );
   }
-  lines.push(
-    'Add a Trusted Publisher to each on crates.io (owner openooxml, repository betteroffice, workflow release.yml) before its next release.'
-  );
-  lines.push(
-    'Remove CRATES_IO_BOOTSTRAP_TOKEN once OIDC works for all crates, not just once all names exist.'
-  );
+  if (fallback.length > 0) {
+    lines.push(
+      `Published with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crates, OIDC unavailable or failed): ${fallback.join(', ')}. ${TRUSTED_PUBLISHER_REMINDER}`
+    );
+  }
   return lines.join('\n');
 }
 
 export function recordBootstrapUse(name, kind) {
-  const text =
-    kind === 'bootstrap'
-      ? `Created ${name} with CRATES_IO_BOOTSTRAP_TOKEN.`
-      : `Published ${name} with CRATES_IO_BOOTSTRAP_TOKEN fallback (existing crate).`;
-  appendStepSummary(text);
-}
-
-function reportAuthSummary(created, fallback) {
-  if (created.length === 0 && fallback.length === 0) return;
-  appendStepSummary(formatBootstrapSummary(created, fallback));
+  appendStepSummary(
+    kind === 'bootstrap' ? formatBootstrapSummary([name], []) : formatBootstrapSummary([], [name])
+  );
 }
 
 /**
- * Publish one crate, trying OIDC first for existing crates and falling back
- * to the bootstrap token. New crates go straight to the bootstrap token.
- * `checkVersion` must throw on registry lookup errors, never resolve missing.
+ * Publish one crate OIDC-first with one bootstrap retry. Throws on lookup errors.
  */
 export async function attemptPublishWithFallback({
   name,
@@ -137,66 +118,67 @@ export async function attemptPublishWithFallback({
   checkVersion,
   runPublish
 }) {
-  if (!exists) {
-    if (!bootstrapToken) {
-      throw new Error(
-        `${name} is not on crates.io and CRATES_IO_BOOTSTRAP_TOKEN is missing: OIDC cannot create a crate`
-      );
-    }
-    const result = await runPublish(bootstrapToken, 'bootstrap');
-    if (result.status !== 0) {
-      const found = await checkVersion();
-      if (!found) throw new Error(`Failed to publish ${name}@${version} with the bootstrap token`);
-      if (found.yanked) throw new Error(`${name}@${version} is yanked`);
-      return { source: 'bootstrap' };
-    }
-    return { source: 'bootstrap' };
+  const selected = selectPublishToken({ name, exists, oidcToken, bootstrapToken });
+  const attempts = [selected];
+  if (selected.source === 'oidc' && bootstrapToken) {
+    attempts.push({ token: bootstrapToken, source: 'bootstrap-fallback' });
   }
-
-  if (oidcToken) {
-    const oidcResult = await runPublish(oidcToken, 'oidc');
-    if (oidcResult.status === 0) return { source: 'oidc' };
+  for (let index = 0; index < attempts.length; index++) {
+    const attempt = attempts[index];
+    const last = index === attempts.length - 1;
+    console.log(`${name}: publishing with ${attempt.source}.`);
+    const result = await runPublish(attempt.token, attempt.source);
+    if (result.status === 0) return { source: attempt.source };
     const found = await checkVersion();
     if (found) {
       if (found.yanked) throw new Error(`${name}@${version} is yanked`);
-      return { source: 'oidc' };
+      return { source: attempt.source };
     }
-    if (!bootstrapToken) {
+    if (!last) continue;
+    if (attempts.length > 1) {
+      throw new Error(
+        `Failed to publish ${name}@${version} with OIDC and with the bootstrap token fallback`
+      );
+    }
+    if (attempt.source === 'bootstrap') {
+      throw new Error(`Failed to publish ${name}@${version} with the bootstrap token`);
+    }
+    if (attempt.source === 'oidc') {
       throw new Error(
         `Failed to publish ${name}@${version} with OIDC and CRATES_IO_BOOTSTRAP_TOKEN is missing: cannot fall back`
       );
     }
-    const fallbackResult = await runPublish(bootstrapToken, 'bootstrap-fallback');
-    if (fallbackResult.status !== 0) {
-      const retried = await checkVersion();
-      if (!retried) {
-        throw new Error(
-          `Failed to publish ${name}@${version} with OIDC and with the bootstrap token fallback`
-        );
-      }
-      if (retried.yanked) throw new Error(`${name}@${version} is yanked`);
-      return { source: 'bootstrap-fallback' };
-    }
-    return { source: 'bootstrap-fallback' };
-  }
-
-  if (!bootstrapToken) {
     throw new Error(
-      `${name} is on crates.io but CARGO_REGISTRY_TOKEN and CRATES_IO_BOOTSTRAP_TOKEN are both missing`
+      `Failed to publish ${name}@${version} with the bootstrap token fallback (OIDC unavailable)`
     );
   }
-  const direct = await runPublish(bootstrapToken, 'bootstrap-fallback');
-  if (direct.status !== 0) {
-    const found = await checkVersion();
-    if (!found) {
-      throw new Error(
-        `Failed to publish ${name}@${version} with the bootstrap token fallback (OIDC unavailable)`
-      );
-    }
-    if (found.yanked) throw new Error(`${name}@${version} is yanked`);
-    return { source: 'bootstrap-fallback' };
-  }
-  return { source: 'bootstrap-fallback' };
+}
+
+/** Run attempt, record bootstrap use, then wait. Records only on success. */
+export async function publishOneCrate({
+  name,
+  version,
+  exists,
+  oidcToken,
+  bootstrapToken,
+  checkVersion,
+  runPublish,
+  recordUse = recordBootstrapUse,
+  waitRegistry
+}) {
+  const { source } = await attemptPublishWithFallback({
+    name,
+    version,
+    exists,
+    oidcToken,
+    bootstrapToken,
+    checkVersion,
+    runPublish
+  });
+  if (source === 'bootstrap') recordUse(name, 'bootstrap');
+  else if (source === 'bootstrap-fallback') recordUse(name, 'bootstrap-fallback');
+  await waitRegistry();
+  return { source };
 }
 
 async function crateExists(name) {
@@ -298,8 +280,6 @@ async function publish() {
     return;
   }
 
-  const createdWithBootstrap = [];
-  const fallbackWithBootstrap = [];
   for (const crate of RUST_PUBLISH_CRATES) {
     const existing = await crateVersion(crate.name, version);
     if (existing) {
@@ -319,7 +299,7 @@ async function publish() {
     }
 
     const exists = await crateExists(crate.name);
-    const { source } = await attemptPublishWithFallback({
+    await publishOneCrate({
       name: crate.name,
       version,
       exists,
@@ -330,19 +310,10 @@ async function publish() {
         run('cargo', ['publish', '--locked', '--registry', 'crates-io', '-p', crate.name], {
           allowFailure: true,
           env: cargoPublishEnv(token)
-        })
+        }),
+      waitRegistry: () => waitForRegistry(crate.name, version)
     });
-    console.log(`${crate.name}: publishing with ${source}.`);
-    if (source === 'bootstrap') {
-      createdWithBootstrap.push(crate.name);
-      recordBootstrapUse(crate.name, 'bootstrap');
-    } else if (source === 'bootstrap-fallback') {
-      fallbackWithBootstrap.push(crate.name);
-      recordBootstrapUse(crate.name, 'bootstrap-fallback');
-    }
-    await waitForRegistry(crate.name, version);
   }
-  reportAuthSummary(createdWithBootstrap, fallbackWithBootstrap);
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

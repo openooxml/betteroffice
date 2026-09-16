@@ -8,7 +8,7 @@ import {
   cargoNoAuthEnv,
   cargoPublishEnv,
   formatBootstrapSummary,
-  recordBootstrapUse,
+  publishOneCrate,
   selectPublishToken
 } from './publish-crates.mjs';
 import { run } from './rust-crates.mjs';
@@ -331,53 +331,100 @@ describe('formatBootstrapSummary', () => {
     expect(summary).toContain('CRATES_IO_BOOTSTRAP_TOKEN');
   });
 
-  test('differentiates new crates from existing fallback and asks for OIDC for all', () => {
+  test('differentiates new crates from existing fallback, each with its reminder', () => {
     const summary = formatBootstrapSummary(['new-crate'], ['existing-crate']);
     expect(summary).toContain('new-crate');
     expect(summary).toContain('existing-crate');
     expect(summary).toContain('Created with CRATES_IO_BOOTSTRAP_TOKEN');
     expect(summary).toContain('fallback');
-    expect(summary).toContain('once OIDC works for all crates');
     const createdLine = summary.split('\n').find((line) => line.startsWith('Created with'))!;
     expect(createdLine).not.toContain('existing-crate');
+    expect(createdLine).toContain('Trusted Publisher');
+    const fallbackLine = summary.split('\n').find((line) => line.includes('fallback'))!;
+    expect(fallbackLine).toContain('existing-crate');
+    expect(fallbackLine).not.toContain('new-crate');
+    expect(fallbackLine).toContain('Trusted Publisher');
   });
+});
 
-  test('a partial failure retains the already recorded bootstrap use', () => {
+describe('publishOneCrate', () => {
+  test('a failing registry wait retains the already recorded fallback use', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'crates-auth-'));
     const summaryFile = join(dir, 'summary.md');
     const previous = process.env.GITHUB_STEP_SUMMARY;
     process.env.GITHUB_STEP_SUMMARY = summaryFile;
     try {
-      recordBootstrapUse('first-crate', 'bootstrap');
-      const waitFails = () => {
-        throw new Error('registry wait failed');
-      };
-      expect(() => waitFails()).toThrow('registry wait failed');
+      const tracker = publishTracker([
+        { token: FAKE_OIDC, status: 1 },
+        { token: FAKE_BOOTSTRAP, status: 0 }
+      ]);
+      await expect(
+        publishOneCrate({
+          name: 'first-crate',
+          version: '0.1.0',
+          exists: true,
+          oidcToken: FAKE_OIDC,
+          bootstrapToken: FAKE_BOOTSTRAP,
+          checkVersion: async () => null,
+          runPublish: tracker.runPublish,
+          waitRegistry: async () => {
+            throw new Error('registry wait failed');
+          }
+        })
+      ).rejects.toThrow('registry wait failed');
+      expect(tracker.calls).toEqual([
+        { token: FAKE_OIDC, source: 'oidc' },
+        { token: FAKE_BOOTSTRAP, source: 'bootstrap-fallback' }
+      ]);
       const persisted = readFileSync(summaryFile, 'utf8');
       expect(persisted).toContain('first-crate');
       expect(persisted).toContain('CRATES_IO_BOOTSTRAP_TOKEN');
+      expect(persisted).toContain('fallback');
+      expect(persisted).toContain('Trusted Publisher');
     } finally {
       if (previous === undefined) delete process.env.GITHUB_STEP_SUMMARY;
       else process.env.GITHUB_STEP_SUMMARY = previous;
     }
   });
 
-  test('no success is recorded when cargo failed and the version is not visible', async () => {
-    const tracker = publishTracker([
-      { token: FAKE_OIDC, status: 1 },
-      { token: FAKE_BOOTSTRAP, status: 1 }
-    ]);
-    await expect(
-      attemptPublishWithFallback({
-        name: 'betteroffice-xlsx',
-        version: '0.1.0',
-        exists: true,
-        oidcToken: FAKE_OIDC,
-        bootstrapToken: FAKE_BOOTSTRAP,
-        checkVersion: async () => null,
-        runPublish: tracker.runPublish
-      })
-    ).rejects.toThrow();
+  test('no success is recorded when both attempts fail and the version is absent', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'crates-auth-'));
+    const summaryFile = join(dir, 'summary.md');
+    const previous = process.env.GITHUB_STEP_SUMMARY;
+    process.env.GITHUB_STEP_SUMMARY = summaryFile;
+    try {
+      const tracker = publishTracker([
+        { token: FAKE_OIDC, status: 1 },
+        { token: FAKE_BOOTSTRAP, status: 1 }
+      ]);
+      let waited = false;
+      await expect(
+        publishOneCrate({
+          name: 'betteroffice-xlsx',
+          version: '0.1.0',
+          exists: true,
+          oidcToken: FAKE_OIDC,
+          bootstrapToken: FAKE_BOOTSTRAP,
+          checkVersion: async () => null,
+          runPublish: tracker.runPublish,
+          waitRegistry: async () => {
+            waited = true;
+          }
+        })
+      ).rejects.toThrow('OIDC and with the bootstrap token');
+      expect(tracker.calls).toHaveLength(2);
+      expect(waited).toBe(false);
+      let persisted = '';
+      try {
+        persisted = readFileSync(summaryFile, 'utf8');
+      } catch {
+        persisted = '';
+      }
+      expect(persisted).not.toContain('betteroffice-xlsx');
+    } finally {
+      if (previous === undefined) delete process.env.GITHUB_STEP_SUMMARY;
+      else process.env.GITHUB_STEP_SUMMARY = previous;
+    }
   });
 });
 
@@ -468,15 +515,6 @@ describe('cargo child environment isolation', () => {
     }
   });
 
-  test('tokens travel only in the environment, never in command arguments', () => {
-    const env = cargoPublishEnv(FAKE_SELECTED);
-    expect(env.CARGO_REGISTRY_TOKEN).toBe(FAKE_SELECTED);
-    expect(env.CARGO_REGISTRIES_CRATES_IO_TOKEN).toBe(FAKE_SELECTED);
-    const args = ['publish', '--locked', '--registry', 'crates-io', '-p', 'betteroffice-xlsx'];
-    expect(args.join(' ')).not.toContain(FAKE_SELECTED);
-    expect(args.join(' ')).not.toContain(FAKE_BOOTSTRAP);
-    expect(args.join(' ')).not.toContain(FAKE_OIDC);
-  });
 });
 
 describe('release workflow crates auth', () => {

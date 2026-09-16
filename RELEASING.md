@@ -17,7 +17,7 @@ crates.io before each upload, so rerunning a partial release resumes safely.
 
 Trusted Publishing can only be configured after a crate exists, so a crate
 that is not on crates.io yet cannot be created with OIDC. Every release
-obtains an OIDC token via `rust-lang/crates-io-auth-action` (pinned to the
+attempts to obtain an OIDC token via `rust-lang/crates-io-auth-action` (pinned to the
 official v1 commit) and publishes per crate: a crate that does not exist yet
 goes straight to `CRATES_IO_BOOTSTRAP_TOKEN`, while a crate that already
 exists tries OIDC first and falls back to the bootstrap token only if the
@@ -37,9 +37,9 @@ step summary before the registry wait for that crate can fail.
    `openooxml`, repository `betteroffice`, and workflow `release.yml`, before
    its next release.
 5. Remove the GitHub secret and revoke the bootstrap token once OIDC works
-   for all crates, not just once all names exist. The release lists every
-   crate it created with the bootstrap token and every existing crate it
-   published with the bootstrap fallback separately in the step summary,
+   for all crates, not just once all names exist. The release records each
+   crate it creates with the bootstrap token and each existing crate it
+   publishes with the bootstrap fallback separately in the step summary,
    recording each use before that crate's registry wait runs.
 
 `scripts/check-publish-targets.mjs --crates` runs before the crates publish and
