@@ -79,9 +79,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | — | 0/64 | [3a8a192f](https://github.com/openooxml/betteroffice/commit/3a8a192fb4a9ad5c66f022ba50c0a9217e6c1d26) | — | 0/64 |
-| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | — | 0/9 | [3a8a192f](https://github.com/openooxml/betteroffice/commit/3a8a192fb4a9ad5c66f022ba50c0a9217e6c1d26) | — | 0/9 |
-| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | — | 0/8 | [3a8a192f](https://github.com/openooxml/betteroffice/commit/3a8a192fb4a9ad5c66f022ba50c0a9217e6c1d26) | — | 0/8 |
+| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7538 | 64/64 | [90ed0d4c](https://github.com/openooxml/betteroffice/commit/90ed0d4c6257b6beba722b470c0ce04fd15b4181) | 0.7538 | 64/64 |
+| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [90ed0d4c](https://github.com/openooxml/betteroffice/commit/90ed0d4c6257b6beba722b470c0ce04fd15b4181) | 0.8769 | 9/9 |
+| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [90ed0d4c](https://github.com/openooxml/betteroffice/commit/90ed0d4c6257b6beba722b470c0ce04fd15b4181) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
