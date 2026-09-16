@@ -47,12 +47,6 @@
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
-### Diagrams — `.vsdx`
-
-Visio drawings (`.vsdx`) and templates (`.vstx`) open in the source-available VSDX core, which is not yet published. Stencils (`.vssx`) and macro-enabled files are not supported.
-
-The editor puts a flat command bar and a searchable thirty-two shape gallery over a focusable canvas: gallery shapes drag onto it and land where they are dropped, and the canvas offers in-place shape text editing, keyboard undo and redo, Delete or Backspace, arrow-key nudge with a larger Shift step, and Escape to clear the selection or cancel a drag, plus a right-click context menu for delete and z-order arrange, with the arrange commands in submenus.
-
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),
 [crates.io](https://docs.betteroffice.dev/docs/rust),
