@@ -21,7 +21,7 @@ attempts to obtain an OIDC token via `rust-lang/crates-io-auth-action` (pinned t
 official v1 commit) and publishes per crate: a crate that does not exist yet
 goes straight to `CRATES_IO_BOOTSTRAP_TOKEN`, while a crate that already
 exists tries OIDC first and falls back to the bootstrap token only if the
-OIDC publish is missing or fails. The choice is independent per crate.
+OIDC token is unavailable or the publish fails. The choice is independent per crate.
 `scripts/publish-crates.mjs` passes only the selected token to that crate's
 `cargo publish` (under both `CARGO_REGISTRY_TOKEN` and
 `CARGO_REGISTRIES_CRATES_IO_TOKEN`, with `CRATES_IO_BOOTSTRAP_TOKEN` removed
@@ -29,7 +29,8 @@ from every cargo child environment), rechecks the target version after a
 failed OIDC upload before falling back, and records each bootstrap use in the
 step summary before the registry wait for that crate can fail.
 
-1. Create a short-lived crates.io token authorized to publish new crates.
+1. Create a short-lived crates.io token authorized to publish new crates and
+   any existing crates that may need the fallback.
 2. Add it to the repository as `CRATES_IO_BOOTSTRAP_TOKEN` before merging the
    release PR that introduces the new crate names.
 3. Merge the release PR and confirm every crate was published.
