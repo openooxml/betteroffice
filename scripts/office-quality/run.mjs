@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -7,10 +6,13 @@ import { promisify } from 'node:util';
 import { FORMATS, renderSection } from './readme.mjs';
 import { measureSamples } from './results.mjs';
 import { validateReferenceMetadata } from './reference.mjs';
+import { download } from './download.mjs';
+import { fetchAsset, resolveAssetCacheDir } from './asset-cache.mjs';
 import { CORPUS_ORIGIN as corpus, selectSamples } from './samples.mjs';
 
 const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
+const assetCache = resolveAssetCacheDir(process.env);
 const python = process.env.QUALITY_PYTHON ?? 'python3';
 if (
   (
@@ -40,25 +42,6 @@ async function command(program, args, options = {}) {
   return result.stdout;
 }
 
-async function download(url, maximum = 32 * 1024 * 1024) {
-  const response = await fetch(url, {
-    signal: AbortSignal.timeout(
-      Math.max(30_000, Math.ceil(maximum / (1024 * 1024)) * 1000)
-    ),
-    credentials: 'omit',
-    referrerPolicy: 'no-referrer',
-  });
-  if (!response.ok) throw new Error(`Download failed (${response.status}): ${url}`);
-  const chunks = [];
-  let size = 0;
-  for await (const chunk of response.body) {
-    size += chunk.length;
-    if (size > maximum) throw new Error(`Download exceeds byte limit: ${url}`);
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
-}
-
 async function registry(name) {
   return JSON.parse(
     await download(
@@ -69,23 +52,11 @@ async function registry(name) {
 }
 
 async function asset(entry, destination, sample, maximum = 32 * 1024 * 1024) {
-  const url = new URL(entry.url);
-  if (
-    url.origin !== corpus ||
-    !url.pathname.startsWith(`/${sample}/`) ||
-    !Number.isInteger(entry.bytes) ||
-    entry.bytes < 1 ||
-    entry.bytes > maximum ||
-    !/^[a-f0-9]{64}$/.test(entry.sha256)
-  )
-    throw new Error('Invalid corpus asset metadata');
-  const bytes = await download(url, entry.bytes);
-  if (
-    bytes.length !== entry.bytes ||
-    createHash('sha256').update(bytes).digest('hex') !== entry.sha256
-  ) {
-    throw new Error(`Corpus hash mismatch: ${url}`);
-  }
+  const bytes = await fetchAsset(entry, sample, download, {
+    cacheDir: assetCache,
+    origin: corpus,
+    maximum,
+  });
   await writeFile(destination, bytes);
 }
 

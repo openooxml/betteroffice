@@ -51,6 +51,15 @@ jobs:
           test "$source_sha" = "$remote_sha"
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
+      - name: Restore fidelity asset cache
+        id: fidelity-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/fidelity-assets
+          key: fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-
+          restore-keys: |
+            fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: "1.3.14"
@@ -97,9 +106,24 @@ jobs:
           QUALITY_COLLECTION: ${{ inputs.collection }}
           QUALITY_SAMPLES: ${{ inputs.samples }}
           QUALITY_OUTPUT: .source/office-quality/ci
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
         run: |
           node scripts/office-quality/run.mjs
           cat .source/office-quality/ci/section.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compute fidelity asset cache digest
+        id: asset-cache
+        if: always()
+        run: |
+          digest=$(node scripts/office-quality/asset-cache.mjs "${RUNNER_TEMP}/fidelity-assets")
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Save fidelity asset cache
+        if: always() && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v1-{0}-{1}-{2}', runner.os, inputs.collection, steps.asset-cache.outputs.digest)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/fidelity-assets
+          key: fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-${{ steps.asset-cache.outputs.digest }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
