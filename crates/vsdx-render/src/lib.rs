@@ -3211,13 +3211,7 @@ mod tests {
         assert_point_close(matrix.apply_point(8.0, 12.0), (18.0, 32.0));
     }
 
-    fn transform_rect(
-        x: &mut f32,
-        y: &mut f32,
-        width: &mut f32,
-        height: &mut f32,
-        matrix: Affine,
-    ) {
+    fn transform_rect(x: &mut f32, y: &mut f32, width: &mut f32, height: &mut f32, matrix: Affine) {
         let corners = [
             matrix.apply_point(*x, *y),
             matrix.apply_point(*x + *width, *y),
@@ -3594,8 +3588,8 @@ mod tests {
         assert_eq!((*x, *y, *width, *height), (0.0, 0.0, 1.0, 1.0));
         assert!((group.b - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-5);
         let page = group.compose(*transform);
-        let corners = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
-            .map(|(x, y)| page.apply_point(x, y));
+        let corners =
+            [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)].map(|(x, y)| page.apply_point(x, y));
         let expected = [(1.0, 2.0), (2.0, 2.0), (1.0, 3.0), (2.0, 3.0)].map(|(x, y)| {
             Affine {
                 a: std::f32::consts::FRAC_1_SQRT_2,
@@ -3701,7 +3695,10 @@ mod tests {
         else {
             unreachable!()
         };
-        let Primitive::Shape { path, transform, .. } = &primitives[0] else {
+        let Primitive::Shape {
+            path, transform, ..
+        } = &primitives[0]
+        else {
             unreachable!()
         };
         let page = group.compose(*transform);
@@ -5142,7 +5139,10 @@ mod tests {
         assert_point_close((*x, *y), (0.0, 0.0));
         assert_point_close((*width, *height), (1.0, 1.0));
         assert_eq!(*transform, Affine::identity());
-        assert_point_close(page.apply_point(lines[0].x, lines[0].y), (8.429537, 9.975697));
+        assert_point_close(
+            page.apply_point(lines[0].x, lines[0].y),
+            (8.429537, 9.975697),
+        );
         assert_point_close(
             page.apply_point(lines[0].caret_stops[1].x, lines[0].caret_stops[1].y),
             (8.411563, 9.908618),
