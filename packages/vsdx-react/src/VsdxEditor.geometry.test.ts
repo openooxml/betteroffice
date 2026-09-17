@@ -1,13 +1,16 @@
 import { expect, test } from 'bun:test';
-import type { DiagramSnapshot, PageDisplayList } from '@betteroffice/vsdx';
+import type { DiagramSnapshot, PageDisplayList, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { PointerEvent } from 'react';
-import { canvasPointerPosition, centreInsertPoint, clientPointToModel, inchFormula, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
-import { previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { MAX_PAGE_BREAK_LINES, canvasPointerPosition, centreInsertPoint, clientPointToModel, connectorTargetForPoint, inchFormula, marqueeEnclosedShapes, pageBreakLines, resolveDragGeometry, selectionCorners, stillSelectable } from './VsdxEditor';
+import { normalizeMarquee, previewOutline, resolveNudgeGeometry, resolveRotationAngle } from './interactions';
+import { modelToPage } from './connector';
 
 const frame: PageDisplayList = {
-  contractVersion: 5,
+  contractVersion: 7,
   width: 816,
   height: 1056,
+  printWidth: 816,
+  printHeight: 1056,
   paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 },
   primitives: [],
 };
@@ -207,4 +210,120 @@ test('a nudge inside a rotated and scaled group matches the equivalent drag', ()
   expect(nudged.x).toBeCloseTo(dragged.x, 10);
   expect(nudged.y).toBeCloseTo(dragged.y, 10);
   expect(nudged.x).not.toBeCloseTo(2 + dx, 6);
+});
+
+test('page breaks fall on printer-paper boundaries inside the page', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  const lines = pageBreakLines(plan, 1);
+  expect(lines.vertical).toHaveLength(3);
+  expect(lines.horizontal).toHaveLength(4);
+  expect(lines.vertical[0]).toBeCloseTo(plan.printWidth, 8);
+  expect(lines.horizontal[0]).toBeCloseTo(plan.printHeight, 8);
+  for (let i = 1; i < lines.vertical.length; i += 1) expect(lines.vertical[i] - lines.vertical[i - 1]).toBeCloseTo(plan.printWidth, 8);
+  for (let i = 1; i < lines.horizontal.length; i += 1) expect(lines.horizontal[i] - lines.horizontal[i - 1]).toBeCloseTo(plan.printHeight, 8);
+  expect(lines.vertical.every((x) => x < plan.width)).toBe(true);
+  expect(lines.horizontal.every((y) => y < plan.height)).toBe(true);
+});
+
+test('page breaks scale with the zoom and vanish for a page that fits one sheet', () => {
+  const plan = { width: 45.27165 * 96, height: 39.33858 * 96, printWidth: 11.69291 * 96, printHeight: 8.26772 * 96 };
+  expect(pageBreakLines(plan, 1.5).vertical[0]).toBeCloseTo(plan.printWidth * 1.5, 8);
+  expect(pageBreakLines(frame, 1)).toEqual({ vertical: [], horizontal: [] });
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: frame.width * 2, printHeight: frame.height * 2 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+test('a degenerate print tile draws no page-break guides', () => {
+  const dense = { width: frame.width, height: frame.height, printWidth: 1e-4 * 96, printHeight: 1e-4 * 96 };
+  expect(pageBreakLines(dense, 1)).toEqual({ vertical: [], horizontal: [] });
+  const legible = { width: frame.width, height: frame.height, printWidth: frame.width / MAX_PAGE_BREAK_LINES, printHeight: frame.height / MAX_PAGE_BREAK_LINES };
+  expect(pageBreakLines(legible, 1).vertical).toHaveLength(MAX_PAGE_BREAK_LINES - 1);
+  expect(pageBreakLines({ width: frame.width, height: frame.height, printWidth: 0, printHeight: -1 }, 1)).toEqual({ vertical: [], horizontal: [] });
+});
+
+function cellShape(id: string, cells: Record<string, string>): ShapeSnapshot {
+  return {
+    id,
+    sourceId: id === 'a' ? 1 : 2,
+    name: null,
+    children: [],
+    cells: Object.entries(cells).map(([name, formula]) => ({
+      locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name },
+      name,
+      formula,
+      value: formula,
+    })),
+  };
+}
+
+function pointerForModel(model: { x: number; y: number }, zoom: number): PointerEvent<HTMLCanvasElement> {
+  const page = modelToPage(frame, model);
+  return pointerAt(page.x * zoom, page.y * zoom, zoom);
+}
+
+/** A centre-to-centre drag must resolve at 50%, 100% and 150% zoom. */
+test('resolves a connector drag at every review zoom', () => {
+  const shapes = [
+    cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' }),
+    cellShape('b', { PinX: '5', PinY: '2', Width: '1', Height: '1' }),
+  ];
+  const silentHandle = { hitTest: () => null };
+  for (const zoom of [0.5, 1, 1.5]) {
+    const from = canvasPointerPosition(pointerForModel({ x: 2, y: 2 }, zoom), frame);
+    expect(from.model.x).toBeCloseTo(2, 8);
+    expect(from.model.y).toBeCloseTo(2, 8);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, from.canvas, from.model)?.shapeId).toBe('a');
+    const to = canvasPointerPosition(pointerForModel({ x: 5, y: 2 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, to.canvas, to.model)?.shapeId).toBe('b');
+    const interior = canvasPointerPosition(pointerForModel({ x: 5.2, y: 2.1 }, zoom), frame);
+    expect(connectorTargetForPoint(shapes, silentHandle as never, interior.canvas, interior.model)?.shapeId).toBe('b');
+  }
+});
+
+/** A hit-tested shape still glues when the pointer misses every connection point. */
+test('falls back to the hit-tested shape for rotated frames', () => {
+  const shapes = [cellShape('a', { PinX: '2', PinY: '2', Width: '1', Height: '1' })];
+  const handle = { hitTest: () => ({ kind: 'shape', shapeId: 'a' }) };
+  const target = connectorTargetForPoint(shapes, handle as never, { x: 0, y: 0 }, { x: 2.1, y: 2.05 });
+  expect(target?.shapeId).toBe('a');
+  expect(target?.point.side).toBe('centre');
+});
+
+function marqueeCell(name: string, value: string) {
+  return { locator: { sheet: 'document' as const, shapeId: null, section: null, row: null, cellName: name }, name, formula: value, value };
+}
+function marqueeShape(id: string, cells: Array<ReturnType<typeof marqueeCell>>) {
+  return { id, sourceId: Number(id.replace('shape', '')) || 1, name: id, children: [], cells };
+}
+function marqueePage() {
+  const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
+  const frame: PageDisplayList = { contractVersion: 7, width: 816, height: 1056, printWidth: 816, printHeight: 1056, paintTransform: identity, primitives: [] };
+  const page = {
+    id: 'page',
+    sourcePartPath: 'page',
+    name: 'Page',
+    shapes: [
+      marqueeShape('shape1', [marqueeCell('PinX', '100'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape2', [marqueeCell('PinX', '400'), marqueeCell('PinY', '400'), marqueeCell('Width', '40'), marqueeCell('Height', '40')]),
+      marqueeShape('shape3', [marqueeCell('PinX', '600'), marqueeCell('PinY', '100'), marqueeCell('Width', '40'), marqueeCell('Height', '20'), marqueeCell('Angle', String(Math.PI / 2))]),
+      marqueeShape('shape4', [marqueeCell('PinX', '100'), marqueeCell('PinY', '600'), marqueeCell('Width', '40'), marqueeCell('Height', '40'), marqueeCell('FlipX', '1')]),
+    ],
+  };
+  return { page: page as never, frame };
+}
+test('a marquee selects every fully enclosed shape and nothing partially overlapped', () => {
+  const { page, frame } = marqueePage();
+  const enclosed = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 200, y: 200 }));
+  expect(enclosed.map((item) => item.shapeId)).toEqual(['shape1']);
+  expect(enclosed[0]).toEqual({ pageId: 'page', shapeId: 'shape1', hit: { kind: 'shape', shapeId: 'shape1' } });
+  const clipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 10, y: 10 }, { x: 110, y: 110 }));
+  expect(clipped).toEqual([]);
+});
+test('a marquee encloses rotated and flipped shapes through the selection corners', () => {
+  const { page, frame } = marqueePage();
+  const rotated = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 620, y: 130 }));
+  expect(rotated.map((item) => item.shapeId)).toEqual(['shape3']);
+  const rotatedClipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 580, y: 70 }, { x: 605, y: 130 }));
+  expect(rotatedClipped).toEqual([]);
+  const flipped = marqueeEnclosedShapes(page, frame, normalizeMarquee({ x: 70, y: 570 }, { x: 130, y: 630 }));
+  expect(flipped.map((item) => item.shapeId)).toEqual(['shape4']);
 });

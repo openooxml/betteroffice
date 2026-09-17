@@ -4,6 +4,8 @@ use crate::GeometryPathCommand;
 
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
+/// The `vf` that puts a hexagon's corners on its frame; larger values would leave it.
+const HEXAGON_VERTICAL_FACTOR: f64 = 1.154_7;
 
 pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
     let values = match shape_type {
@@ -11,24 +13,16 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         "plus" => vec![("adj", 0.25)],
         "triangle" | "isosTriangle" => vec![("adj", 0.5)],
         "parallelogram" => vec![("adj", 0.25)],
-        "trapezoid" => vec![("adj", 0.2)],
+        "trapezoid" => vec![("adj", 0.25)],
         "hexagon" => vec![("adj", 0.25)],
         "octagon" => vec![("adj", 0.292_89)],
         "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => {
             vec![("adj1", 0.5), ("adj2", 0.5)]
         }
         "chevron" | "homePlate" => vec![("adj", 0.5)],
-        value
-            if value
-                .strip_prefix("star")
-                .and_then(|points| points.parse::<usize>().ok())
-                .is_some_and(|points| {
-                    matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32)
-                }) =>
-        {
-            vec![("adj", 0.45)]
-        }
-        _ => Vec::new(),
+        _ => star_preset(shape_type)
+            .map(|star| vec![("adj", star.adjustment)])
+            .unwrap_or_default(),
     };
     values
         .into_iter()
@@ -103,49 +97,57 @@ pub fn preset_geometry_to_path(
         "diamond" | "flowChartDecision" => {
             polygon(&[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)])
         }
-        "parallelogram" => {
-            let i = clamp_fraction(adjustments.get("adj").copied(), 0.25);
-            polygon(&[(i, 0.0), (1.0, 0.0), (1.0 - i, 1.0), (0.0, 1.0)])
-        }
+        "parallelogram" => parallelogram(shortest_side_adjustment(
+            adjustments.get("adj").copied(),
+            0.25,
+            1.0,
+            aspect_ratio,
+        )),
         "plus" => plus(aspect_ratio, adjustments.get("adj").copied()),
         "trapezoid" => {
-            let i = clamp_fraction(adjustments.get("adj").copied(), 0.2);
+            let i =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.25, 0.5, aspect_ratio);
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
         }
         "pentagon" | "flowChartOffpageConnector" => regular_polygon(5),
         "hexagon" => {
-            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.25).min(0.5);
+            let adjustment =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.25, 0.5, aspect_ratio);
+            let vertical_factor = pin(
+                adjustments.get("vf").copied(),
+                HEXAGON_VERTICAL_FACTOR,
+                HEXAGON_VERTICAL_FACTOR,
+            );
+            let rise = 0.5 * vertical_factor * std::f64::consts::FRAC_PI_3.sin();
             polygon(&[
-                (adjustment, 0.0),
-                (1.0 - adjustment, 0.0),
+                (adjustment, 0.5 - rise),
+                (1.0 - adjustment, 0.5 - rise),
                 (1.0, 0.5),
-                (1.0 - adjustment, 1.0),
-                (adjustment, 1.0),
+                (1.0 - adjustment, 0.5 + rise),
+                (adjustment, 0.5 + rise),
                 (0.0, 0.5),
             ])
         }
         "heptagon" => regular_polygon(7),
         "octagon" => {
-            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.292_89).min(0.5);
+            let adjustment = pin(adjustments.get("adj").copied(), 0.292_89, 0.5);
+            let x = adjustment / width_in_shortest_sides(aspect_ratio);
+            let y = adjustment / height_in_shortest_sides(aspect_ratio);
             polygon(&[
-                (adjustment, 0.0),
-                (1.0 - adjustment, 0.0),
-                (1.0, adjustment),
-                (1.0, 1.0 - adjustment),
-                (1.0 - adjustment, 1.0),
-                (adjustment, 1.0),
-                (0.0, 1.0 - adjustment),
-                (0.0, adjustment),
+                (x, 0.0),
+                (1.0 - x, 0.0),
+                (1.0, y),
+                (1.0, 1.0 - y),
+                (1.0 - x, 1.0),
+                (x, 1.0),
+                (0.0, 1.0 - y),
+                (0.0, y),
             ])
         }
         "decagon" => regular_polygon(10),
         "dodecagon" => regular_polygon(12),
         value if value.starts_with("star") => {
-            let points = value[4..].parse::<usize>().ok()?;
-            if !matches!(points, 4 | 5 | 6 | 7 | 8 | 10 | 12 | 16 | 24 | 32) {
-                return None;
-            }
-            star(points, adjustments.get("adj").copied())
+            star(star_preset(value)?, adjustments.get("adj").copied())
         }
         "bentConnector2" => bent_connector(2, adjustments.get("adj1").copied()),
         "bentConnector3" => bent_connector(3, adjustments.get("adj1").copied()),
@@ -205,7 +207,7 @@ pub fn preset_geometry_to_path(
         ]),
         "chevron" => {
             let notch =
-                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, 1.0, aspect_ratio);
             polygon(&[
                 (0.0, 0.0),
                 (1.0 - notch, 0.0),
@@ -217,7 +219,7 @@ pub fn preset_geometry_to_path(
         }
         "homePlate" => {
             let point =
-                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, 1.0, aspect_ratio);
             polygon(&[
                 (0.0, 0.0),
                 (1.0 - point, 0.0),
@@ -238,19 +240,26 @@ pub fn preset_geometry_to_path(
         | "flowChartDisplay"
         | "textBox" => preset_geometry_to_path("rect", adjustments, aspect_ratio)?,
         "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments, aspect_ratio)?,
-        "flowChartInputOutput" | "flowChartManualInput" => {
-            preset_geometry_to_path("parallelogram", adjustments, aspect_ratio)?
-        }
+        "flowChartInputOutput" | "flowChartManualInput" => parallelogram(0.25),
         "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
         _ => return None,
     };
     Some(result)
 }
 
-/// Pins to `w / ss`, then converts from shortest-side to width units.
-fn shortest_side_adjustment(adjustment: Option<f64>, fallback: f64, aspect_ratio: f64) -> f64 {
+/// Pins to `max · w / ss`, then converts from shortest-side to width units.
+fn shortest_side_adjustment(
+    adjustment: Option<f64>,
+    fallback: f64,
+    max: f64,
+    aspect_ratio: f64,
+) -> f64 {
     let width = width_in_shortest_sides(aspect_ratio);
-    pin(adjustment, fallback, width) / width
+    pin(adjustment, fallback, max * width) / width
+}
+
+fn parallelogram(offset: f64) -> Vec<GeometryPathCommand> {
+    polygon(&[(offset, 0.0), (1.0, 0.0), (1.0 - offset, 1.0), (0.0, 1.0)])
 }
 
 fn height_in_shortest_sides(aspect_ratio: f64) -> f64 {
@@ -367,15 +376,44 @@ fn regular_polygon(sides: usize) -> Vec<GeometryPathCommand> {
     )
 }
 
-fn star(points: usize, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
-    let inner_radius = clamp_fraction(adjustment, 0.45) * 0.5;
+/// A `starN` preset's point count, default `adj`, and `hf`/`vf` radius factors.
+#[derive(Clone, Copy)]
+struct StarPreset {
+    points: usize,
+    adjustment: f64,
+    hf: f64,
+    vf: f64,
+}
+
+fn star_preset(shape_type: &str) -> Option<StarPreset> {
+    let points = shape_type.strip_prefix("star")?.parse::<usize>().ok()?;
+    let (adjustment, hf, vf) = match points {
+        4 => (0.125, 1.0, 1.0),
+        5 => (0.190_98, 1.051_46, 1.105_57),
+        6 => (0.288_68, 1.154_7, 1.0),
+        7 => (0.346_01, 1.025_72, 1.052_1),
+        10 => (0.425_33, 1.051_46, 1.0),
+        8 | 12 | 16 | 24 | 32 => (0.375, 1.0, 1.0),
+        _ => return None,
+    };
+    Some(StarPreset {
+        points,
+        adjustment,
+        hf,
+        vf,
+    })
+}
+
+fn star(preset: StarPreset, adjustment: Option<f64>) -> Vec<GeometryPathCommand> {
+    let (rx, ry) = (0.5 * preset.hf, 0.5 * preset.vf);
+    let inner = pin(adjustment, preset.adjustment, 0.5) * 2.0;
     polygon(
-        &(0..points * 2)
+        &(0..preset.points * 2)
             .map(|i| {
-                let a =
-                    -std::f64::consts::PI / 2.0 + i as f64 * std::f64::consts::PI / points as f64;
-                let r = if i % 2 == 0 { 0.5 } else { inner_radius };
-                (0.5 + a.cos() * r, 0.5 + a.sin() * r)
+                let a = -std::f64::consts::PI / 2.0
+                    + i as f64 * std::f64::consts::PI / preset.points as f64;
+                let scale = if i % 2 == 0 { 1.0 } else { inner };
+                (0.5 + a.cos() * rx * scale, ry + a.sin() * ry * scale)
             })
             .collect::<Vec<_>>(),
     )
@@ -659,6 +697,96 @@ mod tests {
         }
     }
 
+    fn vertex(
+        shape: &str,
+        adjustments: &[(&str, f64)],
+        aspect_ratio: f64,
+        index: usize,
+    ) -> (f64, f64) {
+        let adjustments = adjustments
+            .iter()
+            .map(|&(name, value)| (name.to_owned(), value))
+            .collect();
+        match preset_geometry_to_path(shape, &adjustments, aspect_ratio).unwrap()[index] {
+            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => (x, y),
+            _ => panic!("expected a vertex"),
+        }
+    }
+
+    #[test]
+    fn hexagon_family_adjustments_are_fractions_of_the_shortest_side() {
+        for shape in ["hexagon", "parallelogram", "trapezoid", "octagon"] {
+            assert_close(vertex(shape, &[("adj", 0.25)], 4.0, 0).0, 0.0625);
+            assert_close(vertex(shape, &[("adj", 0.25)], 0.25, 0).0, 0.25);
+        }
+        assert_close(vertex("octagon", &[("adj", 0.25)], 4.0, 2).1, 0.25);
+        assert_close(vertex("octagon", &[("adj", 0.25)], 0.25, 2).1, 0.0625);
+    }
+
+    #[test]
+    fn hexagon_family_adjustments_pin_at_their_aspect_scaled_maximum() {
+        let aspect = 43.6;
+        assert_close(
+            vertex("hexagon", &[("adj", 1.29)], aspect, 0).0,
+            1.29 / aspect,
+        );
+        assert_close(
+            vertex("hexagon", &[("adj", 20.9)], aspect, 0).0,
+            20.9 / aspect,
+        );
+        assert_close(vertex("hexagon", &[("adj", 30.0)], aspect, 0).0, 0.5);
+        assert_close(
+            vertex("trapezoid", &[("adj", 1.298_51)], 50.0, 0).0,
+            1.298_51 / 50.0,
+        );
+        assert_close(vertex("trapezoid", &[("adj", 30.0)], 50.0, 0).0, 0.5);
+        assert_close(vertex("parallelogram", &[("adj", 3.0)], 4.0, 0).0, 0.75);
+        assert_close(vertex("parallelogram", &[("adj", 9.0)], 4.0, 0).0, 1.0);
+        assert_close(vertex("octagon", &[("adj", 9.0)], 4.0, 0).0, 0.125);
+    }
+
+    #[test]
+    fn trapezoid_defaults_to_a_quarter_of_the_shortest_side() {
+        assert_eq!(
+            preset_geometry_default_adjustments("trapezoid").get("adj"),
+            Some(&0.25)
+        );
+        assert_close(vertex("trapezoid", &[], 4.0, 0).0, 0.0625);
+    }
+
+    #[test]
+    fn hexagon_height_follows_its_vertical_factor() {
+        assert!(vertex("hexagon", &[], 4.0, 0).1.abs() < 1e-6);
+        assert_close(
+            vertex("hexagon", &[("vf", 0.5)], 4.0, 0).1,
+            0.5 - 0.25 * 3f64.sqrt() / 2.0,
+        );
+    }
+
+    #[test]
+    fn hexagon_vertical_factor_pins_inside_the_frame() {
+        for vf in [1.2, 40.0, f64::INFINITY] {
+            assert_eq!(
+                vertex("hexagon", &[("vf", vf)], 4.0, 0),
+                vertex("hexagon", &[], 4.0, 0),
+                "{vf}"
+            );
+        }
+        for vf in [0.0, -3.0] {
+            assert_close(vertex("hexagon", &[("vf", vf)], 4.0, 0).1, 0.5);
+            assert_close(vertex("hexagon", &[("vf", vf)], 4.0, 3).1, 0.5);
+        }
+    }
+
+    #[test]
+    fn flow_chart_input_output_ignores_the_parallelogram_adjust() {
+        let adjustments = HashMap::from([("adj".to_owned(), 0.6)]);
+        assert_eq!(
+            preset_geometry_to_path("flowChartInputOutput", &adjustments, 4.0),
+            preset_geometry_to_path("flowChartInputOutput", &HashMap::new(), 1.0),
+        );
+    }
+
     #[test]
     fn normalized_adjustments_do_not_guess_raw_guide_units() {
         for shape in [
@@ -681,6 +809,94 @@ mod tests {
             };
             assert_eq!(path(2.0), path(1.0), "{shape}");
         }
+    }
+
+    const STARS: [&str; 10] = [
+        "star4", "star5", "star6", "star7", "star8", "star10", "star12", "star16", "star24",
+        "star32",
+    ];
+
+    fn star_vertices(shape: &str, adjust: Option<f64>) -> Vec<(f64, f64)> {
+        let adjustments = adjust
+            .map(|value| HashMap::from([("adj".to_owned(), value)]))
+            .unwrap_or_default();
+        preset_geometry_to_path(shape, &adjustments, 1.0)
+            .unwrap()
+            .into_iter()
+            .filter_map(|command| match command {
+                GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                    Some((x, y))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn cross(origin: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+        (a.0 - origin.0) * (b.1 - origin.1) - (a.1 - origin.1) * (b.0 - origin.0)
+    }
+
+    #[test]
+    fn five_point_star_at_its_default_is_a_regular_pentagram() {
+        for adjust in [None, Some(0.190_98)] {
+            let v = star_vertices("star5", adjust);
+            assert!(cross(v[0], v[4], v[1]).abs() < 1e-5, "{adjust:?}");
+            assert!(cross(v[0], v[4], v[3]).abs() < 1e-5, "{adjust:?}");
+        }
+    }
+
+    #[test]
+    fn star_inner_radius_is_twice_adj_times_the_outer() {
+        let v = star_vertices("star8", Some(0.25));
+        let radius = |(x, y): (f64, f64)| (x - 0.5).hypot(y - 0.5);
+        assert_close(radius(v[0]), 0.5);
+        assert_close(radius(v[1]), 0.25);
+    }
+
+    #[test]
+    fn star_adjustment_pins_between_zero_and_half() {
+        assert_eq!(
+            star_vertices("star5", Some(0.8)),
+            star_vertices("star5", Some(0.5))
+        );
+        let v = star_vertices("star8", Some(0.5));
+        assert_close((v[1].0 - 0.5).hypot(v[1].1 - 0.5), 0.5);
+        let v = star_vertices("star8", Some(-0.1));
+        assert_close(v[1].0, 0.5);
+        assert_close(v[1].1, 0.5);
+    }
+
+    #[test]
+    fn stars_fill_their_frame() {
+        for shape in STARS {
+            let v = star_vertices(shape, None);
+            let min_x = v.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let max_x = v.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+            let min_y = v.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let max_y = v.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+            for (actual, expected) in [(min_x, 0.0), (max_x, 1.0), (min_y, 0.0), (max_y, 1.0)] {
+                assert!((actual - expected).abs() < 1e-4, "{shape}: {actual}");
+            }
+        }
+    }
+
+    #[test]
+    fn stars_default_to_their_own_adjustment() {
+        for (shape, expected) in [("star4", 0.125), ("star5", 0.190_98), ("star12", 0.375)] {
+            assert_eq!(
+                preset_geometry_default_adjustments(shape).get("adj"),
+                Some(&expected)
+            );
+        }
+        for shape in STARS {
+            let default = preset_geometry_default_adjustments(shape)["adj"];
+            assert_eq!(
+                star_vertices(shape, None),
+                star_vertices(shape, Some(default)),
+                "{shape}"
+            );
+        }
+        assert!(preset_geometry_to_path("star9", &HashMap::new(), 1.0).is_none());
     }
 
     fn assert_close(actual: f64, expected: f64) {

@@ -36,15 +36,20 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
     canUndo: () => false,
     canRedo: () => false,
     deleteShape: (...args: [string, string]) => { calls.deletes.push([...args]); return {}; },
+    deleteShapes: (deletes: ReadonlyArray<{ pageId: string; shapeId: string }>) => { calls.deletes.push([...deletes]); return []; },
     reorderShape: (...args: [string, string, number]) => { calls.reorders.push([...args]); return {}; },
     setCellFormula: (pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
     },
+    setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
+      for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
+      return [];
+    },
   } as unknown as DiagramHandle;
 }
 
-function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
+function Host({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection[]; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
@@ -61,7 +66,7 @@ function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; position?
   const diagram = stubHandle(state, calls);
   const closed: string[] = [];
   const shapeId = options.shapeId ?? 'three';
-  const selection: Selection = { pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } };
+  const selection: Selection[] = [{ pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } }];
   let focusTarget: HTMLElement | undefined;
   if (options.withFocusTarget) {
     focusTarget = document.createElement('button');
@@ -140,7 +145,7 @@ test('each entry runs its command and closes the menu', () => {
       }
       expect(item).not.toBeNull();
       fireEvent.click(item);
-      if (id === 'delete') expect(calls.deletes).toEqual([['page', 'three']]);
+      if (id === 'delete') expect(calls.deletes).toEqual([[{ pageId: 'page', shapeId: 'three' }]]);
       else if (id === 'bringToFront') expect(last(calls.reorders)).toEqual(['page', 'three', 4]);
       else if (id === 'bringForward') expect(last(calls.reorders)).toEqual(['page', 'three', 3]);
       else if (id === 'sendBackward') expect(last(calls.reorders)).toEqual(['page', 'three', 1]);

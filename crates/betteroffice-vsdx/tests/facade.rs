@@ -128,6 +128,7 @@ fn edit(
         gesture,
         formula: Some(formula.to_owned()),
         value: None,
+        row_type: None,
     }
 }
 
@@ -450,6 +451,7 @@ fn saves_a_semantic_cell_edit_without_source_spans() {
             gesture: MutationGesture::CellEdit,
             formula: Some("42".to_owned()),
             value: None,
+            row_type: None,
         }])
         .unwrap();
     let saved = Diagram::open(&saved).unwrap();
@@ -780,6 +782,7 @@ fn session_added_shapes_reach_the_saved_package() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("X", "2", Some("Geometry"), Some(CellRow::Index(0))),
@@ -826,6 +829,7 @@ fn added_shape_drafts_evaluate_against_their_own_cells() {
             &page,
             &ShapeDraft {
                 name: Some("Added".to_owned()),
+                master: None,
                 cells: vec![
                     draft_cell("Width", "5", None, None),
                     draft_cell("Height", "Width*2", None, None),
@@ -907,4 +911,41 @@ fn export_pdf_renders_a_vector_document_with_selectable_text() {
         text.match_indices("/Type /Page ").count(),
         diagram.package().page_part_paths.len()
     );
+}
+
+#[test]
+fn export_svg_renders_one_vector_page_per_diagram_page() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+    let diagram = Diagram::open(source).unwrap();
+    let pages = diagram.export_svg().unwrap();
+    assert_eq!(pages.len(), diagram.package().page_part_paths.len());
+    assert!(!pages.is_empty());
+    for page in &pages {
+        assert!(page.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+        assert!(page.ends_with("</svg>"));
+    }
+    let body = pages.join("");
+    assert!(body.contains("<path") && body.contains("<text"));
+    assert!(!body.contains("@font-face") && !body.contains("data:font"));
+}
+
+#[test]
+fn export_svg_page_rejects_an_unknown_page() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/foundation.vsdx");
+    let diagram = Diagram::open(source).unwrap();
+    assert!(diagram.export_svg_page(99).is_err());
+}
+
+#[cfg(feature = "raster")]
+#[test]
+fn export_png_renders_scaled_raster_pages() {
+    let source = include_bytes!("../../vsdx-parse/tests/fixtures/text-accounting.vsdx");
+    let diagram = Diagram::open(source).unwrap();
+    let first = diagram.export_png(0, 1.0).unwrap();
+    assert_eq!(&first.bytes[0..8], &[137, 80, 78, 71, 13, 10, 26, 10]);
+    let second = diagram.export_png(0, 2.0).unwrap();
+    assert_eq!(second.width, first.width * 2);
+    assert_eq!(second.height, first.height * 2);
+    assert!(diagram.export_png(99, 1.0).is_err());
+    assert!(diagram.export_png(0, 0.0).is_err());
 }

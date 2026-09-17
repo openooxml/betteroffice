@@ -1,7 +1,8 @@
 import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { Affine, ModelPoint, PageDisplayList, TextBoxPrimitive } from '@betteroffice/vsdx';
-import { RESIZE_HANDLES, SELECTION_STROKE, canvasKeyboardIntent, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, paintControlHandles, paintSelectionFrame, paintDragPreview, pageToShapeLocal, passedDragThreshold, previewOutline, resolveControlDrag, resizedBounds, resizeCursor, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, selectionHandlePositions, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
+import { MIN_ZOOM } from './components/statusbar';
+import { canvasKeyboardIntent, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, MARQUEE_STROKE, marqueeEnclosesQuad, normalizeMarquee, pageToShapeLocal, paintControlHandles, paintDragPreview, paintMarquee, paintSelectionFrame, passedDragThreshold, previewOutline, RESIZE_HANDLES, resizeCursor, resizedBounds, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, SELECTION_STROKE, selectionHandlePositions, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -292,7 +293,10 @@ test('canvas keyboard maps history, delete and escape intents', () => {
   expect(canvasKeyboardIntent({ key: 'Delete' }, 1)).toEqual({ kind: 'delete' });
   expect(canvasKeyboardIntent({ key: 'Backspace' }, 1)).toEqual({ kind: 'delete' });
   expect(canvasKeyboardIntent({ key: 'Escape' }, 1)).toEqual({ kind: 'escape' });
-  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true }, 1)).toEqual({ kind: 'selectAll' });
+  expect(canvasKeyboardIntent({ key: 'A', metaKey: true }, 1)).toEqual({ kind: 'selectAll' });
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, shiftKey: true }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, altKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, altKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Delete', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', ctrlKey: true }, 1)).toBeNull();
@@ -301,18 +305,28 @@ test('resolveNudgeGeometry turns a screen nudge into the parent-local pin delta'
   const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 2, y: 3 }, size: { width: 4, height: 5 }, parentTransforms: [{ a: 0, b: 1, c: -1, d: 0, e: 0, f: 0 }] };
   expect(resolveNudgeGeometry(start, 1, 0)).toEqual({ x: 2, y: 2, width: 4, height: 5 });
 });
-test('canvas keyboard nudges one screen pixel with Y up and ten with shift', () => {
+test('canvas keyboard nudges a ruler tick with Y up and one screen pixel with shift', () => {
   expect(keyboardNudgeStep(1)).toBeCloseTo(1 / 96, 10);
   expect(keyboardNudgeStep(2)).toBeCloseTo(1 / 192, 10);
-  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 96 });
-  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 192, dy: 0 });
+  expect(canvasKeyboardIntent({ key: 'ArrowUp' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: 1 / 16 });
+  expect(canvasKeyboardIntent({ key: 'ArrowDown' }, 1)).toEqual({ kind: 'nudge', dx: 0, dy: -1 / 16 });
+  expect(canvasKeyboardIntent({ key: 'ArrowLeft' }, 2)).toEqual({ kind: 'nudge', dx: -1 / 16, dy: 0 });
+  expect(canvasKeyboardIntent({ key: 'ArrowRight' }, 4)).toEqual({ kind: 'nudge', dx: 1 / 16, dy: 0 });
   const right = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, 1);
   expect(right?.kind).toBe('nudge');
-  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(10 / 96, 10); expect(right.dy).toBe(0); }
+  if (right?.kind === 'nudge') { expect(right.dx).toBeCloseTo(1 / 96, 10); expect(right.dy).toBe(0); }
   const up = canvasKeyboardIntent({ key: 'ArrowUp', shiftKey: true }, 2);
   expect(up?.kind).toBe('nudge');
-  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(10 / 192, 10); expect(up.dx).toBe(0); }
+  if (up?.kind === 'nudge') { expect(up.dy).toBeCloseTo(1 / 192, 10); expect(up.dx).toBe(0); }
+  for (const zoom of [MIN_ZOOM, 0.5, 1, 4]) {
+    const plain = canvasKeyboardIntent({ key: 'ArrowRight' }, zoom);
+    const fine = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, zoom);
+    if (plain?.kind !== 'nudge' || fine?.kind !== 'nudge') throw new Error('nudge intents missing');
+    expect(fine.dx).toBeLessThanOrEqual(plain.dx);
+  }
+  const zoomedOut = canvasKeyboardIntent({ key: 'ArrowRight', shiftKey: true }, MIN_ZOOM);
+  expect(zoomedOut?.kind).toBe('nudge');
+  if (zoomedOut?.kind === 'nudge') expect(zoomedOut.dx).toBeCloseTo(1 / 16, 10);
   expect(canvasKeyboardIntent({ key: 'ArrowUp', ctrlKey: true }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', altKey: true }, 1)).toBeNull();
 });
@@ -327,10 +341,51 @@ test('canvas keyboard produces no intent from editable targets', () => {
   expect(canvasKeyboardIntent({ key: 'Delete', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'ArrowUp', target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'z', ctrlKey: true, target: textarea }, 1)).toBeNull();
+  expect(canvasKeyboardIntent({ key: 'a', ctrlKey: true, target: input }, 1)).toBeNull();
   expect(canvasKeyboardIntent({ key: 'Escape', target: editable }, 1)).toBeNull();
 });
+test('a marquee normalises drags from any direction', () => {
+  expect(normalizeMarquee({ x: 10, y: 20 }, { x: 30, y: 60 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+  expect(normalizeMarquee({ x: 30, y: 60 }, { x: 10, y: 20 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+  expect(normalizeMarquee({ x: 30, y: 20 }, { x: 10, y: 60 })).toEqual({ left: 10, top: 20, right: 30, bottom: 60 });
+});
+test('a marquee selects only fully enclosed quads', () => {
+  const rect = normalizeMarquee({ x: 0, y: 0 }, { x: 100, y: 100 });
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }, { x: 90, y: 10 }, { x: 90, y: 90 }, { x: 10, y: 90 }], rect)).toBe(true);
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }, { x: 110, y: 10 }, { x: 110, y: 90 }, { x: 10, y: 90 }], rect)).toBe(false);
+  expect(marqueeEnclosesQuad([{ x: 200, y: 200 }, { x: 210, y: 200 }, { x: 210, y: 210 }, { x: 200, y: 210 }], rect)).toBe(false);
+  expect(marqueeEnclosesQuad([{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }], rect)).toBe(true);
+  expect(marqueeEnclosesQuad([{ x: 10, y: 10 }], rect)).toBe(false);
+});
+test('a marquee encloses a rotated quad by its corners, not its axis box', () => {
+  const start = { canvas: { x: 0, y: 0 }, model: { x: 0, y: 0 }, resize: false, pin: { x: 50, y: 50 }, size: { width: 40, height: 20 }, angle: Math.PI / 4 };
+  const corners = previewOutline(start, { x: 0, y: 0 }, identity);
+  const tight = normalizeMarquee({ x: 25, y: 25 }, { x: 75, y: 75 });
+  expect(marqueeEnclosesQuad(corners, tight)).toBe(true);
+  const clipped = normalizeMarquee({ x: 25, y: 25 }, { x: 60, y: 75 });
+  expect(corners.some((corner) => corner.x > 60)).toBe(true);
+  expect(marqueeEnclosesQuad(corners, clipped)).toBe(false);
+});
+test('the marquee paints a dashed rect with a wash on the overlay transform', () => {
+  const calls: string[] = [];
+  const context = new Proxy({ canvas: {} }, {
+    get(target, key) {
+      if (key in target) return Reflect.get(target, key);
+      return (...args: unknown[]) => { calls.push(`${String(key)}:${args.join(',')}`); };
+    },
+    set(target, key, value) { calls.push(`${String(key)}=${String(value)}`); Reflect.set(target, key, value); return true; },
+  }) as unknown as CanvasRenderingContext2D;
+  paintMarquee(context, normalizeMarquee({ x: 30, y: 20 }, { x: 10, y: 60 }), 2, 1);
+  expect(calls).toContain('setTransform:2,0,0,2,0,0');
+  expect(calls).toContain(`strokeStyle=${MARQUEE_STROKE}`);
+  expect(calls).toContain('fillRect:10,20,20,40');
+  expect(calls).toContain('strokeRect:10,20,20,40');
+  expect(calls.some((entry) => entry.startsWith('setLineDash:'))).toBe(true);
+  expect(calls[calls.length - 1].startsWith('restore:')).toBe(true);
+});
 
-const textFrame: PageDisplayList = { contractVersion: 5, width: 816, height: 1056, paintTransform: pagePaintTransform, primitives: [] };
+
+const textFrame: PageDisplayList = { contractVersion: 7, width: 816, height: 1056, printWidth: 816, printHeight: 1056, paintTransform: pagePaintTransform, primitives: [] };
 
 function textBox(transform?: Affine): TextBoxPrimitive {
   return {

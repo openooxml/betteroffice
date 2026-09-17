@@ -1,4 +1,4 @@
-import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, Stroke, TextBoxPrimitive, TextRun } from '../types';
+import type { Affine, PageDisplayList, PagePrimitive, Paint, PlaceholderPrimitive, ShapePrimitive, ShapeShadow, Stroke, TextBoxPrimitive, TextRun } from '../types';
 
 export type CanvasImageResolver = (assetId: string) => CanvasImageSource | Promise<CanvasImageSource | null> | null;
 export interface PaintPageOptions { resolveImage?: CanvasImageResolver; signal?: AbortSignal; }
@@ -21,7 +21,7 @@ export function modelPointToCanvas(paintTransform: Affine, x: number, y: number,
 }
 const paintRequests = new WeakMap<CanvasRenderingContext2D, object>();
 export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplayList, dpr = 1, scale = 1, options: PaintPageOptions = {}): Promise<void> {
-  if (list.contractVersion !== 5) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
+  if (list.contractVersion !== 7) throw new Error(`unsupported VSDX display-list contract version ${list.contractVersion}`);
   const request = {};
   paintRequests.set(ctx, request);
   const images = new Map<string, CanvasImageSource | null>();
@@ -39,24 +39,38 @@ export async function paintPage(ctx: CanvasRenderingContext2D, list: PageDisplay
   await Promise.all(pending.values());
   if (options.signal?.aborted || paintRequests.get(ctx) !== request) return;
   ctx.save();
-  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images); }
+  try { ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0); ctx.clearRect(0, 0, list.width, list.height); const device = { a: dpr * scale, b: 0, c: 0, d: dpr * scale }; for (const primitive of [...list.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, primitive, list.paintTransform, images, device); }
   finally { ctx.restore(); }
 }
-function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>): void {
+function paintPrimitive(ctx: CanvasRenderingContext2D, primitive: PagePrimitive, paintTransform: Affine, images: Map<string, CanvasImageSource | null>, device: Linear): void {
   ctx.save();
   try {
     const transform = 'transform' in primitive ? primitive.transform ?? identity() : identity(); ctx.transform(paintTransform.a, paintTransform.b, paintTransform.c, paintTransform.d, paintTransform.e, paintTransform.f); ctx.transform(transform.a, transform.b, transform.c, transform.d, transform.e, transform.f);
+    const linear = compose(compose(device, paintTransform), transform);
     switch (primitive.kind) {
-      case 'shape': paintShape(ctx, primitive); break;
+      case 'shape': paintShape(ctx, primitive, linear); break;
       case 'image': { const source = images.get(primitive.assetId); if (source) { ctx.translate(0, 2 * primitive.y + primitive.height); ctx.scale(1, -1); ctx.drawImage(source, primitive.x, primitive.y, primitive.width, primitive.height); } break; }
       case 'textBox': paintTextBox(ctx, primitive); break;
       case 'placeholder': paintPlaceholder(ctx, primitive); break;
-      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images); break;
+      case 'group': for (const child of [...primitive.primitives].sort((a, b) => a.zOrder - b.zOrder)) paintPrimitive(ctx, child, identity(), images, linear); break;
     }
   } finally { ctx.restore(); }
 }
 function identity(): Affine { return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 }; }
-function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill, shapeBounds(shape.path)); ctx.fill(); } if (shape.stroke) stroke(ctx, shape.stroke); }
+interface Linear { a: number; b: number; c: number; d: number; }
+function compose(outer: Linear, inner: Linear): Linear {
+  return { a: outer.a * inner.a + outer.c * inner.b, b: outer.b * inner.a + outer.d * inner.b, c: outer.a * inner.c + outer.c * inner.d, d: outer.b * inner.c + outer.d * inner.d };
+}
+function paintShape(ctx: CanvasRenderingContext2D, shape: ShapePrimitive, linear: Linear): void { ctx.beginPath(); for (const command of shape.path) { if (command.type === 'move') ctx.moveTo(Number(command.x), Number(command.y)); else if (command.type === 'line') ctx.lineTo(Number(command.x), Number(command.y)); else if (command.type === 'quad') ctx.quadraticCurveTo(Number(command.cpx), Number(command.cpy), Number(command.x), Number(command.y)); else if (command.type === 'cubic') ctx.bezierCurveTo(Number(command.cp1x), Number(command.cp1y), Number(command.cp2x), Number(command.cp2y), Number(command.x), Number(command.y)); else if (command.type === 'close') ctx.closePath(); } if (shape.shadow) castShadow(ctx, shape.shadow, linear); if (shape.fill) { ctx.fillStyle = paintStyle(ctx, shape.fill, shapeBounds(shape.path)); ctx.fill(); if (shape.shadow) clearShadow(ctx); } if (shape.stroke) stroke(ctx, shape.stroke); }
+/** Canvas shadow offsets and blur ignore the transform, so they are mapped to device pixels here. */
+function castShadow(ctx: CanvasRenderingContext2D, shadow: ShapeShadow, linear: Linear): void {
+  const determinant = Math.abs(linear.a * linear.d - linear.b * linear.c);
+  ctx.shadowColor = shadow.color;
+  ctx.shadowOffsetX = linear.a * shadow.offsetXIn + linear.c * shadow.offsetYIn;
+  ctx.shadowOffsetY = linear.b * shadow.offsetXIn + linear.d * shadow.offsetYIn;
+  ctx.shadowBlur = shadow.blurIn * Math.sqrt(determinant);
+}
+function clearShadow(ctx: CanvasRenderingContext2D): void { ctx.shadowColor = 'rgba(0, 0, 0, 0)'; ctx.shadowOffsetX = 0; ctx.shadowOffsetY = 0; ctx.shadowBlur = 0; }
 function shapeBounds(path: ShapePrimitive['path']): { x: number; y: number; width: number; height: number } {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
   for (const command of path) for (const key of ['x', 'y', 'cpx', 'cpy', 'cp1x', 'cp1y', 'cp2x', 'cp2y'] as const) {

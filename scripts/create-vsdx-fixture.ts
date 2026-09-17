@@ -26,6 +26,8 @@ const xform = (width: number, height: number, pinX: number, pinY: number, locPin
   `<Cell N='Width' V='${width}'/><Cell N='Height' V='${height}'/><Cell N='PinX' V='${pinX}'/><Cell N='PinY' V='${pinY}'/><Cell N='LocPinX' V='${locPinX}'/><Cell N='LocPinY' V='${locPinY}'/><Cell N='Angle' V='${angle}'/><Cell N='FlipX' V='${flipX}'/><Cell N='FlipY' V='${flipY}'/>`;
 const rect = `<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row IX='2' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row><Row IX='3' T='LineTo'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row IX='4' T='Close'/></Section>`;
 
+const guardedSeedShape = `<Shape ID='1' Name='BetterOffice' NameU='BetterOffice' Type='Shape'><Cell N='PinX' V='2.25'/><Cell N='PinY' V='5.5'/><Cell N='Width' V='3.5'/><Cell N='Height' V='1.15'/><Cell N='LocPinX' V='1.75'/><Cell N='LocPinY' V='0.575'/><Cell N='FillPattern' V='1'/><Cell N='FillForegnd' F='GUARD(1)' V='1'/><Cell N='LinePattern' V='1'/><Cell N='LineColor' V='2'/><Cell N='Angle' F='GUARD(0)' V='0'/><Cell N='FlipX' V='0'/><Cell N='FlipY' V='0'/><Cell N='LockDelete' V='1'/><Cell N='VerticalAlign' V='1'/><Cell N='LineWeight' V='0.018'/><Cell N='ThemeIndex' V='0'/><Section N='Geometry' IX='0'><Row T='MoveTo' IX='0'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='1'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='2'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='3'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row></Section><Section N='Property'><Row N='Device'><Cell N='Label' V='Device'/><Cell N='Value' F='"Amp"' V='Amp'/><Cell N='Type' V='0'/></Row><Row N='Hidden'><Cell N='Label' V='Hidden'/><Cell N='Value' V='x'/><Cell N='Invisible' V='1'/></Row></Section><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/><Cell N='Size' V='0.19444444444444445'/><Cell N='Color' V='0'/><Cell N='Style' V='1'/></Row></Section><Section N='Paragraph'><Row IX='0'><Cell N='HorzAlign' V='1'/></Row></Section><Text><cp IX='0'/><pp IX='0'/>BETTEROFFICE</Text></Shape>`;
+
 async function writeZip(file: string, parts: Record<string, string | Uint8Array>): Promise<void> {
   const zip = new JSZip();
   for (const [name, contents] of Object.entries(parts)) zip.file(name, contents, { date: zipDate, createFolders: false });
@@ -72,6 +74,19 @@ async function writeTestFixtures(): Promise<void> {
     'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(4, 3, 7, 5, 2, 1.5, 0, 0, 0)}<Section N='Geometry'><Row T='MoveTo' IX='0'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='2'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='3'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='4'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row></Section></Shape><Shape ID='2' Type='Shape'>${xform(4, 3, 14, 5, 2, 1.5, 0, 0, 0)}<Section N='Geometry'><Row T='MoveTo' IX='0'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row T='RelLineTo' IX='1'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row T='RelMoveTo' IX='2'><Cell N='X' V='0'/><Cell N='Y' V='1'/></Row><Row T='RelLineTo' IX='3'><Cell N='X' V='1'/><Cell N='Y' V='1'/></Row></Section></Shape></Shapes></PageContents>`,
   });
 
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/validation.vsdx'), {
+    ...parts,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes>`
+      + `<Shape ID='1' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}<Section N='Property'><Row N='Owner'><Cell N='Label' V='Owner'/><Cell N='Value' V=''/><Cell N='Type' V='0'/><Cell N='Ask' V='1'/></Row><Row N='Notes'><Cell N='Label' V='Notes'/><Cell N='Value' V=''/><Cell N='Type' V='0'/><Cell N='Ask' V='0'/></Row></Section></Shape>`
+      + `<Shape ID='2' Type='Shape'>${xform(1, 1, 1.5, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `<Shape ID='3' Type='Shape'>${xform(1, 1, 9, 9, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `<Shape ID='4' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='1'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='0.2'/><Cell N='EndY' V='3'/></Shape>`
+      + `<Shape ID='5' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='6'/><Cell N='BeginY' V='6'/><Cell N='EndX' V='7'/><Cell N='EndY' V='7'/></Shape>`
+      + `<Shape ID='6' Type='Shape'><Cell N='OneD' V='1'/><Cell N='BeginX' V='1.5'/><Cell N='BeginY' V='1'/><Cell N='EndX' V='9'/><Cell N='EndY' V='9'/></Shape>`
+      + `<Shape ID='7' Type='Shape'>${xform(1, 1, 3, 3, 0.5, 0.5, 0, 0, 0)}${rect}</Shape>`
+      + `</Shapes><Connects><Connect FromSheet='4' FromCell='BeginX' FromPart='9' ToSheet='1' ToCell='PinX' ToPart='3'/><Connect FromSheet='6' FromCell='BeginX' FromPart='9' ToSheet='2' ToCell='PinX' ToPart='3'/><Connect FromSheet='6' FromCell='EndX' FromPart='9' ToSheet='3' ToCell='PinX' ToPart='3'/></Connects></PageContents>`,
+  });
+
   await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/text-accounting.vsdx'), {
     ...parts,
     'visio/document.xml': `<VisioDocument ${ns}><FaceNames><FaceName ID='0' Name='Calibri'/></FaceNames><StyleSheets><StyleSheet ID='1' NameU='Text'><Section N='Character'><Row IX='0'><Cell N='Font' V='0'/><Cell N='Size' V='0.25'/><Cell N='Color' V='RGB(1,2,3)'/></Row></Section></StyleSheet></StyleSheets><DocumentSheet><Cell N='PageWidth' V='8.5'/><Cell N='PageHeight' V='11'/></DocumentSheet></VisioDocument>`,
@@ -99,6 +114,22 @@ async function writeTestFixtures(): Promise<void> {
     ...parts,
     'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape'>${xform(2, 1, 3, 4, 1, 0.5, 0.5235987755982988, 1, 0)}${rect}</Shape><Shape ID='2' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape><Shape ID='3' Type='Group'>${xform(4, 4, 6, 6, 2, 2, 0.7853981633974483, 0, 1)}<Shapes><Shape ID='4' Type='Shape'>${xform(1, 1, 1, 1, 0.5, 0.5, 0, 0, 0)}${rect}</Shape><Shape ID='5' Type='Shape' Master='1' MasterShape='10'>${rect}</Shape></Shapes></Shape><Shape ID='6' Type='Shape'><Cell N='Width' F='1+1'/><Cell N='Height' F='Width/2'/><Cell N='PinX' F='2*4'/><Cell N='PinY' V='2'/><Cell N='LocPinX' F='Width*0.5'/><Cell N='LocPinY' F='Height*0.5'/><Cell N='Angle' V='0'/>${rect}</Shape></Shapes></PageContents>`,
     'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'>${xform(1.5, 0.75, 2, 2, 0.75, 0.375, 0, 0, 0)}${rect}</Shape></Shapes></MasterContents>`,
+  });
+
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/guard-format.vsdx'), {
+    ...parts,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes>${guardedSeedShape}<Shape ID='2' Type='Shape'>${xform(1, 1, 6, 5, 0.5, 0.5, 0, 0, 0)}${rect}<Cell N='FillForegnd' V='1'/><Cell N='LineColor' F='SETATREF(LineTarget)' V='2'/><Cell N='LineTarget' F='GUARD(2)' V='2'/><Cell N='Angle' V='0'/></Shape><Shape ID='3' Type='Shape'>${xform(1, 1, 8, 5, 0.5, 0.5, 0, 0, 0)}${rect}<Cell N='FillForegnd' V='1'/><Cell N='LineColor' V='2'/><Cell N='LineWeight' V='0.018'/><Cell N='LinePattern' V='1'/><Cell N='Angle' V='0'/></Shape></Shapes></PageContents>`,
+  });
+
+  const stencilDims = (width: number, height: number) => `<PageSheet><Cell N='PageWidth' V='${width}'/><Cell N='PageHeight' V='${height}'/></PageSheet>`;
+  const stencilTri = `<Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' V='0'/><Cell N='Y' V='0'/></Row><Row IX='1' T='LineTo'><Cell N='X' V='1'/><Cell N='Y' V='0'/></Row><Row IX='2' T='LineTo'><Cell N='X' V='0.5'/><Cell N='Y' V='1'/></Row><Row IX='3' T='Close'/></Section>`;
+  await writeZip(path.join(root, 'crates/vsdx-parse/tests/fixtures/document-stencil.vsdx'), {
+    ...parts,
+    'visio/masters/masters.xml': `<Masters ${ns}><Master ID='1' NameU='Stencil-Rect' r:id='rId1' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims(1, 1)}</Master><Master ID='2' NameU='Stencil-Tri' r:id='rId2' xmlns:r='http://schemas.openxmlformats.org/officeDocument/2006/relationships'>${stencilDims(2, 0.5)}</Master></Masters>`,
+    'visio/masters/_rels/masters.xml.rels': "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'><Relationship Id='rId1' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master1.xml'/><Relationship Id='rId2' Type='http://schemas.microsoft.com/visio/2010/relationships/master' Target='master2.xml'/></Relationships>",
+    'visio/masters/master1.xml': `<MasterContents ${ns}><Shapes><Shape ID='10' Type='Shape'>${xform(1, 1, 0.5, 0.5, 0.5, 0.5, 0, 0, 0)}${rect}<Text>stencil rect</Text></Shape></Shapes></MasterContents>`,
+    'visio/masters/master2.xml': `<MasterContents ${ns}><Shapes><Shape ID='20' Type='Shape'>${xform(2, 0.5, 1, 0.25, 1, 0.25, 0, 0, 0)}${stencilTri}<Text>stencil tri</Text></Shape></Shapes></MasterContents>`,
+    'visio/pages/page1.xml': `<PageContents ${ns}><Shapes><Shape ID='1' Type='Shape' Master='1'>${xform(2, 1, 4, 5, 1, 0.5, 0, 0, 0)}</Shape><Shape ID='2' Type='Shape'>${xform(1, 1, 1, 1, 0, 0, 0, 0, 0)}${rect}</Shape><Shape ID='3' Type='Shape' Master='2'><Cell N='PinX' V='4'/><Cell N='PinY' V='2'/></Shape></Shapes></PageContents>`,
   });
 }
 

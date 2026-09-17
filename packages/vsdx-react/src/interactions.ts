@@ -14,15 +14,18 @@ export const SELECTION_HANDLE_FILL = '#ffffff';
 export const SELECTION_HANDLE_CSS = 7;
 export const SELECTION_ROTATE_RADIUS_CSS = 5;
 export const SELECTION_ROTATE_OFFSET_CSS = 18;
+export const MARQUEE_STROKE = '#0f6cbd';
+export const MARQUEE_FILL = 'rgba(15, 108, 189, 0.08)';
 export const HANDLE_HIT_TOLERANCE_CSS = 6;
 export const CONTROL_HANDLE_FILL = '#ffeb00';
 export const CONTROL_HANDLE_CSS = 7;
 export const ROTATION_SNAP_STEP = Math.PI / 12;
 export const CANVAS_KEYBOARD_DPI = 96;
-export const CANVAS_KEYBOARD_NUDGE_MULTIPLIER = 10;
-export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'nudge'; dx: number; dy: number };
+/** One ruler tick, which is what Visio's plain arrow nudges by with nothing to snap to. */
+export const CANVAS_KEYBOARD_NUDGE_INCHES = 1 / 16;
+export type CanvasKeyboardIntent = { kind: 'undo' } | { kind: 'redo' } | { kind: 'delete' } | { kind: 'escape' } | { kind: 'save' } | { kind: 'selectAll' } | { kind: 'nudge'; dx: number; dy: number };
 export interface CanvasKeyboardEventLike { key: string; ctrlKey?: boolean; metaKey?: boolean; shiftKey?: boolean; altKey?: boolean; target?: unknown; }
-/** One screen pixel in model inches at the given zoom. */
+/** One screen pixel in model inches; the Shift nudge, capped at a ruler tick so it never coarsens past the plain one. */
 export const keyboardNudgeStep = (zoom: number): number => {
   const safe = Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
   return 1 / (CANVAS_KEYBOARD_DPI * safe);
@@ -42,6 +45,11 @@ export const isEditableKeyboardTarget = (target: unknown): boolean => {
   }
   return false;
 };
+/** Ctrl+S saves the diagram, so it must never reach the browser's own save. */
+export const isOwnedBrowserShortcut = (event: CanvasKeyboardEventLike): boolean => {
+  if (!(event.ctrlKey || event.metaKey) || event.altKey) return false;
+  return event.key.toLowerCase() === 's';
+};
 /** Pure key-to-intent mapping for the editor canvas. Y is up, so ArrowUp yields +dy. */
 export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: number): CanvasKeyboardIntent | null => {
   if (isEditableKeyboardTarget(event.target)) return null;
@@ -54,14 +62,16 @@ export const canvasKeyboardIntent = (event: CanvasKeyboardEventLike, zoom: numbe
   if (key === 'Escape') return mod || alt ? null : { kind: 'escape' };
   if (mod && !alt) {
     const lower = key.toLowerCase();
+    if (lower === 's') return { kind: 'save' };
     if (lower === 'z' && !shift) return { kind: 'undo' };
     if (lower === 'y' && !shift) return { kind: 'redo' };
     if (lower === 'z' && shift) return { kind: 'redo' };
+    if (lower === 'a' && !shift) return { kind: 'selectAll' };
     return null;
   }
   if (mod || alt) return null;
   if (key === 'Delete' || key === 'Backspace') return { kind: 'delete' };
-  const step = keyboardNudgeStep(zoom) * (shift ? CANVAS_KEYBOARD_NUDGE_MULTIPLIER : 1);
+  const step = shift ? Math.min(keyboardNudgeStep(zoom), CANVAS_KEYBOARD_NUDGE_INCHES) : CANVAS_KEYBOARD_NUDGE_INCHES;
   if (key === 'ArrowLeft') return { kind: 'nudge', dx: -step, dy: 0 };
   if (key === 'ArrowRight') return { kind: 'nudge', dx: step, dy: 0 };
   if (key === 'ArrowUp') return { kind: 'nudge', dx: 0, dy: step };
@@ -260,6 +270,30 @@ export const paintSelectionFrame = (context: CanvasRenderingContext2D, corners: 
     context.fillStyle = SELECTION_HANDLE_FILL;
     context.fill();
     context.stroke();
+  } finally { context.restore(); }
+};
+export interface MarqueeRect { left: number; top: number; right: number; bottom: number; }
+export const normalizeMarquee = (start: ModelPoint, end: ModelPoint): MarqueeRect => ({
+  left: Math.min(start.x, end.x),
+  top: Math.min(start.y, end.y),
+  right: Math.max(start.x, end.x),
+  bottom: Math.max(start.y, end.y),
+});
+export const marqueeEnclosesQuad = (corners: readonly ModelPoint[], rect: MarqueeRect): boolean => {
+  if (corners.length < 4) return false;
+  return corners.every((corner) => corner.x >= rect.left && corner.x <= rect.right && corner.y >= rect.top && corner.y <= rect.bottom);
+};
+export const paintMarquee = (context: CanvasRenderingContext2D, rect: MarqueeRect, dpr: number, scale: number): void => {
+  const zoom = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  context.save();
+  try {
+    context.setTransform(dpr * zoom, 0, 0, dpr * zoom, 0, 0);
+    context.fillStyle = MARQUEE_FILL;
+    context.fillRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+    context.strokeStyle = MARQUEE_STROKE;
+    context.lineWidth = 1 / zoom;
+    context.setLineDash([4, 4]);
+    context.strokeRect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
   } finally { context.restore(); }
 };
 const pointInQuad = (point: ModelPoint, corners: readonly ModelPoint[]): boolean => {

@@ -4,6 +4,7 @@ use ooxml_drawingml::GeometryPathCommand;
 use vsdx_parse::VsdxPackage;
 
 use crate::display_list::{Affine, Paint, Primitive, TextRun, VsdxDisplayList};
+use crate::vector::{collect_ordered, num, rgb, z_order};
 use crate::{RenderError, Renderer};
 
 const POINTS_PER_INCH: f32 = 72.0;
@@ -101,32 +102,6 @@ struct Emitter<'a> {
     package: &'a VsdxPackage,
     content: PageContent,
     image_count: usize,
-}
-
-fn num(value: f64) -> String {
-    if value == 0.0 {
-        return "0".to_owned();
-    }
-    let text = format!("{value:.4}");
-    let text = text.trim_end_matches('0').trim_end_matches('.');
-    if text == "-0" {
-        "0".to_owned()
-    } else {
-        text.to_owned()
-    }
-}
-
-fn rgb(color: &str) -> Option<(f64, f64, f64)> {
-    let hex = color.strip_prefix('#')?;
-    if hex.len() != 6 {
-        return None;
-    }
-    let channel = |range: std::ops::Range<usize>| {
-        u8::from_str_radix(hex.get(range)?, 16)
-            .ok()
-            .map(|v| f64::from(v) / 255.0)
-    };
-    Some((channel(0..2)?, channel(2..4)?, channel(4..6)?))
 }
 
 fn solid(paint: &Option<Paint>) -> Option<(f64, f64, f64)> {
@@ -571,41 +546,6 @@ impl<'a> Emitter<'a> {
             .as_bytes(),
         );
         self.content.stream.extend_from_slice(b"Q\n");
-    }
-}
-
-fn collect_ordered<'b>(primitive: &'b Primitive, out: &mut Vec<(&'b Primitive, Affine)>) {
-    match primitive {
-        Primitive::Group {
-            primitives,
-            transform,
-            ..
-        } => {
-            let mut children: Vec<&Primitive> = primitives.iter().collect();
-            children.sort_by_key(|child| z_order(child));
-            for child in children {
-                let before = out.len();
-                collect_ordered(child, out);
-                for (_, matrix) in &mut out[before..] {
-                    *matrix = transform.compose(*matrix);
-                }
-            }
-            out.push((primitive, Affine::identity()));
-        }
-        Primitive::Shape { transform, .. }
-        | Primitive::Image { transform, .. }
-        | Primitive::TextBox { transform, .. } => out.push((primitive, *transform)),
-        Primitive::Placeholder { .. } => out.push((primitive, Affine::identity())),
-    }
-}
-
-fn z_order(primitive: &Primitive) -> u32 {
-    match primitive {
-        Primitive::Shape { z_order, .. }
-        | Primitive::Image { z_order, .. }
-        | Primitive::TextBox { z_order, .. }
-        | Primitive::Placeholder { z_order, .. }
-        | Primitive::Group { z_order, .. } => *z_order,
     }
 }
 

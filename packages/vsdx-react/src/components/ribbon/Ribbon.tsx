@@ -6,8 +6,10 @@ import { RibbonIcon } from './RibbonIcon';
 import { LINE_PATTERN_VALUES, parseLinePatternInput, parseLineWeightInput, useRibbonCommands } from './commands';
 import type { RibbonCommandId } from './commands';
 
-const baseTabs = ['file', 'home', 'insert'] as const;
+const baseTabs = ['file', 'home', 'insert', 'view'] as const;
 type RibbonTab = (typeof baseTabs)[number] | 'shape';
+export type ViewToggleKey = 'grid' | 'snap' | 'rulers';
+export interface RibbonViewState { grid: boolean; snap: boolean; rulers: boolean; }
 
 type IconName = Parameters<typeof RibbonIcon>[0]['name'];
 
@@ -85,6 +87,13 @@ function RibbonRun({ label, children }: { label: string; children?: ReactNode })
 
 function Divider() { return <div role="separator" aria-orientation="vertical" style={styles.divider} />; }
 
+export interface RibbonConnectorToggle { active: boolean; disabled: boolean; onToggle: () => void; }
+
+function ConnectorToggle({ t, connector }: { t: TFunction; connector: RibbonConnectorToggle }) {
+  const label = `${t('ribbon.commands.connector')} (Alt+3)`;
+  return <button type="button" disabled={connector.disabled} aria-label={label} aria-pressed={connector.active} title={label} onMouseDown={(event) => event.preventDefault()} onClick={() => connector.onToggle()} className="vsdx-cmd-btn" style={{ ...styles.button, color: connector.disabled ? '#b4b4b4' : '#242424', background: connector.active ? '#ebf3fc' : 'transparent', cursor: connector.disabled ? 'default' : 'pointer' }}><RibbonIcon name="connector" size={20} /></button>;
+}
+
 function RibbonSplitButton({ defaultId, defaultIcon, entries, label }: { defaultId: RibbonCommandId; defaultIcon: IconName; entries: ReadonlyArray<{ id: RibbonCommandId; icon: IconName }>; label: (id: RibbonCommandId) => string }) {
   const commands = useRibbonCommands();
   const [open, setOpen] = useState(false);
@@ -135,12 +144,20 @@ function HomePanel({ t }: { t: TFunction }) {
   return <div style={styles.surface} data-testid="vsdx-ribbon-home-panel">
     <RibbonRun label={t('ribbon.groups.history')}><CommandButton id="undo" icon="undo" label={label('undo')} /><CommandButton id="redo" icon="redo" label={label('redo')} /></RibbonRun>
     <Divider />
+    <RibbonRun label={t('ribbon.groups.clipboard')}><CommandButton id="cut" icon="cut" label={label('cut')} /><CommandButton id="copy" icon="copy" label={label('copy')} /><CommandButton id="paste" icon="paste" label={label('paste')} /><CommandButton id="duplicate" icon="duplicate" label={label('duplicate')} /></RibbonRun>
+    <Divider />
     <RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="delete" icon="delete" label={label('delete')} /><CommandButton id="addShape" icon="add" label={label('addShape')} /></RibbonRun>
     <Divider />
     <FormatRun t={t} />
     <Divider />
     <ArrangeRun t={t} />
+    <Divider />
+    <ShowRun t={t} />
   </div>;
+}
+
+function ShowRun({ t }: { t: TFunction }) {
+  return <RibbonRun label={t('ribbon.groups.view')}><CommandButton id="pageBreaks" icon="pageBreaks" label={t('ribbon.commands.pageBreaks')} /></RibbonRun>;
 }
 
 function ShapePanel({ t }: { t: TFunction }) {
@@ -151,7 +168,21 @@ function ShapePanel({ t }: { t: TFunction }) {
   </div>;
 }
 
-export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection?: boolean }) {
+function ViewToggleButton({ toggleKey, icon, label, pressed, onToggle }: { toggleKey: ViewToggleKey; icon: IconName; label: string; pressed: boolean; onToggle: (key: ViewToggleKey) => void }) {
+  return <button type="button" aria-label={label} aria-pressed={pressed} title={label} data-view-toggle={toggleKey} onMouseDown={(event) => event.preventDefault()} onClick={() => onToggle(toggleKey)} className="vsdx-cmd-btn" style={{ ...styles.button, color: '#242424', background: pressed ? '#ebf3fc' : 'transparent', cursor: 'pointer' }}><RibbonIcon name={icon} size={20} /></button>;
+}
+
+function ViewPanel({ t, view, onToggleView }: { t: TFunction; view: RibbonViewState; onToggleView: (key: ViewToggleKey) => void }) {
+  return <div style={styles.surface} data-testid="vsdx-ribbon-view-panel">
+    <RibbonRun label={t('ribbon.groups.view')}>
+      <ViewToggleButton toggleKey="grid" icon="grid" label={t('ribbon.commands.showGrid')} pressed={view.grid} onToggle={onToggleView} />
+      <ViewToggleButton toggleKey="snap" icon="snap" label={t('ribbon.commands.snapObjects')} pressed={view.snap} onToggle={onToggleView} />
+      <ViewToggleButton toggleKey="rulers" icon="ruler" label={t('ribbon.commands.showRulers')} pressed={view.rulers} onToggle={onToggleView} />
+    </RibbonRun>
+  </div>;
+}
+
+export function Ribbon({ t, hasSelection = false, connector, view = { grid: true, snap: true, rulers: true }, onToggleView = () => {} }: { t: TFunction; hasSelection?: boolean; connector?: RibbonConnectorToggle; view?: RibbonViewState; onToggleView?: (key: ViewToggleKey) => void }) {
   const visibleTabs: readonly RibbonTab[] = hasSelection ? [...baseTabs, 'shape'] : baseTabs;
   const [active, setActive] = useState<RibbonTab>(hasSelection ? 'shape' : 'home');
   const [selectionShown, setSelectionShown] = useState(hasSelection);
@@ -178,7 +209,7 @@ export function Ribbon({ t, hasSelection = false }: { t: TFunction; hasSelection
       return <button ref={(node) => { tabRefs.current[index] = node; }} key={tab} id={`vsdx-ribbon-tab-${tab}`} type="button" role="tab" aria-selected={selected} aria-controls={`vsdx-ribbon-panel-${tab}`} tabIndex={selected ? 0 : -1} onClick={() => select(tab)} onKeyDown={(event) => onKeyDown(event, index)} style={styles.tab}><span style={{ ...styles.tabLabel, borderBottomColor: selected ? '#0f6cbd' : 'transparent', color: '#242424', fontWeight: selected ? 600 : 400 }}>{t(`ribbon.tabs.${tab}`)}</span></button>;
     })}</div>
     <div id={`vsdx-ribbon-panel-${active}`} role="tabpanel" aria-labelledby={`vsdx-ribbon-tab-${active}`} style={styles.panel}>
-      {active === 'home' ? <HomePanel t={t} /> : active === 'shape' ? <ShapePanel t={t} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun></div>}
+      {active === 'home' ? <HomePanel t={t} /> : active === 'shape' ? <ShapePanel t={t} /> : active === 'view' ? <ViewPanel t={t} view={view} onToggleView={onToggleView} /> : active === 'file' ? <div style={styles.surface}><RibbonRun label={t('ribbon.groups.file')}><CommandButton id="download" icon="download" label={t('ribbon.commands.download')} /></RibbonRun></div> : <div style={styles.surface}><RibbonRun label={t('ribbon.groups.insert')}><CommandButton id="addShape" icon="add" label={t('ribbon.commands.addShape')} /></RibbonRun>{connector ? <><Divider /><RibbonRun label={t('ribbon.groups.connector')}><ConnectorToggle t={t} connector={connector} /></RibbonRun></> : null}</div>}
     </div>
   </section>;
 }

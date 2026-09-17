@@ -21,7 +21,7 @@ beforeAll(async () => {
   foundation = fixture;
 });
 
-const { act, cleanup, render, waitFor } = await import('@testing-library/react');
+const { act, cleanup, fireEvent, render, waitFor } = await import('@testing-library/react');
 const originalOpenDiagram = vsdx.openDiagram;
 const originalPaintPage = vsdx.paintPage;
 let opens = 0;
@@ -42,6 +42,22 @@ const { VsdxEditor } = await import('./VsdxEditor');
 const { useState } = await import('react');
 
 afterEach(() => { cleanup(); paintPageOverride = null; });
+
+/** The drawing canvas, which the rulers precede in DOM order, and its overlay. */
+function drawingCanvas(container: HTMLElement): HTMLCanvasElement | null {
+  return container.querySelector<HTMLCanvasElement>('canvas[aria-label]');
+}
+
+function drawingCanvases(container: HTMLElement): [HTMLCanvasElement, HTMLCanvasElement] {
+  const drawing = drawingCanvas(container)!;
+  return [drawing, drawing.parentElement!.querySelector<HTMLCanvasElement>('canvas[aria-hidden]')!];
+}
+
+/** Snapping is on by default; a drag that asserts its raw release turns it off in the View tab. */
+function turnSnapOff(view: ReturnType<typeof render>): void {
+  fireEvent.click(view.getByRole('tab', { name: 'View' }));
+  fireEvent.click(view.container.querySelector('[data-view-toggle="snap"]') as HTMLElement);
+}
 
 test('does not reopen for inline fonts and a state-setting onReady callback', async () => {
   let ready: { handle: DiagramHandle } | undefined;
@@ -163,7 +179,7 @@ test('a stale paint does not resolve images after a newer paint has taken over',
     api.handle.mediaBytes = (assetId: string) => { mediaBytesCalls.push(assetId); return new Uint8Array(0); };
   }} onError={(error) => { onErrors.push(error); }} />);
   await waitFor(() => expect(refreshApi).toBeDefined());
-  view.container.querySelector('canvas')!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  drawingCanvas(view.container)!.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
   paintPageOverride = (_context, _list, _dpr, _scale, options) => {
     const index = call++;
     return new Promise<void>((resolve, reject) => {
@@ -408,7 +424,7 @@ test('a peer reordering pages preserves the active page by its identity', async 
     await act(async () => { ready!.applyUpdate(peer!.encodeStateAsUpdate(ready!.encodeStateVector())); });
     expect(view.getByRole('tab', { name: 'Product map' }).getAttribute('aria-selected')).toBe('true');
     expect(view.getByRole('tab', { name: 'Release flow' }).getAttribute('aria-selected')).toBe('false');
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toBe('Page 2 of 2');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toBe('Page 2 of 2');
   } finally { peer?.dispose(); cleanup(); canvasPrototype.getContext = getContext; }
 });
 
@@ -425,7 +441,7 @@ test('an update received in onReady preserves the initial active page before Rea
     finally { peer.dispose(); }
   }} />); });
   try {
-    await waitFor(() => expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toBe('Page 2 of 2'));
+    await waitFor(() => expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toBe('Page 2 of 2'));
     expect(view.getByRole('tab', { name: 'Product map' }).getAttribute('aria-selected')).toBe('true');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
@@ -440,7 +456,7 @@ test('drag paints a live preview on the overlay and commits the release geometry
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
@@ -450,7 +466,7 @@ test('drag paints a live preview on the overlay and commits the release geometry
     const originalResize = handle.resizeShape.bind(handle);
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -467,6 +483,7 @@ test('drag paints a live preview on the overlay and commits the release geometry
     const shapeBefore = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
     const initialPinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const initialPinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
+    turnSnapOff(view);
     fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 1, clientX: 101, clientY: 101 });
@@ -485,7 +502,7 @@ test('drag paints a live preview on the overlay and commits the release geometry
     fireEvent.pointerDown(main, { pointerId: 2, clientX: 200, clientY: 200 });
     await act(async () => {});
     expect(view.container.querySelector('output')).toBeNull();
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
     fireEvent.pointerMove(main, { pointerId: 2, clientX: 201, clientY: 201 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 30)); });
     expect(calls.some((entry) => entry === 'setLineDash:4,4')).toBe(false);
@@ -494,7 +511,78 @@ test('drag paints a live preview on the overlay and commits the release geometry
     expect(moves).toHaveLength(1);
     expect(resizes).toHaveLength(0);
     expect(view.container.querySelector('output')).toBeNull();
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Ctrl+S saves the diagram from anywhere in the editor and never reaches the browser', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const createObjectURL = URL.createObjectURL;
+  const revokeObjectURL = URL.revokeObjectURL;
+  URL.createObjectURL = (() => 'blob:diagram') as typeof URL.createObjectURL;
+  URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL;
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    let saves = 0;
+    const originalSave = handle.save.bind(handle);
+    handle.save = (() => { saves += 1; return originalSave(); }) as DiagramHandle['save'];
+    const header = view.container.querySelector('header') as HTMLElement;
+    expect(fireEvent.keyDown(header, { key: 's', ctrlKey: true })).toBe(false);
+    await act(async () => {});
+    expect(saves).toBe(1);
+    expect(fireEvent.keyDown(header, { key: 'r', ctrlKey: true })).toBe(true);
+    expect(fireEvent.keyDown(header, { key: 'l', ctrlKey: true })).toBe(true);
+    expect(saves).toBe(1);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; URL.createObjectURL = createObjectURL; URL.revokeObjectURL = revokeObjectURL; }
+});
+
+test('a snapped drag commits the point the preview painted, and Alt keeps the raw release', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    const moves: string[][] = [];
+    const originalMove = handle.moveShape.bind(handle);
+    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
+    await act(async () => { ready!.refresh(); });
+    const [main, overlay] = drawingCanvases(view.container);
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    overlay.getContext = ((() => new Proxy({ canvas: {} }, { get: (target, key) => (key in target ? Reflect.get(target, key) : () => {}), set: () => true })) as unknown as typeof overlay.getContext);
+    const pinBefore = Number(handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20')?.cells.find((cell) => cell.name === 'PinX')?.value);
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 1, clientX: 120, clientY: 130 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 120, clientY: 130, altKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(moves).toHaveLength(1);
+    const snapped = Number(moves[0][2]);
+    expect(snapped).not.toBeCloseTo(pinBefore + 20 / 96, 4);
+    expect(Math.abs(snapped - (pinBefore + 20 / 96))).toBeLessThanOrEqual(6 / 96);
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: 200, clientY: 200, altKey: true });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 2, clientX: 220, clientY: 230, altKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 2, clientX: 220, clientY: 230, altKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(moves).toHaveLength(2);
+    expect(Number(moves[1][2])).toBeCloseTo(snapped + 20 / 96, 4);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
@@ -508,14 +596,14 @@ test('a drag returning near its start keeps the preview and commit in agreement'
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -532,6 +620,7 @@ test('a drag returning near its start keeps the preview and commit in agreement'
     const shapeBefore = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
     const initialPinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const initialPinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
+    turnSnapOff(view);
     fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 1, clientX: 120, clientY: 130 });
@@ -577,14 +666,14 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -596,6 +685,7 @@ test('concurrent pointers cannot commit or cancel each other', async () => {
     const shapeBefore = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
     const initialPinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const initialPinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
+    turnSnapOff(view);
     fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 1, clientX: 120, clientY: 130 });
@@ -646,7 +736,7 @@ for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPin
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
@@ -659,7 +749,7 @@ for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPin
     handle.onUpdate(() => updates.push(handle.snapshot()));
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -678,7 +768,7 @@ for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPin
     fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(view.container.querySelector('output')).toBeNull();
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
     const page = handle.snapshot().pages[0];
     const shapeBefore = page.shapes.find((shape) => shape.id === 'page:1:shape:20');
     const width = Number(shapeBefore?.cells.find((cell) => cell.name === 'Width')?.value);
@@ -711,7 +801,7 @@ for (const formulaPins of [false, true]) test(`a handle resize with ${formulaPin
     expect(handle.snapshot().pages[0].shapes.find((shape) => shape.id === after.id)).toEqual(shapeBefore);
     expect(handle.canUndo()).toBe(false);
     expect(view.container.querySelector('output')).toBeNull();
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
@@ -725,7 +815,7 @@ test('a rotate grip drag commits the expected angle', async () => {
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const formulas: Array<{ cellName: string; formula: string }> = [];
@@ -736,7 +826,7 @@ test('a rotate grip drag commits the expected angle', async () => {
     }) as DiagramHandle['setCellFormula'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -786,12 +876,12 @@ test('a queued rotation preview follows the latest Shift state', async () => {
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -833,6 +923,64 @@ test('a queued rotation preview follows the latest Shift state', async () => {
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+test('a rotation-locked grip stays disabled and keeps the angle', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const errors: unknown[] = [];
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} onError={(error) => { errors.push(error); }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 4, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    const formulas: Array<{ cellName: string; formula: string }> = [];
+    const originalSet = handle.setCellFormula.bind(handle);
+    handle.setCellFormula = ((pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
+      formulas.push({ cellName: locator.cellName, formula });
+      return originalSet(pageId, shapeId, locator, formula);
+    }) as DiagramHandle['setCellFormula'];
+    const { fireEvent } = await import('@testing-library/react');
+    const main = drawingCanvas(view.container)!;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    const pageId = handle.snapshot().pages[0].id;
+    const added = await act(async () => handle.addShape(pageId, { name: 'rotation-locked', cells: [
+      { locator: { cellName: 'PinX' }, formula: '4' },
+      { locator: { cellName: 'PinY' }, formula: '4' },
+      { locator: { cellName: 'Width' }, formula: '2' },
+      { locator: { cellName: 'Height' }, formula: '1' },
+      { locator: { cellName: 'Angle' }, formula: '0' },
+      { locator: { cellName: 'LockRotate' }, formula: '1' },
+    ] }));
+    const lockedId = (added as unknown as { shapeId: string }).shapeId;
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: lockedId })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const { selectionCorners } = await import('./VsdxEditor');
+    const corners = selectionCorners(handle.snapshot().pages[0], fakeFrame as never, { pageId, shapeId: lockedId, hit: { kind: 'shape', shapeId: lockedId } });
+    const grip = rotationGripPosition(corners!, 1);
+    formulas.length = 0;
+    errors.length = 0;
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: grip.x, clientY: grip.y });
+    await act(async () => {});
+    fireEvent.pointerMove(main, { pointerId: 2, clientX: grip.x + 40, clientY: grip.y - 40 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    fireEvent.pointerUp(main, { pointerId: 2, clientX: grip.x + 40, clientY: grip.y - 40 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(formulas.some((entry) => entry.cellName === 'Angle')).toBe(false);
+    expect(Number(handle.snapshot().pages[0].shapes.find((item) => item.id === lockedId)?.cells.find((cell) => cell.name === 'Angle')?.value ?? 0)).toBe(0);
+    expect(errors.map(String)).toEqual(['Error: Shape rotation is locked and cannot be changed with handles.']);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
 test('hovering handles sets resize and rotation cursors', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
@@ -843,12 +991,12 @@ test('hovering handles sets resize and rotation cursors', async () => {
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -885,11 +1033,11 @@ test('the overlay paints the selection frame at a zoom other than 1', async () =
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -926,12 +1074,12 @@ test('a refused handle resize preserves the pin and size', async () => {
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -944,7 +1092,7 @@ test('a refused handle resize preserves the pin and size', async () => {
     await act(async () => {});
     fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
     const page = handle.snapshot().pages[0];
     const shapeBefore = page.shapes.find((shape) => shape.id === 'page:1:shape:20');
     const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
@@ -977,7 +1125,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
@@ -988,7 +1136,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
     handle.resizeShape = ((...args: [string, string, string, string]) => { resizes.push([...args]); return originalResize(...args); }) as DiagramHandle['resizeShape'];
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1012,7 +1160,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
     await act(async () => {});
     fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain(`selected shape ${lockedId}`);
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain(`selected shape ${lockedId}`);
     const shapeBefore = handle.snapshot().pages[0].shapes.find((shape) => shape.id === lockedId);
     const pinX = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinX')?.value);
     const pinY = Number(shapeBefore?.cells.find((cell) => cell.name === 'PinY')?.value);
@@ -1038,7 +1186,7 @@ test('a handle resize on a move-locked shape commits neither size nor pin', asyn
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
-test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', async () => {
+test('the canvas is focusable and ArrowUp nudges PinY by the grid-off step', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
   canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
@@ -1048,14 +1196,14 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
-    const moves: string[][] = [];
-    const originalMove = handle.moveShape.bind(handle);
-    handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
+    const moves: Array<ReadonlyArray<{ pageId: string; shapeId: string; xFormula: string; yFormula: string }>> = [];
+    const originalMoves = handle.moveShapes.bind(handle);
+    handle.moveShapes = ((arg: ReadonlyArray<{ pageId: string; shapeId: string; xFormula: string; yFormula: string }>) => { moves.push(arg); return originalMoves(arg); }) as DiagramHandle['moveShapes'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1075,8 +1223,9 @@ test('the canvas is focusable and ArrowUp nudges PinY by one screen pixel', asyn
     fireEvent.keyDown(main, { key: 'ArrowUp' });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(moves).toHaveLength(1);
-    expect(Number(moves[0][3])).toBeGreaterThan(pinY);
-    expect(Number(moves[0][3])).toBeCloseTo(pinY + 1 / 96, 6);
+    expect(moves[0]).toHaveLength(1);
+    expect(Number(moves[0][0].yFormula)).toBeGreaterThan(pinY);
+    expect(Number(moves[0][0].yFormula)).toBeCloseTo(pinY + 1 / 16, 6);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
@@ -1090,14 +1239,14 @@ test('Delete removes the selected shape and Escape cancels a drag without a comm
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1153,11 +1302,11 @@ test('typing Delete in the shapes search box keeps the selected shape', async ()
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
@@ -1187,11 +1336,11 @@ test('a right-click opens the shape menu on a shape and the canvas menu on empty
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => null) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    const main = drawingCanvases(view.container)[0];
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
     (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
@@ -1232,7 +1381,7 @@ test('replacing the document closes the open canvas menu', async () => {
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => null) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    const main = drawingCanvases(view.container)[0];
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
     const { fireEvent } = await import('@testing-library/react');
@@ -1257,7 +1406,7 @@ test('switching the active page closes the open canvas menu', async () => {
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => null) as unknown as DiagramHandle['hitTest'];
     await act(async () => { ready!.refresh(); });
-    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    const main = drawingCanvases(view.container)[0];
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
     const { fireEvent } = await import('@testing-library/react');
@@ -1282,14 +1431,14 @@ test('a right-click during a drag opens no menu and adds no commit', async () =>
   try {
     await waitFor(() => expect(ready).toBeDefined());
     const handle = ready!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
     const moves: string[][] = [];
     const originalMove = handle.moveShape.bind(handle);
     handle.moveShape = ((...args: [string, string, string, string]) => { moves.push([...args]); return originalMove(...args); }) as DiagramHandle['moveShape'];
     await act(async () => { ready!.refresh(); });
-    const main = view.container.querySelectorAll('canvas')[0] as HTMLCanvasElement;
+    const main = drawingCanvases(view.container)[0];
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
     (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
@@ -1298,6 +1447,7 @@ test('a right-click during a drag opens no menu and adds no commit', async () =>
     const before = handle.snapshot().pages[0].shapes.find((shape) => shape.id === 'page:1:shape:20');
     const initialPinX = Number(before?.cells.find((cell) => cell.name === 'PinX')?.value);
     const initialPinY = Number(before?.cells.find((cell) => cell.name === 'PinY')?.value);
+    turnSnapOff(view);
     fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => {});
     fireEvent.pointerMove(main, { pointerId: 1, clientX: 120, clientY: 130 });
@@ -1334,7 +1484,7 @@ test('a guarded Angle leaves the rotation grip inert without an Angle write', as
     await act(async () => { ready!.refresh(); });
     const { selectionCorners } = await import('./VsdxEditor');
     const { rotationGripPosition } = await import('./interactions');
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1387,7 +1537,7 @@ test('a selected control handle paints yellow and drags through the edit session
   try {
     await waitFor(() => expect(readyControl).toBeDefined());
     const handle = readyControl!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     const pageId = handle.snapshot().pages[0].id;
     const added = await act(async () => handle.addShape(pageId, { name: 'adjustable', cells: [
@@ -1403,7 +1553,7 @@ test('a selected control handle paints yellow and drags through the edit session
     const shapeId = (added as unknown as { shapeId: string }).shapeId;
     handle.hitTest = (() => ({ kind: 'shape', shapeId })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { readyControl!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     const overlay = canvases[1] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -1421,7 +1571,7 @@ test('a selected control handle paints yellow and drags through the edit session
     await act(async () => {});
     fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
-    expect(view.container.querySelector('canvas')?.getAttribute('aria-label')).toContain(`selected shape ${shapeId}`);
+    expect(drawingCanvas(view.container)?.getAttribute('aria-label')).toContain(`selected shape ${shapeId}`);
     await act(async () => { readyControl!.refresh(); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
     expect(calls).toContain('fillStyle=#ffeb00');
@@ -1486,7 +1636,7 @@ test('a control drag skips guarded cells instead of partially committing', async
   try {
     await waitFor(() => expect(readyGuarded).toBeDefined());
     const handle = readyGuarded!.handle;
-    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
     handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
     const pageId = handle.snapshot().pages[0].id;
     const added = await act(async () => handle.addShape(pageId, { name: 'adjustable', cells: [
@@ -1502,7 +1652,7 @@ test('a control drag skips guarded cells instead of partially committing', async
     const shapeId = (added as unknown as { shapeId: string }).shapeId;
     handle.hitTest = (() => ({ kind: 'shape', shapeId })) as unknown as DiagramHandle['hitTest'];
     await act(async () => { readyGuarded!.refresh(); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     const main = canvases[0] as HTMLCanvasElement;
     main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
     (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
@@ -1549,3 +1699,260 @@ test('a control drag skips guarded cells instead of partially committing', async
     expect(errors).toEqual([]);
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
+
+test('the view toggle draws page-break guides over the page', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: (_target, key) => key === 'measureText' ? () => ({ width: 0 }) : () => {}, set: () => true }) as never;
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={foundation} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 240, printHeight: 240, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    ready!.handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    await act(async () => { ready!.refresh(); });
+    expect(view.queryByTestId('vsdx-page-breaks')).toBeNull();
+    const { fireEvent } = await import('@testing-library/react');
+    await act(async () => { fireEvent.click(view.container.querySelector('[data-command-id="pageBreaks"]')!); });
+    expect(view.getByTestId('vsdx-page-breaks').querySelectorAll('div')).toHaveLength(5);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('the error banner dismisses and clears on the next successful edit', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'crates/vsdx-parse/tests/fixtures/guard-format.vsdx'));
+  const errors: Error[] = [];
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} onError={(error) => { errors.push(error); }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 5, width: 960, height: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:1' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const { selectionCorners } = await import('./VsdxEditor');
+    const canvases = drawingCanvases(view.container);
+    const main = canvases[0] as HTMLCanvasElement;
+    const overlay = canvases[1] as HTMLCanvasElement;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    overlay.getContext = ((() => new Proxy({}, { get: () => () => {}, set: () => true })) as unknown as typeof overlay.getContext);
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 1, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    const page = handle.snapshot().pages[0];
+    const corners = selectionCorners(page, fakeFrame as never, { pageId: page.id, shapeId: 'page:1:shape:1', hit: { kind: 'shape', shapeId: 'page:1:shape:1' } });
+    const grip = rotationGripPosition(corners!, 1);
+    fireEvent.pointerDown(main, { pointerId: 2, clientX: grip.x, clientY: grip.y });
+    await act(async () => {});
+    const banner = view.container.querySelector('[role="alert"]');
+    expect(banner?.textContent).toContain('rotation');
+    const dismiss = view.getByRole('button', { name: 'Dismiss error' });
+    fireEvent.click(dismiss);
+    await act(async () => {});
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+    fireEvent.pointerDown(main, { pointerId: 3, clientX: grip.x, clientY: grip.y });
+    await act(async () => {});
+    expect(view.container.querySelector('[role="alert"]')?.textContent).toContain('rotation');
+    const plainId = handle.snapshot().pages[0].shapes[2].id;
+    await act(async () => { handle.setCellFormula(page.id, plainId, { cellName: 'FillForegnd' }, 'RGB(9,9,9)'); ready!.refresh(); });
+    await act(async () => {});
+    expect(view.container.querySelector('[role="alert"]')).toBeNull();
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Delete, undo and Escape work while editor chrome holds focus', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = drawingCanvas(view.container)!;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    const selectShape = async () => {
+      fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+      await act(async () => {});
+      fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+      expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    };
+    await selectShape();
+    fireEvent.click(view.getByRole('tab', { name: 'Home' }));
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    ribbonDelete.focus();
+    expect(document.activeElement).toBe(ribbonDelete);
+    fireEvent.keyDown(ribbonDelete, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+    await selectShape();
+    const pageTab = view.container.querySelector('footer [role="tab"]') as HTMLButtonElement;
+    pageTab.focus();
+    expect(document.activeElement).toBe(pageTab);
+    fireEvent.keyDown(pageTab, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    const undoAfterPageDelete = view.container.querySelector('[data-command-id="undo"]') as HTMLButtonElement;
+    undoAfterPageDelete.focus();
+    fireEvent.keyDown(undoAfterPageDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+    await selectShape();
+    const escapeTarget = view.container.querySelector('footer [role="tab"]') as HTMLButtonElement;
+    escapeTarget.focus();
+    expect(document.activeElement).toBe(escapeTarget);
+    fireEvent.keyDown(escapeTarget, { key: 'Escape' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).not.toContain('selected shape');
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Ctrl+A selects every shape on the page and Delete removes them', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const shapeCount = handle.snapshot().pages[0].shapes.length;
+    expect(shapeCount).toBeGreaterThan(1);
+    const main = drawingCanvas(view.container)!;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    /** The Shape tab replaces the Home panel on selection, so the button is re-read every time. */
+    const homeDelete = (): HTMLButtonElement => {
+      fireEvent.click(view.getByRole('tab', { name: 'Home' }));
+      return view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    };
+    const first = homeDelete();
+    first.focus();
+    expect(fireEvent.keyDown(first, { key: 'a', ctrlKey: true }) === false).toBe(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain(`${shapeCount} shapes selected`);
+    const selected = homeDelete();
+    fireEvent.keyDown(selected, { key: 'Escape' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).not.toContain('shapes selected');
+    expect(handle.snapshot().pages[0].shapes).toHaveLength(shapeCount);
+    main.focus();
+    expect(fireEvent.keyDown(main, { key: 'a', ctrlKey: true }) === false).toBe(true);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain(`${shapeCount} shapes selected`);
+    const deleteAll = homeDelete();
+    deleteAll.focus();
+    fireEvent.keyDown(deleteAll, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes).toHaveLength(0);
+    expect(main.getAttribute('aria-label')).not.toContain('shapes selected');
+    fireEvent.keyDown(homeDelete(), { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.length).toBeGreaterThan(0);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('text fields keep their own undo while the ribbon uses the document history', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = drawingCanvas(view.container)!;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    fireEvent.keyDown(main, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    const search = view.container.querySelector('input[type="search"]') as HTMLInputElement;
+    search.focus();
+    expect(document.activeElement).toBe(search);
+    expect(fireEvent.keyDown(search, { key: 'z', ctrlKey: true }) === false).toBe(false);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+    fireEvent.click(view.getByRole('tab', { name: 'Home' }));
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    ribbonDelete.focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'z', ctrlKey: true });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
+test('Delete waits out an open context menu', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: 'page:1:shape:20' })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = drawingCanvas(view.container)!;
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.pointerDown(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 7, clientX: 100, clientY: 100 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain('selected shape page:1:shape:20');
+    expect(fireEvent.contextMenu(main, { clientX: 100, clientY: 100, button: 2 }) === false).toBe(true);
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(true);
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: 'Escape' });
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    fireEvent.click(view.getByRole('tab', { name: 'Home' }));
+    const ribbonDelete = view.container.querySelector('[data-command-id="delete"]') as HTMLButtonElement;
+    ribbonDelete.focus();
+    fireEvent.keyDown(ribbonDelete, { key: 'Delete' });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(handle.snapshot().pages[0].shapes.some((shape) => shape.id === 'page:1:shape:20')).toBe(false);
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+

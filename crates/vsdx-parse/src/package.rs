@@ -8,7 +8,10 @@ use crate::patch::{
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::sheet::{parse_records, parse_sheet};
 use crate::xml::{ParseBudget, XmlElement, XmlNode, parse_xml};
-use crate::{CellAttribute, ConnectsChild, ParseLimits, Shape, Sheet, SheetChild, VsdxError};
+use crate::{
+    CellAttribute, ConnectsChild, ParseLimits, Shape, Sheet, SheetChild, ThemeEffectColor,
+    ThemeEffectStyle, ThemeEffects, ThemeOuterShadow, ThemeVariationScheme, VsdxError,
+};
 use ooxml_drawingml::Theme;
 
 /// Identifies the ShapeSheet containing a semantic cell.
@@ -44,6 +47,8 @@ pub struct SemanticCellEdit {
     pub gesture: MutationGesture,
     pub formula: Option<String>,
     pub value: Option<String>,
+    /// Row type for cells that create their container row.
+    pub row_type: Option<String>,
 }
 
 /// Plain-text content of a shape's `Text` element.
@@ -62,6 +67,7 @@ pub enum MutationGesture {
     ResizeWidth,
     ResizeHeight,
     ResizeAspect,
+    Rotate,
     TextEdit,
     Format,
     Delete,
@@ -120,6 +126,7 @@ struct NewContainerCell {
     section: Option<String>,
     section_index: Option<u32>,
     row: Option<CellRow>,
+    row_type: Option<String>,
     name: String,
     formula: String,
     value: Option<String>,
@@ -260,15 +267,34 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
             .copied()
             .unwrap_or(usize::MAX)
     });
+    let mut master_names = BTreeMap::new();
+    for master in xml_parts
+        .get(masters_part_path.as_deref().unwrap_or(""))
+        .into_iter()
+        .flat_map(|root| root.children_named("Master"))
+    {
+        let Some(id) = master.attribute("ID").and_then(|id| id.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Some(name) = master
+            .attribute("Name")
+            .or_else(|| master.attribute("NameU"))
+        {
+            master_names.insert(id, name.to_owned());
+        }
+    }
     let page_contents = parse_part_sheets(&page_part_paths, &mut xml_parts, &mut budget)?;
     let master_contents = parse_part_sheets(&master_part_paths, &mut xml_parts, &mut budget)?;
     let mut themes: BTreeMap<u32, Theme> = BTreeMap::new();
+    let mut theme_effects = BTreeMap::new();
     for (index, path) in theme_part_paths.iter().enumerate() {
         let root = xml_parts
             .get(path)
             .ok_or_else(|| VsdxError::MissingPart(path.clone()))?;
         let theme = parse_theme(root, path)?;
-        themes.insert((index + 1) as u32, theme.clone());
+        let key = (index + 1) as u32;
+        themes.insert(key, theme.clone());
+        theme_effects.insert(key, parse_theme_effects(root));
         if let Some(id) = theme_scheme_enum(root)
             && !themes.contains_key(&id)
         {
@@ -304,6 +330,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         master_part_paths,
         theme_part_paths,
         themes,
+        theme_effects,
         windows_part_path,
         relationships,
         document_sheet,
@@ -315,6 +342,7 @@ pub fn parse_vsdx_with_limits(data: &[u8], limits: &ParseLimits) -> Result<VsdxP
         page_part_ids,
         page_names,
         master_part_ids,
+        master_names,
         page_contents,
         master_contents,
         parts: package_parts,
@@ -371,6 +399,118 @@ fn theme_scheme_enum(root: &XmlElement) -> Option<u32> {
         }
     }
     None
+}
+
+fn parse_theme_effects(root: &XmlElement) -> ThemeEffects {
+    let mut effects = ThemeEffects::default();
+    let Some(elements) = root.children_named("themeElements").next() else {
+        return effects;
+    };
+    for ext in elements
+        .children_named("extLst")
+        .flat_map(|list| list.children_named("ext"))
+    {
+        if let Some(scheme) = ext.children_named("themeScheme").next()
+            && let Some(id) = scheme
+                .children_named("schemeID")
+                .find_map(|id| id.attribute("schemeEnum"))
+                .and_then(|id| id.parse().ok())
+        {
+            effects.scheme_id = Some(id);
+        }
+        for scheme in ext.children_named("variationStyleSchemeLst") {
+            for variant in scheme.children_named("variationStyleScheme") {
+                effects.variation_schemes.push(ThemeVariationScheme {
+                    embellishment: variant
+                        .attribute("embellishment")
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0),
+                    effect_indexes: variant
+                        .children_named("varStyle")
+                        .filter_map(|style| style.attribute("effectIdx"))
+                        .filter_map(|index| index.parse().ok())
+                        .collect(),
+                });
+            }
+        }
+        for schemes in ext.children_named("variationClrSchemeLst") {
+            for scheme in schemes.children_named("variationClrScheme") {
+                let mut colors = Vec::new();
+                for position in 1..=7 {
+                    let name = format!("varColor{position}");
+                    colors.push(scheme.children_named(&name).next().and_then(|slot| {
+                        slot.children.iter().find_map(|child| match child {
+                            XmlNode::Element(value) => {
+                                let hex = value
+                                    .attribute("lastClr")
+                                    .or_else(|| value.attribute("val"))?;
+                                (value.local_name() == "srgbClr").then(|| hex.to_ascii_uppercase())
+                            }
+                            XmlNode::Text(_) => None,
+                        })
+                    }));
+                }
+                effects.variation_colors.push(colors);
+            }
+        }
+    }
+    if let Some(styles) = elements
+        .children_named("fmtScheme")
+        .next()
+        .and_then(|scheme| scheme.children_named("effectStyleLst").next())
+    {
+        for style in styles.children_named("effectStyle") {
+            let list = style.children_named("effectLst").next();
+            effects.effect_styles.push(ThemeEffectStyle {
+                outer_shadow: list.and_then(|list| {
+                    list.children_named("outerShdw")
+                        .next()
+                        .map(parse_outer_shadow)
+                }),
+                has_bevel: style.children_named("sp3d").next().is_some(),
+            });
+        }
+    }
+    effects
+}
+
+fn parse_outer_shadow(style: &XmlElement) -> ThemeOuterShadow {
+    let number = |name: &str| {
+        style
+            .attribute(name)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    };
+    let mut shadow = ThemeOuterShadow {
+        blur_emu: number("blurRad"),
+        dist_emu: number("dist"),
+        direction_60k: number("dir"),
+        color: ThemeEffectColor::Placeholder,
+        alpha_1000pct: None,
+    };
+    let Some(color) = style.children.iter().find_map(|child| match child {
+        XmlNode::Element(value) if matches!(value.local_name(), "srgbClr" | "schemeClr") => {
+            Some(value)
+        }
+        _ => None,
+    }) else {
+        return shadow;
+    };
+    shadow.color = match color.local_name() {
+        "srgbClr" => color
+            .attribute("val")
+            .map(|hex| ThemeEffectColor::Srgb(hex.to_ascii_uppercase()))
+            .unwrap_or_default(),
+        _ => color
+            .attribute("val")
+            .map(|slot| ThemeEffectColor::Scheme(slot.to_owned()))
+            .unwrap_or_default(),
+    };
+    shadow.alpha_1000pct = color
+        .children_named("alpha")
+        .find_map(|alpha| alpha.attribute("val"))
+        .and_then(|value| value.parse().ok());
+    shadow
 }
 
 fn catalog_part_ids(
@@ -521,6 +661,95 @@ pub(crate) fn save_cell_edits(
     edits: &[CellEdit],
 ) -> Result<Vec<u8>, VsdxError> {
     save_cell_edits_with_new_cells(package, edits, &[], &[], &[])
+}
+
+struct ContainerCell {
+    name: String,
+    formula: String,
+    value: Option<String>,
+}
+
+struct ContainerRow {
+    row: Option<CellRow>,
+    row_type: Option<String>,
+    cells: Vec<ContainerCell>,
+}
+
+struct ContainerGroup {
+    part_path: String,
+    owner_span: crate::SourceSpan,
+    section: Option<String>,
+    section_index: Option<u32>,
+    rows: Vec<ContainerRow>,
+}
+
+/// Merges container cells that share an insertion point into one section block.
+/// Rows join one group only when the section itself is new; an existing section
+/// keeps a group per row so each row resolves its own insertion point.
+fn group_container_cells(cells: &[NewContainerCell]) -> Vec<ContainerGroup> {
+    let mut groups: Vec<ContainerGroup> = Vec::new();
+    for cell in cells {
+        let group = match groups.iter_mut().find(|group| {
+            group.part_path == cell.part_path
+                && group.owner_span == cell.owner_span
+                && group.section == cell.section
+                && group.section_index == cell.section_index
+                && (cell.section.is_some()
+                    || group
+                        .rows
+                        .iter()
+                        .all(|row| row.row == cell.row && row.row_type == cell.row_type))
+        }) {
+            Some(group) => group,
+            None => {
+                groups.push(ContainerGroup {
+                    part_path: cell.part_path.clone(),
+                    owner_span: cell.owner_span,
+                    section: cell.section.clone(),
+                    section_index: cell.section_index,
+                    rows: Vec::new(),
+                });
+                groups.last_mut().expect("group was just pushed")
+            }
+        };
+        match group
+            .rows
+            .iter_mut()
+            .find(|row| row.row == cell.row && row.row_type == cell.row_type)
+        {
+            Some(row) => row.cells.push(ContainerCell {
+                name: cell.name.clone(),
+                formula: cell.formula.clone(),
+                value: cell.value.clone(),
+            }),
+            None => group.rows.push(ContainerRow {
+                row: cell.row.clone(),
+                row_type: cell.row_type.clone(),
+                cells: vec![ContainerCell {
+                    name: cell.name.clone(),
+                    formula: cell.formula.clone(),
+                    value: cell.value.clone(),
+                }],
+            }),
+        }
+    }
+    for group in &mut groups {
+        for row in &mut group.rows {
+            row.cells.sort_by(|left, right| left.name.cmp(&right.name));
+        }
+        group
+            .rows
+            .sort_by(|left, right| row_sort_key(&left.row).cmp(&row_sort_key(&right.row)));
+    }
+    groups
+}
+
+fn row_sort_key(row: &Option<CellRow>) -> (u8, u32, &str) {
+    match row {
+        Some(CellRow::Index(index)) => (0, *index, ""),
+        Some(CellRow::Name(name)) => (1, 0, name),
+        None => (2, 0, ""),
+    }
 }
 
 fn save_cell_edits_with_new_cells(
@@ -764,21 +993,21 @@ fn save_cell_edits_with_new_cells(
             .ok_or(VsdxError::PatchLimit { kind: "editBytes" })?;
         validated.push((part.path.as_str(), SpanEdit { span, replacement }));
     }
-    for new_cell in new_container_cells {
+    for group in group_container_cells(new_container_cells) {
         let part = package
             .parts
             .iter()
-            .find(|part| part.path == new_cell.part_path)
+            .find(|part| part.path == group.part_path)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "part does not exist".to_owned(),
             })?;
         let owner = part
             .spans
             .iter()
-            .find(|span| span.span == new_cell.owner_span)
+            .find(|span| span.span == group.owner_span)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "local container owner does not exist".to_owned(),
             })?;
         let quote = owner
@@ -787,54 +1016,62 @@ fn save_cell_edits_with_new_cells(
             .next()
             .map(|attribute| attribute.quote)
             .ok_or_else(|| VsdxError::InvalidCellEdit {
-                part: new_cell.part_path.clone(),
+                part: group.part_path.clone(),
                 message: "local container owner has no attribute quote style".to_owned(),
             })?;
         let (span, closes_owner) = container_insertion_point(
             part,
             owner,
-            new_cell.section.as_deref(),
-            new_cell.row.as_ref(),
+            group.section.as_deref(),
+            group.rows.first().and_then(|row| row.row.as_ref()),
         )?;
         let mut replacement = Vec::new();
         if closes_owner {
             replacement.push(b'>');
         }
-        if let Some(section) = &new_cell.section {
+        if let Some(section) = &group.section {
             replacement.extend_from_slice(b"<Section N=");
             push_quoted(&mut replacement, section, quote)?;
-            if let Some(index) = new_cell.section_index {
+            if let Some(index) = group.section_index {
                 replacement.extend_from_slice(b" IX=");
                 push_quoted(&mut replacement, &index.to_string(), quote)?;
             }
             replacement.push(b'>');
         }
-        if let Some(row) = &new_cell.row {
-            replacement.extend_from_slice(b"<Row ");
-            match row {
-                CellRow::Index(_) => replacement.extend_from_slice(b"IX="),
-                CellRow::Name(_) => replacement.extend_from_slice(b"N="),
+        for row in &group.rows {
+            if let Some(row_key) = &row.row {
+                replacement.extend_from_slice(b"<Row ");
+                match row_key {
+                    CellRow::Index(_) => replacement.extend_from_slice(b"IX="),
+                    CellRow::Name(_) => replacement.extend_from_slice(b"N="),
+                }
+                let row_value = match row_key {
+                    CellRow::Index(index) => index.to_string(),
+                    CellRow::Name(name) => name.clone(),
+                };
+                push_quoted(&mut replacement, &row_value, quote)?;
+                if let Some(row_type) = &row.row_type {
+                    replacement.extend_from_slice(b" T=");
+                    push_quoted(&mut replacement, row_type, quote)?;
+                }
+                replacement.push(b'>');
             }
-            let row_value = match row {
-                CellRow::Index(index) => index.to_string(),
-                CellRow::Name(name) => name.clone(),
-            };
-            push_quoted(&mut replacement, &row_value, quote)?;
-            replacement.push(b'>');
+            for cell in &row.cells {
+                replacement.extend_from_slice(b"<Cell N=");
+                push_quoted(&mut replacement, &cell.name, quote)?;
+                replacement.extend_from_slice(b" F=");
+                push_quoted(&mut replacement, &cell.formula, quote)?;
+                if let Some(value) = &cell.value {
+                    replacement.extend_from_slice(b" V=");
+                    push_quoted(&mut replacement, value, quote)?;
+                }
+                replacement.extend_from_slice(b"/>");
+            }
+            if row.row.is_some() {
+                replacement.extend_from_slice(b"</Row>");
+            }
         }
-        replacement.extend_from_slice(b"<Cell N=");
-        push_quoted(&mut replacement, &new_cell.name, quote)?;
-        replacement.extend_from_slice(b" F=");
-        push_quoted(&mut replacement, &new_cell.formula, quote)?;
-        if let Some(value) = &new_cell.value {
-            replacement.extend_from_slice(b" V=");
-            push_quoted(&mut replacement, value, quote)?;
-        }
-        replacement.extend_from_slice(b"/>");
-        if new_cell.row.is_some() {
-            replacement.extend_from_slice(b"</Row>");
-        }
-        if new_cell.section.is_some() {
+        if group.section.is_some() {
             replacement.extend_from_slice(b"</Section>");
         }
         if closes_owner {
@@ -931,6 +1168,7 @@ pub fn save_semantic_cell_edits(
                     section,
                     section_index: edit.locator.section_index,
                     row,
+                    row_type: edit.row_type.clone(),
                     name: edit.locator.cell_name.clone(),
                     formula: formula.clone(),
                     value: edit.value.clone(),
@@ -2457,6 +2695,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: Some("4".to_owned()),
             }],
@@ -2482,6 +2721,7 @@ mod tests {
                 cell_name: name.to_owned(),
             },
             gesture: MutationGesture::CellEdit,
+            row_type: None,
             formula: Some("9".to_owned()),
             value: None,
         };
@@ -2511,6 +2751,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: None,
             }],
@@ -2532,6 +2773,7 @@ mod tests {
                     cell_name: "Value".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: Some("4".to_owned()),
                 value: None,
             }],
@@ -2560,6 +2802,7 @@ mod tests {
                     cell_name: "Width".to_owned(),
                 },
                 gesture: MutationGesture::CellEdit,
+                row_type: None,
                 formula: None,
                 value: Some("4".to_owned()),
             }],
@@ -2640,6 +2883,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(parse_vsdx(&saved).unwrap().part_bytes(&path).unwrap(), b"<PageContents><Shapes><Shape ID='1'><Section N='User'><Row IX='1'/><Row IX='2'><Cell N='Value' F='4' V='4'/></Row><Row IX='3'/></Section></Shape></Shapes></PageContents>");
+    }
+
+    #[test]
+    fn groups_typed_container_rows_into_one_section() {
+        let source =
+            b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep'/></Shape></Shapes></PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let page_id = package.page_part_ids[&path];
+        let edit = |row: u32, name: &str, row_type: &str| SemanticCellEdit {
+            locator: CellLocator {
+                sheet: CellSheet::Page(page_id),
+                shape_id: Some(1),
+                section: Some("Geometry".to_owned()),
+                section_index: None,
+                row: Some(CellRow::Index(row)),
+                cell_name: name.to_owned(),
+            },
+            gesture: MutationGesture::CellEdit,
+            row_type: Some(row_type.to_owned()),
+            formula: Some("1".to_owned()),
+            value: None,
+        };
+        let saved = save_semantic_cell_edits(
+            &package,
+            &[
+                edit(0, "X", "MoveTo"),
+                edit(0, "Y", "MoveTo"),
+                edit(1, "X", "LineTo"),
+                edit(1, "Y", "LineTo"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            parse_vsdx(&saved).unwrap().part_bytes(&path).unwrap(),
+            b"<PageContents><Shapes><Shape ID='1'><Cell N='Keep'/><Section N='Geometry'><Row IX='0' T='MoveTo'><Cell N='X' F='1'/><Cell N='Y' F='1'/></Row><Row IX='1' T='LineTo'><Cell N='X' F='1'/><Cell N='Y' F='1'/></Row></Section></Shape></Shapes></PageContents>"
+        );
     }
 
     #[test]
@@ -3135,6 +3414,7 @@ mod tests {
                 cell_name: "Value".to_owned(),
             },
             gesture: MutationGesture::CellEdit,
+            row_type: None,
             formula: Some("4".to_owned()),
             value: Some("4".to_owned()),
         }
@@ -3435,6 +3715,7 @@ mod tests {
                 &[SemanticCellEdit {
                     locator,
                     gesture: MutationGesture::CellEdit,
+                    row_type: None,
                     formula: Some("2".to_owned()),
                     value: Some(new_value.to_owned()),
                 }],
@@ -3737,6 +4018,44 @@ mod tests {
             parse_theme(&root, part),
             Err(VsdxError::MalformedXml { message, .. }) if message == "theme is missing themeElements/clrScheme"
         ));
+    }
+
+    #[test]
+    fn parses_theme_shadow_and_variant_effects() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<a:theme xmlns:a='http://schemas.openxmlformats.org/drawingml/2006/main' xmlns:vt='http://schemas.microsoft.com/office/visio/2012/theme'><a:themeElements><a:fmtScheme><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst><a:outerShdw blurRad="38100" dist="25420" dir="5400000"><a:srgbClr val="A5A5A5"><a:alpha val="60000"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle><a:effectStyle><a:effectLst/><a:sp3d/></a:effectStyle></a:effectStyleLst></a:fmtScheme><a:extLst><a:ext><vt:themeScheme><vt:schemeID schemeEnum="34"/></vt:themeScheme></a:ext><a:ext><vt:variationStyleSchemeLst><vt:variationStyleScheme embellishment="2"><vt:varStyle fillIdx="2" lineIdx="2" effectIdx="2" fontIdx="2"/></vt:variationStyleScheme></vt:variationStyleSchemeLst></a:ext><a:ext><vt:variationClrSchemeLst><vt:variationClrScheme><vt:varColor1><a:srgbClr val="268FEE"/></vt:varColor1></vt:variationClrScheme></vt:variationClrSchemeLst></a:ext></a:extLst></a:themeElements></a:theme>"#,
+            "visio/theme/theme1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let effects = parse_theme_effects(&root);
+        assert_eq!(effects.scheme_id, Some(34));
+        assert_eq!(effects.effect_styles.len(), 3);
+        assert_eq!(effects.effect_styles[0].outer_shadow, None);
+        let shadow = effects.effect_styles[1].outer_shadow.as_ref().unwrap();
+        assert_eq!(shadow.blur_emu, 38100);
+        assert_eq!(shadow.dist_emu, 25420);
+        assert_eq!(shadow.direction_60k, 5400000);
+        assert_eq!(shadow.color, ThemeEffectColor::Srgb("A5A5A5".to_owned()));
+        assert_eq!(shadow.alpha_1000pct, Some(60000));
+        assert!(effects.effect_styles[2].has_bevel);
+        assert_eq!(effects.variation_schemes.len(), 1);
+        assert_eq!(effects.variation_schemes[0].embellishment, 2);
+        assert_eq!(effects.variation_schemes[0].effect_indexes, vec![2]);
+        assert_eq!(
+            effects.variation_colors,
+            vec![vec![
+                Some("268FEE".to_owned()),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ]]
+        );
     }
 
     #[test]

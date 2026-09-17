@@ -152,6 +152,7 @@ fn lock_for(gesture: MutationGesture) -> Option<&'static str> {
         MutationGesture::ResizeWidth => Some("LockWidth"),
         MutationGesture::ResizeHeight => Some("LockHeight"),
         MutationGesture::ResizeAspect => Some("LockAspect"),
+        MutationGesture::Rotate => Some("LockRotate"),
         MutationGesture::TextEdit => Some("LockTextEdit"),
         MutationGesture::Format => Some("LockFormat"),
         MutationGesture::Delete => Some("LockDelete"),
@@ -165,6 +166,7 @@ fn gesture_name(gesture: MutationGesture) -> &'static str {
         MutationGesture::ResizeWidth
         | MutationGesture::ResizeHeight
         | MutationGesture::ResizeAspect => "resize",
+        MutationGesture::Rotate => "rotate",
         MutationGesture::TextEdit => "text-edit",
         MutationGesture::Format => "format",
         MutationGesture::Delete => "delete",
@@ -239,6 +241,7 @@ mod tests {
             ("LockMoveX", MutationGesture::MoveX),
             ("LockMoveY", MutationGesture::MoveY),
             ("LockAspect", MutationGesture::ResizeAspect),
+            ("LockRotate", MutationGesture::Rotate),
             ("LockTextEdit", MutationGesture::TextEdit),
             ("LockFormat", MutationGesture::Format),
         ] {

@@ -5,9 +5,15 @@ mod layout;
 mod line_jumps;
 mod paint;
 mod pdf;
+mod shadow;
+mod svg;
+mod vector;
 
 pub use display_list::*;
 pub use layout::{PIXELS_PER_INCH, final_paint_transform, to_canvas, to_canvas_length};
+pub use vector::{
+    LinearGradient, TextFragment, collect_ordered, linear_gradient, text_fragments, z_order,
+};
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -471,6 +477,8 @@ impl Default for RenderLimits {
 pub enum RenderError {
     #[error("page not found: {0}")]
     MissingPage(String),
+    #[error("master not found: {0}")]
+    MissingMaster(u32),
     #[error("render budget exceeded: {0}")]
     Budget(&'static str),
     #[error("invalid font: {0}")]
@@ -556,6 +564,14 @@ impl Renderer {
         self.registered_fonts.insert(key, id);
         Ok(())
     }
+    /// The faces layout measured with, for backends that also paint glyphs.
+    pub fn fonts(&self) -> &ooxml_text::FontStore {
+        &self.fonts
+    }
+    /// The face layout measured `family` with, after style and generic fallback.
+    pub fn font_id(&self, family: &str, bold: bool, italic: bool) -> Option<ooxml_text::FontId> {
+        self.font_for(family, bold, italic)
+    }
     pub fn layout_page(
         &self,
         package: &VsdxPackage,
@@ -594,6 +610,7 @@ impl Renderer {
                 "dimensions must be positive finite canvas values".into(),
             ));
         }
+        let print_tile = print_tile_inches(&resolver, package, page_part, page_width, page_height);
         let mut state = State {
             count: 0,
             z_order: 0,
@@ -603,9 +620,15 @@ impl Renderer {
             text_runs: 0,
             primitives: Vec::new(),
             jump_overrides: Vec::new(),
+            connectors: Vec::new(),
         };
         let mut cache = LayoutCache::default();
         let layers = self.effective_page_layers(package, page_part);
+        let page_shadow = shadow::page_shadow(&resolver, package, page_part);
+        let context = shadow::ShadowContext {
+            page: &page_shadow,
+            parent_show: None,
+        };
         for shape in page.shapes() {
             self.layout_shape(
                 package,
@@ -619,6 +642,7 @@ impl Renderer {
                 shape,
                 0,
                 (false, false),
+                &context,
                 &mut state,
                 &mut cache,
             )?;
@@ -628,12 +652,113 @@ impl Renderer {
             &state.jump_overrides,
             &line_jumps::page_jump_settings(package, &resolver, page_part),
         );
+        self.finish_display_list(state, page_width, page_height, print_tile)
+    }
+    /// Renders one document master for stencil previews, resolving its
+    /// shapes through the same master and style chains as pages.
+    pub fn layout_master(
+        &self,
+        package: &VsdxPackage,
+        master_id: u32,
+    ) -> Result<VsdxDisplayList, RenderError> {
+        let part = package
+            .master_part_ids
+            .iter()
+            .find_map(|(path, id)| (*id == master_id).then_some(path))
+            .ok_or(RenderError::MissingMaster(master_id))?;
+        let sheet = package
+            .master_contents
+            .get(part)
+            .ok_or(RenderError::MissingMaster(master_id))?;
+        let resolver = Resolver::new(package);
+        let mut shapes = BTreeMap::new();
+        for shape in sheet.shapes() {
+            resolve_master_shape_tree(&resolver, sheet, shape, &mut shapes)?;
+        }
+        let connectivity = vsdx_resolve::PageConnectivity::default();
+        let transforms = vsdx_resolve::scene_transforms(sheet, &shapes, |id, shape, name| {
+            evaluated(package, None, shape, id, name)
+        });
+        let sheet_dims = package.master_sheets.get(&master_id);
+        let master_width =
+            sheet_dims.and_then(|sheet| master_dimension(&resolver, package, sheet, "PageWidth"));
+        let master_height =
+            sheet_dims.and_then(|sheet| master_dimension(&resolver, package, sheet, "PageHeight"));
+        let (Some(master_width), Some(master_height)) = (master_width, master_height) else {
+            return Err(RenderError::PageDimensions(
+                "master dimensions are unavailable".into(),
+            ));
+        };
+        if master_width <= 0.0
+            || master_height <= 0.0
+            || !(master_width as f32).is_finite()
+            || !(master_height as f32).is_finite()
+            || !(master_width as f32 * PIXELS_PER_INCH).is_finite()
+            || !(master_height as f32 * PIXELS_PER_INCH).is_finite()
+        {
+            return Err(RenderError::PageDimensions(
+                "dimensions must be positive finite canvas values".into(),
+            ));
+        }
+        let mut state = State {
+            count: 0,
+            z_order: 0,
+            text_bytes: 0,
+            text_paragraphs: 0,
+            text_lines: 0,
+            text_runs: 0,
+            primitives: Vec::new(),
+            jump_overrides: Vec::new(),
+            connectors: Vec::new(),
+        };
+        let mut cache = LayoutCache::default();
+        let layers: &[vsdx_resolve::PageLayer] = &[];
+        let master_shadow = shadow::PageShadow::default();
+        let context = shadow::ShadowContext {
+            page: &master_shadow,
+            parent_show: None,
+        };
+        for shape in sheet.shapes() {
+            self.layout_shape(
+                package,
+                &resolver,
+                &connectivity,
+                None,
+                &shapes,
+                &transforms,
+                layers,
+                part,
+                shape,
+                0,
+                (false, false),
+                &context,
+                &mut state,
+                &mut cache,
+            )?;
+        }
+        self.finish_display_list(
+            state,
+            master_width,
+            master_height,
+            (master_width, master_height),
+        )
+    }
+    fn finish_display_list(
+        &self,
+        state: State,
+        width: f64,
+        height: f64,
+        print_tile: (f64, f64),
+    ) -> Result<VsdxDisplayList, RenderError> {
         let list = VsdxDisplayList {
             contract_version: CONTRACT_VERSION,
-            width: page_width as f32 * PIXELS_PER_INCH,
-            height: page_height as f32 * PIXELS_PER_INCH,
-            paint_transform: final_paint_transform(page_height as f32),
+            width: width as f32 * PIXELS_PER_INCH,
+            height: height as f32 * PIXELS_PER_INCH,
+            print_width: print_tile.0 as f32 * PIXELS_PER_INCH,
+            print_height: print_tile.1 as f32 * PIXELS_PER_INCH,
+            paint_transform: final_paint_transform(height as f32),
             primitives: state.primitives,
+            connectors: state.connectors,
         };
         if !display_list_finite(&list) {
             return Err(RenderError::PageDimensions(
@@ -661,6 +786,7 @@ impl Renderer {
         shape: &Shape,
         depth: usize,
         flips: (bool, bool),
+        context: &shadow::ShadowContext<'_>,
         state: &mut State,
         cache: &mut LayoutCache,
     ) -> Result<(), RenderError> {
@@ -745,6 +871,7 @@ impl Renderer {
                 z_order,
                 resolved,
                 &sections,
+                context,
                 state,
                 transforms,
             );
@@ -783,6 +910,10 @@ impl Renderer {
         if !child_shapes.is_empty() {
             let group_transform = affine(transform.local);
             let start = state.primitives.len();
+            let child_context = shadow::ShadowContext {
+                page: context.page,
+                parent_show: Some(shadow::show_value(package, references, resolved, shape.id)),
+            };
             for child in child_shapes {
                 self.layout_shape(
                     package,
@@ -796,6 +927,7 @@ impl Renderer {
                     child,
                     depth + 1,
                     flips,
+                    &child_context,
                     state,
                     cache,
                 )?;
@@ -915,7 +1047,9 @@ impl Renderer {
             needs_fill,
             needs_stroke,
         );
+        let shade = shadow::resolve(package, references, resolved, shape.id, context);
         let mut diagnostics = outcome.diagnostics;
+        diagnostics.extend(shade.diagnostics);
         for (controls, path) in paths {
             state.primitives.push(Primitive::Shape {
                 id: id.clone(),
@@ -931,6 +1065,7 @@ impl Renderer {
                 } else {
                     outcome.stroke.clone()
                 },
+                shadow: shade.shadow.clone(),
                 transform: Affine::identity(),
                 diagnostics: std::mem::take(&mut diagnostics),
             });
@@ -972,6 +1107,7 @@ impl Renderer {
         z_order: u32,
         resolved: &ResolvedShape,
         sections: &[&vsdx_resolve::ResolvedSection],
+        context: &shadow::ShadowContext<'_>,
         state: &mut State,
         transforms: &BTreeMap<u32, SceneTransform>,
     ) -> Result<(), RenderError> {
@@ -1044,24 +1180,34 @@ impl Renderer {
             package, references, resolved, shape.id, transforms, begin, end,
         )
         .unwrap_or_else(|| connector_route(begin, end, style));
+        let shade = shadow::resolve(package, references, resolved, shape.id, context);
+        let mut diagnostics = outcome.diagnostics;
+        diagnostics.extend(shade.diagnostics);
         state.primitives.push(Primitive::Shape {
             id: id.clone(),
             z_order,
             path,
             fill: outcome.fill,
             stroke: outcome.stroke,
+            shadow: shade.shadow,
             transform: Affine::identity(),
-            diagnostics: outcome.diagnostics,
+            diagnostics,
         });
         state
             .jump_overrides
             .push(line_jumps::ConnectorJumpOverride {
-                id,
+                id: id.clone(),
                 code: line_jumps::connector_override(package, resolved, "ConLineJumpCode"),
                 style: line_jumps::connector_override(package, resolved, "ConLineJumpStyle"),
                 dir_x: line_jumps::connector_override(package, resolved, "ConLineJumpDirX"),
                 dir_y: line_jumps::connector_override(package, resolved, "ConLineJumpDirY"),
             });
+        state.connectors.push(ConnectorChrome {
+            id,
+            begin: connector_glue(connector, vsdx_resolve::ConnectorEndpoint::Begin),
+            end: connector_glue(connector, vsdx_resolve::ConnectorEndpoint::End),
+            routable: connector_routable(package, references, resolved, shape.id, transforms),
+        });
         Ok(())
     }
     #[allow(clippy::too_many_arguments)]
@@ -1088,6 +1234,7 @@ impl Renderer {
         let lookup = package
             .page_contents
             .get(page_part)
+            .or_else(|| package.master_contents.get(page_part))
             .ok_or_else(|| RenderError::MissingPage(page_part.into()))?;
         let tokens = resolver.resolve_text_in_context(shape, lookup, resolved)?;
         let mut paragraphs =
@@ -1606,6 +1753,7 @@ struct State {
     text_runs: usize,
     primitives: Vec<Primitive>,
     jump_overrides: Vec<line_jumps::ConnectorJumpOverride>,
+    connectors: Vec<ConnectorChrome>,
 }
 impl State {
     fn next_z(&mut self) -> u32 {
@@ -1665,6 +1813,39 @@ fn connector_route_style(
         return style;
     }
     page_dimension(resolver, package, page_part, "RouteStyle").unwrap_or(0.0)
+}
+/// Free when unglued, point when tied to a connection row, shape otherwise.
+fn connector_glue(
+    connector: &vsdx_resolve::ResolvedConnector,
+    endpoint: vsdx_resolve::ConnectorEndpoint,
+) -> ConnectorEndpointGlue {
+    match connector.glue.iter().find(|glue| glue.endpoint == endpoint) {
+        Some(glue)
+            if glue
+                .to
+                .as_ref()
+                .is_some_and(|target| target.connection_point.is_some()) =>
+        {
+            ConnectorEndpointGlue::Point
+        }
+        Some(glue) if glue.to.is_some() => ConnectorEndpointGlue::Shape,
+        _ => ConnectorEndpointGlue::Free,
+    }
+}
+/// Whether a route filed on this connector would come back out of `connector_geometry`.
+fn connector_routable(
+    package: &VsdxPackage,
+    references: Option<&PageShapeReferences>,
+    resolved: &ResolvedShape,
+    shape_id: u32,
+    transforms: &BTreeMap<u32, SceneTransform>,
+) -> bool {
+    transforms.contains_key(&shape_id)
+        && bounds(package, references, resolved, shape_id).is_some_and(|size| {
+            [size.width, size.height].into_iter().all(f64::is_finite)
+                && size.width != 0.0
+                && size.height != 0.0
+        })
 }
 /// Filed connector waypoints in scene space, or nothing when the file route is unusable.
 fn connector_geometry(
@@ -1755,6 +1936,49 @@ fn bounds_finite(bounds: Bounds) -> bool {
     .into_iter()
     .all(|value| value.is_finite() && (value as f32).is_finite())
 }
+fn resolve_master_shape_tree(
+    resolver: &Resolver<'_>,
+    sheet: &vsdx_parse::Sheet,
+    shape: &Shape,
+    shapes: &mut BTreeMap<u32, ResolvedShape>,
+) -> Result<(), RenderError> {
+    shapes.insert(shape.id, resolver.resolve_shape_in_sheet(shape, sheet)?);
+    for child in shape.shapes() {
+        resolve_master_shape_tree(resolver, sheet, child, shapes)?;
+    }
+    Ok(())
+}
+fn master_dimension(
+    resolver: &Resolver<'_>,
+    package: &VsdxPackage,
+    sheet: &vsdx_parse::Sheet,
+    name: &str,
+) -> Option<f64> {
+    let resolved = resolver.resolve_sheet(sheet).ok()?;
+    let Lookup::Found(cell) = resolved.cell(name)? else {
+        return None;
+    };
+    if let Some(formula) = cell.cell.formula.as_deref()
+        && let Evaluation::Evaluated(result) = evaluate_cell_with_shape_package_theme(
+            name,
+            formula,
+            &resolved,
+            &ParseLimits::default(),
+            &resolved,
+            package,
+        )
+        && let Value::Number(number) = result.value
+        && number.number.is_finite()
+    {
+        return Some(number.number);
+    }
+    cell.cell
+        .value
+        .as_deref()?
+        .parse()
+        .ok()
+        .filter(|value: &f64| value.is_finite())
+}
 fn page_dimension(
     resolver: &Resolver<'_>,
     package: &VsdxPackage,
@@ -1787,6 +2011,90 @@ fn page_dimension(
         .parse()
         .ok()
         .filter(|value: &f64| value.is_finite())
+}
+/// Printer paper in inches, keyed by the Windows `DMPAPER` value the `PaperKind` cell carries.
+const PAPER_KIND_INCHES: &[(u32, f64, f64)] = &[
+    (1, 8.5, 11.0),
+    (2, 8.5, 11.0),
+    (3, 11.0, 17.0),
+    (4, 17.0, 11.0),
+    (5, 8.5, 14.0),
+    (6, 5.5, 8.5),
+    (7, 7.25, 10.5),
+    (8, 11.69291, 16.53543),
+    (9, 8.26772, 11.69291),
+    (10, 8.26772, 11.69291),
+    (11, 5.82677, 8.26772),
+    (12, 9.84252, 13.93701),
+    (13, 7.16535, 10.11811),
+    (14, 8.5, 13.0),
+    (15, 8.46457, 10.82677),
+    (16, 10.0, 14.0),
+    (17, 11.0, 17.0),
+    (18, 8.5, 11.0),
+    (24, 17.0, 22.0),
+    (25, 22.0, 34.0),
+    (26, 34.0, 44.0),
+    (66, 16.53543, 23.38583),
+];
+fn paper_inches(kind: f64) -> Option<(f64, f64)> {
+    let kind = kind.round() as u32;
+    PAPER_KIND_INCHES
+        .iter()
+        .find(|(value, _, _)| *value == kind)
+        .map(|(_, width, height)| (*width, *height))
+}
+/// Drawing units per printed inch: the page's `PageScale`:`DrawingScale` ratio, 1 when unscaled.
+fn drawing_scale(resolver: &Resolver<'_>, package: &VsdxPackage, page: &str) -> f64 {
+    let positive =
+        |name: &str| page_dimension(resolver, package, page, name).filter(|value| *value > 0.0);
+    match (positive("PageScale"), positive("DrawingScale")) {
+        (Some(page_unit), Some(drawing_unit)) => drawing_unit / page_unit,
+        _ => 1.0,
+    }
+}
+/// One sheet of printer paper in drawing units: `PaperKind` less the print margins, at the page's
+/// drawing scale. Paper follows the page's own aspect unless `PrintPageOrientation` states one, and
+/// a page whose file names no paper falls back to its own extent, which is one sheet.
+fn print_tile_inches(
+    resolver: &Resolver<'_>,
+    package: &VsdxPackage,
+    page: &str,
+    page_width: f64,
+    page_height: f64,
+) -> (f64, f64) {
+    let Some(paper) = page_dimension(resolver, package, page, "PaperKind").and_then(paper_inches)
+    else {
+        return (page_width, page_height);
+    };
+    let landscape =
+        match page_dimension(resolver, package, page, "PrintPageOrientation").map(f64::round) {
+            Some(1.0) => false,
+            Some(2.0) => true,
+            _ => page_width > page_height,
+        };
+    let (paper_width, paper_height) = if landscape { (paper.1, paper.0) } else { paper };
+    let margin = |name: &str| {
+        page_dimension(resolver, package, page, name)
+            .filter(|value| *value >= 0.0)
+            .unwrap_or(0.0)
+    };
+    let printable_axis = |paper: f64, near: &str, far: &str| {
+        let inked = paper - margin(near) - margin(far);
+        if inked > 0.0 { inked } else { paper }
+    };
+    let printable = (
+        printable_axis(paper_width, "PageLeftMargin", "PageRightMargin"),
+        printable_axis(paper_height, "PageTopMargin", "PageBottomMargin"),
+    );
+    let scale = drawing_scale(resolver, package, page);
+    let tile = (printable.0 * scale, printable.1 * scale);
+    let usable = |value: f64| value > 0.0 && (value as f32 * PIXELS_PER_INCH).is_finite();
+    if usable(tile.0) && usable(tile.1) {
+        tile
+    } else {
+        (page_width, page_height)
+    }
 }
 fn bounds(
     package: &VsdxPackage,
@@ -1845,6 +2153,8 @@ fn evaluated(
 fn display_list_finite(list: &VsdxDisplayList) -> bool {
     list.width.is_finite()
         && list.height.is_finite()
+        && list.print_width.is_finite()
+        && list.print_height.is_finite()
         && [
             list.paint_transform.a,
             list.paint_transform.b,
@@ -1864,6 +2174,7 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
             transform,
             fill,
             stroke,
+            shadow,
             ..
         } => {
             transform.is_finite()
@@ -1872,6 +2183,11 @@ fn primitives_finite(primitives: &[Primitive]) -> bool {
                 && stroke
                     .as_ref()
                     .is_none_or(|stroke| stroke.width.is_finite())
+                && shadow.as_ref().is_none_or(|shadow| {
+                    [shadow.blur_in, shadow.offset_x_in, shadow.offset_y_in]
+                        .into_iter()
+                        .all(f32::is_finite)
+                })
         }
         Primitive::Image {
             x,
@@ -2057,16 +2373,6 @@ pub fn hit_test(list: &VsdxDisplayList, x: f32, y: f32) -> Option<HitTestResult>
         }
     }
     None
-}
-
-fn z_order(primitive: &Primitive) -> u32 {
-    match primitive {
-        Primitive::Shape { z_order, .. }
-        | Primitive::Image { z_order, .. }
-        | Primitive::TextBox { z_order, .. }
-        | Primitive::Placeholder { z_order, .. }
-        | Primitive::Group { z_order, .. } => *z_order,
-    }
 }
 
 fn text_caret_at(
@@ -2580,6 +2886,7 @@ mod tests {
     mod gradient_fill;
     mod layers;
     mod section_controls;
+    mod shadow;
 
     #[test]
     fn hit_testing_does_not_bridge_separate_subpaths() {
@@ -2628,6 +2935,116 @@ mod tests {
     fn render(shapes: Vec<Shape>) -> VsdxDisplayList {
         let package = package(shapes);
         Renderer::default().layout_page(&package, "page").unwrap()
+    }
+
+    fn print_sheet_sized(width: &str, height: &str, cells: Vec<(&str, &str)>) -> VsdxDisplayList {
+        let mut laid = package(vec![]);
+        let sheet = laid.page_sheets.get_mut(&1).unwrap();
+        sheet.children = vec![
+            SheetChild::Cell(cell("PageWidth", width)),
+            SheetChild::Cell(cell("PageHeight", height)),
+        ];
+        sheet.children.extend(
+            cells
+                .into_iter()
+                .map(|(name, value)| SheetChild::Cell(cell(name, value))),
+        );
+        Renderer::default().layout_page(&laid, "page").unwrap()
+    }
+
+    fn print_sheet(cells: Vec<(&str, &str)>) -> VsdxDisplayList {
+        print_sheet_sized("8.5", "11", cells)
+    }
+
+    #[test]
+    fn print_tile_defaults_to_the_page_extent() {
+        let list = print_sheet(vec![]);
+        assert_eq!(list.print_width, list.width);
+        assert_eq!(list.print_height, list.height);
+    }
+
+    #[test]
+    fn print_tile_uses_the_named_paper_kind() {
+        let list = print_sheet(vec![("PaperKind", "9")]);
+        assert_eq!(list.print_width, 8.26772 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, 11.69291 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_ignores_an_unknown_paper_kind() {
+        let list = print_sheet(vec![("PaperKind", "999")]);
+        assert_eq!(list.print_width, list.width);
+        assert_eq!(list.print_height, list.height);
+    }
+
+    #[test]
+    fn print_tile_follows_a_stated_print_orientation() {
+        let landscape = print_sheet(vec![("PaperKind", "1"), ("PrintPageOrientation", "2")]);
+        assert_eq!(landscape.print_width, 11.0 * PIXELS_PER_INCH);
+        assert_eq!(landscape.print_height, 8.5 * PIXELS_PER_INCH);
+        let portrait = print_sheet_sized(
+            "14",
+            "11",
+            vec![("PaperKind", "1"), ("PrintPageOrientation", "1")],
+        );
+        assert_eq!(portrait.print_width, 8.5 * PIXELS_PER_INCH);
+        assert_eq!(portrait.print_height, 11.0 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_follows_the_page_aspect_when_no_orientation_is_stated() {
+        let wide = print_sheet_sized("14", "11", vec![("PaperKind", "1")]);
+        assert_eq!(wide.print_width, 11.0 * PIXELS_PER_INCH);
+        assert_eq!(wide.print_height, 8.5 * PIXELS_PER_INCH);
+        let tall = print_sheet_sized("11", "14", vec![("PaperKind", "1")]);
+        assert_eq!(tall.print_width, 8.5 * PIXELS_PER_INCH);
+        assert_eq!(tall.print_height, 11.0 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_subtracts_print_margins() {
+        let list = print_sheet(vec![
+            ("PaperKind", "1"),
+            ("PageLeftMargin", "0.25"),
+            ("PageRightMargin", "0.25"),
+            ("PageTopMargin", "0.25"),
+            ("PageBottomMargin", "0.25"),
+        ]);
+        assert_eq!(list.print_width, 8.0 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, 10.5 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_ignores_degenerate_margins_one_axis_at_a_time() {
+        let both = print_sheet(vec![
+            ("PaperKind", "1"),
+            ("PageLeftMargin", "99"),
+            ("PageRightMargin", "99"),
+            ("PageTopMargin", "99"),
+            ("PageBottomMargin", "99"),
+        ]);
+        assert_eq!(both.print_width, 8.5 * PIXELS_PER_INCH);
+        assert_eq!(both.print_height, 11.0 * PIXELS_PER_INCH);
+        let wide_only = print_sheet(vec![
+            ("PaperKind", "1"),
+            ("PageLeftMargin", "99"),
+            ("PageRightMargin", "99"),
+            ("PageTopMargin", "0.25"),
+            ("PageBottomMargin", "0.25"),
+        ]);
+        assert_eq!(wide_only.print_width, 8.5 * PIXELS_PER_INCH);
+        assert_eq!(wide_only.print_height, 10.5 * PIXELS_PER_INCH);
+    }
+
+    #[test]
+    fn print_tile_follows_the_drawing_scale() {
+        let list = print_sheet(vec![
+            ("PaperKind", "1"),
+            ("PageScale", "1"),
+            ("DrawingScale", "24"),
+        ]);
+        assert_eq!(list.print_width, 204.0 * PIXELS_PER_INCH);
+        assert_eq!(list.print_height, 264.0 * PIXELS_PER_INCH);
     }
 
     fn glued_connector_package(to_cell: &str) -> VsdxPackage {
@@ -2958,6 +3375,25 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(ids, vec!["page:1".to_owned(), "page:2".to_owned()]);
+    }
+
+    #[test]
+    fn layout_master_renders_inherited_geometry_for_stencil_previews() {
+        let bytes = include_bytes!("../../vsdx-parse/tests/fixtures/document-stencil.vsdx");
+        let package = vsdx_parse::parse_vsdx(bytes).unwrap();
+        let renderer = Renderer::default();
+        let list = renderer.layout_master(&package, 1).unwrap();
+        assert_eq!(list.contract_version, super::CONTRACT_VERSION);
+        let shapes = list
+            .primitives
+            .iter()
+            .filter(|primitive| matches!(primitive, Primitive::Shape { .. }))
+            .count();
+        assert_eq!(shapes, 1);
+        assert!(matches!(
+            renderer.layout_master(&package, 999),
+            Err(RenderError::MissingMaster(999))
+        ));
     }
 
     #[test]
@@ -4041,7 +4477,10 @@ mod tests {
             contract_version: CONTRACT_VERSION,
             width: 100.0,
             height: 100.0,
+            print_width: 100.0,
+            print_height: 100.0,
             paint_transform: final_paint_transform(1.0),
+            connectors: Vec::new(),
             primitives: vec![
                 Primitive::Shape {
                     id: "bottom".into(),
@@ -4056,6 +4495,7 @@ mod tests {
                         color: "#000".into(),
                     }),
                     stroke: None,
+                    shadow: None,
                     transform: Affine::identity(),
                     diagnostics: Vec::new(),
                 },
@@ -4072,6 +4512,7 @@ mod tests {
                         color: "#000".into(),
                     }),
                     stroke: None,
+                    shadow: None,
                     transform: Affine::identity(),
                     diagnostics: Vec::new(),
                 },
@@ -4118,6 +4559,7 @@ mod tests {
                         color: "#000".into(),
                     }),
                     stroke: None,
+                    shadow: None,
                     transform: Affine::identity(),
                     diagnostics: Vec::new(),
                 },
@@ -4134,6 +4576,7 @@ mod tests {
                         width: 0.2,
                         dashed: false,
                     }),
+                    shadow: None,
                     transform: Affine::identity(),
                     diagnostics: Vec::new(),
                 },
@@ -4793,6 +5236,74 @@ mod tests {
         );
     }
 
+    #[test]
+    fn connector_chrome_reports_free_endpoints() {
+        let list = render(vec![unglued_connector(None)]);
+        assert_eq!(
+            list.connectors,
+            vec![ConnectorChrome {
+                id: "page:1".into(),
+                begin: ConnectorEndpointGlue::Free,
+                end: ConnectorEndpointGlue::Free,
+                routable: true,
+            }]
+        );
+    }
+
+    /// A connector drafted without transform cells paints, but a filed route would be dropped.
+    #[test]
+    fn connector_chrome_marks_a_frameless_connector_unroutable() {
+        let mut connector = unglued_connector(None);
+        connector.children.retain(|child| {
+            !matches!(child, ShapeChild::Cell(Cell { name, .. })
+                if matches!(name.as_str(), "Width" | "Height" | "PinX" | "PinY"))
+        });
+        let list = render(vec![connector]);
+        assert_eq!(list.connectors.len(), 1);
+        assert!(!list.connectors[0].routable);
+    }
+
+    #[test]
+    fn connector_chrome_marks_a_connection_point_begin() {
+        let package = glued_connector_package("Connections.X1");
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert_eq!(
+            list.connectors,
+            vec![ConnectorChrome {
+                id: "page:1".into(),
+                begin: ConnectorEndpointGlue::Point,
+                end: ConnectorEndpointGlue::Free,
+                routable: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn connector_chrome_omits_placeholders() {
+        let package = glued_connector_package("Connections.X9");
+        let list = Renderer::default().layout_page(&package, "page").unwrap();
+        assert!(list.connectors.is_empty());
+    }
+
+    #[test]
+    fn connector_chrome_survives_a_wire_round_trip() {
+        let list = render(vec![unglued_connector(None)]);
+        let decoded: VsdxDisplayList =
+            serde_json::from_str(&serde_json::to_string(&list).unwrap()).unwrap();
+        assert_eq!(decoded.connectors, list.connectors);
+        let legacy = serde_json::json!({
+            "contractVersion": CONTRACT_VERSION,
+            "width": 0.0,
+            "height": 0.0,
+            "printWidth": 0.0,
+            "printHeight": 0.0,
+            "paintTransform": { "a": 1.0, "b": 0.0, "c": 0.0, "d": 1.0, "e": 0.0, "f": 0.0 },
+            "primitives": [],
+        });
+        let decoded: VsdxDisplayList = serde_json::from_value(legacy).unwrap();
+        assert!(decoded.connectors.is_empty());
+    }
+
     fn route_fixture_path(page: &str) -> Vec<GeometryPathCommand> {
         let source = include_bytes!("../../vsdx-parse/tests/fixtures/connector-route-style.vsdx");
         let package = vsdx_parse::parse_vsdx(source).unwrap();
@@ -5285,8 +5796,11 @@ mod tests {
             contract_version: CONTRACT_VERSION + 1,
             width: 0.0,
             height: 0.0,
+            print_width: 0.0,
+            print_height: 0.0,
             paint_transform: final_paint_transform(0.0),
             primitives: vec![],
+            connectors: Vec::new(),
         };
         assert!(list.validate().is_err());
     }
@@ -5893,6 +6407,8 @@ mod tests {
                 contract_version: CONTRACT_VERSION,
                 width: 0.0,
                 height: 0.0,
+                print_width: 0.0,
+                print_height: 0.0,
                 paint_transform: final_paint_transform(0.0),
                 primitives: vec![Primitive::TextBox {
                     id: "fixture".into(),
@@ -5905,6 +6421,7 @@ mod tests {
                     lines: Vec::new(),
                     transform: Affine::identity(),
                 }],
+                connectors: Vec::new(),
             },
             expected,
         )
