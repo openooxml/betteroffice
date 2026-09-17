@@ -2,7 +2,7 @@
   "name": "@betteroffice/vsdx-react",
   "version": "0.0.3",
   "private": true,
-  "description": "React VSDX editor for @betteroffice/vsdx: a tabbed ribbon, a searchable standard-shape gallery, a page tab strip and a zoom status bar over move, Shift-drag to resize, add, delete, set fill or line colour, and save, with right-click context menus for shape and canvas actions. It has no resize-handle or connector-drag UI.",
+  "description": "React VSDX editor for @betteroffice/vsdx: a tabbed ribbon, searchable standard-shape and arrow galleries across two switchable stencils, a page tab strip and a zoom status bar over move, resize and rotate with the selection handles, add, delete, edit text in place, set fill or line colour, draw orthogonal connectors that glue to shapes from the Insert tab, the AutoConnect arrows, or a hover connection point, and save, with right-click context menus for shape and canvas actions.",
   "type": "module",
   "sideEffects": false,
   "main": "./dist/index.js",

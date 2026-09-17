@@ -4,11 +4,13 @@ import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CollaborationProvider, initWasm, openDiagram, type CollaborationUser, type VsdxFontFace } from "@betteroffice/vsdx";
+import type { VsdxEditorApi } from "@betteroffice/vsdx-react";
 import { loadBundledFontBytes, resolveLastResortFace, resolveMetricCompatFace } from "@betteroffice/fonts";
 import { Logo } from "../components/Logo";
 import { CollaborationControls, COLLAB_RELAY_ORIGIN, useCollabRoom, useDemoRoom, useLeaveRoom, type CollaborationReplica, type CollaborationTransport } from "../collab";
 import { planDemoSession } from "../../lib/demoSession";
 import { readLocalDiagram } from "../../lib/localDiagram";
+import { clearVsdxApi, exposeVsdxApi, shouldExposeVsdxApi } from "./vsdxApiExposure";
 
 const VsdxEditor = dynamic(
   () => import("@betteroffice/vsdx-react").then((module) => module.VsdxEditor),
@@ -42,6 +44,16 @@ export function VsdxDemoClient() {
   const leaveRoom = useLeaveRoom();
   const createProvider = useCallback((replica: CollaborationReplica, transport: CollaborationTransport) => new CollaborationProvider(replica, transport, { user: { name: presenceName() } }), []);
   const collab = useCollabRoom(COLLAB_RELAY_ORIGIN, room, createProvider);
+  const readyApiRef = useRef<VsdxEditorApi | null>(null);
+  const handleReady = useCallback((api: VsdxEditorApi) => {
+    readyApiRef.current = api;
+    if (shouldExposeVsdxApi(window.location.search)) exposeVsdxApi(window, api);
+  }, []);
+  useEffect(() => () => {
+    const api = readyApiRef.current;
+    readyApiRef.current = null;
+    if (api) clearVsdxApi(window, api);
+  }, [room, source?.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -164,7 +176,7 @@ export function VsdxDemoClient() {
         }}
         onDrop={onDrop}
       >
-        {loadError ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {loadError}</p> : source && fonts && session.status !== "loading" ? <VsdxEditor key={`${room ?? "private"}:${source.id}`} file={source.file} fonts={fonts} collaboration={collaboration} /> : <p className="m-auto text-mute">Loading diagram…</p>}
+        {loadError ? <p className="m-auto text-mute" role="alert">Failed to load the demo diagram: {loadError}</p> : source && fonts && session.status !== "loading" ? <VsdxEditor key={`${room ?? "private"}:${source.id}`} file={source.file} fonts={fonts} collaboration={collaboration} onReady={handleReady} /> : <p className="m-auto text-mute">Loading diagram…</p>}
         {dragging && (
           <div className="pointer-events-none absolute inset-0 z-10 grid place-items-center bg-white/70 p-8" role="status">
             <div className="grid w-[min(440px,100%)] place-items-center rounded-md border-2 border-dashed border-acc bg-white px-8 py-10 text-center">

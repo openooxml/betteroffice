@@ -33,7 +33,7 @@ function Host({ diagram, position, closed, focusTarget }: { diagram: DiagramHand
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
-    <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}>
+    <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={[]} onMutation={() => {}} onError={() => {}} onDownload={() => {}}>
       <CanvasContextMenu t={createT(en)} position={position} onClose={() => { closed.push('close'); setOpen(false); }} onCloseAndFocus={() => { closed.push('focus'); setOpen(false); focusTarget?.focus(); }} />
     </RibbonCommandsProvider>
   );

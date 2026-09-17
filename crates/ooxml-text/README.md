@@ -25,8 +25,9 @@ native shells.
 
 No `wasm-bindgen` here by design; a thin facade can wrap it.
 
-Snap-to-grid (`w:docGrid`) rounds line heights up to the section grid pitch
-(`snap_line_height`) when the host supplies an activating pitch, honouring
-paragraph/run `w:snapToGrid` opt-outs.
+Snap-to-grid (`w:docGrid`) fills a line's content box up to one section
+grid row (`snap_line_box`) when the host supplies an activating pitch, so
+the `auto` multiple scales the filled pitch; paragraph/run `w:snapToGrid`
+opt-outs are honoured.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

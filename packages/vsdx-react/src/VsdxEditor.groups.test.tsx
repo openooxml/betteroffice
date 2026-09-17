@@ -74,7 +74,9 @@ async function clickInsideTheGroup() {
   const hit = handle.hitTest(INSIDE_CHILD.x, INSIDE_CHILD.y);
   const child = bounds(childPoints(handle.layoutPage(0).primitives));
   await act(async () => { ready!.refresh(); });
-  const canvases = view.container.querySelectorAll('canvas');
+  fireEvent.click(view.getByRole('tab', { name: en.ribbon.tabs.view }));
+  fireEvent.click(view.container.querySelector('[data-view-toggle="grid"]') as HTMLElement);
+  const canvases = drawingCanvases(view.container);
   const main = canvases[0] as HTMLCanvasElement;
   const overlay = canvases[1] as HTMLCanvasElement;
   main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 816, height: 1056, right: 816, bottom: 1056, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
@@ -88,6 +90,12 @@ async function clickInsideTheGroup() {
   fireEvent.pointerUp(main, { pointerId: 1, clientX: INSIDE_CHILD.x, clientY: INSIDE_CHILD.y });
   await act(async () => { await new Promise((settle) => setTimeout(settle, 20)); });
   return { handle, main, calls, hit, child, restore: () => { cleanup(); canvasPrototype.getContext = getContext; } };
+}
+
+/** The drawing canvas, which the rulers precede in DOM order, and its overlay. */
+function drawingCanvases(container: HTMLElement): [HTMLCanvasElement, HTMLCanvasElement] {
+  const drawing = container.querySelector<HTMLCanvasElement>('canvas[aria-label]')!;
+  return [drawing, drawing.parentElement!.querySelector<HTMLCanvasElement>('canvas[aria-hidden]')!];
 }
 
 test('a click inside a group selects the group and frames it where the group is drawn', async () => {
@@ -114,11 +122,11 @@ test('an arrow-key nudge moves the selected group in page space', async () => {
     const groupBefore = pin(handle, GROUP_ID, 'PinY');
     const childBefore = pin(handle, CHILD_ID, 'PinY');
     await act(async () => { fireEvent.keyDown(main, { key: 'ArrowUp' }); });
-    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(1 / 96, 6);
+    expect(pin(handle, GROUP_ID, 'PinY') - groupBefore).toBeCloseTo(1 / 16, 6);
     expect(pin(handle, CHILD_ID, 'PinY')).toBe(childBefore);
     const moved = bounds(childPoints(handle.layoutPage(0).primitives));
     expect(moved.left).toBeCloseTo(child.left, 3);
-    expect(moved.top).toBeCloseTo(child.top - 1, 3);
+    expect(moved.top).toBeCloseTo(child.top - 96 / 16, 3);
   } finally { restore(); }
 });
 

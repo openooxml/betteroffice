@@ -14,6 +14,12 @@ const root = resolve(import.meta.dir, '../../..');
 
 beforeAll(async () => initWasm(await readFile(resolve(root, 'packages/vsdx/src/wasm/generated/vsdx_wasm_bg.wasm'))));
 
+/** The drawing canvas, which the rulers precede in DOM order, and its overlay. */
+function drawingCanvases(container: HTMLElement): [HTMLCanvasElement, HTMLCanvasElement] {
+  const drawing = container.querySelector<HTMLCanvasElement>('canvas[aria-label]')!;
+  return [drawing, drawing.parentElement!.querySelector<HTMLCanvasElement>('canvas[aria-hidden]')!];
+}
+
 test('the explorer mirrors the engine snapshot and shares the canvas selection', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;
@@ -28,7 +34,7 @@ test('the explorer mirrors the engine snapshot and shares the canvas selection',
     const node = view.getByRole('button', { name: 'Shape 1' }) as HTMLButtonElement;
     expect(node.closest('[role="treeitem"]')?.getAttribute('aria-selected')).toBe('false');
     await act(async () => { fireEvent.click(node); });
-    const canvases = view.container.querySelectorAll('canvas');
+    const canvases = drawingCanvases(view.container);
     expect(canvases[0].getAttribute('aria-label')).toContain('page:1:shape:1');
     expect(node.closest('[role="treeitem"]')?.getAttribute('aria-selected')).toBe('true');
     expect(view.getByRole('button', { name: 'Geometry' })).toBeDefined();

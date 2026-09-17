@@ -287,8 +287,10 @@ dependencies = [
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-eval",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
  "betteroffice-vsdx-resolve",
+ "betteroffice-vsdx-validate",
 ]
 
 [[package]]
@@ -348,9 +350,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-raster"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-drawingml",
+ "betteroffice-ooxml-text",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
+ "image",
+ "png",
+ "rustybuzz",
+ "serde_json",
+ "tiny-skia",
+]
+
+[[package]]
 name = "betteroffice-vsdx-render"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "betteroffice-ooxml-text",
  "betteroffice-vsdx-eval",
@@ -371,6 +389,17 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+]
+
+[[package]]
+name = "betteroffice-vsdx-validate"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-vsdx-formula",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-resolve",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1633,7 +1662,9 @@ version = "0.0.0"
 dependencies = [
  "betteroffice-vsdx-edit",
  "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-raster",
  "betteroffice-vsdx-render",
+ "betteroffice-vsdx-validate",
  "serde_json",
  "wasm-bindgen",
  "yrs",

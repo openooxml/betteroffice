@@ -148,9 +148,10 @@ fn adjustments() -> impl Strategy<Value = HashMap<String, f64>> {
         proptest::option::of(any_adjust()),
         proptest::option::of(any_adjust()),
         proptest::option::of(any_adjust()),
+        proptest::option::of(any_adjust()),
     )
-        .prop_map(|(adj, adj1, adj2)| {
-            [("adj", adj), ("adj1", adj1), ("adj2", adj2)]
+        .prop_map(|(adj, adj1, adj2, vf)| {
+            [("adj", adj), ("adj1", adj1), ("adj2", adj2), ("vf", vf)]
                 .into_iter()
                 .filter_map(|(name, value)| Some((name.to_owned(), value?)))
                 .collect()

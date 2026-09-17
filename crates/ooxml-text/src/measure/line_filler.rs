@@ -254,9 +254,11 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 
 /// Measures an empty or whitespace-only paragraph as one zero-width line at
 /// the ruled height of `font` at `size_pt`, floored at
-/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`,
-/// then snapped up to `snap_pitch_px` when set and the rule is `auto` (a
-/// pinned `exact`/`atLeast` height never snaps).
+/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`.
+/// When `snap_pitch_px` is set and the rule is `auto`, the content box is
+/// first rounded up to a whole number of grid rows, so the rule's multiple
+/// scales the quantized pitch (a pinned `exact`/`atLeast` height never
+/// snaps).
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
@@ -271,16 +273,17 @@ pub(super) fn empty_paragraph_extent(
     let size_px = pt_to_px(size_pt);
     let content = wm::single_line_box(metrics, size_px, &to_flags(compat));
     let rule = rule_from_spacing(spacing);
+    // Pinned boxes (`exact` fixed, `atLeast` author-floored) never snap;
+    // only automatically-determined heights do.
+    let auto_rule = matches!(rule, wm::LineSpacingRule::Auto { .. });
+    let content = match snap_pitch_px.filter(|_| auto_rule) {
+        Some(pitch) => wm::snap_line_box(content, pitch),
+        None => content,
+    };
     let ruled = wm::apply_spacing_rule(content, &rule);
     let mut line_height = ruled.height();
     if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
-    }
-    // Pinned boxes (`exact` fixed, `atLeast` author-floored) never snap;
-    // only automatically-determined heights do.
-    let auto_rule = matches!(rule, wm::LineSpacingRule::Auto { .. });
-    if let Some(pitch) = snap_pitch_px.filter(|_| auto_rule) {
-        line_height = wm::snap_line_height(line_height, pitch);
     }
 
     let mut total = line_height;
@@ -638,11 +641,12 @@ impl Filler<'_> {
         })
     }
 
-    /// Snap a ruled text height for the running Y and base line box.
-    fn snap_text_height(&self, height: f32) -> f32 {
+    /// Round the content box up to a whole number of grid rows, before the
+    /// spacing rule scales it.
+    fn snap_content_box(&self, content: wm::LineBox) -> wm::LineBox {
         match (self.p.snap_pitch_px, self.line_may_snap()) {
-            (Some(pitch), true) => wm::snap_line_height(height, pitch),
-            _ => height,
+            (Some(pitch), true) => wm::snap_line_box(content, pitch),
+            _ => content,
         }
     }
 
@@ -702,10 +706,11 @@ impl Filler<'_> {
                 leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
             },
         };
+        let content = self.snap_content_box(content);
         let ruled = wm::apply_spacing_rule(content, &self.rule);
         let mut ascent = ruled.ascent;
         let mut descent = ruled.descent;
-        let text_line_height = self.snap_text_height(ruled.height());
+        let text_line_height = ruled.height();
         let mut line_height = text_line_height;
 
         // An image dictates the whole box, so it buffers from the content

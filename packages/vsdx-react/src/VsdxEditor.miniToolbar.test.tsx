@@ -36,10 +36,15 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
     canUndo: () => false,
     canRedo: () => false,
     deleteShape: (...args: [string, string]) => { calls.deletes.push([...args]); return {}; },
+    deleteShapes: (deletes: ReadonlyArray<{ pageId: string; shapeId: string }>) => { calls.deletes.push([...deletes]); return []; },
     reorderShape: (...args: [string, string, number]) => { calls.reorders.push([...args]); return {}; },
     setCellFormula: (pageId: string, shapeId: string, locator: { cellName: string }, formula: string) => {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
+    },
+    setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
+      for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
+      return [];
     },
   } as unknown as DiagramHandle;
 }
@@ -50,7 +55,7 @@ function renderShapeMenu(options: { cells?: Array<ReturnType<typeof cell>>; posi
   const state = snapshot(options.cells ?? [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'RGB(0,0,255)'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')]);
   const diagram = stubHandle(state, calls);
   const closed: string[] = [];
-  const selection: Selection = { pageId: 'page', shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } };
+  const selection: Selection[] = [{ pageId: 'page', shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }];
   let focusTarget: HTMLElement | undefined;
   if (options.withFocusTarget) {
     focusTarget = document.createElement('button');
@@ -60,7 +65,7 @@ function renderShapeMenu(options: { cells?: Array<ReturnType<typeof cell>>; posi
   return { view: rendered, calls, closed, focusTarget, selection };
 }
 
-function MenuHost({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
+function MenuHost({ diagram, selection, position, closed, focusTarget }: { diagram: DiagramHandle; selection: Selection[]; position: { top: number; left: number }; closed: string[]; focusTarget?: HTMLElement }) {
   const [open, setOpen] = useState(true);
   if (!open) return null;
   return (
@@ -214,7 +219,7 @@ test('an outside press and a menu action close the toolbar with the menu', () =>
   try {
     const item = document.querySelector('[role="menu"] [data-command-id="delete"]') as HTMLElement;
     fireEvent.click(item);
-    expect(second.calls.deletes).toEqual([['page', 'three']]);
+    expect(second.calls.deletes).toEqual([[{ pageId: 'page', shapeId: 'three' }]]);
     expect(shapeMenu()).toBeNull();
     expect(toolbar()).toBeNull();
     expect(second.closed).toEqual(['focus']);
@@ -230,6 +235,18 @@ test('guarded colour cells hide the mini toolbar instead of refusing on pick', (
     expect(toolbar()).toBeNull();
   } finally {
     view.unmount();
+  }
+});
+
+test('a SETATREF redirect to a guarded cell hides only that swatch', () => {
+  const redirected = renderShapeMenu({ cells: [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'SETATREF(LineTarget)'), cell('LineTarget', 'GUARD(RGB(0,0,255))')] });
+  try {
+    const bar = toolbar();
+    expect(bar).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="fillColor"]')).not.toBeNull();
+    expect(bar?.querySelector('[data-command-id="lineColor"]')).toBeNull();
+  } finally {
+    redirected.view.unmount();
   }
 });
 
@@ -272,7 +289,7 @@ test('the canvas menu has no mini toolbar', () => {
   const state = snapshot([cell('Angle', '0')]);
   const diagram = stubHandle(state, calls);
   const view = render(
-    <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={null} onMutation={() => {}} onError={() => {}} onDownload={() => {}}>
+    <RibbonCommandsProvider handle={diagram} snapshot={diagram.snapshot()} pageId="page" selection={[]} onMutation={() => {}} onError={() => {}} onDownload={() => {}}>
       <CanvasContextMenu t={createT(en)} position={{ top: 300, left: 300 }} onClose={() => {}} onCloseAndFocus={() => {}} />
     </RibbonCommandsProvider>,
   );

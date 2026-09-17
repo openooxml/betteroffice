@@ -1,7 +1,7 @@
 {
   "_lang": "en",
   "editor": { "appLabel": "Visio diagram editor", "opening": "Opening diagram…", "noPages": "No pages", "openPrompt": "Open a VSDX file", "toolbarLabel": "Diagram editing tools", "addShape": "Add shape", "deleteShape": "Delete selected", "fillColor": "Fill", "lineColor": "Line", "save": "Download" },
-  "pages": { "panelLabel": "Pages", "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}" },
+  "pages": { "panelLabel": "Pages", "fallbackTitle": "Page {number}", "canvasLabel": "Page {current} of {total}", "canvasLabelWithSelection": "Page {current} of {total}; selected shape {name}", "canvasLabelWithMultiSelection": "Page {current} of {total}; {count} shapes selected" },
   "statusBar": { "pageList": "Page list", "previousPage": "Previous page", "nextPage": "Next page", "pageTabs": "Page tabs", "addPage": "Add page", "zoomControls": "Zoom controls", "zoomOut": "Zoom out", "zoomIn": "Zoom in", "zoomSlider": "Zoom level", "zoomPercentage": "{zoom}%", "resetZoom": "Reset zoom to 100%", "fitToWindow": "Fit to window" },
   "shapes": { "selected": "Selected: {name}", "editingText": "Editing text of shape {name}" },
   "diagnostics": {
@@ -12,7 +12,7 @@
     "fidelity": { "font-substituted": "A font was substituted.", "unsupported-effect": "An effect was rendered differently.", "unsupported-geometry": "A shape was approximated." },
     "unknown": "{category} notice: {code}"
   },
-  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram", "resizeLocked": "Shape is locked and cannot be resized with handles.", "rotationGuarded": "Shape rotation is guarded and cannot be changed with the grip." },
+  "errors": { "decodePageImage": "Could not decode page image", "openDiagram": "Could not open diagram", "resizeLocked": "Shape is locked and cannot be resized with handles.", "rotateLocked": "Shape rotation is locked and cannot be changed with handles.", "rotationGuarded": "Shape rotation is guarded and cannot be changed with the grip.", "dismiss": "Dismiss error" },
   "ribbon": {
     "label": "Diagram ribbon",
     "tabsLabel": "Ribbon tabs",
@@ -23,10 +23,11 @@
     "saved": "Saved",
     "dirty": "Unsaved changes",
     "tabs": { "file": "File", "home": "Home", "insert": "Insert", "shape": "Shape", "design": "Design", "review": "Review", "view": "View", "help": "Help" },
-    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange" },
+    "groups": { "file": "File", "history": "History", "clipboard": "Clipboard", "font": "Font", "paragraph": "Paragraph", "insert": "Insert", "shape": "Shape", "arrange": "Arrange", "view": "Show", "connector": "Connector" },
     "commands": {
-      "undo": "Undo", "redo": "Redo", "delete": "Delete selected", "fillColor": "Fill color", "lineColor": "Line color", "lineWeight": "Line weight", "linePattern": "Line pattern",
-      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download"
+      "undo": "Undo", "redo": "Redo", "delete": "Delete selected", "cut": "Cut", "copy": "Copy", "paste": "Paste", "duplicate": "Duplicate", "fillColor": "Fill color", "lineColor": "Line color", "lineWeight": "Line weight", "linePattern": "Line pattern",
+      "bringToFront": "Bring to Front", "bringForward": "Bring Forward", "sendBackward": "Send Backward", "sendToBack": "Send to Back", "rotateLeft": "Rotate left", "rotateRight": "Rotate right", "flipHorizontal": "Flip horizontal", "flipVertical": "Flip vertical", "addShape": "Add shape", "download": "Download", "pageBreaks": "Page breaks", "connector": "Connector",
+      "showGrid": "Show grid", "snapObjects": "Snap to grid and shapes", "showRulers": "Show rulers"
     }
   },
   "contextMenu": { "label": "Shape actions", "canvasLabel": "Canvas actions", "miniToolbarLabel": "Shape formatting" },
@@ -47,7 +48,11 @@
     "searchPlaceholder": "Search shapes",
     "categoriesLabel": "Shape categories",
     "standardShapes": "Standard Shapes",
+    "quickShapes": "Quick Shapes",
+    "arrowShapes": "Arrows and Lines",
+    "documentShapes": "Document Stencil",
     "empty": "No shapes found",
+    "documentEmpty": "This document defines no masters",
     "shape": {
       "rectangle": "Rectangle",
       "square": "Square",
@@ -80,7 +85,36 @@
       "star5": "5-Point Star",
       "star6": "6-Point Star",
       "star7": "7-Point Star",
-      "star16": "16-Point Star"
+      "star16": "16-Point Star",
+      "arrowRight": "Right Arrow",
+      "arrowLeft": "Left Arrow",
+      "arrowUp": "Up Arrow",
+      "arrowDown": "Down Arrow",
+      "arrowDoubleHorizontal": "Double Arrow Horizontal",
+      "arrowDoubleVertical": "Double Arrow Vertical",
+      "curvedArrowRight": "Curved Right Arrow",
+      "curvedArrowLeft": "Curved Left Arrow",
+      "curvedArrowUp": "Curved Up Arrow",
+      "curvedArrowDown": "Curved Down Arrow",
+      "lineArrowRight": "Line Arrow Right",
+      "lineArrowLeft": "Line Arrow Left",
+      "lineArrowUp": "Line Arrow Up",
+      "lineArrowDown": "Line Arrow Down",
+      "lineHorizontal": "Horizontal Line",
+      "lineVertical": "Vertical Line",
+      "lineDiagonal": "Diagonal Line",
+      "lineElbow": "Elbow Line",
+      "bentArrow": "Bent Arrow",
+      "uTurnArrow": "U-Turn Arrow",
+      "sharpBent": "Sharp Bent",
+      "stripedArrow": "Striped Arrow",
+      "notched": "Notched",
+      "blockArrow": "Block Arrow",
+      "circularArrow": "Circular Arrow",
+      "quadArrow": "Quad Arrow",
+      "leftRightUp": "Left-Right-Up",
+      "arcedLine": "Arced Line",
+      "documentShape": "Document shape"
     }
   },
   "shapeData": {
@@ -107,5 +141,22 @@
     "empty": "No diagram open",
     "emptyShapes": "No shapes",
     "depthLimit": "Deeper levels hidden"
+  },
+  "issuesPanel": {
+    "title": "Issues",
+    "collapse": "Collapse Issues",
+    "expand": "Expand Issues",
+    "empty": "No issues on this page",
+    "selectIssue": "Select shape {name}",
+    "unnamedShape": "Shape {id}",
+    "endpoint": { "begin": "begin", "end": "end" },
+    "rules": {
+      "dangling-connector": "Connector {name} is glued at only one end ({endpoint})",
+      "dangling-connector-unconnected": "Connector {name} is not glued at either end",
+      "isolated-shape": "Shape {name} has no connections",
+      "overlapping-shapes": "Shape {name} overlaps {other}",
+      "connector-crossing": "Connector {name} crosses {other}",
+      "empty-shape-data": "Shape {name} has an empty required field ({row})"
+    }
   }
 }

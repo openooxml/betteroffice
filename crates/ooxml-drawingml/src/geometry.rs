@@ -4,6 +4,8 @@ use crate::GeometryPathCommand;
 
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
+/// The `vf` that puts a hexagon's corners on its frame; larger values would leave it.
+const HEXAGON_VERTICAL_FACTOR: f64 = 1.154_7;
 
 pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
     let values = match shape_type {
@@ -11,7 +13,7 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         "plus" => vec![("adj", 0.25)],
         "triangle" | "isosTriangle" => vec![("adj", 0.5)],
         "parallelogram" => vec![("adj", 0.25)],
-        "trapezoid" => vec![("adj", 0.2)],
+        "trapezoid" => vec![("adj", 0.25)],
         "hexagon" => vec![("adj", 0.25)],
         "octagon" => vec![("adj", 0.292_89)],
         "rightArrow" | "leftArrow" | "upArrow" | "downArrow" => {
@@ -95,39 +97,51 @@ pub fn preset_geometry_to_path(
         "diamond" | "flowChartDecision" => {
             polygon(&[(0.5, 0.0), (1.0, 0.5), (0.5, 1.0), (0.0, 0.5)])
         }
-        "parallelogram" => {
-            let i = clamp_fraction(adjustments.get("adj").copied(), 0.25);
-            polygon(&[(i, 0.0), (1.0, 0.0), (1.0 - i, 1.0), (0.0, 1.0)])
-        }
+        "parallelogram" => parallelogram(shortest_side_adjustment(
+            adjustments.get("adj").copied(),
+            0.25,
+            1.0,
+            aspect_ratio,
+        )),
         "plus" => plus(aspect_ratio, adjustments.get("adj").copied()),
         "trapezoid" => {
-            let i = clamp_fraction(adjustments.get("adj").copied(), 0.2);
+            let i =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.25, 0.5, aspect_ratio);
             polygon(&[(i, 0.0), (1.0 - i, 0.0), (1.0, 1.0), (0.0, 1.0)])
         }
         "pentagon" | "flowChartOffpageConnector" => regular_polygon(5),
         "hexagon" => {
-            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.25).min(0.5);
+            let adjustment =
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.25, 0.5, aspect_ratio);
+            let vertical_factor = pin(
+                adjustments.get("vf").copied(),
+                HEXAGON_VERTICAL_FACTOR,
+                HEXAGON_VERTICAL_FACTOR,
+            );
+            let rise = 0.5 * vertical_factor * std::f64::consts::FRAC_PI_3.sin();
             polygon(&[
-                (adjustment, 0.0),
-                (1.0 - adjustment, 0.0),
+                (adjustment, 0.5 - rise),
+                (1.0 - adjustment, 0.5 - rise),
                 (1.0, 0.5),
-                (1.0 - adjustment, 1.0),
-                (adjustment, 1.0),
+                (1.0 - adjustment, 0.5 + rise),
+                (adjustment, 0.5 + rise),
                 (0.0, 0.5),
             ])
         }
         "heptagon" => regular_polygon(7),
         "octagon" => {
-            let adjustment = clamp_fraction(adjustments.get("adj").copied(), 0.292_89).min(0.5);
+            let adjustment = pin(adjustments.get("adj").copied(), 0.292_89, 0.5);
+            let x = adjustment / width_in_shortest_sides(aspect_ratio);
+            let y = adjustment / height_in_shortest_sides(aspect_ratio);
             polygon(&[
-                (adjustment, 0.0),
-                (1.0 - adjustment, 0.0),
-                (1.0, adjustment),
-                (1.0, 1.0 - adjustment),
-                (1.0 - adjustment, 1.0),
-                (adjustment, 1.0),
-                (0.0, 1.0 - adjustment),
-                (0.0, adjustment),
+                (x, 0.0),
+                (1.0 - x, 0.0),
+                (1.0, y),
+                (1.0, 1.0 - y),
+                (1.0 - x, 1.0),
+                (x, 1.0),
+                (0.0, 1.0 - y),
+                (0.0, y),
             ])
         }
         "decagon" => regular_polygon(10),
@@ -193,7 +207,7 @@ pub fn preset_geometry_to_path(
         ]),
         "chevron" => {
             let notch =
-                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, 1.0, aspect_ratio);
             polygon(&[
                 (0.0, 0.0),
                 (1.0 - notch, 0.0),
@@ -205,7 +219,7 @@ pub fn preset_geometry_to_path(
         }
         "homePlate" => {
             let point =
-                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, aspect_ratio);
+                shortest_side_adjustment(adjustments.get("adj").copied(), 0.5, 1.0, aspect_ratio);
             polygon(&[
                 (0.0, 0.0),
                 (1.0 - point, 0.0),
@@ -226,19 +240,26 @@ pub fn preset_geometry_to_path(
         | "flowChartDisplay"
         | "textBox" => preset_geometry_to_path("rect", adjustments, aspect_ratio)?,
         "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments, aspect_ratio)?,
-        "flowChartInputOutput" | "flowChartManualInput" => {
-            preset_geometry_to_path("parallelogram", adjustments, aspect_ratio)?
-        }
+        "flowChartInputOutput" | "flowChartManualInput" => parallelogram(0.25),
         "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
         _ => return None,
     };
     Some(result)
 }
 
-/// Pins to `w / ss`, then converts from shortest-side to width units.
-fn shortest_side_adjustment(adjustment: Option<f64>, fallback: f64, aspect_ratio: f64) -> f64 {
+/// Pins to `max · w / ss`, then converts from shortest-side to width units.
+fn shortest_side_adjustment(
+    adjustment: Option<f64>,
+    fallback: f64,
+    max: f64,
+    aspect_ratio: f64,
+) -> f64 {
     let width = width_in_shortest_sides(aspect_ratio);
-    pin(adjustment, fallback, width) / width
+    pin(adjustment, fallback, max * width) / width
+}
+
+fn parallelogram(offset: f64) -> Vec<GeometryPathCommand> {
+    polygon(&[(offset, 0.0), (1.0, 0.0), (1.0 - offset, 1.0), (0.0, 1.0)])
 }
 
 fn height_in_shortest_sides(aspect_ratio: f64) -> f64 {
@@ -674,6 +695,96 @@ mod tests {
             assert_close(leading_edge(shape, Some(2.0), 0.25), 0.0);
             assert_close(leading_edge(shape, Some(-0.25), 4.0), 1.0);
         }
+    }
+
+    fn vertex(
+        shape: &str,
+        adjustments: &[(&str, f64)],
+        aspect_ratio: f64,
+        index: usize,
+    ) -> (f64, f64) {
+        let adjustments = adjustments
+            .iter()
+            .map(|&(name, value)| (name.to_owned(), value))
+            .collect();
+        match preset_geometry_to_path(shape, &adjustments, aspect_ratio).unwrap()[index] {
+            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => (x, y),
+            _ => panic!("expected a vertex"),
+        }
+    }
+
+    #[test]
+    fn hexagon_family_adjustments_are_fractions_of_the_shortest_side() {
+        for shape in ["hexagon", "parallelogram", "trapezoid", "octagon"] {
+            assert_close(vertex(shape, &[("adj", 0.25)], 4.0, 0).0, 0.0625);
+            assert_close(vertex(shape, &[("adj", 0.25)], 0.25, 0).0, 0.25);
+        }
+        assert_close(vertex("octagon", &[("adj", 0.25)], 4.0, 2).1, 0.25);
+        assert_close(vertex("octagon", &[("adj", 0.25)], 0.25, 2).1, 0.0625);
+    }
+
+    #[test]
+    fn hexagon_family_adjustments_pin_at_their_aspect_scaled_maximum() {
+        let aspect = 43.6;
+        assert_close(
+            vertex("hexagon", &[("adj", 1.29)], aspect, 0).0,
+            1.29 / aspect,
+        );
+        assert_close(
+            vertex("hexagon", &[("adj", 20.9)], aspect, 0).0,
+            20.9 / aspect,
+        );
+        assert_close(vertex("hexagon", &[("adj", 30.0)], aspect, 0).0, 0.5);
+        assert_close(
+            vertex("trapezoid", &[("adj", 1.298_51)], 50.0, 0).0,
+            1.298_51 / 50.0,
+        );
+        assert_close(vertex("trapezoid", &[("adj", 30.0)], 50.0, 0).0, 0.5);
+        assert_close(vertex("parallelogram", &[("adj", 3.0)], 4.0, 0).0, 0.75);
+        assert_close(vertex("parallelogram", &[("adj", 9.0)], 4.0, 0).0, 1.0);
+        assert_close(vertex("octagon", &[("adj", 9.0)], 4.0, 0).0, 0.125);
+    }
+
+    #[test]
+    fn trapezoid_defaults_to_a_quarter_of_the_shortest_side() {
+        assert_eq!(
+            preset_geometry_default_adjustments("trapezoid").get("adj"),
+            Some(&0.25)
+        );
+        assert_close(vertex("trapezoid", &[], 4.0, 0).0, 0.0625);
+    }
+
+    #[test]
+    fn hexagon_height_follows_its_vertical_factor() {
+        assert!(vertex("hexagon", &[], 4.0, 0).1.abs() < 1e-6);
+        assert_close(
+            vertex("hexagon", &[("vf", 0.5)], 4.0, 0).1,
+            0.5 - 0.25 * 3f64.sqrt() / 2.0,
+        );
+    }
+
+    #[test]
+    fn hexagon_vertical_factor_pins_inside_the_frame() {
+        for vf in [1.2, 40.0, f64::INFINITY] {
+            assert_eq!(
+                vertex("hexagon", &[("vf", vf)], 4.0, 0),
+                vertex("hexagon", &[], 4.0, 0),
+                "{vf}"
+            );
+        }
+        for vf in [0.0, -3.0] {
+            assert_close(vertex("hexagon", &[("vf", vf)], 4.0, 0).1, 0.5);
+            assert_close(vertex("hexagon", &[("vf", vf)], 4.0, 3).1, 0.5);
+        }
+    }
+
+    #[test]
+    fn flow_chart_input_output_ignores_the_parallelogram_adjust() {
+        let adjustments = HashMap::from([("adj".to_owned(), 0.6)]);
+        assert_eq!(
+            preset_geometry_to_path("flowChartInputOutput", &adjustments, 4.0),
+            preset_geometry_to_path("flowChartInputOutput", &HashMap::new(), 1.0),
+        );
     }
 
     #[test]

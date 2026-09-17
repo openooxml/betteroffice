@@ -35,7 +35,8 @@ file serves as the copy of the license for this derivation.
 `crates/xlsx-raster/assets/Carlito-Regular.ttf` is vendored unmodified from
 the google/fonts repository, `ofl/carlito` (https://github.com/google/fonts);
 upstream project https://github.com/googlefonts/carlito. The bytes are
-compiled into the `betteroffice-xlsx-raster` crate via `include_bytes!`.
+compiled into the `betteroffice-xlsx-raster` crate via `include_bytes!`, and
+shared unmodified by the `betteroffice-vsdx-raster` crate through the same path.
 
 Copyright 2013 The Carlito Project Authors, with Reserved Font Name "Carlito".
 
@@ -70,7 +71,9 @@ directory; those files are the authoritative copies for redistribution.
   upstream https://github.com/notofonts/arabic. `LICENSES/OFL-NotoArabic.txt`.
 - **Noto Sans Hebrew** (2 faces) — Copyright 2022 The Noto Project Authors.
   From https://github.com/notofonts/notofonts.github.io; upstream
-  https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`.
+  https://github.com/notofonts/hebrew. `LICENSES/OFL-NotoSansHebrew.txt`. The
+  regular face is also compiled into the `betteroffice-vsdx-raster` tests via
+  `include_bytes!`.
 
 `packages/fonts-cjk/assets` — 5 faces:
 
