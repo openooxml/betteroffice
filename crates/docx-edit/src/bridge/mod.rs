@@ -1028,6 +1028,13 @@ fn lower_table<T: ReadTxn>(
         .get("floating")
         .and_then(any_map)
         .map(lower_floating_table);
+    let compatibility_mode = map_number(tbl_pr, "compatibilityMode").and_then(|value| {
+        (value.is_finite() && (0.0..=255.0).contains(&value)).then_some(value as u8)
+    });
+    let cell_margin_left = table_margins
+        .and_then(|margins| map_number(margins, "left"))
+        .map(twips_to_pixels)
+        .filter(|value| value.is_finite() && *value > 0.0);
 
     Ok((
         TableBlock {
@@ -1047,6 +1054,8 @@ fn lower_table<T: ReadTxn>(
             bidi: (map_bool(tbl_pr, "bidi") == Some(true)).then_some(true),
             indent,
             floating,
+            compatibility_mode,
+            cell_margin_left,
             pm_start: Some(pm_start as f64),
             pm_end: Some((pm_start + node_size) as f64),
         },

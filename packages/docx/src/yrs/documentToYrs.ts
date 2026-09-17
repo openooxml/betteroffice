@@ -119,6 +119,12 @@ interface LoweringContext {
   styleResolver: StyleResolver | null;
   theme: Theme | null;
   plans: StoryPlan[];
+  compatibilityMode: number;
+}
+
+function compatibilityModeFromDocument(document: Document): number {
+  const mode = document.package.settings?.compatibilityFlags?.compatibilityMode;
+  return typeof mode === 'number' && Number.isFinite(mode) ? Math.trunc(mode) : 12;
 }
 
 const BOOLEAN_MARKS = new Set([
@@ -1367,7 +1373,8 @@ function projectRow(
 function projectTable(
   table: Table,
   styleResolver: StyleResolver | null,
-  theme: Theme | null
+  theme: Theme | null,
+  compatibilityMode: number
 ): ProjectedTable {
   const defaultStyle = styleResolver?.getDefaultTableStyle();
   const styleId = table.formatting?.styleId;
@@ -1417,6 +1424,9 @@ function projectTable(
     cellMargins: defaultMargins ?? null,
     look: table.formatting?.look ?? null,
     bidi: table.formatting?.bidi || null,
+    // Omit the default so pre-existing yrs snapshots (no field) keep matching;
+    // the bridge treats an absent mode as 12.
+    compatibilityMode: compatibilityMode === 12 ? null : compatibilityMode,
     _originalFormatting: originalFormatting,
   };
   if (table.propertyChanges?.length) attrs.tblPrChange = table.propertyChanges;
@@ -1503,7 +1513,12 @@ function visitStory(
     }
     if (block.type === 'table') {
       const currentTable = tableIndex++;
-      const table = projectTable(block, context.styleResolver, context.theme);
+      const table = projectTable(
+        block,
+        context.styleResolver,
+        context.theme,
+        context.compatibilityMode
+      );
       const rows = table.rows.map((row, rowIndex) => ({
         trPr: row.attrs,
         cells: row.cells.map((cell, cellIndex) => ({
@@ -1629,6 +1644,7 @@ export function documentToYrs(session: YrsSession, document: Document): void {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,
     plans: [],
+    compatibilityMode: compatibilityModeFromDocument(document),
   };
   visitStory(context, 'body', document.package.document.content, {
     includePageBreaks: true,

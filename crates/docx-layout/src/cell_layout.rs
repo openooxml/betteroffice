@@ -22,10 +22,37 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
     .filter(|offset| offset.is_finite() && *offset >= 0.0)
 }
 
+/// Leading-edge shift for `w:tblInd` under pre-2013 compatibility.
+///
+/// Word 2013 changed what `w:tblInd` is measured to: in compatibilityMode <= 14
+/// a left-aligned table's leading border sits at
+/// `margin + tblInd - resolvedLeftCellMargin`, while in mode 15 it sits at
+/// `margin + tblInd`. The resolved margin is the table-level `w:tblCellMar`
+/// left (already cascaded table -> style -> default style by the seed).
+/// Centered/right tables never shift; an absent mode defaults to 12 (shifts).
+pub(crate) fn table_compat_leading_shift(
+    justification: Option<&str>,
+    compatibility_mode: Option<u8>,
+    cell_margin_left: Option<f64>,
+) -> f64 {
+    if matches!(justification, Some("center" | "right")) {
+        return 0.0;
+    }
+    if compatibility_mode.unwrap_or(12) > 14 {
+        return 0.0;
+    }
+    match cell_margin_left {
+        Some(margin) if margin.is_finite() && margin > 0.0 => margin,
+        _ => 0.0,
+    }
+}
+
 pub(crate) fn nested_table_horizontal_offset(
     position: Option<&FloatingTablePosition>,
     justification: Option<&str>,
     indent: Option<f64>,
+    compatibility_mode: Option<u8>,
+    cell_margin_left: Option<f64>,
     table_width: f64,
     content_width: f64,
 ) -> f64 {
@@ -50,7 +77,10 @@ pub(crate) fn nested_table_horizontal_offset(
     match justification {
         Some("center") => ((content_width - table_width) / 2.0).max(0.0),
         Some("right") => (content_width - table_width).max(0.0),
-        _ => indent.unwrap_or(0.0).max(0.0),
+        _ => {
+            indent.unwrap_or(0.0).max(0.0)
+                - table_compat_leading_shift(justification, compatibility_mode, cell_margin_left)
+        }
     }
 }
 
@@ -313,5 +343,129 @@ mod tests {
         assert_eq!(layout.line_tops, vec![vec![2.0], vec![], vec![67.0]]);
         assert_eq!(layout.flat_bottoms, vec![22.0, 67.0, 87.0]);
         assert_eq!(layout.content_height, 85.0);
+    }
+
+    fn twips_to_px(twips: f64) -> f64 {
+        twips / 15.0
+    }
+
+    #[test]
+    fn compat_mode_14_left_shifts_by_resolved_cell_margin() {
+        let margin = twips_to_px(108.0);
+        assert_eq!(
+            table_compat_leading_shift(Some("left"), Some(14), Some(margin)),
+            margin
+        );
+        assert_eq!(
+            table_compat_leading_shift(None, Some(14), Some(margin)),
+            margin
+        );
+        // 108 tw = 7.2 px at 96 DPI (11.25 px at 150 DPI capture scale).
+        let offset = nested_table_horizontal_offset(
+            None,
+            Some("left"),
+            Some(0.0),
+            Some(14),
+            Some(margin),
+            200.0,
+            500.0,
+        );
+        assert!((offset - (-margin)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn compat_mode_15_does_not_shift() {
+        let margin = twips_to_px(108.0);
+        assert_eq!(
+            table_compat_leading_shift(Some("left"), Some(15), Some(margin)),
+            0.0
+        );
+        let offset = nested_table_horizontal_offset(
+            None,
+            Some("left"),
+            Some(0.0),
+            Some(15),
+            Some(margin),
+            200.0,
+            500.0,
+        );
+        assert_eq!(offset, 0.0);
+    }
+
+    #[test]
+    fn centred_and_right_tables_never_shift() {
+        let margin = twips_to_px(108.0);
+        for justification in [Some("center"), Some("right")] {
+            for mode in [Some(12), Some(14), Some(15), None] {
+                assert_eq!(
+                    table_compat_leading_shift(justification, mode, Some(margin)),
+                    0.0
+                );
+            }
+        }
+        // Centred placement ignores the margin in either mode.
+        assert_eq!(
+            nested_table_horizontal_offset(
+                None,
+                Some("center"),
+                Some(0.0),
+                Some(14),
+                Some(margin),
+                200.0,
+                500.0,
+            ),
+            150.0
+        );
+        assert_eq!(
+            nested_table_horizontal_offset(
+                None,
+                Some("center"),
+                Some(0.0),
+                Some(15),
+                Some(margin),
+                200.0,
+                500.0,
+            ),
+            150.0
+        );
+    }
+
+    #[test]
+    fn non_default_28tw_margin_shifts_by_its_own_value() {
+        let small = twips_to_px(28.0);
+        let large = twips_to_px(108.0);
+        assert!((small - 1.8666666666666667).abs() < 1e-9);
+        assert!((large - 7.2).abs() < 1e-9);
+        assert_eq!(
+            table_compat_leading_shift(Some("left"), Some(14), Some(small)),
+            small
+        );
+        assert_ne!(
+            table_compat_leading_shift(Some("left"), Some(14), Some(small)),
+            large
+        );
+        let offset = nested_table_horizontal_offset(
+            None,
+            None,
+            Some(10.0),
+            Some(14),
+            Some(small),
+            200.0,
+            500.0,
+        );
+        assert!((offset - (10.0 - small)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn absent_compat_mode_behaves_as_mode_12() {
+        let margin = twips_to_px(108.0);
+        assert_eq!(table_compat_leading_shift(None, None, Some(margin)), margin);
+        assert_eq!(
+            table_compat_leading_shift(None, Some(12), Some(margin)),
+            margin
+        );
+        let offset =
+            nested_table_horizontal_offset(None, None, Some(0.0), None, Some(margin), 200.0, 500.0);
+        assert!((offset - (-margin)).abs() < 1e-9);
     }
 }

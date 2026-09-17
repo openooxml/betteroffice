@@ -861,6 +861,10 @@ pub struct TableBlock {
     pub indent: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub floating: Option<FloatingTablePosition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility_mode: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_margin_left: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pm_start: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1388,6 +1392,8 @@ impl PartialEq for TableBlock {
             bidi: _,
             indent: _,
             floating: _,
+            compatibility_mode: _,
+            cell_margin_left: _,
             pm_start: _,
             pm_end: _,
         } = other;
@@ -1407,6 +1413,8 @@ impl PartialEq for TableBlock {
             && self.bidi == other.bidi
             && self.indent == other.indent
             && self.floating == other.floating
+            && self.compatibility_mode == other.compatibility_mode
+            && self.cell_margin_left == other.cell_margin_left
     }
 }
 

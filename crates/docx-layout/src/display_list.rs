@@ -1931,6 +1931,10 @@ pub(crate) struct TableBlockIn {
     #[serde(default)]
     indent: Option<f64>,
     #[serde(default)]
+    compatibility_mode: Option<u8>,
+    #[serde(default)]
+    cell_margin_left: Option<f64>,
+    #[serde(default)]
     caption: Option<String>,
     #[serde(default)]
     description: Option<String>,
@@ -8654,6 +8658,8 @@ fn nested_table_x_offset(block: &TableBlockIn, measure: &TableExtentIn, content_
         block.floating.as_ref(),
         block.justification.as_deref(),
         block.indent,
+        block.compatibility_mode,
+        block.cell_margin_left,
         table_total_width(measure),
         content_width,
     )

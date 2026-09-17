@@ -67,6 +67,16 @@ struct LoweringContext {
     theme: Option<Value>,
     source_json: Arc<BTreeMap<String, String>>,
     plans: Vec<StoryPlan>,
+    compatibility_mode: u8,
+}
+
+fn compatibility_mode_from_package(package: Option<&Value>) -> u8 {
+    field(field(package, "settings"), "compatibilityFlags")
+        .and_then(|flags| field(Some(flags), "compatibilityMode"))
+        .and_then(|value| value.as_f64())
+        .filter(|value| value.is_finite() && (0.0..=255.0).contains(value))
+        .map(|value| value as u8)
+        .unwrap_or(12)
 }
 
 enum OrderedValue {
@@ -2851,7 +2861,12 @@ fn project_row(
     }
 }
 
-fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -> ProjectedTable {
+fn project_table(
+    table: &Value,
+    styles: &StyleResolver,
+    theme: Option<&Value>,
+    compatibility_mode: u8,
+) -> ProjectedTable {
     let formatting = field(Some(table), "formatting");
     let default_style = styles.default_style("table");
     let style_id = string(field(formatting, "styleId"));
@@ -2926,6 +2941,11 @@ fn project_table(table: &Value, styles: &StyleResolver, theme: Option<&Value>) -
         "cellMargins": default_margins,
         "look": nullish(field(formatting, "look")),
         "bidi": truthy(field(formatting, "bidi")).then_some(true),
+        "compatibilityMode": if compatibility_mode == 12 {
+            Value::Null
+        } else {
+            json!(compatibility_mode as f64)
+        },
         "_originalFormatting": Value::Object(original_formatting)
     }));
     if !array(field(Some(table), "propertyChanges")).is_empty() {
@@ -3065,7 +3085,12 @@ fn visit_story(
             "table" => {
                 let current_table = table_index;
                 table_index += 1;
-                let table = project_table(block, &context.styles, context.theme.as_ref());
+                let table = project_table(
+                    block,
+                    &context.styles,
+                    context.theme.as_ref(),
+                    context.compatibility_mode,
+                );
                 let rows: Vec<Value> = table
                     .rows
                     .iter()
@@ -3366,11 +3391,13 @@ pub(crate) fn seed_parsed_docx(
     drop(envelope);
     let package =
         field(Some(&parsed), "package").ok_or_else(|| "parsed DOCX has no package".to_owned())?;
+    let compatibility_mode = compatibility_mode_from_package(Some(package));
     let mut context = LoweringContext {
         styles: StyleResolver::new(field(Some(package), "styles")),
         theme: field(Some(package), "theme").cloned(),
         source_json: Arc::new(source_json),
         plans: Vec::new(),
+        compatibility_mode,
     };
     visit_story(
         &mut context,
@@ -3479,6 +3506,7 @@ mod tests {
                 theme: None,
                 source_json: Arc::new(BTreeMap::new()),
                 plans: Vec::new(),
+                compatibility_mode: 12,
             };
             visit_story(
                 &mut context,
@@ -3596,6 +3624,7 @@ mod tests {
             theme: None,
             source_json: Arc::new(BTreeMap::new()),
             plans: Vec::new(),
+            compatibility_mode: 12,
         };
         visit_story(
             &mut context,

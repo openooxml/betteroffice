@@ -7,6 +7,7 @@
 //! the caller rather than producing wrong geometry.
 
 use crate::LayoutError;
+use crate::cell_layout::table_compat_leading_shift;
 use crate::page_flow::Paginator;
 use crate::prescan::SectionLayoutConfig;
 use crate::table_row_break::{
@@ -310,11 +311,17 @@ fn layout_table_with_position(
             desired_x += (paginator.column_width() - measure.total_width) / 2.0;
         } else if block.justification.as_deref() == Some("right") {
             desired_x += paginator.column_width() - measure.total_width;
-        } else if let Some(indent) = block.indent
-            && indent != 0.0
-            && !indent.is_nan()
-        {
-            desired_x += indent;
+        } else {
+            let indent = block
+                .indent
+                .filter(|value| value.is_finite())
+                .unwrap_or(0.0);
+            let shift = table_compat_leading_shift(
+                block.justification.as_deref(),
+                block.compatibility_mode,
+                block.cell_margin_left,
+            );
+            desired_x += indent - shift;
         }
 
         if let Some(x) = floating_x {

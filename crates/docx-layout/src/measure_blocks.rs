@@ -1336,6 +1336,8 @@ fn measure_cell_blocks_with_table_floats(
                 Some(floating),
                 table.justification.as_deref(),
                 table.indent,
+                table.compatibility_mode,
+                table.cell_margin_left,
                 measure.total_width,
                 content_width,
             );
