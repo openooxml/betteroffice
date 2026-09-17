@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use vsdx_parse::{Connect, ConnectsChild, ShapesChild, SheetChild};
 use vsdx_resolve::Resolver;
@@ -294,9 +294,9 @@ pub(super) fn validate_remote_glue(before: &Doc, staged: &Doc) -> EditResult<()>
         .map(|record| (record.id.clone(), record))
         .collect::<BTreeMap<_, _>>();
     let sheets = required_map(&txn, SHEETS)?;
-    for record in before_glue {
+    for record in &before_glue {
         match after_glue.get(&record.id) {
-            Some(after) if after == &record => {}
+            Some(after) if after == record => {}
             Some(_) => {
                 return Err(EditError::InvalidState(format!(
                     "remote update changes connector glue {}",
@@ -314,7 +314,78 @@ pub(super) fn validate_remote_glue(before: &Doc, staged: &Doc) -> EditResult<()>
             None => {}
         }
     }
+    drop(txn);
+    let known = before_glue
+        .iter()
+        .map(|record| record.id.as_str())
+        .collect::<BTreeSet<_>>();
+    validate_added_glue(
+        staged,
+        &after_glue
+            .values()
+            .filter(|record| !known.contains(record.id.as_str()))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Rejects added glue naming a connection row the staged target does not have.
+///
+/// Only row existence is checked. Whether the row still evaluates is merged state a
+/// concurrent local cell edit can change, and rejecting that would strand the two peers.
+fn validate_added_glue(staged: &Doc, added: &[&GlueRecord]) -> EditResult<()> {
+    let rows = added
+        .iter()
+        .filter_map(|record| connection_row(&record.to_cell).map(|row| (*record, row)))
+        .collect::<Vec<_>>();
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let package = super::package_from_doc(staged)?;
+    let snapshot = super::snapshot_doc(staged)?;
+    let resolver = Resolver::new(&package);
+    let mut resolved: BTreeMap<&str, BTreeMap<u32, vsdx_resolve::ResolvedShape>> = BTreeMap::new();
+    for (record, row) in rows {
+        let Some(page) = snapshot.pages.iter().find(|page| page.id == record.page_id) else {
+            continue;
+        };
+        let Some(target) = snapshot_shape_sources(page)
+            .get(record.target_id.as_str())
+            .copied()
+        else {
+            continue;
+        };
+        let shapes = match resolved.entry(page.source_part_path.as_str()) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
+                resolver
+                    .resolve_page_shapes(&page.source_part_path)
+                    .map_err(|error| EditError::InvalidState(error.to_string()))?,
+            ),
+        };
+        let present = shapes.get(&target).is_some_and(|shape| {
+            shape.sections.get("Connection").is_some_and(|section| {
+                !section.deleted
+                    && section
+                        .rows
+                        .get(&format!("IX:{row}"))
+                        .is_some_and(|row| !row.deleted)
+            })
+        });
+        if !present {
+            return Err(EditError::InvalidState(format!(
+                "remote update adds connector glue {} for a connection row the target does not have",
+                record.id
+            )));
+        }
+    }
     Ok(())
+}
+
+fn connection_row(cell: &str) -> Option<u32> {
+    cell.strip_prefix("Connections.X")?
+        .parse::<u32>()
+        .ok()?
+        .checked_sub(1)
 }
 
 #[cfg(test)]
@@ -820,6 +891,108 @@ mod tests {
             .unwrap();
         assert!(session.apply_update_v1(&update).is_err());
         assert_eq!(before, session.encode_state_as_update_v1());
+    }
+
+    fn connection_row_package() -> Vec<u8> {
+        let package = vsdx_parse::parse_vsdx(include_bytes!(
+            "../../../vsdx-parse/tests/fixtures/foundation.vsdx"
+        ))
+        .unwrap();
+        vsdx_parse::save_structural_edits(
+            &package,
+            &[vsdx_parse::StructuralEdit::AddShape {
+                page_id: 1,
+                shape_xml: b"<Shape><Cell N='PinX' V='1'/><Cell N='PinY' V='1'/><Cell N='Width' V='1'/><Cell N='Height' V='1'/><Section N='Connection'><Row IX='0'><Cell N='X' V='0.5'/><Cell N='Y' V='0.5'/></Row></Section></Shape>".to_vec(),
+            }],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn remote_glue_with_an_unusable_target_cell_is_rejected() {
+        for cell in ["Connections.X9", "Width"] {
+            let (session, from, to, _) = glued_fixture();
+            let before = session.encode_state_as_update_v1();
+            let peer = DiagramSession::open_from_update(&before, 708).unwrap();
+            let connector = peer
+                .add_connector(
+                    &EditCtx::local("peer"),
+                    "page:1",
+                    &connector_draft(),
+                    &ConnectorGlue {
+                        shape_id: from.clone(),
+                        to_cell: None,
+                    },
+                    &ConnectorGlue {
+                        shape_id: to.clone(),
+                        to_cell: None,
+                    },
+                )
+                .unwrap();
+            {
+                let mut txn = peer.yrs_doc().transact_mut();
+                let connects = txn.get_map(crate::CONNECTS).unwrap();
+                let key = format!("{}:begin", connector.shape_id);
+                let Some(Out::YMap(entry)) = connects.get(&txn, &key) else {
+                    panic!("peer glue is missing");
+                };
+                entry.insert(&mut txn, "toCell", cell);
+            }
+            let update = peer
+                .encode_diff_v1(&session.encode_state_vector_v1())
+                .unwrap();
+            assert!(session.apply_update_v1(&update).is_err(), "{cell}");
+            assert_eq!(before, session.encode_state_as_update_v1());
+        }
+    }
+
+    /// Row existence alone gates remote glue, so a concurrent cell edit cannot strand a peer.
+    #[test]
+    fn concurrent_connector_and_connection_cell_edit_converge() {
+        let bytes = connection_row_package();
+        let left = DiagramSession::open(&bytes, 801).unwrap();
+        let right =
+            DiagramSession::open_from_update(&left.encode_state_as_update_v1(), 802).unwrap();
+        left.add_connector(
+            &EditCtx::local("left"),
+            "page:1",
+            &connector_draft(),
+            &ConnectorGlue {
+                shape_id: "page:1:shape:2".to_owned(),
+                to_cell: Some("Connections.X1".to_owned()),
+            },
+            &ConnectorGlue {
+                shape_id: "page:1:shape:2".to_owned(),
+                to_cell: None,
+            },
+        )
+        .unwrap();
+        right
+            .set_cell_formula_at(
+                &EditCtx::local("right"),
+                "page:1",
+                "page:1:shape:2",
+                CellLocator {
+                    sheet: CellSheet::Page(1),
+                    shape_id: None,
+                    section: Some("Connection".to_owned()),
+                    section_index: None,
+                    row: Some(CellRow::Index(0)),
+                    cell_name: "X".to_owned(),
+                },
+                "User.Unknown",
+            )
+            .unwrap();
+        let add = left
+            .encode_diff_v1(&right.encode_state_vector_v1())
+            .unwrap();
+        let edit = right
+            .encode_diff_v1(&left.encode_state_vector_v1())
+            .unwrap();
+        right.apply_update_v1(&add).unwrap();
+        left.apply_update_v1(&edit).unwrap();
+        assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
+        assert_eq!(left.save().unwrap(), right.save().unwrap());
     }
 
     #[test]

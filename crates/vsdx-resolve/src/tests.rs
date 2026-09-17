@@ -586,16 +586,16 @@ fn grouped_glue_connection_points_use_scene_transforms() {
         })
         .collect::<std::collections::BTreeMap<_, _>>();
 
-    // Target 11: rotate the local (0.5, 0.5) by +90° and scale by 2 around (10, 10):
-    // (-1, 1) + (10, 10) = (9, 11). Target 21 scales (0.5, 0.5) by (2, 2) at
-    // (20, 10) = (21, 11). Target 32 is scaled by 2 in each nested group: (0.5, 0.5)
-    // becomes (2, 2), then the outer group's origin maps it to (32, 2).
-    assert_eq!(points[&11].x, 9.0);
-    assert_eq!(points[&11].y, 11.0);
-    assert_eq!(points[&21].x, 21.0);
-    assert_eq!(points[&21].y, 11.0);
-    assert_eq!(points[&32].x, 32.0);
-    assert_eq!(points[&32].y, 2.0);
+    // A group's box never rescales its children, so each connection point is only rotated,
+    // flipped and translated. Target 11: rotate the local (0.5, 0.5) by +90° about (10, 10)
+    // gives (9.5, 10.5). Target 21 translates (0.5, 0.5) to (20.5, 10.5). Target 32 is
+    // translated by each nested group: (0.5, 0.5) + (1, 1) + (30, 0) = (31.5, 1.5).
+    assert_eq!(points[&11].x, 9.5);
+    assert_eq!(points[&11].y, 10.5);
+    assert_eq!(points[&21].x, 20.5);
+    assert_eq!(points[&21].y, 10.5);
+    assert_eq!(points[&32].x, 31.5);
+    assert_eq!(points[&32].y, 1.5);
 
     let direct_pins = connectivity.connectors[&1]
         .glue
@@ -613,7 +613,7 @@ fn grouped_glue_connection_points_use_scene_transforms() {
     // A target pin is its local LocPin transformed through every containing group.
     assert_eq!(direct_pins[&11], crate::ScenePoint { x: 10.0, y: 10.0 });
     assert_eq!(direct_pins[&21], crate::ScenePoint { x: 20.0, y: 10.0 });
-    assert_eq!(direct_pins[&32], crate::ScenePoint { x: 30.0, y: 0.0 });
+    assert_eq!(direct_pins[&32], crate::ScenePoint { x: 31.0, y: 1.0 });
 }
 
 #[test]
@@ -803,6 +803,114 @@ fn add_page(package: &mut VsdxPackage, value: Shape) {
     );
 }
 
+fn add_page_sheet(package: &mut VsdxPackage, rows: Vec<Row>) {
+    package.page_part_ids.insert("page".into(), 1);
+    package.page_sheets.insert(
+        1,
+        sheet(None, vec![SheetChild::Section(section("Layer", rows))]),
+    );
+}
+
+fn layer_row(index: u32, name: &str, visible: &str) -> Row {
+    row(
+        index,
+        vec![
+            cell("Name", name),
+            cell("Color", "255"),
+            cell("Status", "0"),
+            cell("Visible", visible),
+            cell("Print", "1"),
+            cell("Active", "0"),
+            cell("Lock", "0"),
+        ],
+    )
+}
+
+#[test]
+fn layer_section_resolves_named_rows_with_visibility() {
+    let mut package = package();
+    add_page_sheet(
+        &mut package,
+        vec![
+            layer_row(0, "Trussing", "1"),
+            layer_row(1, "Lighting", "0"),
+            deleted_row(2),
+        ],
+    );
+    let layers = crate::page_layers(&package, "page");
+    assert_eq!(layers.len(), 2);
+    assert_eq!(
+        layers[0],
+        crate::PageLayer {
+            index: 0,
+            name: "Trussing".into(),
+            visible: true,
+            print: true,
+            lock: false,
+            active: false,
+            color: "255".into(),
+            status: "0".into(),
+        }
+    );
+    assert_eq!(layers[1].name, "Lighting");
+    assert!(!layers[1].visible);
+    assert!(crate::page_layers(&package, "missing").is_empty());
+}
+
+#[test]
+fn layer_section_missing_means_no_layers() {
+    let package = package();
+    assert!(crate::page_layers(&package, "page").is_empty());
+}
+
+#[test]
+fn layer_member_lists_membership_indices() {
+    for (member, expected) in [
+        ("0;2", vec![0, 2]),
+        ("1;0;1", vec![0, 1]),
+        (" 2 ; 9 ", vec![2, 9]),
+        ("", vec![]),
+        ("a;3", vec![3]),
+        ("3;", vec![3]),
+        (";", vec![]),
+        ("-1;2", vec![2]),
+        ("+1;2", vec![1, 2]),
+        ("4294967296;5", vec![5]),
+    ] {
+        let mut package = package();
+        add_page(
+            &mut package,
+            shape(10, vec![ShapeChild::Cell(cell("LayerMember", member))]),
+        );
+        let resolved = Resolver::new(&package).resolve_shape("page", 10).unwrap();
+        assert_eq!(crate::shape_layer_indices(&resolved), expected, "{member}");
+    }
+}
+
+#[test]
+fn hidden_by_layers_requires_every_layer_invisible() {
+    let mut layer_package = package();
+    add_page_sheet(
+        &mut layer_package,
+        vec![layer_row(0, "Trussing", "1"), layer_row(1, "Lighting", "0")],
+    );
+    let layers = crate::page_layers(&layer_package, "page");
+    for (member, expected) in [("1", true), ("0;1", false), ("7", false), ("", false)] {
+        let mut member_package = package();
+        add_page(
+            &mut member_package,
+            shape(10, vec![ShapeChild::Cell(cell("LayerMember", member))]),
+        );
+        let resolved = Resolver::new(&member_package)
+            .resolve_shape("page", 10)
+            .unwrap();
+        assert_eq!(
+            crate::shape_hidden_by_layers(&resolved, &layers),
+            expected,
+            "{member}"
+        );
+    }
+}
 fn add_master(package: &mut VsdxPackage, id: u32, value: Shape) {
     let path = format!("master{id}");
     package.master_part_ids.insert(path.clone(), id);

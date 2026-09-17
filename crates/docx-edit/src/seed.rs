@@ -581,6 +581,20 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
         return target.cloned();
     };
     let mut result = object(target).cloned().unwrap_or_default();
+    if let Some(value) = source
+        .get("indentFirstLine")
+        .filter(|value| !value.is_null())
+    {
+        result.insert("indentFirstLine".to_owned(), value.clone());
+        match source.get("hangingIndent").filter(|value| !value.is_null()) {
+            Some(hanging) => {
+                result.insert("hangingIndent".to_owned(), hanging.clone());
+            }
+            None => {
+                result.remove("hangingIndent");
+            }
+        }
+    }
     for (key, value) in source {
         if key == "runProperties" {
             if let Some(merged) = merge_text_formatting(result.get(key), Some(value)) {
@@ -591,6 +605,8 @@ fn merge_paragraph_formatting(target: Option<&Value>, source: Option<&Value>) ->
                 key.clone(),
                 merge_plain(result.get(key), Some(value)).unwrap_or_else(|| value.clone()),
             );
+        } else if matches!(key.as_str(), "indentFirstLine" | "hangingIndent") {
+            continue;
         } else {
             result.insert(key.clone(), value.clone());
         }
@@ -1771,15 +1787,17 @@ fn paragraph_attrs(
     let formatting = field(Some(paragraph), "formatting");
     let style_id = string(field(formatting, "styleId"));
     let list = field(Some(paragraph), "listRendering");
-    let direct_first =
-        field(formatting, "indentFirstLine").filter(|value| number(Some(value)) != Some(0.0));
-    let first_line = direct_first
-        .or_else(|| field(list, "indentFirstLine"))
-        .or_else(|| field(formatting, "indentFirstLine"));
-    let hanging = if direct_first.is_none() && field(list, "indentFirstLine").is_some() {
-        field(list, "hangingIndent")
+    let direct_value = field(formatting, "indentFirstLine");
+    let direct_nonzero = direct_value.filter(|value| number(Some(value)) != Some(0.0));
+    let list_value = field(list, "indentFirstLine");
+    let (selected_first, selected_hanging) = if let Some(value) = direct_nonzero {
+        (Some(value), field(formatting, "hangingIndent"))
+    } else if let Some(value) = list_value {
+        (Some(value), field(list, "hangingIndent"))
+    } else if let Some(value) = direct_value {
+        (Some(value), field(formatting, "hangingIndent"))
     } else {
-        field(formatting, "hangingIndent").or_else(|| field(list, "hangingIndent"))
+        (None, None)
     };
     let mut attrs = map_from_value(json!({
         "paraId": nullish(field(Some(paragraph), "paraId")),
@@ -1855,25 +1873,27 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            first_line
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "indentFirstLine"))
-                        .flatten()
-                })
-                .cloned()
-                .unwrap_or(Value::Null),
+            if selected_first.is_some() {
+                selected_first
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "indentFirstLine")
+            }
+            .cloned()
+            .unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            hanging
-                .or_else(|| {
-                    (!numbering_removed)
-                        .then(|| field(style_ppr_ref, "hangingIndent"))
-                        .flatten()
-                })
-                .cloned()
-                .unwrap_or(Value::Bool(false)),
+            if selected_first.is_some() {
+                selected_hanging
+            } else if numbering_removed {
+                None
+            } else {
+                field(style_ppr_ref, "hangingIndent")
+            }
+            .cloned()
+            .unwrap_or(Value::Bool(false)),
         );
         let default_character = styles
             .default_style("character")
@@ -1939,11 +1959,11 @@ fn paragraph_attrs(
         );
         attrs.insert(
             "indentFirstLine".to_owned(),
-            first_line.cloned().unwrap_or(Value::Null),
+            selected_first.cloned().unwrap_or(Value::Null),
         );
         attrs.insert(
             "hangingIndent".to_owned(),
-            hanging.cloned().unwrap_or(Value::Bool(false)),
+            selected_hanging.cloned().unwrap_or(Value::Bool(false)),
         );
         attrs.insert(
             "defaultTextFormatting".to_owned(),
@@ -3655,6 +3675,188 @@ mod tests {
             assert_eq!(properties["indentFirstLine"], json!(240));
             assert_eq!(properties["hangingIndent"], json!(false));
         }
+    }
+
+    #[test]
+    fn first_line_value_and_kind_share_one_source() {
+        let hanging_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":-730,"hangingIndent":true}}]}),
+        ));
+        let first_styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":{"indentLeft":1450,"indentFirstLine":720}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":720},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160));
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":720,"indentFirstLine":0},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":1425},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(1425));
+        assert_eq!(properties["indentFirstLine"], json!(-730));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentLeft":2160,"indentFirstLine":-720,"hangingIndent":true},"content":[]}),
+            &first_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":720},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(720));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{},"listRendering":{"indentLeft":1440,"indentFirstLine":300},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(300));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":0},"listRendering":{"indentLeft":1440,"indentFirstLine":-360,"hangingIndent":true},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"indentFirstLine":-720,"hangingIndent":true},"listRendering":{"indentLeft":2145},"content":[]}),
+            &hanging_styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2145));
+        assert_eq!(properties["indentFirstLine"], json!(-720));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn derived_first_line_without_flag_clears_base_hanging() {
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":200}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(200));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":-730,"hangingIndent":true}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":0}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(0));
+        assert_eq!(properties["hangingIndent"], json!(false));
+        let styles = StyleResolver::new(Some(
+            &json!({"docDefaults":{"pPr":{"indentFirstLine":200}},"styles":[{"styleId":"Derived","type":"paragraph","pPr":{"indentFirstLine":-360,"hangingIndent":true}}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting":{"styleId":"Derived"},"content":[]}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentFirstLine"], json!(-360));
+        assert_eq!(properties["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn indent_kind_pairs_merge_atomically_including_zero() {
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentFirstLine":200});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let derived = json!({"indentFirstLine":0});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(0));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":200});
+        let derived = json!({"hangingIndent":true});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(200));
+        assert!(merged.get("hangingIndent").is_none());
+        let base = json!({"indentFirstLine":-730,"hangingIndent":true});
+        let derived = json!({"indentLeft":720});
+        let merged = merge_paragraph_formatting(Some(&base), Some(&derived)).unwrap();
+        assert_eq!(merged["indentFirstLine"], json!(-730));
+        assert_eq!(merged["hangingIndent"], json!(true));
+    }
+
+    #[test]
+    fn parsed_indent_xml_seeds_matching_attrs() {
+        fn ppr(xml: &str) -> Value {
+            let limits = docx_parse::xml::ParseLimits::default();
+            let mut budget = docx_parse::xml::ParseBudget::new(&limits);
+            let root = docx_parse::xml::parse_xml(xml.as_bytes(), "formatting.xml", &mut budget)
+                .unwrap()
+                .root()
+                .unwrap()
+                .clone();
+            serde_json::to_value(docx_parse::parse_paragraph_properties(Some(&root), None).unwrap())
+                .unwrap()
+        }
+        let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
+        assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
+        assert_eq!(style_ppr["hangingIndent"], json!(true));
+        let direct_ppr = ppr(r#"<w:pPr><w:ind w:left="2160" w:firstLine="720"/></w:pPr>"#);
+        assert_eq!(direct_ppr["indentFirstLine"], json!(720.0));
+        assert!(direct_ppr.get("hangingIndent").is_none());
+        let styles = StyleResolver::new(Some(
+            &json!({"styles":[{"styleId":"Normal","type":"paragraph","default":true,"pPr":style_ppr}]}),
+        ));
+        let properties = paragraph_attrs(
+            &json!({"formatting": direct_ppr, "content": []}),
+            &styles,
+            &[],
+            &[],
+            None,
+        );
+        assert_eq!(properties["indentLeft"], json!(2160.0));
+        assert_eq!(properties["indentFirstLine"], json!(720.0));
+        assert_eq!(properties["hangingIndent"], json!(false));
     }
 
     #[test]

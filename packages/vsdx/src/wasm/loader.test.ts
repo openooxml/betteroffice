@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import JSZip from 'jszip';
 import { VsdxDocument, VsdxRenderer } from './generated/vsdx_wasm.js';
-import { initWasm, openDiagram } from '../index';
+import { initWasm, openDiagram, shapeDataRows, shapeDataValueFormula, visibleShapeDataRows } from '../index';
 import type { FormulaShapeDraft } from '../types';
 
 const root = resolve(import.meta.dir, '../../../..');
@@ -648,6 +648,79 @@ describe('VSDX wasm boundary', () => {
     expect(x?.formula).toBe('2');
     expect(x?.locator).toEqual(expect.objectContaining({ section: 'Geometry', row: { index: 0 }, cellName: 'X' }));
     diagram.dispose();
+  });
+
+  test('commits a shape-data edit through the mutation policy', async () => {
+    const section = `<Section N='Property'>`
+      + `<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' V='Old' F='&quot;Old&quot;'/></Row>`
+      + `<Row N='Serial'><Cell N='Label' V='Serial'/><Cell N='Type' V='0'/><Cell N='SortKey' V='A'/><Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/></Row>`
+      + `<Row N='Hidden'><Cell N='Label' V='Hidden'/><Cell N='Invisible' V='1'/><Cell N='Value' V='H' F='&quot;H&quot;'/></Row>`
+      + `</Section>`;
+    const archive = await JSZip.loadAsync(foundation);
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'>${section}`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9054 });
+    try {
+      const page = diagram.snapshot().pages[0];
+      const shape = page.shapes[0];
+      expect(shapeDataRows(shape).map(row => row.rowName)).toEqual(['Hidden', 'Serial', 'Device']);
+      expect(visibleShapeDataRows(shape).map(row => row.rowName)).toEqual(['Serial', 'Device']);
+      const locate = (rowName: string) => ({ cellName: 'Value', section: 'Property', rowName });
+      const receipt = diagram.setCellFormula(page.id, shape.id, locate('Device'), shapeDataValueFormula('string', 'New'));
+      expect(receipt).toEqual({ pageId: page.id, shapeId: shape.id, cellName: 'Value', before: '"Old"', after: '"New"' });
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Device')!.displayValue).toBe('New');
+      expect(() => diagram.setCellFormula(page.id, shape.id, locate('Serial'), '"XYZ"')).toThrow();
+      expect(shapeDataRows(diagram.snapshot().pages[0].shapes[0]).find(row => row.rowName === 'Serial')!.formula).toBe('GUARD("ABC")');
+      const saved = await JSZip.loadAsync(diagram.save()).then(zip => zip.file('visio/pages/page1.xml')!.async('string'));
+      expect(saved).toContain(`<Row N='Device'><Cell N='Label' V='Device name'/><Cell N='Type' V='0'/><Cell N='SortKey' V='B'/><Cell N='Value' F='&quot;New&quot;'/></Row>`);
+      expect(saved).toContain(`<Cell N='Value' V='ABC' F='GUARD(&quot;ABC&quot;)'/>`);
+    } finally { diagram.dispose(); }
+  });
+
+  test('lists page layers and hides shapes on invisible layers', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='1'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Color' V='255'/><Cell N='Status' V='0'/><Cell N='Visible' V='0'/><Cell N='Print' V='1'/><Cell N='Active' V='0'/><Cell N='Lock' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const diagram = openDiagram(await archive.generateAsync({ type: 'uint8array' }), { clientId: 9052 });
+    try {
+      expect(diagram.pageLayers(0)).toEqual([
+        { index: 0, name: 'Trussing', visible: true, print: true, lock: false, active: false, color: '255', status: '0' },
+        { index: 1, name: 'Lighting', visible: false, print: true, lock: false, active: false, color: '255', status: '0' },
+      ]);
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.setLayerVisible(part, 1, true);
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: true }));
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(true);
+      diagram.setLayerVisible(part, 1, false);
+      expect(diagram.layoutPage(0).primitives.some(primitive => primitive.id === `${part}:1`)).toBe(false);
+      diagram.clearLayerVisibility();
+      expect(diagram.pageLayers(0)[1]).toEqual(expect.objectContaining({ index: 1, visible: false }));
+    } finally { diagram.dispose(); }
+  });
+
+  test('layer visibility stays out of the saved package', async () => {
+    const archive = await JSZip.loadAsync(foundation);
+    const pages = await archive.file('visio/pages/pages.xml')!.async('string');
+    archive.file('visio/pages/pages.xml', pages.replace('</PageSheet>',
+      `<Section N='Layer'><Row IX='0'><Cell N='Name' V='Trussing'/><Cell N='Visible' V='1'/></Row><Row IX='1'><Cell N='Name' V='Lighting'/><Cell N='Visible' V='0'/></Row></Section></PageSheet>`));
+    const contents = await archive.file('visio/pages/page1.xml')!.async('string');
+    archive.file('visio/pages/page1.xml', contents.replace(`NameU='Process'`, `NameU='Process'><Cell N='LayerMember' V='1'/>`));
+    const bytes = await archive.generateAsync({ type: 'uint8array' });
+    const diagram = openDiagram(bytes, { clientId: 9053 });
+    try {
+      const part = diagram.snapshot().pages[0].sourcePartPath;
+      const before = diagram.save();
+      diagram.setLayerVisible(part, 1, true);
+      diagram.layoutPage(0);
+      expect(diagram.save()).toEqual(before);
+      expect(diagram.canUndo()).toBe(false);
+      const saved = await JSZip.loadAsync(diagram.save());
+      expect(await saved.file('visio/pages/pages.xml')!.async('string')).toBe(await JSZip.loadAsync(bytes).then(zip => zip.file('visio/pages/pages.xml')!.async('string')));
+    } finally { diagram.dispose(); }
   });
 
   test('does not reenter update listeners before the outer call unwinds', () => {

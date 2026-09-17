@@ -28,6 +28,15 @@
     }
   },
   "contextMenu": { "label": "Shape actions" },
+  "layersPanel": {
+    "title": "Layers",
+    "collapse": "Collapse Layers",
+    "expand": "Expand Layers",
+    "empty": "No layers on this page",
+    "showLayer": "Show layer {name}",
+    "hideLayer": "Hide layer {name}",
+    "unnamedLayer": "Layer {index}"
+  },
   "shapesPanel": {
     "title": "Shapes",
     "collapse": "Collapse Shapes",
@@ -71,5 +80,11 @@
       "star7": "7-Point Star",
       "star16": "16-Point Star"
     }
+  },
+  "shapeData": {
+    "title": "Shape Data",
+    "noSelection": "Select a shape to see its data.",
+    "empty": "This shape has no visible data.",
+    "valueLabel": "Value"
   }
 }

@@ -4,7 +4,9 @@ mod connectivity;
 mod containers;
 mod geometry;
 mod inheritance;
+mod layers;
 mod model;
+mod shape_data;
 mod text;
 
 #[cfg(test)]
@@ -14,4 +16,6 @@ pub use connectivity::*;
 pub use containers::*;
 pub use geometry::*;
 pub use inheritance::*;
+pub use layers::*;
 pub use model::*;
+pub use shape_data::*;

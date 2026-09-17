@@ -1532,7 +1532,12 @@ fn add_shape(
                 offset: end - 2,
                 length: 2,
             },
-            [b">".as_slice(), new_shape.as_slice(), b"</Shapes>"].concat(),
+            [
+                b">".as_slice(),
+                new_shape.as_slice(),
+                format!("</{}>", shapes.name).as_bytes(),
+            ]
+            .concat(),
         )
     } else {
         let close = part.bytes[..end]
@@ -2921,6 +2926,26 @@ mod tests {
             reparsed.part_bytes(&path).unwrap(),
             b"<PageContents><Shapes><Shape ID='1'/><Shape ID='2'/></Shapes><Connects><Connect FromSheet=\"2\" FromCell=\"BeginX\" ToSheet=\"1\" ToCell=\"PinX\"/></Connects></PageContents>"
         );
+        validate_structure(&reparsed).unwrap();
+    }
+
+    #[test]
+    fn add_shape_preserves_a_prefixed_empty_shapes_container() {
+        let source = b"<v:PageContents xmlns:v='http://schemas.microsoft.com/office/visio/2012/main'><v:Shapes/></v:PageContents>";
+        let (package, path) = package_with_page_xml(source);
+        let saved = save_structural_edits(
+            &package,
+            &[StructuralEdit::AddShape {
+                page_id: package.page_part_ids[&path],
+                shape_xml: b"<v:Shape><v:Cell N='Width' V='1'/></v:Shape>".to_vec(),
+            }],
+        )
+        .unwrap();
+        let reparsed = parse_vsdx(&saved).unwrap();
+        let after = std::str::from_utf8(reparsed.part_bytes(&path).unwrap()).unwrap();
+        assert!(after.contains("</v:Shapes>"), "{after}");
+        assert!(!after.contains("</Shapes>"), "{after}");
+        assert_eq!(reparsed.page_contents[&path].shapes().count(), 1);
         validate_structure(&reparsed).unwrap();
     }
 

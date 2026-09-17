@@ -5,7 +5,7 @@ use vsdx_eval::{Evaluation, Value, evaluate_cell_with_shape_package_theme};
 use vsdx_parse::{ParseLimits, Sheet, VsdxPackage};
 use vsdx_resolve::{Lookup, ResolvedShape, Resolver};
 
-use crate::display_list::Primitive;
+use crate::display_list::{Affine, Primitive};
 
 const END_EPSILON: f64 = 1e-9;
 const MAX_STYLE_DEPTH: usize = 8;
@@ -92,7 +92,7 @@ pub fn apply_line_jumps(
         .map(|item| (item.id.as_str(), item))
         .collect();
     let mut routes = Vec::new();
-    collect_routes(primitives, &lookup, &mut routes);
+    collect_routes(primitives, &lookup, Affine::identity(), &mut routes);
     if routes.len() < 2 {
         return;
     }
@@ -147,8 +147,14 @@ pub fn apply_line_jumps(
         }
     }
     for (index, mut placed) in jumps {
-        if let Some(path) = shape_mut(primitives, &routes[index].id) {
-            *path = splice(&routes[index].points, &mut placed);
+        let route = &routes[index];
+        if let Some(path) = shape_mut(primitives, &route.id) {
+            *path = splice(&route.points, &mut placed);
+            if let Some(inverse) = route.local {
+                for command in path.iter_mut() {
+                    crate::transform_affine(command, inverse);
+                }
+            }
         }
     }
 }
@@ -162,7 +168,10 @@ enum Side {
 struct Route {
     id: String,
     z: u32,
+    /// Page space, so routes from different groups share one frame.
     points: Vec<(f64, f64)>,
+    /// Maps page space back onto the path's own frame; `None` when they are the same.
+    local: Option<Affine>,
 }
 
 struct Segment {
@@ -283,6 +292,7 @@ fn no_style_chain(package: &VsdxPackage, sheet: &Sheet, name: &str, depth: usize
 fn collect_routes(
     primitives: &[Primitive],
     lookup: &BTreeMap<&str, &ConnectorJumpOverride>,
+    ancestors: Affine,
     routes: &mut Vec<Route>,
 ) {
     for primitive in primitives {
@@ -292,17 +302,39 @@ fn collect_routes(
                 z_order,
                 path,
                 stroke: Some(_),
+                transform,
                 ..
             } if lookup.contains_key(id.as_str()) => {
-                if let Some(points) = route_points(path) {
-                    routes.push(Route {
-                        id: id.clone(),
-                        z: *z_order,
-                        points,
-                    });
+                let page = ancestors.compose(*transform);
+                let local = if page.is_identity() {
+                    None
+                } else {
+                    let Some(inverse) = page.invert() else {
+                        continue;
+                    };
+                    Some(inverse)
+                };
+                let Some(mut points) = route_points(path) else {
+                    continue;
+                };
+                if local.is_some() {
+                    for point in &mut points {
+                        let (x, y) = page.apply_point(point.0 as f32, point.1 as f32);
+                        *point = (x as f64, y as f64);
+                    }
                 }
+                routes.push(Route {
+                    id: id.clone(),
+                    z: *z_order,
+                    points,
+                    local,
+                });
             }
-            Primitive::Group { primitives, .. } => collect_routes(primitives, lookup, routes),
+            Primitive::Group {
+                primitives,
+                transform,
+                ..
+            } => collect_routes(primitives, lookup, ancestors.compose(*transform), routes),
             _ => {}
         }
     }

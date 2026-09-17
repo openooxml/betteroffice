@@ -5,6 +5,7 @@ export type SnapshotCellRow = { index: number } | { name: string };
 export interface SnapshotCellLocator { sheet: SnapshotCellSheet; shapeId: number | null; section: string | null; sectionIndex?: number | null; row: SnapshotCellRow | null; cellName: string; }
 export interface CellSnapshot { locator: SnapshotCellLocator; name: string; formula: string | null; value: string | null; rowType?: string; }
 export interface ShapeSnapshot { id: string; sourceId: number; name: string | null; cells: CellSnapshot[]; children: ShapeSnapshot[]; }
+export interface PageLayer { index: number; name: string; visible: boolean; print: boolean; lock: boolean; active: boolean; color: string; status: string; }
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
