@@ -30,12 +30,12 @@ configureDefaultFonts({ fonts });
 
 `configureDefaultFonts({ load: () => import('@betteroffice/fonts') })` does the same lazily, keeping the package in its own chunk. To leave the binaries off your origin, add a `baseUrl` — see [Serving the faces from a CDN](#serving-the-faces-from-a-cdn).
 
-Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those six faces are 39 MB and ship separately so nobody installs them unnecessarily.
+Add [`@betteroffice/fonts-cjk`](https://www.npmjs.com/package/@betteroffice/fonts-cjk) when your documents contain Chinese, Japanese or Korean text — those five faces are 33 MB and ship separately so nobody installs them unnecessarily.
 
 | Package                   | Faces | Size on disk | Contents                                     |
 | ------------------------- | ----- | ------------ | -------------------------------------------- |
 | `@betteroffice/fonts`     | 25    | 7.9 MB       | Latin metric-compatible set + Hebrew/Arabic  |
-| `@betteroffice/fonts-cjk` | 6     | 39 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC/JP      |
+| `@betteroffice/fonts-cjk` | 5     | 33 MB        | Noto Sans SC/TC/JP/KR, Noto Serif SC         |
 
 Faces are fetched per face, lazily. A typical English document using regular and bold Calibri pulls Carlito Regular + Bold plus the chain's always-appended Liberation Sans Regular + Bold: 2,135,668 bytes (2.04 MiB) raw.
 
@@ -62,8 +62,7 @@ For the bundled entry, the CJK rows below require **`@betteroffice/fonts-cjk` in
 | Noto Sans SC      | Microsoft YaHei, SimHei, DengXian (微软雅黑, 黑体, 等线)                                                          | `cjk-sc`      | OFL 1.1 | 2.004   |
 | Noto Serif SC     | SimSun, NSimSun, FangSong, KaiTi (宋体, 仿宋, 楷体)                                                               | `cjk-sc`      | OFL 1.1 | 2.003   |
 | Noto Sans TC      | Microsoft JhengHei, PMingLiU, MingLiU, DFKai-SB (微軟正黑體, 新細明體, 細明體, 標楷體)                            | `cjk-tc`      | OFL 1.1 | 2.004   |
-| Noto Sans JP      | MS (P)Gothic, Meiryo, Meiryo UI, Yu Gothic (ＭＳ ゴシック, メイリオ, 游ゴシック)                                | `cjk-jp`      | OFL 1.1 | 2.004   |
-| Noto Serif JP     | MS (P)Mincho, Yu Mincho (ＭＳ 明朝, 游明朝)                                                                     | `cjk-jp`      | OFL 1.1 | 2.003   |
+| Noto Sans JP      | MS (P)Gothic, MS (P)Mincho, Meiryo, Yu Gothic, Yu Mincho (ＭＳ ゴシック, ＭＳ 明朝, メイリオ, 游ゴシック, 游明朝) | `cjk-jp`      | OFL 1.1 | 2.004   |
 | Noto Sans KR      | Malgun Gothic, Gulim, Dotum, Batang, Gungsuh (맑은 고딕, 굴림, 돋움, 바탕, 궁서)                                  | `cjk-kr`      | OFL 1.1 | 2.004   |
 | Noto Sans Hebrew  | — (script fallback only)                                                                                          | `hebrew`      | OFL 1.1 | 3.001   |
 | Noto Sans Arabic  | — (script fallback only)                                                                                          | `arabic`      | OFL 1.1 | 2.013   |
@@ -71,7 +70,7 @@ For the bundled entry, the CJK rows below require **`@betteroffice/fonts-cjk` in
 
 Notes:
 
-- **Regular only (CJK).** The CJK faces ship a single Regular each; a bold CJK request resolves to the Regular face and bold falls back through the measurement font chain. Serif TC/KR are not vendored (size budget) — the Ming/Batang serif families map to the regional sans face, diverging from `fontResolver.ts`'s Noto Serif picks for those regions; coverage wins over style. The Mincho serif families resolve to the vendored Noto Serif JP face, matching `fontResolver.ts`.
+- **Regular only (CJK).** The CJK faces ship a single Regular each; a bold CJK request resolves to the Regular face and bold falls back through the measurement font chain. Serif TC/JP/KR are not vendored (size budget) — the Ming/Mincho/Batang serif families map to the regional sans face, diverging from `fontResolver.ts`'s Noto Serif picks for those regions; coverage wins over style.
 - **Static CFF, not the variable TTFs.** The CJK binaries are the static `SubsetOTF` Regulars from noto-cjk, NOT the google/fonts variable TTFs: those VFs default to the Thin (wght=100) instance, and the Rust `FontStore` reads default-instance advances while the browser measures at wght=400 — same bytes, different numbers. The statics keep both sides identical (skrifa parses CFF; verified against the measure pipeline).
 - **RTL faces carry no Word-family mapping.** Hebrew/Arabic documents mostly name Latin families (Arial, Times New Roman) which keep their Liberation mapping; the per-script fallback chain supplies the Hebrew/Arabic glyphs. Hebrew and Arabic sans ship Regular + Bold statics.
 

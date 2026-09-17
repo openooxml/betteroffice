@@ -39,17 +39,12 @@ describe('CDN font provider', () => {
   test('lazily loads Latin and Japanese faces from separately pinned packages', async () => {
     const requested: string[] = [];
     const latin = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts@${fontsVersion}/assets/Carlito-Regular.ttf`;
-    const japaneseSerif = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSerifJP-Regular.otf`;
-    const japaneseSans = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSansJP-Regular.otf`;
+    const japanese = `https://cdn.jsdelivr.net/npm/@betteroffice/fonts-cjk@${fontsCjkVersion}/assets/NotoSansJP-Regular.otf`;
     intercept(
       {
         [latin]: new URL('../assets/Carlito-Regular.ttf', import.meta.url)
           .pathname,
-        [japaneseSerif]: new URL(
-          '../../fonts-cjk/assets/NotoSerifJP-Regular.otf',
-          import.meta.url,
-        ).pathname,
-        [japaneseSans]: new URL(
+        [japanese]: new URL(
           '../../fonts-cjk/assets/NotoSansJP-Regular.otf',
           import.meta.url,
         ).pathname,
@@ -64,9 +59,7 @@ describe('CDN font provider', () => {
     expect(new DataView(first).getUint32(0)).toBe(0x00010000);
     const cjk = await provider.resolve('MS Mincho', false, false)!();
     expect(new DataView(cjk).getUint32(0)).toBe(0x4f54544f);
-    const gothic = await provider.resolve('MS Gothic', false, false)!();
-    expect(new DataView(gothic).getUint32(0)).toBe(0x4f54544f);
-    expect(requested).toEqual([latin, japaneseSerif, japaneseSans]);
+    expect(requested).toEqual([latin, japanese]);
   });
 
   test('custom origins remain isolated and failed downloads can retry', async () => {

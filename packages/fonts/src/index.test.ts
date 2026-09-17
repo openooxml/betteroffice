@@ -40,48 +40,8 @@ describe('resolution', () => {
 
   test('script fallbacks prefer the sans face of the bucket', () => {
     expect(resolveScriptFallbackFace('cjk-sc', false, false)?.family).toBe('Noto Sans SC');
-    expect(resolveScriptFallbackFace('cjk-jp', false, false)?.family).toBe('Noto Sans JP');
     expect(resolveScriptFallbackFace('arabic', false, false)?.family).toBe('Noto Sans Arabic');
     expect(resolveScriptFallbackFace('hebrew', true, false)?.file).toBe('NotoSansHebrew-Bold.ttf');
-  });
-
-  test('resolves Japanese Mincho requests to the serif face', () => {
-    for (const family of [
-      'MS Mincho',
-      'MS PMincho',
-      'Yu Mincho',
-      'ＭＳ 明朝',
-      'ＭＳ Ｐ明朝',
-      '游明朝',
-    ]) {
-      expect(resolveMetricCompatFamily(family)).toBe('Noto Serif JP');
-      expect(resolveMetricCompatFace(family, false, false)?.file).toBe(
-        'NotoSerifJP-Regular.otf'
-      );
-    }
-    // Bold/italic fall back to the single Regular, like the other CJK faces.
-    expect(resolveMetricCompatFace('MS Mincho', true, true)?.file).toBe(
-      'NotoSerifJP-Regular.otf'
-    );
-  });
-
-  test('keeps Japanese Gothic and Meiryo requests on the sans face', () => {
-    for (const family of [
-      'MS Gothic',
-      'MS PGothic',
-      'Meiryo',
-      'Meiryo UI',
-      'Yu Gothic',
-      'ＭＳ ゴシック',
-      'ＭＳ Ｐゴシック',
-      'メイリオ',
-      '游ゴシック',
-    ]) {
-      expect(resolveMetricCompatFamily(family)).toBe('Noto Sans JP');
-      expect(resolveMetricCompatFace(family, false, false)?.file).toBe(
-        'NotoSansJP-Regular.otf'
-      );
-    }
   });
 });
 

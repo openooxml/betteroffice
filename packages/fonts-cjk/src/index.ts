@@ -7,5 +7,4 @@ export const CJK_FONT_ASSET_URLS: Record<string, () => URL> = {
   'NotoSansSC-Regular.otf': () => new URL('../assets/NotoSansSC-Regular.otf', import.meta.url),
   'NotoSansTC-Regular.otf': () => new URL('../assets/NotoSansTC-Regular.otf', import.meta.url),
   'NotoSerifSC-Regular.otf': () => new URL('../assets/NotoSerifSC-Regular.otf', import.meta.url),
-  'NotoSerifJP-Regular.otf': () => new URL('../assets/NotoSerifJP-Regular.otf', import.meta.url),
 };
