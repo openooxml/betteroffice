@@ -22,6 +22,8 @@ import type {
   ParagraphAlignment,
   PresetShapeDraft,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   ShapeAdjustReceipt,
   ShapeDraft,
   ShapeFillReceipt,
@@ -64,6 +66,8 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /** Literal search in slide order. */
+  searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
   layoutSlide(slideIndex: number): SlideDisplayList;
   hitTest(x: number, y: number): HitTestResult | null;
@@ -335,6 +339,20 @@ export function openPresentation(
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
+    },
+    searchText(query, options = {}) {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return jsonWasmCall(() =>
+        doc.searchTextJson(JSON.stringify({
+          query,
+          caseSensitive: options.caseSensitive ?? false,
+          limit: Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined,
+        }))
+      );
     },
     registerFont(face: PptxFontFace): number {
       return wasmCall(() => registerFont(renderer, face));

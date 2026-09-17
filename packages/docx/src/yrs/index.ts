@@ -149,6 +149,22 @@ export interface YrsParagraph {
   properties: Record<string, unknown>;
 }
 
+export interface YrsTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; unlimited by default. */
+  limit?: number;
+}
+
+/** Paragraph-local UTF-16 offsets. */
+export interface YrsTextMatch {
+  story: string;
+  paraId: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
 /** One direct numbering reference (`w:numPr`) on a paragraph. */
 export interface YrsNumberingProperties {
   numId?: number;
@@ -897,6 +913,8 @@ export interface YrsSession extends CollaborationReplica {
   yrsBlocksForStory(story: string, env?: YrsRenderEnv): unknown[];
   /** Paragraph snapshots in document order. */
   paragraphs(story: string): YrsParagraph[];
+  /** Literal search in document order. */
+  searchText(query: string, options?: YrsTextSearchOptions): YrsTextMatch[];
   /** Paragraph ids and inline-unit lengths, resolved in one Rust story traversal. */
   paragraphSpans(story: string): YrsParagraphLength[];
   /** The raw formatted-segment view (the render bridge's input). */
@@ -1703,6 +1721,20 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       return blocks;
     },
     paragraphs: (story) => JSON.parse(session.paragraphs(story)) as YrsParagraph[],
+    searchText: (query, options = {}) => {
+      if (!query) return [];
+      const limit = options.limit ?? Number.POSITIVE_INFINITY;
+      if ((!Number.isSafeInteger(limit) && limit !== Number.POSITIVE_INFINITY) || limit < 0) {
+        throw new RangeError('search limit must be a non-negative safe integer');
+      }
+      return JSON.parse(
+        session.search_text(
+          query,
+          options.caseSensitive ?? false,
+          Number.isFinite(limit) ? Math.min(limit, 0xffffffff) : undefined
+        )
+      ) as YrsTextMatch[];
+    },
     paragraphSpans: (story) => JSON.parse(session.paragraph_spans(story)) as YrsParagraphLength[],
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>

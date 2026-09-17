@@ -93,6 +93,8 @@ export type {
   PrintMetrics,
   SheetInfo,
   WorkbookHandle,
+  XlsxTextMatch,
+  XlsxTextSearchOptions,
   WorkbookUpdateListener,
   WorkbookUpdateOrigin,
   CellEdit,

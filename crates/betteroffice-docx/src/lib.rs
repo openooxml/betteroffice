@@ -16,7 +16,7 @@ pub use types::{DocumentModel, DocumentStructure, LayoutResult, SaveOptions};
 
 pub use docx_edit::{
     EditCtx, EditError, EditOrigin, EditingDoc, FormatPolicy, Loc, LocRange, OpError, Receipt,
-    StoryRange, TextView,
+    StoryRange, TextSearchError, TextSearchMatch, TextView,
 };
 pub use docx_layout::display_list::{DisplayList, DisplayPage, Primitive};
 pub use docx_layout::types::{Input as LayoutInput, Layout, LayoutOptions, MeasuredBlock, Page};

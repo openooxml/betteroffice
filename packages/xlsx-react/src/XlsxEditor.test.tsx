@@ -12,7 +12,7 @@ import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { cellRect, initWasm, openWorkbook } from '@betteroffice/xlsx';
+import { cellRect, initWasm, openWorkbook, selectionAt } from '@betteroffice/xlsx';
 import type { CellAddr, ChartRegion, GridMeta, WorkbookHandle } from '@betteroffice/xlsx';
 import { XlsxEditor, type XlsxEditorApi } from './XlsxEditor';
 
@@ -755,6 +755,131 @@ describe('XlsxEditor chart objects', () => {
   });
 });
 
+describe('XlsxEditor host integration', () => {
+  it('keeps viewing mode navigable without exposing user mutations', async () => {
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onChange={() => changes++}
+        onReady={(ready) => {
+          api = ready;
+        }}
+        readOnly
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const target = { row: 2, col: 0 };
+    const before = api!.handle.cell(0, target.row, target.col).input;
+
+    fireEvent.doubleClick(surface, pointAt(plain, target));
+    fireEvent.keyDown(surface, { key: 'x' });
+    fireEvent.keyDown(surface, { key: 'Delete' });
+
+    expect(view.queryByTestId('xlsx-toolbar')).toBeNull();
+    expect(view.queryByTestId('xlsx-cell-editor')).toBeNull();
+    expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+    expect(changes).toBe(0);
+
+    await act(async () => {
+      expect(api!.selectCells(0, selectionAt({ row: 3, col: 1 }))).toBe(true);
+    });
+    await waitFor(() => {
+      const selected = view.getByRole('gridcell', { selected: true });
+      expect(selected.textContent).toContain('B4');
+    });
+    await act(async () => api!.clearSelection());
+    await waitFor(() =>
+      expect(view.queryAllByRole('gridcell', { selected: true })).toHaveLength(0)
+    );
+    expect(api!.selectCells(99, selectionAt({ row: 0, col: 0 }))).toBe(false);
+  });
+
+  it('notifies on applied edits and saves through the host API', async () => {
+    let api: XlsxEditorApi | undefined;
+    let changes = 0;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onChange={() => changes++}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const target = { row: 2, col: 0 };
+
+    await act(async () => {
+      expect(api!.selectCells(0, selectionAt(target))).toBe(true);
+    });
+    fireEvent.doubleClick(surface, pointAt(plain, target));
+    const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
+    fireEvent.change(editor, { target: { value: 'Host edit' } });
+    fireEvent.keyDown(editor, { key: 'Enter' });
+    expect(changes).toBe(1);
+
+    await act(async () => {
+      api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+      api!.clearSelection();
+    });
+    let saved!: Uint8Array;
+    await act(async () => {
+      saved = api!.save();
+    });
+    expect(changes).toBe(1);
+
+    const reopened = openWorkbook(saved);
+    try {
+      expect(reopened.cell(0, target.row, target.col).input).toBe('Host edit');
+    } finally {
+      reopened.dispose();
+    }
+  });
+
+  it('does not finish an asynchronous paste after entering viewing mode', async () => {
+    const file = plain.bytes.slice();
+    let api: XlsxEditorApi | undefined;
+    let resolveClipboard!: (text: string) => void;
+    const clipboardText = new Promise<string>((resolve) => {
+      resolveClipboard = resolve;
+    });
+    const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { readText: () => clipboardText },
+    });
+
+    try {
+      const onReady = (ready: XlsxEditorApi) => {
+        api = ready;
+      };
+      const view = render(<XlsxEditor file={file} onReady={onReady} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const target = { row: 2, col: 0 };
+      const before = api!.handle.cell(0, target.row, target.col).input;
+      await act(async () => {
+        api!.selectCells(0, selectionAt(target));
+      });
+
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+      view.rerender(<XlsxEditor file={file} onReady={onReady} readOnly />);
+      await act(async () => resolveClipboard('late paste'));
+
+      expect(api!.handle.cell(0, target.row, target.col).input).toBe(before);
+    } finally {
+      if (originalClipboard) {
+        Object.defineProperty(navigator, 'clipboard', originalClipboard);
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard');
+      }
+    }
+  });
+});
+
 describe('XlsxEditor proposal review', () => {
   it('reviews a staged proposal through accept, undo, reject, stale warning, and force apply', async () => {
     let api: XlsxEditorApi | undefined;
@@ -819,5 +944,149 @@ describe('XlsxEditor proposal review', () => {
     fireEvent.click(view.getByTestId('xlsx-proposal-accept'));
     await waitFor(() => expect(workbook.cell(0, 6, 4).input).toBe('=G2*2'));
     expect(workbook.listProposals()).toHaveLength(0);
+  });
+});
+
+describe('XlsxEditor pending host edits', () => {
+  it('settles a pending chart move before selecting another sheet', async () => {
+    const source = openWorkbook(charted.bytes);
+    source.applyOps([{ type: 'addSheet', index: 1, name: 'Extra' }]);
+    const file = source.save();
+    source.dispose();
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={file}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const surface = view.getByTestId('xlsx-scroll');
+    const chart = api!.handle.displayList({ x: 0, y: 0, ...VIEWPORT }).charts![0];
+    fireEvent.mouseDown(surface, chartCenter(chart));
+    fireEvent.mouseUp(window, chartCenter(chart));
+    await act(async () => {
+      fireEvent.keyDown(surface, { key: 'ArrowRight' });
+    });
+    expect(
+      Math.round(parseFloat(view.getByTestId('xlsx-chart-selection').style.left))
+    ).toBe(Math.round(chart.rect.x + 1));
+    await act(async () => {
+      expect(api!.selectCells(1, selectionAt({ row: 0, col: 0 }))).toBe(true);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+    });
+    await act(async () => {
+      api!.selectCells(0, selectionAt({ row: 0, col: 0 }));
+    });
+    const after = api!.handle
+      .displayList({ x: 0, y: 0, ...VIEWPORT })
+      .charts!.find((c) => c.id === chart.id)!;
+    expect(after.rect.x).toBe(chart.rect.x + 1);
+  });
+
+  it('commits the current cell draft before selecting another cell', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const target = { row: 2, col: 0 };
+    await act(async () => {
+      api!.selectCells(0, selectionAt(target));
+    });
+    fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+    const editor = await waitFor(() => view.getByTestId('xlsx-cell-editor'));
+    fireEvent.change(editor, { target: { value: 'Draft that must survive' } });
+    await act(async () => {
+      api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+    });
+    expect(api!.handle.cell(0, target.row, target.col).input).toBe(
+      'Draft that must survive'
+    );
+  });
+  for (const source of ['cell', 'formula'] as const) {
+    for (const action of ['save', 'clear', 'select'] as const) {
+      it(`commits a ${source} draft before host ${action}`, async () => {
+        let api: XlsxEditorApi | undefined;
+        let changes = 0;
+        const view = render(
+          <XlsxEditor
+            file={plain.bytes.slice()}
+            onChange={() => {
+              changes += 1;
+            }}
+            onReady={(ready) => {
+              api = ready;
+            }}
+          />
+        );
+        await waitFor(() => expect(api).toBeDefined());
+        const target = { row: 2, col: 0 };
+        await act(async () => {
+          api!.selectCells(0, selectionAt(target));
+        });
+        if (source === 'cell') {
+          fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+        }
+        const input = view.getByTestId(
+          source === 'cell' ? 'xlsx-cell-editor' : 'xlsx-formula-input'
+        );
+        fireEvent.change(input, { target: { value: 'Saved draft' } });
+        expect(api!.selectCells(-1, selectionAt(target))).toBe(false);
+        expect(api!.handle.cell(0, target.row, target.col).input).toBe('Line item 1');
+        let saved: Uint8Array | undefined;
+        await act(async () => {
+          if (action === 'save') saved = api!.save();
+          else if (action === 'clear') api!.clearSelection();
+          else api!.selectCells(0, selectionAt({ row: 3, col: 1 }));
+        });
+        expect(api!.handle.cell(0, target.row, target.col).input).toBe('Saved draft');
+        expect(changes).toBe(1);
+        if (saved) {
+          const reopened = openWorkbook(saved);
+          try {
+            expect(reopened.cell(0, target.row, target.col).input).toBe('Saved draft');
+          } finally {
+            reopened.dispose();
+          }
+        }
+      });
+    }
+  }
+  it('commits the next cell edit on blur after a host save', async () => {
+    let api: XlsxEditorApi | undefined;
+    const view = render(
+      <XlsxEditor
+        file={plain.bytes.slice()}
+        onReady={(ready) => {
+          api = ready;
+        }}
+      />
+    );
+    await waitFor(() => expect(api).toBeDefined());
+    const target = { row: 2, col: 0 };
+    await act(async () => {
+      api!.selectCells(0, selectionAt(target));
+    });
+    fireEvent.change(view.getByTestId('xlsx-formula-input'), {
+      target: { value: 'First draft' },
+    });
+    await act(async () => {
+      api!.save();
+    });
+    fireEvent.doubleClick(view.getByTestId('xlsx-scroll'), pointAt(plain, target));
+    const editor = view.getByTestId('xlsx-cell-editor');
+    fireEvent.change(editor, { target: { value: 'Second draft' } });
+    fireEvent.blur(editor);
+    expect(api!.handle.cell(0, target.row, target.col).input).toBe('Second draft');
   });
 });

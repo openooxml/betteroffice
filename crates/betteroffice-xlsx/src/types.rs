@@ -42,6 +42,12 @@ pub struct CellEdit {
     pub is_formula: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchMatch {
+    pub address: CellAddress,
+    pub text: String,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SheetInfo {
     pub sheet_ids: Vec<String>,

@@ -3,7 +3,8 @@ pub use pptx_edit::{
     EditOrigin, ParagraphSnapshot, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft,
     ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
     ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, StorySnapshot, TextReceipt, TextRunSnapshot,
-    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin, UpdateSubscription,
+    TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateOrigin,
+    UpdateSubscription,
 };
 pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,

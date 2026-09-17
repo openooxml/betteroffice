@@ -48,6 +48,7 @@ export const pptxdocument_removeShapeJson: (a: number, b: number, c: number) => 
 export const pptxdocument_replyToCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_saveBytes: (a: number) => [number, number, number, number];
+export const pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];

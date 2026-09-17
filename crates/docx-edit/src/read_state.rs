@@ -123,7 +123,7 @@ pub struct RevisionInfo {
 /// Collects every story id referenced as a cell story by a `table` embed
 /// (payload `rows[*].cells[*].story`). Nested tables are covered because a
 /// nested table's embed lives in a cell story that is itself iterated.
-fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
+pub(crate) fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
     let mut cells = HashSet::new();
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return cells;

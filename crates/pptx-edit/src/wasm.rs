@@ -23,6 +23,15 @@ struct UpdateObserver {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SearchTextArgs {
+    query: String,
+    #[serde(default)]
+    case_sensitive: bool,
+    limit: Option<u32>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StoryArgs {
     story_id: String,
 }
@@ -314,6 +323,20 @@ impl PptxDocument {
     #[wasm_bindgen(js_name = snapshotJson)]
     pub fn snapshot_json(&self) -> Result<String, JsValue> {
         json(self.session.snapshot().map_err(js_error)?)
+    }
+
+    #[wasm_bindgen(js_name = searchTextJson)]
+    pub fn search_text_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: SearchTextArgs = parse_args(args)?;
+        json(
+            self.session
+                .search_text(
+                    &args.query,
+                    args.case_sensitive,
+                    args.limit.map(|value| value as usize),
+                )
+                .map_err(js_error)?,
+        )
     }
 
     #[wasm_bindgen(js_name = storyJson)]

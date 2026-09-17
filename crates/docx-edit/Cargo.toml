@@ -24,6 +24,7 @@ crate-type = ["cdylib", "rlib"]
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
 
 [dependencies]
+regex = "1"
 # 0.27.3 is the newest crates.io release. The repository's minimumReleaseAge is a Bun/npm
 # policy; there is no Cargo deny/release-age policy, and the existing lockfile already pins it.
 docx-layout.workspace = true

@@ -62,6 +62,8 @@ export type {
   PositionedTextRun,
   PresetShapeDraft,
   PptxFontFace,
+  PptxTextMatch,
+  PptxTextSearchOptions,
   PrimitiveTransform,
   ShapeAdjustReceipt,
   ShapeDraft,

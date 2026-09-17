@@ -3271,6 +3271,20 @@ impl EditSession {
         serde_json::to_string(&items).map_err(js_err)
     }
 
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<u32>,
+    ) -> Result<String, JsValue> {
+        let matches = self
+            .engine
+            .doc()
+            .search_text(query, case_sensitive, limit.map(|value| value as usize))
+            .map_err(js_err)?;
+        serde_json::to_string(&matches).map_err(js_err)
+    }
+
     /// Every story id in the document, sorted so the order is stable across
     /// replicas.
     pub fn story_ids(&self) -> Vec<String> {

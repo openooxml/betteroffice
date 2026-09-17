@@ -10,11 +10,13 @@ pub use error::Error;
 pub use types::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, HistoryState,
     MutationResult, NumberFormatKind, ProposalAcceptance, ProposalEditInput, ProposalRequest,
-    RenderOptions, RenderedPng, SelectionFormatting, SheetInfo, UpdateEvent, UpdateOrigin,
+    RenderOptions, RenderedPng, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
+    UpdateOrigin,
 };
 pub use workbook::{
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS, UpdateSubscription, Workbook,
+    DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_DISPLAY_CELLS, MAX_PIXMAP_DIM, MAX_PIXMAP_PIXELS,
+    UpdateSubscription, Workbook,
 };
 
 pub use xlsx_model::addr::AddrError;

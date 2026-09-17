@@ -59,6 +59,27 @@ struct CellArgs {
     col: u32,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchTextArgs {
+    query: String,
+    #[serde(default)]
+    case_sensitive: bool,
+    limit: Option<u32>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TextSearchMatch {
+    sheet: u32,
+    sheet_id: String,
+    sheet_name: String,
+    row: u32,
+    col: u32,
+    a1: String,
+    text: String,
+}
+
 #[derive(Serialize)]
 struct CellPosition {
     x: f32,
@@ -445,6 +466,37 @@ impl Session {
             is_formula: cell.is_formula,
         })
         .map_err(|error| error.to_string())
+    }
+
+    pub fn search_text_json(&self, args: &str) -> Result<String, String> {
+        let args: SearchTextArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad search text args: {error}"))?;
+        let info = self
+            .workbook
+            .sheet_info()
+            .map_err(|error| error.to_string())?;
+        let matches = self
+            .workbook
+            .search_text(
+                &args.query,
+                args.case_sensitive,
+                args.limit.map(|limit| limit as usize),
+            )
+            .into_iter()
+            .map(|result| {
+                let sheet = result.address.sheet.0;
+                TextSearchMatch {
+                    sheet,
+                    sheet_id: info.sheet_ids[sheet as usize].clone(),
+                    sheet_name: info.sheet_names[sheet as usize].clone(),
+                    row: result.address.cell.row,
+                    col: result.address.cell.col,
+                    a1: result.address.cell.to_a1(),
+                    text: result.text,
+                }
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&matches).map_err(|error| error.to_string())
     }
 
     pub fn cell_position_json(&self, args: &str) -> Result<String, String> {

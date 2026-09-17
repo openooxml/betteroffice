@@ -71,6 +71,7 @@ mod presence;
 mod queries;
 mod raw;
 mod read_state;
+mod search;
 mod seed;
 mod undo;
 
@@ -99,6 +100,7 @@ pub use queries::{
 };
 pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
+pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::seed_from_docx;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
 

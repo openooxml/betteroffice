@@ -4,7 +4,7 @@ use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
     EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt,
     ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot, TextReceipt,
-    TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
+    TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
@@ -116,6 +116,15 @@ impl Presentation {
 
     pub fn media(&self) -> &[MediaPart] {
         &self.package().media
+    }
+
+    pub fn search_text(
+        &self,
+        query: &str,
+        case_sensitive: bool,
+        limit: Option<usize>,
+    ) -> Result<Vec<TextSearchMatch>> {
+        Ok(self.session.search_text(query, case_sensitive, limit)?)
     }
 
     pub fn snapshot(&self) -> Result<DeckSnapshot> {

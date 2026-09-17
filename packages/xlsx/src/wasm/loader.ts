@@ -203,6 +203,25 @@ export interface CellEdit {
   isFormula: boolean;
 }
 
+export interface XlsxTextSearchOptions {
+  /** Defaults to false. */
+  caseSensitive?: boolean;
+  /** Maximum matches; defaults to 1000. */
+  limit?: number;
+}
+
+/** Zero-based sheet, row, and column. */
+export interface XlsxTextMatch {
+  sheet: number;
+  sheetId: string;
+  sheetName: string;
+  row: number;
+  col: number;
+  a1: string;
+  /** Formatted display text. */
+  text: string;
+}
+
 /** One cell of a batch edit: target coordinates plus the raw user input. */
 export interface CellInputEdit {
   row: number;
@@ -328,6 +347,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   redo(): EditResult;
   /** the editable view of one cell (formula bar / in-cell editor prefill). */
   cell(sheet: number, row: number, col: number): CellEdit;
+  /** Searches formatted text in sheet and row order. */
+  searchText(query: string, options?: XlsxTextSearchOptions): XlsxTextMatch[];
   cellPosition(sheet: number, row: number, col: number): CellPosition;
   /** row-major editable views for a range, e.g. "A1:C3" (clipboard copy). */
   rangeCells(sheet: number, range: string): CellEdit[][];
@@ -633,6 +654,25 @@ export function openWorkbook(
     },
     cell(sheet: number, row: number, col: number): CellEdit {
       return parseJson(() => doc.cellJson(JSON.stringify({ sheet, row, col })));
+    },
+    searchText(query, options): XlsxTextMatch[] {
+      if (!query) return [];
+      const limit = options?.limit;
+      if (
+        limit !== undefined &&
+        (!Number.isSafeInteger(limit) || limit < 0 || limit > 0xffff_ffff)
+      ) {
+        throw new RangeError('search limit must be an unsigned 32-bit integer');
+      }
+      return parseJson(() =>
+        doc.searchTextJson(
+          JSON.stringify({
+            query,
+            caseSensitive: options?.caseSensitive ?? false,
+            ...(limit === undefined ? {} : { limit }),
+          })
+        )
+      );
     },
     cellPosition(sheet: number, row: number, col: number): CellPosition {
       return parseJson(() => doc.cellPositionJson(JSON.stringify({ sheet, row, col })));

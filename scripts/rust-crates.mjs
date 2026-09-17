@@ -27,6 +27,8 @@ export const RUST_CRATES = [
   { name: 'betteroffice-vsdx-resolve', dependency: 'vsdx-resolve', publish: false },
   { name: 'betteroffice-vsdx-eval', dependency: 'vsdx-eval', publish: false },
   { name: 'betteroffice-vsdx-render', dependency: 'vsdx-render', publish: false },
+  { name: 'betteroffice-vsdx-raster', dependency: 'vsdx-raster', publish: false },
+  { name: 'betteroffice-vsdx-validate', dependency: 'vsdx-validate', publish: false },
   { name: 'betteroffice-vsdx-edit', dependency: 'vsdx-edit', publish: false },
   { name: 'betteroffice-vsdx', dependency: 'betteroffice-vsdx', publish: false },
   { name: 'betteroffice-pptx-edit', dependency: 'pptx-edit' },

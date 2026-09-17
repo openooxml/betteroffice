@@ -5,6 +5,7 @@
 import { beforeAll, describe, expect, it } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import type { XlsxTextMatch, XlsxTextSearchOptions } from '../index';
 
 import {
   StaleProposalError,
@@ -57,6 +58,52 @@ describe('wasm loader', () => {
       const position = handle.cellPosition(0, 7, 2);
       expect(position.x).toBeGreaterThan(0);
       expect(position.y).toBeGreaterThan(0);
+    } finally {
+      handle.dispose();
+    }
+  });
+
+  it('searches formatted cell text without changing workbook state', () => {
+    const handle = openWorkbook(sampleBytes());
+    try {
+      handle.editCell(0, 20, 1, 'QueryNeedle');
+      handle.editCell(1, 0, 0, 'queryneedle');
+      handle.editCell(2, 4, 2, '0.25');
+      handle.setNumberFormat(2, 'C5', 'percent');
+      const before = handle.encodeStateVector();
+
+      const options: XlsxTextSearchOptions = { caseSensitive: false };
+      const matches: XlsxTextMatch[] = handle.searchText('queryneedle', options);
+      expect(matches).toEqual([
+        {
+          sheet: 0,
+          sheetId: 'sheet:0',
+          sheetName: 'Budget',
+          row: 20,
+          col: 1,
+          a1: 'B21',
+          text: 'QueryNeedle',
+        },
+        {
+          sheet: 1,
+          sheetId: 'sheet:1',
+          sheetName: 'Summary',
+          row: 0,
+          col: 0,
+          a1: 'A1',
+          text: 'queryneedle',
+        },
+      ]);
+      expect(handle.searchText('QueryNeedle', { caseSensitive: true })).toHaveLength(1);
+      expect(handle.searchText('queryneedle', { limit: 1 })).toHaveLength(1);
+      expect(handle.searchText('25.00%')[0]).toMatchObject({
+        sheet: 2,
+        a1: 'C5',
+        text: '25.00%',
+      });
+      expect(handle.searchText('')).toEqual([]);
+      expect(() => handle.searchText('queryneedle', { limit: -1 })).toThrow(RangeError);
+      expect(handle.encodeStateVector()).toEqual(before);
     } finally {
       handle.dispose();
     }

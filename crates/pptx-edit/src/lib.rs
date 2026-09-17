@@ -22,6 +22,7 @@ mod outline_gradients;
 mod proposal_diff;
 mod proposals;
 mod save;
+mod search;
 mod source_run_properties;
 mod story;
 mod undo;
@@ -29,6 +30,7 @@ mod undo;
 pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
+pub use search::TextSearchMatch;
 pub use undo::DeckUndoManager;
 
 #[cfg(feature = "wasm")]

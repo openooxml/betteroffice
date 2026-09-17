@@ -4,6 +4,7 @@ export type {
   PptxEditorCollaborationOptions,
   PptxEditorProps,
   PptxTextSelection,
+  PptxTextSelectionTarget,
 } from './PptxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
 export {

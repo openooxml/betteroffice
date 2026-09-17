@@ -1486,7 +1486,7 @@ fn parse_shape_kind(value: &str) -> EditResult<ShapeKind> {
     }
 }
 
-fn required_order<T: ReadTxn>(txn: &T) -> EditResult<ArrayRef> {
+pub(crate) fn required_order<T: ReadTxn>(txn: &T) -> EditResult<ArrayRef> {
     txn.get_array(SLIDE_ORDER)
         .ok_or_else(|| EditError::InvalidState("missing slide order".to_owned()))
 }
@@ -1503,7 +1503,7 @@ pub(crate) fn slide_ref<T: ReadTxn>(txn: &T, slide_id: &str) -> EditResult<MapRe
         .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))
 }
 
-fn shape_ref<T: ReadTxn>(txn: &T, shape_id: &str) -> EditResult<MapRef> {
+pub(crate) fn shape_ref<T: ReadTxn>(txn: &T, shape_id: &str) -> EditResult<MapRef> {
     required_map(txn, SHAPES)?
         .get(txn, shape_id)
         .and_then(|value| value.cast::<MapRef>().ok())
@@ -1520,7 +1520,7 @@ fn require_shape_kind<T: ReadTxn>(shape: &MapRef, txn: &T) -> EditResult<()> {
     }
 }
 
-fn slide_shape_order<T: ReadTxn>(slide: &MapRef, txn: &T) -> EditResult<ArrayRef> {
+pub(crate) fn slide_shape_order<T: ReadTxn>(slide: &MapRef, txn: &T) -> EditResult<ArrayRef> {
     slide
         .get(txn, "shapes")
         .and_then(|value| value.cast::<ArrayRef>().ok())
@@ -1608,14 +1608,18 @@ fn array_index<T: ReadTxn>(array: &ArrayRef, txn: &T, value: &str) -> Option<u32
         .map(|(index, _)| index as u32)
 }
 
-fn string_array_ref<T: ReadTxn>(array: &ArrayRef, txn: &T) -> Vec<String> {
+pub(crate) fn string_array_ref<T: ReadTxn>(array: &ArrayRef, txn: &T) -> Vec<String> {
     array
         .iter(txn)
         .filter_map(|value| out_string(&value))
         .collect()
 }
 
-fn map_string_array<T: ReadTxn>(map: &MapRef, txn: &T, key: &str) -> EditResult<Vec<String>> {
+pub(crate) fn map_string_array<T: ReadTxn>(
+    map: &MapRef,
+    txn: &T,
+    key: &str,
+) -> EditResult<Vec<String>> {
     match map.get(txn, key) {
         Some(Out::Any(Any::Array(values))) => Ok(values
             .iter()
