@@ -58,6 +58,66 @@ fn resolve_paragraph_line_spacing(paragraph: &mut ParagraphBlock, line_px: f64) 
     }
 }
 
+/// Resolve the section's document-grid snap pitch onto every paragraph in
+/// the block tree (recursing into tables, text boxes and shapes, mirroring
+/// [`resolve_line_unit_spacing`]). `None` clears any pitch, so sections
+/// without an activating grid measure exactly as before.
+pub fn resolve_doc_grid_pitch(block: &mut LayoutBlock, pitch_px: Option<f64>) {
+    match block {
+        LayoutBlock::Paragraph(paragraph) => {
+            if let Some(attrs) = paragraph.attrs.as_mut() {
+                attrs.doc_grid_pitch_px = pitch_px;
+            } else if pitch_px.is_some() {
+                paragraph.attrs = Some(crate::types::ParagraphAttrs {
+                    doc_grid_pitch_px: pitch_px,
+                    ..crate::types::ParagraphAttrs::default()
+                });
+            }
+        }
+        LayoutBlock::Table(table) => {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    for block in &mut cell.blocks {
+                        resolve_doc_grid_pitch(block, pitch_px);
+                    }
+                }
+            }
+        }
+        LayoutBlock::TextBox(text_box) => {
+            for paragraph in &mut text_box.content {
+                if let Some(attrs) = paragraph.attrs.as_mut() {
+                    attrs.doc_grid_pitch_px = pitch_px;
+                } else if pitch_px.is_some() {
+                    paragraph.attrs = Some(crate::types::ParagraphAttrs {
+                        doc_grid_pitch_px: pitch_px,
+                        ..crate::types::ParagraphAttrs::default()
+                    });
+                }
+            }
+        }
+        LayoutBlock::Shape(shape) => resolve_shape_doc_grid_pitch(shape, pitch_px),
+        _ => {}
+    }
+}
+
+fn resolve_shape_doc_grid_pitch(shape: &mut ShapeBlock, pitch_px: Option<f64>) {
+    if let Some(paragraphs) = &mut shape.inner_text {
+        for paragraph in paragraphs {
+            if let Some(attrs) = paragraph.attrs.as_mut() {
+                attrs.doc_grid_pitch_px = pitch_px;
+            } else if pitch_px.is_some() {
+                paragraph.attrs = Some(crate::types::ParagraphAttrs {
+                    doc_grid_pitch_px: pitch_px,
+                    ..crate::types::ParagraphAttrs::default()
+                });
+            }
+        }
+    }
+    for child in &mut shape.children {
+        resolve_shape_doc_grid_pitch(child, pitch_px);
+    }
+}
+
 pub(crate) fn is_empty_paragraph(block: &ParagraphBlock) -> bool {
     if block.runs.is_empty() {
         return true;

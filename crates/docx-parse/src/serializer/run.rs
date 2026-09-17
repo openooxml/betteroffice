@@ -137,6 +137,7 @@ pub fn serialize_text_formatting(formatting: Option<&TextFormatting>) -> String 
     }
     on_off(&mut body, "w:rtl", formatting.rtl);
     on_off(&mut body, "w:cs", formatting.cs);
+    on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
 
     let body = body.finish();
     if body.is_empty() {

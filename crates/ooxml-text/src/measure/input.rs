@@ -254,6 +254,10 @@ pub struct RunIn {
     /// only affects how neutrals segment.
     #[serde(default)]
     pub rtl: bool,
+    /// Run-level `w:snapToGrid` opt-out. `None` is the OOXML default (on);
+    /// `Some(false)` disables grid snapping for lines containing this run.
+    #[serde(default)]
+    pub snap_to_grid: Option<bool>,
     /// Cached field display text; missing or empty values measure as `"1"`.
     #[serde(default)]
     pub fallback: Option<String>,
@@ -322,6 +326,14 @@ pub struct RotationBoundsIn {
 
 /// `ParagraphAttrs` subset. `alignment` is accepted but never affects
 /// measurement (lines report natural widths; justification is paint-time).
+///
+/// `doc_grid_pitch_px` carries the section's `w:docGrid w:linePitch` in px,
+/// already gated by the host to an activating grid type (`lines`,
+/// `linesAndChars`, `snapToChars`); `None` (or a non-positive value) means
+/// no snapping. `snap_to_grid` is the paragraph-level `w:snapToGrid`
+/// opt-out (`None` is the default, on); a run-level `w:snapToGrid` opt-out
+/// lives on each [`RunIn`]. A line snaps only when the pitch is set, the
+/// paragraph allows it, and no contributing run opts out.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrsIn {
@@ -373,6 +385,14 @@ pub struct AttrsIn {
     /// grid.
     #[serde(default)]
     pub default_tab_stop_twips: Option<f32>,
+    /// Section grid pitch in px (`w:docGrid w:linePitch`), host-gated to an
+    /// activating grid type. `None` (or non-positive) disables snapping.
+    #[serde(default)]
+    pub doc_grid_pitch_px: Option<f32>,
+    /// Paragraph-level `w:snapToGrid` opt-out. `None` is the OOXML default
+    /// (on); `Some(false)` disables snapping for the whole paragraph.
+    #[serde(default)]
+    pub snap_to_grid: Option<bool>,
 }
 
 /// `ParagraphSpacing`: before/after in px; `line` in px or as a multiplier

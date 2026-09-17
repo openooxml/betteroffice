@@ -81,6 +81,15 @@ pub(super) struct FillParams<'a> {
     /// Paragraph Y in the floating-zone coordinate space.
     pub paragraph_y_offset: f32,
     pub authoritative_shaping: bool,
+    /// Grid pitch in px for snap-to-grid (`w:docGrid w:linePitch`), already
+    /// gated to an activating grid type AND the paragraph opt-out (`None`
+    /// disables snapping). Per-line run opt-outs in `run_snaps` can still
+    /// disable individual lines.
+    pub snap_pitch_px: Option<f32>,
+    /// Per prepared run (index-aligned with `prepared`): whether the run
+    /// allows grid snapping (`w:snapToGrid`, default on). A line containing
+    /// any disallowing run does not snap.
+    pub run_snaps: &'a [bool],
 }
 
 /// The line currently being filled. Reset wholesale by `start_new_line`.
@@ -244,13 +253,15 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 
 /// Measures an empty or whitespace-only paragraph as one zero-width line at
 /// the ruled height of `font` at `size_pt`, floored at
-/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`.
+/// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`,
+/// then snapped up to `snap_pitch_px` when set.
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
     size_pt: f32,
     spacing: Option<&SpacingIn>,
     compat: &CompatIn,
+    snap_pitch_px: Option<f32>,
 ) -> Result<ParagraphExtentOut, MeasureError> {
     let metrics = store
         .metrics(font)
@@ -262,6 +273,11 @@ pub(super) fn empty_paragraph_extent(
     let mut line_height = ruled.height();
     if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
+    }
+    // Exact boxes are fixed regardless of content and never snap.
+    let fixed = matches!(rule, wm::LineSpacingRule::Exact { .. });
+    if let Some(pitch) = snap_pitch_px.filter(|_| !fixed) {
+        line_height = wm::snap_line_height(line_height, pitch);
     }
 
     let mut total = line_height;
@@ -597,6 +613,44 @@ impl Filler<'_> {
         }
     }
 
+    /// Whether the current line may snap: the paragraph carries an active
+    /// grid pitch, the spacing rule is not `exact` (an exact box is fixed
+    /// regardless of content, so there is no pitch to snap), and no
+    /// contributing run opts out. Lines with no recorded contributions
+    /// (e.g. only hidden runs) defer to the paragraph.
+    fn line_may_snap(&self) -> bool {
+        if self.p.snap_pitch_px.is_none() {
+            return false;
+        }
+        if matches!(self.rule, wm::LineSpacingRule::Exact { .. }) {
+            return false;
+        }
+        self.cur.contributions.iter().all(|part| {
+            self.p
+                .run_snaps
+                .get(part.run_index as usize)
+                .copied()
+                .unwrap_or(true)
+        })
+    }
+
+    /// Snap a ruled text height for the running Y and base line box.
+    fn snap_text_height(&self, height: f32) -> f32 {
+        match (self.p.snap_pitch_px, self.line_may_snap()) {
+            (Some(pitch), true) => wm::snap_line_height(height, pitch),
+            _ => height,
+        }
+    }
+
+    /// Snap a final (possibly image-grown) line box. Ascent/descent stay
+    /// put; the caller grows only the box.
+    fn snap_line_height(&self, height: f32) -> f32 {
+        match (self.p.snap_pitch_px, self.line_may_snap()) {
+            (Some(pitch), true) => wm::snap_line_height(height, pitch),
+            _ => height,
+        }
+    }
+
     /// Closes the current line: resolve typography from its largest font,
     /// apply the spacing rule, let any taller image grow the box, attach
     /// float offsets, segments and skip, and push the row. Advances the
@@ -647,7 +701,7 @@ impl Filler<'_> {
         let ruled = wm::apply_spacing_rule(content, &self.rule);
         let mut ascent = ruled.ascent;
         let mut descent = ruled.descent;
-        let text_line_height = ruled.height();
+        let text_line_height = self.snap_text_height(ruled.height());
         let mut line_height = text_line_height;
 
         // An image dictates the whole box, so it buffers from the content
@@ -669,6 +723,9 @@ impl Filler<'_> {
                 line_height = image_h + buffer;
                 ascent = image_h;
             }
+            // The grid snaps the final box, whatever grew it. Ascent/descent
+            // stay put so the extra lands below the descent.
+            line_height = self.snap_line_height(line_height);
         }
 
         // Float fields are omitted when unset.
@@ -1056,6 +1113,7 @@ mod tests {
 
     fn fill_at(width: f32, prepared: &[PreparedRun]) -> Vec<TypesetRowOut> {
         let compat = CompatIn::default();
+        let run_snaps = vec![true; prepared.len()];
         fill(FillParams {
             justify: false,
             store: &{
@@ -1075,6 +1133,8 @@ mod tests {
             zones: &[],
             paragraph_y_offset: 0.0,
             authoritative_shaping: false,
+            snap_pitch_px: None,
+            run_snaps: &run_snaps,
         })
         .unwrap()
         .lines

@@ -220,6 +220,10 @@ pub struct RunFormatting {
     pub hidden: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtl: Option<bool>,
+    /// Run-level `w:snapToGrid` (§17.3.2). Absent is the OOXML default (on);
+    /// `Some(false)` disables grid snapping for lines containing this run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_effect: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -617,6 +621,17 @@ pub struct ParagraphAttrs {
     pub default_font_family: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_empty_paragraph_height: Option<bool>,
+    /// Effective paragraph-level `w:snapToGrid` (§17.3.1) resolved from the
+    /// direct pPr child AND the paragraph-mark rPr (absent is the OOXML
+    /// default, on). `Some(false)` opts the whole paragraph out of
+    /// document-grid snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    /// Section grid pitch in px (`w:docGrid w:linePitch`), set by the
+    /// section-grid resolve pass for the paragraph's section and already
+    /// gated to an activating grid type. `None` disables snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub p_pr_ins: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -64,14 +64,22 @@
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
 //!
-//! # 4. Snap-to-grid — not applied
+//! # 4. Snap-to-grid — [`snap_line_height`]
 //!
-//! Where a section defines a document grid (`w:docGrid`, §17.6.5), Word snaps
-//! each line's height up to the next grid multiple unless the paragraph or
-//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2). Measurement
-//! here never snaps: the input carries no grid pitch, so a line's height is
-//! whatever rules 1 and 2 compute and nothing more. CJK documents relying on
-//! the grid measure slightly short as a result.
+//! Where a section defines a document grid (`w:docGrid`, §17.6.5) with an
+//! activating type, Word snaps each line's height up to the next grid
+//! multiple unless the paragraph or run opts out (`w:snapToGrid` on
+//! pPr/rPr, §17.3.1/§17.3.2, defaulting to on). Callers thread the section's
+//! grid pitch and the paragraph/run opt-outs in as inputs; this rule only
+//! rounds. It applies after rules 1 and 2 (and after image growth), keeping
+//! ascent/descent put so the extra lands below the descent, matching how
+//! rule 2 treats growth. `exact` line boxes are fixed regardless of content
+//! and never snap. Absolute grid-phase alignment against the page
+//! origin is not modeled — only the per-line ceiling.
+//!
+//! Activation is narrow: only grid types `lines`, `linesAndChars` and
+//! `snapToChars` snap. `default` (or a bare `linePitch` with no type) never
+//! does. Callers enforce that; [`snap_line_height`] trusts a `Some` pitch.
 //!
 //! # 5. Kerning threshold — [`kern_enabled`], [`kern_features`]
 //!
@@ -301,6 +309,33 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     }
 }
 
+/// Rule 4: snap a line's height up to the next multiple of the section's
+/// grid pitch (`w:docGrid w:linePitch`, §17.6.5).
+///
+/// `grid_pitch_px` must already be gated by the caller to an activating grid
+/// type (`lines`, `linesAndChars`, `snapToChars`) with a finite positive
+/// pitch; `None` (or a non-positive/non-finite pitch) is the identity.
+/// Exact multiples are unchanged; everything else rounds up. Non-finite or
+/// non-positive heights pass through untouched.
+pub fn snap_line_height(line_height_px: f32, grid_pitch_px: f32) -> f32 {
+    if !line_height_px.is_finite() || line_height_px <= 0.0 {
+        return line_height_px;
+    }
+    if !grid_pitch_px.is_finite() || grid_pitch_px <= 0.0 {
+        return line_height_px;
+    }
+    let multiples = (line_height_px / grid_pitch_px).ceil();
+    if !multiples.is_finite() {
+        return line_height_px;
+    }
+    let snapped = multiples * grid_pitch_px;
+    if snapped.is_finite() && snapped >= line_height_px {
+        snapped
+    } else {
+        line_height_px
+    }
+}
+
 /// Rule 3: distribute `slack` px across space clusters only (never
 /// inter-letter). `is_space[i]` marks advance i as an expandable space
 /// cluster. No-op when slack <= 0 or no spaces. Mutates advances in place.
@@ -366,5 +401,26 @@ pub fn kern_features(enabled: bool) -> Vec<ShapeFeature> {
             tag: *b"kern",
             value: 0,
         }]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::snap_line_height;
+
+    #[test]
+    fn snap_rounds_up_to_the_next_pitch_multiple() {
+        // 354 twips at 150 DPI is 36.875px; the technical-sample body mean.
+        assert_eq!(snap_line_height(30.5, 36.875), 36.875);
+        assert_eq!(snap_line_height(36.875, 36.875), 36.875);
+        assert_eq!(snap_line_height(37.0, 36.875), 73.75);
+    }
+
+    #[test]
+    fn snap_guards_are_identity() {
+        assert_eq!(snap_line_height(18.5, 0.0), 18.5);
+        assert_eq!(snap_line_height(18.5, -24.0), 18.5);
+        assert_eq!(snap_line_height(18.5, f32::NAN), 18.5);
+        assert_eq!(snap_line_height(0.0, 24.0), 0.0);
     }
 }

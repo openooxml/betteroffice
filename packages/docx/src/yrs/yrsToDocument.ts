@@ -138,6 +138,7 @@ const PARAGRAPH_ATTR_DEFAULTS: Attrs = {
   keepLines: null,
   widowControl: null,
   contextualSpacing: null,
+  snapToGrid: null,
   defaultTextFormatting: null,
   sectionBreakType: null,
   bidi: null,

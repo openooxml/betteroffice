@@ -1398,6 +1398,48 @@ fn field_measures_at_fallback_text() {
     );
 }
 
+/// An `exact` box never snaps: it is fixed regardless of content, so the
+/// 10px box keeps its height under an active 24px grid. An `atLeast` floor
+/// resolves first and then snaps like any other ruled height: the 30px
+/// floor (above the 18.4px content) snaps up to 48px.
+#[test]
+fn fixed_line_rules_do_not_snap() {
+    let exact = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "exact" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        exact["lines"][0]["lineHeight"].as_f64().unwrap(),
+        10.0,
+        "exact lineHeight",
+    );
+    let at_least = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 30.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least["lines"][0]["lineHeight"].as_f64().unwrap(),
+        48.0,
+        "atLeast snaps after resolving",
+    );
+}
+
 #[test]
 fn horizontal_rule_reserves_atomic_width_and_run_font_metrics() {
     let v = measure(
@@ -2786,4 +2828,96 @@ fn an_oversized_fallback_chain_measures_like_its_head() {
         ids.resize(len, 1);
         assert_eq!(short, measure_chain(ids), "chain of {len} ids");
     }
+}
+
+// 37. document-grid snap-to-grid (w:docGrid §17.6.5, w:snapToGrid §17.3.1/2)
+//
+// At 12pt the single-spacing line is LH = 18.3984375px; a 360-twips grid
+// pitch is 24px, so an active grid snaps the line to 24. Only an activating
+// grid type reaches measurement (the host withholds the pitch for `default`
+// or a bare linePitch), and either opt-out disables the snap.
+
+/// A grid-active section snaps the line up to the next pitch multiple.
+#[test]
+fn grid_active_section_snaps_line_height_up() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped lineHeight",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        24.0,
+        "snapped totalHeight",
+    );
+    // Ascent/descent stay put; the snap slack lands below the descent.
+    approx(v["lines"][0]["ascent"].as_f64().unwrap(), ASC, "ascent");
+    approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
+}
+
+/// A `default`-type grid never reaches measurement (the host passes no
+/// pitch), so the line keeps its ruled height.
+#[test]
+fn default_type_grid_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }]
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "unsnapped lineHeight",
+    );
+}
+
+/// A paragraph-level opt-out (`w:snapToGrid` on pPr) disables the snap.
+#[test]
+fn paragraph_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": { "docGridPitchPx": 24.0, "snapToGrid": false }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
+}
+
+/// A run-level opt-out (`w:snapToGrid` on rPr) disables the snap for lines
+/// containing that run.
+#[test]
+fn run_opt_out_does_not_snap() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0", "snapToGrid": false }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "opt-out lineHeight",
+    );
 }

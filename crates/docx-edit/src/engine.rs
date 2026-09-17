@@ -17,6 +17,7 @@ use docx_layout::header_footer::{
     resolve_header_footer_field_widths,
 };
 use docx_layout::hit::{CaretRect, VerticalDirection};
+use docx_layout::paragraph_spacing::resolve_doc_grid_pitch;
 use docx_layout::paragraph_spacing::resolve_line_unit_spacing;
 use docx_layout::place::LayoutCheckpoint;
 use docx_layout::regions::{
@@ -1041,6 +1042,7 @@ impl EngineSession {
         {
             let line_px = regions.paragraph_spacing_line_px(0);
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
+            env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
         }
         let resident_body = body_story.is_some();
         if let Some(story) = body_story.as_deref() {
@@ -1053,6 +1055,7 @@ impl EngineSession {
             let mut section_index = 0;
             for block in &mut blocks {
                 resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
+                resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
                 if matches!(block, LayoutBlock::SectionBreak(_)) {
                     section_index += 1;
                 }
@@ -1218,6 +1221,10 @@ impl EngineSession {
                     block,
                     regions.paragraph_spacing_line_px(page.region_section_index),
                 );
+                resolve_doc_grid_pitch(
+                    block,
+                    regions.doc_grid_snap_pitch_px(page.region_section_index),
+                );
             }
             apply_note_presentation(
                 &mut blocks,
@@ -1313,6 +1320,7 @@ impl EngineSession {
                         block,
                         regions.paragraph_spacing_line_px(section_index),
                     );
+                    resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
                 }
                 let metrics = HeaderFooterMetrics {
                     kind,
@@ -1768,6 +1776,7 @@ impl EngineSession {
                                 next_block,
                                 regions.paragraph_spacing_line_px(0),
                             );
+                            resolve_doc_grid_pitch(next_block, regions.doc_grid_snap_pitch_px(0));
                             docx_layout::measure_blocks::measure_block(
                                 next_block,
                                 width,

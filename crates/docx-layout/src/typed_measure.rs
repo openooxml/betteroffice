@@ -151,6 +151,8 @@ fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
         list_marker_italic: attrs.list_marker_italic.unwrap_or(false),
         list_marker_suffix: attrs.list_marker_suffix.clone(),
         default_tab_stop_twips: attrs.default_tab_stop_twips.and_then(finite),
+        doc_grid_pitch_px: attrs.doc_grid_pitch_px.and_then(finite),
+        snap_to_grid: attrs.snap_to_grid,
     })
 }
 
@@ -211,6 +213,7 @@ fn formatted_run(kind: &str, fmt: &RunFormatting) -> RunIn {
     out.subscript = fmt.subscript.unwrap_or(false);
     out.hidden = fmt.hidden.unwrap_or(false);
     out.rtl = fmt.rtl.unwrap_or(false);
+    out.snap_to_grid = fmt.snap_to_grid;
     out
 }
 
@@ -237,6 +240,7 @@ fn bare_run(kind: &str) -> RunIn {
         subscript: false,
         hidden: false,
         rtl: false,
+        snap_to_grid: None,
         fallback: None,
         width: None,
         height: None,

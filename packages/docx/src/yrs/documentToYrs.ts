@@ -246,6 +246,9 @@ function formattingToMarks(formatting: TextFormatting | undefined): MarkDescript
   if (formatting.outline) add('textOutline');
   if (formatting.hidden) add('hidden');
   if (formatting.rtl) add('rtl');
+  // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+  // becomes a mark, mirroring how the layout bridge reads it.
+  if (formatting.snapToGrid === false) marks.push({ name: 'snapToGrid', attrs: {} });
   if (formatting.effect && formatting.effect !== 'none') {
     add('textEffect', { effect: formatting.effect });
   }
@@ -262,6 +265,8 @@ function marksToYrsAttrs(marks: readonly MarkDescriptor[]): YrsAttrs {
     if (mark.name === 'comment' || mark.name === 'footnoteRef') continue;
     if (BOOLEAN_MARKS.has(mark.name)) {
       attrs[mark.name] = true;
+    } else if (mark.name === 'snapToGrid') {
+      attrs.snapToGrid = false;
     } else if (mark.name === 'highlight') {
       attrs.highlight = mark.attrs.color;
     } else if (mark.name === 'insertion' || mark.name === 'deletion') {
@@ -897,6 +902,7 @@ function paragraphAttrs(
     attrs.keepLines = formatting?.keepLines ?? stylePpr?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -937,6 +943,7 @@ function paragraphAttrs(
     attrs.keepNext = formatting?.keepNext ?? null;
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
+    attrs.snapToGrid = formatting?.snapToGrid ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;

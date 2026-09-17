@@ -232,6 +232,8 @@ export interface TextFormatting {
   rtl?: boolean;
   /** Complex script formatting (w:cs) */
   cs?: boolean;
+  /** Snap to document grid (w:snapToGrid). Absent is the OOXML default (on). */
+  snapToGrid?: boolean;
 
   // Style reference
   /** Character style ID (w:rStyle) */
@@ -376,6 +378,8 @@ export interface ParagraphFormatting {
   pageBreakBefore?: boolean;
   /** Contextual spacing — suppress space between paragraphs of the same style (w:contextualSpacing) */
   contextualSpacing?: boolean;
+  /** Snap to document grid (w:snapToGrid on pPr). Absent is the OOXML default (on). */
+  snapToGrid?: boolean;
 
   // Numbering/List
   /** Numbering properties (w:numPr) */

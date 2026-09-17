@@ -25,6 +25,8 @@ native shells.
 
 No `wasm-bindgen` here by design; a thin facade can wrap it.
 
-Snap-to-grid (`w:docGrid`) is not implemented.
+Snap-to-grid (`w:docGrid`) rounds line heights up to the section grid pitch
+(`snap_line_height`) when the host supplies an activating pitch, honouring
+paragraph/run `w:snapToGrid` opt-outs.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

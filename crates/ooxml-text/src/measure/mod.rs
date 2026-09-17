@@ -334,6 +334,19 @@ pub fn measure_paragraph_typed(
     let paragraph_y_offset = request.paragraph_y_offset.unwrap_or(0.0);
     input::validate_float_context(zones, paragraph_y_offset)?;
 
+    // Snap-to-grid (§17.6.5 rule 4): the host gates the pitch to an
+    // activating grid type; the paragraph opts out with `w:snapToGrid`.
+    // An invalid pitch silently disables snapping rather than refusing the
+    // paragraph. Run-level opt-outs are resolved per line in the filler.
+    let snap_pitch_px = attrs
+        .and_then(|a| a.doc_grid_pitch_px)
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0 && *pitch <= 100_000.0)
+        .filter(|_| attrs.and_then(|a| a.snap_to_grid) != Some(false));
+    let run_snaps: Vec<bool> = runs
+        .iter()
+        .map(|run| run.snap_to_grid != Some(false))
+        .collect();
+
     if runs.is_empty() {
         if attrs.is_some_and(|a| a.suppress_empty_paragraph_height) {
             return Ok(ParagraphExtentOut {
@@ -351,7 +364,14 @@ pub fn measure_paragraph_typed(
             .unwrap_or(&request.defaults.font_family);
         // Empty paragraphs use the regular face.
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            &request.compat,
+            snap_pitch_px,
+        );
     }
 
     // ---- single whitespace-only text run measures like an empty paragraph ----
@@ -368,7 +388,14 @@ pub fn measure_paragraph_typed(
             .or_else(|| attrs.and_then(|a| a.default_font_family.as_deref()))
             .unwrap_or(&request.defaults.font_family);
         let font = regular_chain_head(store, request, family)?;
-        return line_filler::empty_paragraph_extent(store, font, size_pt, spacing, &request.compat);
+        return line_filler::empty_paragraph_extent(
+            store,
+            font,
+            size_pt,
+            spacing,
+            &request.compat,
+            snap_pitch_px,
+        );
     }
 
     // Visible markers consume width only at zero hanging.
@@ -415,6 +442,8 @@ pub fn measure_paragraph_typed(
         zones,
         paragraph_y_offset,
         authoritative_shaping: request.authoritative_shaping,
+        snap_pitch_px,
+        run_snaps: &run_snaps,
     })
 }
 

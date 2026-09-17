@@ -148,6 +148,7 @@ pub fn serialize_paragraph_formatting(
         write_spacing(&mut body, formatting);
         write_indentation(&mut body, formatting);
         on_off(&mut body, "w:bidi", formatting.bidi);
+        on_off(&mut body, "w:snapToGrid", formatting.snap_to_grid);
         if let Some(value) = nonempty(formatting.alignment.as_deref()) {
             empty_attr(&mut body, "w:jc", "w:val", value);
         }

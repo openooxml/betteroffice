@@ -851,6 +851,11 @@ fn formatting_to_marks(formatting: Option<&Value>) -> Vec<Mark> {
             marks.push(mark(name, vec![]));
         }
     }
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored off
+    // becomes a mark, mirroring documentToYrs.
+    if formatting.get("snapToGrid") == Some(&Value::Bool(false)) {
+        marks.push(mark("snapToGrid", vec![]));
+    }
     if ["spacing", "position", "scale", "kerning"]
         .iter()
         .any(|key| formatting.contains_key(*key))
@@ -918,6 +923,8 @@ fn marks_to_attrs(marks: &[Mark]) -> JsonObject {
         }
         if boolean_marks.contains(&mark.name.as_str()) {
             attrs.insert(mark.name.clone(), Value::Bool(true));
+        } else if mark.name == "snapToGrid" {
+            attrs.insert("snapToGrid".to_owned(), Value::Bool(false));
         } else if mark.name == "highlight" {
             attrs.insert(
                 "highlight".to_owned(),
@@ -1852,6 +1859,7 @@ fn paragraph_attrs(
             "keepLines",
             "widowControl",
             "contextualSpacing",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -1945,6 +1953,7 @@ fn paragraph_attrs(
             "keepNext",
             "keepLines",
             "widowControl",
+            "snapToGrid",
             "outlineLevel",
             "bidi",
         ] {
@@ -4012,6 +4021,54 @@ mod tests {
         )
         .get("widowControl")
         .cloned()
+    }
+
+    fn snap_grid_styles() -> Value {
+        json!({
+            "docDefaults": { "pPr": {} },
+            "styles": [
+                { "styleId": "Normal", "type": "paragraph", "default": true, "pPr": {} },
+                { "styleId": "Body", "type": "paragraph", "pPr": { "snapToGrid": false } },
+                { "styleId": "Quote", "type": "paragraph", "pPr": { "snapToGrid": true } }
+            ]
+        })
+    }
+
+    fn seeded_snap_to_grid(styles: &StyleResolver, formatting: Value) -> Option<Value> {
+        paragraph_attrs(
+            &json!({ "formatting": formatting, "content": [] }),
+            styles,
+            &[],
+            &[],
+            None,
+        )
+        .get("snapToGrid")
+        .cloned()
+    }
+
+    #[test]
+    fn snap_to_grid_is_seeded_from_the_style_and_direct_formatting() {
+        let styles = StyleResolver::new(Some(&snap_grid_styles()));
+
+        assert_eq!(seeded_snap_to_grid(&styles, json!({})), Some(Value::Null));
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body" })),
+            Some(Value::Bool(false))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote" })),
+            Some(Value::Bool(true))
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Body", "snapToGrid": true })),
+            Some(Value::Bool(true)),
+            "a direct on overrides a style that opts out"
+        );
+        assert_eq!(
+            seeded_snap_to_grid(&styles, json!({ "styleId": "Quote", "snapToGrid": false })),
+            Some(Value::Bool(false)),
+            "a direct off overrides a style that turns the toggle back on"
+        );
     }
 
     #[test]

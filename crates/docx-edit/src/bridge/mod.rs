@@ -82,6 +82,12 @@ pub struct RenderEnv {
     pub show_hidden_text: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paragraph_spacing_line_px: Option<f64>,
+    /// Section document-grid snap pitch in px (`w:docGrid w:linePitch`),
+    /// gated to an activating grid type. Lowering stamps it onto every
+    /// paragraph; the engine's per-section resolve pass corrects later
+    /// sections. `None` disables snapping.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_grid_pitch_px: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_paragraph_style_id: Option<String>,
 }
@@ -2694,6 +2700,11 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
     result.text_outline = mark_bool(attributes, "textOutline");
     result.hidden = mark_bool(attributes, "hidden");
     result.rtl = mark_bool(attributes, "rtl");
+    // Document-grid opt-out (w:snapToGrid, default on): only an authored
+    // off is carried, mirroring widowControl.
+    if attribute(attributes, "snapToGrid").and_then(any_bool) == Some(false) {
+        result.snap_to_grid = Some(false);
+    }
 
     if let Some(value) = attribute(attributes, "complexScript") {
         match value {
@@ -2932,6 +2943,12 @@ fn lower_paragraph_attrs(
             .filter(|style| !style.is_empty());
     }
     lower_paragraph_spacing(values, &mut result, env.paragraph_spacing_line_px);
+    // Section document-grid pitch for line-height snapping, stamped at
+    // lowering so incremental reuse compares resolved blocks. The engine
+    // overwrites this per section after lowering.
+    result.doc_grid_pitch_px = env
+        .doc_grid_pitch_px
+        .filter(|pitch| pitch.is_finite() && *pitch > 0.0);
     lower_paragraph_indent(values, &mut result);
     lower_paragraph_tabs(values, &mut result);
 
@@ -2941,6 +2958,18 @@ fn lower_paragraph_attrs(
     result.page_break_before = true_property(values, "pageBreakBefore");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
+    // Document-grid opt-out (w:snapToGrid, default on): the direct pPr child
+    // AND the paragraph-mark rPr (in defaultTextFormatting) both opt out.
+    result.snap_to_grid = false_property(values, "snapToGrid");
+    if values
+        .get("defaultTextFormatting")
+        .and_then(any_map)
+        .and_then(|defaults| defaults.get("snapToGrid"))
+        .and_then(any_bool)
+        == Some(false)
+    {
+        result.snap_to_grid = Some(false);
+    }
     result.borders = lower_paragraph_borders(values, env);
     result.shading = values
         .get("shading")
@@ -3334,6 +3363,9 @@ fn paragraph_run_defaults(values: &BTreeMap<String, Any>) -> RunFormatting {
     result.bold_cs = map_bool(defaults, "boldCs");
     result.italic_cs = map_bool(defaults, "italicCs");
     result.complex_script = map_bool(defaults, "cs");
+    if defaults.get("snapToGrid").and_then(any_bool) == Some(false) {
+        result.snap_to_grid = Some(false);
+    }
     if let Some(Any::Map(language)) = defaults.get("language") {
         result.language = Some(RunLanguageSlots {
             latin: map_string(language, "latin").or_else(|| map_string(language, "val")),
@@ -3365,6 +3397,9 @@ fn apply_run_defaults(target: &mut RunFormatting, defaults: &RunFormatting) {
     }
     if target.complex_script.is_none() {
         target.complex_script = defaults.complex_script;
+    }
+    if target.snap_to_grid.is_none() {
+        target.snap_to_grid = defaults.snap_to_grid;
     }
     if target.language.is_none() {
         target.language = defaults.language.clone();

@@ -197,6 +197,8 @@ pub struct TextFormatting {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
 }
 
@@ -286,6 +288,7 @@ pub fn parse_run_properties(
     value.shadow = boolean_child(r_pr, "shadow");
     value.rtl = boolean_child(r_pr, "rtl");
     value.cs = boolean_child(r_pr, "cs");
+    value.snap_to_grid = boolean_child(r_pr, "snapToGrid");
     value.language = r_pr.child("w", "lang").and_then(|language| {
         let value = RunLanguage {
             latin: valid_language_tag(language.attribute(Some("w"), "val")),
@@ -386,6 +389,7 @@ pub fn merge_text_formatting(
             overlay(&mut result.modern_effects, &source.modern_effects);
             overlay(&mut result.rtl, &source.rtl);
             overlay(&mut result.cs, &source.cs);
+            overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             overlay(&mut result.style_id, &source.style_id);
             Some(result)
         }
@@ -549,6 +553,10 @@ pub struct ParagraphFormatting {
     pub suppress_line_numbers: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub suppress_auto_hyphens: Option<bool>,
+    /// Direct `w:snapToGrid` on pPr (§17.3.1). `None` is the OOXML default
+    /// (snap when a grid is active); `Some(false)` opts the paragraph out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snap_to_grid: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_properties: Option<TextFormatting>,
 }
@@ -620,6 +628,7 @@ pub fn parse_paragraph_properties(
     value.style_id = string_child(p_pr, "pStyle", "val", true);
     value.suppress_line_numbers = boolean_child(p_pr, "suppressLineNumbers");
     value.suppress_auto_hyphens = boolean_child(p_pr, "suppressAutoHyphens");
+    value.snap_to_grid = boolean_child(p_pr, "snapToGrid");
     let run_properties_element = p_pr.child("w", "rPr");
     value.run_properties = parse_run_properties(run_properties_element, theme);
     (value != ParagraphFormatting::default()
@@ -711,6 +720,7 @@ pub fn merge_paragraph_formatting(
                 &mut result.suppress_auto_hyphens,
                 &source.suppress_auto_hyphens,
             );
+            overlay(&mut result.snap_to_grid, &source.snap_to_grid);
             result.run_properties = merge_text_formatting(
                 target.run_properties.as_ref(),
                 source.run_properties.as_ref(),
