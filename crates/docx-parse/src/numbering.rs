@@ -99,6 +99,12 @@ pub struct ListRendering {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_font_size: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_bold: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_italic: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_color: Option<ColorValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub marker_suffix: Option<String>,
     pub level_num_fmts: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -603,6 +609,12 @@ pub fn compute_list_rendering(
             .and_then(|formatting| (formatting.hidden == Some(true)).then_some(true)),
         marker_font_family,
         marker_font_size,
+        marker_bold: level.r_pr.as_ref().and_then(|formatting| formatting.bold),
+        marker_italic: level.r_pr.as_ref().and_then(|formatting| formatting.italic),
+        marker_color: level
+            .r_pr
+            .as_ref()
+            .and_then(|formatting| formatting.color.clone()),
         marker_suffix: level.suffix.clone(),
         level_num_fmts,
         abstract_num_id: instance.map(|instance| instance.abstract_num_id),
@@ -836,6 +848,31 @@ mod tests {
         assert_eq!(format_number(27, "upperLetter"), "AA");
         assert_eq!(format_number(12, "ordinal"), "12th");
         assert_eq!(format_number(-2, "decimalZero4"), "-2");
+    }
+
+    #[test]
+    fn marker_level_rpr_preserves_explicit_off_and_on() {
+        let numbering = parse(
+            r#"<w:numbering><w:abstractNum w:abstractNumId="2"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/><w:rPr><w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"/><w:sz w:val="24"/><w:b w:val="0"/><w:i w:val="0"/><w:color w:val="auto"/></w:rPr></w:lvl><w:lvl w:ilvl="1"><w:numFmt w:val="decimal"/><w:lvlText w:val="%2)"/><w:rPr><w:b/><w:i/><w:color w:val="FF0000"/></w:rPr></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="2"/></w:num></w:numbering>"#,
+        );
+        let off = compute_list_rendering(Some(1.0), Some(0.0), &numbering).unwrap();
+        assert_eq!(off.marker_bold, Some(false));
+        assert_eq!(off.marker_italic, Some(false));
+        assert_eq!(
+            off.marker_color.as_ref().and_then(|color| color.auto),
+            Some(true)
+        );
+        assert_eq!(off.marker_font_family.as_deref(), Some("Times New Roman"));
+        assert_eq!(off.marker_font_size, Some(12.0));
+        let on = compute_list_rendering(Some(1.0), Some(1.0), &numbering).unwrap();
+        assert_eq!(on.marker_bold, Some(true));
+        assert_eq!(on.marker_italic, Some(true));
+        assert_eq!(
+            on.marker_color
+                .as_ref()
+                .and_then(|color| color.rgb.as_deref()),
+            Some("FF0000")
+        );
     }
 
     #[test]

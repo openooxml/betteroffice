@@ -196,6 +196,9 @@ export function computeListRendering(
     markerFontFamily: level.rPr?.fontFamily?.ascii || level.rPr?.fontFamily?.hAnsi || undefined,
     // w:sz is in half-points; convert to points for downstream use
     markerFontSize: level.rPr?.fontSize ? level.rPr.fontSize / 2 : undefined,
+    markerBold: level.rPr?.bold,
+    markerItalic: level.rPr?.italic,
+    markerColor: level.rPr?.color,
     markerSuffix: level.suffix,
     levelNumFmts,
     abstractNumId: instance?.abstractNumId,
