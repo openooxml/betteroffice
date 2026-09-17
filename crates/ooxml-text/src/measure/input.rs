@@ -333,7 +333,8 @@ pub struct RotationBoundsIn {
 /// no snapping. `snap_to_grid` is the paragraph-level `w:snapToGrid`
 /// opt-out (`None` is the default, on); a run-level `w:snapToGrid` opt-out
 /// lives on each [`RunIn`]. A line snaps only when the pitch is set, the
-/// paragraph allows it, and no contributing run opts out.
+/// paragraph allows it, no contributing run opts out, and the spacing
+/// rule is `auto` (pinned `exact`/`atLeast` heights never snap).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttrsIn {

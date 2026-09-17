@@ -83,7 +83,8 @@ pub(super) struct FillParams<'a> {
     pub authoritative_shaping: bool,
     /// Grid pitch in px for snap-to-grid (`w:docGrid w:linePitch`), already
     /// gated to an activating grid type AND the paragraph opt-out (`None`
-    /// disables snapping). Per-line run opt-outs in `run_snaps` can still
+    /// disables snapping). The filler additionally requires an `auto`
+    /// spacing rule. Per-line run opt-outs in `run_snaps` can still
     /// disable individual lines.
     pub snap_pitch_px: Option<f32>,
     /// Per prepared run (index-aligned with `prepared`): whether the run
@@ -254,7 +255,8 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 /// Measures an empty or whitespace-only paragraph as one zero-width line at
 /// the ruled height of `font` at `size_pt`, floored at
 /// [`WORD_SINGLE_LINE_FLOOR`] × the font size under every rule but `exact`,
-/// then snapped up to `snap_pitch_px` when set.
+/// then snapped up to `snap_pitch_px` when set and the rule is `auto` (a
+/// pinned `exact`/`atLeast` height never snaps).
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
@@ -274,9 +276,10 @@ pub(super) fn empty_paragraph_extent(
     if floor_applies(&rule) {
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
     }
-    // Exact boxes are fixed regardless of content and never snap.
-    let fixed = matches!(rule, wm::LineSpacingRule::Exact { .. });
-    if let Some(pitch) = snap_pitch_px.filter(|_| !fixed) {
+    // Pinned boxes (`exact` fixed, `atLeast` author-floored) never snap;
+    // only automatically-determined heights do.
+    let auto_rule = matches!(rule, wm::LineSpacingRule::Auto { .. });
+    if let Some(pitch) = snap_pitch_px.filter(|_| auto_rule) {
         line_height = wm::snap_line_height(line_height, pitch);
     }
 
@@ -614,15 +617,16 @@ impl Filler<'_> {
     }
 
     /// Whether the current line may snap: the paragraph carries an active
-    /// grid pitch, the spacing rule is not `exact` (an exact box is fixed
-    /// regardless of content, so there is no pitch to snap), and no
-    /// contributing run opts out. Lines with no recorded contributions
-    /// (e.g. only hidden runs) defer to the paragraph.
+    /// grid pitch, the spacing rule leaves the height automatic (`auto` —
+    /// a pinned `exact` box is fixed regardless of content and an `atLeast`
+    /// floor is author-set, so Word snaps neither), and no contributing
+    /// run opts out. Lines with no recorded contributions (e.g. only
+    /// hidden runs) defer to the paragraph.
     fn line_may_snap(&self) -> bool {
         if self.p.snap_pitch_px.is_none() {
             return false;
         }
-        if matches!(self.rule, wm::LineSpacingRule::Exact { .. }) {
+        if !matches!(self.rule, wm::LineSpacingRule::Auto { .. }) {
             return false;
         }
         self.cur.contributions.iter().all(|part| {
@@ -723,8 +727,10 @@ impl Filler<'_> {
                 line_height = image_h + buffer;
                 ascent = image_h;
             }
-            // The grid snaps the final box, whatever grew it. Ascent/descent
-            // stay put so the extra lands below the descent.
+            // The grid snaps the final box of an `auto`-ruled line,
+            // whatever grew it (`line_may_snap` still gates pinned rules
+            // out). Ascent/descent stay put so the extra lands below the
+            // descent.
             line_height = self.snap_line_height(line_height);
         }
 

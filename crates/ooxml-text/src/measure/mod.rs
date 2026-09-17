@@ -337,7 +337,9 @@ pub fn measure_paragraph_typed(
     // Snap-to-grid (§17.6.5 rule 4): the host gates the pitch to an
     // activating grid type; the paragraph opts out with `w:snapToGrid`.
     // An invalid pitch silently disables snapping rather than refusing the
-    // paragraph. Run-level opt-outs are resolved per line in the filler.
+    // paragraph. Run-level opt-outs are resolved per line in the filler,
+    // which additionally snaps only `auto`-ruled lines (pinned
+    // `exact`/`atLeast` heights never snap).
     let snap_pitch_px = attrs
         .and_then(|a| a.doc_grid_pitch_px)
         .filter(|pitch| pitch.is_finite() && *pitch > 0.0 && *pitch <= 100_000.0)

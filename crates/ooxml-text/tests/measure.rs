@@ -1398,12 +1398,15 @@ fn field_measures_at_fallback_text() {
     );
 }
 
-/// An `exact` box never snaps: it is fixed regardless of content, so the
-/// 10px box keeps its height under an active 24px grid. An `atLeast` floor
-/// resolves first and then snaps like any other ruled height: the 30px
-/// floor (above the 18.4px content) snaps up to 48px.
+/// Pinned line rules never snap: the `exact` box is fixed regardless of
+/// content, so the 10px box keeps its height under an active 24px grid;
+/// the `atLeast` floor is author-set, so the 30px floor (above the 18.4px
+/// content) likewise keeps its resolved height instead of snapping to 48px,
+/// and a content-winning `atLeast` floor (10px, below the content) keeps
+/// the natural height instead of snapping to 24px. Only `auto`-ruled lines
+/// snap (see `grid_active_section_snaps_line_height_up`).
 #[test]
-fn fixed_line_rules_do_not_snap() {
+fn pinned_line_rules_do_not_snap() {
     let exact = measure_with(
         json!({
             "kind": "paragraph",
@@ -1435,8 +1438,27 @@ fn fixed_line_rules_do_not_snap() {
     .unwrap();
     approx(
         at_least["lines"][0]["lineHeight"].as_f64().unwrap(),
-        48.0,
-        "atLeast snaps after resolving",
+        30.0,
+        "atLeast keeps its resolved height",
+    );
+    let at_least_content_wins = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 10.0, "lineUnit": "px", "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        at_least_content_wins["lines"][0]["lineHeight"]
+            .as_f64()
+            .unwrap(),
+        LH,
+        "content-winning atLeast keeps its natural height",
     );
 }
 

@@ -73,9 +73,12 @@
 //! grid pitch and the paragraph/run opt-outs in as inputs; this rule only
 //! rounds. It applies after rules 1 and 2 (and after image growth), keeping
 //! ascent/descent put so the extra lands below the descent, matching how
-//! rule 2 treats growth. `exact` line boxes are fixed regardless of content
-//! and never snap. Absolute grid-phase alignment against the page
-//! origin is not modeled — only the per-line ceiling.
+//! rule 2 treats growth. Only automatically-determined heights snap:
+//! pinned `exact` boxes are fixed regardless of content and `atLeast`
+//! floors are author-set, so Word snaps neither (measured against Word
+//! 16.112: an `atLeast`-ruled body under an active grid keeps its natural
+//! pitch, not a grid multiple). Absolute grid-phase alignment against the
+//! page origin is not modeled — only the per-line ceiling.
 //!
 //! Activation is narrow: only grid types `lines`, `linesAndChars` and
 //! `snapToChars` snap. `default` (or a bare `linePitch` with no type) never
