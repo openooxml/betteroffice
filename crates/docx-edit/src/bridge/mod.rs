@@ -223,7 +223,8 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        let mut hidden_field_paragraphs = BTreeSet::new();
+        let mut hidden_field_paragraphs = 0_usize;
+        let mut pending_hidden_field_paragraphs = 0_usize;
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
@@ -270,11 +271,14 @@ fn lower_story<T: ReadTxn>(
                         },
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
-                    if !shared_map_string(&pilcrow, txn, "paraId")
-                        .is_some_and(|id| hidden_field_paragraphs.contains(&id))
-                    {
+                    if hidden_field_paragraphs > 0 {
+                        hidden_field_paragraphs -= 1;
+                    } else {
                         blocks.extend(paragraph_blocks);
                     }
+                    // The field's own paragraph is the one just closed, so its
+                    // cached result starts with the next pilcrow.
+                    hidden_field_paragraphs += std::mem::take(&mut pending_hidden_field_paragraphs);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
@@ -470,7 +474,7 @@ fn lower_story<T: ReadTxn>(
                         && let Some(data) = shared_map_string(&field, txn, "fieldData")
                             .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
                     {
-                        collect_hidden_field_paragraphs(&data, &mut hidden_field_paragraphs);
+                        pending_hidden_field_paragraphs += hidden_field_result_paragraphs(&data);
                     }
                     let field_type = shared_map_string(&field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
@@ -764,21 +768,27 @@ pub fn yrsDocToLayoutBlocks(
     yrs_doc_to_layout_blocks(doc, story_id, env)
 }
 
-fn collect_hidden_field_paragraphs(data: &serde_json::Value, hidden: &mut BTreeSet<String>) {
+/// How many story paragraphs a hidden field's cached result occupies.
+///
+/// A block-spanning field keeps its result in `structuredResult.blocks`, which
+/// duplicates the story blocks that follow the field's own paragraph, so the
+/// count identifies them positionally — `w14:paraId` is optional and most
+/// documents carry none. The trailing empty paragraph is the closing
+/// paragraph's prefix and marks the duplication as whole.
+fn hidden_field_result_paragraphs(data: &serde_json::Value) -> usize {
     let Some(blocks) = data["structuredResult"]["blocks"].as_array() else {
-        return;
+        return 0;
     };
     if !blocks.last().is_some_and(|block| {
         block["type"].as_str() == Some("paragraph")
             && block["content"].as_array().is_some_and(Vec::is_empty)
     }) {
-        return;
+        return 0;
     }
-    for block in blocks {
-        if let Some(id) = block["paraId"].as_str() {
-            hidden.insert(id.to_owned());
-        }
-    }
+    blocks
+        .iter()
+        .filter(|block| block["type"].as_str() == Some("paragraph"))
+        .count()
 }
 
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {

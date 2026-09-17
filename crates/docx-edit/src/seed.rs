@@ -3500,11 +3500,14 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 mod tests {
     #[test]
     fn numeric_fields_hide_cached_paragraphs_without_changing_the_story() {
-        for instruction in ["0", "TOC"] {
+        // `w14:paraId` is optional and plenty of real documents carry none, so
+        // the cached result has to be recognised positionally.
+        for (instruction, para_ids) in [("0", true), ("TOC", true), ("0", false), ("TOC", false)] {
+            let id = |name: &str| if para_ids { json!(name) } else { json!(null) };
             let run = |text: &str| json!({"type":"run","content":[{"type":"text","text":text}]});
             let cached =
-                json!({"type":"paragraph","paraId":"cached","content":[run("Cached second") ]});
-            let end = json!({"type":"paragraph","paraId":"end","content":[]});
+                json!({"type":"paragraph","paraId":id("cached"),"content":[run("Cached second") ]});
+            let end = json!({"type":"paragraph","paraId":id("end"),"content":[]});
             let field = json!({
                 "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
                 "fieldCode":[], "fieldResult":[run("Cached first")],
@@ -3521,10 +3524,10 @@ mod tests {
                 &mut context,
                 "body".to_owned(),
                 &[
-                    json!({"type":"paragraph","paraId":"owner","content":[field]}),
+                    json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
                     cached,
                     end,
-                    json!({"type":"paragraph","paraId":"after","content":[run("After")]}),
+                    json!({"type":"paragraph","paraId":id("after"),"content":[run("After")]}),
                 ],
                 StoryOptions {
                     include_page_breaks: true,
@@ -3548,11 +3551,20 @@ mod tests {
                 &crate::bridge::RenderEnv::default(),
             )
             .unwrap();
-            assert_eq!(blocks.len(), if instruction == "0" { 2 } else { 4 });
+            let label = format!("{instruction} paraIds={para_ids}");
+            assert_eq!(
+                blocks.len(),
+                if instruction == "0" { 2 } else { 4 },
+                "{label}"
+            );
             let output = serde_json::to_string(&blocks).unwrap();
-            assert_eq!(output.contains("Cached"), instruction != "0");
-            assert!(output.contains("After"));
-            assert_eq!(before, crate::story_checksum(&document, "body").unwrap());
+            assert_eq!(output.contains("Cached"), instruction != "0", "{label}");
+            assert!(output.contains("After"), "{label}");
+            assert_eq!(
+                before,
+                crate::story_checksum(&document, "body").unwrap(),
+                "{label}"
+            );
         }
     }
 
