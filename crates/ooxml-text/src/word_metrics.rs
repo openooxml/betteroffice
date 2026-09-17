@@ -64,21 +64,37 @@
 //! happens at line layout, after shaping: shaped cluster advances stay
 //! fixed, only space-cluster advances grow.
 //!
-//! # 4. Snap-to-grid — [`snap_line_height`]
+//! # 4. Snap-to-grid — [`snap_line_height`], [`snap_line_box`]
 //!
 //! Where a section defines a document grid (`w:docGrid`, §17.6.5) with an
-//! activating type, Word snaps each line's height up to the next grid
-//! multiple unless the paragraph or run opts out (`w:snapToGrid` on
-//! pPr/rPr, §17.3.1/§17.3.2, defaulting to on). Callers thread the section's
-//! grid pitch and the paragraph/run opt-outs in as inputs; this rule only
-//! rounds. It applies after rules 1 and 2 (and after image growth), keeping
-//! ascent/descent put so the extra lands below the descent, matching how
-//! rule 2 treats growth. Only automatically-determined heights snap:
-//! pinned `exact` boxes are fixed regardless of content and `atLeast`
-//! floors are author-set, so Word snaps neither (measured against Word
-//! 16.112: an `atLeast`-ruled body under an active grid keeps its natural
-//! pitch, not a grid multiple). Absolute grid-phase alignment against the
-//! page origin is not modeled — only the per-line ceiling.
+//! activating type, Word fits each line's *content* box to the grid — the
+//! single-spaced box, before rule 2's multiple — unless the paragraph or
+//! run opts out (`w:snapToGrid` on pPr/rPr, §17.3.1/§17.3.2, defaulting to
+//! on). The grid quantizes the line pitch; `auto` spacing then scales that
+//! quantized pitch, so a 1.5-spaced line on a one-row grid is 1.5 grid rows
+//! tall, not two. Callers thread the section's grid pitch and the
+//! paragraph/run opt-outs in as inputs; this rule only rounds. It applies
+//! after rule 1 and before rule 2, keeping ascent/descent put so the extra
+//! lands below the descent, matching how rule 2 treats growth. Only
+//! automatically-determined heights snap: pinned `exact` boxes are fixed
+//! regardless of content and `atLeast` floors are author-set, so Word snaps
+//! neither (measured against Word 16.112: an `atLeast`-ruled body under an
+//! active grid keeps its natural pitch, not a grid multiple). Absolute
+//! grid-phase alignment against the page origin is not modeled.
+//!
+//! Word itself rounds the content box up to a *whole* number of rows:
+//! measured off Word 16.112's own rasters of two Chinese theses on a
+//! `linesAndChars` grid (326 and 312 twips), single-spaced body lines sit
+//! at 1.00 grid rows, `w:line="360"` body lines at 1.50, and cover-page
+//! lines whose content outgrows one row at exactly 2.00, 3.00 and 4.00.
+//! The engine deliberately stops at the first row and leaves a taller
+//! content box alone. Word's `linePitch` is authored against the real CJK
+//! face; the substituted faces this engine ships measure a few percent
+//! taller, which straddles the row boundary, and a full `ceil` turns that
+//! few-percent metric error into a doubled line. Capping at one row keeps
+//! the fill that the grid is for — a short line filling its row — without
+//! betting page counts on a metric we do not have. Revisit the `ceil` once
+//! the CJK faces carry Word's metrics.
 //!
 //! Activation is narrow: only grid types `lines`, `linesAndChars` and
 //! `snapToChars` snap. `default` (or a bare `linePitch` with no type) never
@@ -312,14 +328,20 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     }
 }
 
-/// Rule 4: snap a line's height up to the next multiple of the section's
-/// grid pitch (`w:docGrid w:linePitch`, §17.6.5).
+/// Rule 4: fill a height up to one row of the section's grid pitch
+/// (`w:docGrid w:linePitch`, §17.6.5). A height already past one row is
+/// left alone — see the module docs for why this stops short of Word's
+/// `ceil`.
 ///
 /// `grid_pitch_px` must already be gated by the caller to an activating grid
 /// type (`lines`, `linesAndChars`, `snapToChars`) with a finite positive
 /// pitch; `None` (or a non-positive/non-finite pitch) is the identity.
-/// Exact multiples are unchanged; everything else rounds up. Non-finite or
-/// non-positive heights pass through untouched.
+/// Non-finite or non-positive heights pass through untouched.
+///
+/// Line boxes go through [`snap_line_box`], which fills the content box so
+/// that rule 2's multiple scales the filled pitch. This scalar form is for
+/// heights that no longer carry a spacing rule, such as an image-dictated
+/// box.
 pub fn snap_line_height(line_height_px: f32, grid_pitch_px: f32) -> f32 {
     if !line_height_px.is_finite() || line_height_px <= 0.0 {
         return line_height_px;
@@ -327,15 +349,30 @@ pub fn snap_line_height(line_height_px: f32, grid_pitch_px: f32) -> f32 {
     if !grid_pitch_px.is_finite() || grid_pitch_px <= 0.0 {
         return line_height_px;
     }
-    let multiples = (line_height_px / grid_pitch_px).ceil();
-    if !multiples.is_finite() {
-        return line_height_px;
-    }
-    let snapped = multiples * grid_pitch_px;
-    if snapped.is_finite() && snapped >= line_height_px {
-        snapped
+    if line_height_px < grid_pitch_px {
+        grid_pitch_px
     } else {
         line_height_px
+    }
+}
+
+/// Rule 4 for a line box: fill the content height up to one grid row,
+/// keeping ascent and descent put so the growth lands in leading below the
+/// descent.
+///
+/// The caller applies this to the *content* box, before rule 2, so that an
+/// `auto` multiple scales the filled grid pitch — Word renders a 1.5-spaced
+/// line on a one-row grid at 1.5 rows, not two.
+pub fn snap_line_box(content: LineBox, grid_pitch_px: f32) -> LineBox {
+    let height = content.height();
+    let snapped = snap_line_height(height, grid_pitch_px);
+    if snapped <= height {
+        return content;
+    }
+    LineBox {
+        ascent: content.ascent,
+        descent: content.descent,
+        leading: content.leading + (snapped - height),
     }
 }
 
@@ -409,14 +446,63 @@ pub fn kern_features(enabled: bool) -> Vec<ShapeFeature> {
 
 #[cfg(test)]
 mod tests {
-    use super::snap_line_height;
+    use super::{LineBox, LineSpacingRule, apply_spacing_rule, snap_line_box, snap_line_height};
 
     #[test]
-    fn snap_rounds_up_to_the_next_pitch_multiple() {
+    fn snap_fills_one_row_and_leaves_taller_lines() {
         // 354 twips at 150 DPI is 36.875px; the technical-sample body mean.
         assert_eq!(snap_line_height(30.5, 36.875), 36.875);
         assert_eq!(snap_line_height(36.875, 36.875), 36.875);
-        assert_eq!(snap_line_height(37.0, 36.875), 73.75);
+        assert_eq!(snap_line_height(37.0, 36.875), 37.0);
+        assert_eq!(snap_line_height(80.0, 36.875), 80.0);
+    }
+
+    /// Word rounds the *content* box to whole rows and the `auto` multiple
+    /// then scales that quantized pitch: measured off Word's own raster of
+    /// a 326-twip `linesAndChars` grid (33.98px rows at 150 DPI), a
+    /// `w:line="360"` body line sits at 1.5 rows, not the 2 rows a ruled
+    /// snap would give.
+    #[test]
+    fn multiple_spacing_scales_the_snapped_row() {
+        let row = 33.958_332_f32;
+        let content = LineBox {
+            ascent: 22.0,
+            descent: 6.0,
+            leading: 1.6,
+        };
+        let snapped = snap_line_box(content, row);
+        assert!((snapped.height() - row).abs() < 1e-3);
+        assert_eq!(snapped.ascent, content.ascent);
+        assert_eq!(snapped.descent, content.descent);
+        assert_eq!(snapped.leading, content.leading + (row - content.height()));
+        let ruled = apply_spacing_rule(snapped, &LineSpacingRule::Auto { line_240ths: 360 });
+        assert!((ruled.height() - 1.5 * row).abs() < 1e-3);
+    }
+
+    /// A content box already past one row is left alone: a `ceil` here
+    /// would double the line off a few-percent font-metric difference.
+    #[test]
+    fn snap_line_box_leaves_a_taller_content_box() {
+        let row = 33.958_332_f32;
+        let content = LineBox {
+            ascent: 30.0,
+            descent: 8.0,
+            leading: 2.0,
+        };
+        assert_eq!(snap_line_box(content, row), content);
+    }
+
+    /// An exact-multiple content box is untouched.
+    #[test]
+    fn snap_line_box_is_identity_on_a_whole_row() {
+        let row = 24.0_f32;
+        let content = LineBox {
+            ascent: 18.0,
+            descent: 4.0,
+            leading: 2.0,
+        };
+        assert_eq!(snap_line_box(content, row).height(), 24.0);
+        assert_eq!(snap_line_box(content, 0.0).height(), content.height());
     }
 
     #[test]

@@ -20,12 +20,13 @@
 //!   rules ([`apply_spacing_rule`]), justification gating and
 //!   space-stretch ([`line_is_justified`], [`stretch_spaces`]), the w:kern
 //!   threshold ([`kern_enabled`], [`kern_features`]), document-grid line
-//!   snapping ([`snap_line_height`], active only for an activating
-//!   `w:docGrid` type with per-paragraph/per-run `w:snapToGrid` opt-outs),
-//!   and the settings.xml
+//!   snapping ([`snap_line_box`], [`snap_line_height`], active only for an
+//!   activating `w:docGrid` type with per-paragraph/per-run `w:snapToGrid`
+//!   opt-outs), and the settings.xml
 //!   compat flags that feed them ([`CompatFlags`]). Snap-to-grid (w:docGrid)
-//!   rounds line heights up via [`snap_line_height`] when the caller supplies
-//!   an activating grid pitch.
+//!   fills the *content* box up to one grid row via [`snap_line_box`] when
+//!   the caller supplies an activating grid pitch, so the `auto` multiple
+//!   then scales the filled pitch.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -59,5 +60,5 @@ pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
-    line_is_justified, single_line_box, snap_line_height, stretch_spaces,
+    line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,
 };

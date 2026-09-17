@@ -2855,11 +2855,14 @@ fn an_oversized_fallback_chain_measures_like_its_head() {
 // 37. document-grid snap-to-grid (w:docGrid §17.6.5, w:snapToGrid §17.3.1/2)
 //
 // At 12pt the single-spacing line is LH = 18.3984375px; a 360-twips grid
-// pitch is 24px, so an active grid snaps the line to 24. Only an activating
-// grid type reaches measurement (the host withholds the pitch for `default`
-// or a bare linePitch), and either opt-out disables the snap.
+// pitch is 24px, so an active grid snaps the content box to 24. Only an
+// activating grid type reaches measurement (the host withholds the pitch
+// for `default` or a bare linePitch), and either opt-out disables the snap.
+// The grid quantizes the content box, so an `auto` multiple scales the
+// quantized row; `exact` and `atLeast` are pinned and never snap.
 
-/// A grid-active section snaps the line up to the next pitch multiple.
+/// A grid-active section snaps the content box up to the next pitch
+/// multiple.
 #[test]
 fn grid_active_section_snaps_line_height_up() {
     let v = measure_with(
@@ -2884,6 +2887,95 @@ fn grid_active_section_snaps_line_height_up() {
     // Ascent/descent stay put; the snap slack lands below the descent.
     approx(v["lines"][0]["ascent"].as_f64().unwrap(), ASC, "ascent");
     approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
+}
+
+/// A content box already past one row keeps its natural height: at 24pt
+/// the content line is 2×LH = 36.796875px, which a 24px pitch leaves alone
+/// rather than doubling to 48.
+#[test]
+fn grid_leaves_a_tall_content_box_alone() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0", "fontSize": 24.0 }],
+            "attrs": { "docGridPitchPx": 24.0 }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        2.0 * LH,
+        "natural lineHeight",
+    );
+}
+
+/// The `auto` multiple scales the snapped row, not the natural height: a
+/// 1.5-spaced line on a one-row grid is 1.5 rows tall, not two. This is the
+/// rule Word's own rasters of a `linesAndChars` thesis grid show.
+#[test]
+fn grid_multiple_spacing_scales_the_snapped_row() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 1.5, "lineUnit": "multiplier" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        36.0,
+        "1.5 grid rows",
+    );
+}
+
+/// An `exact` rule pins the box, so the grid never touches it.
+#[test]
+fn grid_does_not_snap_an_exact_rule() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 20.0, "lineRule": "exact" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        20.0,
+        "exact lineHeight",
+    );
+}
+
+/// An `atLeast` floor is author-set, so the grid never touches it either.
+#[test]
+fn grid_does_not_snap_an_at_least_rule() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "0" }],
+            "attrs": {
+                "docGridPitchPx": 24.0,
+                "spacing": { "line": 30.0, "lineRule": "atLeast" }
+            }
+        }),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        30.0,
+        "atLeast lineHeight",
+    );
 }
 
 /// A `default`-type grid never reaches measurement (the host passes no
