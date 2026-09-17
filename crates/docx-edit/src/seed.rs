@@ -2991,6 +2991,111 @@ fn table_cell_story_id(parent: &str, table: usize, row: usize, cell: usize) -> S
     format!("{parent}:t{table}:r{row}c{cell}")
 }
 
+/// Hands each block of a story the identity `visit_story` seeds it with.
+#[derive(Clone, Copy, Default)]
+struct BlockCursor {
+    paragraph: usize,
+    table: usize,
+    sdt: usize,
+}
+
+impl BlockCursor {
+    fn take(&mut self, story_id: &str, block: &Value) -> Option<String> {
+        match string(field(Some(block), "type")).unwrap_or_default() {
+            "rawXml" => None,
+            "paragraph" => {
+                let id = string(field(Some(block), "paraId"))
+                    .filter(|value| !value.is_empty())
+                    .map_or_else(|| format!("{story_id}:p{}", self.paragraph), str::to_owned);
+                self.paragraph += 1;
+                Some(id)
+            }
+            "table" => {
+                let id = format!("{story_id}:t{}", self.table);
+                self.table += 1;
+                Some(id)
+            }
+            _ => {
+                let id = format!("{story_id}:sdt{}", self.sdt);
+                self.sdt += 1;
+                Some(id)
+            }
+        }
+    }
+}
+
+/// How many story blocks a suppressed field's cached result duplicates.
+///
+/// The trailing empty paragraph is the closing paragraph stripped of its field
+/// characters, so its presence marks the duplication as whole.
+fn cached_result_block_count(data: &Value) -> Option<usize> {
+    let blocks = array(field(field(Some(data), "structuredResult"), "blocks"));
+    blocks
+        .last()
+        .is_some_and(|block| {
+            string(field(Some(block), "type")) == Some("paragraph")
+                && array(field(Some(block), "content")).is_empty()
+        })
+        .then(|| blocks.len())
+}
+
+/// Binds every suppressed field in a paragraph to the story blocks its cached
+/// result duplicates, and reports the tables among them by block index — a
+/// table carries no identity of its own.
+fn bind_field_result_blocks(
+    units: &mut [InlineUnit],
+    story_id: &str,
+    blocks: &[Value],
+    owner: usize,
+    after_owner: BlockCursor,
+    table_ids: &mut BTreeMap<usize, String>,
+) {
+    for unit in units {
+        let UnitContent::Embed { kind, payload } = &mut unit.content else {
+            continue;
+        };
+        // `instruction` is the key the render side suppresses on.
+        if kind.as_str() != "field"
+            || !numeric_field_instruction(
+                payload
+                    .get("instruction")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+        {
+            continue;
+        }
+        let Some(count) = payload
+            .get("fieldData")
+            .and_then(Value::as_str)
+            .and_then(|data| serde_json::from_str::<Value>(data).ok())
+            .as_ref()
+            .and_then(cached_result_block_count)
+        else {
+            continue;
+        };
+        let Some(duplicated) = blocks.get(owner + 1..owner + 1 + count) else {
+            continue;
+        };
+        let mut cursor = after_owner;
+        let mut ids = Vec::with_capacity(duplicated.len());
+        for (offset, block) in duplicated.iter().enumerate() {
+            let is_table = string(field(Some(block), "type")) == Some("table");
+            let Some(id) = cursor.take(story_id, block) else {
+                continue;
+            };
+            if is_table {
+                table_ids.insert(owner + 1 + offset, id.clone());
+            }
+            ids.push(Value::String(id));
+        }
+        if ids.is_empty() {
+            continue;
+        }
+        payload.insert("fieldResultBlocks".to_owned(), Value::Array(ids));
+    }
+}
+
 fn add_comment_coverage(plan: &mut StoryPlan) {
     let mut offset = 0u32;
     for unit in &plan.units {
@@ -3042,11 +3147,14 @@ fn visit_story(
     } else {
         source_blocks
     };
-    let mut table_index = 0usize;
-    let mut sdt_index = 0usize;
-    let mut paragraph_index = 0usize;
+    let mut cursor = BlockCursor::default();
+    let mut result_table_ids = BTreeMap::new();
     let mut last_kind = None;
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
+        let position = cursor;
+        let Some(block_id) = cursor.take(&story_id, block) else {
+            continue;
+        };
         match string(field(Some(block), "type")).unwrap_or_default() {
             "paragraph" => {
                 let (leading_breaks, trailing_breaks) = paragraph_flow_breaks(block);
@@ -3061,23 +3169,21 @@ fn visit_story(
                         ));
                     }
                 }
-                let (units, mut ppr) =
+                let (mut units, mut ppr) =
                     paragraph_units(block, &context.styles, None, &context.source_json);
-                let fallback = format!("{story_id}:p{paragraph_index}");
-                ppr.insert(
-                    "paraId".to_owned(),
-                    Value::String(
-                        string(field(Some(block), "paraId"))
-                            .filter(|value| !value.is_empty())
-                            .unwrap_or(&fallback)
-                            .to_owned(),
-                    ),
+                ppr.insert("paraId".to_owned(), Value::String(block_id));
+                bind_field_result_blocks(
+                    &mut units,
+                    &story_id,
+                    blocks,
+                    block_index,
+                    cursor,
+                    &mut result_table_ids,
                 );
                 context.plans[plan_index].units.extend(units);
                 context.plans[plan_index]
                     .units
                     .push(embed_unit("pilcrow", ppr, &[], None, 1));
-                paragraph_index += 1;
                 if options.include_page_breaks {
                     for kind in trailing_breaks {
                         context.plans[plan_index].units.push(embed_unit(
@@ -3092,8 +3198,7 @@ fn visit_story(
                 last_kind = Some("paragraph");
             }
             "table" => {
-                let current_table = table_index;
-                table_index += 1;
+                let current_table = position.table;
                 let table = project_table(
                     block,
                     &context.styles,
@@ -3131,17 +3236,17 @@ fn visit_story(
                     .into_iter()
                     .map(drop_nulls)
                     .collect::<Vec<_>>();
-                context.plans[plan_index].units.push(embed_unit(
-                    "table",
-                    map_from_value(json!({
-                        "tblPr": value_from_map(&tbl_pr),
-                        "grid": grid,
-                        "rows": rows
-                    })),
-                    &[],
-                    None,
-                    1,
-                ));
+                let mut payload = map_from_value(json!({
+                    "tblPr": value_from_map(&tbl_pr),
+                    "grid": grid,
+                    "rows": rows
+                }));
+                if let Some(id) = result_table_ids.remove(&block_index) {
+                    payload.insert("blockId".to_owned(), Value::String(id));
+                }
+                context.plans[plan_index]
+                    .units
+                    .push(embed_unit("table", payload, &[], None, 1));
                 let previous_table_formatting = context.styles.table_paragraph_formatting.take();
                 for (row_index, row) in table.rows.into_iter().enumerate() {
                     for (cell_index, cell) in row.cells.into_iter().enumerate() {
@@ -3161,11 +3266,8 @@ fn visit_story(
                 context.styles.table_paragraph_formatting = previous_table_formatting;
                 last_kind = Some("table");
             }
-            "rawXml" => continue,
             _ => {
-                let current_sdt = sdt_index;
-                sdt_index += 1;
-                let child_story = format!("{story_id}:sdt{current_sdt}");
+                let child_story = block_id;
                 let mut properties = sdt_properties_attrs(
                     field(Some(block), "properties").unwrap_or(&Value::Null),
                     &context.source_json,
@@ -3197,7 +3299,7 @@ fn visit_story(
             "pilcrow",
             map_from_value(json!({
                 "hangingIndent": false,
-                "paraId": format!("{story_id}:p{paragraph_index}")
+                "paraId": format!("{story_id}:p{}", cursor.paragraph)
             })),
             &[],
             None,
@@ -3498,66 +3600,94 @@ pub fn seed_from_docx(document: &EditingDoc, bytes: &[u8]) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    fn seed_body(blocks: &[Value]) -> EditingDoc {
+        let mut context = LoweringContext {
+            styles: StyleResolver::new(None),
+            theme: None,
+            source_json: Arc::new(BTreeMap::new()),
+            plans: Vec::new(),
+            compatibility_mode: 12,
+        };
+        visit_story(
+            &mut context,
+            "body".to_owned(),
+            blocks,
+            StoryOptions {
+                include_page_breaks: true,
+                append_body_tail: false,
+                seed_comments: false,
+            },
+        );
+        let document = EditingDoc::new(74101);
+        document
+            .create_empty_stories(
+                &context
+                    .plans
+                    .iter()
+                    .map(|plan| plan.story_id.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+        let batches = context
+            .plans
+            .into_iter()
+            .map(|plan| {
+                let (story_id, ops, _) = seed_plan(plan).unwrap();
+                (story_id, ops)
+            })
+            .collect();
+        document
+            .apply_raw_story_batches(batches, &EditCtx::local(String::new(), String::new()))
+            .unwrap();
+        document
+    }
+
+    fn rendered(document: &EditingDoc) -> (usize, String) {
+        let blocks = crate::bridge::yrs_doc_to_layout_blocks(
+            document,
+            "body",
+            &crate::bridge::RenderEnv::default(),
+        )
+        .unwrap();
+        let json = serde_json::to_string(&blocks).unwrap();
+        (blocks.len(), json)
+    }
+
+    fn run(text: &str) -> Value {
+        json!({"type":"run","content":[{"type":"text","text":text}]})
+    }
+
+    fn block_field(instruction: &str, blocks: &[Value]) -> Value {
+        json!({
+            "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
+            "fieldCode":[], "fieldResult":[run("Cached first")],
+            "structuredResult":{
+                "inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],
+                "blocks":blocks
+            }
+        })
+    }
+
     #[test]
     fn numeric_fields_hide_cached_paragraphs_without_changing_the_story() {
         // `w14:paraId` is optional and plenty of real documents carry none, so
-        // the cached result has to be recognised positionally.
+        // the binding cannot key on it.
         for (instruction, para_ids) in [("0", true), ("TOC", true), ("0", false), ("TOC", false)] {
             let id = |name: &str| if para_ids { json!(name) } else { json!(null) };
-            let run = |text: &str| json!({"type":"run","content":[{"type":"text","text":text}]});
             let cached =
                 json!({"type":"paragraph","paraId":id("cached"),"content":[run("Cached second") ]});
             let end = json!({"type":"paragraph","paraId":id("end"),"content":[]});
-            let field = json!({
-                "type":"complexField", "fieldType":"UNKNOWN", "instruction":instruction,
-                "fieldCode":[], "fieldResult":[run("Cached first")],
-                "structuredResult":{"inline":[{"type":"hyperlink","anchor":"bookmark","children":[run("Cached first")]}],"blocks":[cached,end]}
-            });
-            let mut context = LoweringContext {
-                styles: StyleResolver::new(None),
-                theme: None,
-                source_json: Arc::new(BTreeMap::new()),
-                plans: Vec::new(),
-                compatibility_mode: 12,
-            };
-            visit_story(
-                &mut context,
-                "body".to_owned(),
-                &[
-                    json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
-                    cached,
-                    end,
-                    json!({"type":"paragraph","paraId":id("after"),"content":[run("After")]}),
-                ],
-                StoryOptions {
-                    include_page_breaks: true,
-                    append_body_tail: false,
-                    seed_comments: false,
-                },
-            );
-            let document = EditingDoc::new(74101);
-            let (story, ops, _) = seed_plan(context.plans.pop().unwrap()).unwrap();
-            document.create_empty_stories(&[story.clone()]).unwrap();
-            document
-                .apply_raw_story_batches(
-                    vec![(story, ops)],
-                    &EditCtx::local(String::new(), String::new()),
-                )
-                .unwrap();
+            let field = block_field(instruction, &[cached.clone(), end.clone()]);
+            let document = seed_body(&[
+                json!({"type":"paragraph","paraId":id("owner"),"content":[field]}),
+                cached,
+                end,
+                json!({"type":"paragraph","paraId":id("after"),"content":[run("After")]}),
+            ]);
             let before = crate::story_checksum(&document, "body").unwrap();
-            let blocks = crate::bridge::yrs_doc_to_layout_blocks(
-                &document,
-                "body",
-                &crate::bridge::RenderEnv::default(),
-            )
-            .unwrap();
+            let (count, output) = rendered(&document);
             let label = format!("{instruction} paraIds={para_ids}");
-            assert_eq!(
-                blocks.len(),
-                if instruction == "0" { 2 } else { 4 },
-                "{label}"
-            );
-            let output = serde_json::to_string(&blocks).unwrap();
+            assert_eq!(count, if instruction == "0" { 2 } else { 4 }, "{label}");
             assert_eq!(output.contains("Cached"), instruction != "0", "{label}");
             assert!(output.contains("After"), "{label}");
             assert_eq!(
@@ -3566,6 +3696,79 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    #[test]
+    fn numeric_fields_hide_non_paragraph_cached_blocks() {
+        for instruction in ["0", "TOC"] {
+            let cell = json!({"type":"tableCell","content":[
+                json!({"type":"paragraph","content":[run("Cached cell")]})
+            ]});
+            let table = json!({"type":"table","rows":[{"type":"tableRow","cells":[cell]}]});
+            let sdt = json!({"type":"blockSdt","properties":{},"content":[
+                json!({"type":"paragraph","content":[run("Cached sdt")]})
+            ]});
+            let end = json!({"type":"paragraph","content":[]});
+            let field = block_field(instruction, &[table.clone(), sdt.clone(), end.clone()]);
+            let document = seed_body(&[
+                json!({"type":"paragraph","content":[field]}),
+                table,
+                sdt,
+                end,
+                json!({"type":"paragraph","content":[run("After")]}),
+            ]);
+            let before = crate::story_checksum(&document, "body").unwrap();
+            let (count, output) = rendered(&document);
+            assert_eq!(
+                count,
+                if instruction == "0" { 2 } else { 5 },
+                "{instruction}"
+            );
+            assert_eq!(
+                output.contains("Cached"),
+                instruction != "0",
+                "{instruction}"
+            );
+            assert!(output.contains("After"), "{instruction}");
+            assert_eq!(
+                before,
+                crate::story_checksum(&document, "body").unwrap(),
+                "{instruction}"
+            );
+        }
+    }
+
+    #[test]
+    fn splitting_a_cached_paragraph_shows_the_authored_half_only() {
+        let cached = json!({"type":"paragraph","content":[run("Cached second")]});
+        let end = json!({"type":"paragraph","content":[]});
+        let document = seed_body(&[
+            json!({"type":"paragraph","content":[block_field("0", &[cached.clone(), end.clone()])]}),
+            cached,
+            end,
+            json!({"type":"paragraph","content":[run("After")]}),
+        ]);
+        assert_eq!(rendered(&document).0, 2);
+        // The field embed, the owner's pilcrow, then the cached text: pressing
+        // Enter at the end of the cached paragraph and typing into the new one.
+        let cached_pilcrow = 2 + "Cached second".encode_utf16().count() as u32;
+        let ctx = EditCtx::local("Ada".to_owned(), "2026-01-01T00:00:00Z".to_owned());
+        document
+            .split_paragraph(&ctx, crate::Position::new("body", cached_pilcrow), None)
+            .unwrap();
+        document
+            .insert_text(
+                &ctx,
+                crate::Position::new("body", cached_pilcrow + 1),
+                "Authored",
+                crate::FormatPolicy::Plain,
+            )
+            .unwrap();
+        let (count, output) = rendered(&document);
+        assert_eq!(count, 3);
+        assert!(output.contains("Authored"));
+        assert!(output.contains("After"));
+        assert!(!output.contains("Cached"));
     }
 
     #[test]
