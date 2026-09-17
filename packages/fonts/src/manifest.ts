@@ -188,6 +188,15 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     script: 'cjk-jp',
   },
   {
+    family: 'Noto Serif JP',
+    metricCompatWith: 'MS Mincho',
+    weight: 400,
+    style: 'normal',
+    file: 'NotoSerifJP-Regular.otf',
+    byteLength: 6210492,
+    script: 'cjk-jp',
+  },
+  {
     family: 'Noto Sans KR',
     metricCompatWith: 'Malgun Gothic',
     weight: 400,
@@ -207,9 +216,10 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
  * The CJK alias set mirrors the CJK table in core's `utils/fontResolver.ts`
  * (both romanized and native spellings; native full-width Latin lowercases
  * too, e.g. `ＭＳ ゴシック` -> `ｍｓ ゴシック`). Where fontResolver picks a
- * serif Noto family this package does not vendor (Noto Serif TC/JP/KR), the
+ * serif Noto family this package does not vendor (Noto Serif TC/KR), the
  * alias points at the vendored sans face of the same region — coverage
- * first.
+ * first. Noto Serif JP IS vendored, so the Mincho serif families point at
+ * `ms mincho` instead.
  */
 const WORD_FAMILY_ALIASES: Record<string, string> = {
   helvetica: 'arial',
@@ -238,21 +248,23 @@ const WORD_FAMILY_ALIASES: Record<string, string> = {
   新細明體: 'microsoft jhenghei',
   細明體: 'microsoft jhenghei',
   標楷體: 'microsoft jhenghei',
-  // Japanese (the Mincho serif families map to the sans face — Noto Serif JP
-  // is not vendored)
+  // Japanese — Gothic/Meiryo sans families resolve to the sans face.
+  // (Meiryo is a sans design, so it stays on the Gothic face.)
   'ms pgothic': 'ms gothic',
   meiryo: 'ms gothic',
+  'meiryo ui': 'ms gothic',
   'yu gothic': 'ms gothic',
   'ｍｓ ゴシック': 'ms gothic',
   'ｍｓ ｐゴシック': 'ms gothic',
   メイリオ: 'ms gothic',
   游ゴシック: 'ms gothic',
-  'ms mincho': 'ms gothic',
-  'ms pmincho': 'ms gothic',
-  'yu mincho': 'ms gothic',
-  'ｍｓ 明朝': 'ms gothic',
-  'ｍｓ ｐ明朝': 'ms gothic',
-  游明朝: 'ms gothic',
+  // Japanese — Mincho serif families resolve to the vendored Noto Serif JP
+  // face (`ms mincho` is covered directly by its metricCompatWith entry).
+  'ms pmincho': 'ms mincho',
+  'yu mincho': 'ms mincho',
+  'ｍｓ 明朝': 'ms mincho',
+  'ｍｓ ｐ明朝': 'ms mincho',
+  游明朝: 'ms mincho',
   // Korean (Batang/Gungsuh serif map to the sans face — Noto Serif KR is not
   // vendored)
   '맑은 고딕': 'malgun gothic',
