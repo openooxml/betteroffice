@@ -136,8 +136,11 @@ fn row_keep_heights(block: &TableBlock, measure: &TableExtent) -> Vec<f64> {
 /// that fits (Word's "allow row to break across pages"), which keeps the row's
 /// other columns on the page where they start and lets a tall vertically merged
 /// cell flow across the boundary. `w:cantSplit` rows (§17.4.6) never break
-/// unless they cannot fit a whole column even alone. A fresh fragment where not
-/// one line fits places the row's remainder with overflow instead of looping.
+/// unless they cannot fit a whole column even alone. `w:trHeight w:hRule="exact"`
+/// rows are likewise atomic: their break geometry offers only the full-height
+/// boundary, so the whole row moves to the next page rather than slicing
+/// mid-row. A fresh fragment where not one line fits places the row's remainder
+/// with overflow instead of looping.
 ///
 /// A continuation fragment repeats the leading header band, but only when the
 /// band plus the smallest legal body slice still fits the column; otherwise it
@@ -182,7 +185,17 @@ fn layout_table_with_position(
             .get(row_index)
             .and_then(|row| row.cant_split)
             .unwrap_or(false);
-        if row_cant_split
+        // An exact-height row is atomic (its break geometry holds only the
+        // full-height boundary), so like `cantSplit` it must move whole to the
+        // next page when it fits there but not in the remaining space. A row
+        // taller than the whole column still progresses: `ensure_fits`
+        // advances at most once for oversized heights and the fresh-fragment
+        // overflow guard below then places it rather than looping.
+        let row_is_exact = block
+            .rows
+            .get(row_index)
+            .is_some_and(|row| row.is_exact_height());
+        if (row_cant_split || row_is_exact)
             && consumed == 0.0
             && row_remaining_at_start > paginator.get_available_height()
             && paginator.state(state_idx).pen_y != paginator.state(state_idx).content_top
@@ -270,7 +283,9 @@ fn layout_table_with_position(
             // at the deepest whole line that fits (Word's "allow row to break across
             // pages") — this keeps the row's other columns on the page where they
             // start and flows a tall vertically-merged cell across the boundary.
-            // `w:cantSplit` rows (§17.4.6) never break.
+            // `w:cantSplit` rows (§17.4.6) never break. Exact-height rows need no
+            // branch here: their break geometry holds only the full-height
+            // boundary, so `snap_row_break` already returns 0 for a partial fit.
             let budget = available_height - used;
             let cant_split = block
                 .rows

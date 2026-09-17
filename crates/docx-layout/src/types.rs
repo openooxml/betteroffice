@@ -803,6 +803,16 @@ pub struct TableRow {
     pub tracked_del: Option<Value>,
 }
 
+impl TableRow {
+    /// Word's `w:trHeight w:hRule="exact"` fixed-height row: measurement treats
+    /// it as a verbatim block and pagination must not split it mid-row. The
+    /// `height.is_some()` conjunct mirrors measurement — an `exact` rule with
+    /// no height value carries no fixed size and stays splittable.
+    pub fn is_exact_height(&self) -> bool {
+        self.height_rule.as_deref() == Some("exact") && self.height.is_some()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct FloatingTablePosition {

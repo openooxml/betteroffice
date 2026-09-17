@@ -1509,8 +1509,7 @@ fn measure_table(
             }
             max_border_height = max_border_height.max(cell_border_height(source_cell));
         }
-        exact[row_index] =
-            source_row.height_rule.as_deref() == Some("exact") && source_row.height.is_some();
+        exact[row_index] = source_row.is_exact_height();
         measured_row.height = match (source_row.height, source_row.height_rule.as_deref()) {
             (Some(height), Some("exact")) => height,
             (Some(height), _) => max_height.max(height + max_padding_height) + max_border_height,

@@ -100,6 +100,16 @@ pub fn build_table_row_break_info(block: &TableBlock, measure: &TableExtent) -> 
     let mut break_offsets: Vec<Vec<f64>> = Vec::with_capacity(row_count);
     for r in 0..row_count {
         let row_height = measure.rows[r].height;
+        // Word treats an exact-height row as an indivisible fixed block
+        // (measurement takes its height verbatim), so it offers only its
+        // full-height boundary. Filtering here — rather than adding a second
+        // check in the paginator — makes every downstream consumer
+        // (`snap_row_break`, `minimum_row_slice`, `first_table_fragment_height`)
+        // see the row as atomic by construction.
+        if block.rows.get(r).is_some_and(|row| row.is_exact_height()) {
+            break_offsets.push(vec![row_height]);
+            continue;
+        }
         let mut offsets: Vec<f64> = Vec::new();
         let mut unbreakable_ranges: Vec<(f64, f64)> = Vec::new();
         add_unique(&mut offsets, row_height); // a row boundary is always a clean break
@@ -559,5 +569,248 @@ mod tests {
         .unwrap();
         let info = build_table_row_break_info(&block, &measure);
         assert_eq!(snap_row_break(&info, 0, 0.0, 50.0), 50.0);
+    }
+
+    fn single_row_table(
+        height: Option<f64>,
+        height_rule: Option<&str>,
+        cant_split: Option<bool>,
+        lines: usize,
+        row_height: f64,
+    ) -> (TableBlock, TableExtent) {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{
+                "id": 0,
+                "height": height,
+                "heightRule": height_rule,
+                "cantSplit": cant_split,
+                "cells": [{ "id": 0, "blocks": [para()] }],
+            }],
+            "columnWidths": [100.0],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "columnWidths": [100.0],
+            "totalWidth": 100.0,
+            "totalHeight": row_height,
+            "rows": [{
+                "height": row_height,
+                "cells": [measured_cell(vec![para_measure(lines)])],
+            }],
+        }))
+        .unwrap();
+        (block, measure)
+    }
+
+    #[test]
+    fn exact_row_offers_only_its_full_height_boundary() {
+        let (block, measure) = single_row_table(Some(60.0), Some("exact"), None, 3, 60.0);
+        assert!(block.rows[0].is_exact_height());
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![60.0]);
+        // A partial budget fits no clean boundary; the full budget fits whole.
+        assert_eq!(snap_row_break(&info, 0, 0.0, 30.0), 0.0);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+        assert_eq!(minimum_row_slice(&block, &measure, &info, 0, 0.0), 60.0);
+    }
+
+    #[test]
+    fn at_least_row_keeps_interior_line_boundaries() {
+        let (block, measure) = single_row_table(Some(20.0), Some("atLeast"), None, 3, 60.0);
+        assert!(!block.rows[0].is_exact_height());
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 40.0, 60.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 30.0), 20.0);
+    }
+
+    #[test]
+    fn absent_rule_keeps_interior_line_boundaries() {
+        let (block, measure) = single_row_table(None, None, None, 3, 60.0);
+        assert!(!block.rows[0].is_exact_height());
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0, 40.0, 60.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 30.0), 20.0);
+    }
+
+    #[test]
+    fn exact_and_cant_split_together_stay_atomic() {
+        let (block, measure) = single_row_table(Some(60.0), Some("exact"), Some(true), 3, 60.0);
+        assert!(block.rows[0].is_exact_height());
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![60.0]);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 30.0), 0.0);
+        assert_eq!(snap_row_break(&info, 0, 0.0, 60.0), 60.0);
+        assert_eq!(minimum_row_slice(&block, &measure, &info, 0, 0.0), 60.0);
+    }
+
+    #[test]
+    fn exact_row_spanned_by_a_merged_cell_stays_atomic() {
+        // Row 1 is exact but covered by a rowSpan=2 merged cell starting in row
+        // 0. The exact row must ignore the spill interior and offer only its
+        // full-height boundary, while the non-exact row above is unaffected.
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [
+                { "id": 0, "cells": [
+                    { "id": 0, "rowSpan": 2, "blocks": [para()] },
+                    { "id": 1, "blocks": [para()] },
+                ] },
+                { "id": 1, "height": 60.0, "heightRule": "exact", "cells": [
+                    { "id": 2, "blocks": [para()] },
+                ] },
+            ],
+            "columnWidths": [100.0, 100.0],
+        }))
+        .unwrap();
+        let measure: TableExtent = serde_json::from_value(json!({
+            "columnWidths": [100.0, 100.0],
+            "totalWidth": 200.0,
+            "totalHeight": 80.0,
+            "rows": [
+                { "height": 20.0, "cells": [
+                    measured_cell(vec![para_measure(4)]),
+                    measured_cell(vec![para_measure(1)]),
+                ] },
+                { "height": 60.0, "cells": [measured_cell(vec![para_measure(1)])] },
+            ],
+        }))
+        .unwrap();
+        assert!(block.rows[1].is_exact_height());
+        assert!(!block.rows[0].is_exact_height());
+        let info = build_table_row_break_info(&block, &measure);
+        assert_eq!(info.break_offsets[0], vec![20.0]);
+        assert_eq!(info.break_offsets[1], vec![60.0]);
+        assert_eq!(snap_row_break(&info, 1, 0.0, 30.0), 0.0);
+    }
+
+    #[test]
+    fn exact_row_taller_than_the_page_still_progresses() {
+        // A 500px exact row on a 100px content column cannot move whole to a
+        // fresh page and fit; pagination must place it with overflow rather
+        // than loop forever pushing it forward.
+        let table_block = json!({
+            "kind": "table", "id": 0, "columnWidths": [100.0],
+            "rows": [{
+                "id": 0, "height": 500.0, "heightRule": "exact",
+                "cells": [{ "id": 1, "blocks": [
+                    { "kind": "paragraph", "id": 2, "runs": [] }
+                ] }],
+            }],
+        });
+        let table_measure = json!({
+            "kind": "table", "columnWidths": [100.0],
+            "totalWidth": 100.0, "totalHeight": 500.0,
+            "rows": [{ "height": 500.0, "cells": [{
+                "blocks": [{
+                    "kind": "paragraph", "lines": [
+                        { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                          "width": 0.0, "ascent": 0.0, "descent": 0.0, "lineHeight": 20.0 }
+                    ], "totalHeight": 20.0,
+                }],
+                "width": 100.0, "height": 20.0,
+            }] }],
+        });
+        let input = serde_json::json!({
+            "measured": [{ "block": table_block, "measure": table_measure }],
+            "options": {
+                "pageSize": { "w": 400.0, "h": 100.0 },
+                "margins": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 },
+            },
+        })
+        .to_string();
+        let layout = crate::compute_layout(&input).expect("tall exact row lays out");
+        assert!(!layout.pages.is_empty(), "makes progress");
+        let table_fragments: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.fragments.iter())
+            .filter_map(|fragment| match fragment {
+                crate::types::Fragment::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(table_fragments.len(), 1);
+        assert_eq!(
+            (table_fragments[0].row_start, table_fragments[0].row_end),
+            (0, 1)
+        );
+        assert_eq!(table_fragments[0].clip_bottom, None);
+    }
+
+    #[test]
+    fn exact_row_moves_whole_to_the_next_page_when_it_fits_there() {
+        // Paragraph (80px) leaves 20px on a 100px page; the following 60px
+        // exact row fits on an empty page, so it must move whole instead of
+        // leaving a 20px slice behind.
+        let para_block = json!({
+            "kind": "paragraph", "id": 10, "runs": [],
+        });
+        let para_measure = json!({
+            "kind": "paragraph",
+            "lines": [{
+                "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                "width": 0.0, "ascent": 64.0, "descent": 16.0, "lineHeight": 80.0,
+            }],
+            "totalHeight": 80.0,
+        });
+        let table_block = json!({
+            "kind": "table", "id": 20, "columnWidths": [100.0],
+            "rows": [{
+                "id": 21, "height": 60.0, "heightRule": "exact",
+                "cells": [{ "id": 22, "blocks": [
+                    { "kind": "paragraph", "id": 23, "runs": [] }
+                ] }],
+            }],
+        });
+        let table_measure = json!({
+            "kind": "table", "columnWidths": [100.0],
+            "totalWidth": 100.0, "totalHeight": 60.0,
+            "rows": [{ "height": 60.0, "cells": [{
+                "blocks": [{
+                    "kind": "paragraph",
+                    "lines": [
+                        { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                          "width": 0.0, "ascent": 0.0, "descent": 0.0, "lineHeight": 20.0 },
+                        { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                          "width": 0.0, "ascent": 0.0, "descent": 0.0, "lineHeight": 20.0 },
+                        { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 0,
+                          "width": 0.0, "ascent": 0.0, "descent": 0.0, "lineHeight": 20.0 },
+                    ],
+                    "totalHeight": 60.0,
+                }],
+                "width": 100.0, "height": 60.0,
+            }] }],
+        });
+        let input = serde_json::json!({
+            "measured": [
+                { "block": para_block, "measure": para_measure },
+                { "block": table_block, "measure": table_measure },
+            ],
+            "options": {
+                "pageSize": { "w": 400.0, "h": 100.0 },
+                "margins": { "top": 0.0, "right": 0.0, "bottom": 0.0, "left": 0.0 },
+            },
+        })
+        .to_string();
+        let layout = crate::compute_layout(&input).expect("exact push-forward lays out");
+        assert_eq!(layout.pages.len(), 2);
+        assert_eq!(layout.pages[0].fragments.len(), 1);
+        let table_fragments: Vec<_> = layout
+            .pages
+            .iter()
+            .flat_map(|page| page.fragments.iter())
+            .filter_map(|fragment| match fragment {
+                crate::types::Fragment::Table(table) => Some(table),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(table_fragments.len(), 1);
+        assert_eq!(
+            (table_fragments[0].row_start, table_fragments[0].row_end),
+            (0, 1)
+        );
+        assert_eq!(table_fragments[0].clip_top, None);
+        assert_eq!(table_fragments[0].clip_bottom, None);
     }
 }
