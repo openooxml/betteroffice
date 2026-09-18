@@ -118,6 +118,37 @@ pub(super) fn find_clear_line_y(
     y
 }
 
+/// First Y at or below `start_y` where a line of `line_height` clears every
+/// `fullWidthBlock` band, stepping band bottom by band bottom.
+///
+/// Side floats are deliberately not re-tested: this runs once a line is
+/// already filled, and only a full-width band leaves the same room above and
+/// below it, so moving the line cannot invalidate the break it was given.
+pub(super) fn clear_full_width_band_y(
+    start_y: f32,
+    line_height: f32,
+    zones: &[FloatZoneIn],
+) -> f32 {
+    let mut y = start_y;
+    for _ in 0..zones.len() {
+        let mut next = y;
+        for zone in zones {
+            if zone.full_width_block
+                && y + line_height > zone.top_y
+                && y < zone.bottom_y
+                && zone.bottom_y > next
+            {
+                next = zone.bottom_y;
+            }
+        }
+        if next <= y {
+            break;
+        }
+        y = next;
+    }
+    y
+}
+
 /// Intersects strip pairs in input order.
 fn intersect_segments(a: &[FloatSegmentIn], b: &[FloatSegmentIn]) -> Vec<FloatSegmentIn> {
     let mut result = Vec::new();

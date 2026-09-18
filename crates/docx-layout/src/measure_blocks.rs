@@ -15,6 +15,9 @@ use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 const ANCHOR_PROXIMITY: usize = 4;
+/// Zones one anchor frame may accumulate, matching the measurement layer's own
+/// ceiling so an overlong run never degrades a paragraph to synthetic metrics.
+const MAX_ACTIVE_ZONES: usize = 200;
 
 #[derive(Clone, Debug)]
 pub(crate) struct FloatingZone {
@@ -379,8 +382,16 @@ pub fn measure_blocks_with_shape_offsets(
             cumulative_y = 0.0;
         }
         if let Some(zones) = zones_by_anchor.get(&index) {
-            cumulative_y = 0.0;
-            active_zones.clone_from(zones);
+            // Anchors reached without the flow advancing share one origin, so
+            // their zones accumulate; a later anchor opens a new frame. The
+            // cap keeps a pathological run of anchors inside the measurement
+            // layer's zone limit.
+            if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+                active_zones.extend(zones.iter().cloned());
+            } else {
+                cumulative_y = 0.0;
+                active_zones.clone_from(zones);
+            }
         }
         let width = widths.get(index).copied().unwrap_or(default_width);
         let extent = measure_block_with_context(

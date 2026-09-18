@@ -3030,3 +3030,84 @@ fn run_opt_out_does_not_snap() {
         "opt-out lineHeight",
     );
 }
+
+// 38. a `fullWidthBlock` band inside the probe blind spot: the per-line probe
+// uses the default font size (16px at 12pt), so a band between that and the
+// real line box (LH = 18.398px) is invisible to it. The line is re-tested once
+// it closes and drops below the band, unless side floats already narrowed it.
+
+/// A band the estimate clears but the real line box reaches still moves the
+/// line, and the skip counts toward `totalHeight`.
+#[test]
+fn a_band_below_the_probe_estimate_still_moves_the_closed_line() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+                 "fullWidthBlock": true }]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "late hop to the band bottom",
+    );
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        3.0 * W0,
+        "full-width line below the band",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        LH + 18.0,
+        "totalHeight includes the late skip",
+    );
+}
+
+/// An empty paragraph has no width to narrow, so a band moves it outright.
+#[test]
+fn an_empty_paragraph_drops_below_a_band() {
+    let v = measure_block_floats(
+        json!({ "kind": "paragraph", "runs": [] }),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 12.0,
+                 "fullWidthBlock": true }]),
+        0.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        12.0,
+        "empty paragraph hop",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        v["lines"][0]["lineHeight"].as_f64().unwrap() + 12.0,
+        "totalHeight includes the hop",
+    );
+}
+
+/// A line a side float already narrowed keeps its position: moving it would
+/// change the room it was filled against.
+#[test]
+fn a_narrowed_line_is_not_moved_by_the_late_band_test() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 5.0 },
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true }
+        ]),
+    )
+    .unwrap();
+    assert!(
+        v["lines"][0].get("floatSkipBefore").is_none(),
+        "a narrowed line stays put"
+    );
+    approx(
+        v["lines"][0]["leftOffset"].as_f64().unwrap(),
+        40.0,
+        "side float still narrows",
+    );
+}

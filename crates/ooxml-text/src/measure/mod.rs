@@ -374,6 +374,7 @@ pub fn measure_paragraph_typed(
             spacing,
             &request.compat,
             snap_pitch_px,
+            (zones, paragraph_y_offset),
         );
     }
 
@@ -398,6 +399,7 @@ pub fn measure_paragraph_typed(
             spacing,
             &request.compat,
             snap_pitch_px,
+            (zones, paragraph_y_offset),
         );
     }
 
