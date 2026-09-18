@@ -176,14 +176,26 @@ pub fn paragraph_keeps_lines(block: &LayoutBlock) -> bool {
     }
 }
 
-/// Whether a paragraph must begin on a fresh page (pageBreakBefore).
-pub fn paragraph_breaks_before(block: &LayoutBlock) -> bool {
+/// Whether a paragraph must begin on a fresh page, and whether that is
+/// because a hard `w:br w:type="page"` run opens it rather than
+/// `w:pageBreakBefore`.
+pub fn paragraph_breaks_before_run(block: &LayoutBlock) -> (bool, bool) {
     match block {
         LayoutBlock::Paragraph(p) => {
-            p.attrs.as_ref().and_then(|a| a.page_break_before) == Some(true)
+            let attrs = p.attrs.as_ref();
+            (
+                attrs.and_then(|a| a.page_break_before) == Some(true),
+                attrs.and_then(|a| a.page_break_before_run) == Some(true),
+            )
         }
-        _ => false,
+        _ => (false, false),
     }
+}
+
+/// Whether a paragraph must begin on a fresh page, however it asked.
+pub fn paragraph_breaks_before(block: &LayoutBlock) -> bool {
+    let (property, run) = paragraph_breaks_before_run(block);
+    property || run
 }
 
 #[cfg(test)]

@@ -2960,6 +2960,7 @@ fn lower_paragraph_attrs(
     result.keep_lines = true_property(values, "keepLines");
     result.widow_control = false_property(values, "widowControl");
     result.page_break_before = true_property(values, "pageBreakBefore");
+    result.page_break_before_run = true_property(values, "pageBreakBeforeRun");
     result.contextual_spacing = true_property(values, "contextualSpacing");
     result.bidi = true_property(values, "bidi");
     // Document-grid opt-out (w:snapToGrid, default on): the direct pPr child

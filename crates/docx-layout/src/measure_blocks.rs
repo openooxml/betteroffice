@@ -373,7 +373,7 @@ pub fn measure_blocks_with_shape_offsets(
         if matches!(
             block,
             LayoutBlock::PageBreak(_) | LayoutBlock::ColumnBreak(_) | LayoutBlock::SectionBreak(_)
-        ) || matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.attrs.as_ref().and_then(|attrs| attrs.page_break_before) == Some(true))
+        ) || crate::keep_together::paragraph_breaks_before(block)
         {
             active_zones.clear();
             cumulative_y = 0.0;
