@@ -33,13 +33,20 @@ pub struct ResolvedImageData {
 }
 
 pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
+    build_media_map_with_warnings(parts).0
+}
+
+/// Media map plus one warning per part that could not be transcoded for display.
+pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, Vec<String>) {
     let mut media = MediaMap::new();
+    let mut warnings = Vec::new();
     for (path, data) in parts {
         if !path.to_ascii_lowercase().starts_with("word/media/") {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let (data, mime_type) = display_form(data, media_mime_type(path));
+        let (data, mime_type, warning) = display_form(data, media_mime_type(path), path);
+        warnings.extend(warning);
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
         let file = MediaFile {
@@ -54,7 +61,7 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
             media.insert(normalized.to_owned(), file);
         }
     }
-    media
+    (media, warnings)
 }
 
 pub fn resolve_image_data(
@@ -102,20 +109,34 @@ pub fn resolve_image_data(
 
 /// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.
 /// Save reads the untouched package part, so the original bytes still round-trip.
+/// An encoding the decoder does not support keeps the TIFF source — decoders that
+/// do handle it still render — and reports why the transcode was skipped.
 #[cfg(feature = "tiff")]
-fn display_form<'a>(data: &'a [u8], mime_type: &'static str) -> (Cow<'a, [u8]>, &'static str) {
+fn display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
     if !is_tiff(data) {
-        return (Cow::Borrowed(data), mime_type);
+        return (Cow::Borrowed(data), mime_type, None);
     }
     match ooxml_drawingml::media::decode_tiff_png(data) {
-        Ok(png) => (Cow::Owned(png), "image/png"),
-        Err(_) => (Cow::Borrowed(data), mime_type),
+        Ok(png) => (Cow::Owned(png), "image/png", None),
+        Err(error) => (
+            Cow::Borrowed(data),
+            mime_type,
+            Some(format!("TIFF image {path} could not be decoded for display: {error}")),
+        ),
     }
 }
 
 #[cfg(not(feature = "tiff"))]
-fn display_form<'a>(data: &'a [u8], mime_type: &'static str) -> (Cow<'a, [u8]>, &'static str) {
-    (Cow::Borrowed(data), mime_type)
+fn display_form<'a>(
+    data: &'a [u8],
+    mime_type: &'static str,
+    _path: &str,
+) -> (Cow<'a, [u8]>, &'static str, Option<String>) {
+    (Cow::Borrowed(data), mime_type, None)
 }
 
 #[cfg(feature = "tiff")]

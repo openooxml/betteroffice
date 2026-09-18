@@ -6,19 +6,29 @@ export interface TiffMediaResult {
   dataUrl: string;
 }
 
-/** TIFF media to PNG via the parse wasm; non-TIFF passes through untouched. */
+/**
+ * TIFF media to PNG via the parse wasm; non-TIFF passes through untouched.
+ * The parse wasm already transcodes what it can, so anything still TIFF here is
+ * an encoding it rejected and has warned about. Keep the source rather than
+ * failing the open — a decoder that handles it still renders.
+ */
 export function maybeTranscodeTiffMedia(
   bytes: Uint8Array,
   mimeType: string,
   dataUrl: string,
   transcode: (bytes: Uint8Array) => Uint8Array
 ): TiffMediaResult {
-  if (!isTiff(bytes)) return { bytes, mimeType, dataUrl };
-  if (bytes.byteLength > MAX_TIFF_BYTES) {
-    throw new Error('TIFF image exceeds the browser transfer budget');
+  if (!isTiff(bytes) || bytes.byteLength > MAX_TIFF_BYTES) return { bytes, mimeType, dataUrl };
+  try {
+    const png = transcode(bytes);
+    return {
+      bytes: png,
+      mimeType: 'image/png',
+      dataUrl: `data:image/png;base64,${encodeBase64(png)}`,
+    };
+  } catch {
+    return { bytes, mimeType, dataUrl };
   }
-  const png = transcode(bytes);
-  return { bytes: png, mimeType: 'image/png', dataUrl: `data:image/png;base64,${encodeBase64(png)}` };
 }
 
 function encodeBase64(bytes: Uint8Array): string {

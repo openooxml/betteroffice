@@ -67,12 +67,23 @@ describe('maybeTranscodeTiffMedia', () => {
     });
   });
 
-  test('rejects TIFF past the transfer budget before transcoding', () => {
+  test('keeps TIFF past the transfer budget without transcoding', () => {
     const bytes = new Uint8Array(MAX_TIFF_BYTES + 1);
     bytes.set([0x4d, 0x4d, 0, 0x2a]);
-    expect(() =>
-      maybeTranscodeTiffMedia(bytes, 'image/tiff', 'data:image/tiff;base64,', failingTranscode())
-    ).toThrow('TIFF image exceeds the browser transfer budget');
+    const dataUrl = 'data:image/tiff;base64,';
+    expect(
+      maybeTranscodeTiffMedia(bytes, 'image/tiff', dataUrl, failingTranscode())
+    ).toEqual({ bytes, mimeType: 'image/tiff', dataUrl });
+  });
+
+  test('keeps the TIFF source when the transcode rejects the encoding', () => {
+    const bytes = tinyRgbTiff();
+    const dataUrl = 'data:image/tiff;base64,';
+    expect(maybeTranscodeTiffMedia(bytes, 'image/tiff', dataUrl, failingTranscode())).toEqual({
+      bytes,
+      mimeType: 'image/tiff',
+      dataUrl,
+    });
   });
 
   test('transcodes TIFF media to PNG bytes', () => {
@@ -172,12 +183,21 @@ describeIfWasm('decodeS9EnvelopeValue TIFF media', () => {
 
 /** Minimal single-strip little-endian 2x1 RGB TIFF, uncompressed. */
 function tinyRgbTiff(): Uint8Array {
+  return tiffWithPhotometric(2);
+}
+
+/** Same TIFF with a CIELab photometric the decoder does not support. */
+function unsupportedTiff(): Uint8Array {
+  return tiffWithPhotometric(8);
+}
+
+function tiffWithPhotometric(photometric: number): Uint8Array {
   const entries: Array<[number, number, number, number]> = [
     [256, 3, 1, 2],
     [257, 3, 1, 1],
     [258, 3, 3, 122],
     [259, 3, 1, 1],
-    [262, 3, 1, 2],
+    [262, 3, 1, photometric],
     [273, 4, 1, 128],
     [277, 3, 1, 3],
     [278, 4, 1, 1],
@@ -270,6 +290,25 @@ describeIfWasm('TIFF media end to end', () => {
     const saved = readDocxContainer(await repackDocx(parsed));
     expect(Array.from(saved.file(TIFF_PART) ?? [])).toEqual(Array.from(tiff));
     expect(saved.paths().some((path) => path.endsWith('.png'))).toBe(false);
+  });
+
+  test('reports an undecodable TIFF encoding through document warnings', async () => {
+    const parts = new Map<string, Uint8Array>();
+    parts.set('[Content_Types].xml', toBytes(TIFF_CONTENT_TYPES));
+    parts.set('_rels/.rels', toBytes(TIFF_PACKAGE_RELS));
+    parts.set('word/_rels/document.xml.rels', toBytes(TIFF_DOCUMENT_RELS));
+    parts.set(TIFF_PART, unsupportedTiff());
+    parts.set('word/document.xml', toBytes(TIFF_DOCUMENT));
+
+    const parsed = await parseDocx(rezipPartsToArrayBuffer(parts), { preloadFonts: false });
+    expect(parsed.warnings).toEqual([
+      expect.stringContaining(`TIFF image ${TIFF_PART} could not be decoded for display`),
+    ]);
+    const images = findImages(parsed.package.document.content);
+    expect(images[0]?.mimeType).toBe('image/tiff');
+    expect(String(images[0]?.src).startsWith('data:image/tiff;base64,')).toBe(true);
+    const saved = readDocxContainer(await repackDocx(parsed));
+    expect(Array.from(saved.file(TIFF_PART) ?? [])).toEqual(Array.from(unsupportedTiff()));
   });
 
   // The renderer paints the yrs-seeded src, which docx-edit parses itself.

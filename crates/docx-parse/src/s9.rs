@@ -14,7 +14,7 @@ use crate::comments::remove_orphan_comment_ranges;
 use crate::document::{DocumentBody, extract_all_template_variables, parse_document_body_compact};
 use crate::fonts::{FontTable, parse_font_table};
 use crate::header_footer::{HeaderFooter, parse_related_header_footers};
-use crate::media::{MediaFile, build_media_map};
+use crate::media::{MediaFile, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
@@ -234,7 +234,7 @@ pub fn parse_docx_s9_wire_with_limits(
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
-    let media = build_media_map(&parts);
+    let (media, media_warnings) = build_media_map_with_warnings(&parts);
     let all_xml: IndexMap<_, _> = parts
         .iter()
         .filter(|(path, _)| {
@@ -407,6 +407,7 @@ pub fn parse_docx_s9_wire_with_limits(
     let template_variables = options
         .detect_variables
         .then(|| extract_all_template_variables(&body.content));
+    warnings.extend(media_warnings);
     warnings.extend(smart_art.warnings);
     let warnings = (!warnings.is_empty()).then_some(warnings);
 
