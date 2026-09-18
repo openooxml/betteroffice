@@ -24,9 +24,9 @@
 //!   activating `w:docGrid` type with per-paragraph/per-run `w:snapToGrid`
 //!   opt-outs), and the settings.xml
 //!   compat flags that feed them ([`CompatFlags`]). Snap-to-grid (w:docGrid)
-//!   fills the *content* box up to one grid row via [`snap_line_box`] when
-//!   the caller supplies an activating grid pitch, so the `auto` multiple
-//!   then scales the filled pitch.
+//!   rounds the *content* box up to a whole number of grid rows via
+//!   [`snap_line_box`] when the caller supplies an activating grid pitch, so
+//!   the `auto` multiple then scales the quantized pitch.
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):

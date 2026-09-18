@@ -2884,11 +2884,10 @@ fn grid_active_section_snaps_line_height_up() {
     approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
 }
 
-/// A content box already past one row keeps its natural height: at 24pt
-/// the content line is 2×LH = 36.796875px, which a 24px pitch leaves alone
-/// rather than doubling to 48.
+/// A content box past one row takes the next whole row: at 24pt the content
+/// line is 2×LH = 36.796875px, which a 24px pitch rounds up to two rows.
 #[test]
-fn grid_leaves_a_tall_content_box_alone() {
+fn grid_rounds_a_tall_content_box_up_to_two_rows() {
     let v = measure_with(
         json!({
             "kind": "paragraph",
@@ -2900,8 +2899,8 @@ fn grid_leaves_a_tall_content_box_alone() {
     .unwrap();
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        2.0 * LH,
-        "natural lineHeight",
+        48.0,
+        "two grid rows",
     );
 }
 

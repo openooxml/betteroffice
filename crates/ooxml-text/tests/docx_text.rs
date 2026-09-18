@@ -4,7 +4,7 @@ use ooxml_text::{
     BaseDirection, BreakOpportunity, CompatFlags, FontMetrics, FontStore, LineBox, LineSpacingRule,
     ShapeDirection, ShapeFeature, apply_spacing_rule, bidi_paragraphs, break_opportunities,
     kern_enabled, kern_features, line_is_justified, shape, shape_with_direction, single_line_box,
-    stretch_spaces,
+    snap_line_box, snap_line_height, stretch_spaces,
 };
 
 const LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
@@ -1038,4 +1038,63 @@ fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
             "{family}"
         );
     }
+}
+
+#[test]
+fn a_grid_rounds_a_line_up_to_a_whole_number_of_rows() {
+    let pitch = 24.0;
+    assert_eq!(
+        snap_line_height(10.0, pitch),
+        pitch,
+        "a short line fills its row"
+    );
+    assert_eq!(
+        snap_line_height(pitch, pitch),
+        pitch,
+        "an exact row does not grow"
+    );
+    assert_eq!(
+        snap_line_height(pitch + 0.5, pitch),
+        2.0 * pitch,
+        "past a row takes two"
+    );
+    assert_eq!(snap_line_height(2.0 * pitch, pitch), 2.0 * pitch);
+    assert_eq!(snap_line_height(2.0 * pitch + 0.1, pitch), 3.0 * pitch);
+}
+
+#[test]
+fn a_row_boundary_is_not_pushed_over_by_float_error() {
+    let pitch = 17.7;
+    for rows in 1..=40 {
+        let height = rows as f32 * pitch;
+        assert_eq!(
+            snap_line_height(height, pitch),
+            height,
+            "{rows} whole rows stay {rows} rows"
+        );
+    }
+}
+
+#[test]
+fn a_grid_grown_box_keeps_ascent_and_descent() {
+    let content = LineBox {
+        ascent: 20.0,
+        descent: 5.0,
+        leading: 0.0,
+    };
+    let snapped = snap_line_box(content, 40.0);
+    assert_eq!(snapped.ascent, content.ascent);
+    assert_eq!(snapped.descent, content.descent);
+    assert_eq!(snapped.height(), 40.0);
+    let two_rows = snap_line_box(
+        LineBox {
+            ascent: 36.0,
+            descent: 9.0,
+            leading: 0.0,
+        },
+        40.0,
+    );
+    assert_eq!(two_rows.ascent, 36.0);
+    assert_eq!(two_rows.descent, 9.0);
+    assert_eq!(two_rows.height(), 80.0, "content past one row takes two");
 }
