@@ -113,3 +113,31 @@ fn parity_aligned_floats_keep_their_existing_placement() {
         assert!(fragments[0]["carriedToNext"].is_null());
     }
 }
+
+/// Word 16.113 reserves a full-width float's band rather than painting over the
+/// flow: a page-anchored float whose band starts above the pen displaced the
+/// lines already sitting in it, so the page held that much less flow. Probed
+/// with a `vertAnchor="page"` float anchored after 30 lines — Word moved every
+/// line the band covered below it and pushed the tail onto the next page.
+#[test]
+fn a_page_anchored_band_above_the_pen_displaces_the_flow_below_it() {
+    let mut table = table(180, 10);
+    table["block"]["floating"]["vertAnchor"] = json!("page");
+    let output = layout(50, table);
+    let after = output["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .flat_map(|(index, page)| {
+            page["fragments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(move |fragment| (index, fragment))
+        })
+        .find(|(_, fragment)| fragment["blockId"] == "after")
+        .unwrap();
+    assert_eq!(after.0, 1);
+    assert_eq!(after.1["y"], 10);
+}
