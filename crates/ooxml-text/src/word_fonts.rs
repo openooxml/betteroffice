@@ -1,23 +1,7 @@
-//! Vertical metrics of the East Asian faces Word ships, keyed by the name a
-//! document asks for.
-//!
-//! Word measures an East Asian face at 1.3x its `hhea` span (see
-//! [`crate::word_metrics`]). That rule is only as good as the span it is given,
-//! and a host rarely has the named face: the bundled Noto CJK coverage faces
-//! span 1.448 em where the faces documents name span 1.000 to 1.500 em, so the
-//! right rule lands on the wrong number. [`FontStore::register_substitute`]
-//! closes that gap by giving a substitute a metrics-only view carrying the
-//! requested face's span; glyphs, advances and outlines stay the substitute's.
-//!
-//! Every value here is read off `head.unitsPerEm` and `hhea` of the face Word
-//! itself ships, in `Microsoft Word.app/Contents/Resources/DFonts` (Word
-//! 16.113). Two entries are the exception: FangSong and DFKai-SB ship only on
-//! Windows, and take the span every other member of their family measures at.
-//!
-//! A family with no entry keeps its substitute's own metrics and measures
-//! exactly as it did before this table existed.
-//!
-//! [`FontStore::register_substitute`]: crate::font_store::FontStore::register_substitute
+//! Vertical metrics of the East Asian faces Word ships, keyed by the requested
+//! family. Read off `head` and `hhea` of Word's own `DFonts` copies (16.113);
+//! FangSong and DFKai-SB are Windows-only and take their family's span.
+//! A family with no entry keeps its substitute's own metrics.
 
 use crate::font_store::RequestedLineMetrics;
 

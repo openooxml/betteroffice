@@ -310,18 +310,9 @@ impl FontStore {
         Ok(id)
     }
 
-    /// Register a measurement view of `base` that carries `requested`'s
-    /// vertical metrics — the face the document named, which the host had to
-    /// substitute `base` for.
-    ///
-    /// The view shares `base`'s bytes, so its glyphs, advances, cmap coverage
-    /// and outlines are `base`'s and its `units_per_em` stays `base`'s. Only
-    /// the `hhea` span moves, rescaled into `base`'s units per em, and the
-    /// `OS/2` East Asian code pages are asserted so `single_line_box` measures
-    /// the view the way Word measures the named face.
-    ///
-    /// Hosts put the returned id at the head of that family's fallback chain;
-    /// the chain head is what line metrics come from.
+    /// A measurement view of `base` carrying `requested`'s hhea span and East
+    /// Asian code pages. Shares `base`'s bytes, so glyphs and advances are
+    /// unchanged; hosts put the returned id at the head of the fallback chain.
     pub fn register_substitute(
         &mut self,
         base: FontId,
