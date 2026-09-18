@@ -47,6 +47,12 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # --frozen-lockfile accepts stale workspace versions, so regenerate to catch them.
+      - name: Check the lockfile is current
+        run: |
+          bun install --lockfile-only
+          git diff --exit-code -- bun.lock
+
       - name: Type check
         run: bun run typecheck:packages
 
