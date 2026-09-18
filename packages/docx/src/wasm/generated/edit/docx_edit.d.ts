@@ -840,6 +840,11 @@ export function clear_measure_fonts(): void;
 export function close_display_list(handle: number): void;
 
 /**
+ * Decodes TIFF bytes to PNG bytes for browsers without a TIFF decoder.
+ */
+export function decodeTiffPng(data: Uint8Array): Uint8Array;
+
+/**
  * wasm wrapper over [`hit::hit_test_json`]: display-list JSON + page-local
  * point in, document position (or `null`) as JSON out.
  */
@@ -1131,6 +1136,7 @@ export interface InitOutput {
     readonly editsession_undo: (a: number) => number;
     readonly editsession_yrs_blocks_for_story: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_load: (a: number, b: number, c: number) => [number, number];
+    readonly decodeTiffPng: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_relationships: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s2: (a: number, b: number) => [number, number, number, number];
     readonly parse_docx_s3: (a: number, b: number) => [number, number, number, number];

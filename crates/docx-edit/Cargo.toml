@@ -22,6 +22,9 @@ crate-type = ["cdylib", "rlib"]
 # and `cargo test` never pull the wasm-bindgen stack; wasm-pack builds pass
 # `--features wasm` (driven by scripts/build-docx-wasm.ts).
 wasm = ["dep:wasm-bindgen", "dep:js-sys"]
+# The seeded yrs image src is what the renderer paints, so this crate needs the
+# same TIFF transcode the docx-parse wasm build enables.
+tiff = ["docx-parse/tiff"]
 
 [dependencies]
 regex = "1"

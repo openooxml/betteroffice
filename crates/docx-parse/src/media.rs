@@ -1,5 +1,7 @@
 //! Embedded media table and image-resolution aliases.
 
+use std::borrow::Cow;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -37,8 +39,9 @@ pub fn build_media_map(parts: &[(String, Vec<u8>)]) -> MediaMap {
             continue;
         }
         let filename = path.rsplit('/').next().unwrap_or(path).to_owned();
-        let mime_type = media_mime_type(path).to_owned();
-        let base64 = base64::engine::general_purpose::STANDARD.encode(data);
+        let (data, mime_type) = display_form(data, media_mime_type(path));
+        let mime_type = mime_type.to_owned();
+        let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
         let file = MediaFile {
             path: path.clone(),
             filename: Some(filename),
@@ -95,6 +98,29 @@ pub fn resolve_image_data(
         mime_type: Some(media_mime_type(target).to_owned()),
         filename,
     }
+}
+
+/// Browsers have no TIFF decoder, so the display copy carries a PNG transcode.
+/// Save reads the untouched package part, so the original bytes still round-trip.
+#[cfg(feature = "tiff")]
+fn display_form<'a>(data: &'a [u8], mime_type: &'static str) -> (Cow<'a, [u8]>, &'static str) {
+    if !is_tiff(data) {
+        return (Cow::Borrowed(data), mime_type);
+    }
+    match ooxml_drawingml::media::decode_tiff_png(data) {
+        Ok(png) => (Cow::Owned(png), "image/png"),
+        Err(_) => (Cow::Borrowed(data), mime_type),
+    }
+}
+
+#[cfg(not(feature = "tiff"))]
+fn display_form<'a>(data: &'a [u8], mime_type: &'static str) -> (Cow<'a, [u8]>, &'static str) {
+    (Cow::Borrowed(data), mime_type)
+}
+
+#[cfg(feature = "tiff")]
+fn is_tiff(data: &[u8]) -> bool {
+    matches!(data.first_chunk::<4>(), Some(b"II\x2a\x00" | b"MM\x00\x2a"))
 }
 
 pub fn media_mime_type(path: &str) -> &'static str {
