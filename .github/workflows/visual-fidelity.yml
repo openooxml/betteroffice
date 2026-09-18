@@ -116,7 +116,6 @@ jobs:
           node scripts/office-quality/run.mjs
           cat .source/office-quality/ci/section.md >> "$GITHUB_STEP_SUMMARY"
 
-      # Soft-failing: an unprovisioned bucket must never withhold the README update.
       - name: Publish the commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         continue-on-error: true
