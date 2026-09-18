@@ -19,6 +19,14 @@ const ANCHOR_PROXIMITY: usize = 4;
 /// ceiling so an overlong run never degrades a paragraph to synthetic metrics.
 const MAX_ACTIVE_ZONES: usize = 200;
 
+/// A shape the lowering placed by anchor rather than in the flow. A malformed
+/// anchor can lose its position and keep only its wrap, and the lowering lifts
+/// it out of its paragraph either way, so the flow must not charge it height
+/// either.
+fn anchored_shape(shape: &ShapeBlock) -> bool {
+    shape.position.is_some() || shape.wrap_type.is_some()
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FloatingZone {
     pub(crate) left_margin: f64,
@@ -402,7 +410,7 @@ pub fn measure_blocks_with_shape_offsets(
             cumulative_y,
         )?;
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
-            && !matches!(block, LayoutBlock::Shape(shape) if shape.position.is_some())
+            && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
         {
             cumulative_y += extent_height(&extent);
         }
@@ -1985,6 +1993,37 @@ mod tests {
             assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
             assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
         }
+    }
+
+    /// A malformed anchor can keep its wrap and lose its position. The lowering
+    /// still lifts it out of its paragraph, so charging it flow height here
+    /// would slide the anchor frame out from under a band anchored alongside
+    /// it and cancel that band's reservation.
+    #[test]
+    fn a_wrap_only_anchor_does_not_advance_the_anchor_frame() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+             "width":40,"height":40,"wrapType":"topAndBottom",
+             "position":{"horizontal":{"relativeTo":"column","posOffset":0},"vertical":{"relativeTo":"paragraph","posOffset":0}}},
+            {"kind":"shape","id":"wrapOnly","shapeType":"rect","geometryPath":[],"children":[],
+             "width":40,"height":40,"wrapType":"topAndBottom"},
+            {"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"words words words"}]}
+        ]))
+        .unwrap();
+        let measures = measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+        let BlockExtent::Paragraph(paragraph) = &measures[2] else {
+            panic!()
+        };
+        assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 40.0);
     }
 
     #[test]
