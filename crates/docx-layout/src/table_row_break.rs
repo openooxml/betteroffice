@@ -61,6 +61,14 @@ fn cell_unbreakable_ranges(
             BlockExtent::Chart(value) => Some(value.height),
             _ => None,
         };
+        if let Some(LayoutBlock::Shape(shape)) = block
+            && crate::cell_layout::cell_overlay_drawing(
+                shape.position.is_some(),
+                shape.wrap_type.as_deref(),
+            )
+        {
+            continue;
+        }
         if let Some(height) = height {
             y += previous_after;
             if let Some(LayoutBlock::Table(table)) = block

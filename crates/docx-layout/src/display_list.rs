@@ -2140,6 +2140,8 @@ pub(crate) struct ShapeBlockIn {
     pub(crate) position: Option<crate::types::ImageRunPosition>,
     #[serde(default)]
     pub(crate) behind_doc: Option<bool>,
+    #[serde(default)]
+    pub(crate) wrap_type: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -9344,6 +9346,14 @@ fn emit_cell_content(
                 block_tops.push(stack_cursor);
                 stack_cursor += text_box.height;
                 prev_after = 0.0;
+            }
+            (BlockIn::Shape(sb), Some(MeasureIn::Shape(_)))
+                if crate::cell_layout::cell_overlay_drawing(
+                    sb.position.is_some(),
+                    sb.wrap_type.as_deref(),
+                ) =>
+            {
+                block_tops.push(stack_cursor);
             }
             (BlockIn::Shape(_), Some(MeasureIn::Shape(sm)))
             | (BlockIn::Chart(_), Some(MeasureIn::Chart(sm))) => {

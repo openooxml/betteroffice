@@ -1477,6 +1477,14 @@ fn measure_table(
                     previous_after = 0.0;
                     continue;
                 }
+                if let LayoutBlock::Shape(shape) = block
+                    && crate::cell_layout::cell_overlay_drawing(
+                        shape.position.is_some(),
+                        shape.wrap_type.as_deref(),
+                    )
+                {
+                    continue;
+                }
                 let visual = if has_table_floats {
                     extent_height(measure)
                 } else {
@@ -1993,6 +2001,58 @@ mod tests {
             assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
             assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
         }
+    }
+
+    /// Word 16.113 paints a `wrapNone` anchor over its cell and leaves the row
+    /// alone: probing a two-cell table with and without the anchor kept the row
+    /// at the same bottom and the flow below it unmoved, while the same probe
+    /// with `wrapSquare` grew the row to the float's bottom.
+    #[test]
+    fn a_wrap_none_cell_anchor_leaves_the_row_height_alone() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let cell_blocks = |anchor: Option<Value>| {
+            let mut blocks = Vec::new();
+            if let Some(anchor) = anchor {
+                blocks.push(anchor);
+            }
+            blocks.push(
+                json!({"kind":"paragraph","id":"body","runs":[{"kind":"text","text":"cell"}]}),
+            );
+            json!({"kind":"table","id":"outer","columnWidths":[220],
+                   "rows":[{"id":"row","cells":[{"id":"cell","blocks":blocks}]}]})
+        };
+        let height = |value: Value| {
+            let mut block: LayoutBlock = serde_json::from_value(value).unwrap();
+            let measure = measure_block(&mut block, 220.0, &config).unwrap();
+            let (LayoutBlock::Table(table), BlockExtent::Table(extent)) = (&block, &measure) else {
+                panic!()
+            };
+            let layout = crate::cell_layout::layout_cell_content(
+                Some(&table.rows[0].cells[0].blocks),
+                Some(&extent.rows[0].cells[0].blocks),
+                0.0,
+            );
+            assert!((layout.content_height - extent.total_height).abs() < 0.01);
+            extent.total_height
+        };
+        let plain = height(cell_blocks(None));
+        let anchor = |wrap: &str| {
+            json!({"kind":"shape","id":"ellipse","shapeType":"ellipse","geometryPath":[],
+                   "children":[],"width":80,"height":40,"wrapType":wrap,
+                   "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                               "vertical":{"relativeTo":"paragraph","posOffset":36}}})
+        };
+        assert_eq!(height(cell_blocks(Some(anchor("inFront")))), plain);
+        assert_eq!(height(cell_blocks(Some(anchor("behind")))), plain);
+        assert_eq!(height(cell_blocks(Some(anchor("square")))), plain + 40.0);
     }
 
     /// A malformed anchor can keep its wrap and lose its position. The lowering
