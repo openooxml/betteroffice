@@ -344,6 +344,7 @@ fn aptos_measures_its_hhea_span_not_its_taller_win_box() {
         os2_typo_line_gap: 0,
         os2_fs_selection: USE_TYPO_METRICS,
         os2_version: 4,
+        os2_code_page_range1: 0,
     };
 
     let line = single_line_box(&aptos, 2048.0, &CompatFlags::default());
