@@ -1367,6 +1367,44 @@ test('a right-click opens the shape menu on a shape and the canvas menu on empty
   } finally { cleanup(); canvasPrototype.getContext = getContext; }
 });
 
+test('an invalidated selection drops the shape menu instead of reopening it on the next shape', async () => {
+  const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
+  const getContext = canvasPrototype.getContext;
+  canvasPrototype.getContext = () => new Proxy({}, { get: () => () => {}, set: () => true }) as never;
+  const fixture = await readFile(resolve(root, 'apps/demo/public/betteroffice-demo.vsdx'));
+  let ready: { handle: DiagramHandle; refresh: () => void } | undefined;
+  const view = render(<VsdxEditor file={fixture} fonts={[]} onReady={(api) => { ready = api; }} />);
+  try {
+    await waitFor(() => expect(ready).toBeDefined());
+    const handle = ready!.handle;
+    const fakeFrame = { contractVersion: 7, width: 960, height: 720, printWidth: 960, printHeight: 720, paintTransform: { a: 96, b: 0, c: 0, d: -96, e: 0, f: 720 }, primitives: [] };
+    handle.layoutPage = (() => fakeFrame) as unknown as DiagramHandle['layoutPage'];
+    const page = handle.snapshot().pages[0];
+    const [first, second] = page.shapes.map((shape) => shape.id);
+    expect(second).toBeDefined();
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: first })) as unknown as DiagramHandle['hitTest'];
+    await act(async () => { ready!.refresh(); });
+    const main = drawingCanvases(view.container)[0];
+    main.getBoundingClientRect = (() => ({ left: 0, top: 0, width: 960, height: 720, right: 960, bottom: 720, x: 0, y: 0, toJSON: () => ({}) })) as unknown as typeof main.getBoundingClientRect;
+    (main as unknown as { setPointerCapture: (id: number) => void }).setPointerCapture = () => {};
+    (main as unknown as { releasePointerCapture: (id: number) => void }).releasePointerCapture = () => {};
+    (main as unknown as { hasPointerCapture: (id: number) => boolean }).hasPointerCapture = () => false;
+    const { fireEvent } = await import('@testing-library/react');
+    fireEvent.contextMenu(main, { clientX: 100, clientY: 100, button: 2 });
+    expect(document.querySelector('[role="menu"]')).not.toBeNull();
+    await act(async () => { handle.deleteShape(page.id, first); ready!.refresh(); });
+    expect(main.getAttribute('aria-label')).not.toContain('selected shape');
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+    handle.hitTest = (() => ({ kind: 'shape', shapeId: second })) as unknown as DiagramHandle['hitTest'];
+    fireEvent.pointerDown(main, { pointerId: 3, clientX: 300, clientY: 300 });
+    await act(async () => {});
+    fireEvent.pointerUp(main, { pointerId: 3, clientX: 300, clientY: 300 });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+    expect(main.getAttribute('aria-label')).toContain(second);
+    expect(document.querySelector('[role="menu"]')).toBeNull();
+  } finally { cleanup(); canvasPrototype.getContext = getContext; }
+});
+
 test('replacing the document closes the open canvas menu', async () => {
   const canvasPrototype = Object.getPrototypeOf(document.createElement('canvas')) as HTMLCanvasElement;
   const getContext = canvasPrototype.getContext;

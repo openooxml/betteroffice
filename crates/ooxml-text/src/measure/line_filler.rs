@@ -26,10 +26,10 @@
 //! - A tall inline image sits on the baseline with text descent below it.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
-//!   default-font-size estimate, never the line's real metrics, which are
-//!   unknown until the line closes. That running Y advances by each line's
-//!   *text* height, so image growth never shifts the next probe; float skips
-//!   do, since they move the line itself.
+//!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
+//!   once the line closes and its box is known. That running Y advances by each
+//!   line's *text* height, so image growth never shifts the next probe; float
+//!   skips do, since they move the line itself.
 //! - `totalHeight` is Σ (line height + `floatSkipBefore`) plus
 //!   `spacing.before` and `spacing.after`.
 
@@ -259,6 +259,10 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
 /// first rounded up to a whole number of grid rows, so the rule's multiple
 /// scales the quantized pitch (a pinned `exact`/`atLeast` height never
 /// snaps).
+///
+/// `floats` carries the zone list and the paragraph's absolute Y. The line has
+/// no width to narrow, so only a `fullWidthBlock` band moves it, and it drops
+/// below any band its box reaches.
 pub(super) fn empty_paragraph_extent(
     store: &crate::font_store::FontStore,
     font: FontId,
@@ -266,6 +270,7 @@ pub(super) fn empty_paragraph_extent(
     spacing: Option<&SpacingIn>,
     compat: &CompatIn,
     snap_pitch_px: Option<f32>,
+    floats: (&[FloatZoneIn], f32),
 ) -> Result<ParagraphExtentOut, MeasureError> {
     let metrics = store
         .metrics(font)
@@ -286,7 +291,12 @@ pub(super) fn empty_paragraph_extent(
         line_height = line_height.max(size_px * WORD_SINGLE_LINE_FLOOR);
     }
 
-    let mut total = line_height;
+    let (zones, paragraph_y_offset) = floats;
+    let skip = floats::clear_full_width_band_y(paragraph_y_offset, line_height, zones)
+        - paragraph_y_offset;
+    let float_skip_before = (skip > 0.0).then_some(skip);
+
+    let mut total = line_height + float_skip_before.unwrap_or(0.0);
     if let Some(sp) = spacing {
         total += sp.before.unwrap_or(0.0) + sp.after.unwrap_or(0.0);
     }
@@ -304,7 +314,7 @@ pub(super) fn empty_paragraph_extent(
             left_offset: None,
             right_offset: None,
             segments: None,
-            float_skip_before: None,
+            float_skip_before,
             run_advances: None,
             cluster_advances: None,
             bidi_slices: None,
@@ -733,6 +743,8 @@ impl Filler<'_> {
             line_height = self.snap_line_height(line_height);
         }
 
+        self.clear_full_width_bands(line_height);
+
         // Float fields are omitted when unset.
         let segments = match self.cur.segment_zones.as_deref() {
             Some(zones) if !zones.is_empty() => self.create_line_segments(zones),
@@ -767,6 +779,40 @@ impl Filler<'_> {
         // Float probes advance by text height, excluding image growth.
         self.cumulative_height += text_line_height;
         Ok(())
+    }
+
+    /// Drops the closed line below any band its box reaches, taking the
+    /// margins it lands in. Narrower room declines: the fill would overflow.
+    fn clear_full_width_bands(&mut self, line_height: f32) {
+        if self.p.zones.is_empty() {
+            return;
+        }
+        let top = self.p.paragraph_y_offset + self.cumulative_height;
+        let skip = floats::clear_full_width_band_y(top, line_height, self.p.zones) - top;
+        if skip <= 0.0 {
+            return;
+        }
+        let full = if self.lines.is_empty() {
+            self.p.first_line_width
+        } else {
+            self.p.body_width
+        };
+        let margins = floats::floating_margins(
+            self.cumulative_height + skip,
+            line_height,
+            self.p.zones,
+            self.p.paragraph_y_offset,
+        );
+        let available = floats::available_width(&margins, full).max(1.0);
+        if available + WRAP_SLACK_PX < self.cur.available {
+            return;
+        }
+        self.cumulative_height += skip;
+        self.pending_float_skip += skip;
+        self.cur.available = available;
+        self.cur.left_offset = margins.left;
+        self.cur.right_offset = margins.right;
+        self.cur.segment_zones = margins.segments;
     }
 
     /// Splits the just-closed line across the zone's strips. One strip — or a

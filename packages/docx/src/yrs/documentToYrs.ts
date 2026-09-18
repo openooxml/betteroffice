@@ -963,7 +963,7 @@ function paragraphAttrs(
     }
   }
   if (paragraph.renderedPageBreakBefore) attrs.renderedPageBreakBefore = true;
-  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBefore = true;
+  if (paragraphStartsWithPageBreak(paragraph)) attrs.pageBreakBeforeRun = true;
   if (paragraph.pPrIns) {
     attrs.pPrIns = {
       revisionId: paragraph.pPrIns.id,

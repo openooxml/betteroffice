@@ -30,6 +30,31 @@
 //! The usWin family stays on [`crate::font_store::FontMetrics`] because the
 //! opt-in experiments below still read it.
 //!
+//! ## 1a. East Asian faces — [`EAST_ASIAN_CODE_PAGES`]
+//!
+//! A face whose `OS/2` ulCodePageRange1 claims one of the four East Asian
+//! code pages — 932 Shift-JIS (bit 17), 936 GB2312 (18), 949 Wansung (19),
+//! 950 Big5 (20) — takes a different pitch entirely:
+//!
+//! ```text
+//! pitch = 1.3 x (hhea.ascender - hhea.descender)
+//! ```
+//!
+//! with the extra 0.3 split evenly above the ascender and below the
+//! descender. `usWinAscent`/`usWinDescent`, `hhea.lineGap` and the sTypo
+//! family are all ignored, including when `USE_TYPO_METRICS` is set.
+//!
+//! Measured against Word 16.113 on macOS across 65 installed faces and 30
+//! synthesized ones. The gate is causal, not correlational: giving Arial a
+//! single East Asian code page bit switches it to the East Asian pitch,
+//! and clearing those bits on Arial Unicode MS switches it back, while
+//! adding CJK cmap coverage, CJK `ulUnicodeRange` bits or a `vhea` table
+//! changes nothing. Code page bit 21 (1361 Johab) does *not* gate.
+//!
+//! The 1.3 factor holds to 1e-4 on faces at 2048 units per em; faces at
+//! 256 units per em measure 0.24% under it and faces at 1024 units per em
+//! 0.08% over, a residual that no font-table field accounts for.
+//!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
 //! `w:spacing w:lineRule` (§17.3.1.33):
@@ -87,19 +112,18 @@
 //! active grid keeps its natural pitch, not a grid multiple). Absolute
 //! grid-phase alignment against the page origin is not modeled.
 //!
-//! Word itself rounds the content box up to a *whole* number of rows:
-//! measured off Word 16.112's own rasters of two Chinese theses on a
-//! `linesAndChars` grid (326 and 312 twips), single-spaced body lines sit
-//! at 1.00 grid rows, `w:line="360"` body lines at 1.50, and cover-page
-//! lines whose content outgrows one row at exactly 2.00, 3.00 and 4.00.
-//! The engine deliberately stops at the first row and leaves a taller
-//! content box alone. Word's `linePitch` is authored against the real CJK
-//! face; the substituted faces this engine ships measure a few percent
-//! taller, which straddles the row boundary, and a full `ceil` turns that
-//! few-percent metric error into a doubled line. Capping at one row keeps
-//! the fill that the grid is for — a short line filling its row — without
-//! betting page counts on a metric we do not have. Revisit the `ceil` once
-//! the CJK faces carry Word's metrics.
+//! The box rounds up to a *whole* number of rows. Measured off Word's own
+//! exported references: on the `linesAndChars` grids of two Chinese theses
+//! (326 and 312 twips) baseline gaps cluster at 1.00 and 1.50 rows for body
+//! text and at exactly 2.00 for lines whose content outgrows a row, and a
+//! Japanese `lines` grid at 360 twips puts its tallest lines at 3.00.
+//!
+//! This rounded up to one row only until the substituted faces carried the
+//! requested face's metrics ([`crate::word_fonts`]). `linePitch` is authored
+//! against the real East Asian face, so a substitute measuring a few percent
+//! tall straddled the row boundary and a `ceil` turned that metric error into
+//! a doubled line; capping at one row bought the fill the grid is for without
+//! betting page counts on a metric the engine did not have. It has it now.
 //!
 //! Activation is narrow: only grid types `lines`, `linesAndChars` and
 //! `snapToChars` snap. `default` (or a bare `linePitch` with no type) never
@@ -198,6 +222,9 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 
     if !compat.gdi_line_metrics && !compat.typo_line_spacing {
         let scale = size_px / m.units_per_em as f32;
+        if let Some(line) = east_asian_line_box(m, scale) {
+            return line;
+        }
         let gap = if compat.no_leading {
             0
         } else {
@@ -232,11 +259,42 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
     }
 }
 
+/// `OS/2` ulCodePageRange1 bits 17-20 — code pages 932, 936, 949 and 950.
+/// Any one of them switches Word to the East Asian line pitch; bit 21
+/// (1361 Johab) does not.
+pub const EAST_ASIAN_CODE_PAGES: u32 = 0x001E_0000;
+
+/// Word's East Asian pitch as a multiple of the hhea ascent-to-descent span.
+const EAST_ASIAN_PITCH: f32 = 1.3;
+
 /// Per-component ceiling for the bounded experiments.
 const MAX_METRIC_EMS: i32 = 16;
 
 /// Word's 1638pt size limit in px at 96 DPI.
 const MAX_SIZE_PX: f32 = 2184.0;
+
+/// Slack on the grid row count, so a box that lands on a row boundary in
+/// exact arithmetic is not pushed to the next row by float error.
+const GRID_ROW_SLACK: f32 = 1e-3;
+
+/// Rule 1a: the East Asian line box, or `None` for a face Word measures the
+/// Latin way. The extra 0.3 em-span is half-leading, so the baseline sits
+/// where Word puts it rather than at the top of the box.
+fn east_asian_line_box(m: &FontMetrics, scale: f32) -> Option<LineBox> {
+    if !m.east_asian_line_metrics() {
+        return None;
+    }
+    let span = m.hhea_ascender as i32 - m.hhea_descender as i32;
+    if span <= 0 {
+        return None;
+    }
+    let half_leading = span as f32 * (EAST_ASIAN_PITCH - 1.0) / 2.0;
+    Some(LineBox {
+        ascent: (m.hhea_ascender as f32 + half_leading) * scale,
+        descent: (-(m.hhea_descender as f32) + half_leading) * scale,
+        leading: 0.0,
+    })
+}
 
 /// hhea line height in excess of the win box, in design units.
 fn win_external_leading(m: &FontMetrics) -> i32 {
@@ -336,10 +394,8 @@ pub fn apply_spacing_rule(content: LineBox, rule: &LineSpacingRule) -> LineBox {
     }
 }
 
-/// Rule 4: fill a height up to one row of the section's grid pitch
-/// (`w:docGrid w:linePitch`, §17.6.5). A height already past one row is
-/// left alone — see the module docs for why this stops short of Word's
-/// `ceil`.
+/// Rule 4: round a height up to a whole number of rows of the section's
+/// grid pitch (`w:docGrid w:linePitch`, §17.6.5), never below one row.
 ///
 /// `grid_pitch_px` must already be gated by the caller to an activating grid
 /// type (`lines`, `linesAndChars`, `snapToChars`) with a finite positive
@@ -357,11 +413,10 @@ pub fn snap_line_height(line_height_px: f32, grid_pitch_px: f32) -> f32 {
     if !grid_pitch_px.is_finite() || grid_pitch_px <= 0.0 {
         return line_height_px;
     }
-    if line_height_px < grid_pitch_px {
-        grid_pitch_px
-    } else {
-        line_height_px
-    }
+    let rows = (line_height_px / grid_pitch_px - GRID_ROW_SLACK)
+        .ceil()
+        .max(1.0);
+    (rows * grid_pitch_px).max(line_height_px)
 }
 
 /// Rule 4 for a line box: fill the content height up to one grid row,
@@ -457,12 +512,12 @@ mod tests {
     use super::{LineBox, LineSpacingRule, apply_spacing_rule, snap_line_box, snap_line_height};
 
     #[test]
-    fn snap_fills_one_row_and_leaves_taller_lines() {
+    fn snap_rounds_up_to_whole_rows() {
         // 354 twips at 150 DPI is 36.875px; the technical-sample body mean.
         assert_eq!(snap_line_height(30.5, 36.875), 36.875);
         assert_eq!(snap_line_height(36.875, 36.875), 36.875);
-        assert_eq!(snap_line_height(37.0, 36.875), 37.0);
-        assert_eq!(snap_line_height(80.0, 36.875), 80.0);
+        assert_eq!(snap_line_height(37.0, 36.875), 73.75);
+        assert_eq!(snap_line_height(80.0, 36.875), 110.625);
     }
 
     /// Word rounds the *content* box to whole rows and the `auto` multiple
@@ -487,17 +542,20 @@ mod tests {
         assert!((ruled.height() - 1.5 * row).abs() < 1e-3);
     }
 
-    /// A content box already past one row is left alone: a `ceil` here
-    /// would double the line off a few-percent font-metric difference.
+    /// A content box past one row takes the next whole row, with the growth
+    /// in leading so ascent and descent stay where the font put them.
     #[test]
-    fn snap_line_box_leaves_a_taller_content_box() {
+    fn snap_line_box_grows_a_taller_content_box_to_two_rows() {
         let row = 33.958_332_f32;
         let content = LineBox {
             ascent: 30.0,
             descent: 8.0,
             leading: 2.0,
         };
-        assert_eq!(snap_line_box(content, row), content);
+        let snapped = snap_line_box(content, row);
+        assert_eq!(snapped.ascent, content.ascent);
+        assert_eq!(snapped.descent, content.descent);
+        assert!((snapped.height() - 2.0 * row).abs() < 1e-3);
     }
 
     /// An exact-multiple content box is untouched.

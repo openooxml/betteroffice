@@ -29,6 +29,7 @@ export type ResidentEngineSession = Pick<
   | 'onUpdate'
   | 'outlineGlyphJson'
   | 'registerFont'
+  | 'registerSubstituteFont'
   | 'residentCaretSnapshot'
   | 'selection'
   | 'setSelection'
@@ -64,6 +65,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
 
   return {
     registerFont: (bytes) => session.register_measure_font(bytes),
+    registerSubstituteFont: (base, family) =>
+      session.register_substitute_measure_font(base, family),
     clearFonts: () => session.clear_measure_fonts(),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),

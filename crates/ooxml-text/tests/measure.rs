@@ -2882,11 +2882,10 @@ fn grid_active_section_snaps_line_height_up() {
     approx(v["lines"][0]["descent"].as_f64().unwrap(), DESC, "descent");
 }
 
-/// A content box already past one row keeps its natural height: at 24pt
-/// the content line is 2×LH = 36.796875px, which a 24px pitch leaves alone
-/// rather than doubling to 48.
+/// A content box past one row takes the next whole row: at 24pt the content
+/// line is 2×LH = 36.796875px, which a 24px pitch rounds up to two rows.
 #[test]
-fn grid_leaves_a_tall_content_box_alone() {
+fn grid_rounds_a_tall_content_box_up_to_two_rows() {
     let v = measure_with(
         json!({
             "kind": "paragraph",
@@ -2898,8 +2897,8 @@ fn grid_leaves_a_tall_content_box_alone() {
     .unwrap();
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        2.0 * LH,
-        "natural lineHeight",
+        48.0,
+        "two grid rows",
     );
 }
 
@@ -3026,5 +3025,144 @@ fn run_opt_out_does_not_snap() {
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
         LH,
         "opt-out lineHeight",
+    );
+}
+
+// 38. a `fullWidthBlock` band the per-line probe misses: it estimates with the
+// default font size (16px at 12pt), short of the real box (LH = 18.398px), so
+// the line is re-tested against bands once it closes.
+
+/// A band the estimate clears but the real box reaches still moves the line.
+#[test]
+fn a_band_below_the_probe_estimate_still_moves_the_closed_line() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+                 "fullWidthBlock": true }]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "late hop to the band bottom",
+    );
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        3.0 * W0,
+        "full-width line below the band",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        LH + 18.0,
+        "totalHeight includes the late skip",
+    );
+}
+
+/// An empty paragraph has no width to narrow, so a band moves it outright.
+#[test]
+fn an_empty_paragraph_drops_below_a_band() {
+    let v = measure_block_floats(
+        json!({ "kind": "paragraph", "runs": [] }),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 12.0,
+                 "fullWidthBlock": true }]),
+        0.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        12.0,
+        "empty paragraph hop",
+    );
+    approx(
+        v["totalHeight"].as_f64().unwrap(),
+        v["lines"][0]["lineHeight"].as_f64().unwrap() + 12.0,
+        "totalHeight includes the hop",
+    );
+}
+
+/// A narrowed line moves too, taking the room it lands in.
+#[test]
+fn a_narrowed_line_moves_below_a_band_and_takes_the_new_room() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 5.0 },
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true }
+        ]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "narrowed line still hops",
+    );
+    assert!(
+        v["lines"][0].get("leftOffset").is_none(),
+        "below the float it takes the full width"
+    );
+}
+
+/// A float outliving the band keeps narrowing the line it pushed down.
+#[test]
+fn a_line_pushed_below_a_band_keeps_a_float_that_outlives_it() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 40.0, "rightMargin": 0.0, "topY": 0.0, "bottomY": 60.0 },
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true }
+        ]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        18.0,
+        "hops",
+    );
+    approx(
+        v["lines"][0]["leftOffset"].as_f64().unwrap(),
+        40.0,
+        "still narrowed below the band",
+    );
+}
+
+/// Narrower room below leaves the line where it is: its fill would overflow.
+#[test]
+fn a_band_is_left_alone_when_the_room_below_is_narrower() {
+    let v = measure_floats(
+        json!([{ "kind": "text", "text": "000" }]),
+        100.0,
+        json!([
+            { "leftMargin": 0.0, "rightMargin": 0.0, "topY": 17.0, "bottomY": 18.0,
+              "fullWidthBlock": true },
+            { "leftMargin": 90.0, "rightMargin": 0.0, "topY": 18.0, "bottomY": 60.0 }
+        ]),
+    )
+    .unwrap();
+    assert!(
+        v["lines"][0].get("floatSkipBefore").is_none(),
+        "declines the hop"
+    );
+}
+
+/// An image grows the line past its text height; the band test uses that box.
+#[test]
+fn an_image_grown_line_clears_a_band_inside_its_growth() {
+    let v = measure_floats(
+        json!([{ "kind": "image", "width": 20.0, "height": 40.0 }]),
+        100.0,
+        json!([{ "leftMargin": 0.0, "rightMargin": 0.0, "topY": 25.0, "bottomY": 30.0,
+                 "fullWidthBlock": true }]),
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["floatSkipBefore"].as_f64().unwrap(),
+        30.0,
+        "the image box reaches the band",
     );
 }
