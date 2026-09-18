@@ -7,10 +7,8 @@ const PREFIX = 'renders/';
 const IMMUTABLE = 'public, max-age=31536000, immutable';
 const POINTER = 'public, max-age=0, must-revalidate';
 
-function key(pathname: string): string | null {
-  const decoded = decodeURIComponent(pathname.slice(1));
-  if (!decoded.startsWith(PREFIX) || decoded.includes('..') || decoded.includes('//')) return null;
-  return decoded;
+function allowed(path: string): boolean {
+  return path.startsWith(PREFIX) && !path.includes('..') && !path.includes('//');
 }
 
 async function renders(request: Request, env: Env, path: string): Promise<Response> {
@@ -31,7 +29,12 @@ export default {
       return new Response('Method not allowed', { status: 405 });
     const { pathname } = new URL(request.url);
     if (!pathname.startsWith(`/${PREFIX}`)) return env.ASSETS.fetch(request);
-    const path = key(pathname);
-    return path ? renders(request, env, path) : new Response('Not found', { status: 404 });
+    let path: string;
+    try {
+      path = decodeURIComponent(pathname.slice(1));
+    } catch {
+      return new Response('Invalid path', { status: 400 });
+    }
+    return allowed(path) ? renders(request, env, path) : new Response('Not found', { status: 404 });
   },
 };
