@@ -203,7 +203,11 @@ fn an_unsupported_tiff_encoding_warns_and_keeps_the_original_source() {
     let original = package_with_media(unsupported_tiff_bytes());
     let wire = parse_docx_s9_wire(&original, S9ParseOptions::default()).unwrap();
     let warnings = wire.document.warnings.clone().unwrap_or_default();
-    assert_eq!(warnings.len(), 1, "one warning per media part: {warnings:?}");
+    assert_eq!(
+        warnings.len(),
+        1,
+        "one warning per media part: {warnings:?}"
+    );
     assert!(
         warnings[0].starts_with(&format!("TIFF image {TIFF_PATH} could not be decoded")),
         "the warning must name the part: {}",

@@ -125,7 +125,9 @@ fn display_form<'a>(
         Err(error) => (
             Cow::Borrowed(data),
             mime_type,
-            Some(format!("TIFF image {path} could not be decoded for display: {error}")),
+            Some(format!(
+                "TIFF image {path} could not be decoded for display: {error}"
+            )),
         ),
     }
 }
