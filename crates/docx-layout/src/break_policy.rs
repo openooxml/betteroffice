@@ -13,8 +13,7 @@ pub enum AuthoredBreak {
 }
 
 impl AuthoredBreak {
-    /// Word keeps the paragraph's space-before across a hard break run —
-    /// measured against Word 16.113, independent of how full the page was.
+    /// Word keeps space-before across a hard break run, not an automatic one.
     pub fn keeps_leading_spacing(self) -> bool {
         matches!(self, Self::HardBreakRun)
     }

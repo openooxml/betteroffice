@@ -482,9 +482,7 @@ impl Paginator {
         }
     }
 
-    /// Forces a page the document asked for. `keep_leading_spacing` is Word's
-    /// hard-break rule: a page turned by a hard break keeps the next
-    /// paragraph's space-before, a page turned by itself does not.
+    /// Forces an authored page; `keep_leading_spacing` is Word's hard-break rule.
     pub fn force_authored_page_break(&mut self, keep_leading_spacing: bool) -> usize {
         let index = self.force_page_break();
         self.suppress_leading_spacing = !keep_leading_spacing;
