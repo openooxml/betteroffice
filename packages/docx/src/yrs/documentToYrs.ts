@@ -1476,6 +1476,71 @@ function addCommentCoverage(plan: StoryPlan): void {
   }
 }
 
+interface BlockCursor {
+  paragraph: number;
+  table: number;
+  sdt: number;
+}
+
+/** Hands each block of a story the identity `visitStory` seeds it with. */
+function takeBlockId(cursor: BlockCursor, storyId: string, block: BlockContent): string | null {
+  if (isRawXml(block)) return null;
+  if (block.type === 'paragraph') {
+    const index = cursor.paragraph++;
+    return block.paraId || `${storyId}:p${index}`;
+  }
+  if (block.type === 'table') return `${storyId}:t${cursor.table++}`;
+  return blockSdtStoryId(storyId, cursor.sdt++);
+}
+
+function numericFieldInstruction(instruction: string): boolean {
+  return /^\d+$/.test(instruction.trim());
+}
+
+/** How many story blocks a suppressed field's cached result duplicates. */
+function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
+  const blocks = field.structuredResult?.blocks ?? [];
+  const last = blocks[blocks.length - 1];
+  if (!last || last.type !== 'paragraph' || (last.content?.length ?? 0) > 0) return null;
+  return blocks.length;
+}
+
+/** Binds each suppressed field to the story blocks its cached result duplicates. */
+function bindFieldResultBlocks(
+  units: readonly InlineUnit[],
+  storyId: string,
+  blocks: readonly BlockContent[],
+  owner: number,
+  afterOwner: BlockCursor,
+  tableIds: Map<number, string>
+): void {
+  for (const unit of units) {
+    if (unit.kind !== 'embed' || unit.embedKind !== 'field') continue;
+    const instruction = unit.payload.instruction;
+    if (typeof instruction !== 'string' || !numericFieldInstruction(instruction)) continue;
+    const data = unit.payload.fieldData;
+    if (typeof data !== 'string') continue;
+    let parsed: SimpleField | ComplexField;
+    try {
+      parsed = JSON.parse(data) as SimpleField | ComplexField;
+    } catch {
+      continue;
+    }
+    const count = cachedResultBlockCount(parsed);
+    if (count === null || owner + 1 + count > blocks.length) continue;
+    const cursor = { ...afterOwner };
+    const ids: string[] = [];
+    for (let offset = 0; offset < count; offset += 1) {
+      const block = blocks[owner + 1 + offset]!;
+      const id = takeBlockId(cursor, storyId, block);
+      if (id === null) continue;
+      if (block.type === 'table') tableIds.set(owner + 1 + offset, id);
+      ids.push(id);
+    }
+    if (ids.length > 0) unit.payload.fieldResultBlocks = ids;
+  }
+}
+
 function visitStory(
   context: LoweringContext,
   storyId: string,
@@ -1490,13 +1555,15 @@ function visitStory(
   context.plans.push(plan);
   const blocks =
     sourceBlocks.length > 0 ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
-  let tableIndex = 0;
-  let sdtIndex = 0;
-  let paragraphIndex = 0;
+  const cursor: BlockCursor = { paragraph: 0, table: 0, sdt: 0 };
+  const resultTableIds = new Map<number, string>();
   let lastKind: 'paragraph' | 'table' | 'blockSdt' | null = null;
 
-  for (const block of blocks) {
+  for (const [blockIndex, block] of blocks.entries()) {
     if (isRawXml(block)) continue;
+    const currentTable = cursor.table;
+    const blockId = takeBlockId(cursor, storyId, block);
+    if (blockId === null) continue;
     if (block.type === 'paragraph') {
       const paragraph = paragraphUnits(
         block,
@@ -1504,14 +1571,16 @@ function visitStory(
         options.extraRunFormatting,
         options.tableParagraphFormatting
       );
-      plan.units.push(...paragraph.units);
-      plan.units.push(
-        embedUnit('pilcrow', {
-          ...paragraph.ppr,
-          paraId: block.paraId || `${storyId}:p${paragraphIndex}`,
-        })
+      bindFieldResultBlocks(
+        paragraph.units,
+        storyId,
+        blocks,
+        blockIndex,
+        cursor,
+        resultTableIds
       );
-      paragraphIndex += 1;
+      plan.units.push(...paragraph.units);
+      plan.units.push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
       if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
         plan.units.push(embedUnit('pageBreak', {}));
       }
@@ -1519,7 +1588,6 @@ function visitStory(
       continue;
     }
     if (block.type === 'table') {
-      const currentTable = tableIndex++;
       const table = projectTable(
         block,
         context.styleResolver,
@@ -1533,11 +1601,13 @@ function visitStory(
           story: tableCellStoryId(storyId, currentTable, rowIndex, cellIndex),
         })),
       }));
+      const resultTableId = resultTableIds.get(blockIndex);
       plan.units.push(
         embedUnit('table', {
           tblPr: tableAttrsToTblPr(table.attrs),
           grid: tableAttrsToGrid(table.attrs),
           rows,
+          ...(resultTableId === undefined ? {} : { blockId: resultTableId }),
         })
       );
       table.rows.forEach((row, rowIndex) => {
@@ -1559,8 +1629,7 @@ function visitStory(
       lastKind = 'table';
       continue;
     }
-    const currentSdt = sdtIndex++;
-    const childStory = blockSdtStoryId(storyId, currentSdt);
+    const childStory = blockId;
     plan.units.push(
       embedUnit('blockSdt', {
         ...blockSdtAttrs(block.properties),
@@ -1580,7 +1649,7 @@ function visitStory(
     plan.units.push(
       embedUnit('pilcrow', {
         hangingIndent: false,
-        paraId: `${storyId}:p${paragraphIndex}`,
+        paraId: `${storyId}:p${cursor.paragraph}`,
       })
     );
   }

@@ -223,7 +223,8 @@ fn lower_story<T: ReadTxn>(
         let mut paragraph_pm_units = 0_u32;
         let mut pm_cursor = pm_base;
         let mut at_block_boundary = true;
-        let mut hidden_field_paragraphs = BTreeSet::new();
+        let mut hidden_field_blocks = BTreeSet::new();
+        let mut pending_hidden_field_blocks = BTreeSet::new();
         // Sections are body-level, so the cascade is per story; cell and
         // header/footer stories simply never carry section properties.
         let mut section_margins = SectionMarginsTwips::default();
@@ -271,10 +272,13 @@ fn lower_story<T: ReadTxn>(
                     );
                     pm_cursor = paragraph_pm_start + u64::from(paragraph_pm_units) + 2;
                     if !shared_map_string(&pilcrow, txn, "paraId")
-                        .is_some_and(|id| hidden_field_paragraphs.contains(&id))
+                        .is_some_and(|id| hidden_field_blocks.contains(&id))
                     {
                         blocks.extend(paragraph_blocks);
                     }
+                    // The field's own paragraph is the one just closed, so the
+                    // range it suppresses opens with the next block.
+                    hidden_field_blocks.append(&mut pending_hidden_field_blocks);
                     // A pilcrow carrying section properties ENDS its section,
                     // so the break block follows its paragraph.
                     if let Some(section_break) = section_break_block(&values, &mut section_margins)
@@ -302,7 +306,9 @@ fn lower_story<T: ReadTxn>(
                             detail: "table embed interrupts paragraph content".to_owned(),
                         });
                     }
-                    let (table, node_size) = lower_table(
+                    let hidden = shared_map_string(&table, txn, "blockId")
+                        .is_some_and(|id| hidden_field_blocks.contains(&id));
+                    let (lowered, node_size) = lower_table(
                         &table,
                         txn,
                         story_id,
@@ -312,7 +318,9 @@ fn lower_story<T: ReadTxn>(
                         active_stories,
                         list_state,
                     )?;
-                    blocks.push(LayoutBlock::Table(table));
+                    if !hidden {
+                        blocks.push(LayoutBlock::Table(lowered));
+                    }
                     story_index += 1;
                     paragraph_start = story_index;
                     pm_cursor += node_size;
@@ -402,7 +410,9 @@ fn lower_story<T: ReadTxn>(
                         },
                     )?;
                     stamp_sdt_group(&mut child_blocks, group);
-                    blocks.extend(child_blocks);
+                    if !hidden_field_blocks.contains(&child_story) {
+                        blocks.extend(child_blocks);
+                    }
                     story_index += 1;
                     paragraph_start = story_index;
                     pm_cursor += content_size + 2;
@@ -466,11 +476,9 @@ fn lower_story<T: ReadTxn>(
                     let hidden = instruction
                         .as_deref()
                         .is_some_and(super::seed::numeric_field_instruction);
-                    if hidden
-                        && let Some(data) = shared_map_string(&field, txn, "fieldData")
-                            .and_then(|data| serde_json::from_str::<serde_json::Value>(&data).ok())
-                    {
-                        collect_hidden_field_paragraphs(&data, &mut hidden_field_paragraphs);
+                    if hidden {
+                        pending_hidden_field_blocks
+                            .append(&mut hidden_field_result_blocks(&field, txn));
                     }
                     let field_type = shared_map_string(&field, txn, "fieldType")
                         .unwrap_or_else(|| "OTHER".to_owned());
@@ -764,21 +772,12 @@ pub fn yrsDocToLayoutBlocks(
     yrs_doc_to_layout_blocks(doc, story_id, env)
 }
 
-fn collect_hidden_field_paragraphs(data: &serde_json::Value, hidden: &mut BTreeSet<String>) {
-    let Some(blocks) = data["structuredResult"]["blocks"].as_array() else {
-        return;
+/// Story blocks a hidden field's cached result duplicates, bound at seed time.
+fn hidden_field_result_blocks<T: ReadTxn>(field: &MapRef, txn: &T) -> BTreeSet<String> {
+    let Some(Any::Array(ids)) = shared_any(field, txn, "fieldResultBlocks") else {
+        return BTreeSet::new();
     };
-    if !blocks.last().is_some_and(|block| {
-        block["type"].as_str() == Some("paragraph")
-            && block["content"].as_array().is_some_and(Vec::is_empty)
-    }) {
-        return;
-    }
-    for block in blocks {
-        if let Some(id) = block["paraId"].as_str() {
-            hidden.insert(id.to_owned());
-        }
-    }
+    ids.iter().filter_map(any_str).map(str::to_owned).collect()
 }
 
 fn malformed_table(story: &str, index: u32, detail: impl Into<String>) -> BridgeError {

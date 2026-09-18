@@ -1772,7 +1772,7 @@ fn inline_wrap_distances_do_not_move_text_or_resize_image_only_lines() {
 }
 
 #[test]
-fn inline_image_wrapping_and_column_fit() {
+fn inline_image_wrapping_keeps_the_declared_box() {
     // 22 zeros fill 195.77px; the 50px image wraps to its own line
     let v = measure(
         json!([
@@ -1789,25 +1789,20 @@ fn inline_image_wrapping_and_column_fit() {
         "wrapped image line",
     );
 
-    // A 400px image wraps from a 200px empty line and reserves half height.
+    // A 400px image stays on the empty 200px line at its declared height.
     let v = measure(
         json!([{ "kind": "image", "width": 400.0, "height": 100.0 }]),
         200.0,
     )
     .unwrap();
-    assert_eq!(spans(&v), vec![(0, 0, 0, 0), (0, 0, 0, 1)]);
+    assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "empty leading row",
+        100.0 + 3.2,
+        "declared height reserved",
     );
     approx(
-        v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        50.0 + 3.2,
-        "rendered (fitted) height reserved",
-    );
-    approx(
-        v["lines"][1]["width"].as_f64().unwrap(),
+        v["lines"][0]["width"].as_f64().unwrap(),
         400.0,
         "declared width kept",
     );

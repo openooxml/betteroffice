@@ -346,19 +346,13 @@ impl Filler<'_> {
         self.finalize_line()
     }
 
-    /// Place an inline image using its fitted height.
+    /// Place an inline image at its declared extent.
     fn fill_inline_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
-        if self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
+        if self.cur.width > 0.0 && self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
         }
-        let fit_scale = if img.width > 0.0 && img.width > self.cur.available {
-            self.cur.available / img.width
-        } else {
-            1.0
-        };
-        let footprint = img.height * fit_scale;
-        if footprint > self.cur.max_image_height_px {
-            self.cur.max_image_height_px = footprint;
+        if img.height > self.cur.max_image_height_px {
+            self.cur.max_image_height_px = img.height;
         }
         self.record_atomic(ri, 0, 1, img.width, img.bidi_level);
         self.cur.width += img.width;
