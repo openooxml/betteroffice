@@ -97,8 +97,11 @@ fn fixture_spacing_cascades_from_master_layout_and_shape_lists() {
         );
         assert_eq!(lines[0].runs[0].color, "#2040B0");
     }
+    // 300px shape top + (1854 + 67) / 2048 em of Arial at 32pt. PowerPoint
+    // 16.113 puts this baseline at ~341.4px, so the hhea ascent is closer than
+    // the usWin ascent it replaced (338.625) but still not PowerPoint's own.
     for id in [5, 6] {
-        assert!((lines(&list, id)[0].baseline - 338.625).abs() < 0.001);
+        assert!((lines(&list, id)[0].baseline - 340.0208).abs() < 0.001);
     }
     let font_based = lines(&list, 3);
     let control = lines(&list, 7);

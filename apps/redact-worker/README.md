@@ -16,7 +16,7 @@ Then replace the `replace-with-redacted-bucket` placeholder in `wrangler.jsonc` 
 
 ```sh
 bun run build:wasm
-bunx tsc --noEmit
+bun run typecheck
 bun test
 bun run deploy
 ```
