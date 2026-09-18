@@ -3025,9 +3025,6 @@ impl BlockCursor {
 }
 
 /// How many story blocks a suppressed field's cached result duplicates.
-///
-/// The trailing empty paragraph is the closing paragraph stripped of its field
-/// characters, so its presence marks the duplication as whole.
 fn cached_result_block_count(data: &Value) -> Option<usize> {
     let blocks = array(field(field(Some(data), "structuredResult"), "blocks"));
     blocks
@@ -3039,9 +3036,7 @@ fn cached_result_block_count(data: &Value) -> Option<usize> {
         .then(|| blocks.len())
 }
 
-/// Binds every suppressed field in a paragraph to the story blocks its cached
-/// result duplicates, and reports the tables among them by block index — a
-/// table carries no identity of its own.
+/// Binds each suppressed field to the story blocks its cached result duplicates.
 fn bind_field_result_blocks(
     units: &mut [InlineUnit],
     story_id: &str,

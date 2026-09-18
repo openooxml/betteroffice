@@ -1497,12 +1497,7 @@ function numericFieldInstruction(instruction: string): boolean {
   return /^\d+$/.test(instruction.trim());
 }
 
-/**
- * How many story blocks a suppressed field's cached result duplicates.
- *
- * The trailing empty paragraph is the closing paragraph stripped of its field
- * characters, so its presence marks the duplication as whole.
- */
+/** How many story blocks a suppressed field's cached result duplicates. */
 function cachedResultBlockCount(field: SimpleField | ComplexField): number | null {
   const blocks = field.structuredResult?.blocks ?? [];
   const last = blocks[blocks.length - 1];
@@ -1510,11 +1505,7 @@ function cachedResultBlockCount(field: SimpleField | ComplexField): number | nul
   return blocks.length;
 }
 
-/**
- * Binds every suppressed field in a paragraph to the story blocks its cached
- * result duplicates, and reports the tables among them by block index — a table
- * carries no identity of its own.
- */
+/** Binds each suppressed field to the story blocks its cached result duplicates. */
 function bindFieldResultBlocks(
   units: readonly InlineUnit[],
   storyId: string,
