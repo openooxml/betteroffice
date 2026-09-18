@@ -15,14 +15,10 @@ use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
 const ANCHOR_PROXIMITY: usize = 4;
-/// Zones one anchor frame may accumulate, matching the measurement layer's own
-/// ceiling so an overlong run never degrades a paragraph to synthetic metrics.
+/// Zones one anchor frame may accumulate, matching the measurement layer's cap.
 const MAX_ACTIVE_ZONES: usize = 200;
 
-/// A shape the lowering placed by anchor rather than in the flow. A malformed
-/// anchor can lose its position and keep only its wrap, and the lowering lifts
-/// it out of its paragraph either way, so the flow must not charge it height
-/// either.
+/// A shape the lowering placed by anchor rather than in the flow.
 fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
@@ -390,10 +386,7 @@ pub fn measure_blocks_with_shape_offsets(
             cumulative_y = 0.0;
         }
         if let Some(zones) = zones_by_anchor.get(&index) {
-            // Anchors reached without the flow advancing share one origin, so
-            // their zones accumulate; a later anchor opens a new frame. The
-            // cap keeps a pathological run of anchors inside the measurement
-            // layer's zone limit.
+            // Anchors the flow has not advanced past share one origin.
             if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
                 active_zones.extend(zones.iter().cloned());
             } else {
@@ -1995,10 +1988,8 @@ mod tests {
         }
     }
 
-    /// A malformed anchor can keep its wrap and lose its position. The lowering
-    /// still lifts it out of its paragraph, so charging it flow height here
-    /// would slide the anchor frame out from under a band anchored alongside
-    /// it and cancel that band's reservation.
+    /// A wrap-only anchor must not slide the frame out from under a band
+    /// anchored beside it.
     #[test]
     fn a_wrap_only_anchor_does_not_advance_the_anchor_frame() {
         let font_id = crate::register_measure_font(include_bytes!(

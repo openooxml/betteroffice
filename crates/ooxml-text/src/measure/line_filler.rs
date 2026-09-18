@@ -26,13 +26,10 @@
 //! - A tall inline image sits on the baseline with text descent below it.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
-//!   default-font-size estimate, since the line's real metrics are unknown
-//!   until it closes. Once it closes, a line still at full width is re-tested
-//!   against `fullWidthBlock` bands with its real box, which the estimate can
-//!   fall short of; a band leaves no room beside it, so that late hop cannot
-//!   invalidate the break. That running Y advances by each line's *text*
-//!   height, so image growth never shifts the next probe; float skips do,
-//!   since they move the line itself.
+//!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
+//!   once the line closes and its box is known. That running Y advances by each
+//!   line's *text* height, so image growth never shifts the next probe; float
+//!   skips do, since they move the line itself.
 //! - `totalHeight` is Σ (line height + `floatSkipBefore`) plus
 //!   `spacing.before` and `spacing.after`.
 
@@ -746,12 +743,13 @@ impl Filler<'_> {
             line_height = self.snap_line_height(line_height);
         }
 
+        self.clear_full_width_bands(line_height);
+
         // Float fields are omitted when unset.
         let segments = match self.cur.segment_zones.as_deref() {
             Some(zones) if !zones.is_empty() => self.create_line_segments(zones),
             _ => None,
         };
-        self.clear_full_width_bands(text_line_height, segments.is_some());
         let float_skip_before = (self.pending_float_skip > 0.0).then_some(self.pending_float_skip);
         self.pending_float_skip = 0.0;
         let (run_advances, cluster_advances, bidi_slices) = if self.p.authoritative_shaping {
@@ -783,29 +781,38 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Drops the just-closed line below any `fullWidthBlock` band its real box
-    /// reaches into.
-    ///
-    /// The probe that opened this line used [`estimated_line_height`], which is
-    /// the default font size rather than the ruled box, so a band sitting in
-    /// the difference was invisible to it. A full-width band leaves no room
-    /// beside it, so the line has to clear it whatever its width; a line the
-    /// side floats already narrowed is left alone, because moving it would
-    /// change the room it was filled against.
-    fn clear_full_width_bands(&mut self, text_line_height: f32, narrowed_by_segments: bool) {
-        if self.p.zones.is_empty()
-            || narrowed_by_segments
-            || self.cur.left_offset > 0.0
-            || self.cur.right_offset > 0.0
-        {
+    /// Drops the closed line below any band its box reaches, taking the
+    /// margins it lands in. Narrower room declines: the fill would overflow.
+    fn clear_full_width_bands(&mut self, line_height: f32) {
+        if self.p.zones.is_empty() {
             return;
         }
         let top = self.p.paragraph_y_offset + self.cumulative_height;
-        let skip = floats::clear_full_width_band_y(top, text_line_height, self.p.zones) - top;
-        if skip > 0.0 {
-            self.cumulative_height += skip;
-            self.pending_float_skip += skip;
+        let skip = floats::clear_full_width_band_y(top, line_height, self.p.zones) - top;
+        if skip <= 0.0 {
+            return;
         }
+        let full = if self.lines.is_empty() {
+            self.p.first_line_width
+        } else {
+            self.p.body_width
+        };
+        let margins = floats::floating_margins(
+            self.cumulative_height + skip,
+            line_height,
+            self.p.zones,
+            self.p.paragraph_y_offset,
+        );
+        let available = floats::available_width(&margins, full).max(1.0);
+        if available + WRAP_SLACK_PX < self.cur.available {
+            return;
+        }
+        self.cumulative_height += skip;
+        self.pending_float_skip += skip;
+        self.cur.available = available;
+        self.cur.left_offset = margins.left;
+        self.cur.right_offset = margins.right;
+        self.cur.segment_zones = margins.segments;
     }
 
     /// Splits the just-closed line across the zone's strips. One strip — or a
