@@ -2006,7 +2006,7 @@ fn paragraph_attrs(
         attrs.insert("renderedPageBreakBefore".to_owned(), Value::Bool(true));
     }
     if paragraph_starts_with_page_break(paragraph) {
-        attrs.insert("pageBreakBefore".to_owned(), Value::Bool(true));
+        attrs.insert("pageBreakBeforeRun".to_owned(), Value::Bool(true));
     }
     for (source, target) in [("pPrIns", "pPrIns"), ("pPrDel", "pPrDel")] {
         if let Some(info) = field(Some(paragraph), source) {

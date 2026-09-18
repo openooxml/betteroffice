@@ -482,9 +482,10 @@ impl Paginator {
         }
     }
 
-    pub fn force_authored_page_break(&mut self) -> usize {
+    /// Forces an authored page; `keep_leading_spacing` is Word's hard-break rule.
+    pub fn force_authored_page_break(&mut self, keep_leading_spacing: bool) -> usize {
         let index = self.force_page_break();
-        self.suppress_leading_spacing = true;
+        self.suppress_leading_spacing = !keep_leading_spacing;
         index
     }
 

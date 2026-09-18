@@ -458,6 +458,17 @@ export interface YrsEngineApplyProfile {
  *
  * @internal
  */
+/**
+ * One resident font-store registration, in the order the main thread made it:
+ * raw bytes, or a measurement view of an earlier id. The worker replays the
+ * list to reproduce the same dense ids, so the order and the mix both matter.
+ *
+ * @internal
+ */
+export type YrsResidentFontRegistration =
+  | Uint8Array
+  | { substituteOf: number; family: string };
+
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
   /** Full document state, or a state-vector diff when the caller supplied
@@ -466,7 +477,7 @@ export interface YrsResidentWorkerSnapshot {
   selection: YrsSelection | null;
   /** Empty when the caller declared the worker's fonts current
    * (`knownFontsRevision` matches); the worker then keeps its registrations. */
-  fonts: Uint8Array[];
+  fonts: YrsResidentFontRegistration[];
   /** Monotonic revision of the resident font set (bumped by register/clear). */
   fontsRevision: number;
   renderInputs: Array<{ story: string; env: YrsRenderEnv }>;
@@ -653,6 +664,12 @@ export interface YrsSession extends CollaborationReplica {
 
   /** Register raw sfnt bytes in the session's measurement/display font store. */
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Register a measurement view of `base` carrying the vertical metrics Word
+   * measures `family` with, for a face the host substituted; `base` when the
+   * engine knows no metrics for the family.
+   */
+  registerSubstituteFont(base: number, family: string): number;
   /** Clear the session's registered measurement/display fonts. */
   clearFonts(): void;
   /** Measure one paragraph through the session's resident text engine. */
@@ -1021,7 +1038,7 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
   let undoTracked = false;
   let cachedSelection: YrsSelection | null | undefined;
   let cachedSelectionContext: { key: string; json: string } | null = null;
-  const residentFonts: Uint8Array[] = [];
+  const residentFonts: YrsResidentFontRegistration[] = [];
   const residentRenderInputs = new Map<string, YrsRenderEnv>();
   const residentMeasureInputs = new Map<string, string>();
   let residentLayoutInput: string | null = null;
@@ -1129,6 +1146,13 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentFontsRevision += 1;
       return id;
     },
+    registerSubstituteFont: (base, family) => {
+      const id = session.register_substitute_measure_font(base, family);
+      if (id === base) return id;
+      residentFonts.push({ substituteOf: base, family });
+      residentFontsRevision += 1;
+      return id;
+    },
     clearFonts: () => {
       session.clear_measure_fonts();
       residentFonts.length = 0;
@@ -1213,7 +1237,11 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
         clientId,
         state: state ?? session.encode_state(),
         selection: JSON.parse(selectionJson) as YrsSelection | null,
-        fonts: fontsCurrent ? [] : residentFonts.map((bytes) => bytes.slice()),
+        fonts: fontsCurrent
+          ? []
+          : residentFonts.map((font) =>
+              font instanceof Uint8Array ? font.slice() : { ...font }
+            ),
         fontsRevision: residentFontsRevision,
         renderInputs: [...residentRenderInputs].map(([story, env]) => ({
           story,

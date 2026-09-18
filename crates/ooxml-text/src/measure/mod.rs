@@ -584,6 +584,7 @@ mod authoritative_tests {
             os2_typo_line_gap: -210,
             os2_fs_selection: 0x00c0,
             os2_version: 4,
+            os2_code_page_range1: 0,
             ..*store.metrics(id).unwrap()
         };
         store.replace_metrics_for_test(id, metrics).unwrap();

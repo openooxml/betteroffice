@@ -4,7 +4,7 @@ use ooxml_text::{
     BaseDirection, BreakOpportunity, CompatFlags, FontMetrics, FontStore, LineBox, LineSpacingRule,
     ShapeDirection, ShapeFeature, apply_spacing_rule, bidi_paragraphs, break_opportunities,
     kern_enabled, kern_features, line_is_justified, shape, shape_with_direction, single_line_box,
-    stretch_spaces,
+    snap_line_box, snap_line_height, stretch_spaces,
 };
 
 const LIBERATION_SANS: &[u8] = include_bytes!("fonts/LiberationSans-Regular.ttf");
@@ -339,6 +339,7 @@ fn synthetic_metrics() -> FontMetrics {
         os2_win_descent: 170,
         os2_fs_selection: 0,
         os2_version: 4,
+        os2_code_page_range1: 0,
     }
 }
 
@@ -492,6 +493,7 @@ fn typo_line_gap_stays_signed() {
         os2_typo_line_gap: -210,
         os2_fs_selection: 0xC0,
         os2_version: 4,
+        os2_code_page_range1: 0,
         ..synthetic_metrics()
     };
     assert_eq!(
@@ -511,6 +513,7 @@ fn use_typo_metrics_is_ignored_before_os2_version_4() {
     for version in [0u16, 1, 2, 3] {
         let old = FontMetrics {
             os2_version: version,
+            os2_code_page_range1: 0,
             ..typo_metrics()
         };
         assert!(!old.use_typo_metrics(), "version {version}");
@@ -875,4 +878,223 @@ fn kern_features_gate_pair_kerning_in_shaping() {
         kerned < plain,
         "kern_features(true) must keep GPOS pair kerning: {kerned} vs {plain}"
     );
+}
+
+/// Word 16.113 (macOS) measures a face claiming an East Asian code page at
+/// 1.3 x the hhea ascent-to-descent span, half-leading split, ignoring the
+/// win and sTypo families and hhea.lineGap.
+#[test]
+fn east_asian_code_pages_select_the_cjk_line_pitch() {
+    let m = FontMetrics {
+        os2_code_page_range1: 0x0002_0000,
+        ..synthetic_metrics()
+    };
+    let line = single_line_box(&m, 1000.0, &CompatFlags::default());
+    assert_eq!(line.height(), 1.3 * 790.0);
+    assert_eq!(line.ascent, 620.0 + 0.15 * 790.0);
+    assert_eq!(line.descent, 170.0 + 0.15 * 790.0);
+    assert_eq!(line.leading, 0.0);
+
+    for bits in [0x0004_0000, 0x0008_0000, 0x0010_0000] {
+        let gated = FontMetrics {
+            os2_code_page_range1: bits,
+            ..synthetic_metrics()
+        };
+        assert_eq!(
+            single_line_box(&gated, 1000.0, &CompatFlags::default()),
+            line
+        );
+    }
+}
+
+/// Johab (bit 21) and Thai (bit 16) are not East Asian code pages for this
+/// rule, and neither is a face that only covers CJK.
+#[test]
+fn non_gating_code_pages_keep_the_latin_line_pitch() {
+    let latin = single_line_box(&synthetic_metrics(), 1000.0, &CompatFlags::default());
+    for bits in [0x0001_0000, 0x0020_0000, 0x0040_0000, 0x4000_01ff] {
+        let m = FontMetrics {
+            os2_code_page_range1: bits,
+            ..synthetic_metrics()
+        };
+        assert_eq!(
+            single_line_box(&m, 1000.0, &CompatFlags::default()),
+            latin,
+            "code page bits {bits:#x} must not gate"
+        );
+    }
+}
+
+/// The East Asian pitch reads hhea only: the win family, hhea.lineGap and
+/// USE_TYPO_METRICS all leave it untouched.
+#[test]
+fn east_asian_line_pitch_ignores_win_gap_and_typo_metrics() {
+    let base = FontMetrics {
+        os2_code_page_range1: 0x0002_0000,
+        ..synthetic_metrics()
+    };
+    let expected = single_line_box(&base, 1000.0, &CompatFlags::default());
+    let variants = [
+        FontMetrics {
+            os2_win_ascent: 1200,
+            os2_win_descent: 400,
+            ..base
+        },
+        FontMetrics {
+            hhea_line_gap: 600,
+            ..base
+        },
+        FontMetrics {
+            os2_fs_selection: USE_TYPO_METRICS,
+            ..base
+        },
+    ];
+    for m in variants {
+        assert_eq!(
+            single_line_box(&m, 1000.0, &CompatFlags::default()),
+            expected
+        );
+    }
+}
+
+/// A face the host substituted measures the way Word measures the face the
+/// document named, while every glyph-side answer stays the substitute's.
+#[test]
+fn a_substitute_measures_as_the_face_it_stands_in_for() {
+    let (mut store, base) = store_with_font();
+    let mincho = ooxml_text::word_fonts::requested_line_metrics("ＭＳ 明朝")
+        .expect("MS Mincho is a known East Asian face");
+    let view = store
+        .register_substitute(base, mincho)
+        .expect("a measurement view registers");
+    assert_ne!(view, base, "the view is its own font id");
+
+    let size_px = 32.0;
+    let line = single_line_box(
+        store.metrics(view).unwrap(),
+        size_px,
+        &CompatFlags::default(),
+    );
+    assert!(
+        (line.height() - size_px * 1.3).abs() < 0.01,
+        "MS Mincho spans one em, so Word's East Asian pitch is 1.3 em: {}",
+        line.height()
+    );
+    let base_line = single_line_box(
+        store.metrics(base).unwrap(),
+        size_px,
+        &CompatFlags::default(),
+    );
+    assert!(
+        base_line.height() < line.height(),
+        "Liberation Sans measures shorter on its own: {} vs {}",
+        base_line.height(),
+        line.height()
+    );
+
+    assert_eq!(
+        store.metrics(view).unwrap().units_per_em,
+        store.metrics(base).unwrap().units_per_em,
+        "units per em describes the bytes, which shaping and outlines scale by"
+    );
+    assert_eq!(
+        store.glyph_id(view, 'A').unwrap(),
+        store.glyph_id(base, 'A').unwrap()
+    );
+    assert_eq!(
+        store.advance_width(view, 'A').unwrap(),
+        store.advance_width(base, 'A').unwrap()
+    );
+    assert_eq!(
+        store.outline_glyph_json(view, 36).unwrap(),
+        store.outline_glyph_json(base, 36).unwrap()
+    );
+    assert_eq!(
+        shape(&store, view, "Ag fi", size_px, &[]).unwrap(),
+        shape(&store, base, "Ag fi", size_px, &[]).unwrap()
+    );
+}
+
+#[test]
+fn a_substitute_view_rescales_the_requested_span_into_its_own_units() {
+    let (mut store, base) = store_with_font();
+    let malgun = ooxml_text::word_fonts::requested_line_metrics("Malgun Gothic").unwrap();
+    let view = store.register_substitute(base, malgun).unwrap();
+    let metrics = store.metrics(view).unwrap();
+    let span = f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender);
+    let requested_span = f32::from(malgun.hhea_ascender) - f32::from(malgun.hhea_descender);
+    assert!(
+        (span / f32::from(metrics.units_per_em) - requested_span / f32::from(malgun.units_per_em))
+            .abs()
+            < 1e-3
+    );
+}
+
+#[test]
+fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
+    for family in ["HGPｺﾞｼｯｸM", "BIZ UDPゴシック", "Arial"] {
+        assert!(
+            ooxml_text::word_fonts::requested_line_metrics(family).is_none(),
+            "{family}"
+        );
+    }
+}
+
+#[test]
+fn a_grid_rounds_a_line_up_to_a_whole_number_of_rows() {
+    let pitch = 24.0;
+    assert_eq!(
+        snap_line_height(10.0, pitch),
+        pitch,
+        "a short line fills its row"
+    );
+    assert_eq!(
+        snap_line_height(pitch, pitch),
+        pitch,
+        "an exact row does not grow"
+    );
+    assert_eq!(
+        snap_line_height(pitch + 0.5, pitch),
+        2.0 * pitch,
+        "past a row takes two"
+    );
+    assert_eq!(snap_line_height(2.0 * pitch, pitch), 2.0 * pitch);
+    assert_eq!(snap_line_height(2.0 * pitch + 0.1, pitch), 3.0 * pitch);
+}
+
+#[test]
+fn a_row_boundary_is_not_pushed_over_by_float_error() {
+    let pitch = 17.7;
+    for rows in 1..=40 {
+        let height = rows as f32 * pitch;
+        assert_eq!(
+            snap_line_height(height, pitch),
+            height,
+            "{rows} whole rows stay {rows} rows"
+        );
+    }
+}
+
+#[test]
+fn a_grid_grown_box_keeps_ascent_and_descent() {
+    let content = LineBox {
+        ascent: 20.0,
+        descent: 5.0,
+        leading: 0.0,
+    };
+    let snapped = snap_line_box(content, 40.0);
+    assert_eq!(snapped.ascent, content.ascent);
+    assert_eq!(snapped.descent, content.descent);
+    assert_eq!(snapped.height(), 40.0);
+    let two_rows = snap_line_box(
+        LineBox {
+            ascent: 36.0,
+            descent: 9.0,
+            leading: 0.0,
+        },
+        40.0,
+    );
+    assert_eq!(two_rows.ascent, 36.0);
+    assert_eq!(two_rows.descent, 9.0);
+    assert_eq!(two_rows.height(), 80.0, "content past one row takes two");
 }

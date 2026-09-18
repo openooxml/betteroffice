@@ -8,7 +8,9 @@
 //!
 //! Each block is processed in a fixed order: record a checkpoint if placement
 //! stands at a pristine page start; force a page when the block carries
-//! `w:pageBreakBefore`; at the head of a keep-with-next group, force a page when
+//! `w:pageBreakBefore` or opens with a hard `w:br w:type="page"` run, the
+//! latter keeping the paragraph's space-before on the new page; at the head
+//! of a keep-with-next group, force a page when
 //! the group would otherwise straddle the boundary; then dispatch to the placer.
 //! A section break reads the *next* section's configuration and break type,
 //! falling back to the current break's when the plan has no successor. Column
@@ -501,9 +503,9 @@ fn place(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
-        // pageBreakBefore forces a fresh page before the block is placed
-        if hooks::breaks_before_block(&mb.block)? {
-            paginator.force_authored_page_break();
+        // pageBreakBefore, or a hard page-break run, forces a fresh page
+        if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
+            paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
 
         // at the head of a keep-with-next group, move to a fresh page when the
@@ -523,7 +525,7 @@ fn place(
                 page_has_content,
             )?;
             if must_advance {
-                paginator.force_authored_page_break();
+                paginator.force_authored_page_break(false);
             }
         }
 
@@ -588,7 +590,7 @@ fn place(
             }
 
             LayoutBlock::PageBreak(_) => {
-                paginator.force_authored_page_break();
+                paginator.force_authored_page_break(false);
             }
 
             LayoutBlock::ColumnBreak(_) => {
@@ -1269,7 +1271,7 @@ mod pagination_rule_tests {
     }
 
     #[test]
-    fn manual_page_break_suppresses_leading_spacing_but_column_break_preserves_it() {
+    fn a_standalone_break_paragraph_suppresses_leading_spacing_but_a_column_break_preserves_it() {
         let mut value = input(vec![
             paragraph(1, 1, 10.0, json!({})),
             json!({"block":{"kind":"pageBreak","id":"page"},"measure":{"kind":"pageBreak"}}),
@@ -1294,6 +1296,36 @@ mod pagination_rule_tests {
             .find(|checkpoint| checkpoint.page_index == 1)
             .unwrap();
         assert!(checkpoint.flow.suppress_leading_spacing);
+    }
+
+    /// Measured against Word 16.113 (oxi-ja-policies-01 page 45, and a
+    /// hand-authored probe): a paragraph opened by `w:br w:type="page"` keeps
+    /// its space-before on the new page, however full the previous page was.
+    #[test]
+    fn a_leading_hard_page_break_run_keeps_leading_spacing() {
+        for filler in [1, 5, 9] {
+            let mut measured = vec![paragraph(0, filler, 10.0, json!({}))];
+            measured.push(paragraph(
+                1,
+                1,
+                10.0,
+                json!({"spacing":{"before":20},"pageBreakBeforeRun":true}),
+            ));
+            let mut value = input(measured);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2, "filler {filler}");
+            let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            assert_eq!(after_break.y, 30.0, "filler {filler}");
+            let recorded = layout_document_checkpointed(&mut value).unwrap();
+            let checkpoint = recorded
+                .checkpoints
+                .iter()
+                .find(|checkpoint| checkpoint.page_index == 1)
+                .unwrap();
+            assert!(!checkpoint.flow.suppress_leading_spacing, "filler {filler}");
+        }
     }
 
     #[test]

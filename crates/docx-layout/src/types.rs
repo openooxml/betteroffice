@@ -577,6 +577,9 @@ pub struct ParagraphAttrs {
     pub widow_control: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page_break_before: Option<bool>,
+    /// Opens with a hard `w:br w:type="page"` run rather than `w:pageBreakBefore`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_break_before_run: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

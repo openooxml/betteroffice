@@ -317,7 +317,10 @@ function residentWorkerError(message: string, unavailable = false): Error {
 }
 
 function snapshotTransfers(snapshot: YrsResidentWorkerSnapshot): Transferable[] {
-  return [snapshot.state.buffer, ...snapshot.fonts.map((font) => font.buffer)];
+  return [
+    snapshot.state.buffer,
+    ...snapshot.fonts.flatMap((font) => (font instanceof Uint8Array ? [font.buffer] : [])),
+  ];
 }
 
 function frameResult(

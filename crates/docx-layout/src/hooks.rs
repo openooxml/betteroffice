@@ -27,7 +27,9 @@ fn unsupported(feature: &str) -> LayoutError {
 // `prescan`/`place` keep importing them from the hooks seam
 pub use crate::keep_together::{KeepWithNextGroup, KeepWithNextScan};
 
-pub fn breaks_before_block(block: &LayoutBlock) -> Result<bool, LayoutError> {
+pub fn breaks_before_block(
+    block: &LayoutBlock,
+) -> Result<Option<break_policy::AuthoredBreak>, LayoutError> {
     Ok(break_policy::breaks_before_block(block))
 }
 

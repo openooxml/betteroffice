@@ -380,3 +380,36 @@ describe('default font provider', () => {
     }
   });
 });
+
+
+describe('substituted-face metrics', () => {
+  test('measures a substituted face as the family the document asked for', async () => {
+    const substituted: Array<[number, string]> = [];
+    const registry = new TextMeasureFontRegistry(
+      {
+        registerFont: () => 3,
+        registerSubstituteFont: (id, family) => {
+          substituted.push([id, family]);
+          return id + 100;
+        },
+      },
+      {
+        bundled: {
+          resolve: () => async () => new ArrayBuffer(8),
+        },
+      }
+    );
+
+    expect(await registry.getFontIdChain('MS Mincho', false, false)).toEqual([103]);
+    expect(substituted).toEqual([[3, 'MS Mincho']]);
+  });
+
+  test('keeps the plain registration when the sink has no substitute path', async () => {
+    const registry = new TextMeasureFontRegistry(
+      { registerFont: () => 3 },
+      { bundled: { resolve: () => async () => new ArrayBuffer(8) } }
+    );
+
+    expect(await registry.getFontIdChain('MS Mincho', false, false)).toEqual([3]);
+  });
+});
