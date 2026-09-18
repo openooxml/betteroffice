@@ -20,6 +20,7 @@ import wasmInit, {
   measure_paragraph_json,
   range_rects_json,
   register_measure_font,
+  register_substitute_measure_font,
 } from './generated/layout/docx_layout.js';
 // Namespace view of the same glue. Exports the generated .d.ts does not
 // declare are resolved by name through this, since a named import of an
@@ -312,6 +313,16 @@ export function layoutDocumentJson(input: string): string {
 export function registerMeasureFont(bytes: Uint8Array): number {
   state.ensure();
   return register_measure_font(bytes);
+}
+
+/**
+ * Register a measurement view of `base` carrying the vertical metrics Word
+ * measures `family` with — for a face the host substituted. Returns `base`
+ * unchanged for a family whose metrics the engine does not know.
+ */
+export function registerSubstituteMeasureFont(base: number, family: string): number {
+  state.ensure();
+  return register_substitute_measure_font(base, family);
 }
 
 /** Drop every registered measurement font (ids restart at 0). Callers must re-register before the next `measureParagraphJson`. */

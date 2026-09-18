@@ -956,3 +956,86 @@ fn east_asian_line_pitch_ignores_win_gap_and_typo_metrics() {
         );
     }
 }
+
+/// A face the host substituted measures the way Word measures the face the
+/// document named, while every glyph-side answer stays the substitute's.
+#[test]
+fn a_substitute_measures_as_the_face_it_stands_in_for() {
+    let (mut store, base) = store_with_font();
+    let mincho = ooxml_text::word_fonts::requested_line_metrics("ＭＳ 明朝")
+        .expect("MS Mincho is a known East Asian face");
+    let view = store
+        .register_substitute(base, mincho)
+        .expect("a measurement view registers");
+    assert_ne!(view, base, "the view is its own font id");
+
+    let size_px = 32.0;
+    let line = single_line_box(
+        store.metrics(view).unwrap(),
+        size_px,
+        &CompatFlags::default(),
+    );
+    assert!(
+        (line.height() - size_px * 1.3).abs() < 0.01,
+        "MS Mincho spans one em, so Word's East Asian pitch is 1.3 em: {}",
+        line.height()
+    );
+    let base_line = single_line_box(
+        store.metrics(base).unwrap(),
+        size_px,
+        &CompatFlags::default(),
+    );
+    assert!(
+        base_line.height() < line.height(),
+        "Liberation Sans measures shorter on its own: {} vs {}",
+        base_line.height(),
+        line.height()
+    );
+
+    assert_eq!(
+        store.metrics(view).unwrap().units_per_em,
+        store.metrics(base).unwrap().units_per_em,
+        "units per em describes the bytes, which shaping and outlines scale by"
+    );
+    assert_eq!(
+        store.glyph_id(view, 'A').unwrap(),
+        store.glyph_id(base, 'A').unwrap()
+    );
+    assert_eq!(
+        store.advance_width(view, 'A').unwrap(),
+        store.advance_width(base, 'A').unwrap()
+    );
+    assert_eq!(
+        store.outline_glyph_json(view, 36).unwrap(),
+        store.outline_glyph_json(base, 36).unwrap()
+    );
+    assert_eq!(
+        shape(&store, view, "Ag fi", size_px, &[]).unwrap(),
+        shape(&store, base, "Ag fi", size_px, &[]).unwrap()
+    );
+}
+
+#[test]
+fn a_substitute_view_rescales_the_requested_span_into_its_own_units() {
+    let (mut store, base) = store_with_font();
+    let malgun = ooxml_text::word_fonts::requested_line_metrics("Malgun Gothic").unwrap();
+    let view = store.register_substitute(base, malgun).unwrap();
+    let metrics = store.metrics(view).unwrap();
+    let span = f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender);
+    let requested_span = f32::from(malgun.hhea_ascender) - f32::from(malgun.hhea_descender);
+    assert!(
+        (span / f32::from(metrics.units_per_em) - requested_span / f32::from(malgun.units_per_em))
+            .abs()
+            < 1e-3
+    );
+}
+
+#[test]
+fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
+    for family in ["HGPｺﾞｼｯｸM", "BIZ UDPゴシック", "Arial"] {
+        assert!(
+            ooxml_text::word_fonts::requested_line_metrics(family).is_none(),
+            "{family}"
+        );
+    }
+}

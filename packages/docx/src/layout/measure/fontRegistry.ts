@@ -7,6 +7,14 @@ export interface TextEngineFontSink {
    * Throws on unparseable bytes.
    */
   registerFont(bytes: Uint8Array): number;
+  /**
+   * Register a measurement view of `id` carrying the vertical metrics Word
+   * measures `family` with, and return its id — the engine's answer to a face
+   * this host had to substitute. Returns `id` for a family whose metrics the
+   * engine does not know. Optional so partial sinks (tests, older hosts) keep
+   * working; without it a substitute measures with its own metrics.
+   */
+  registerSubstituteFont?(id: number, family: string): number;
 }
 
 /**
@@ -435,6 +443,27 @@ export class TextMeasureFontRegistry {
     );
   }
 
+  /**
+   * The id that measures `base`'s bytes the way Word measures `family` — what
+   * a chain head must be for a substituted face, since line metrics come from
+   * the head. Falls back to `base` when the sink or the engine has no metrics
+   * for the family, which is how every face measured before this existed.
+   */
+  private measuredAs(base: number, family: string): number {
+    const substitute = this.sink.registerSubstituteFont;
+    if (!substitute) return base;
+    try {
+      return substitute.call(this.sink, base, family);
+    } catch (error) {
+      console.warn(
+        `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
+          `measuring with the substitute's own metrics: ` +
+          `${error instanceof Error ? error.message : String(error)}`
+      );
+      return base;
+    }
+  }
+
   /** Register raw bytes exactly once per buffer identity (see `bufferIds`). */
   private registerBuffer(bytes: ArrayBuffer): Promise<number> {
     let pending = this.bufferIds.get(bytes);
@@ -483,7 +512,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return await this.registerBuffer(bytes);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch (error) {
           console.warn(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
@@ -513,7 +542,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return await this.registerBuffer(bytes);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch {
           console.warn(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +

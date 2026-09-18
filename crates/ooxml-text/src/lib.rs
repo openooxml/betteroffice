@@ -27,6 +27,8 @@
 //!   fills the *content* box up to one grid row via [`snap_line_box`] when
 //!   the caller supplies an activating grid pitch, so the `auto` multiple
 //!   then scales the filled pitch.
+//! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
+//!   ships, so a substituted face measures as the one the document named.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -45,12 +47,13 @@ pub mod line_break;
 pub mod measure;
 pub mod outline;
 pub mod shape;
+pub mod word_fonts;
 pub mod word_metrics;
 
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };
-pub use font_store::{FontError, FontId, FontMetrics, FontStore};
+pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{BreakOpportunity, break_opportunities};
 pub use measure::{
     FontChains, MeasureError, MeasureInput, MeasureRequest, ParagraphExtentOut, TypesetRowOut,

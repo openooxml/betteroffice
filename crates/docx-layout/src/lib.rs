@@ -535,6 +535,24 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     })
 }
 
+/// Register a measurement view of `base` carrying the vertical metrics Word
+/// measures `requested_family` with, and return its id; returns `base`
+/// unchanged for a family with no known metrics. Hosts call this for a face
+/// they substituted, and put the result at the head of that family's chain.
+#[wasm_bindgen]
+pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
+    let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
+        return Ok(base);
+    };
+    MEASURE_FONTS.with(|store| {
+        store
+            .borrow_mut()
+            .register_substitute(ooxml_text::FontId::from_u32(base), requested)
+            .map(|id| id.to_u32())
+            .map_err(|e| JsValue::from_str(&e.to_string()))
+    })
+}
+
 /// Drop every registered measurement font (ids restart at 0). Callers must
 /// re-register before the next `measure_paragraph_json`.
 #[wasm_bindgen]

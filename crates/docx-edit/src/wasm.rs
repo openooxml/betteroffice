@@ -1212,6 +1212,17 @@ impl EditSession {
         docx_layout::register_measure_font(bytes)
     }
 
+    /// Registers a measurement view of `base` carrying the vertical metrics
+    /// Word measures `requested_family` with — for a face this host had to
+    /// substitute. Returns `base` for a family whose metrics are unknown.
+    pub fn register_substitute_measure_font(
+        &self,
+        base: u32,
+        requested_family: &str,
+    ) -> Result<u32, JsValue> {
+        docx_layout::register_substitute_measure_font(base, requested_family)
+    }
+
     /// Drops every registered measurement font (ids restart at zero) and
     /// invalidates the retained paragraph measurement templates, so the next
     /// edit must pass back through the full layout path.

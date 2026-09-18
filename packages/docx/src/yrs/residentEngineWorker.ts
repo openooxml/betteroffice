@@ -236,7 +236,10 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
     // A mismatched revision always carries the full font set (the client only
     // omits fonts when it knows this session's applied revision matches).
     session.clearFonts();
-    for (const font of snapshot.fonts) session.registerFont(font);
+    for (const font of snapshot.fonts) {
+      if (font instanceof Uint8Array) session.registerFont(font);
+      else session.registerSubstituteFont(font.substituteOf, font.family);
+    }
     fontsRevision = snapshot.fontsRevision;
   }
   for (const { story, env } of snapshot.renderInputs) session.yrsBlocksForStory(story, env);

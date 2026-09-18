@@ -158,10 +158,23 @@ impl std::fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
+/// `head.unitsPerEm` and the `hhea` ascender/descender of a face a document
+/// asked for but the host could not supply, carried by the substitute that
+/// stands in for it. See [`FontStore::register_substitute`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestedLineMetrics {
+    pub units_per_em: u16,
+    pub hhea_ascender: i16,
+    pub hhea_descender: i16,
+}
+
 /// Design-space metrics extracted at registration time, in font units.
 ///
 /// Both the `hhea` and `OS/2` variants support the line-metric experiments in
-/// [`crate::word_metrics`].
+/// [`crate::word_metrics`]. On an entry made by
+/// [`FontStore::register_substitute`] the vertical fields describe the face the
+/// document asked for rather than the bytes; `units_per_em` always describes
+/// the bytes, so shaping and outlines are unaffected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FontMetrics {
     pub units_per_em: u16,
@@ -200,6 +213,9 @@ impl FontMetrics {
 }
 
 struct FontEntry {
+    /// Entry owning the bytes, for a metrics-only view of another face;
+    /// `None` when this entry owns its own.
+    bytes_of: Option<usize>,
     // Declared before `data` so the borrowing parser views drop first.
     //
     // SAFETY invariants for the `'static` lifetimes below: both views borrow
@@ -285,8 +301,53 @@ impl FontStore {
 
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(FontEntry {
+            bytes_of: None,
             face,
             data,
+            metrics,
+            char_cache: RefCell::new(HashMap::new()),
+        });
+        Ok(id)
+    }
+
+    /// Register a measurement view of `base` that carries `requested`'s
+    /// vertical metrics — the face the document named, which the host had to
+    /// substitute `base` for.
+    ///
+    /// The view shares `base`'s bytes, so its glyphs, advances, cmap coverage
+    /// and outlines are `base`'s and its `units_per_em` stays `base`'s. Only
+    /// the `hhea` span moves, rescaled into `base`'s units per em, and the
+    /// `OS/2` East Asian code pages are asserted so `single_line_box` measures
+    /// the view the way Word measures the named face.
+    ///
+    /// Hosts put the returned id at the head of that family's fallback chain;
+    /// the chain head is what line metrics come from.
+    pub fn register_substitute(
+        &mut self,
+        base: FontId,
+        requested: RequestedLineMetrics,
+    ) -> Result<FontId, FontError> {
+        let entry = self.entry(base)?;
+        let owner = entry.bytes_of.unwrap_or(base.0 as usize);
+        let mut metrics = entry.metrics;
+        if requested.units_per_em == 0 || metrics.units_per_em == 0 {
+            return Ok(base);
+        }
+        let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
+        let rescale = |design: i16| {
+            (f32::from(design) * scale)
+                .round()
+                .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16
+        };
+        metrics.hhea_ascender = rescale(requested.hhea_ascender);
+        metrics.hhea_descender = rescale(requested.hhea_descender);
+        metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+
+        let id = FontId(self.fonts.len() as u32);
+        self.fonts.push(FontEntry {
+            bytes_of: Some(owner),
+            face: None,
+            data: Box::default(),
             metrics,
             char_cache: RefCell::new(HashMap::new()),
         });
@@ -314,7 +375,7 @@ impl FontStore {
 
     /// Raw bytes of a registered font (for shaping / outline extraction).
     pub fn font_bytes(&self, id: FontId) -> Result<&[u8], FontError> {
-        self.entry(id).map(|e| &*e.data)
+        self.byte_entry(id).map(|e| &*e.data)
     }
 
     /// Parsed shaping face memoized at registration. `None` when rustybuzz
@@ -323,7 +384,7 @@ impl FontStore {
         &self,
         id: FontId,
     ) -> Result<Option<&rustybuzz::Face<'_>>, FontError> {
-        self.entry(id).map(|e| e.face.as_ref())
+        self.byte_entry(id).map(|e| e.face.as_ref())
     }
 
     pub(crate) fn cached_shape(&self, key: &ShapeCacheKey) -> Option<Vec<ShapedGlyph>> {
@@ -357,7 +418,7 @@ impl FontStore {
 
     /// Memoized cmap (+advance) lookup for one character of one font.
     fn char_entry(&self, id: FontId, ch: char) -> Result<CharEntry, FontError> {
-        let entry = self.entry(id)?;
+        let entry = self.byte_entry(id)?;
         if let Some(cached) = entry.char_cache.borrow().get(&ch) {
             return Ok(*cached);
         }
@@ -413,6 +474,15 @@ impl FontStore {
 
     fn entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
         self.fonts.get(id.0 as usize).ok_or(FontError::UnknownFont)
+    }
+
+    /// Entry holding `id`'s bytes: itself, or the face a measurement view
+    /// stands in for.
+    fn byte_entry(&self, id: FontId) -> Result<&FontEntry, FontError> {
+        match self.entry(id)?.bytes_of {
+            Some(base) => self.fonts.get(base).ok_or(FontError::UnknownFont),
+            None => self.entry(id),
+        }
     }
 
     // registration already proved the bytes parse, so this cannot fail
