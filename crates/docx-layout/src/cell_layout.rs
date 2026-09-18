@@ -22,11 +22,7 @@ pub(crate) fn nested_table_float_offset(position: Option<&FloatingTablePosition>
     .filter(|offset| offset.is_finite() && *offset >= 0.0)
 }
 
-/// Whether a cell drawing is an overlay the row must not grow for.
-///
-/// Word paints a `wrapNone` anchor (`behind` / `inFront`) over the cell and
-/// reserves nothing for it, in the row height or in the flow below. A wrapping
-/// anchor still displaces cell text and keeps its space.
+/// Whether a cell anchor only paints, reserving no row height.
 pub(crate) fn cell_overlay_drawing(positioned: bool, wrap_type: Option<&str>) -> bool {
     positioned
         && !matches!(

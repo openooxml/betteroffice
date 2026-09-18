@@ -114,30 +114,35 @@ fn parity_aligned_floats_keep_their_existing_placement() {
     }
 }
 
-/// Word 16.113 reserves a full-width float's band rather than painting over the
-/// flow: a page-anchored float whose band starts above the pen displaced the
-/// lines already sitting in it, so the page held that much less flow. Probed
-/// with a `vertAnchor="page"` float anchored after 30 lines — Word moved every
-/// line the band covered below it and pushed the tail onto the next page.
+/// A band opening above the pen still costs the page its height, and the flow
+/// already emitted into it stays put — Word instead moves that flow below the
+/// band, which a single forward pass cannot do.
 #[test]
-fn a_page_anchored_band_above_the_pen_displaces_the_flow_below_it() {
+fn a_page_anchored_band_above_the_pen_costs_the_page_its_height() {
     let mut table = table(180, 10);
     table["block"]["floating"]["vertAnchor"] = json!("page");
     let output = layout(50, table);
-    let after = output["pages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .enumerate()
-        .flat_map(|(index, page)| {
-            page["fragments"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(move |fragment| (index, fragment))
-        })
-        .find(|(_, fragment)| fragment["blockId"] == "after")
-        .unwrap();
-    assert_eq!(after.0, 1);
-    assert_eq!(after.1["y"], 10);
+    let placed = |id: &str| {
+        output["pages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .enumerate()
+            .flat_map(|(index, page)| {
+                page["fragments"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |fragment| (index, fragment))
+            })
+            .find(|(_, fragment)| fragment["blockId"] == id)
+            .map(|(index, fragment)| (index, fragment["y"].as_f64().unwrap()))
+            .unwrap()
+    };
+    let band = &output["pages"][0]["fragments"][1];
+    assert_eq!(band["y"], 10);
+    assert_eq!(band["height"], 60);
+    assert_eq!(placed("after"), (1, 10.0));
+    // Residue: `before` occupies 10..60, inside the 10..70 band.
+    assert_eq!(placed("before"), (0, 10.0));
 }

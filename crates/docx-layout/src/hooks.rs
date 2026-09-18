@@ -576,9 +576,8 @@ pub fn layout_floating_table(
     paginator.push_fragment_direct(fragment);
 
     if full_width {
-        // The band is reserved, not merely skipped: flow already sitting inside
-        // it is displaced below it, so the pen starts from the later of the pen
-        // and the band top before the band's own height is added.
+        // Charges the band to the page even when it opens above the pen; flow
+        // already emitted into it keeps its place.
         let pen_y = paginator.state(state_idx).pen_y;
         let advance_to = pen_y.max(y) + measure.total_height + finite(floating.bottom_from_text);
         if advance_to > pen_y {
