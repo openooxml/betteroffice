@@ -4980,7 +4980,7 @@ fn build_display_list_selected(
                 _ => {}
             }
         }
-        behind_objects.sort_by_key(BehindObject::relative_height);
+        behind_objects.sort_by_key(|object| (object.relative_height(), object.doc_order()));
         for object in behind_objects {
             match object {
                 BehindObject::Image {
@@ -7699,6 +7699,17 @@ impl BehindObject<'_> {
             Self::Shape { block, .. } => block.relative_height,
         }
         .unwrap_or(0)
+    }
+
+    /// Word breaks equal ranks by document order. Fragment order alone cannot
+    /// see it: a paragraph's anchored pictures are its own runs while its
+    /// anchored shapes are sibling blocks, so the two interleave only here.
+    fn doc_order(&self) -> i64 {
+        match self {
+            Self::Image { image, .. } => image.pm_start,
+            Self::Shape { fragment, block } => fragment.pm_start.or(block.pm_start),
+        }
+        .unwrap_or(i64::MAX)
     }
 }
 
