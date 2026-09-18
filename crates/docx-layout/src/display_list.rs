@@ -7701,9 +7701,7 @@ impl BehindObject<'_> {
         .unwrap_or(0)
     }
 
-    /// Word breaks equal ranks by document order. Fragment order alone cannot
-    /// see it: a paragraph's anchored pictures are its own runs while its
-    /// anchored shapes are sibling blocks, so the two interleave only here.
+    /// Tie-break for equal ranks: document order.
     fn doc_order(&self) -> i64 {
         match self {
             Self::Image { image, .. } => image.pm_start,
