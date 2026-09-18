@@ -346,10 +346,7 @@ impl Filler<'_> {
         self.finalize_line()
     }
 
-    /// Place an inline image at its declared height. Word never shrinks an
-    /// inline picture to the column: one wider than the column keeps its
-    /// `wp:extent` and overflows the margin, and alone on a line it does not
-    /// wrap first.
+    /// Place an inline image at its declared extent.
     fn fill_inline_image(&mut self, ri: u32, img: PreparedImage) -> Result<(), MeasureError> {
         if self.cur.width > 0.0 && self.cur.width + img.width > self.cur.available + WRAP_SLACK_PX {
             self.start_new_line(ri, 0)?;
