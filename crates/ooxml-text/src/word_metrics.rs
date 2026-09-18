@@ -21,16 +21,11 @@
 //! The `w:noLeading` compatibility flag (`w:compat`, ECMA-376 §17.15.3)
 //! drops the lineGap, leaving the bare ascender-to-descender span.
 //!
-//! Measured against Word 16.113 on macOS with synthetic faces that move one
-//! field at a time, embedded in the probe document so Word measures the exact
-//! bytes under test. The gate is causal: inflating usWinAscent/usWinDescent
-//! from 1.117 to 1.285 em moves neither the pitch nor the baseline, shrinking
-//! them to 0.977 em moves nothing either, and rewriting the sTypo family
-//! moves nothing with or without `USE_TYPO_METRICS`; hhea.lineGap,
-//! hhea.ascender and hhea.descender each move the pitch one-for-one, and
-//! lineGap alone moves the first baseline by its full value. Word's bundled
-//! Aptos discriminates the two rules on a real face — usWin 1.28467 em
-//! against hhea 1.22070 em — and measures 1.21925 em.
+//! Measured on Word 16.113 and PowerPoint 16.113 (macOS); both applications
+//! read the same family, so this rule is shared, not per-format. Verified on
+//! Latin and script-neutral faces only. Arabic faces are **unverified** —
+//! neither application could be made to lay out an Arabic-script face under
+//! test here.
 //!
 //! The usWin family stays on [`crate::font_store::FontMetrics`] because the
 //! opt-in experiments below still read it.
