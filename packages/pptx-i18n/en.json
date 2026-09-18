@@ -18,6 +18,7 @@
     "deleteSlide": "Delete slide",
     "objectsLabel": "Objects",
     "addTextBox": "Add text box",
+    "insertImage": "Insert image",
     "groups": {
       "file": "File",
       "slides": "Slides",
@@ -62,6 +63,11 @@
     "noBorder": "No border",
     "cornerRadius": "Corner radius",
     "shapeAdjustment": "Shape adjustment",
+    "arrange": "Arrange",
+    "bringToFront": "Bring to front",
+    "bringForward": "Bring forward",
+    "sendBackward": "Send backward",
+    "sendToBack": "Send to back",
     "shapes": {
       "rect": "Rectangle",
       "roundRect": "Rounded rectangle",
@@ -95,7 +101,8 @@
     "openPrompt": "Open a PPTX file"
   },
   "objects": {
-    "defaultTextBoxName": "Text Box"
+    "defaultTextBoxName": "Text Box",
+    "defaultPictureName": "Picture"
   },
   "presentation": {
     "label": "Slide presentation",

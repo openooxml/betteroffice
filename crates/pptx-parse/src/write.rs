@@ -26,6 +26,8 @@ const SLIDE_LAYOUT_RELATIONSHIP_TYPE: &str =
     "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout";
 const SLIDE_CONTENT_TYPE: &str =
     "application/vnd.openxmlformats-officedocument.presentationml.slide+xml";
+const IMAGE_RELATIONSHIP_TYPE: &str =
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
 const MIN_SLIDE_ID: u32 = 256;
 const MAX_SLIDE_ID: u32 = 2_147_483_647;
 
@@ -140,6 +142,13 @@ pub struct ShapeAdd {
     pub fill: Option<ShapeFill>,
     pub outline: Option<ShapeOutline>,
     pub paragraphs: Option<Vec<ParagraphWrite>>,
+    /// A picture instead of an autoshape; mints its own media part and relationship.
+    pub picture: Option<PictureAdd>,
+}
+
+pub struct PictureAdd {
+    pub media_bytes: Vec<u8>,
+    pub content_type: String,
 }
 
 /// Writes the package with `deck` applied. Slides marked [`SlideWrite::Keep`]
@@ -171,21 +180,6 @@ pub fn write_pptx_with_edits(
     let mut replacements: HashMap<String, Vec<u8>> = HashMap::new();
     let mut new_parts: Vec<(String, Vec<u8>)> = Vec::new();
 
-    for slide in &deck.slides {
-        if let SlideWrite::Patch { part_path, shapes } = slide {
-            let bytes = package
-                .part_bytes(part_path)
-                .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
-            let mut root = parse_xml(bytes, part_path, &mut budget)?;
-            let original_root = root.clone();
-            let theme = slide_theme(package, part_path);
-            patch_slide(&mut root, shapes, theme, part_path, package.shape_elements)?;
-            if root != original_root {
-                replacements.insert(part_path.clone(), serialize_xml(&root));
-            }
-        }
-    }
-
     let mut minted = Vec::new();
     let mut next_slide_number = next_slide_number(package);
     let mut minted_slide_id: Option<u32> = None;
@@ -193,71 +187,101 @@ pub fn write_pptx_with_edits(
     let mut structural = false;
     let mut final_order: Vec<FinalSlide<'_>> = Vec::new();
     let mut minted_by_slide: HashMap<usize, usize> = HashMap::new();
-    for (slide_index, slide) in deck.slides.iter().enumerate() {
-        match slide {
-            SlideWrite::Keep { part_path } | SlideWrite::Patch { part_path, .. } => {
-                let reference = package
-                    .presentation
-                    .slides
-                    .iter()
-                    .find(|reference| &reference.part_path == part_path)
-                    .ok_or_else(|| write_error(part_path, "not a slide of this deck"))?;
-                final_order.push(FinalSlide::Existing(reference));
-            }
-            SlideWrite::Add {
-                name,
-                layout_part_path,
-                shapes,
-            } => {
-                structural = true;
-                let part_path = format!("ppt/slides/slide{next_slide_number}.xml");
-                next_slide_number += 1;
-                let relationship_id = format!("rId{next_relationship}");
-                next_relationship += 1;
-                let slide_id = match minted_slide_id {
-                    None => next_slide_id(package)?,
-                    Some(previous) => previous
-                        .checked_add(1)
-                        .filter(|id| *id <= MAX_SLIDE_ID)
-                        .ok_or_else(|| {
-                            write_error(
-                                &package.presentation.part_path,
-                                "the slide id space is exhausted",
-                            )
-                        })?,
-                };
-                minted_slide_id = Some(slide_id);
-                let layout = layout_part_path
-                    .clone()
-                    .filter(|path| {
-                        package
-                            .layouts
-                            .iter()
-                            .any(|layout| &layout.part_path == path)
-                    })
-                    .or_else(|| {
-                        package
-                            .layouts
-                            .first()
-                            .map(|layout| layout.part_path.clone())
-                    });
-                new_parts.push((
-                    part_path.clone(),
-                    slide_xml(name.as_deref(), shapes, &part_path)?,
-                ));
-                if let Some(layout) = &layout {
-                    new_parts.push((
-                        slide_relationships_path(&part_path),
-                        slide_relationships_xml(&part_path, layout),
-                    ));
-                }
-                minted.push(MintedSlide {
+    {
+        let mut sink = PartSink {
+            package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+
+        for slide in &deck.slides {
+            if let SlideWrite::Patch { part_path, shapes } = slide {
+                let bytes = package
+                    .part_bytes(part_path)
+                    .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
+                let mut root = parse_xml(bytes, part_path, &mut budget)?;
+                let original_root = root.clone();
+                let theme = slide_theme(package, part_path);
+                patch_slide(
+                    &mut root,
+                    shapes,
+                    theme,
                     part_path,
-                    relationship_id,
-                    slide_id,
-                });
-                minted_by_slide.insert(slide_index, minted.len() - 1);
-                final_order.push(FinalSlide::Added(minted.len() - 1));
+                    package.shape_elements,
+                    &mut sink,
+                    &mut budget,
+                )?;
+                if root != original_root {
+                    sink.store(part_path, serialize_xml(&root));
+                }
+            }
+        }
+
+        for (slide_index, slide) in deck.slides.iter().enumerate() {
+            match slide {
+                SlideWrite::Keep { part_path } | SlideWrite::Patch { part_path, .. } => {
+                    let reference = package
+                        .presentation
+                        .slides
+                        .iter()
+                        .find(|reference| &reference.part_path == part_path)
+                        .ok_or_else(|| write_error(part_path, "not a slide of this deck"))?;
+                    final_order.push(FinalSlide::Existing(reference));
+                }
+                SlideWrite::Add {
+                    name,
+                    layout_part_path,
+                    shapes,
+                } => {
+                    structural = true;
+                    let part_path = format!("ppt/slides/slide{next_slide_number}.xml");
+                    next_slide_number += 1;
+                    let relationship_id = format!("rId{next_relationship}");
+                    next_relationship += 1;
+                    let slide_id = match minted_slide_id {
+                        None => next_slide_id(package)?,
+                        Some(previous) => previous
+                            .checked_add(1)
+                            .filter(|id| *id <= MAX_SLIDE_ID)
+                            .ok_or_else(|| {
+                                write_error(
+                                    &package.presentation.part_path,
+                                    "the slide id space is exhausted",
+                                )
+                            })?,
+                    };
+                    minted_slide_id = Some(slide_id);
+                    let layout = layout_part_path
+                        .clone()
+                        .filter(|path| {
+                            package
+                                .layouts
+                                .iter()
+                                .any(|layout| &layout.part_path == path)
+                        })
+                        .or_else(|| {
+                            package
+                                .layouts
+                                .first()
+                                .map(|layout| layout.part_path.clone())
+                        });
+                    if let Some(layout) = &layout {
+                        sink.store(
+                            &slide_relationships_path(&part_path),
+                            slide_relationships_xml(&part_path, layout),
+                        );
+                    }
+                    let xml =
+                        slide_xml(name.as_deref(), shapes, &part_path, &mut sink, &mut budget)?;
+                    sink.store(&part_path, xml);
+                    minted.push(MintedSlide {
+                        part_path,
+                        relationship_id,
+                        slide_id,
+                    });
+                    minted_by_slide.insert(slide_index, minted.len() - 1);
+                    final_order.push(FinalSlide::Added(minted.len() - 1));
+                }
             }
         }
     }
@@ -524,10 +548,14 @@ fn patch_structure(
     replacements.insert(relationships_path, serialize_xml(&root));
 
     let content_types_path = "[Content_Types].xml";
-    let bytes = package
-        .part_bytes(content_types_path)
-        .ok_or_else(|| PptxError::MissingPart(content_types_path.to_owned()))?;
-    let mut root = parse_xml(bytes, content_types_path, budget)?;
+    let bytes = match replacements.get(content_types_path) {
+        Some(bytes) => bytes.clone(),
+        None => package
+            .part_bytes(content_types_path)
+            .ok_or_else(|| PptxError::MissingPart(content_types_path.to_owned()))?
+            .to_vec(),
+    };
+    let mut root = parse_xml(&bytes, content_types_path, budget)?;
     let removed_names: HashSet<String> = removed
         .iter()
         .map(|reference| format!("/{}", reference.part_path))
@@ -1022,6 +1050,8 @@ fn set_content_type_override(
         .current(path)
         .ok_or_else(|| PptxError::MissingPart(path.to_owned()))?;
     let mut root = parse_xml(&bytes, path, budget)?;
+    let prefix = root.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+    let override_name = qualified(prefix, "Override");
     let name = format!("/{part_path}");
     let existing = root.children.iter_mut().find_map(|child| match child {
         XmlNode::Element(element)
@@ -1035,7 +1065,7 @@ fn set_content_type_override(
     match existing {
         Some(element) => element.set_attribute("ContentType", content_type),
         None => root.children.push(XmlNode::Element(
-            XmlElement::new("Override")
+            XmlElement::new(override_name)
                 .with_attribute("PartName", name)
                 .with_attribute("ContentType", content_type),
         )),
@@ -1219,6 +1249,7 @@ fn qualified(prefix: &str, local: &str) -> String {
 struct Prefixes {
     drawing: String,
     presentation: String,
+    relationship: String,
 }
 
 impl Prefixes {
@@ -1226,6 +1257,7 @@ impl Prefixes {
         Self {
             drawing: resolve_prefix(root, DRAWINGML_NS, "a"),
             presentation: resolve_prefix(root, PRESENTATIONML_NS, "p"),
+            relationship: resolve_prefix(root, OFFICE_RELATIONSHIPS_NS, "r"),
         }
     }
 
@@ -1235,6 +1267,10 @@ impl Prefixes {
 
     fn presentation(&self, local: &str) -> String {
         qualified(&self.presentation, local)
+    }
+
+    fn relationship(&self, local: &str) -> String {
+        qualified(&self.relationship, local)
     }
 }
 
@@ -1247,6 +1283,8 @@ fn patch_slide(
     theme: Option<&Theme>,
     part: &str,
     elements: ShapeElements,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     let prefixes = Prefixes::from_root(root);
     let mut next_shape_id = max_shape_id(root).checked_add(1);
@@ -1262,6 +1300,8 @@ fn patch_slide(
         &prefixes,
         part,
         elements,
+        sink,
+        budget,
     )
 }
 
@@ -1334,6 +1374,7 @@ struct ShapeSlot {
 /// Rebuilds the shape run in place: non-shape siblings keep their slots
 /// relative to the shape that follows them, and elements trailing the last
 /// shape (`p:extLst` in particular) stay last.
+#[allow(clippy::too_many_arguments)]
 fn patch_shape_children(
     parent: &mut XmlElement,
     writes: &[ShapeWrite],
@@ -1342,6 +1383,8 @@ fn patch_shape_children(
     prefixes: &Prefixes,
     part: &str,
     elements: ShapeElements,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     let mut slots: Vec<Option<XmlNode>> = std::mem::take(&mut parent.children)
         .into_iter()
@@ -1436,6 +1479,8 @@ fn patch_shape_children(
                         prefixes,
                         part,
                         elements,
+                        sink,
+                        budget,
                     )?;
                 }
             }
@@ -1446,11 +1491,13 @@ fn patch_shape_children(
                     let flush_end = first_ext_list(&slots);
                     emit_sibling_slots(&mut slots, &mut children, flush_end, elements);
                 }
-                children.push(XmlNode::Element(shape_element(
+                children.push(XmlNode::Element(add_shape_element(
                     add,
                     next_shape_id,
                     prefixes,
                     part,
+                    sink,
+                    budget,
                 )?));
             }
         }
@@ -1605,6 +1652,7 @@ fn emit_sibling_slots(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn patch_shape(
     element: &mut XmlElement,
     patch: &ShapePatch,
@@ -1613,6 +1661,8 @@ fn patch_shape(
     prefixes: &Prefixes,
     part: &str,
     elements: ShapeElements,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
 ) -> Result<(), PptxError> {
     if patch.offset.is_some() || patch.extent.is_some() {
         patch_transform(element, patch, prefixes, part)?;
@@ -1641,6 +1691,8 @@ fn patch_shape(
             prefixes,
             part,
             elements,
+            sink,
+            budget,
         )?;
     }
     Ok(())
@@ -2981,7 +3033,218 @@ fn shape_element(
     Ok(shape)
 }
 
-fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<u8>, PptxError> {
+/// A new shape, or a picture that also needs a media part and relationship.
+fn add_shape_element(
+    add: &ShapeAdd,
+    next_shape_id: &mut Option<u32>,
+    prefixes: &Prefixes,
+    part: &str,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<XmlElement, PptxError> {
+    match &add.picture {
+        Some(picture) => {
+            picture_shape_element(add, picture, next_shape_id, prefixes, part, sink, budget)
+        }
+        None => shape_element(add, next_shape_id, prefixes, part),
+    }
+}
+
+fn image_content_type_extension(content_type: &str) -> Option<&'static str> {
+    match content_type {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpeg"),
+        "image/gif" => Some("gif"),
+        "image/bmp" => Some("bmp"),
+        "image/tiff" => Some("tiff"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        _ => None,
+    }
+}
+
+fn image_extension(content_type: &str) -> Result<&'static str, PptxError> {
+    image_content_type_extension(content_type)
+        .ok_or_else(|| write_error("media", format!("unsupported image type {content_type:?}")))
+}
+
+/// Whether [`write_pptx_with_edits`] can mint a media part for this MIME type.
+pub fn is_supported_image_content_type(content_type: &str) -> bool {
+    image_content_type_extension(content_type).is_some()
+}
+
+fn next_media_part_path(
+    package: &PptxPackage,
+    new_parts: &[(String, Vec<u8>)],
+    extension: &str,
+) -> String {
+    let existing: HashSet<&str> = package
+        .parts
+        .iter()
+        .map(|part| part.path.as_str())
+        .chain(new_parts.iter().map(|(path, _)| path.as_str()))
+        .collect();
+    let mut number = 1_u64;
+    while existing.contains(format!("ppt/media/image{number}.{extension}").as_str()) {
+        number += 1;
+    }
+    format!("ppt/media/image{number}.{extension}")
+}
+
+/// Registers the extension as a package-wide default, unless already declared.
+fn ensure_media_content_type(
+    sink: &mut PartSink<'_>,
+    extension: &str,
+    part_path: &str,
+    content_type: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<(), PptxError> {
+    let path = "[Content_Types].xml";
+    let bytes = sink
+        .current(path)
+        .ok_or_else(|| PptxError::MissingPart(path.to_owned()))?;
+    let mut root = parse_xml(&bytes, path, budget)?;
+    let default = root.children.iter().find_map(|child| match child {
+        XmlNode::Element(element)
+            if element.local_name() == "Default"
+                && element
+                    .attribute("Extension")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(extension)) =>
+        {
+            Some(element)
+        }
+        _ => None,
+    });
+    if let Some(default) = default {
+        if default.attribute("ContentType") != Some(content_type) {
+            set_content_type_override(sink, part_path, content_type, budget)?;
+        }
+    } else {
+        let prefix = root.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+        root.children.push(XmlNode::Element(
+            XmlElement::new(qualified(prefix, "Default"))
+                .with_attribute("Extension", extension)
+                .with_attribute("ContentType", content_type),
+        ));
+        sink.store(path, serialize_xml(&root));
+    }
+    Ok(())
+}
+
+/// Unlike [`set_relationship`], always mints a fresh one rather than
+/// replacing an existing match, since a slide can carry many images.
+fn add_relationship(
+    sink: &mut PartSink<'_>,
+    relationships_path: &str,
+    relationship_type: &str,
+    target: &str,
+    budget: &mut ParseBudget<'_>,
+) -> Result<String, PptxError> {
+    let mut root = match sink.current(relationships_path) {
+        Some(bytes) => parse_xml(&bytes, relationships_path, budget)?,
+        None => XmlElement::new("Relationships").with_attribute("xmlns", PACKAGE_RELATIONSHIPS_NS),
+    };
+    let used: HashSet<&str> = root
+        .children_named("Relationship")
+        .filter_map(|element| element.attribute("Id"))
+        .collect();
+    let mut number = 1_u64;
+    while used.contains(format!("rId{number}").as_str()) {
+        number += 1;
+    }
+    let id = format!("rId{number}");
+    let prefix = root.name.rsplit_once(':').map_or("", |(prefix, _)| prefix);
+    root.children.push(XmlNode::Element(
+        XmlElement::new(qualified(prefix, "Relationship"))
+            .with_attribute("Id", id.clone())
+            .with_attribute("Type", relationship_type)
+            .with_attribute("Target", target),
+    ));
+    sink.store(relationships_path, serialize_xml(&root));
+    Ok(id)
+}
+
+fn picture_shape_element(
+    add: &ShapeAdd,
+    picture: &PictureAdd,
+    next_shape_id: &mut Option<u32>,
+    prefixes: &Prefixes,
+    slide_part_path: &str,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<XmlElement, PptxError> {
+    let extension = image_extension(&picture.content_type)?;
+    let media_part_path = next_media_part_path(sink.package, sink.new_parts.as_slice(), extension);
+    sink.store(&media_part_path, picture.media_bytes.clone());
+    ensure_media_content_type(
+        sink,
+        extension,
+        &media_part_path,
+        &picture.content_type,
+        budget,
+    )?;
+    let relationships_path = slide_relationships_path(slide_part_path);
+    let target = relative_target(slide_part_path, &media_part_path);
+    let relationship_id = add_relationship(
+        sink,
+        &relationships_path,
+        IMAGE_RELATIONSHIP_TYPE,
+        &target,
+        budget,
+    )?;
+
+    let shape_id = alloc_shape_id(next_shape_id, slide_part_path)?;
+    let non_visual = XmlElement::new(prefixes.presentation("nvPicPr"))
+        .with_child(
+            XmlElement::new(prefixes.presentation("cNvPr"))
+                .with_attribute("id", shape_id.to_string())
+                .with_attribute("name", add.name.clone()),
+        )
+        .with_child(
+            XmlElement::new(prefixes.presentation("cNvPicPr")).with_child(
+                XmlElement::new(prefixes.drawing("picLocks")).with_attribute("noChangeAspect", "1"),
+            ),
+        )
+        .with_child(XmlElement::new(prefixes.presentation("nvPr")));
+    let blip_fill = XmlElement::new(prefixes.presentation("blipFill"))
+        .with_child(
+            XmlElement::new(prefixes.drawing("blip"))
+                .with_attribute(prefixes.relationship("embed"), relationship_id),
+        )
+        .with_child(
+            XmlElement::new(prefixes.drawing("stretch"))
+                .with_child(XmlElement::new(prefixes.drawing("fillRect"))),
+        );
+    let transform = XmlElement::new(prefixes.drawing("xfrm"))
+        .with_child(
+            XmlElement::new(prefixes.drawing("off"))
+                .with_attribute("x", add.x.to_string())
+                .with_attribute("y", add.y.to_string()),
+        )
+        .with_child(
+            XmlElement::new(prefixes.drawing("ext"))
+                .with_attribute("cx", add.width.to_string())
+                .with_attribute("cy", add.height.to_string()),
+        );
+    let geometry = XmlElement::new(prefixes.drawing("prstGeom"))
+        .with_attribute("prst", "rect")
+        .with_child(XmlElement::new(prefixes.drawing("avLst")));
+    let properties = XmlElement::new(prefixes.presentation("spPr"))
+        .with_child(transform)
+        .with_child(geometry);
+    Ok(XmlElement::new(prefixes.presentation("pic"))
+        .with_child(non_visual)
+        .with_child(blip_fill)
+        .with_child(properties))
+}
+
+fn slide_xml(
+    name: Option<&str>,
+    shapes: &[ShapeAdd],
+    part: &str,
+    sink: &mut PartSink<'_>,
+    budget: &mut ParseBudget<'_>,
+) -> Result<Vec<u8>, PptxError> {
     let mut root = XmlElement::new("p:sld")
         .with_attribute("xmlns:a", DRAWINGML_NS)
         .with_attribute("xmlns:r", OFFICE_RELATIONSHIPS_NS)
@@ -2989,6 +3252,7 @@ fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<
     let prefixes = Prefixes {
         drawing: "a".to_owned(),
         presentation: "p".to_owned(),
+        relationship: "r".to_owned(),
     };
     let group_transform = XmlElement::new(prefixes.drawing("xfrm"))
         .with_child(
@@ -3025,7 +3289,14 @@ fn slide_xml(name: Option<&str>, shapes: &[ShapeAdd], part: &str) -> Result<Vec<
         .with_child(XmlElement::new(prefixes.presentation("grpSpPr")).with_child(group_transform));
     let mut next_shape_id = Some(2);
     for shape in shapes {
-        tree = tree.with_child(shape_element(shape, &mut next_shape_id, &prefixes, part)?);
+        tree = tree.with_child(add_shape_element(
+            shape,
+            &mut next_shape_id,
+            &prefixes,
+            part,
+            sink,
+            budget,
+        )?);
     }
     let mut common = XmlElement::new(prefixes.presentation("cSld"));
     if let Some(name) = name {
@@ -3141,6 +3412,14 @@ mod tests {
         )
         .unwrap();
 
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
         patch_slide(
             &mut root,
             &[
@@ -3159,6 +3438,8 @@ mod tests {
             None,
             part,
             ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
         )
         .unwrap();
 
@@ -3181,7 +3462,24 @@ mod tests {
         )
         .unwrap();
 
-        patch_slide(&mut root, &[], None, part, ShapeElements::WithoutConnectors).unwrap();
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
+        patch_slide(
+            &mut root,
+            &[],
+            None,
+            part,
+            ShapeElements::WithoutConnectors,
+            &mut sink,
+            &mut budget,
+        )
+        .unwrap();
 
         let xml = String::from_utf8(serialize_xml(&root)).unwrap();
         assert!(!xml.contains(r#"name="one""#), "{xml}");
@@ -3443,6 +3741,14 @@ mod tests {
         )
         .unwrap();
 
+        let package = PptxPackage::default();
+        let mut replacements = HashMap::new();
+        let mut new_parts = Vec::new();
+        let mut sink = PartSink {
+            package: &package,
+            replacements: &mut replacements,
+            new_parts: &mut new_parts,
+        };
         let error = patch_slide(
             &mut root,
             &[ShapeWrite::Patch {
@@ -3455,6 +3761,8 @@ mod tests {
             None,
             part,
             ShapeElements::WithConnectors,
+            &mut sink,
+            &mut budget,
         )
         .unwrap_err();
         assert!(

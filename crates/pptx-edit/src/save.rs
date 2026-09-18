@@ -1,14 +1,15 @@
 //! Baseline-diff write-back: the live CRDT state is compared against a
 //! freshly seeded copy of the source package and only differences are written.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
+use base64::Engine as _;
 use ooxml_drawingml::{ColorValue, ShapeFill};
 use pptx_parse::{
     Bullet, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite, CommentsWrite,
-    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, Placeholder, PptxPackage,
-    RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform, ShapeWrite,
-    SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
+    DeckWrite, InheritedTransform, NotesWrite, ParagraphWrite, PictureAdd, Placeholder,
+    PptxPackage, RunProperties, RunWrite, ShapeAdd, ShapeNode, ShapePatch, ShapeTransform,
+    ShapeWrite, SlideLayout, SlideMaster, SlideWrite, TextTarget, TextWrite,
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
@@ -687,6 +688,9 @@ fn color_from_hex(color: &str) -> ColorValue {
 }
 
 fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+    if shape.kind == ShapeKind::Picture {
+        return picture_shape_add(shape);
+    }
     if shape.kind != ShapeKind::Shape {
         return Err(EditError::Write(format!(
             "shape {} cannot be written as a new shape",
@@ -709,5 +713,34 @@ fn shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
         fill: shape.fill.clone(),
         outline: shape.outline.clone(),
         paragraphs,
+        picture: None,
+    })
+}
+
+fn picture_shape_add(shape: &ShapeSnapshot) -> EditResult<ShapeAdd> {
+    let pending = shape.pending_media.as_ref().ok_or_else(|| {
+        EditError::Write(format!(
+            "shape {} is a picture but carries no pending image data",
+            shape.id
+        ))
+    })?;
+    let media_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&pending.base64)
+        .map_err(|error| EditError::Write(format!("invalid pending image data: {error}")))?;
+    Ok(ShapeAdd {
+        name: shape.name.clone(),
+        geometry: "rect".to_owned(),
+        x: shape.x,
+        y: shape.y,
+        width: shape.width,
+        height: shape.height,
+        adjust_values: BTreeMap::new(),
+        fill: None,
+        outline: None,
+        paragraphs: None,
+        picture: Some(PictureAdd {
+            media_bytes,
+            content_type: pending.content_type.clone(),
+        }),
     })
 }

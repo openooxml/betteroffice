@@ -657,3 +657,35 @@ function oneCallPerTextRun(
   }
   return calls;
 }
+
+test('inserted pictures render, synchronize, arrange and reopen with their bytes', () => {
+  const source = openPresentation(fixture, { clientId: 9401, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const peer = openPresentation(fixture, { clientId: 9402, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
+  const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]);
+  try {
+    const slide = source.snapshot().slides[0];
+    const added = source.addPicture(slide.id, {
+      name: 'Shared picture', rect: { x: 10, y: 20, width: 3000, height: 4000 },
+      contentType: 'image/png', mediaBase64: Buffer.from(bytes).toString('base64'),
+    });
+    const assetId = `pending-media:${added.shapeId}`;
+    expect(source.layoutSlide(0).primitives.some((p) => p.kind === 'image' && p.assetId === assetId)).toBe(true);
+    expect(source.mediaBytes(assetId)).toEqual(bytes);
+    peer.applyUpdate(source.encodeStateAsUpdate());
+    expect(peer.mediaBytes(assetId)).toEqual(bytes);
+    expect(peer.snapshot()).toEqual(source.snapshot());
+    source.sendShapeToBack(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[0].id).toBe(added.shapeId);
+    source.bringShapeForward(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes[1].id).toBe(added.shapeId);
+    source.sendShapeBackward(slide.id, added.shapeId);
+    source.bringShapeToFront(slide.id, added.shapeId);
+    expect(source.snapshot().slides[0].shapes.slice(-1)[0].id).toBe(added.shapeId);
+    const reopened = openPresentation(source.save(), { clientId: 9403 });
+    try {
+      const picture = reopened.snapshot().slides[0].shapes.slice(-1)[0];
+      expect(picture.name).toBe('Shared picture');
+      expect(reopened.mediaBytes(picture.mediaPartPath!)).toEqual(bytes);
+    } finally { reopened.dispose(); }
+  } finally { source.dispose(); peer.dispose(); }
+});

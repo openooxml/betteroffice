@@ -114,6 +114,8 @@ export interface ShapeSnapshot {
   outline: ShapeOutline | null;
   resolvedOutlineColor: string | null;
   mediaPartPath: string | null;
+  /** Image data added to this session, retained across saves. */
+  pendingMedia?: { contentType: string; base64: string } | null;
   blipEffects?: BlipEffect[];
   graphic: unknown | null;
   textStories: StorySnapshot[];
@@ -174,6 +176,13 @@ export interface ShapeReceipt {
   index: number;
 }
 
+export interface ShapeZOrderReceipt {
+  slideId: string;
+  shapeId: string;
+  fromIndex: number;
+  toIndex: number;
+}
+
 export interface ShapeRect {
   x: number;
   y: number;
@@ -207,6 +216,15 @@ export interface PresetShapeDraft {
   geometry: string;
   rect: ShapeRect;
   fill?: string | null;
+}
+
+export interface PictureDraft {
+  name: string;
+  rect: ShapeRect;
+  /** The image's MIME type, e.g. `image/png`. */
+  contentType: string;
+  /** The image bytes, base64-encoded. */
+  mediaBase64: string;
 }
 
 export interface ShapeStroke {

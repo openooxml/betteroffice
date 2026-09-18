@@ -39,7 +39,7 @@ for metric-compatible open faces.
 
 Click text to place the Rust-computed caret, type to edit the yrs story and
 trigger Rust reflow, drag or resize shapes on the canvas, or use the toolbar
-for bold, italic, size, color, slides, and text boxes.
+for bold, italic, size, color, slides, text boxes, image insertion, and shape ordering.
 
 Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
 `onReady` (exposes the core `PresentationHandle`, a `refresh` callback for
@@ -51,7 +51,7 @@ host-driven edits, `refreshProposals`, and `save`), `onChange` (deck snapshots),
 - Slide rendering with Rust layout and text shaping, painted onto canvas
 - Canvas interactions: shape selection, drag, and resize
 - Text editing with caret and selection computed by the engine
-- Slide management (add, delete), text boxes, undo/redo
+- Slide management (add, delete), text boxes, image insertion, shape ordering, undo/redo
 - Saving the deck back to `.pptx` — toolbar button, Ctrl/Cmd+S, or `api.save()`
 - Localized UI via the `i18n` prop
   ([`@betteroffice/pptx-i18n`](https://www.npmjs.com/package/@betteroffice/pptx-i18n))

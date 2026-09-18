@@ -556,13 +556,14 @@ impl<'a> LayoutBuilder<'a> {
             }
             ShapeKind::Picture => {
                 let source = picture_source(original);
+                let asset_id = picture_asset_id(shape);
                 self.render_picture(
                     shape.source_id,
                     &stable_id,
                     &shape.name,
                     rect,
                     transform,
-                    shape.media_part_path.as_deref(),
+                    asset_id.as_deref(),
                     &shape.blip_effects,
                     source.map(|picture| &picture.crop),
                     source.and_then(|picture| picture_mask(picture, rect)),
@@ -3669,6 +3670,16 @@ fn picture_source(shape: Option<&ShapeNode>) -> Option<&Picture> {
         ShapeNode::Picture(picture) => Some(picture),
         _ => None,
     }
+}
+
+/// A picture's part path, or a marker resolving to its unsaved pending bytes.
+fn picture_asset_id(shape: &ShapeSnapshot) -> Option<String> {
+    shape.media_part_path.clone().or_else(|| {
+        shape
+            .pending_media
+            .as_ref()
+            .map(|_| format!("pending-media:{}", shape.id))
+    })
 }
 
 /// Clamps outsets and discards empty crops.
@@ -7242,6 +7253,7 @@ mod tests {
             outline: None,
             resolved_outline_color: None,
             media_part_path: None,
+            pending_media: None,
             blip_effects: Vec::new(),
             graphic: None,
             text_stories: Vec::new(),

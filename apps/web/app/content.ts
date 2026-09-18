@@ -92,7 +92,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine. Custom browser image loaders can use presentationImageBlob for supported bitmap-only WMF wrappers.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with image insertion and shape ordering. Custom browser image loaders can use presentationImageBlob for supported bitmap-only WMF wrappers.",
   },
   {
     name: "@betteroffice/pptx-react",

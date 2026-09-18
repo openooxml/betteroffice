@@ -84,6 +84,10 @@ function synchronizeStandaloneLocks() {
   }
 }
 
+function synchronizeBunLock() {
+  run('bun', ['install', '--lockfile-only']);
+}
+
 const checkOnly = process.argv.includes('--check');
 const before = rustReleaseVersion();
 const cargoBefore = readFileSync(WORKSPACE_MANIFEST, 'utf8');
@@ -159,6 +163,7 @@ for (const binding of PYTHON_BINDINGS) {
 
 validate(after, true);
 synchronizeStandaloneLocks();
+synchronizeBunLock();
 for (const binding of PYTHON_BINDINGS) {
   const from = pythonBefore.get(binding);
   const to = pythonAfter.get(binding);
@@ -169,6 +174,7 @@ for (const binding of PYTHON_BINDINGS) {
 for (const workspace of STANDALONE_WORKSPACES) {
   console.log(`Synchronized ${workspace}/Cargo.lock.`);
 }
+console.log('Synchronized bun.lock.');
 console.log(
   after === before
     ? `Rust release train remains at ${after}.`

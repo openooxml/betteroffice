@@ -20,6 +20,7 @@ import type {
   HistoryResult,
   HitTestResult,
   ParagraphAlignment,
+  PictureDraft,
   PresetShapeDraft,
   PptxFontFace,
   PptxTextMatch,
@@ -31,6 +32,7 @@ import type {
   ShapeRect,
   ShapeStroke,
   ShapeStrokeReceipt,
+  ShapeZOrderReceipt,
   SlideDisplayList,
   SlideReceipt,
   StorySnapshot,
@@ -93,6 +95,7 @@ export interface PresentationHandle extends CollaborationReplica {
   setSlideNotes(slideId: string, text: string): void;
   addTextBox(slideId: string, draft: ShapeDraft): ShapeReceipt;
   addShape(slideId: string, draft: PresetShapeDraft): ShapeReceipt;
+  addPicture(slideId: string, draft: PictureDraft): ShapeReceipt;
   setShapeFill(slideId: string, shapeId: string, color: string | null): ShapeFillReceipt;
   setShapeStroke(
     slideId: string,
@@ -105,6 +108,14 @@ export interface PresentationHandle extends CollaborationReplica {
     adjustments: Record<string, number>
   ): ShapeAdjustReceipt;
   removeShape(slideId: string, shapeId: string): ShapeReceipt;
+  /** Moves a shape to the top of its slide's paint order (drawn last). */
+  bringShapeToFront(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Moves a shape to the bottom of its slide's paint order (drawn first). */
+  sendShapeToBack(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step later in its slide's paint order. */
+  bringShapeForward(slideId: string, shapeId: string): ShapeZOrderReceipt;
+  /** Swaps a shape one step earlier in its slide's paint order. */
+  sendShapeBackward(slideId: string, shapeId: string): ShapeZOrderReceipt;
   /** Adds a slide comment; coordinates are EMU. */
   addComment(
     slideId: string,
@@ -472,6 +483,9 @@ export function openPresentation(
     addShape(slideId, draft): ShapeReceipt {
       return jsonWasmCall(() => doc.addShapeJson(JSON.stringify({ slideId, draft })), true);
     },
+    addPicture(slideId, draft): ShapeReceipt {
+      return jsonWasmCall(() => doc.addPictureJson(JSON.stringify({ slideId, ...draft })), true);
+    },
     setShapeFill(slideId, shapeId, color): ShapeFillReceipt {
       return jsonWasmCall(
         () => doc.setShapeFillJson(JSON.stringify({ slideId, shapeId, color })),
@@ -493,6 +507,30 @@ export function openPresentation(
     removeShape(slideId, shapeId): ShapeReceipt {
       return jsonWasmCall(
         () => doc.removeShapeJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    bringShapeToFront(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeToFrontJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeToBack(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeToBackJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    bringShapeForward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.bringShapeForwardJson(JSON.stringify({ slideId, shapeId })),
+        true
+      );
+    },
+    sendShapeBackward(slideId, shapeId): ShapeZOrderReceipt {
+      return jsonWasmCall(
+        () => doc.sendShapeBackwardJson(JSON.stringify({ slideId, shapeId })),
         true
       );
     },

@@ -118,6 +118,11 @@ impl Presentation {
         &self.package().media
     }
 
+    /// Resolves a display-list image asset, including unsaved pictures.
+    pub fn media_bytes(&self, asset_id: &str) -> Result<Vec<u8>> {
+        Ok(self.session.media_bytes(asset_id)?)
+    }
+
     pub fn search_text(
         &self,
         query: &str,

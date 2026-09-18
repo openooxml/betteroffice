@@ -5,8 +5,8 @@ use serde::Serialize;
 use yrs::{Map, TextRef, Transact};
 
 use crate::deck::{
-    map_string_array, required_map, required_order, shape_ref, slide_ref, slide_shape_order,
-    string_array_ref,
+    live_shape_order, map_string_array, required_map, required_order, shape_ref, slide_ref,
+    slide_shape_order, string_array_ref,
 };
 use crate::{DeckSession, EditError, EditResult, STORIES, story::snapshot_story};
 
@@ -49,7 +49,7 @@ impl DeckSession {
             .enumerate()
         {
             let slide = slide_ref(&txn, &slide_id)?;
-            let mut shapes = string_array_ref(&slide_shape_order(&slide, &txn)?, &txn);
+            let mut shapes = live_shape_order(&slide_shape_order(&slide, &txn)?, &txn)?;
             shapes.reverse();
             let mut seen_shapes = HashSet::new();
             while let Some(shape_id) = shapes.pop() {

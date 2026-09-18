@@ -80,7 +80,13 @@
       "upArrow": null,
       "downArrow": null,
       "chevron": null
-    }
+    },
+    "insertImage": null,
+    "arrange": null,
+    "bringToFront": null,
+    "bringForward": null,
+    "sendBackward": null,
+    "sendToBack": null
   },
   "slides": {
     "panelLabel": null,
@@ -95,7 +101,8 @@
     "openPrompt": null
   },
   "objects": {
-    "defaultTextBoxName": null
+    "defaultTextBoxName": null,
+    "defaultPictureName": null
   },
   "presentation": {
     "label": "स्लाइड प्रस्तुति",

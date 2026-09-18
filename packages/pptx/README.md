@@ -43,10 +43,15 @@ and registered with the Rust shaper through `openPresentation`.
 Beyond rendering, `PresentationHandle` covers editing: text
 (`insertText` / `deleteText` / `formatText` / `setParagraphAlignment`), slides
 (`insertSlide` / `deleteSlide` / `moveSlide`), shapes
-(`addTextBox` / `moveShape` / `resizeShape` / `setShapeRect`), comments
+(`addTextBox` / `addShape` / `addPicture` / `moveShape` / `resizeShape` /
+`setShapeRect`), paint order (`bringShapeToFront` / `sendShapeToBack` /
+`bringShapeForward` / `sendShapeBackward`), comments
 (`addComment` / `replyToComment` / `setCommentStatus` / `removeComment`),
 `hitTest`, undo/redo, and `save()`, which serializes the deck back to `.pptx`
 bytes with edits applied — untouched slides keep their exact source part bytes.
+`addPicture` accepts common raster/vector MIME types (PNG, JPEG, GIF, BMP,
+TIFF, WebP, SVG) up to 8 MiB, rejecting anything past either limit before it
+reaches the deck.
 
 ## Agent proposals
 

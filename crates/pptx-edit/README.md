@@ -46,3 +46,7 @@ Used by [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx). The
 [@betteroffice/pptx](https://www.npmjs.com/package/@betteroffice/pptx).
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
+
+`add_picture` inserts PNG, JPEG, GIF, BMP, TIFF, WebP, or SVG bytes (up to 8 MiB).
+Pictures synchronize with the shared deck and resolve through `media_bytes` before save.
+`bring_to_front`, `send_to_back`, `bring_forward`, and `send_backward` arrange slide objects.

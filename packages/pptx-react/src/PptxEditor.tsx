@@ -265,6 +265,32 @@ function downloadBytes(bytes: Uint8Array, name: string, mime: string): void {
   URL.revokeObjectURL(url);
 }
 
+/** Reads a file as a `data:` URL, e.g. for handing an image to `<img>`/`Image`. */
+function readFileAsDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error ?? new Error('failed to read the file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+/** The pixel size a `data:` image URL decodes to. */
+function loadImageSize(dataUrl: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = () => reject(new Error('failed to decode the image'));
+    image.src = dataUrl;
+  });
+}
+
+const MAX_INSERT_IMAGE_BYTES = 8 * 1024 * 1024;
+const INSERT_IMAGE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  bmp: 'image/bmp', tif: 'image/tiff', tiff: 'image/tiff', webp: 'image/webp', svg: 'image/svg+xml',
+};
+
 /** Windows/Office caret phase. */
 const CARET_BLINK_MS = 530;
 
@@ -320,6 +346,7 @@ function PptxEditorContent({
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasHostRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pictureInputRef = useRef<HTMLInputElement>(null);
   const [stageFocused, setStageFocused] = useState(false);
   const caretGoalRef = useRef<{
     shapeId: string;
@@ -398,6 +425,8 @@ function PptxEditorContent({
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   modelRef.current = model;
+  const imageInsertAllowedRef = useRef(false);
+  imageInsertAllowedRef.current = !readOnly && !canvasReview.reviewing;
 
   const reportError = useCallback((value: unknown) => {
     const next = value instanceof Error ? value : new Error(String(value));
@@ -1013,6 +1042,65 @@ function PptxEditorContent({
       if (next) stageRef.current?.focus();
     } catch (value) {
       reportError(value);
+    }
+  };
+
+  const insertPicture = async (file: File) => {
+    const handle = handleRef.current;
+    if (!handle || !imageInsertAllowedRef.current) return;
+    try {
+      if (file.size > MAX_INSERT_IMAGE_BYTES) {
+        throw new Error(
+          `image is ${file.size} bytes, exceeds the ${MAX_INSERT_IMAGE_BYTES}-byte limit`
+        );
+      }
+      const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
+      const contentType = file.type === 'image/jpg' ? 'image/jpeg' : file.type || INSERT_IMAGE_TYPES[extension];
+      if (!Object.values(INSERT_IMAGE_TYPES).includes(contentType)) {
+        throw new Error(`unsupported image type ${file.type || extension}`);
+      }
+      const dataUrl = await readFileAsDataUrl(file);
+      const mediaBase64 = dataUrl.slice(dataUrl.indexOf(',') + 1);
+      let previewUrl = `data:${contentType};base64,${mediaBase64}`;
+      if (contentType === 'image/tiff') {
+        const bytes = Uint8Array.from(atob(mediaBase64), (char) => char.charCodeAt(0));
+        previewUrl = await readFileAsDataUrl(presentationImageBlob(bytes));
+      }
+      const natural = await loadImageSize(previewUrl);
+      const current = modelRef.current;
+      if (handleRef.current !== handle || !imageInsertAllowedRef.current || !current?.frame) return;
+      if (natural.width <= 0 || natural.height <= 0) throw new Error('image dimensions must be positive');
+      const slide = current.snapshot.slides[current.slideIndex];
+      if (!slide) return;
+      const maxWidth = current.frame.width * 0.5;
+      const maxHeight = current.frame.height * 0.5;
+      const scale = Math.min(maxWidth / natural.width, maxHeight / natural.height, 1);
+      const width = Math.max(1, natural.width * scale);
+      const height = Math.max(1, natural.height * scale);
+      const x = (current.frame.width - width) / 2;
+      const y = (current.frame.height - height) / 2;
+      const receipt = handle.addPicture(slide.id, {
+        name: file.name || t('objects.defaultPictureName'),
+        rect: {
+          x: Math.round((x * current.snapshot.widthEmu) / current.frame.width),
+          y: Math.round((y * current.snapshot.heightEmu) / current.frame.height),
+          width: Math.round((width * current.snapshot.widthEmu) / current.frame.width),
+          height: Math.round((height * current.snapshot.heightEmu) / current.frame.height),
+        },
+        contentType,
+        mediaBase64,
+      });
+      const next = refreshAt(undefined, true);
+      setActiveTool('select');
+      setSelection(null);
+      setShapeSelection({ slideId: slide.id, shapeId: receipt.shapeId });
+      setDragPreview(null);
+      setTextBoxPreview(null);
+      pointerGestureRef.current = null;
+      recentClickRef.current = null;
+      if (next) stageRef.current?.focus();
+    } catch (value) {
+      if (handleRef.current === handle && imageInsertAllowedRef.current) reportError(value);
     }
   };
 
@@ -1659,11 +1747,19 @@ function PptxEditorContent({
           shapeSelection.shapeId,
           action.value === null ? {} : { widthPt: action.value }
         );
-      } else {
+      } else if (action.type === 'adjust') {
         handle.setShapeAdjust(shapeSelection.slideId, shapeSelection.shapeId, {
           ...selectedShape.adjustValues,
           [action.name]: action.value,
         });
+      } else if (action.type === 'zOrder') {
+        const zOrder = {
+          front: handle.bringShapeToFront,
+          back: handle.sendShapeToBack,
+          forward: handle.bringShapeForward,
+          backward: handle.sendShapeBackward,
+        }[action.value];
+        zOrder(shapeSelection.slideId, shapeSelection.shapeId);
       }
       refreshAt(undefined, true);
     } catch (value) {
@@ -1900,8 +1996,10 @@ function PptxEditorContent({
           onFormat={formatSelection}
           currentShapeFormatting={selectedShapeFormatting}
           shapeSelectionActive={!canvasReview.reviewing && selectedShape?.kind === 'shape'}
+          shapeArrangeActive={!canvasReview.reviewing && Boolean(selectedShape)}
           onShapeFormat={formatShape}
           onInsertSlide={addSlide}
+          onInsertImage={canvasReview.reviewing ? undefined : () => pictureInputRef.current?.click()}
           slideLayouts={slideLayouts}
           currentLayoutPartPath={model?.snapshot.slides[currentSlide]?.layoutPartPath}
           onSave={save}
@@ -1967,6 +2065,21 @@ function PptxEditorContent({
             ) : null}
           </div>
         ) : null}
+        <input
+          ref={pictureInputRef}
+          type="file"
+          accept={Object.values(INSERT_IMAGE_TYPES).join(',')}
+          disabled={readOnly || canvasReview.reviewing}
+          tabIndex={-1}
+          aria-hidden="true"
+          data-testid="pptx-insert-image-input"
+          style={styles.hiddenFileInput}
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0];
+            event.currentTarget.value = '';
+            if (file) void insertPicture(file);
+          }}
+        />
         <button
           type="button"
           onClick={startPresenting}
@@ -2818,6 +2931,17 @@ const styles: Record<string, CSSProperties> = {
   },
   empty: { margin: 'auto', color: '#6b7587', fontSize: 14 },
   error: { position: 'absolute', left: 16, right: 16, bottom: 14, padding: '9px 12px', color: '#8b1e2d', background: '#fff0f2', border: '1px solid #efb8c0', borderRadius: 6, fontSize: 12 },
+  hiddenFileInput: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    padding: 0,
+    margin: -1,
+    overflow: 'hidden',
+    clip: 'rect(0, 0, 0, 0)',
+    whiteSpace: 'nowrap',
+    border: 0,
+  },
   presentButton: {
     display: 'inline-flex',
     alignItems: 'center',

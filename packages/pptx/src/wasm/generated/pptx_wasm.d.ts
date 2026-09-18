@@ -7,9 +7,12 @@ export class PptxDocument {
     [Symbol.dispose](): void;
     acceptProposalJson(args: string): string;
     addCommentJson(args: string): string;
+    addPictureJson(args: string): string;
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     applyUpdateJson(update: Uint8Array): string;
+    bringShapeForwardJson(args: string): string;
+    bringShapeToFrontJson(args: string): string;
     canRedo(): boolean;
     canUndo(): boolean;
     clearUpdateObservation(): void;
@@ -49,6 +52,8 @@ export class PptxDocument {
      */
     saveBytes(): Uint8Array;
     searchTextJson(args: string): string;
+    sendShapeBackwardJson(args: string): string;
+    sendShapeToBackJson(args: string): string;
     setCommentFlavorJson(args: string): string;
     setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
@@ -102,9 +107,12 @@ export interface InitOutput {
     readonly __wbg_pptxdocument_free: (a: number, b: number) => void;
     readonly pptxdocument_acceptProposalJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addCommentJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_addPictureJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
@@ -136,6 +144,8 @@ export interface InitOutput {
     readonly pptxdocument_resizeShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_saveBytes: (a: number) => [number, number, number, number];
     readonly pptxdocument_searchTextJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];

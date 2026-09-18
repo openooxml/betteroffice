@@ -26,11 +26,24 @@ impl Presentation {
     /// cached on the deck, so later slides reuse what earlier ones extracted.
     pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {
         let rendered = self.render_slide(slide_index)?;
-        let images: AssetMap<'_> = self
+        let mut images: AssetMap<'_> = self
             .media()
             .iter()
             .map(|part| (part.part_path.as_str(), part.bytes.as_slice()))
             .collect();
+        let pending: Vec<(&str, Vec<u8>)> = rendered
+            .display_list
+            .primitives
+            .iter()
+            .filter_map(|primitive| match primitive {
+                pptx_render::Primitive::Image {
+                    asset_id: Some(id), ..
+                } if id.starts_with("pending-media:") => Some(id.as_str()),
+                _ => None,
+            })
+            .map(|id| self.media_bytes(id).map(|bytes| (id, bytes)))
+            .collect::<Result<_>>()?;
+        images.extend(pending.iter().map(|(id, bytes)| (*id, bytes.as_slice())));
         let resources = RenderResources::new(self.renderer().fonts(), &images)
             .with_label_font(self.renderer().fallback_font());
         let mut cache = self

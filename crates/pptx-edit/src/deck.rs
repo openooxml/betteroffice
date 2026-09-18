@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
@@ -15,10 +16,10 @@ use yrs::{
 use crate::comments::{flavor_key, seed_comments, snapshot_comments, snapshot_flavor};
 use crate::story::{seed_plain_story, seed_story, snapshot_story, validate_story};
 use crate::{
-    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN,
-    PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt, ShapeDraft,
-    ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
+    DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN, PendingMedia,
+    PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
+    ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
+    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.1;
@@ -29,6 +30,8 @@ const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
 const MAX_ADJUSTMENTS: usize = 32;
 const MAX_ADJUSTMENT_INDEX: usize = 32;
+/// Stays well under the 16 MiB collaboration frame cap once base64-encoded.
+const MAX_PENDING_PICTURE_BYTES: usize = 8 * 1024 * 1024;
 
 pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> EditResult<()> {
     let package_json =
@@ -338,7 +341,7 @@ impl DeckSession {
         let slides = required_map(&txn, SLIDES)?;
         let slide = slide_ref(&txn, slide_id)?;
         let shape_order = slide_shape_order(&slide, &txn)?;
-        let shape_ids = string_array_ref(&shape_order, &txn);
+        let shape_ids = live_shape_order(&shape_order, &txn)?;
         remove_shape_entries(&mut txn, &shape_ids)?;
         let comments = required_map(&txn, crate::COMMENTS)?;
         let comment_ids: Vec<String> = comments
@@ -506,6 +509,92 @@ impl DeckSession {
         })
     }
 
+    /// Resolves a display-list image from the source package or shared edits.
+    pub fn media_bytes(&self, asset_id: &str) -> EditResult<Vec<u8>> {
+        if let Some(shape_id) = asset_id.strip_prefix("pending-media:") {
+            let txn = self.doc.transact();
+            let shape = shape_ref(&txn, shape_id)?;
+            let encoded = map_string(&shape, &txn, "pendingMediaBase64")
+                .ok_or_else(|| EditError::InvalidState("pending media was not found".to_owned()))?;
+            return base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|error| {
+                    EditError::InvalidState(format!("invalid pending image data: {error}"))
+                });
+        }
+        self.package()
+            .media
+            .iter()
+            .find(|media| media.part_path == asset_id)
+            .map(|media| media.bytes.clone())
+            .ok_or_else(|| EditError::InvalidState("media part was not found".to_owned()))
+    }
+
+    /// `save` mints the media part, content-type default and relationship.
+    pub fn add_picture(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        draft: &PictureDraft,
+    ) -> EditResult<ShapeReceipt> {
+        validate_rect(draft.rect)?;
+        crate::model::validate_xml_text(&draft.name)?;
+        if draft.media_bytes.is_empty() {
+            return Err(EditError::InvalidState(
+                "a picture needs image data".to_owned(),
+            ));
+        }
+        if draft.media_bytes.len() > MAX_PENDING_PICTURE_BYTES {
+            return Err(EditError::InvalidState(format!(
+                "image is {} bytes, exceeds the {MAX_PENDING_PICTURE_BYTES}-byte limit",
+                draft.media_bytes.len()
+            )));
+        }
+        if !pptx_parse::is_supported_image_content_type(&draft.content_type) {
+            return Err(EditError::InvalidState(format!(
+                "unsupported image type {:?}",
+                draft.content_type
+            )));
+        }
+        let shape_id = self.next_id("shape");
+        let mut txn = self.transact_for(context);
+        let slide = slide_ref(&txn, slide_id)?;
+        let order = slide_shape_order(&slide, &txn)?;
+        let index = order.len(&txn);
+        let shapes = required_map(&txn, SHAPES)?;
+        let shape = shapes.insert(&mut txn, shape_id.as_str(), MapPrelim::default());
+        shape.insert(&mut txn, "id", shape_id.as_str());
+        shape.insert(&mut txn, "sourceId", 0_f64);
+        shape.insert(&mut txn, "kind", "picture");
+        shape.insert(&mut txn, "name", draft.name.as_str());
+        shape.insert(&mut txn, "x", draft.rect.x as f64);
+        shape.insert(&mut txn, "y", draft.rect.y as f64);
+        shape.insert(&mut txn, "width", draft.rect.width as f64);
+        shape.insert(&mut txn, "height", draft.rect.height as f64);
+        shape.insert(&mut txn, "rotationDeg", 0_f64);
+        shape.insert(&mut txn, "flipH", false);
+        shape.insert(&mut txn, "flipV", false);
+        shape.insert(&mut txn, "geometry", "rect");
+        shape.insert(
+            &mut txn,
+            "pendingMediaBase64",
+            base64::engine::general_purpose::STANDARD.encode(&draft.media_bytes),
+        );
+        shape.insert(
+            &mut txn,
+            "pendingMediaContentType",
+            draft.content_type.as_str(),
+        );
+        shape.insert(&mut txn, "textStories", string_array(&[]));
+        shape.insert(&mut txn, "children", string_array(&[]));
+        order.push_back(&mut txn, shape_id.as_str());
+        Ok(ShapeReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id,
+            index,
+        })
+    }
+
     pub fn set_shape_fill(
         &self,
         context: &EditCtx,
@@ -629,10 +718,17 @@ impl DeckSession {
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         let order = slide_shape_order(&slide, &txn)?;
-        let index = array_index(&order, &txn, shape_id)
-            .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))?;
+        let ids = live_shape_order(&order, &txn)?;
+        let index =
+            ids.iter()
+                .position(|id| id == shape_id)
+                .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))? as u32;
         remove_shape_entries(&mut txn, &[shape_id.to_owned()])?;
-        order.remove(&mut txn, index);
+        for (index, id) in string_array_ref(&order, &txn).iter().enumerate().rev() {
+            if id == shape_id {
+                order.remove(&mut txn, index as u32);
+            }
+        }
         Ok(ShapeReceipt {
             slide_id: slide_id.to_owned(),
             shape_id: shape_id.to_owned(),
@@ -661,6 +757,91 @@ impl DeckSession {
             shape_id: shape_id.to_owned(),
             before,
             after: ShapeRect { x, y, ..before },
+        })
+    }
+
+    /// Moves a shape to the top of its slide's paint order (drawn last).
+    pub fn bring_to_front(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> EditResult<ShapeZOrderReceipt> {
+        self.reorder_shape(context, slide_id, shape_id, |length, _from| length - 1)
+    }
+
+    /// Moves a shape to the bottom of its slide's paint order (drawn first).
+    pub fn send_to_back(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> EditResult<ShapeZOrderReceipt> {
+        self.reorder_shape(context, slide_id, shape_id, |_length, _from| 0)
+    }
+
+    /// Swaps a shape one step later in its slide's paint order.
+    pub fn bring_forward(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> EditResult<ShapeZOrderReceipt> {
+        self.reorder_shape(context, slide_id, shape_id, |length, from| {
+            (from + 1).min(length - 1)
+        })
+    }
+
+    /// Swaps a shape one step earlier in its slide's paint order.
+    pub fn send_backward(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+    ) -> EditResult<ShapeZOrderReceipt> {
+        self.reorder_shape(context, slide_id, shape_id, |_length, from| {
+            from.saturating_sub(1)
+        })
+    }
+
+    fn reorder_shape(
+        &self,
+        context: &EditCtx,
+        slide_id: &str,
+        shape_id: &str,
+        to_index: impl FnOnce(u32, u32) -> u32,
+    ) -> EditResult<ShapeZOrderReceipt> {
+        let mut txn = self.transact_for(context);
+        let slide = slide_ref(&txn, slide_id)?;
+        let order = slide_shape_order(&slide, &txn)?;
+        let ids = live_shape_order(&order, &txn)?;
+        let length = ids.len() as u32;
+        let from_index =
+            ids.iter()
+                .position(|id| id == shape_id)
+                .ok_or_else(|| EditError::ShapeNotFound(shape_id.to_owned()))? as u32;
+        let target = to_index(length, from_index).min(length - 1);
+        let mut seen = HashSet::new();
+        let live: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        let stale: Vec<u32> = string_array_ref(&order, &txn)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, id)| {
+                (!live.contains(id.as_str()) || !seen.insert(id.clone())).then_some(index as u32)
+            })
+            .collect();
+        for index in stale.into_iter().rev() {
+            order.remove(&mut txn, index);
+        }
+        if target != from_index {
+            order.remove(&mut txn, from_index);
+            order.insert(&mut txn, target, shape_id);
+        }
+        Ok(ShapeZOrderReceipt {
+            slide_id: slide_id.to_owned(),
+            shape_id: shape_id.to_owned(),
+            from_index,
+            to_index: target,
         })
     }
 
@@ -1339,6 +1520,15 @@ fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPacka
     serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
 }
 
+pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditResult<Vec<String>> {
+    let shapes = required_map(txn, SHAPES)?;
+    let mut seen = HashSet::new();
+    Ok(string_array_ref(order, txn)
+        .into_iter()
+        .filter(|id| shapes.contains_key(txn, id) && seen.insert(id.clone()))
+        .collect())
+}
+
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -1360,19 +1550,16 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
         let theme = theme_for_layout(package, layout_part_path.as_deref());
         let shape_order = slide_shape_order(&slide, &txn)?;
-        let mut seen_shapes = HashSet::new();
         let mut shape_snapshots = Vec::new();
-        for shape_id in string_array_ref(&shape_order, &txn) {
-            if seen_shapes.insert(shape_id.clone()) {
-                shape_snapshots.push(snapshot_shape(
-                    &shapes,
-                    &stories,
-                    &txn,
-                    &shape_id,
-                    &mut HashSet::new(),
-                    theme,
-                )?);
-            }
+        for shape_id in live_shape_order(&shape_order, &txn)? {
+            shape_snapshots.push(snapshot_shape(
+                &shapes,
+                &stories,
+                &txn,
+                &shape_id,
+                &mut HashSet::new(),
+                theme,
+            )?);
         }
         let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {
             package
@@ -1467,6 +1654,16 @@ fn snapshot_shape<T: ReadTxn>(
         outline,
         resolved_outline_color,
         media_part_path: map_string(&shape, txn, "mediaPartPath"),
+        pending_media: match (
+            map_string(&shape, txn, "pendingMediaBase64"),
+            map_string(&shape, txn, "pendingMediaContentType"),
+        ) {
+            (Some(base64), Some(content_type)) => Some(PendingMedia {
+                content_type,
+                base64,
+            }),
+            _ => None,
+        },
         blip_effects: optional_json(&shape, txn, "blipEffectsJson")?.unwrap_or_default(),
         graphic: optional_json(&shape, txn, "graphicJson")?,
         text_stories: text_snapshots,

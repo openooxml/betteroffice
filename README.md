@@ -43,7 +43,7 @@
 | package | registry | what it does |
 |---|---|---|
 | [`betteroffice-pptx`](https://crates.io/crates/betteroffice-pptx) | crates.io | typed Rust API for opening, editing, rendering, and saving PPTX presentations |
-| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, and rendering in Rust through WebAssembly |
+| [`@betteroffice/pptx`](https://www.npmjs.com/package/@betteroffice/pptx) | npm | framework-free .pptx editor core — slide model, masters, image insertion, shape ordering, and rendering in Rust through WebAssembly |
 | [`@betteroffice/pptx-react`](https://www.npmjs.com/package/@betteroffice/pptx-react) | npm | drop-in React .pptx editor |
 | [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) | PyPI | Python API for reading, editing, saving, and laying out PPTX presentations |
 
@@ -79,9 +79,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7538 | 64/64 | [f5be5d90](https://github.com/openooxml/betteroffice/commit/f5be5d90a880a2fa62c20e7ce4b3284183d5c8f5) | 0.7734 | 64/64 |
-| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [f5be5d90](https://github.com/openooxml/betteroffice/commit/f5be5d90a880a2fa62c20e7ce4b3284183d5c8f5) | 0.8769 | 9/9 |
-| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [f5be5d90](https://github.com/openooxml/betteroffice/commit/f5be5d90a880a2fa62c20e7ce4b3284183d5c8f5) | 0.7695 | 8/8 |
+| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7540 | 63/63 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7742 | 63/63 |
+| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.8769 | 9/9 |
+| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 

@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 use yrs::Subscription;
 
 use crate::{
-    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PresetShapeDraft, ShapeDraft, ShapeRect,
-    ShapeStroke, TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
+    CommentFlavor, DeckSession, DeckSnapshot, EditCtx, PictureDraft, PresetShapeDraft, ShapeDraft,
+    ShapeRect, ShapeStroke, TextStyle, TextStylePatch, UpdateEvent, UpdateOrigin,
 };
 
 #[wasm_bindgen]
@@ -165,6 +166,17 @@ struct AddTextBoxArgs {
 struct AddShapeArgs {
     slide_id: String,
     draft: PresetShapeDraft,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddPictureArgs {
+    slide_id: String,
+    name: String,
+    rect: ShapeRect,
+    content_type: String,
+    /// The image bytes, base64-encoded: JSON has no binary payload of its own.
+    media_base64: String,
 }
 
 #[derive(Deserialize)]
@@ -347,13 +359,7 @@ impl PptxDocument {
 
     #[wasm_bindgen(js_name = mediaBytes)]
     pub fn media_bytes(&self, part_path: &str) -> Result<Vec<u8>, JsValue> {
-        self.session
-            .package()
-            .media
-            .iter()
-            .find(|media| media.part_path == part_path)
-            .map(|media| media.bytes.clone())
-            .ok_or_else(|| JsValue::from_str("media part was not found"))
+        self.session.media_bytes(part_path).map_err(js_error)
     }
 
     /// Serializes the deck back to `.pptx` bytes, edits included.
@@ -636,12 +642,71 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = addPictureJson)]
+    pub fn add_picture_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: AddPictureArgs = parse_args(args)?;
+        let media_bytes = base64::engine::general_purpose::STANDARD
+            .decode(&args.media_base64)
+            .map_err(|error| js_error(format!("invalid image data: {error}")))?;
+        let draft = PictureDraft {
+            name: args.name,
+            rect: args.rect,
+            content_type: args.content_type,
+            media_bytes,
+        };
+        json(
+            self.session
+                .add_picture(&local_context(), &args.slide_id, &draft)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = removeShapeJson)]
     pub fn remove_shape_json(&self, args: &str) -> Result<String, JsValue> {
         let args: ShapeArgs = parse_args(args)?;
         json(
             self.session
                 .remove_shape(&local_context(), &args.slide_id, &args.shape_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = bringShapeToFrontJson)]
+    pub fn bring_shape_to_front_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ShapeArgs = parse_args(args)?;
+        json(
+            self.session
+                .bring_to_front(&local_context(), &args.slide_id, &args.shape_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = sendShapeToBackJson)]
+    pub fn send_shape_to_back_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ShapeArgs = parse_args(args)?;
+        json(
+            self.session
+                .send_to_back(&local_context(), &args.slide_id, &args.shape_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = bringShapeForwardJson)]
+    pub fn bring_shape_forward_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ShapeArgs = parse_args(args)?;
+        json(
+            self.session
+                .bring_forward(&local_context(), &args.slide_id, &args.shape_id)
+                .map_err(js_error)?,
+        )
+    }
+
+    #[wasm_bindgen(js_name = sendShapeBackwardJson)]
+    pub fn send_shape_backward_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: ShapeArgs = parse_args(args)?;
+        json(
+            self.session
+                .send_backward(&local_context(), &args.slide_id, &args.shape_id)
                 .map_err(js_error)?,
         )
     }

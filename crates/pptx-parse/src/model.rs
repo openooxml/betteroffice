@@ -35,7 +35,7 @@ impl ShapeElements {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PptxPackage {
     pub presentation: Presentation,
@@ -97,7 +97,7 @@ pub(crate) struct PackagePart {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Presentation {
     pub part_path: String,

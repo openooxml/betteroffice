@@ -148,6 +148,173 @@ describe('PptxEditor PNG export', () => {
   }
 });
 
+describe('PptxEditor insert image', () => {
+  it(
+    'adds a picture shape sized from the file and saves it back out',
+    async () => {
+      const originalImage = globalThis.Image;
+      class FakeImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 400;
+        naturalHeight = 200;
+        set src(_value: string) {
+          queueMicrotask(() => this.onload?.());
+        }
+      }
+      globalThis.Image = FakeImage as unknown as typeof Image;
+      try {
+        const opened: PptxEditorApi[] = [];
+        const errors: Error[] = [];
+        const view = render(
+          <PptxEditor
+            file={fixture}
+            fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+            clientId={9103}
+            onReady={(api) => opened.push(api)}
+            onError={(error) => errors.push(error)}
+          />
+        );
+        await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+        const before = opened[0].handle.snapshot().slides[0].shapes.length;
+
+        const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+        const file = new File([bytes], 'logo.png', { type: 'image/png' });
+        const input = view.getByTestId('pptx-insert-image-input') as HTMLInputElement;
+        await act(async () => {
+          fireEvent.change(input, { target: { files: [file] } });
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        });
+
+        await waitFor(() => {
+          expect(opened[0].handle.snapshot().slides[0].shapes.length).toBe(before + 1);
+        });
+        const shapes = opened[0].handle.snapshot().slides[0].shapes;
+        const added = shapes[shapes.length - 1];
+        expect(added.kind).toBe('picture');
+        expect(added.name).toBe('logo.png');
+        expect(Math.round(added.width / added.height)).toBe(2);
+        expect(() => opened[0].handle.save()).not.toThrow();
+        expect(errors).toEqual([]);
+      } finally {
+        cleanup();
+        globalThis.Image = originalImage;
+      }
+    },
+    30_000
+  );
+
+  it(
+    'lands on the slide showing when the read finishes, not the one showing when it started',
+    async () => {
+      const originalImage = globalThis.Image;
+      let finishDecoding: (() => void) | undefined;
+      class PausedImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 400;
+        naturalHeight = 200;
+        set src(value: string) {
+          if (value.startsWith('data:')) finishDecoding = () => this.onload?.();
+          else queueMicrotask(() => this.onload?.());
+        }
+      }
+      globalThis.Image = PausedImage as unknown as typeof Image;
+      try {
+        const opened: PptxEditorApi[] = [];
+        const view = render(
+          <PptxEditor
+            file={fixture}
+            fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+            clientId={9104}
+            onReady={(api) => opened.push(api)}
+          />
+        );
+        await waitFor(() => expect(opened.length).toBe(1), { timeout: 15_000 });
+
+        const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 1, 2, 3, 4]);
+        const file = new File([bytes], 'logo.png', { type: 'image/png' });
+        const input = view.getByTestId('pptx-insert-image-input') as HTMLInputElement;
+        fireEvent.change(input, { target: { files: [file] } });
+
+        await waitFor(() => expect(finishDecoding).toBeDefined());
+
+        await act(async () => {
+          expect(opened[0].goToSlide(2)).toBe(true);
+        });
+
+        await act(async () => {
+          finishDecoding!();
+          await Promise.resolve();
+        });
+
+        const hasLogo = (slideIndex: number) =>
+          opened[0].handle
+            .snapshot()
+            .slides[slideIndex].shapes.some((shape) => shape.name === 'logo.png');
+        await waitFor(() => expect(hasLogo(1)).toBe(true));
+        expect(hasLogo(0)).toBe(false);
+      } finally {
+        cleanup();
+        globalThis.Image = originalImage;
+      }
+    },
+    30_000
+  );
+});
+
+describe('PptxEditor pending image insertion', () => {
+  for (const scenario of ['replace', 'unmount', 'readOnly', 'decode-error', 'stale-error'] as const) {
+    it(`handles ${scenario} while an image decodes`, async () => {
+      const originalImage = globalThis.Image;
+      let finish: (() => void) | undefined;
+      class PausedImage {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        naturalWidth = 400;
+        naturalHeight = 200;
+        set src(value: string) {
+          if (value.startsWith('data:')) {
+            finish = () => scenario.endsWith('error') ? this.onerror?.() : this.onload?.();
+          } else queueMicrotask(() => this.onload?.());
+        }
+      }
+      globalThis.Image = PausedImage as unknown as typeof Image;
+      const opened: PptxEditorApi[] = [];
+      const errors: Error[] = [];
+      const props = {
+        file: fixture,
+        fonts: [{ family: 'Liberation Sans', bytes: fontBytes }],
+        clientId: 9110,
+        onReady: (api: PptxEditorApi) => opened.push(api),
+        onError: (error: Error) => errors.push(error),
+      };
+      try {
+        const view = render(<PptxEditor {...props} />);
+        await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+        const before = opened[0].handle.snapshot();
+        const file = new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], 'pending.png', { type: 'image/png' });
+        fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [file] } });
+        await waitFor(() => expect(finish).toBeDefined());
+        if (scenario === 'replace' || scenario === 'stale-error') {
+          view.rerender(<PptxEditor {...props} file={new Uint8Array(fixture)} />);
+          await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
+        } else if (scenario === 'unmount') {
+          view.unmount();
+        } else if (scenario === 'readOnly') {
+          view.rerender(<PptxEditor {...props} readOnly />);
+        }
+        await act(async () => { finish!(); await Promise.resolve(); });
+        if (scenario !== 'unmount') expect(opened[opened.length - 1].handle.snapshot()).toEqual(before);
+        expect(errors).toHaveLength(scenario === 'decode-error' ? 1 : 0);
+      } finally {
+        cleanup();
+        globalThis.Image = originalImage;
+      }
+    }, 30_000);
+  }
+});
+
 describe('PptxEditor font stability', () => {
   // scanning a real font is what makes this slow; the budget is generous so a
   // loaded CI machine reports the assertion rather than a timeout.

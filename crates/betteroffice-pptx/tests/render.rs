@@ -248,3 +248,55 @@ fn blip_effects_render_on_slides_layouts_and_masters() {
         assert_eq!(pixel(x, y), expected, "pixel ({x}, {y})");
     }
 }
+
+#[test]
+fn pictures_received_from_a_peer_render_before_save() {
+    let presentation = deck();
+    let before = presentation
+        .render_png(0, &RenderOptions::default())
+        .unwrap();
+    let peer = pptx_edit::DeckSession::open(FIXTURE, 12).unwrap();
+    let slide_id = peer.snapshot().unwrap().slides[0].id.clone();
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[255, 0, 0, 255])
+            .unwrap();
+    }
+    let added = peer
+        .add_picture(
+            &pptx_edit::EditCtx::local("peer"),
+            &slide_id,
+            &pptx_edit::PictureDraft {
+                name: "Red square".to_owned(),
+                rect: pptx_edit::ShapeRect {
+                    x: 0,
+                    y: 0,
+                    width: 1_000_000,
+                    height: 1_000_000,
+                },
+                content_type: "image/png".to_owned(),
+                media_bytes: bytes.clone(),
+            },
+        )
+        .unwrap();
+    presentation
+        .apply_update_v1(&peer.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(
+        presentation
+            .media_bytes(&format!("pending-media:{}", added.shape_id))
+            .unwrap(),
+        bytes
+    );
+    let rendered = presentation
+        .render_png(0, &RenderOptions::default())
+        .unwrap();
+    assert_eq!(rendered.skipped_images, 0);
+    assert_ne!(rendered.bytes, before.bytes);
+}
