@@ -84,8 +84,6 @@ function synchronizeStandaloneLocks() {
   }
 }
 
-// bun.lock records a version per workspace, and `changeset version` rewrote all of them.
-// `bun install --frozen-lockfile` accepts the stale ones, so nothing else catches this.
 function synchronizeBunLock() {
   run('bun', ['install', '--lockfile-only']);
 }
