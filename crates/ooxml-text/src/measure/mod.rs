@@ -77,14 +77,15 @@
 //! italic, with no caps and no letter spacing.
 //!
 //! An inline image adds its declared width to the line advance and grows the
-//! line box by its column-fitted height, ignoring wrap distances. Alone on a line
-//! it takes a descent buffer above and below; flowing with text it seats on
-//! the baseline. A `topAndBottom` or block image takes its own line at its
-//! declared height plus wrap distances (default 6px, never column-fitted),
-//! adds no width, and opens a fresh line after it. An anchored floating
-//! image is positioned by the host, so it contributes neither width nor
-//! height — but its declared width still counts toward the following-runs
-//! width after a tab.
+//! line box by its declared height, ignoring wrap distances. One wider than the
+//! column keeps that height, overflows the margin the way Word's own rasters
+//! do, and never wraps off an empty line. Alone on a line it takes a descent
+//! buffer above and below; flowing with text it seats on the baseline. A
+//! `topAndBottom` or block image takes its own line at its declared height plus
+//! wrap distances (default 6px), adds no width, and opens a fresh line after
+//! it. An anchored floating image is positioned by the host, so it contributes
+//! neither width nor height — but its declared width still counts toward the
+//! following-runs width after a tab.
 //!
 //! A visible list marker narrows the first line by its footprint, and only
 //! when the paragraph's hanging indent is exactly zero.
@@ -627,5 +628,31 @@ mod authoritative_tests {
         let extent = measure_paragraph(&store, &input).unwrap();
         assert!((extent.lines[0].width - 20.0).abs() < 0.001);
         assert!(extent.lines[0].line_height >= 80.0);
+    }
+
+    #[test]
+    fn an_inline_image_wider_than_the_column_keeps_its_declared_box() {
+        let store = FontStore::new();
+        let measure = |max_width: f64| {
+            let input: MeasureInput = serde_json::from_value(serde_json::json!({
+                "block": {
+                    "kind": "paragraph",
+                    "runs": [{ "kind": "image", "width": 220.0, "height": 400.0 }]
+                },
+                "maxWidth": max_width,
+                "defaults": { "fontSize": 12.0, "fontFamily": "Fallback" }
+            }))
+            .unwrap();
+            measure_paragraph(&store, &input).unwrap()
+        };
+
+        let over_wide = measure(200.0);
+        let fits = measure(300.0);
+
+        assert_eq!(over_wide.lines.len(), 1);
+        assert!((over_wide.lines[0].width - 220.0).abs() < 0.001);
+        assert_eq!(over_wide.lines[0].line_height, fits.lines[0].line_height);
+        assert_eq!(over_wide.total_height, fits.total_height);
+        assert!(over_wide.lines[0].line_height >= 400.0);
     }
 }
