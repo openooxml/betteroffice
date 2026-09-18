@@ -47,6 +47,26 @@ Keep `--ref main`; set `branch` to the repository branch to measure. The optiona
 
 The measurement job allows 90 minutes for setup, builds, and both comparison channels. Each browser capture retains its default 600-second deadline. The longer job budget accommodates larger collections; incomplete captures remain recorded failures.
 
+## Published renders and the viewer
+
+With `publish_renders` left on, the measurement job also uploads the `commit` channel to the
+`betteroffice-fidelity` R2 bucket, keyed by the measured commit:
+
+```text
+renders/<sha>/<sample>/page_0001.png
+renders/<sha>/report.json
+renders/latest.json
+```
+
+`latest.json` names the current SHA, its report key, and the published page count per sample. It is
+written last, so it never points at an incomplete upload. Every published SHA is kept. A full
+`office-quality` run is roughly 1,045 pages and 475 MiB.
+
+The upload step is deliberately soft-failing: an unprovisioned bucket or a token without R2 write
+access marks the step red without withholding the README update. [`apps/fidelity`](../../apps/fidelity)
+serves those renders next to the public Office references, so a page can be compared by swiping or
+by a difference blend. It reads scores only from `report.json` and never derives its own.
+
 ## Office references
 
 Requires macOS and desktop Word, PowerPoint, or Excel. Run exports serially into fresh directories:

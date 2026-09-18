@@ -1,0 +1,21 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "betteroffice-fidelity",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-07-19",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "assets": {
+    "directory": "dist",
+    "binding": "ASSETS"
+  },
+  "r2_buckets": [
+    {
+      "binding": "RENDERS",
+      "bucket_name": "betteroffice-fidelity"
+    }
+  ],
+  "routes": [{ "pattern": "fidelity.betteroffice.dev", "custom_domain": true }],
+  "observability": {
+    "enabled": true
+  }
+}

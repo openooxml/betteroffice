@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Visual fidelity</title>
+    <style>
+      :root {
+        --bg: #0b0b0c;
+        --panel: #141416;
+        --line: #26262a;
+        --text: #e9e9ea;
+        --muted: #8c8c93;
+        --accent: #6aa6ff;
+        color-scheme: dark;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        height: 100vh;
+        display: flex;
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+      }
+      button {
+        font: inherit;
+        color: inherit;
+        background: none;
+        border: 0;
+        cursor: pointer;
+      }
+      .num {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-variant-numeric: tabular-nums;
+      }
+
+      aside {
+        width: 300px;
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        border-right: 1px solid var(--line);
+        background: var(--panel);
+      }
+      aside header {
+        padding: 18px 18px 12px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+        letter-spacing: 0.01em;
+      }
+      #revision {
+        margin: 4px 0 12px;
+        color: var(--muted);
+        font-size: 12px;
+      }
+      #filter {
+        width: 100%;
+        padding: 6px 8px;
+        color: inherit;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        font: inherit;
+      }
+      #filter:focus {
+        outline: 1px solid var(--accent);
+      }
+      #documents {
+        margin: 0;
+        padding: 6px 0 24px;
+        list-style: none;
+        overflow-y: auto;
+      }
+      #documents button {
+        width: 100%;
+        display: flex;
+        gap: 8px;
+        align-items: baseline;
+        padding: 7px 18px;
+        text-align: left;
+      }
+      #documents button:hover {
+        background: #1c1c20;
+      }
+      #documents button[aria-current='true'] {
+        background: #1c1c20;
+        box-shadow: inset 2px 0 var(--accent);
+      }
+      .id {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .format {
+        color: var(--muted);
+        font-size: 10px;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      main {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      main > header {
+        display: flex;
+        gap: 18px;
+        align-items: center;
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      #title {
+        font-weight: 600;
+      }
+      #scores {
+        display: flex;
+        gap: 18px;
+        margin-left: auto;
+        color: var(--muted);
+      }
+      #scores b {
+        color: var(--text);
+        font-weight: 500;
+      }
+      .toggle {
+        display: flex;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        overflow: hidden;
+      }
+      .toggle button {
+        padding: 4px 10px;
+        color: var(--muted);
+      }
+      .toggle button[aria-pressed='true'] {
+        color: var(--text);
+        background: #26262a;
+      }
+
+      #pages {
+        display: flex;
+        gap: 4px;
+        padding: 10px 20px;
+        overflow-x: auto;
+        border-bottom: 1px solid var(--line);
+      }
+      #pages button {
+        flex: none;
+        min-width: 30px;
+        padding: 3px 6px;
+        color: var(--muted);
+        border: 1px solid transparent;
+        border-radius: 3px;
+      }
+      #pages button:hover {
+        border-color: var(--line);
+      }
+      #pages button[aria-current='true'] {
+        color: var(--bg);
+        background: var(--accent);
+      }
+      #pages button[data-missing='true'] {
+        color: #d98b6a;
+      }
+
+      #stage {
+        flex: 1;
+        min-height: 0;
+        display: grid;
+        place-items: center;
+        padding: 20px;
+        overflow: auto;
+      }
+      .sheet {
+        position: relative;
+        isolation: isolate;
+        background: #fff;
+        box-shadow: 0 0 0 1px var(--line);
+      }
+      .sheet img {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      #ours {
+        position: absolute;
+        inset: 0;
+        clip-path: inset(0 0 0 var(--split));
+      }
+      #handle {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: var(--split);
+        width: 11px;
+        margin-left: -5px;
+        cursor: ew-resize;
+        z-index: 2;
+      }
+      #handle::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: 5px;
+        width: 1px;
+        background: var(--accent);
+      }
+      #stage[data-mode='difference'][data-pair='true'] .sheet {
+        background: #000;
+        filter: brightness(2.4);
+      }
+      #stage[data-mode='difference'] #ours {
+        clip-path: none;
+      }
+      #stage[data-mode='difference'][data-pair='true'] #render {
+        mix-blend-mode: difference;
+      }
+      #stage:not([data-pair='true']) #handle,
+      #stage[data-mode='difference'] #handle {
+        display: none;
+      }
+      #stage[data-blink='true'] #ours {
+        visibility: hidden;
+      }
+      [data-absent='true'] {
+        display: none;
+      }
+
+      #note,
+      #hint {
+        padding: 8px 20px;
+        color: var(--muted);
+        border-top: 1px solid var(--line);
+      }
+      #note {
+        color: #d98b6a;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+      }
+      kbd {
+        padding: 1px 4px;
+        color: var(--text);
+        border: 1px solid var(--line);
+        border-radius: 3px;
+        font: inherit;
+        font-size: 11px;
+      }
+
+      #loader {
+        margin: auto;
+        max-width: 440px;
+        padding: 24px;
+        text-align: center;
+      }
+      #loader p {
+        color: var(--muted);
+      }
+      #loader label {
+        display: inline-block;
+        margin-top: 8px;
+        padding: 7px 14px;
+        border: 1px solid var(--line);
+        border-radius: 4px;
+        cursor: pointer;
+      }
+      #loader label:hover {
+        border-color: var(--accent);
+      }
+      #loader input {
+        display: none;
+      }
+      [hidden] {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <aside hidden>
+      <header>
+        <h1>Visual fidelity</h1>
+        <p id="revision"></p>
+        <input id="filter" type="search" placeholder="Filter documents" autocomplete="off" />
+      </header>
+      <ol id="documents"></ol>
+    </aside>
+
+    <main hidden>
+      <header>
+        <span id="title"></span>
+        <div class="toggle" id="modes">
+          <button data-mode="swipe" aria-pressed="true">Swipe</button>
+          <button data-mode="difference" aria-pressed="false">Difference</button>
+        </div>
+        <div class="toggle" id="zooms">
+          <button data-zoom="fit" aria-pressed="true">Fit</button>
+          <button data-zoom="full" aria-pressed="false">100%</button>
+        </div>
+        <div id="scores"></div>
+      </header>
+      <p id="note" hidden></p>
+      <nav id="pages"></nav>
+      <div id="stage" data-mode="swipe">
+        <div class="sheet" id="sheet">
+          <img id="reference" alt="Microsoft Office reference page" />
+          <div id="ours"><img id="render" alt="BetterOffice rendered page" /></div>
+          <div id="handle"></div>
+        </div>
+      </div>
+      <footer id="hint">
+        Drag the divider to swipe · hold <kbd>B</kbd> to blink between the two ·
+        <kbd>←</kbd> <kbd>→</kbd> to change page
+      </footer>
+    </main>
+
+    <div id="loader">
+      <h1>Visual fidelity</h1>
+      <p id="loader-message">Loading the latest measured run…</p>
+      <label>Open a report.json<input id="file" type="file" accept="application/json,.json" /></label>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
