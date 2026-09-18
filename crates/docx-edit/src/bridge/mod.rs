@@ -706,7 +706,7 @@ fn lower_story<T: ReadTxn>(
                     } else {
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset,
-                            floating: block.position.is_some(),
+                            anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
                         });
@@ -734,7 +734,7 @@ fn lower_story<T: ReadTxn>(
                         pm_offset,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
-                        floating: false,
+                        anchored: false,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -1913,16 +1913,13 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
 }
 
-/// A shape or chart child of a paragraph, held with the position it occupied
-/// so the surrounding runs keep their original offsets. `floating` marks the
-/// ones layout places by anchor without consuming flow height; the rest split
-/// the paragraph around them.
+/// A paragraph's shape or chart child, at the offset it occupied.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
     pm_offset: u32,
     block: LayoutBlock,
     hidden: bool,
-    floating: bool,
+    anchored: bool,
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -2047,14 +2044,9 @@ fn push_text_chunks(
     }
 }
 
-/// Emits the blocks one paragraph contributes: normally a single paragraph
-/// block, but a paragraph holding in-flow shape or chart children breaks into
-/// the text segments around them, each carrying the same pilcrow properties.
-/// Empty segments are dropped, and every surviving run keeps its original
-/// position. Anchored children take no room in the flow, so they are lifted
-/// out ahead of the paragraph and leave it whole — the same shape an anchored
-/// picture already has, which is what Word charges: one line box and one
-/// space-after however many objects the paragraph anchors.
+/// Emits the blocks one paragraph contributes. Anchored children are lifted
+/// out ahead of it and leave it whole; in-flow ones break it into the text
+/// segments around them, each carrying the same pilcrow properties.
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph_parts<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
@@ -2079,7 +2071,7 @@ fn flush_paragraph_parts<T: ReadTxn>(
         drawings.retain(|drawing| !drawing.hidden);
     }
     let (anchored, drawings): (Vec<_>, Vec<_>) =
-        drawings.into_iter().partition(|drawing| drawing.floating);
+        drawings.into_iter().partition(|drawing| drawing.anchored);
     let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
 
     if drawings.is_empty() {
@@ -4547,6 +4539,24 @@ mod tests {
         assert_eq!(paragraph.runs.len(), 2);
         assert_eq!(paragraph.pm_start, Some(0.0));
         assert_eq!(paragraph.pm_end, Some(5.0));
+    }
+
+    #[test]
+    fn anchor_that_lost_its_position_still_leaves_its_paragraph_whole() {
+        let blocks = shape_embed_blocks(
+            66,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "wrap": {"type": "square"}
+            }),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        let LayoutBlock::Paragraph(paragraph) = &blocks[1] else {
+            panic!("expected one whole paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 2);
     }
 
     #[test]
