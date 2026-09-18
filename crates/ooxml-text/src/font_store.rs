@@ -177,6 +177,8 @@ pub struct FontMetrics {
     pub os2_fs_selection: u16,
     /// `OS/2` table version, which decides how much of the table is defined.
     pub os2_version: u16,
+    /// `OS/2` ulCodePageRange1, or 0 before table version 1 defined it.
+    pub os2_code_page_range1: u32,
 }
 
 impl FontMetrics {
@@ -188,6 +190,12 @@ impl FontMetrics {
     pub fn use_typo_metrics(&self) -> bool {
         self.os2_version >= 4
             && self.os2_fs_selection & SelectionFlags::USE_TYPO_METRICS.bits() != 0
+    }
+
+    /// Whether Word measures this face with the East Asian line pitch — see
+    /// [`crate::word_metrics::EAST_ASIAN_CODE_PAGES`].
+    pub fn east_asian_line_metrics(&self) -> bool {
+        self.os2_code_page_range1 & crate::word_metrics::EAST_ASIAN_CODE_PAGES != 0
     }
 }
 
@@ -263,6 +271,7 @@ impl FontStore {
             os2_win_descent: os2.us_win_descent(),
             os2_fs_selection: os2.fs_selection().bits(),
             os2_version: os2.version(),
+            os2_code_page_range1: os2.ul_code_page_range_1().unwrap_or(0),
         };
 
         let data: Box<[u8]> = bytes.into_boxed_slice();

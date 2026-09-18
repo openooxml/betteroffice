@@ -25,6 +25,31 @@
 //! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
 //! ECMA-376 §17.15.3) drops that external leading entirely.
 //!
+//! ## 1a. East Asian faces — [`EAST_ASIAN_CODE_PAGES`]
+//!
+//! A face whose `OS/2` ulCodePageRange1 claims one of the four East Asian
+//! code pages — 932 Shift-JIS (bit 17), 936 GB2312 (18), 949 Wansung (19),
+//! 950 Big5 (20) — takes a different pitch entirely:
+//!
+//! ```text
+//! pitch = 1.3 x (hhea.ascender - hhea.descender)
+//! ```
+//!
+//! with the extra 0.3 split evenly above the ascender and below the
+//! descender. `usWinAscent`/`usWinDescent`, `hhea.lineGap` and the sTypo
+//! family are all ignored, including when `USE_TYPO_METRICS` is set.
+//!
+//! Measured against Word 16.113 on macOS across 65 installed faces and 30
+//! synthesized ones. The gate is causal, not correlational: giving Arial a
+//! single East Asian code page bit switches it to the East Asian pitch,
+//! and clearing those bits on Arial Unicode MS switches it back, while
+//! adding CJK cmap coverage, CJK `ulUnicodeRange` bits or a `vhea` table
+//! changes nothing. Code page bit 21 (1361 Johab) does *not* gate.
+//!
+//! The 1.3 factor holds to 1e-4 on faces at 2048 units per em; faces at
+//! 256 units per em measure 0.24% under it and faces at 1024 units per em
+//! 0.08% over, a residual that no font-table field accounts for.
+//!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
 //! `w:spacing w:lineRule` (§17.3.1.33):
@@ -191,6 +216,9 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 
     if !compat.gdi_line_metrics && !compat.typo_line_spacing {
         let scale = size_px / m.units_per_em as f32;
+        if let Some(line) = east_asian_line_box(m, scale) {
+            return line;
+        }
         return LineBox {
             ascent: m.os2_win_ascent as f32 * scale,
             descent: m.os2_win_descent as f32 * scale,
@@ -224,11 +252,38 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
     }
 }
 
+/// `OS/2` ulCodePageRange1 bits 17-20 — code pages 932, 936, 949 and 950.
+/// Any one of them switches Word to the East Asian line pitch; bit 21
+/// (1361 Johab) does not.
+pub const EAST_ASIAN_CODE_PAGES: u32 = 0x001E_0000;
+
+/// Word's East Asian pitch as a multiple of the hhea ascent-to-descent span.
+const EAST_ASIAN_PITCH: f32 = 1.3;
+
 /// Per-component ceiling for the bounded experiments.
 const MAX_METRIC_EMS: i32 = 16;
 
 /// Word's 1638pt size limit in px at 96 DPI.
 const MAX_SIZE_PX: f32 = 2184.0;
+
+/// Rule 1a: the East Asian line box, or `None` for a face Word measures the
+/// Latin way. The extra 0.3 em-span is half-leading, so the baseline sits
+/// where Word puts it rather than at the top of the box.
+fn east_asian_line_box(m: &FontMetrics, scale: f32) -> Option<LineBox> {
+    if !m.east_asian_line_metrics() {
+        return None;
+    }
+    let span = m.hhea_ascender as i32 - m.hhea_descender as i32;
+    if span <= 0 {
+        return None;
+    }
+    let half_leading = span as f32 * (EAST_ASIAN_PITCH - 1.0) / 2.0;
+    Some(LineBox {
+        ascent: (m.hhea_ascender as f32 + half_leading) * scale,
+        descent: (-(m.hhea_descender as f32) + half_leading) * scale,
+        leading: 0.0,
+    })
+}
 
 /// hhea line height in excess of the win box, in design units.
 fn win_external_leading(m: &FontMetrics) -> i32 {

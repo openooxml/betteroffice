@@ -339,6 +339,7 @@ fn synthetic_metrics() -> FontMetrics {
         os2_win_descent: 170,
         os2_fs_selection: 0,
         os2_version: 4,
+        os2_code_page_range1: 0,
     }
 }
 
@@ -492,6 +493,7 @@ fn typo_line_gap_stays_signed() {
         os2_typo_line_gap: -210,
         os2_fs_selection: 0xC0,
         os2_version: 4,
+        os2_code_page_range1: 0,
         ..synthetic_metrics()
     };
     assert_eq!(
@@ -511,6 +513,7 @@ fn use_typo_metrics_is_ignored_before_os2_version_4() {
     for version in [0u16, 1, 2, 3] {
         let old = FontMetrics {
             os2_version: version,
+            os2_code_page_range1: 0,
             ..typo_metrics()
         };
         assert!(!old.use_typo_metrics(), "version {version}");
@@ -875,4 +878,81 @@ fn kern_features_gate_pair_kerning_in_shaping() {
         kerned < plain,
         "kern_features(true) must keep GPOS pair kerning: {kerned} vs {plain}"
     );
+}
+
+/// Word 16.113 (macOS) measures a face claiming an East Asian code page at
+/// 1.3 x the hhea ascent-to-descent span, half-leading split, ignoring the
+/// win and sTypo families and hhea.lineGap.
+#[test]
+fn east_asian_code_pages_select_the_cjk_line_pitch() {
+    let m = FontMetrics {
+        os2_code_page_range1: 0x0002_0000,
+        ..synthetic_metrics()
+    };
+    let line = single_line_box(&m, 1000.0, &CompatFlags::default());
+    assert_eq!(line.height(), 1.3 * 790.0);
+    assert_eq!(line.ascent, 620.0 + 0.15 * 790.0);
+    assert_eq!(line.descent, 170.0 + 0.15 * 790.0);
+    assert_eq!(line.leading, 0.0);
+
+    for bits in [0x0004_0000, 0x0008_0000, 0x0010_0000] {
+        let gated = FontMetrics {
+            os2_code_page_range1: bits,
+            ..synthetic_metrics()
+        };
+        assert_eq!(
+            single_line_box(&gated, 1000.0, &CompatFlags::default()),
+            line
+        );
+    }
+}
+
+/// Johab (bit 21) and Thai (bit 16) are not East Asian code pages for this
+/// rule, and neither is a face that only covers CJK.
+#[test]
+fn non_gating_code_pages_keep_the_latin_line_pitch() {
+    let latin = single_line_box(&synthetic_metrics(), 1000.0, &CompatFlags::default());
+    for bits in [0x0001_0000, 0x0020_0000, 0x0040_0000, 0x4000_01ff] {
+        let m = FontMetrics {
+            os2_code_page_range1: bits,
+            ..synthetic_metrics()
+        };
+        assert_eq!(
+            single_line_box(&m, 1000.0, &CompatFlags::default()),
+            latin,
+            "code page bits {bits:#x} must not gate"
+        );
+    }
+}
+
+/// The East Asian pitch reads hhea only: the win family, hhea.lineGap and
+/// USE_TYPO_METRICS all leave it untouched.
+#[test]
+fn east_asian_line_pitch_ignores_win_gap_and_typo_metrics() {
+    let base = FontMetrics {
+        os2_code_page_range1: 0x0002_0000,
+        ..synthetic_metrics()
+    };
+    let expected = single_line_box(&base, 1000.0, &CompatFlags::default());
+    let variants = [
+        FontMetrics {
+            os2_win_ascent: 1200,
+            os2_win_descent: 400,
+            ..base
+        },
+        FontMetrics {
+            hhea_line_gap: 600,
+            ..base
+        },
+        FontMetrics {
+            os2_fs_selection: USE_TYPO_METRICS,
+            ..base
+        },
+    ];
+    for m in variants {
+        assert_eq!(
+            single_line_box(&m, 1000.0, &CompatFlags::default()),
+            expected
+        );
+    }
 }
