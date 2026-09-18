@@ -22,8 +22,14 @@ pub(super) fn lower_shape_json(
     lower_shape(shape, format!("shape:{pm_start}"), env, Some(pm_start))
 }
 
+/// A `wp:anchor` shape rather than a `wp:inline` one. A malformed anchor can
+/// lose its position and keep only its wrap, so both spellings count.
+pub(super) fn anchored_shape(shape: &ShapeBlock) -> bool {
+    shape.position.is_some() || shape.wrap_type.is_some()
+}
+
 pub(super) fn inline_native_shape(shape: &ShapeBlock) -> bool {
-    if shape.position.is_some() || shape.wrap_type.is_some() {
+    if anchored_shape(shape) {
         return false;
     }
     if shape.shape_type == "textBox" {
