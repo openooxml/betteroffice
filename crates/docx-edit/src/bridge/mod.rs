@@ -706,6 +706,7 @@ fn lower_story<T: ReadTxn>(
                     } else {
                         paragraph_drawings.push(DrawingMarker {
                             pm_offset,
+                            anchored: shapes::anchored_shape(&block),
                             block: LayoutBlock::Shape(block),
                             hidden: mark_bool(attributes, "hidden") == Some(true),
                         });
@@ -733,6 +734,7 @@ fn lower_story<T: ReadTxn>(
                         pm_offset,
                         block: LayoutBlock::Chart(block),
                         hidden: mark_bool(attributes, "hidden") == Some(true),
+                        anchored: false,
                     });
                     story_index += 1;
                     paragraph_pm_units += 1;
@@ -1911,13 +1913,13 @@ struct RawRun {
     inline_sdt_widget: Option<Value>,
 }
 
-/// A shape or chart child that splits its paragraph, held with the position it
-/// occupied so the surrounding runs keep their original offsets.
+/// A paragraph's shape or chart child, at the offset it occupied.
 #[derive(Clone, Debug)]
 struct DrawingMarker {
     pm_offset: u32,
     block: LayoutBlock,
     hidden: bool,
+    anchored: bool,
 }
 
 /// Resolves every comment anchored in `story_id` to sorted, story-global
@@ -2042,10 +2044,9 @@ fn push_text_chunks(
     }
 }
 
-/// Emits the blocks one paragraph contributes: normally a single paragraph
-/// block, but a paragraph holding shape or chart children breaks into the text
-/// segments around them, each carrying the same pilcrow properties. Empty
-/// segments are dropped, and every surviving run keeps its original position.
+/// Emits the blocks one paragraph contributes. Anchored children are lifted
+/// out ahead of it and leave it whole; in-flow ones break it into the text
+/// segments around them, each carrying the same pilcrow properties.
 #[allow(clippy::too_many_arguments)]
 fn flush_paragraph_parts<T: ReadTxn>(
     mut raw_runs: Vec<RawRun>,
@@ -2069,6 +2070,10 @@ fn flush_paragraph_parts<T: ReadTxn>(
         raw_runs.retain(|run| run.formatting.hidden != Some(true));
         drawings.retain(|drawing| !drawing.hidden);
     }
+    let (anchored, drawings): (Vec<_>, Vec<_>) =
+        drawings.into_iter().partition(|drawing| drawing.anchored);
+    let mut blocks: Vec<LayoutBlock> = anchored.into_iter().map(|drawing| drawing.block).collect();
+
     if drawings.is_empty() {
         let paragraph = flush_paragraph(
             raw_runs,
@@ -2090,12 +2095,12 @@ fn flush_paragraph_parts<T: ReadTxn>(
                     .and_then(|defaults| map_bool(defaults, "hidden"))
             }) == Some(true)
         {
-            return Vec::new();
+            return blocks;
         }
-        return vec![LayoutBlock::Paragraph(paragraph)];
+        blocks.push(LayoutBlock::Paragraph(paragraph));
+        return blocks;
     }
 
-    let mut blocks = Vec::new();
     let mut segment_start = 0_u32;
     for drawing in drawings {
         let split_at = raw_runs.partition_point(|run| run.pm_end <= drawing.pm_offset);
@@ -4473,55 +4478,120 @@ mod tests {
         assert_eq!((after.pm_start, after.pm_end), (Some(3.0), Some(4.0)));
     }
 
+    fn shape_embed_blocks(seed: u64, shape: Value) -> Vec<LayoutBlock> {
+        let doc = EditingDoc::new(seed);
+        doc.create_story("body", "AB", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 1,
+                kind: "shape".to_owned(),
+                payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap()
+    }
+
     #[test]
-    fn anchored_and_text_shapes_split_paragraph() {
-        for (name, shape) in [
-            (
-                "anchored",
-                json!({
-                    "shapeType": "rect",
-                    "size": {"width": 914400, "height": 457200},
-                    "position": {
-                        "horizontal": {"relativeTo": "column", "posOffset": 0},
-                        "vertical": {"relativeTo": "paragraph", "posOffset": 0}
-                    },
-                    "wrap": {"type": "square"}
-                }),
-            ),
-            (
-                "text",
-                json!({
-                    "shapeType": "rect",
-                    "size": {"width": 914400, "height": 457200},
-                    "textBody": {"content": [{
-                        "paraId": "p1",
-                        "content": [{
-                            "type": "run",
-                            "content": [{"type": "text", "text": "hi"}]
-                        }]
-                    }]}
-                }),
-            ),
-        ] {
-            let doc = EditingDoc::new(61);
-            doc.create_story("body", "AB", "Normal", "left").unwrap();
-            doc.apply_raw_ops(
-                "body",
-                vec![RawOp::InsertEmbed {
-                    index: 1,
-                    kind: "shape".to_owned(),
-                    payload: vec![("shapeJson".to_owned(), Any::from(shape.to_string()))],
-                    attrs: Attrs::new(),
-                }],
-                &EditCtx::local("", DATE),
-            )
-            .unwrap();
-            let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
-            assert_eq!(blocks.len(), 3, "{name}");
-            assert!(matches!(blocks[0], LayoutBlock::Paragraph(_)));
-            assert!(matches!(blocks[1], LayoutBlock::Shape(_)));
-            assert!(matches!(blocks[2], LayoutBlock::Paragraph(_)));
-        }
+    fn in_flow_text_shape_splits_paragraph() {
+        let blocks = shape_embed_blocks(
+            61,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "textBody": {"content": [{
+                    "paraId": "p1",
+                    "content": [{
+                        "type": "run",
+                        "content": [{"type": "text", "text": "hi"}]
+                    }]
+                }]}
+            }),
+        );
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], LayoutBlock::Paragraph(_)));
+        assert!(matches!(blocks[1], LayoutBlock::Shape(_)));
+        assert!(matches!(blocks[2], LayoutBlock::Paragraph(_)));
+    }
+
+    #[test]
+    fn anchored_shape_leaves_its_paragraph_whole() {
+        let blocks = shape_embed_blocks(
+            64,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "position": {
+                    "horizontal": {"relativeTo": "column", "posOffset": 0},
+                    "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                },
+                "wrap": {"type": "square"}
+            }),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        let LayoutBlock::Paragraph(paragraph) = &blocks[1] else {
+            panic!("expected one whole paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 2);
+        assert_eq!(paragraph.pm_start, Some(0.0));
+        assert_eq!(paragraph.pm_end, Some(5.0));
+    }
+
+    #[test]
+    fn anchor_that_lost_its_position_still_leaves_its_paragraph_whole() {
+        let blocks = shape_embed_blocks(
+            66,
+            json!({
+                "shapeType": "rect",
+                "size": {"width": 914400, "height": 457200},
+                "wrap": {"type": "square"}
+            }),
+        );
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        let LayoutBlock::Paragraph(paragraph) = &blocks[1] else {
+            panic!("expected one whole paragraph");
+        };
+        assert_eq!(paragraph.runs.len(), 2);
+    }
+
+    #[test]
+    fn paragraph_anchoring_only_shapes_still_charges_a_line() {
+        let doc = EditingDoc::new(65);
+        doc.create_story("body", "", "Normal", "left").unwrap();
+        doc.apply_raw_ops(
+            "body",
+            vec![RawOp::InsertEmbed {
+                index: 0,
+                kind: "shape".to_owned(),
+                payload: vec![(
+                    "shapeJson".to_owned(),
+                    Any::from(
+                        json!({
+                            "shapeType": "rect",
+                            "size": {"width": 914400, "height": 457200},
+                            "position": {
+                                "horizontal": {"relativeTo": "column", "posOffset": 0},
+                                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+                            },
+                            "wrap": {"type": "none"}
+                        })
+                        .to_string(),
+                    ),
+                )],
+                attrs: Attrs::new(),
+            }],
+            &EditCtx::local("", DATE),
+        )
+        .unwrap();
+        let blocks = yrs_doc_to_layout_blocks(&doc, "body", &RenderEnv::default()).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], LayoutBlock::Shape(_)));
+        assert!(matches!(blocks[1], LayoutBlock::Paragraph(_)));
     }
 
     #[test]

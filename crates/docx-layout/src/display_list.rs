@@ -4980,7 +4980,7 @@ fn build_display_list_selected(
                 _ => {}
             }
         }
-        behind_objects.sort_by_key(BehindObject::relative_height);
+        behind_objects.sort_by_key(|object| (object.relative_height(), object.doc_order()));
         for object in behind_objects {
             match object {
                 BehindObject::Image {
@@ -7699,6 +7699,15 @@ impl BehindObject<'_> {
             Self::Shape { block, .. } => block.relative_height,
         }
         .unwrap_or(0)
+    }
+
+    /// Tie-break for equal ranks: document order.
+    fn doc_order(&self) -> i64 {
+        match self {
+            Self::Image { image, .. } => image.pm_start,
+            Self::Shape { fragment, block } => fragment.pm_start.or(block.pm_start),
+        }
+        .unwrap_or(i64::MAX)
     }
 }
 
