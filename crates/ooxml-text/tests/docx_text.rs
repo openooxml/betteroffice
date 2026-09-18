@@ -288,14 +288,14 @@ fn bidi_forced_rtl_base_direction() {
 /// Fixture single-spacing box at 16px, computed independently of the crate.
 fn liberation_single_16px() -> LineBox {
     LineBox {
-        ascent: 14.484375,  // 1854 * 16 / 2048
+        ascent: 15.0078125, // (1854 + 67) * 16 / 2048
         descent: 3.390625,  // 434 * 16 / 2048
-        leading: 0.5234375, // max(0, (1854+434+67) - (1854+434)) * 16 / 2048
+        leading: 0.0,
     }
 }
 
 #[test]
-fn single_line_box_uses_win_metrics_and_gdi_external_leading() {
+fn single_line_box_uses_hhea_metrics_with_the_gap_above_the_ascender() {
     let (store, id) = store_with_font();
     let m = store.metrics(id).unwrap();
 
@@ -306,7 +306,53 @@ fn single_line_box_uses_win_metrics_and_gdi_external_leading() {
 }
 
 #[test]
-fn no_leading_compat_flag_drops_external_leading_only() {
+fn the_win_box_does_not_move_the_single_spacing_line() {
+    let (store, id) = store_with_font();
+    let inflated = FontMetrics {
+        os2_win_ascent: 4000,
+        os2_win_descent: 1200,
+        ..*store.metrics(id).unwrap()
+    };
+    let shrunk = FontMetrics {
+        os2_win_ascent: 1000,
+        os2_win_descent: 200,
+        ..*store.metrics(id).unwrap()
+    };
+
+    assert_eq!(
+        single_line_box(&inflated, 16.0, &CompatFlags::default()),
+        liberation_single_16px()
+    );
+    assert_eq!(
+        single_line_box(&shrunk, 16.0, &CompatFlags::default()),
+        liberation_single_16px()
+    );
+}
+
+#[test]
+fn aptos_measures_its_hhea_span_not_its_taller_win_box() {
+    // Word 16.113's own Aptos: upem 2048, usWin 2068/563, hhea 1923/-577/0.
+    let aptos = FontMetrics {
+        units_per_em: 2048,
+        hhea_ascender: 1923,
+        hhea_descender: -577,
+        hhea_line_gap: 0,
+        os2_win_ascent: 2068,
+        os2_win_descent: 563,
+        os2_typo_ascender: 1923,
+        os2_typo_descender: -577,
+        os2_typo_line_gap: 0,
+        os2_fs_selection: USE_TYPO_METRICS,
+        os2_version: 4,
+    };
+
+    let line = single_line_box(&aptos, 2048.0, &CompatFlags::default());
+    assert_eq!(line.height(), 2500.0);
+    assert_eq!(line.ascent, 1923.0);
+}
+
+#[test]
+fn no_leading_compat_flag_drops_the_line_gap_only() {
     let (store, id) = store_with_font();
     let m = store.metrics(id).unwrap();
 
@@ -318,8 +364,9 @@ fn no_leading_compat_flag_drops_external_leading_only() {
     assert_eq!(
         line,
         LineBox {
+            ascent: 14.484375, // 1854 * 16 / 2048
+            descent: 3.390625,
             leading: 0.0,
-            ..liberation_single_16px()
         }
     );
 }
@@ -375,6 +422,9 @@ fn gdi_typo_flags() -> CompatFlags {
 fn default_path_does_not_clamp_spec_valid_vertical_metrics() {
     let metrics = FontMetrics {
         units_per_em: 1024,
+        hhea_ascender: 20_480,
+        hhea_descender: 0,
+        hhea_line_gap: 0,
         os2_win_ascent: 20_480,
         os2_win_descent: 0,
         ..synthetic_metrics()
@@ -687,7 +737,7 @@ fn auto_240_is_identity_and_480_doubles_height_into_leading() {
     // so selection rects hug the text at the top of the line box like Word
     assert_eq!(double.ascent, single.ascent);
     assert_eq!(double.descent, single.descent);
-    assert_eq!(double.leading, 18.921875); // 36.796875 - 14.484375 - 3.390625
+    assert_eq!(double.leading, 18.398438); // 36.796875 - 15.0078125 - 3.390625
 }
 
 /// Word splits an `exact` box 80/20 about the baseline whatever the content.

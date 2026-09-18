@@ -6,11 +6,10 @@
 //! values below are dyadic and exact in f32 unless noted:
 //!   '0' = 1139/128 = 8.8984375     ' ' = 569/128 = 4.4453125
 //!   'A' = 1366/128 = 10.671875
-//!   ascent  = 16 × 1854/2048 = 14.484375
-//!   descent = 16 ×  434/2048 =  3.390625
-//!   external leading = 16 × max(0, (1854+434+67)−(1854+434))/2048 = 0.5234375
-//!   single line = 16 × (1854+434)/2048 + leading = 17.875 + 0.5234375 = 18.3984375
-//!   External leading is included in the line height.
+//!   ascent  = 16 × (1854+67)/2048 = 15.0078125
+//!   descent = 16 ×  434/2048      =  3.390625
+//!   single line = 16 × (1854+434+67)/2048 = 18.3984375
+//!   The hhea line gap rides above the ascender, inside the ascent.
 //!
 //! Because the numbers are exact, expectations are written as literal
 //! arithmetic rather than tolerances, and wrap behaviour is pinned by feeding
@@ -35,10 +34,9 @@ const NOTO_NASKH_ARABIC: &[u8] =
 const W0: f64 = 1139.0 / 128.0;
 const SP: f64 = 569.0 / 128.0;
 const WA: f64 = 1366.0 / 128.0;
-const ASC: f64 = 14.484375;
+const ASC: f64 = 15.0078125;
 const DESC: f64 = 3.390625;
-const LEAD: f64 = 0.5234375;
-const LH: f64 = 17.875 + LEAD;
+const LH: f64 = ASC + DESC;
 
 fn store() -> FontStore {
     let mut s = FontStore::new();
@@ -540,11 +538,11 @@ fn a_shorter_font_does_not_add_leading_below_a_taller_font() {
         let out = measure_paragraph_json(&store, &input.to_string()).unwrap();
         let result: Value = serde_json::from_str(&out).unwrap();
         let line = &result["lines"][0];
-        approx(line["ascent"].as_f64().unwrap(), 16.0 * 1.405, "ascent");
+        approx(line["ascent"].as_f64().unwrap(), 16.0 * 1.069, "ascent");
         approx(line["descent"].as_f64().unwrap(), 16.0 * 0.634, "descent");
         approx(
             line["lineHeight"].as_f64().unwrap(),
-            16.0 * 2.039,
+            16.0 * 1.703,
             "line height",
         );
     }

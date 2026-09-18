@@ -9,21 +9,31 @@
 //!
 //! # 1. Font-unit line height (single spacing) — [`single_line_box`]
 //!
-//! Word derives the default line height from `OS/2` **usWinAscent +
-//! usWinDescent** (the GDI `tmHeight` lineage), *not* from hhea
-//! ascender/descender and *not* from sTypo values — which is why
-//! [`crate::font_store::FontMetrics`] carries all three families. External
-//! leading follows GDI's `tmExternalLeading`:
+//! Word takes the default line height from the **`hhea`** family — the same
+//! ascent, descent and leading CoreText reports — and ignores both the
+//! `OS/2` usWin box and the sTypo family:
 //!
 //! ```text
-//! tmExternalLeading = MAX(0, hhea(ascender − descender + lineGap)
-//!                            − (usWinAscent + usWinDescent))
+//! pitch  = hhea.ascender − hhea.descender + hhea.lineGap
+//! ascent = hhea.ascender + hhea.lineGap      (the whole gap sits above)
 //! ```
 //!
-//! scaled to the requested size, and Word places it *below* the descent
-//! (line pitch = ascent + descent + external leading, baseline hugging the
-//! top of the pitch). The `w:noLeading` compatibility flag (`w:compat`,
-//! ECMA-376 §17.15.3) drops that external leading entirely.
+//! The `w:noLeading` compatibility flag (`w:compat`, ECMA-376 §17.15.3)
+//! drops the lineGap, leaving the bare ascender-to-descender span.
+//!
+//! Measured against Word 16.113 on macOS with synthetic faces that move one
+//! field at a time, embedded in the probe document so Word measures the exact
+//! bytes under test. The gate is causal: inflating usWinAscent/usWinDescent
+//! from 1.117 to 1.285 em moves neither the pitch nor the baseline, shrinking
+//! them to 0.977 em moves nothing either, and rewriting the sTypo family
+//! moves nothing with or without `USE_TYPO_METRICS`; hhea.lineGap,
+//! hhea.ascender and hhea.descender each move the pitch one-for-one, and
+//! lineGap alone moves the first baseline by its full value. Word's bundled
+//! Aptos discriminates the two rules on a real face — usWin 1.28467 em
+//! against hhea 1.22070 em — and measures 1.21925 em.
+//!
+//! The usWin family stays on [`crate::font_store::FontMetrics`] because the
+//! opt-in experiments below still read it.
 //!
 //! # 2. Auto / exact / atLeast spacing — [`apply_spacing_rule`]
 //!
@@ -160,11 +170,13 @@ pub const EXACT_BASELINE_RATIO: f32 = 0.8;
 
 /// One line box in px: total height = ascent + descent + leading. Leading
 /// always sits *below* the descent, so the baseline hugs the top of the box.
+/// Single spacing folds the font's own lineGap into `ascent` and leaves
+/// `leading` at zero; rule 2's growth is what lands here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineBox {
     pub ascent: f32,
     pub descent: f32,
-    /// External leading distributed per Word's rules; 0.0 under no_leading.
+    /// Leading below the descent; 0.0 from the font-unit box alone.
     pub leading: f32,
 }
 
@@ -191,14 +203,15 @@ pub fn single_line_box(m: &FontMetrics, size_px: f32, compat: &CompatFlags) -> L
 
     if !compat.gdi_line_metrics && !compat.typo_line_spacing {
         let scale = size_px / m.units_per_em as f32;
+        let gap = if compat.no_leading {
+            0
+        } else {
+            m.hhea_line_gap as i32
+        };
         return LineBox {
-            ascent: m.os2_win_ascent as f32 * scale,
-            descent: m.os2_win_descent as f32 * scale,
-            leading: if compat.no_leading {
-                0.0
-            } else {
-                win_external_leading(m) as f32 * scale
-            },
+            ascent: (m.hhea_ascender as i32 + gap).max(0) as f32 * scale,
+            descent: (-(m.hhea_descender as i32)).max(0) as f32 * scale,
+            leading: 0.0,
         };
     }
 
