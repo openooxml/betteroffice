@@ -2590,8 +2590,6 @@ pub(crate) struct LineIn {
     #[serde(default)]
     ascent: f64,
     #[serde(default)]
-    descent: f64,
-    #[serde(default)]
     line_height: f64,
     #[serde(default)]
     synthetic_fallback: bool,
@@ -5949,9 +5947,9 @@ fn emit_line(
 
     let mut pen_x = geom.frag_x + pad_left + text_indent + left_offset + align_shift;
     let line_bottom = geom.line_top + line.line_height;
-    // baseline from the measured metrics with CSS half-leading centering
-    let half_leading = ((line.line_height - line.ascent - line.descent) / 2.0).max(0.0);
-    let baseline = geom.line_top + half_leading + line.ascent;
+    // Word hangs the baseline off the box top: whatever the spacing rule adds
+    // beyond ascent + descent is leading below the descent, never centered.
+    let baseline = geom.line_top + line.ascent;
 
     // Numbering is not part of the story text, so materialize the precomputed
     // marker as its own first-line primitive. The hanging-indent slot is its
@@ -10803,9 +10801,9 @@ mod tests {
     #[test]
     fn header_footer_spacing_collapses_and_short_footers_anchor_to_their_height() {
         for (kind, height, spacings, expected) in [
-            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![59.0, 87.0]),
-            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![420.0, 448.0]),
-            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![454.0]),
+            ("header", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![56.0, 84.0]),
+            ("footer", 59.0, [(5.0, 8.0), (4.0, 6.0)], vec![417.0, 445.0]),
+            ("footer", 20.0, [(0.0, 0.0), (0.0, 0.0)], vec![451.0]),
         ] {
             let count = expected.len();
             let measured: Vec<Value> = spacings.into_iter().take(count).enumerate().map(|(i,(before,after))|json!({
