@@ -230,9 +230,17 @@ impl SlideRenderer {
                     .as_ref()
             })
         });
+        // A referenced picture style carries no colour of its own, so keep the
+        // reference's own colour for the fills we cannot paint, such as a tile.
         let background = background_fill
             .as_ref()
             .and_then(|fill| paint(fill, theme))
+            .or_else(|| {
+                background_source
+                    .as_ref()
+                    .and_then(|source| source.fill)
+                    .and_then(|fill| paint(fill, theme))
+            })
             .or_else(|| {
                 Some(Paint::Solid {
                     color: "#ffffff".to_owned(),
@@ -5567,6 +5575,36 @@ mod tests {
         assert_eq!(
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
+        );
+    }
+
+    #[test]
+    fn an_unpaintable_background_style_keeps_the_reference_colour() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let color = ColorValue {
+            rgb: Some("123456".to_owned()),
+            ..ColorValue::default()
+        };
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "theme".to_owned(),
+            color: Some(color),
+            gradient: None,
+        });
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].format_scheme.background_fills =
+            vec![None, None, Some(ShapeFill::named("picture"))];
+        package.themes[0].background_pictures = Vec::new();
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#123456".to_owned()
+            })
         );
     }
 
