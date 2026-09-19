@@ -18,8 +18,8 @@ use yrs::{
 use crate::{
     CONNECTS, CellFormulaReceipt, CellFormulaWrite, CellSnapshot, ConnectorRouteReceipt,
     DiagramSession, DiagramSnapshot, EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES,
-    PageSnapshot, SHEETS, STORIES, ShapeDelete, ShapeDraft, ShapeMove, ShapeReceipt, ShapeSnapshot,
-    ShapeTreeDraft, ShapeTreeGlue, TextReceipt,
+    PageSnapshot, SHEETS, STORIES, ShapeDataReceipt, ShapeDataWrite, ShapeDelete, ShapeDraft,
+    ShapeMove, ShapeReceipt, ShapeSnapshot, ShapeTreeDraft, ShapeTreeGlue, TextReceipt,
 };
 
 mod connect;
@@ -1575,6 +1575,80 @@ impl DiagramSession {
                 before,
                 after: formula,
             });
+        }
+        Ok(receipts)
+    }
+
+    /// Writes a batch of `Property` row values for one shape as a single undo entry.
+    ///
+    /// Every row is decided before anything is written, so a refusal anywhere leaves the
+    /// document untouched and the caller still learns per row why.
+    pub fn set_shape_data(
+        &self,
+        context: &EditCtx,
+        page_id: &str,
+        shape_id: &str,
+        writes: &[ShapeDataWrite],
+    ) -> EditResult<Vec<ShapeDataReceipt>> {
+        if writes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut txn = self.transact_for(context);
+        let policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        let mut receipts = Vec::with_capacity(writes.len());
+        let mut pending = Vec::with_capacity(writes.len());
+        for write in writes {
+            let locator = policy.locator(shape_data_locator(&write.row, write.section_index));
+            let before = policy.current_formula(&locator).ok().flatten();
+            let mut receipt = ShapeDataReceipt {
+                page_id: page_id.to_owned(),
+                shape_id: shape_id.to_owned(),
+                row_name: match &write.row {
+                    CellRow::Name(name) => Some(name.clone()),
+                    CellRow::Index(_) => None,
+                },
+                row_index: match &write.row {
+                    CellRow::Index(index) => Some(*index),
+                    CellRow::Name(_) => None,
+                },
+                section_index: write.section_index,
+                before: before.clone(),
+                after: None,
+                refusal: None,
+            };
+            if let Some(reason) = shape_data_refusal(&policy, write, before.as_deref()) {
+                receipt.refusal = Some(reason);
+                receipts.push(receipt);
+                continue;
+            }
+            match decide_mutation(
+                &policy,
+                locator,
+                gesture_for_cell(SHAPE_DATA_CELL),
+                write.formula.clone(),
+                &ParseLimits::default(),
+            ) {
+                MutationOutcome::Allowed { target, .. } => {
+                    receipt.after = Some(write.formula.clone());
+                    pending.push((target, write.formula.clone(), receipts.len()));
+                }
+                MutationOutcome::Refused { reason } | MutationOutcome::Unsupported { reason } => {
+                    receipt.refusal = Some(reason);
+                }
+            }
+            receipts.push(receipt);
+        }
+        if receipts.iter().any(ShapeDataReceipt::refused) {
+            for receipt in &mut receipts {
+                receipt.after = None;
+            }
+            return Ok(receipts);
+        }
+        for (target, formula, index) in pending {
+            let cell = cell_map(&mut txn, page_id, shape_id, &target)?;
+            let before = map_string(&cell, &txn, "formula");
+            cell.insert(&mut txn, "formula", formula.as_str());
+            receipts[index].before = before;
         }
         Ok(receipts)
     }
@@ -4871,6 +4945,15 @@ impl CrdtMutationContext {
         locator.shape_id = Some(self.shape_id);
         locator
     }
+
+    /// A cell's cached value, falling back to its formula.
+    fn current_text(&self, locator: &CellLocator) -> Option<String> {
+        let key = locator_key(locator);
+        self.values
+            .get(&key)
+            .or_else(|| self.formulas.get(&key))
+            .cloned()
+    }
 }
 
 impl MutationContext for CrdtMutationContext {
@@ -4957,6 +5040,78 @@ fn validate_story_text(text: &str) -> EditResult<()> {
         ));
     }
     Ok(())
+}
+
+/// The `Property` row cell a shape-data write targets.
+const SHAPE_DATA_CELL: &str = "Value";
+
+/// Locator for a `Property` row's `Value`, left unbound to a sheet.
+fn shape_data_locator(row: &CellRow, section_index: Option<u32>) -> CellLocator {
+    CellLocator {
+        sheet: CellSheet::Page(0),
+        shape_id: None,
+        section: Some("Property".to_owned()),
+        section_index,
+        row: Some(row.clone()),
+        cell_name: SHAPE_DATA_CELL.to_owned(),
+    }
+}
+
+/// Visio `Property` row types whose value this op cannot encode back without losing meaning.
+fn shape_data_type_refusal(type_code: Option<&str>) -> Option<&'static str> {
+    match type_code
+        .map(str::trim)
+        .map(|code| code.trim_start_matches('=').trim())
+    {
+        Some("5") => Some("date"),
+        Some("6") => Some("duration"),
+        Some("7") => Some("currency"),
+        _ => None,
+    }
+}
+
+fn is_numeric_literal(formula: &str) -> bool {
+    let trimmed = formula.trim().trim_start_matches('=').trim();
+    !trimmed.is_empty() && trimmed.parse::<f64>().is_ok()
+}
+
+/// Refusals this op owns, ahead of the shared mutation policy.
+fn shape_data_refusal(
+    policy: &CrdtMutationContext,
+    write: &ShapeDataWrite,
+    before: Option<&str>,
+) -> Option<String> {
+    if write.formula.trim().is_empty() {
+        return Some("a shape-data row cannot be set to an empty formula".to_owned());
+    }
+    let type_locator = policy.locator(CellLocator {
+        cell_name: "Type".to_owned(),
+        ..shape_data_locator(&write.row, write.section_index)
+    });
+    let type_code = policy.current_text(&type_locator);
+    if let Some(kind) = shape_data_type_refusal(type_code.as_deref()) {
+        return Some(format!(
+            "a {kind} shape-data row keeps its typed value; editing it here would store text"
+        ));
+    }
+    let numeric = matches!(
+        type_code
+            .as_deref()
+            .map(str::trim)
+            .map(|code| code.trim_start_matches('=').trim()),
+        Some("2")
+    );
+    if numeric {
+        if !is_numeric_literal(&write.formula) {
+            return Some("a number shape-data row takes a numeric value".to_owned());
+        }
+        if before.is_some_and(|formula| !is_numeric_literal(formula)) {
+            return Some(
+                "a number shape-data row holding a formula is not editable as a value".to_owned(),
+            );
+        }
+    }
+    None
 }
 
 fn locator_key(locator: &CellLocator) -> String {

@@ -16,6 +16,10 @@ export interface ValidationIssue { id: string; rule: string; severity: Validatio
 export interface PageSnapshot { id: string; sourcePartPath: string; name: string | null; shapes: ShapeSnapshot[]; }
 export interface DiagramSnapshot { pages: PageSnapshot[]; }
 export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName: string; before: string | null; after: string; }
+/** One `Property` row value to write; give a rowName or a rowIndex, not both. */
+export interface ShapeDataWrite { rowName?: string; rowIndex?: number; sectionIndex?: number; formula: string; }
+/** Per-row outcome of a shape-data batch; `refusal` is set when the row was not written. */
+export interface ShapeDataReceipt { pageId: string; shapeId: string; rowName: string | null; rowIndex: number | null; sectionIndex: number | null; before: string | null; after: string | null; refusal: string | null; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface ConnectedShapeReceipt { shape: ShapeReceipt; connector: ShapeReceipt; }

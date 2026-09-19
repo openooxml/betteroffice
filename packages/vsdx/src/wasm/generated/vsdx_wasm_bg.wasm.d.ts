@@ -51,6 +51,7 @@ export const vsdxdocument_setCellFormulasJson: (a: number, b: number, c: number)
 export const vsdxdocument_setConnectorRouteJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_setControlHandleJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_setShapeBoundsJson: (a: number, b: number, c: number) => [number, number, number, number];
+export const vsdxdocument_setShapeDataJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_setShapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_shapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_snapshotJson: (a: number) => [number, number, number, number];

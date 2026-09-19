@@ -40,6 +40,7 @@ export class VsdxDocument {
     setConnectorRouteJson(args: string): string;
     setControlHandleJson(args: string): string;
     setShapeBoundsJson(args: string): string;
+    setShapeDataJson(args: string): string;
     setShapeTextJson(args: string): string;
     shapeTextJson(args: string): string;
     snapshotJson(): string;
@@ -129,6 +130,7 @@ export interface InitOutput {
     readonly vsdxdocument_setConnectorRouteJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_setControlHandleJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_setShapeBoundsJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly vsdxdocument_setShapeDataJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_setShapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_shapeTextJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_snapshotJson: (a: number) => [number, number, number, number];

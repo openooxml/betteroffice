@@ -2290,6 +2290,196 @@ mod tests {
         );
     }
 
+    fn property_row(
+        session: &DiagramSession,
+        name: &str,
+        type_code: Option<&str>,
+        formula: &str,
+        value: &str,
+    ) -> CellRow {
+        let row = CellRow::Name(name.to_owned());
+        add_cell_at(
+            session,
+            "Label",
+            Some("Property"),
+            Some(row.clone()),
+            None,
+            Some(name),
+        );
+        if let Some(code) = type_code {
+            add_cell_at(
+                session,
+                "Type",
+                Some("Property"),
+                Some(row.clone()),
+                None,
+                Some(code),
+            );
+        }
+        add_cell_at(
+            session,
+            "Value",
+            Some("Property"),
+            Some(row.clone()),
+            Some(formula),
+            Some(value),
+        );
+        row
+    }
+
+    fn data_write(row: &CellRow, formula: &str) -> ShapeDataWrite {
+        ShapeDataWrite {
+            row: row.clone(),
+            section_index: None,
+            formula: formula.to_owned(),
+        }
+    }
+
+    fn value_formula(session: &DiagramSession, row: &CellRow) -> Option<String> {
+        let snapshot = session.snapshot().unwrap();
+        snapshot.pages[0].shapes[0]
+            .cells
+            .iter()
+            .find(|cell| {
+                cell.name == "Value"
+                    && cell.locator.section.as_deref() == Some("Property")
+                    && cell.locator.row.as_ref() == Some(row)
+            })
+            .and_then(|cell| cell.formula.clone())
+    }
+
+    #[test]
+    fn shape_data_batch_is_one_undo_entry() {
+        let session = session();
+        let first = property_row(&session, "Device", None, "\"Amp\"", "Amp");
+        let second = property_row(&session, "Owner", None, "\"Ada\"", "Ada");
+        let before = session.undo_depth();
+        let receipts = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[
+                    data_write(&first, "\"Mixer\""),
+                    data_write(&second, "\"Grace\""),
+                ],
+            )
+            .unwrap();
+        assert!(
+            receipts.iter().all(|receipt| !receipt.refused()),
+            "{receipts:?}"
+        );
+        assert_eq!(
+            value_formula(&session, &first).as_deref(),
+            Some("\"Mixer\"")
+        );
+        assert_eq!(
+            value_formula(&session, &second).as_deref(),
+            Some("\"Grace\"")
+        );
+        assert_eq!(session.undo_depth(), before + 1);
+        assert!(session.undo());
+        assert_eq!(value_formula(&session, &first).as_deref(), Some("\"Amp\""));
+        assert_eq!(value_formula(&session, &second).as_deref(), Some("\"Ada\""));
+    }
+
+    #[test]
+    fn one_refused_row_leaves_the_whole_batch_unwritten() {
+        let session = session();
+        let writable = property_row(&session, "Device", None, "\"Amp\"", "Amp");
+        let guarded = property_row(&session, "Serial", None, "GUARD(\"ABC\")", "ABC");
+        let before = session.undo_depth();
+        let receipts = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[
+                    data_write(&writable, "\"Mixer\""),
+                    data_write(&guarded, "\"XYZ\""),
+                ],
+            )
+            .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(!receipts[0].refused());
+        assert!(receipts[0].after.is_none(), "{:?}", receipts[0]);
+        let reason = receipts[1].refusal.as_deref().unwrap_or_default();
+        assert!(reason.contains("GUARD"), "{reason}");
+        assert_eq!(
+            value_formula(&session, &writable).as_deref(),
+            Some("\"Amp\"")
+        );
+        assert_eq!(
+            value_formula(&session, &guarded).as_deref(),
+            Some("GUARD(\"ABC\")")
+        );
+        assert_eq!(session.undo_depth(), before);
+    }
+
+    #[test]
+    fn typed_rows_refuse_rather_than_losing_their_value() {
+        let session = session();
+        for (name, code, formula, value) in [
+            ("Due", "5", "DATETIME(45000)", "3 March"),
+            ("Runtime", "6", "DURATION(2)", "2 h"),
+            ("Price", "7", "CY(4)", "4.00"),
+        ] {
+            let row = property_row(&session, name, Some(code), formula, value);
+            let receipts = session
+                .set_shape_data(
+                    &EditCtx::local("a"),
+                    "page:1",
+                    "page:1:shape:1",
+                    &[data_write(&row, "\"3 March\"")],
+                )
+                .unwrap();
+            assert!(receipts[0].refused(), "{name}: {receipts:?}");
+            assert_eq!(value_formula(&session, &row).as_deref(), Some(formula));
+        }
+    }
+
+    #[test]
+    fn a_number_row_refuses_a_non_numeric_value() {
+        let session = session();
+        let row = property_row(&session, "Count", Some("2"), "4", "4");
+        let receipts = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[data_write(&row, "\"seven\"")],
+            )
+            .unwrap();
+        assert!(receipts[0].refused(), "{receipts:?}");
+        assert_eq!(value_formula(&session, &row).as_deref(), Some("4"));
+        let ok = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[data_write(&row, "7")],
+            )
+            .unwrap();
+        assert!(!ok[0].refused(), "{ok:?}");
+        assert_eq!(value_formula(&session, &row).as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn an_empty_formula_is_rejected() {
+        let session = session();
+        let row = property_row(&session, "Device", None, "\"Amp\"", "Amp");
+        let receipts = session
+            .set_shape_data(
+                &EditCtx::local("a"),
+                "page:1",
+                "page:1:shape:1",
+                &[data_write(&row, "   ")],
+            )
+            .unwrap();
+        assert!(receipts[0].refused(), "{receipts:?}");
+        assert_eq!(value_formula(&session, &row).as_deref(), Some("\"Amp\""));
+    }
+
     #[test]
     fn guarded_property_value_refuses_edits() {
         let session = session();

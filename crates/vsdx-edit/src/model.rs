@@ -112,6 +112,34 @@ pub struct CellFormulaWrite {
     pub formula: String,
 }
 
+/// One shape-data row write in a batch against a single shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShapeDataWrite {
+    pub row: CellRow,
+    pub section_index: Option<u32>,
+    pub formula: String,
+}
+
+/// Per-row outcome of a shape-data batch; `refusal` is set when the row was not written.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShapeDataReceipt {
+    pub page_id: String,
+    pub shape_id: String,
+    pub row_name: Option<String>,
+    pub row_index: Option<u32>,
+    pub section_index: Option<u32>,
+    pub before: Option<String>,
+    pub after: Option<String>,
+    pub refusal: Option<String>,
+}
+
+impl ShapeDataReceipt {
+    pub fn refused(&self) -> bool {
+        self.refusal.is_some()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShapeReceipt {

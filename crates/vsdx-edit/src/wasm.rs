@@ -142,6 +142,43 @@ struct SetCellFormulasArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ShapeDataWriteArgs {
+    row_index: Option<u32>,
+    row_name: Option<String>,
+    section_index: Option<u32>,
+    formula: String,
+}
+
+impl TryFrom<ShapeDataWriteArgs> for crate::ShapeDataWrite {
+    type Error = &'static str;
+
+    fn try_from(value: ShapeDataWriteArgs) -> Result<Self, Self::Error> {
+        let row = match (value.row_index, value.row_name) {
+            (Some(_), Some(_)) => {
+                return Err("a shape-data write cannot contain both rowIndex and rowName");
+            }
+            (Some(index), None) => CellRow::Index(index),
+            (None, Some(name)) => CellRow::Name(name),
+            (None, None) => return Err("a shape-data write needs a rowIndex or a rowName"),
+        };
+        Ok(Self {
+            row,
+            section_index: value.section_index,
+            formula: value.formula,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetShapeDataArgs {
+    page_id: String,
+    shape_id: String,
+    writes: Vec<ShapeDataWriteArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SetShapeBoundsArgs {
     page_id: String,
     shape_id: String,
@@ -568,6 +605,11 @@ impl VsdxDocument {
     #[wasm_bindgen(js_name = setCellFormulasJson)]
     pub fn set_cell_formulas_json(&self, args: &str) -> Result<String, JsValue> {
         self.set_cell_formulas_json_inner(args).map_err(js_error)
+    }
+
+    #[wasm_bindgen(js_name = setShapeDataJson)]
+    pub fn set_shape_data_json(&self, args: &str) -> Result<String, JsValue> {
+        self.set_shape_data_json_inner(args).map_err(js_error)
     }
 
     #[wasm_bindgen(js_name = setShapeBoundsJson)]
@@ -1014,6 +1056,20 @@ impl VsdxDocument {
     fn set_cell_formulas_json_inner(&self, args: &str) -> Result<String, String> {
         let args = parse_args_inner(args)?;
         self.set_cell_formulas(args)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
+    }
+
+    fn set_shape_data_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: SetShapeDataArgs = parse_args_inner(args)?;
+        let writes = args
+            .writes
+            .into_iter()
+            .map(crate::ShapeDataWrite::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(str::to_owned)?;
+        self.session
+            .set_shape_data(&local_context(), &args.page_id, &args.shape_id, &writes)
             .map_err(|error| error.to_string())
             .and_then(json_inner)
     }
