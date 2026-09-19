@@ -3056,15 +3056,11 @@ fn modern_text_effects_thread_to_text_primitives() {
     assert_eq!(text.attrs.modern_effects.as_ref(), Some(&effects));
 }
 
-/// Word hangs the first baseline of an `auto`-ruled line off the top of the
-/// line box: raising the multiple grows the box downward and leaves the
-/// baseline where single spacing put it.
-///
-/// Measured on Word 16.113 (macOS), Arial 72pt in a 1-inch top margin, three
-/// lines per page: the first baseline lands at 139.552pt under w:line 240,
-/// 276, 288, 360 and 480 alike (max spread 0.045pt), while the line pitch
-/// scales with the multiple. The model puts it at 72 + hhea ascender + lineGap
-/// = 72 + (1854 + 67) / 2048 x 72 = 139.535pt, inside Word's 0.25pt device grid.
+/// Word hangs an `auto` line's first baseline off the box top: raising the
+/// multiple grows the box downward and leaves the baseline put. Measured on
+/// Word 16.113, Arial 72pt, 1-inch top margin — 139.552pt under w:line 240,
+/// 276, 288, 360 and 480 alike (spread 0.045pt), against the model's
+/// 72 + (1854 + 67) / 2048 x 72 = 139.535pt, inside the 0.25pt device grid.
 #[test]
 fn auto_spacing_keeps_the_first_baseline_at_the_top_of_a_taller_box() {
     const WORD_BASELINE_PT: f64 = 139.552;
