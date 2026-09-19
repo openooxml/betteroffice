@@ -18,7 +18,6 @@ use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
 const DEFAULT_CELL_PADDING_X: f64 = 7.0;
 const DEFAULT_CELL_PADDING_Y: f64 = 0.0;
-const ANCHOR_PROXIMITY: usize = 4;
 /// Zones one anchor frame may accumulate, matching the measurement layer's cap.
 const MAX_ACTIVE_ZONES: usize = 200;
 
@@ -353,7 +352,7 @@ pub fn measure_blocks_with_shape_offsets(
     let extracted =
         extract_floating_zones(blocks, default_width, config, page_geometry, shape_offsets)?;
     let mut margin_groups = BTreeMap::<u64, Vec<AnchoredFloatingZone>>::new();
-    let mut paragraph_zones = Vec::new();
+    let mut paragraph_zones = BTreeMap::<usize, Vec<FloatingZone>>::new();
     for anchored in extracted {
         if anchored.margin_relative {
             margin_groups
@@ -361,20 +360,21 @@ pub fn measure_blocks_with_shape_offsets(
                 .or_default()
                 .push(anchored);
         } else {
-            paragraph_zones.push(anchored);
+            paragraph_zones
+                .entry(anchored.anchor_block_index)
+                .or_default()
+                .push(anchored.zone);
         }
     }
-    let mut groups = group_overlapping_zones(paragraph_zones);
-    groups.extend(margin_groups.into_values());
     let mut zones_by_anchor = HashMap::<usize, Vec<FloatingZone>>::new();
-    for group in groups {
+    for group in margin_groups.into_values() {
         let earliest = group
             .iter()
             .map(|anchored| anchored.anchor_block_index)
             .min()
             .unwrap_or(0);
         for anchored in group {
-            let anchor = if anchored.zone.full_width_block && anchored.margin_relative {
+            let anchor = if anchored.zone.full_width_block {
                 0
             } else {
                 earliest
@@ -385,6 +385,15 @@ pub fn measure_blocks_with_shape_offsets(
                 .push(anchored.zone);
         }
     }
+
+    let section_break_marks = blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| {
+            matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
+                && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
+        })
+        .collect::<Vec<_>>();
 
     let mut cumulative_y = 0.0;
     let mut active_zones = Vec::new();
@@ -398,6 +407,20 @@ pub fn measure_blocks_with_shape_offsets(
             active_zones.clear();
             cumulative_y = 0.0;
         }
+        if let Some(zones) = paragraph_zones.get(&index) {
+            // A paragraph-anchored band hangs off its own anchor, which sits at
+            // `cumulative_y` in the frame the earlier bands were measured in.
+            if active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
+                active_zones.extend(zones.iter().map(|zone| FloatingZone {
+                    top_y: zone.top_y + cumulative_y,
+                    bottom_y: zone.bottom_y + cumulative_y,
+                    ..zone.clone()
+                }));
+            } else {
+                cumulative_y = 0.0;
+                active_zones.clone_from(zones);
+            }
+        }
         if let Some(zones) = zones_by_anchor.get(&index) {
             // Anchors the flow has not advanced past share one origin.
             if cumulative_y == 0.0 && active_zones.len() + zones.len() <= MAX_ACTIVE_ZONES {
@@ -408,13 +431,22 @@ pub fn measure_blocks_with_shape_offsets(
             }
         }
         let width = widths.get(index).copied().unwrap_or(default_width);
-        let extent = measure_block_with_context(
-            block,
-            width,
-            config,
-            (!active_zones.is_empty()).then_some(active_zones.as_slice()),
-            cumulative_y,
-        )?;
+        // A bare paragraph mark carrying section properties is the section
+        // break itself; Word prints no line for it.
+        let extent = if section_break_marks[index] {
+            BlockExtent::Paragraph(ParagraphExtent {
+                lines: Vec::new(),
+                total_height: 0.0,
+            })
+        } else {
+            measure_block_with_context(
+                block,
+                width,
+                config,
+                (!active_zones.is_empty()).then_some(active_zones.as_slice()),
+                cumulative_y,
+            )?
+        };
         if !matches!(block, LayoutBlock::Table(table) if table.floating.is_some())
             && !matches!(block, LayoutBlock::Shape(shape) if anchored_shape(shape))
         {
@@ -1253,24 +1285,6 @@ fn anchored_vertical_top(
     }
 }
 
-fn group_overlapping_zones(zones: Vec<AnchoredFloatingZone>) -> Vec<Vec<AnchoredFloatingZone>> {
-    let mut groups: Vec<Vec<AnchoredFloatingZone>> = Vec::new();
-    for zone in zones {
-        if let Some(group) = groups.iter_mut().find(|group| {
-            group.iter().any(|other| {
-                other.anchor_block_index.abs_diff(zone.anchor_block_index) <= ANCHOR_PROXIMITY
-                    && zone.zone.top_y < other.zone.bottom_y
-                    && zone.zone.bottom_y > other.zone.top_y
-            })
-        }) {
-            group.push(zone);
-        } else {
-            groups.push(vec![zone]);
-        }
-    }
-    groups
-}
-
 fn emu_to_pixels(value: f64) -> f64 {
     value / 9_525.0
 }
@@ -1724,6 +1738,82 @@ fn cell_border_height(cell: &crate::types::TableCell) -> f64 {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_paragraph_anchored_band_hangs_off_its_own_anchor_not_an_earlier_one() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let shape = |id: &str, offset: f64| {
+            json!({"kind":"shape","id":id,"shapeType":"rect","geometryPath":[],"children":[],
+                "width":40,"height":40,"wrapType":"square",
+                "wrapDistances":{"left":0,"right":10,"top":0,"bottom":0},
+                "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                    "vertical":{"relativeTo":"paragraph","posOffset":offset}}})
+        };
+        let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+            shape("far", 30.0),
+            {"kind":"paragraph","id":"first","runs":[{"kind":"text","text":"words"}]},
+            shape("near", 0.0),
+            {"kind":"paragraph","id":"second","runs":[{"kind":"text","text":"words"}]}
+        ]))
+        .unwrap();
+        let measures = measure_blocks_with_floats(&mut blocks, &[200.0; 4], &config, None).unwrap();
+        let offset = |measure: &BlockExtent| {
+            let BlockExtent::Paragraph(paragraph) = measure else {
+                panic!()
+            };
+            paragraph.lines[0].left_offset.unwrap_or(0.0)
+        };
+        // `near` starts at the second paragraph, below the first one's line.
+        assert_eq!(offset(&measures[1]), 0.0);
+        assert_eq!(offset(&measures[3]), 50.0);
+    }
+
+    #[test]
+    fn a_bare_section_break_paragraph_mark_takes_no_line() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let measure = |blocks: serde_json::Value| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(blocks).unwrap();
+            measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap()
+        };
+        let empty = json!({"kind":"paragraph","id":"mark","runs":[]});
+        let spaced = json!({"kind":"paragraph","id":"mark","runs":[{"kind":"text","text":" "}]});
+        let section = json!({"kind":"sectionBreak","id":"sect:mark"});
+        let tail = json!({"kind":"paragraph","id":"tail","runs":[{"kind":"text","text":"words"}]});
+
+        let marked = measure(json!([empty, section, tail]));
+        let BlockExtent::Paragraph(mark) = &marked[0] else {
+            panic!()
+        };
+        assert!(mark.lines.is_empty());
+        assert_eq!(mark.total_height, 0.0);
+
+        for kept in [
+            measure(json!([empty, tail])),
+            measure(json!([spaced, section, tail])),
+        ] {
+            let BlockExtent::Paragraph(mark) = &kept[0] else {
+                panic!()
+            };
+            assert_eq!(mark.lines.len(), 1);
+            assert!(mark.total_height > 0.0);
+        }
+    }
 
     #[test]
     fn nested_text_anchored_tables_share_measure_paint_and_break_positions() {
