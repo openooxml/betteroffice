@@ -1102,6 +1102,34 @@ fn automatic_tabs_resume_on_grid_multiples_after_custom_stops() {
     }
 }
 
+// An `end` stop parks the pen exactly on itself; the hanging indent's implicit
+// stop is the next one past it, not the default grid an inch further right.
+#[test]
+fn a_tab_after_an_end_stop_lands_on_the_hanging_indent() {
+    let v = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" },
+                { "kind": "tab" },
+                { "kind": "text", "text": "0" }
+            ],
+            "attrs": {
+                "tabs": [{ "val": "end", "pos": 1531.0 }],
+                "indent": { "left": 109.6, "hanging": 109.6 }
+            }
+        }),
+        400.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        109.6 + W0,
+        "second tab lands on the hanging indent, not the default grid",
+    );
+}
+
 #[test]
 fn paragraph_indent_does_not_shift_the_automatic_tab_grid() {
     let v = measure_with(
