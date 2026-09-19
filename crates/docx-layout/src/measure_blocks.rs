@@ -5,7 +5,10 @@ use serde_json::Value;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
 use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
-use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
+use crate::table_grid::{
+    content_sized_columns, count_table_columns, grow_content_sized_columns, resolve_cell_grid,
+    resolve_table_column_widths, resolve_table_width_px,
+};
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
     ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
@@ -1410,6 +1413,73 @@ fn measure_cell_blocks_with_table_floats(
     Ok(measured)
 }
 
+/// The width a paragraph wants when nothing forces it to wrap: its widest
+/// typeset line plus the indents that sit beside it.
+fn paragraph_content_width(
+    paragraph: &crate::types::ParagraphBlock,
+    budget: f64,
+    config: &MeasurementConfig,
+) -> Result<f64, String> {
+    let indent = paragraph
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.indent.as_ref());
+    let edge = |value: Option<f64>| value.unwrap_or(0.0).max(0.0);
+    let first_line = indent.map_or(0.0, |indent| edge(indent.first_line));
+    let extent = measure_paragraph(paragraph, budget, config)?;
+    let widest = extent
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| line.width + if index == 0 { first_line } else { 0.0 })
+        .fold(0.0_f64, f64::max);
+    Ok(widest + indent.map_or(0.0, |indent| edge(indent.left) + edge(indent.right)))
+}
+
+/// Per-column widest unwrapped content, for `columns` only; every other entry
+/// stays zero so [`grow_content_sized_columns`] leaves it alone.
+fn column_content_maximums(
+    table: &TableBlock,
+    columns: &[usize],
+    content_width: f64,
+    config: &MeasurementConfig,
+) -> Result<Vec<f64>, String> {
+    let mut maximums = vec![0.0_f64; count_table_columns(table)];
+    for entry in resolve_cell_grid(table) {
+        if entry.col_span != 1 || !columns.contains(&entry.column_index) {
+            continue;
+        }
+        let Some(cell) = table
+            .rows
+            .get(entry.row_index)
+            .and_then(|row| row.cells.get(entry.cell_index))
+        else {
+            continue;
+        };
+        let left = cell
+            .padding
+            .as_ref()
+            .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.left);
+        let right = cell
+            .padding
+            .as_ref()
+            .map_or(DEFAULT_CELL_PADDING_X, |padding| padding.right);
+        let budget = (content_width - left - right).max(1.0);
+        let mut widest = 0.0_f64;
+        for block in &cell.blocks {
+            if let LayoutBlock::Paragraph(paragraph) = block {
+                widest = widest.max(paragraph_content_width(paragraph, budget, config)?);
+            }
+        }
+        if widest > 0.0
+            && let Some(slot) = maximums.get_mut(entry.column_index)
+        {
+            *slot = slot.max(widest + left + right);
+        }
+    }
+    Ok(maximums)
+}
+
 fn measure_table(
     table: &mut TableBlock,
     content_width: f64,
@@ -1418,7 +1488,12 @@ fn measure_table(
     let explicit_width =
         resolve_table_width_px(table.width, table.width_type.as_deref(), content_width);
     let target_width = explicit_width.unwrap_or(content_width);
-    let column_widths = resolve_table_column_widths(table, content_width);
+    let mut column_widths = resolve_table_column_widths(table, content_width);
+    let content_sized = content_sized_columns(table, content_width, &column_widths);
+    if !content_sized.is_empty() {
+        let maximums = column_content_maximums(table, &content_sized, content_width, config)?;
+        grow_content_sized_columns(table, content_width, &maximums, &mut column_widths);
+    }
     let grid = resolve_cell_grid(table);
     let mut rows = Vec::with_capacity(table.rows.len());
 
@@ -2400,5 +2475,45 @@ mod tests {
                 "{wrap_text} must keep a single side"
             );
         }
+    }
+    /// A stale `w:gridCol` must not force a wrap: the heading in
+    /// `oxi-en-administrative-04` fits one line in Word only because Word
+    /// re-measures the `auto` column the declared grid left 5.84px short.
+    #[test]
+    fn a_stale_grid_column_widens_to_keep_its_heading_on_one_line() {
+        let font = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..Default::default()
+        };
+        let padding = json!({"top":0,"bottom":0,"left":1,"right":1});
+        let cell = |text: &str, width: Value| {
+            json!({"id":text,"padding":padding,"widthValue":width,"widthType":"dxa","blocks":[
+                {"kind":"paragraph","id":text,"runs":[{"kind":"text","text":text}]}]})
+        };
+        let mut block: LayoutBlock = serde_json::from_value(json!({
+            "kind":"table","id":"stale","columnWidths":[60,100],
+            "rows":[{"id":"row","cells":[
+                cell("Content sized column", json!(0)),
+                cell("Priced", json!(1500)),
+            ]}]
+        }))
+        .unwrap();
+        let measure = measure_block(&mut block, 300.0, &config).unwrap();
+        let BlockExtent::Table(extent) = &measure else {
+            panic!()
+        };
+        let heading = &extent.rows[0].cells[0];
+        let BlockExtent::Paragraph(paragraph) = &heading.blocks[0] else {
+            panic!()
+        };
+        assert_eq!(paragraph.lines.len(), 1);
+        assert!(heading.width > 60.0 && heading.width < 300.0);
+        assert!((heading.width - (paragraph.lines[0].width + 2.0)).abs() < 0.01);
+        assert_eq!(extent.rows[0].cells[1].width, 100.0);
     }
 }

@@ -18,7 +18,10 @@
 //!   room above the minimums in proportion to each column's flex
 //!   (`max - min`); with no flex anywhere the target is spread evenly.
 //! - otherwise — normalize the declared grid and uniformly scale it to an
-//!   explicit table width when the two differ by more than a pixel.
+//!   explicit table width when the two differ by more than a pixel. A table
+//!   that declares no width of its own then lets [`content_sized_columns`] and
+//!   [`grow_content_sized_columns`] widen the columns no cell prices, which is
+//!   where Word re-measures and the stored `w:gridCol` goes stale.
 //!
 //! A width pair resolves through the preferred-width element, then the flat
 //! value/type pair, then a raw pixel width. `pct` units are 50ths of a percent
@@ -344,6 +347,101 @@ fn resolve_autofit_column_widths(
         .collect()
 }
 
+/// The budget a table may spend, after its own left indent.
+fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
+    let indent = table_block.indent.unwrap_or(0.0);
+    (content_width - if indent > 0.0 { indent } else { 0.0 }).max(0.0)
+}
+
+/// Grid columns whose width no cell states, for a table that states no width
+/// of its own and whose resolved `widths` leave room in `content_width`.
+///
+/// Word sizes exactly these columns from their content, so the declared
+/// `w:gridCol` is only a hint and goes stale whenever the content changes.
+/// Empty whenever the declared geometry already decides the answer.
+pub fn content_sized_columns(
+    table_block: &TableBlock,
+    content_width: f64,
+    widths: &[f64],
+) -> Vec<usize> {
+    if table_block.rows.is_empty() || widths.is_empty() {
+        return Vec::new();
+    }
+    if preferred_width_px(
+        table_block.preferred_width.as_ref(),
+        table_block.width,
+        table_block.width_type.as_deref(),
+        content_width,
+        None,
+    )
+    .is_some()
+    {
+        return Vec::new();
+    }
+    let total: f64 = widths.iter().sum();
+    if !total.is_finite() || total >= table_width_budget(table_block, content_width) {
+        return Vec::new();
+    }
+    let mut priced = vec![false; widths.len()];
+    for grid_cell in resolve_cell_grid(table_block) {
+        if grid_cell.col_span != 1 || grid_cell.column_index >= priced.len() {
+            continue;
+        }
+        let Some(cell) = table_block
+            .rows
+            .get(grid_cell.row_index)
+            .and_then(|row| row.cells.get(grid_cell.cell_index))
+        else {
+            continue;
+        };
+        if preferred_width_px(
+            cell.preferred_width.as_ref(),
+            cell.width_value,
+            cell.width_type.as_deref(),
+            content_width,
+            cell.width,
+        )
+        .is_some()
+        {
+            priced[grid_cell.column_index] = true;
+        }
+    }
+    (0..priced.len()).filter(|index| !priced[*index]).collect()
+}
+
+/// Raises each column toward `maximums[column]`, its widest unwrapped cell
+/// content, spending only the room left inside the table's budget and sharing
+/// that room in proportion to the demands when it cannot cover them all.
+/// Columns never shrink, so a cell can only wrap onto fewer lines.
+pub fn grow_content_sized_columns(
+    table_block: &TableBlock,
+    content_width: f64,
+    maximums: &[f64],
+    widths: &mut [f64],
+) {
+    let total: f64 = widths.iter().sum();
+    let slack = table_width_budget(table_block, content_width) - total;
+    if !(slack > 0.0) {
+        return;
+    }
+    let demands: Vec<f64> = widths
+        .iter()
+        .enumerate()
+        .map(|(index, width)| match maximums.get(index) {
+            Some(maximum) if maximum.is_finite() => (maximum - width).max(0.0),
+            _ => 0.0,
+        })
+        .collect();
+    let demanded: f64 = demands.iter().sum();
+    if !(demanded > 0.0) {
+        return;
+    }
+    let share = (slack / demanded).min(1.0);
+    for (width, demand) in widths.iter_mut().zip(&demands) {
+        *width += demand * share;
+    }
+}
+
 /// Resolves per-column pixel widths from the table's grid metadata and width
 /// budget, per the module's three algorithms. Measures no cell content.
 pub fn resolve_table_column_widths(table_block: &TableBlock, content_width: f64) -> Vec<f64> {
@@ -593,6 +691,86 @@ mod tests {
         assert_eq!(
             resolve_table_column_widths(&block, 600.0),
             vec![150.0, 200.0]
+        );
+    }
+
+    /// `oxi-en-administrative-04`, measured off Word's own `reference.pdf`: an
+    /// `auto` first column whose `w:gridCol` of 2143tw no longer fits the
+    /// heading Word lays out at 110.028pt, so Word widens it to 111.805pt and
+    /// leaves the three priced columns on their `w:tcW`.
+    fn administrative_04_table() -> TableBlock {
+        let priced =
+            |value: f64| json!({ "id": 0, "blocks": [], "widthValue": value, "widthType": "dxa" });
+        serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [
+                { "id": 0, "blocks": [], "widthValue": 0, "widthType": "auto" },
+                priced(1821.0),
+                priced(2410.0),
+                priced(2410.0),
+            ] }],
+            "columnWidths": [142.866_666, 121.4, 160.666_666, 160.666_666],
+            "width": 0,
+            "widthType": "auto",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn an_unpriced_column_widens_to_its_content_inside_the_leftover_budget() {
+        let block = administrative_04_table();
+        let mut widths = resolve_table_column_widths(&block, 601.333_333);
+        assert_eq!(content_sized_columns(&block, 601.333_333, &widths), vec![0]);
+        // 110.028pt of heading plus the 15tw cell margins Word reserves.
+        grow_content_sized_columns(&block, 601.333_333, &[148.704, 0.0, 0.0, 0.0], &mut widths);
+        assert_close_to(widths[0], 148.704, 3);
+        assert_close_to(widths[1], 121.4, 3);
+        assert_close_to(widths[2], 160.666_666, 3);
+        assert_close_to(widths[3], 160.666_666, 3);
+        // Word's own rules sit 0.37px further out; the declared grid was 5.84px short.
+        assert!((widths[0] - 149.073).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_table_that_states_its_own_width_keeps_the_declared_grid() {
+        let mut block = administrative_04_table();
+        block.width = Some(8784.0);
+        block.width_type = Some("dxa".to_owned());
+        let widths = resolve_table_column_widths(&block, 601.333_333);
+        assert_eq!(
+            content_sized_columns(&block, 601.333_333, &widths),
+            Vec::<usize>::new()
+        );
+    }
+
+    #[test]
+    fn demands_beyond_the_leftover_budget_are_shared_in_proportion() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [plain_cell(), plain_cell()] }],
+            "columnWidths": [100.0, 100.0],
+        }))
+        .unwrap();
+        let mut widths = resolve_table_column_widths(&block, 260.0);
+        assert_eq!(content_sized_columns(&block, 260.0, &widths), vec![0, 1]);
+        grow_content_sized_columns(&block, 260.0, &[160.0, 120.0], &mut widths);
+        assert_close_to(widths[0], 145.0, 6);
+        assert_close_to(widths[1], 115.0, 6);
+        assert_close_to(widths[0] + widths[1], 260.0, 6);
+    }
+
+    #[test]
+    fn a_grid_that_already_fills_the_budget_never_grows() {
+        let block: TableBlock = serde_json::from_value(json!({
+            "id": 0,
+            "rows": [{ "id": 0, "cells": [plain_cell(), plain_cell()] }],
+            "columnWidths": [100.0, 100.0],
+        }))
+        .unwrap();
+        let widths = resolve_table_column_widths(&block, 200.0);
+        assert_eq!(
+            content_sized_columns(&block, 200.0, &widths),
+            Vec::<usize>::new()
         );
     }
 }
