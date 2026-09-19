@@ -1,5 +1,28 @@
 # @betteroffice/docx-react
 
+## 0.3.0
+
+### Patch Changes
+
+- Updated dependencies [8eddb2e]
+- Updated dependencies [6db9411]
+- Updated dependencies [69b7cca]
+- Updated dependencies [c087612]
+- Updated dependencies [0e9ca88]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [8273450]
+- Updated dependencies [b46ad04]
+- Updated dependencies [4eb1d90]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [e151d79]
+- Updated dependencies [e5ad702]
+- Updated dependencies [2958935]
+- Updated dependencies [41f508b]
+- Updated dependencies [1247270]
+  - @betteroffice/docx@0.3.0
+  - @betteroffice/docx-i18n@0.3.0
+
 ## 0.2.1
 
 ### Patch Changes

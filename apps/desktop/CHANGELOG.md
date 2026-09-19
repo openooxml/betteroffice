@@ -1,5 +1,44 @@
 # @betteroffice/desktop
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies [8eddb2e]
+- Updated dependencies [6db9411]
+- Updated dependencies [69b7cca]
+- Updated dependencies [c087612]
+- Updated dependencies [0e9ca88]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [8273450]
+- Updated dependencies [b46ad04]
+- Updated dependencies [4eb1d90]
+- Updated dependencies [9b2fe7b]
+- Updated dependencies [e151d79]
+- Updated dependencies [e5ad702]
+- Updated dependencies [2958935]
+- Updated dependencies [41f508b]
+- Updated dependencies [c02a145]
+- Updated dependencies [9e2c648]
+- Updated dependencies [3e0c311]
+- Updated dependencies [3d77b4f]
+- Updated dependencies [911a294]
+- Updated dependencies [60c79dd]
+- Updated dependencies [911a294]
+- Updated dependencies [18e1f32]
+- Updated dependencies [ab3d722]
+- Updated dependencies [e7f4868]
+- Updated dependencies [1247270]
+- Updated dependencies [5206ccf]
+- Updated dependencies [bcc90ba]
+  - @betteroffice/docx@0.3.0
+  - @betteroffice/pptx@0.2.0
+  - @betteroffice/pptx-react@0.2.0
+  - @betteroffice/xlsx@0.3.0
+  - @betteroffice/xlsx-react@0.3.0
+  - @betteroffice/docx-react@0.3.0
+
 ## 0.1.2
 
 ### Patch Changes

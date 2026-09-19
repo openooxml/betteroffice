@@ -1,5 +1,26 @@
 # @betteroffice/pptx-react
 
+## 0.2.0
+
+### Minor Changes
+
+- 3d77b4f: Add host-controlled viewing mode, initial slide selection, and imperative slide and text navigation APIs.
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. Unsupported MIME types and images over 8 MiB are rejected before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+
+### Patch Changes
+
+- Updated dependencies [c02a145]
+- Updated dependencies [9e2c648]
+- Updated dependencies [3e0c311]
+- Updated dependencies [911a294]
+- Updated dependencies [60c79dd]
+- Updated dependencies [911a294]
+- Updated dependencies [18e1f32]
+- Updated dependencies [ab3d722]
+  - @betteroffice/pptx@0.2.0
+  - @betteroffice/pptx-i18n@0.2.0
+
 ## 0.1.1
 
 ### Patch Changes

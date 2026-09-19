@@ -1,5 +1,11 @@
 # @betteroffice/python-xlsx
 
+## 0.1.1
+
+### Patch Changes
+
+- e7f4868: Honor Text cell formatting when entering values, including numeric strings, booleans, and formula-looking text. General cells retain Excel-style input coercion. Apply the same format-aware behavior to cell assignments, batches, and proposals.
+
 ## 0.1.0
 
 ### Minor Changes

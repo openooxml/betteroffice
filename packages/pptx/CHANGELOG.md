@@ -1,5 +1,21 @@
 # @betteroffice/pptx
 
+## 0.2.0
+
+### Minor Changes
+
+- 911a294: Insert a picture onto a slide from the editor. The image mints its own media part, content-type default and relationship on save; `PptxEditor` gains a small "Insert image" icon button next to the text-box tool, and `PresentationHandle` gains `addPicture`. Unsupported MIME types and images over 8 MiB are rejected before the picture reaches the deck, keeping oversized bytes out of collaboration updates.
+- 911a294: Reorder a shape's paint order on its slide: bring to front, send to back, and step it forward or backward. `PresentationHandle` gains `bringShapeToFront`, `sendShapeToBack`, `bringShapeForward` and `sendShapeBackward`, and `PptxEditor`'s shape-formatting toolbar gains an "Arrange" menu for them.
+- ab3d722: Add a format-owned text search API to presentation handles.
+
+### Patch Changes
+
+- c02a145: Paint slide background pictures and honour `p:sld/@showMasterSp` on the layout. A `p:bg` declaring a `a:blipFill`, or a `p:bgRef` resolving to one through the theme's `a:bgFillStyleLst`, now paints as a full-slide image instead of a flat grey, and `p:bgRef` resolves the referenced fill style rather than only its colour override. A slide that turns off master shapes also drops the layout's own decoration, which is what PowerPoint draws, since the master reaches the slide through the layout.
+- 9e2c648: Expose when an unsupported PowerPoint preset geometry is rendered with a rectangular fallback.
+- 3e0c311: Measure the `hexagon`, `parallelogram`, `trapezoid` and `octagon` adjust against the shortest side, and pin it at the spec's aspect-scaled maximum, so wide shapes no longer draw their slant or corner at a fraction of the width. The trapezoid defaults to the spec's 25000, and the hexagon honours its `vf` height factor, pinned so the corners stay on the frame.
+- 60c79dd: Draw eleven more PowerPoint preset shapes. `donut`, `noSmoking`, `corner`, `foldedCorner`, `mathMultiply`, `bentArrow`, `ribbon`, `ellipseRibbon`, `cloudCallout`, `wedgeEllipseCallout` and `wedgeRoundRectCallout` fell back to a plain rectangle; they now follow their ECMA-376 definitions, including the elliptical arcs `arcTo` measures by polar angle rather than by ellipse parameter.
+- 18e1f32: Draw star presets with the spec's inner radius, per-preset default adjustment, and frame-filling radius factors.
+
 ## 0.1.1
 
 ## 0.1.0
