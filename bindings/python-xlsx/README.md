@@ -182,7 +182,7 @@ formulas evaluated or a sheet rasterized, that is the gap this fills.
 | `wb[key]` / `wb.sheet(key)` | a `Sheet` by name or index |
 | `wb.sheet_index(key)` | resolve a name or index to an index |
 | `sheet[addr]` | cell value — see the note below on when it is recalculated |
-| `sheet[addr] = value` | set from what a user would type |
+| `sheet[addr] = value` | set a Python value or formula |
 | `sheet.formula(addr)` | source formula, or `None` |
 | `wb.value(sheet, addr)` / `wb.formula(sheet, addr)` | the same two reads without a `Sheet` |
 | `wb.set(sheet, addr, value)` / `wb.set_many(sheet, edits)` | write one cell, or many as one undo step |
@@ -225,13 +225,19 @@ converting them needs the workbook's date system, which is not exposed yet, and
 stringifying them would write text that only looks like a date. Pass the Excel
 serial number as a float if you need a date today.
 
-Strings are interpreted the way Excel interprets typed input: a leading `=` is a
-formula, `TRUE`/`FALSE` become booleans, and numeric text becomes a number.
-Prefix with an apostrophe to force text.
+Strings stay text, including numeric strings such as `"1.0"` and `"001"`,
+`"TRUE"`/`"FALSE"`, and the empty string. Pass a Python number or `bool` to store
+those types, or `None` to clear a cell. This applies to assignment, `set`,
+`set_many`, and `propose`, regardless of the cell's number format.
+
+A leading `=` still creates a formula. A leading apostrophe is still an escape:
+it is removed and the rest is stored as text.
 
 ```python
-sheet["A1"] = "'=1+1"   # the text "=1+1"
-sheet["A2"] = "=1+1"    # the formula, evaluating to 2.0
+sheet["A1"] = "1.0"
+sheet["A2"] = 1.0
+sheet["A3"] = "'=1+1"
+sheet["A4"] = "=1+1"
 ```
 
 Mutating calls return a `Mutation` — truthy when something changed, with
