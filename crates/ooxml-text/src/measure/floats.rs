@@ -26,8 +26,7 @@ pub(super) struct LineMargins {
 }
 
 impl LineMargins {
-    /// Where the line's text starts: the first usable strip, or the left
-    /// margin when the zones resolved to plain side margins.
+    /// The first usable strip, or the left margin when there are none.
     pub(super) fn text_left(&self) -> f32 {
         match self.segments.as_deref().and_then(<[_]>::first) {
             Some(first) => first.left_offset,

@@ -835,9 +835,6 @@ fn extract_floating_zones(
 }
 
 /// Whether a line runs past a float rather than stopping at its wider side.
-/// Both strips must be worth wrapping into, and the band the renderer cannot
-/// jump has to be narrower than the strip the one-sided fallback would throw
-/// away — otherwise keeping one side is the closer approximation.
 fn flows_past(strip_left: f64, strip_right: f64, band: f64) -> bool {
     strip_left >= MIN_WRAP_SEGMENT_WIDTH
         && strip_right >= MIN_WRAP_SEGMENT_WIDTH
