@@ -158,14 +158,19 @@ impl std::fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
-/// `head.unitsPerEm` and the `hhea` ascender/descender of a face a document
-/// asked for but the host could not supply, carried by the substitute that
-/// stands in for it. See [`FontStore::register_substitute`].
+/// `head.unitsPerEm` and the `hhea` line metrics of a face a document asked
+/// for but the host could not supply, carried by the substitute that stands in
+/// for it. See [`FontStore::register_substitute`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RequestedLineMetrics {
     pub units_per_em: u16,
     pub hhea_ascender: i16,
     pub hhea_descender: i16,
+    pub hhea_line_gap: i16,
+    /// Whether Word measures the requested family with the East Asian pitch
+    /// ([`crate::word_metrics::EAST_ASIAN_CODE_PAGES`]) rather than the Latin
+    /// win-box rule. Decides which fields the view has to move.
+    pub east_asian: bool,
 }
 
 /// Design-space metrics extracted at registration time, in font units.
@@ -310,9 +315,11 @@ impl FontStore {
         Ok(id)
     }
 
-    /// A measurement view of `base` carrying `requested`'s hhea span and East
-    /// Asian code pages. Shares `base`'s bytes, so glyphs and advances are
-    /// unchanged; hosts put the returned id at the head of the fallback chain.
+    /// A measurement view of `base` carrying `requested`'s line metrics. Shares
+    /// `base`'s bytes, so glyphs and advances are unchanged; hosts put the
+    /// returned id at the head of the fallback chain. A Latin entry mirrors the
+    /// span into the win box and clears the East Asian code pages, so the view
+    /// measures the same under either line rule whatever the substitute claims.
     pub fn register_substitute(
         &mut self,
         base: FontId,
@@ -332,7 +339,14 @@ impl FontStore {
         };
         metrics.hhea_ascender = rescale(requested.hhea_ascender);
         metrics.hhea_descender = rescale(requested.hhea_descender);
-        metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+        metrics.hhea_line_gap = rescale(requested.hhea_line_gap);
+        if requested.east_asian {
+            metrics.os2_code_page_range1 |= crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+        } else {
+            metrics.os2_code_page_range1 &= !crate::word_metrics::EAST_ASIAN_CODE_PAGES;
+            metrics.os2_win_ascent = metrics.hhea_ascender.max(0) as u16;
+            metrics.os2_win_descent = metrics.hhea_descender.saturating_neg().max(0) as u16;
+        }
 
         let id = FontId(self.fonts.len() as u32);
         self.fonts.push(FontEntry {

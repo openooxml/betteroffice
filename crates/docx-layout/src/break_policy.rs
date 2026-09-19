@@ -13,10 +13,8 @@ pub enum AuthoredBreak {
 }
 
 impl AuthoredBreak {
-    /// Word keeps space-before across either authored break, and only across
-    /// an automatic one does it not. The two differ solely under
-    /// `w:suppressSpBfAfterPgBrk` (§17.15.1.87), which suppresses the run but
-    /// not the property; it is unparsed here and unset in every corpus file.
+    /// Word keeps space-before across an authored break, not an automatic one.
+    /// The variants differ only under `w:suppressSpBfAfterPgBrk` (§17.15.1.87).
     pub fn keeps_leading_spacing(self) -> bool {
         matches!(self, Self::HardBreakRun | Self::PageBreakBefore)
     }

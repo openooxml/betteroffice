@@ -1081,9 +1081,63 @@ fn a_substitute_view_rescales_the_requested_span_into_its_own_units() {
     );
 }
 
+/// A Latin substitute is measured the Latin way — the win box plus external
+/// leading — off the requested face's span, not the East Asian pitch and not
+/// the substitute's own box.
+#[test]
+fn a_latin_substitute_measures_at_the_requested_span() {
+    let (mut store, base) = store_with_font();
+    for (family, span_em) in [("Open Sans", 2789.0 / 2048.0), ("Lato", 2400.0 / 2000.0)] {
+        let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
+        let view = store.register_substitute(base, requested).expect(family);
+        let metrics = store.metrics(view).unwrap();
+        assert!(
+            !metrics.east_asian_line_metrics(),
+            "{family} must not take the East Asian pitch"
+        );
+        let size_px = 32.0;
+        let line = single_line_box(metrics, size_px, &CompatFlags::default());
+        assert!(
+            (line.height() - size_px * span_em).abs() < 0.01,
+            "{family}: {} vs {}",
+            line.height(),
+            size_px * span_em
+        );
+        assert_eq!(
+            store.advance_width(view, 'A').unwrap(),
+            store.advance_width(base, 'A').unwrap(),
+            "{family} keeps the substitute's advances"
+        );
+    }
+}
+
+/// The win box of a Latin view spans exactly the requested ascender to
+/// descender, so the requested span survives whatever box the substitute has.
+#[test]
+fn a_latin_view_pins_the_win_box_to_the_requested_span() {
+    let (mut store, base) = store_with_font();
+    let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Sans Unicode").unwrap();
+    let view = store.register_substitute(base, requested).unwrap();
+    let metrics = store.metrics(view).unwrap();
+    assert_eq!(
+        i32::from(metrics.hhea_ascender),
+        i32::from(metrics.os2_win_ascent)
+    );
+    assert_eq!(
+        i32::from(metrics.hhea_descender),
+        -i32::from(metrics.os2_win_descent)
+    );
+}
+
 #[test]
 fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
-    for family in ["HGPｺﾞｼｯｸM", "BIZ UDPゴシック", "Arial"] {
+    for family in [
+        "HGPｺﾞｼｯｸM",
+        "BIZ UDPゴシック",
+        "Arial",
+        "Lucida Bright",
+        "Helvetica",
+    ] {
         assert!(
             ooxml_text::word_fonts::requested_line_metrics(family).is_none(),
             "{family}"

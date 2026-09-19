@@ -210,6 +210,8 @@ interface BookmarkBoundary extends CommentBoundary {
 interface OriginalRunBoundary {
   text: string;
   noteMarks?: string[];
+  /** Flow breaks the run held, at their offsets into `text`. */
+  breaks?: Array<{ offset: number; type: 'page' | 'column' }>;
   marksKey?: string;
   formatting?: TextFormatting;
   propertyChanges?: Run['propertyChanges'];
@@ -1183,6 +1185,30 @@ function noteMarkContent(boundary: OriginalRunBoundary): RunContent[] | null {
   }));
 }
 
+/**
+ * Rebuilds a run from its recorded boundary. Flow breaks occupy no story unit,
+ * so without their recorded offsets an authored page break would not be saved.
+ */
+function boundaryContent(boundary: OriginalRunBoundary, formatting: TextFormatting): RunContent[] {
+  const notes = noteMarkContent(boundary);
+  if (notes) return notes;
+  if (!boundary.breaks?.length) return runContentForText(boundary.text, formatting);
+  const content: RunContent[] = [];
+  let cursor = 0;
+  for (const entry of boundary.breaks) {
+    const at = Math.min(Math.max(entry.offset, cursor), boundary.text.length);
+    if (at > cursor) {
+      content.push(...runContentForText(boundary.text.slice(cursor, at), formatting));
+    }
+    content.push({ type: 'break', breakType: entry.type });
+    cursor = at;
+  }
+  if (cursor < boundary.text.length) {
+    content.push(...runContentForText(boundary.text.slice(cursor), formatting));
+  }
+  return content;
+}
+
 function restoreOriginalRuns(
   content: ParagraphContent[],
   items: InlineItem[],
@@ -1238,7 +1264,7 @@ function restoreOriginalRuns(
         : attrsToTextFormatting(restoredAttrs[index]);
     const run: Run = {
       type: 'run',
-      content: noteMarkContent(boundary) ?? runContentForText(boundary.text, formatting ?? {}),
+      content: boundaryContent(boundary, formatting ?? {}),
     };
     if (formatting && Object.keys(formatting).length > 0) run.formatting = formatting;
     if (boundary.propertyChanges?.length) run.propertyChanges = boundary.propertyChanges;
@@ -1979,8 +2005,11 @@ class SaveContext {
     }
 
     // Defensive recovery for malformed/legacy stories without a final pilcrow.
+    // A story ending in a flow-break embed is well-formed, not a lost
+    // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
-      blocks.push({ type: 'paragraph', content: buildParagraphContent(items) });
+      const trailing = buildParagraphContent(items);
+      if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
     }
     return restoreRawBlocks(blocks, baseBlocks ?? []);
   }

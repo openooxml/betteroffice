@@ -1744,7 +1744,59 @@ fn note_ref_mark_types(run: &Value) -> Vec<Value> {
         .collect()
 }
 
-fn run_boundary(run: &Value, units: &[InlineUnit]) -> Option<Value> {
+fn units_text(units: &[InlineUnit]) -> String {
+    units
+        .iter()
+        .map(|unit| match &unit.content {
+            UnitContent::Text(text) => text.clone(),
+            UnitContent::Embed { payload, .. } => payload
+                .get("footnoteRefId")
+                .or_else(|| payload.get("endnoteRefId"))
+                .map(js_string)
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// `w:br w:type="page"|"column"`, which the story carries as a block embed
+/// beside the paragraph instead of as an inline unit.
+fn flow_break_type(content: &Value) -> Option<&'static str> {
+    if string(field(Some(content), "type")) != Some("break") {
+        return None;
+    }
+    match string(field(Some(content), "breakType")) {
+        Some("page") => Some("page"),
+        Some("column") => Some("column"),
+        _ => None,
+    }
+}
+
+/// Where a run's flow breaks sit in its text. They occupy no story unit, so
+/// the save projection rebuilds them from these offsets.
+fn flow_break_offsets(run: &Value, source: &BTreeMap<String, String>) -> Vec<Value> {
+    let contents = array(field(Some(run), "content"));
+    if !contents.iter().any(|item| flow_break_type(item).is_some()) {
+        return Vec::new();
+    }
+    let mut breaks = Vec::new();
+    let mut offset = 0usize;
+    for content in contents {
+        if let Some(kind) = flow_break_type(content) {
+            breaks.push(json!({ "offset": offset, "type": kind }));
+            continue;
+        }
+        offset += units_text(&run_content_to_units(content, &[], None, source))
+            .encode_utf16()
+            .count();
+    }
+    breaks
+}
+
+fn run_boundary(
+    run: &Value,
+    units: &[InlineUnit],
+    source: &BTreeMap<String, String>,
+) -> Option<Value> {
     if units
         .iter()
         .any(|unit| matches!(&unit.content, UnitContent::Embed { kind, .. } if kind != "noteRef"))
@@ -1758,22 +1810,15 @@ fn run_boundary(run: &Value, units: &[InlineUnit]) -> Option<Value> {
     {
         return None;
     }
-    let text = units
-        .iter()
-        .map(|unit| match &unit.content {
-            UnitContent::Text(text) => text.clone(),
-            UnitContent::Embed { payload, .. } => payload
-                .get("footnoteRefId")
-                .or_else(|| payload.get("endnoteRefId"))
-                .map(js_string)
-                .unwrap_or_default(),
-        })
-        .collect::<String>();
     let note_marks = note_ref_mark_types(run);
+    let breaks = flow_break_offsets(run, source);
     let mut boundary = Map::new();
-    boundary.insert("text".to_owned(), Value::String(text));
+    boundary.insert("text".to_owned(), Value::String(units_text(units)));
     if !note_marks.is_empty() {
         boundary.insert("noteMarks".to_owned(), Value::Array(note_marks));
+    }
+    if !breaks.is_empty() {
+        boundary.insert("breaks".to_owned(), Value::Array(breaks));
     }
     if let Some(key) = keys.first() {
         boundary.insert("marksKey".to_owned(), Value::String(key.clone()));
@@ -2138,7 +2183,7 @@ fn paragraph_units(
                     source,
                 );
                 if let Some(run_boundaries) = &mut boundaries {
-                    if let Some(boundary) = run_boundary(content, &run_units) {
+                    if let Some(boundary) = run_boundary(content, &run_units, source) {
                         run_boundaries.push(boundary);
                     } else {
                         boundaries = None;
@@ -4326,13 +4371,49 @@ mod tests {
             });
             let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
             assert!(units.is_empty());
-            let boundary = run_boundary(&run, &units).unwrap();
+            let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
             assert_eq!(
                 boundary.get("noteMarks"),
                 Some(&json!([note_type, note_type]))
             );
             assert_eq!(boundary.get("text"), Some(&Value::String(String::new())));
         }
+    }
+
+    #[test]
+    fn flow_breaks_land_in_the_run_boundary_at_their_text_offset() {
+        let styles = StyleResolver::new(None);
+        let wrapping = json!({
+            "type": "run",
+            "content": [
+                { "type": "text", "text": "AB" },
+                { "type": "break", "breakType": "page" },
+                { "type": "break", "breakType": "textWrapping" },
+            ],
+        });
+        let units = run_to_units(&wrapping, None, &styles, None, &[], &BTreeMap::new());
+        // A wrapping break is an inline unit, so the run keeps no boundary.
+        assert!(run_boundary(&wrapping, &units, &BTreeMap::new()).is_none());
+
+        let run = json!({
+            "type": "run",
+            "content": [
+                { "type": "text", "text": "AB" },
+                { "type": "break", "breakType": "page" },
+                { "type": "text", "text": "C" },
+                { "type": "break", "breakType": "column" },
+            ],
+        });
+        let units = run_to_units(&run, None, &styles, None, &[], &BTreeMap::new());
+        let boundary = run_boundary(&run, &units, &BTreeMap::new()).unwrap();
+        assert_eq!(boundary.get("text"), Some(&json!("ABC")));
+        assert_eq!(
+            boundary.get("breaks"),
+            Some(&json!([
+                { "offset": 2, "type": "page" },
+                { "offset": 3, "type": "column" },
+            ]))
+        );
     }
 
     #[test]

@@ -22,17 +22,20 @@ cd betteroffice
 # Install dependencies
 bun install
 
-# Compile the ignored XLSX wasm asset
-bun run build:xlsx-wasm
+# Start the editor playground (builds the wasm bundles on first run)
+bun run dev:demo
 
-# Start the web app
+# Start the betteroffice.dev site (no wasm needed)
 bun run dev
+
+# Start the documentation site
+bun run dev:docs
 ```
 
 ## Running Tests
 
 ```bash
-# TypeScript
+# TypeScript (`bun run test` builds the xlsx and docx wasm itself)
 bun run typecheck
 bun run test
 

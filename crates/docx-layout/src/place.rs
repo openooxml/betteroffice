@@ -815,7 +815,6 @@ fn layout_paragraph(
         let fragment = Fragment::Paragraph(ParagraphFragment {
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
-            // add_fragment resolves the real y; leading spacing is its job
             y: pen_y + paginator.leading_spacing(space_before),
             width: paginator.get_content_width(),
             height: 0.0,
