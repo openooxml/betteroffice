@@ -625,6 +625,48 @@ impl Paginator {
     pub fn set_pen_y(&mut self, idx: usize, y: f64) {
         self.states[idx].pen_y = y;
     }
+
+    /// Restarts flow content that meets a floating table's band below it.
+    ///
+    /// Word never paints a page-anchored floating table over flow content: the
+    /// first row or line reaching into the band, and everything after it, moves
+    /// to the band's bottom. A fragment whose own lead clears the band would
+    /// have to be split there, which this cannot do, so it keeps its place.
+    /// Returns the shift, or `None` when nothing moves or the shift would push
+    /// content past the content limit.
+    pub fn clear_float_band(&mut self, idx: usize, top: f64, bottom: f64) -> Option<f64> {
+        let page_index = self.states[idx].page_index;
+        let limit = self.states[idx].content_limit;
+        let boxes: Vec<(f64, f64, f64)> = self.pages[page_index]
+            .fragments
+            .iter()
+            .filter_map(Fragment::flow_box)
+            .collect();
+        let (first, lead) = boxes
+            .iter()
+            .filter(|(y, height, _)| *y < bottom && y + height > top)
+            .map(|(y, _, lead)| (*y, *lead))
+            .reduce(|a, b| if b.0 < a.0 { b } else { a })?;
+        let delta = bottom - first;
+        if delta <= 0.0 || first + lead <= top {
+            return None;
+        }
+        let deepest = boxes
+            .iter()
+            .filter(|(y, _, _)| *y >= first)
+            .map(|(y, height, _)| y + height)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if deepest + delta > limit || self.states[idx].pen_y + delta > limit {
+            return None;
+        }
+        for fragment in &mut self.pages[page_index].fragments {
+            if fragment.flow_box().is_some_and(|(y, _, _)| y >= first) {
+                fragment.shift_y(delta);
+            }
+        }
+        self.states[idx].pen_y += delta;
+        Some(delta)
+    }
 }
 
 impl crate::section_breaks::SectionBreakPaginator for Paginator {
