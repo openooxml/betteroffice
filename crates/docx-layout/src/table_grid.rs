@@ -349,8 +349,7 @@ fn resolve_autofit_column_widths(
 
 /// The budget a table may spend, after its own left indent.
 fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
-    let indent = table_block.indent.unwrap_or(0.0);
-    (content_width - if indent > 0.0 { indent } else { 0.0 }).max(0.0)
+    (content_width - table_block.indent.unwrap_or(0.0).max(0.0)).max(0.0)
 }
 
 /// Grid columns whose width no cell states, for a table that states no width
@@ -358,13 +357,22 @@ fn table_width_budget(table_block: &TableBlock, content_width: f64) -> f64 {
 ///
 /// Word sizes exactly these columns from their content, so the declared
 /// `w:gridCol` is only a hint and goes stale whenever the content changes.
-/// Empty whenever the declared geometry already decides the answer.
+/// Empty under `w:tblLayout w:type="fixed"`, and whenever the declared
+/// geometry already decides the answer.
 pub fn content_sized_columns(
     table_block: &TableBlock,
     content_width: f64,
     widths: &[f64],
 ) -> Vec<usize> {
     if table_block.rows.is_empty() || widths.is_empty() {
+        return Vec::new();
+    }
+    if table_block
+        .width_algorithm
+        .as_deref()
+        .or(table_block.layout_mode.as_deref())
+        == Some("fixed")
+    {
         return Vec::new();
     }
     if preferred_width_px(
@@ -757,6 +765,17 @@ mod tests {
         assert_close_to(widths[0], 145.0, 6);
         assert_close_to(widths[1], 115.0, 6);
         assert_close_to(widths[0] + widths[1], 260.0, 6);
+    }
+
+    #[test]
+    fn a_fixed_layout_table_is_never_content_sized() {
+        let mut block = administrative_04_table();
+        block.layout_mode = Some("fixed".to_owned());
+        let widths = resolve_table_column_widths(&block, 601.333_333);
+        assert_eq!(
+            content_sized_columns(&block, 601.333_333, &widths),
+            Vec::<usize>::new()
+        );
     }
 
     #[test]
