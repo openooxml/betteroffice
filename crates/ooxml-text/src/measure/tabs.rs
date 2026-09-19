@@ -23,6 +23,9 @@
 //! - When the resolved span shrinks below a pixel — following content wider
 //!   than an `end` stop's room — the tab gives up on the stop and takes plain
 //!   default-grid spacing instead.
+//! - A `start` stop reserves nothing for what follows, so the caller checks
+//!   the following word itself; `end`, `center` and `bar` stops already
+//!   account for it, which [`TabAdvance::reserves_following`] reports.
 
 use super::input::TabStopIn;
 
@@ -137,6 +140,23 @@ fn default_grid_advance(from_x_px: f32) -> f32 {
     if advance <= 0.0 { stride_px } else { advance }
 }
 
+/// What one tab resolved to: its advance, and whether the stop it landed on
+/// already reserved room for the runs that follow.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct TabAdvance {
+    pub width: f32,
+    pub reserves_following: bool,
+}
+
+impl TabAdvance {
+    fn start(width: f32) -> Self {
+        Self {
+            width,
+            reserves_following: false,
+        }
+    }
+}
+
 /// Advance a tab occupies starting from `current_x_px`, in content-area
 /// coordinates. `following_width_px` is the inline width of the runs after
 /// the tab, which `end` and `center` stops anchor on.
@@ -146,7 +166,7 @@ pub(super) fn calculate_tab_width(
     left_indent_twips: f32,
     following_width_px: f32,
     available_width_px: f32,
-) -> f32 {
+) -> TabAdvance {
     let current_x_twips = px_to_twips(current_x_px);
     let grid = compute_tab_stops(declared, left_indent_twips);
 
@@ -155,7 +175,7 @@ pub(super) fn calculate_tab_width(
         .iter()
         .find(|s| s.0 > current_x_twips + PEN_ON_STOP_TWIPS)
     else {
-        return default_grid_advance(current_x_px);
+        return TabAdvance::start(default_grid_advance(current_x_px));
     };
 
     let mut width = twips_to_px(pos) - current_x_px;
@@ -165,19 +185,30 @@ pub(super) fn calculate_tab_width(
         // decimal measures like start (see module docs)
         StopKind::Decimal | StopKind::Start => {}
         // a bar stop draws a vertical rule but consumes no horizontal space
-        StopKind::Bar => return 0.0,
+        StopKind::Bar => {
+            return TabAdvance {
+                width: 0.0,
+                reserves_following: true,
+            };
+        }
     }
 
     // following content wider than the span: give up on the stop and use the
     // default grid instead
     if width < 1.0 {
-        return default_grid_advance(current_x_px);
+        return TabAdvance::start(default_grid_advance(current_x_px));
     }
     if kind == StopKind::End && width > available_width_px + 1e-3 {
         let clamped = available_width_px - following_width_px;
         if clamped > 1.0 {
-            return clamped;
+            return TabAdvance {
+                width: clamped,
+                reserves_following: true,
+            };
         }
     }
-    width
+    TabAdvance {
+        width,
+        reserves_following: matches!(kind, StopKind::End | StopKind::Center),
+    }
 }

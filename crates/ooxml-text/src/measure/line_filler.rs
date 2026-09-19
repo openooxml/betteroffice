@@ -413,24 +413,72 @@ impl Filler<'_> {
     }
 
     /// Places a tab against the stop grid, recomputing its width after wrapping.
+    ///
+    /// A `start` stop that leaves the word after it no room takes the tab to
+    /// the next line with it — Word never strands that word at the paragraph
+    /// indent while its tab sits on the line above.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         let following = self.following_width_after(run_index);
-        let mut tab_width = self.tab_width(following);
-        if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
+        let mut tab = self.tab_width(following);
+        let word = if tab.reserves_following {
+            0.0
+        } else {
+            self.first_word_after(run_index)
+        };
+        let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
+        let strands_word = self.cur.width > 0.0
+            && word > 0.0
+            && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
+        if overflows || strands_word {
             self.start_new_line(ri, 0)?;
-            tab_width = self.tab_width(following);
+            tab = self.tab_width(following);
         }
 
         self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
-        self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
-        self.cur.width += tab_width;
+        self.record_atomic(ri, 0, 1, tab.width, t.bidi_level);
+        self.cur.width += tab.width;
         self.cur.tail_run = ri;
         self.cur.tail_char = 1;
         Ok(())
     }
 
-    fn tab_width(&self, following: f32) -> f32 {
+    /// Visible width of the first word after a tab — the span up to the first
+    /// break opportunity, which can run past the end of one text run.
+    fn first_word_after(&self, tab_index: usize) -> f32 {
+        let mut width = 0.0f32;
+        for prun in &self.p.prepared[tab_index + 1..] {
+            match prun {
+                PreparedRun::Tab(_) | PreparedRun::LineBreak => break,
+                PreparedRun::Text(t) => {
+                    if t.chars.is_empty() {
+                        continue;
+                    }
+                    let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                    width += visible_span_width(&t.chars[..end], t.letter_spacing);
+                    if !t.breaks.is_empty() {
+                        break;
+                    }
+                }
+                PreparedRun::Field(f) => {
+                    width += f.width;
+                    break;
+                }
+                PreparedRun::InlineImage(img) | PreparedRun::OwnLineImage(img) => {
+                    width += img.width;
+                    break;
+                }
+                PreparedRun::SkippedImage { width: w, .. } => {
+                    width += w;
+                    break;
+                }
+                PreparedRun::Hidden { .. } => {}
+            }
+        }
+        width
+    }
+
+    fn tab_width(&self, following: f32) -> tabs::TabAdvance {
         let line_x = self.cur.width + self.cur.left_offset;
         let is_first_line = self.lines.is_empty();
         let content_x = self.p.indent_left_px
