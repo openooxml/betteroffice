@@ -668,10 +668,7 @@ impl Filler<'_> {
         }
     }
 
-    /// Box for a line with no font-bearing run: Word sizes it from the
-    /// paragraph mark, so a line carrying only floats, hidden runs or a
-    /// trailing break measures like an empty paragraph. Without a resolved
-    /// mark face it falls back to a 0.8/0.2 em split.
+    /// Word sizes a line with no font-bearing run from the paragraph mark.
     fn markless_box(&self, size_px: f32) -> wm::LineBox {
         if let Some((font, size_pt)) = self.p.mark_font
             && let Ok(metrics) = self.p.store.metrics(font)

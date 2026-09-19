@@ -7736,11 +7736,7 @@ fn emit_paragraph_floating_images(
     }
 }
 
-/// Word keeps a text-wrapping float on its anchor's page: a box that would
-/// hang off the bottom is pushed back so its bottom sits on the page edge,
-/// and the top clamp wins for a box taller than the page. A `wrapNone` float
-/// is left where the anchor puts it — Word lets it run past the margin, off
-/// the page edge, and simply stops drawing it once it clears the sheet.
+/// Word clamps a text-wrapping float into its page and leaves `wrapNone` free.
 fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
     if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
         return y;
