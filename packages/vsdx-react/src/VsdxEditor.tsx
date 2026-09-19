@@ -134,6 +134,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const marqueeFrameRef = useRef<number | null>(null);
   const zoomRef = useRef(zoom);
   zoomRef.current = zoom;
+  const overlayDprRef = useRef(1);
   const [connectorMode, setConnectorMode] = useState(false);
   const connectorModeRef = useRef(connectorMode);
   connectorModeRef.current = connectorMode;
@@ -319,7 +320,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = canvas.getContext('2d'); if (!context) return;
     const controller = new AbortController();
     const originHandle = handleRef.current;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom);
+    const dpr = sizeCanvasForPage(canvas, frame, window.devicePixelRatio || 1, zoom);
     void paintPage(context, frame, dpr, zoom, {
       signal: controller.signal,
       resolveImage: async (assetId) => {
@@ -335,7 +336,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const canvas = overlayCanvasRef.current; const frame = model.frame;
     if (!canvas || !frame) return;
     const context = canvas.getContext('2d'); if (!context) return;
-    const dpr = window.devicePixelRatio || 1; sizeCanvasForPage(canvas, frame, dpr, zoom); context.clearRect(0, 0, canvas.width, canvas.height);
+    const dpr = sizeCanvasForPage(canvas, frame, window.devicePixelRatio || 1, zoom); overlayDprRef.current = dpr; context.clearRect(0, 0, canvas.width, canvas.height);
     if (showGrid) {
       try { paintGrid(context, frame, dpr, zoom); } catch { void 0; }
     }
@@ -420,7 +421,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const marquee = marqueeRef.current; const overlay = overlayCanvasRef.current;
     if (!marquee || !overlay || !marquee.thresholdPassed) return;
     const context = overlay.getContext('2d'); if (!context) return;
-    try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+    try { paintMarquee(context, normalizeMarquee(marquee.startCanvas, marquee.currentCanvas), overlayDprRef.current, zoomRef.current); } catch { void 0; }
   };
 
   const repaintOverlaySelection = () => {
@@ -429,7 +430,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     const context = overlay.getContext('2d'); if (!context) return;
     const currentSelection = selectionRef.current;
     const page = current.snapshot?.pages[current.pageIndex];
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = overlayDprRef.current;
     const zoom = zoomRef.current;
     context.clearRect(0, 0, overlay.width, overlay.height);
     if (showGridRef.current) {
@@ -444,10 +445,10 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           const placement = findShapePlacement(page.shapes, item.shapeId);
           const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
           const rotationBlocked = placement ? isRotateBlocked(placement.shape) : false;
-          if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current, blocked ? [] : undefined, !rotationBlocked);
-          if (placement && currentSelection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), window.devicePixelRatio || 1, zoomRef.current);
+          if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotationBlocked);
+          if (placement && currentSelection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), dpr, zoom);
         } catch { void 0; }
-        if (currentSelection.length === 1) paintSelectedConnector(context, frame, page, item, segmentDragRef.current, window.devicePixelRatio || 1, zoomRef.current);
+        if (currentSelection.length === 1) paintSelectedConnector(context, frame, page, item, segmentDragRef.current, dpr, zoom);
       }
     }
     try { paintSmartGuides(context, frame, dpr, zoom, guidesRef.current); } catch { void 0; }
@@ -517,7 +518,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   };
 
   const paintConnectorLayer = (context: CanvasRenderingContext2D, frame: PageDisplayList) => {
-    const dpr = window.devicePixelRatio || 1;
+    const dpr = overlayDprRef.current;
     try { paintConnectorOverlay(context, frame, dpr, zoomRef.current, connectorScene(frame)); } catch { void 0; }
     if (connectorModeRef.current || connectorDragRef.current || !autoHoverRef.current) return;
     const page = modelRef.current.snapshot?.pages[modelRef.current.pageIndex];
@@ -966,7 +967,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const livePlacement = findShapePlacement(livePage.shapes, liveSelection.shapeId);
             const corners = selectionCorners(livePage, liveFrame, liveSelection);
             context.clearRect(0, 0, overlay.width, overlay.height);
-            if (corners) paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
+            if (corners) paintSelectionFrame(context, corners, overlayDprRef.current, zoomRef.current);
             if (livePlacement) {
               const positions = controlHandleCanvasPositions(livePlacement.shape, liveStart, liveFrame.paintTransform).map((position) => {
                 if (position.row !== liveStart.control!.row) return position;
@@ -974,7 +975,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
                 const page = shapeLocalToPage(liveStart, next);
                 return { ...position, canvas: modelPointToCanvas(liveFrame.paintTransform, page.x, page.y) };
               });
-              paintControlHandles(context, positions, window.devicePixelRatio || 1, zoomRef.current);
+              paintControlHandles(context, positions, overlayDprRef.current, zoomRef.current);
             }
             return;
           }
@@ -982,12 +983,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           reroutePreviewRef.current = gluedReroutePreview(liveStart, release);
           context.clearRect(0, 0, overlay.width, overlay.height);
           if (showGridRef.current) {
-            try { paintGrid(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current); } catch { void 0; }
+            try { paintGrid(context, liveFrame, overlayDprRef.current, zoomRef.current); } catch { void 0; }
           }
           paintConnectorLayer(context, liveFrame);
-          paintDragPreview(context, corners, window.devicePixelRatio || 1, zoomRef.current);
-          paintSelectionFrame(context, corners, window.devicePixelRatio || 1, zoomRef.current);
-          try { paintSmartGuides(context, liveFrame, window.devicePixelRatio || 1, zoomRef.current, guidesRef.current); } catch { void 0; }
+          paintDragPreview(context, corners, overlayDprRef.current, zoomRef.current);
+          paintSelectionFrame(context, corners, overlayDprRef.current, zoomRef.current);
+          try { paintSmartGuides(context, liveFrame, overlayDprRef.current, zoomRef.current, guidesRef.current); } catch { void 0; }
         } catch (value) { reportError(value); }
       });
     } catch (value) { reportError(value); }

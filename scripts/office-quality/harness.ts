@@ -250,10 +250,10 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
     capture = async (index) => {
       const list = handle.layoutPage(index);
       const canvas = document.createElement('canvas');
-      sizeCanvasForPage(canvas, list, 150 / 96, 1);
+      const effective = sizeCanvasForPage(canvas, list, 150 / 96, 1);
       const images = new Map<string, ImageBitmap>();
       try {
-        await paintPage(canvas.getContext('2d')!, list, 150 / 96, 1, {
+        await paintPage(canvas.getContext('2d')!, list, effective, 1, {
           resolveImage: async (assetId: string) => {
             if (!images.has(assetId))
               images.set(

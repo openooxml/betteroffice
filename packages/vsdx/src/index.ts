@@ -1,4 +1,5 @@
-export { canvasPointToModel, modelPointToCanvas, paintPage, sizeCanvasForPage } from './render/canvas';
+export { canvasPointToModel, effectiveDprForSurface, modelPointToCanvas, paintPage, sizeCanvasForPage } from './render/canvas';
+export { MAX_CANVAS_AREA, MAX_CANVAS_DIMENSION } from './render/canvas';
 export type { CanvasImageResolver, ModelPoint, PageCanvasLike, PaintPageOptions } from './render/canvas';
 export { formatOptions, isShapeDataValueEditable, quoteShapeDataValue, shapeDataRows, shapeDataTypeFromValue, shapeDataValueFormula, unquoteFormula, visibleShapeDataRows } from './shapeData';
 export type { ShapeDataRow, ShapeDataType } from './shapeData';
