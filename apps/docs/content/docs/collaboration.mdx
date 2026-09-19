@@ -91,4 +91,23 @@ or changes rooms.
 The reference relay is intentionally small. Add authentication before resolving
 a room, authorize each room ID, enforce connection and storage quotas, and define
 a snapshot or compaction policy for long-lived documents. The included relay
-retains at most 512 frames or 16 MiB per room.
+retains at most 512 frames or 64 MiB per room.
+
+## Threat model
+
+Room IDs are bearer credentials: anyone holding one gets read, write, and
+retained-state replay for that room. The relay performs no authentication by
+design — that is a product decision, so generate unguessable IDs (the demo
+mints `crypto.randomUUID()`), treat a shared link as shared access, and add
+authentication before resolving a room in production.
+
+The relay validates framing only: sync-v1 structure, the 16 MiB frame cap, a
+32 KiB awareness payload cap, and a per-socket rate limit on frames carrying
+awareness. It
+never parses Office files and never validates CRDT payloads; update validity is
+enforced inside the engine, which applies remote updates to a staged clone and
+adopts them only if valid.
+
+History is bounded, not secret: each room retains at most 512 frames or 64 MiB,
+and a joining socket replays at most 64 MiB. Evicted history is gone — late
+joiners converge the tail through live peers.
