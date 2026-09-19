@@ -1,4 +1,4 @@
-name: Visual fidelity
+name: Benchmarks
 
 on:
   workflow_dispatch:
@@ -225,5 +225,5 @@ jobs:
           git config core.hooksPath /dev/null
           gh auth setup-git
           git add -- README.md
-          git commit -m 'docs(ci): refresh visual fidelity'
+          git commit -m 'docs(ci): refresh benchmarks'
           git push origin "HEAD:refs/heads/$TARGET_BRANCH"

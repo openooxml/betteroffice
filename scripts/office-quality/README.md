@@ -37,7 +37,7 @@ chart typography can still differ from Excel.
 
 ## Manual CI and generated README
 
-After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main`, use **Actions → Visual fidelity → Run workflow**, or:
+After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main`, use **Actions → Benchmarks → Run workflow**, or:
 
 ```sh
 gh workflow run visual-fidelity.yml --ref main -f branch=main

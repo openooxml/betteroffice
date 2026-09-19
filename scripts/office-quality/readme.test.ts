@@ -33,10 +33,42 @@ test('generates every format and never reuses scores for a different release or 
   input.commit = 'b'.repeat(40);
   const section = renderSection(input);
   expect(section).not.toContain('0.8000');
-  expect(section).toContain('| PPTX | [0.0.4]');
-  expect(section).toContain('| XLSX | [0.1.0]');
+  expect(section).toContain('#### PPTX');
+  expect(section).toContain('| [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) |');
+  expect(section).toContain('| [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) |');
   expect(section).toContain('| — |');
-  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
+  expect(section).toMatch(/^\| SSIM \| — \| — \|$/m);
+  expect(section).toMatch(/^\| Scored\/total \| 0\/1 \| 0\/1 \|$/m);
+});
+
+test('reports DOCX page agreement apart from SSIM, and only where pages are known', () => {
+  const input = report();
+  const paged = (reference: number, actual: number, id: string) => ({
+    id,
+    format: 'docx',
+    metadata_url: `https://corpus.betteroffice.dev/${id}/metadata.json`,
+    comparisons: [
+      {
+        source_verified: true,
+        reference: { status: 'ok', sha256: 'source' },
+        actual: { status: 'ok', sha256: 'source' },
+        penalized_ssim: 0.8,
+        reference_pages: reference,
+        actual_pages: actual,
+        channel: 'commit',
+        renderer_source_commit: commit,
+      },
+    ],
+  });
+  // two exact, one two pages short, one page over: 2/4 exact, error 3
+  input.samples = [paged(4, 4, 'a'), paged(9, 9, 'b'), paged(5, 3, 'c'), paged(2, 3, 'd')] as any;
+  const section = renderSection(input);
+  expect(section).toMatch(/^\| Exact page counts \| — \| 2\/4 \|$/m);
+  expect(section).toMatch(/^\| Absolute page error \| — \| 3 \|$/m);
+  // a comparison without page counts contributes to SSIM but not to page agreement
+  input.samples = [paged(4, 4, 'a'), report().samples[0]] as any;
+  const mixed = renderSection(input);
+  expect(mixed).toMatch(/^\| Exact page counts \| — \| 1\/1 \|$/m);
 });
 
 test('replaces and moves the generated block without touching other sections', () => {
@@ -76,11 +108,12 @@ test('keeps each format tied to its own published version and comparison', () =>
   }
   const section = renderSection(input);
   expect(section).toMatch(
-    /\| PPTX .*\| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
+    /pptx\/v\/0\.0\.4\) \| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
   );
   expect(section).toMatch(
-    /\| XLSX .*\| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
+    /xlsx\/v\/0\.1\.0\) \| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
   );
+  expect(section).toMatch(/^\| SSIM \| 0\.8000 \| 0\.8000 \|$/m);
 });
 
 test('all failures show no score and cannot carry an invented zero', () => {
@@ -98,7 +131,8 @@ test('all failures show no score and cannot carry an invented zero', () => {
   };
   const section = renderSection(failedReport);
   expect(section).not.toContain('0.0000');
-  expect(section).toMatch(/\| DOCX .*\| — \| 0\/1 .*\| — \| 0\/1 \|$/m);
+  expect(section).toMatch(/^\| SSIM \| — \| — \|$/m);
+  expect(section).toMatch(/^\| Exact page counts \| — \| — \|$/m);
   expect(section).not.toContain('Could not render');
   expect(() =>
     renderSection({
