@@ -626,14 +626,10 @@ impl Paginator {
         self.states[idx].pen_y = y;
     }
 
-    /// Restarts flow content that meets a floating table's band below it.
-    ///
-    /// Word never paints a page-anchored floating table over flow content: the
-    /// first row or line reaching into the band, and everything after it, moves
-    /// to the band's bottom. A fragment whose own lead clears the band would
-    /// have to be split there, which this cannot do, so it keeps its place.
-    /// Returns the shift, or `None` when nothing moves or the shift would push
-    /// content past the content limit.
+    /// Restarts flow meeting a floating table's band below it, since Word never
+    /// paints a page-anchored float over flow content. Declines when the first
+    /// fragment's lead clears the band, needing a split this cannot do, or when
+    /// the shift would pass the content limit.
     pub fn clear_float_band(&mut self, idx: usize, top: f64, bottom: f64) -> Option<f64> {
         let page_index = self.states[idx].page_index;
         let limit = self.states[idx].content_limit;

@@ -2119,9 +2119,9 @@ impl Fragment {
         }
     }
 
-    /// Returns `(y, height, lead)` for a fragment the flow placed, `None` for a
-    /// float. `lead` estimates its first row or line — the unit Word relocates
-    /// whole — by sharing the height across the rows or lines it covers.
+    /// `(y, height, lead)` for a flow-placed fragment, `None` for a float.
+    /// `lead` approximates the first row or line — the unit Word relocates
+    /// whole — as the fragment's mean; per-row heights are not carried here.
     pub fn flow_box(&self) -> Option<(f64, f64, f64)> {
         let share = |height: f64, units: usize| height / units.max(1) as f64;
         match self {
