@@ -30,10 +30,11 @@ use super::input::TabStopIn;
 pub(super) const DEFAULT_TAB_INTERVAL_TWIPS: f32 = 720.0;
 /// Two positions closer than this count as the same stop.
 const STOP_COINCIDENCE_TWIPS: f32 = 20.0;
-/// A pen this close to a stop rests *on* it. Stop positions round-trip through
-/// 96-DPI pixels in f32, so a pen an `end` stop parked exactly on one can read
-/// a whisker short and match that same stop a second time.
-const PEN_ON_STOP_TWIPS: f32 = 0.5;
+/// A pen this close to a stop rests *on* it: an `end` stop parks the pen exactly
+/// on itself, and the twips-px-twips round trip in f32 reads a whisker short.
+/// The observed error is 1e-4 twips and authored stops are whole twips apart,
+/// so this absorbs the noise without reaching a distinct stop.
+const PEN_ON_STOP_TWIPS: f32 = 0.05;
 /// The implicit grid is laid out to ten inches past the left indent.
 const GRID_CEILING_SPAN_TWIPS: f32 = 14_400.0;
 
