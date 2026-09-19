@@ -416,7 +416,8 @@ impl Filler<'_> {
     ///
     /// A `start` stop that leaves the word after it no room takes the tab to
     /// the next line with it — Word never strands that word at the paragraph
-    /// indent while its tab sits on the line above.
+    /// indent while its tab sits on the line above. Content too wide for a
+    /// whole line cannot be stranded, so the tab keeps its line for that.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         let following = self.following_width_after(run_index);
@@ -429,6 +430,7 @@ impl Filler<'_> {
         let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
         let strands_word = self.cur.width > 0.0
             && word > 0.0
+            && word <= self.cur.available + WRAP_SLACK_PX
             && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
         if overflows || strands_word {
             self.start_new_line(ri, 0)?;
@@ -443,13 +445,18 @@ impl Filler<'_> {
         Ok(())
     }
 
-    /// Visible width of the first word after a tab — the span up to the first
-    /// break opportunity, which can run past the end of one text run.
+    /// Width of what the tab has to fit beside it on this line: the span up to
+    /// the first break opportunity, which can run past the end of one text run.
+    /// Unlike [`Self::following_width_after`], which sums declared width for an
+    /// `end` stop to anchor on, this counts only content that shares the line —
+    /// an own-line image never does, and a floating one carries no line width.
     fn first_word_after(&self, tab_index: usize) -> f32 {
         let mut width = 0.0f32;
         for prun in &self.p.prepared[tab_index + 1..] {
             match prun {
-                PreparedRun::Tab(_) | PreparedRun::LineBreak => break,
+                PreparedRun::Tab(_) | PreparedRun::LineBreak | PreparedRun::OwnLineImage(_) => {
+                    break;
+                }
                 PreparedRun::Text(t) => {
                     if t.chars.is_empty() {
                         continue;
@@ -464,15 +471,11 @@ impl Filler<'_> {
                     width += f.width;
                     break;
                 }
-                PreparedRun::InlineImage(img) | PreparedRun::OwnLineImage(img) => {
+                PreparedRun::InlineImage(img) => {
                     width += img.width;
                     break;
                 }
-                PreparedRun::SkippedImage { width: w, .. } => {
-                    width += w;
-                    break;
-                }
-                PreparedRun::Hidden { .. } => {}
+                PreparedRun::SkippedImage { .. } | PreparedRun::Hidden { .. } => {}
             }
         }
         width

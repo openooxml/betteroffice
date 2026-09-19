@@ -1293,6 +1293,76 @@ fn a_stranding_start_tab_costs_a_line() {
     );
 }
 
+/// The wrap serves the word that would otherwise be stranded, so a tab holds
+/// its line for anything it cannot strand: an own-line image opens a line of
+/// its own, a floating image carries no line width, and content wider than the
+/// whole line gains nothing from the break. Each case keeps the tab on the
+/// 96px stop, as it did before the wrap rule existed.
+#[test]
+fn a_start_tab_holds_its_line_for_content_it_cannot_strand() {
+    for width in [400.0, 20.0] {
+        for image in [
+            json!({ "kind": "image", "width": width, "height": 20.0, "wrapType": "topAndBottom" }),
+            json!({ "kind": "image", "width": width, "height": 20.0, "displayMode": "block" }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "displayMode": "float", "position": { "x": 0.0, "y": 0.0 } }),
+            json!({ "kind": "image", "width": width, "height": 20.0,
+                    "wrapType": "square", "position": { "x": 0.0, "y": 0.0 } }),
+        ] {
+            let v = measure(
+                json!([
+                    { "kind": "text", "text": "0".repeat(7) },
+                    { "kind": "tab" },
+                    image.clone()
+                ]),
+                110.0,
+            )
+            .unwrap();
+            approx(
+                v["lines"][0]["width"].as_f64().unwrap(),
+                96.0,
+                &format!("{width}px {image}"),
+            );
+        }
+    }
+    // An image too wide for any line is not worth a break either.
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 400.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        96.0,
+        "inline image wider than the line",
+    );
+}
+
+/// An inline image does share the tab's line, so it strands like a word.
+#[test]
+fn a_start_tab_wraps_with_an_inline_image_it_cannot_fit() {
+    let v = measure(
+        json!([
+            { "kind": "text", "text": "0".repeat(7) },
+            { "kind": "tab" },
+            { "kind": "image", "width": 20.0, "height": 20.0 }
+        ]),
+        110.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 7), (1, 0, 2, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 7.0 * W0, "text");
+    approx(
+        v["lines"][1]["width"].as_f64().unwrap(),
+        48.0 + 20.0,
+        "the tab takes the image to the 48px stop",
+    );
+}
+
 #[test]
 fn wrapped_tabs_resolve_against_the_new_line_grid() {
     for tab_count in 1..=3 {
