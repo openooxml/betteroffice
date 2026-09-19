@@ -84,12 +84,7 @@ const PRESETS: &[&str] = &[
     "cloudCallout",
     "wedgeEllipseCallout",
     "wedgeRoundRectCallout",
-    "arc",
-    "cube",
-    "leftBrace",
-    "rightBrace",
     "wedgeRectCallout",
-    "ribbon2",
     "swooshArrow",
     "circularArrow",
 ];
@@ -409,6 +404,8 @@ proptest! {
             for (x, y) in coordinates(&draw(shape, &adjustments, aspect)) {
                 prop_assert!(x.is_finite() && y.is_finite(), "{shape} emitted ({x}, {y})");
             }
+        }
+        for shape in PRESETS.iter().chain(["arc", "cube", "leftBrace", "rightBrace", "ribbon2"].iter()) {
             for layer in preset_geometry_layers(shape, &adjustments, aspect).into_iter().flatten() {
                 for (x, y) in coordinates(&layer.commands) {
                     prop_assert!(x.is_finite() && y.is_finite(), "{shape} layer emitted ({x}, {y})");
@@ -682,5 +679,18 @@ proptest! {
                 .count();
             prop_assert!(curves > 0, "{shape} drew only straight edges");
         }
+    }
+}
+
+#[test]
+fn single_path_consumers_do_not_receive_partial_layered_presets() {
+    for shape in ["arc", "cube", "leftBrace", "rightBrace", "ribbon2"] {
+        assert!(preset_geometry_to_path(shape, &HashMap::new(), 1.0).is_none());
+        assert!(
+            preset_geometry_layers(shape, &HashMap::new(), 1.0)
+                .unwrap()
+                .len()
+                > 1
+        );
     }
 }

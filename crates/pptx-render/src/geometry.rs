@@ -1,6 +1,6 @@
 use ooxml_drawingml::{PresetPathFill, preset_geometry_layers};
 
-use crate::{Paint, Primitive};
+use crate::{Paint, Primitive, ShadowPath};
 
 pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, bool)> {
     if let Primitive::Shape {
@@ -50,9 +50,28 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
     else {
         return vec![(primitive, true)];
     };
+    let shadow_paths = if let Primitive::Shape {
+        shadow: Some(_),
+        stroke,
+        ..
+    } = &primitive
+        && layers.len() > 1
+    {
+        layers
+            .iter()
+            .map(|layer| ShadowPath {
+                path: layer.commands.clone(),
+                fill: layer.fill != PresetPathFill::None,
+                stroke: stroke.clone().filter(|_| layer.stroke),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     layers
         .into_iter()
-        .map(|layer| {
+        .enumerate()
+        .map(|(index, layer)| {
             let mut part = primitive.clone();
             if let Primitive::Shape {
                 path,
@@ -73,8 +92,10 @@ pub(crate) fn preset_primitives(mut primitive: Primitive) -> Vec<(Primitive, boo
                 if !layer.stroke {
                     *stroke = None;
                 }
-                if fill.is_none() && stroke.is_none() {
+                if index > 0 {
                     *shadow = None;
+                } else if let Some(shadow) = shadow {
+                    shadow.paths.clone_from(&shadow_paths);
                 }
             }
             (part, layer.fill != PresetPathFill::None)
@@ -128,6 +149,57 @@ fn shade_fill(paint: &mut Paint, mode: PresetPathFill) {
         Paint::Gradient { stops, .. } => {
             for stop in stops {
                 shade(&mut stop.color);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layered_presets_cast_one_shadow_with_every_fill_and_open_stroke() {
+        for geometry in [
+            "arc",
+            "cube",
+            "leftBrace",
+            "rightBrace",
+            "ribbon2",
+            "foldedCorner",
+            "cloudCallout",
+        ] {
+            let source = serde_json::from_value(serde_json::json!({
+                "kind": "shape", "objectId": 1, "name": "shadow", "geometry": geometry,
+                "x": 10, "y": 20, "w": 100, "h": 70, "path": [],
+                "fill": { "kind": "solid", "color": "#DCE9F780" },
+                "stroke": { "color": "#000000", "width": 1 },
+                "shadow": { "color": "#00000066", "blur": 8, "dx": 10 }
+            }))
+            .unwrap();
+            let parts = preset_primitives(source);
+            let Primitive::Shape {
+                shadow: Some(shadow),
+                ..
+            } = &parts[0].0
+            else {
+                panic!("{geometry}")
+            };
+            assert_eq!(shadow.paths.len(), parts.len(), "{geometry}");
+            for (index, (mask, (part, has_fill))) in shadow.paths.iter().zip(&parts).enumerate() {
+                let Primitive::Shape {
+                    path,
+                    stroke,
+                    shadow,
+                    ..
+                } = part
+                else {
+                    panic!()
+                };
+                assert_eq!(&mask.path, path);
+                assert_eq!(&mask.stroke, stroke);
+                assert_eq!(mask.fill, *has_fill);
+                assert_eq!(shadow.is_some(), index == 0);
             }
         }
     }

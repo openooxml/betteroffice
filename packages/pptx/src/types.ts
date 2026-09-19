@@ -308,6 +308,7 @@ export interface Stroke {
 
 /** An `a:outerShdw`: a blurred copy of the shape's own path, offset and tinted. */
 export interface Shadow {
+  paths?: Array<{ path: GeometryPathCommand[]; fill: boolean; stroke?: Stroke }>;
   color: string;
   blur?: number;
   dx?: number;

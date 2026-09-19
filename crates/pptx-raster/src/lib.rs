@@ -212,6 +212,69 @@ pub fn render_slide_cached(
     })
 }
 
+struct ShadowGeometry<'a> {
+    path: Path,
+    fill: bool,
+    stroke: Option<&'a SlideStroke>,
+}
+
+fn shadow_geometry<'a>(
+    shadow: &'a SlideShadow,
+    path: &Path,
+    stroke: Option<&'a SlideStroke>,
+    [x, y, w, h]: [f32; 4],
+) -> Vec<ShadowGeometry<'a>> {
+    if shadow.paths.is_empty() {
+        return vec![ShadowGeometry {
+            path: path.clone(),
+            fill: true,
+            stroke,
+        }];
+    }
+    shadow
+        .paths
+        .iter()
+        .filter_map(|part| {
+            Some(ShadowGeometry {
+                path: geometry_path(&part.path, x, y, w, h)?,
+                fill: part.fill,
+                stroke: part.stroke.as_ref(),
+            })
+        })
+        .collect()
+}
+
+fn shadow_bounds(paths: &[ShadowGeometry<'_>], placed: Transform) -> Option<Rect> {
+    let mut bounds: Option<Rect> = None;
+    for part in paths {
+        let Some(path) = part.path.clone().transform(placed) else {
+            continue;
+        };
+        let next = path.bounds();
+        bounds = Some(match bounds {
+            None => next,
+            Some(previous) => Rect::from_ltrb(
+                previous.left().min(next.left()),
+                previous.top().min(next.top()),
+                previous.right().max(next.right()),
+                previous.bottom().max(next.bottom()),
+            )?,
+        });
+    }
+    bounds
+}
+
+fn shadow_reach(paths: &[ShadowGeometry<'_>], shadow: &SlideShadow, scale: f32) -> f32 {
+    paths
+        .iter()
+        .filter_map(|part| part.stroke)
+        .map(|stroke| stroke.width)
+        .fold(0.0, f32::max)
+        * scale
+        * shadow.scale_x.abs().max(shadow.scale_y.abs())
+        * 2.0
+}
+
 fn surface_dimension(value: f32, scale: f32, label: &str) -> Result<u32, String> {
     let scaled = value * scale;
     if !scaled.is_finite() || scaled <= 0.0 {
@@ -590,49 +653,56 @@ impl Painter<'_, '_> {
         clip: Option<&Mask>,
     ) -> Result<(), String> {
         let color = parse_color(&shadow.color)?;
-        if color.alpha() == 0.0 || (decoded.is_none() && stroke.is_none()) {
+        let paths = shadow_geometry(shadow, outline, stroke, bounds);
+        if color.alpha() == 0.0
+            || !paths
+                .iter()
+                .any(|part| (part.fill && decoded.is_some()) || part.stroke.is_some())
+        {
             return Ok(());
         }
         let placed = placed_shadow(shadow, transform, self.scale);
-        let Some(placed_outline) = outline.clone().transform(placed) else {
+        let Some(placed_bounds) = shadow_bounds(&paths, placed) else {
             return Ok(());
         };
-        let reach = stroke.map_or(0.0, |stroke| {
-            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
-        });
+        let reach = shadow_reach(&paths, shadow, self.scale);
         self.paint_shadow_layer(
-            placed_outline.bounds(),
+            placed_bounds,
             reach,
             shadow,
             color,
             placed,
             clip,
             |scratch, local| {
-                if let Some((source, fit)) = decoded {
-                    let mask = if bounded {
-                        let mut mask = Mask::new(scratch.width(), scratch.height())
-                            .ok_or("invalid shadow mask size".to_string())?;
-                        mask.fill_path(outline, FillRule::Winding, true, local);
-                        Some(mask)
-                    } else {
-                        None
-                    };
-                    scratch.draw_pixmap(
-                        0,
-                        0,
-                        source.as_ref(),
-                        &PixmapPaint {
-                            quality: FilterQuality::Bicubic,
-                            ..PixmapPaint::default()
-                        },
-                        local.pre_concat(fit),
-                        mask.as_ref(),
-                    );
-                }
-                if let Some(stroke) = stroke
-                    && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
-                {
-                    scratch.stroke_path(outline, &paint, &stroke, local, None);
+                for part in &paths {
+                    if part.fill
+                        && let Some((source, fit)) = decoded
+                    {
+                        let mask = if bounded || !shadow.paths.is_empty() {
+                            let mut mask = Mask::new(scratch.width(), scratch.height())
+                                .ok_or("invalid shadow mask size".to_string())?;
+                            mask.fill_path(&part.path, FillRule::Winding, true, local);
+                            Some(mask)
+                        } else {
+                            None
+                        };
+                        scratch.draw_pixmap(
+                            0,
+                            0,
+                            source.as_ref(),
+                            &PixmapPaint {
+                                quality: FilterQuality::Bicubic,
+                                ..PixmapPaint::default()
+                            },
+                            local.pre_concat(fit),
+                            mask.as_ref(),
+                        );
+                    }
+                    if let Some(stroke) = part.stroke
+                        && let Some((paint, stroke)) = stroke_paint(stroke, bounds)?
+                    {
+                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                    }
                 }
                 Ok(())
             },
@@ -701,32 +771,39 @@ impl Painter<'_, '_> {
         clip: Option<&Mask>,
     ) -> Result<(), String> {
         let color = parse_color(&shadow.color)?;
-        if color.alpha() == 0.0 || (fill.is_none() && stroke.is_none()) {
+        let paths = shadow_geometry(shadow, path, stroke, [x, y, w, h]);
+        if color.alpha() == 0.0
+            || !paths
+                .iter()
+                .any(|part| (part.fill && fill.is_some()) || part.stroke.is_some())
+        {
             return Ok(());
         }
         let placed = placed_shadow(shadow, transform, self.scale);
-        let Some(placed_path) = path.clone().transform(placed) else {
+        let Some(bounds) = shadow_bounds(&paths, placed) else {
             return Ok(());
         };
-        let reach = stroke.map_or(0.0, |stroke| {
-            stroke.width * self.scale * shadow.scale_x.abs().max(shadow.scale_y.abs()) * 2.0
-        });
+        let reach = shadow_reach(&paths, shadow, self.scale);
         self.paint_shadow_layer(
-            placed_path.bounds(),
+            bounds,
             reach,
             shadow,
             color,
             placed,
             clip,
             |scratch, local| {
-                if let Some(fill) = fill {
-                    let paint = shader_paint(fill, x, y, w, h)?;
-                    scratch.fill_path(path, &paint, FillRule::Winding, local, None);
-                }
-                if let Some(stroke) = stroke
-                    && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
-                {
-                    scratch.stroke_path(path, &paint, &stroke, local, None);
+                for part in &paths {
+                    if part.fill
+                        && let Some(fill) = fill
+                    {
+                        let paint = shader_paint(fill, x, y, w, h)?;
+                        scratch.fill_path(&part.path, &paint, FillRule::Winding, local, None);
+                    }
+                    if let Some(stroke) = part.stroke
+                        && let Some((paint, stroke)) = stroke_paint(stroke, [x, y, w, h])?
+                    {
+                        scratch.stroke_path(&part.path, &paint, &stroke, local, None);
+                    }
                 }
                 Ok(())
             },
@@ -1448,6 +1525,7 @@ mod tests {
                 }),
                 stroke: None,
                 shadow: Some(SlideShadow {
+                    paths: Vec::new(),
                     color: "#00000066".into(),
                     blur: 8.0,
                     dx: 1.0,
@@ -1527,6 +1605,7 @@ mod tests {
 
         let plain = render(square(None));
         let shadowed = render(square(Some(SlideShadow {
+            paths: Vec::new(),
             color: "#00000066".into(),
             blur: 8.0,
             dx: 6.0,
@@ -1581,6 +1660,7 @@ mod tests {
             }),
             stroke,
             shadow: Some(SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur,
                 dx,
@@ -1644,6 +1724,87 @@ mod tests {
     }
 
     #[test]
+    fn layered_shape_and_picture_shadows_composite_alpha_with_one_budget_charge() {
+        let mut list = shadow_probe(40.0, Some("#FF000080"), None, 0.0, 60.0);
+        let Primitive::Shape {
+            path,
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        else {
+            panic!()
+        };
+        shadow.paths = vec![
+            pptx_render::ShadowPath {
+                path: path.clone(),
+                fill: true,
+                stroke: None,
+            };
+            2
+        ];
+        let picture = shadowed_image("mark", shadow.clone());
+        let mut source = Pixmap::new(40, 40).unwrap();
+        source.fill(Color::from_rgba8(255, 0, 0, 128));
+        let bytes = source.encode_png().unwrap();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("mark", bytes.as_slice())]);
+        let resources = resources(&fonts, &images);
+        let options = RenderOptions {
+            max_shadow_pixels: 42 * 42,
+            ..Default::default()
+        };
+        for primitive in [list.primitives[0].clone(), picture] {
+            list.primitives = vec![primitive];
+            let rendered = render_slide(&list, &resources, &options).unwrap();
+            let pixels = Pixmap::decode_png(&rendered.bytes).unwrap();
+            assert_eq!(pixels.pixel(120, 60).unwrap().red(), 178);
+            assert_eq!(pixels.pixel(95, 60).unwrap().red(), 255);
+            let tight = RenderOptions {
+                max_shadow_pixels: 42 * 42 - 1,
+                ..options.clone()
+            };
+            assert!(
+                render_slide(&list, &resources, &tight)
+                    .unwrap_err()
+                    .contains("shadows cover")
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_first_layer_preserves_the_open_stroke_shadow() {
+        let stroke = SlideStroke {
+            color: "#C00000".into(),
+            width: 2.0,
+            dashed: false,
+            paint: None,
+            head_end: None,
+            tail_end: None,
+            join: None,
+        };
+        let mut list = shadow_probe(40.0, None, Some(stroke), 0.0, 60.0);
+        let Primitive::Shape {
+            path,
+            stroke,
+            shadow: Some(shadow),
+            ..
+        } = &mut list.primitives[0]
+        else {
+            panic!()
+        };
+        path.pop();
+        shadow.paths = vec![pptx_render::ShadowPath {
+            path: path.clone(),
+            fill: false,
+            stroke: stroke.take(),
+        }];
+        let pixels = render_probe(&list, 1.0);
+        assert!(pixels.pixel(120, 40).unwrap().red() < 255);
+        assert_eq!(pixels.pixel(120, 60).unwrap().red(), 255);
+        assert_eq!(pixels.pixel(100, 60).unwrap().red(), 255);
+    }
+
+    #[test]
     fn a_picture_shadow_traces_the_alpha_rather_than_the_frame() {
         let mut source = Pixmap::new(80, 80).unwrap();
         for y in 20..60 {
@@ -1670,6 +1831,7 @@ mod tests {
             path: None,
             stroke: None,
             shadow: Some(SlideShadow {
+                paths: Vec::new(),
                 color: "#000000FF".into(),
                 blur: 0.0,
                 dx: 120.0,
@@ -1733,6 +1895,7 @@ mod tests {
         list.primitives.push(shadowed_image(
             "mark",
             SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur: 8.0,
                 dx: 60.0,
@@ -1761,6 +1924,7 @@ mod tests {
         list.primitives.push(shadowed_image(
             "mark",
             SlideShadow {
+                paths: Vec::new(),
                 color: "#00000066".into(),
                 blur: 0.0,
                 dx: 0.0,

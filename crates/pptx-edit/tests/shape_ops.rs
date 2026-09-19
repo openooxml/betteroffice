@@ -451,3 +451,37 @@ fn chart_deck_part(path: &str) -> Vec<u8> {
         .map(|(_, bytes)| bytes)
         .expect("part is in the fixture")
 }
+
+#[test]
+fn layered_presets_can_be_inserted() {
+    let session = DeckSession::open(FIXTURE, 644).unwrap();
+    let slide_id = session.snapshot().unwrap().slides[0].id.clone();
+    for geometry in ["arc", "cube", "leftBrace", "rightBrace", "ribbon2"] {
+        let receipt = session
+            .add_shape(
+                &EditCtx::local("test"),
+                &slide_id,
+                &PresetShapeDraft {
+                    name: geometry.to_owned(),
+                    geometry: geometry.to_owned(),
+                    rect: ShapeRect {
+                        x: 0,
+                        y: 0,
+                        width: 952_500,
+                        height: 952_500,
+                    },
+                    fill: Some("#DCE9F7".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            session.snapshot().unwrap().slides[0]
+                .shapes
+                .iter()
+                .find(|shape| shape.id == receipt.shape_id)
+                .unwrap()
+                .geometry,
+            geometry
+        );
+    }
+}

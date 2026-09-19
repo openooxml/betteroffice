@@ -324,8 +324,11 @@ pub fn preset_geometry_to_path(
         "flowChartInputOutput" | "flowChartManualInput" => parallelogram(0.25),
         "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
         _ => {
-            let paths = preset_geometry_layers(shape_type, adjustments, aspect_ratio)?;
-            paths.into_iter().next()?.commands
+            let mut paths = preset_geometry_layers(shape_type, adjustments, aspect_ratio)?;
+            if paths.len() != 1 {
+                return None;
+            }
+            paths.pop()?.commands
         }
     };
     Some(result)

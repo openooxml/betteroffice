@@ -365,6 +365,7 @@ fn golden_picture_shadow() {
             path: None,
             stroke: None,
             shadow: Some(Shadow {
+                paths: Vec::new(),
                 color: "#00000099".into(),
                 blur: 6.0,
                 dx: 12.0,

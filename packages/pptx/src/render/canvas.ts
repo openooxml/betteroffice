@@ -147,7 +147,7 @@ function paintShape(
     buildPath(ctx, shape.clip, shape.x, shape.y, shape.w, shape.h);
     ctx.clip();
   }
-  if (shape.shadow && (shape.fill || shape.stroke)) {
+  if (shape.shadow && (shape.fill || shape.stroke || shape.shadow.paths?.some((part) => part.stroke))) {
     paintShadowedShape(ctx, shape, deviceScale, shadowBudget);
   }
   buildPath(ctx, shape.path, shape.x, shape.y, shape.w, shape.h);
@@ -167,14 +167,20 @@ function paintShadowedShape(
   deviceScale: number,
   shadowBudget: ShadowBudget
 ): void {
+  const parts: ShapePrimitive[] = shape.shadow?.paths?.length
+    ? shape.shadow.paths.map((part) => ({ ...shape, path: part.path,
+        fill: part.fill ? shape.fill : undefined, stroke: part.stroke, shadow: undefined }))
+    : [{ ...shape, shadow: undefined }];
   paintShadowLayer(
     ctx,
     shape.shadow!,
-    pathPoints(shape.path, shape),
-    shape.stroke?.width ?? 0,
+    parts.flatMap((part) => pathPoints(part.path, part)),
+    parts.reduce((reach, part) => Math.max(reach, part.stroke?.width ?? 0), 0),
     deviceScale,
     shadowBudget,
-    (scratch) => paintShape(scratch, { ...shape, shadow: undefined }, deviceScale, shadowBudget)
+    (scratch) => {
+      for (const part of parts) paintShape(scratch, part, deviceScale, shadowBudget);
+    }
   );
 }
 
@@ -528,15 +534,21 @@ async function paintImage(
     const resolved = await resolver(image.assetId);
     if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
-  if (image.shadow && (source || image.stroke)) {
+  if (image.shadow && (source || image.stroke || image.shadow.paths?.some((part) => part.stroke))) {
+    const parts = image.shadow.paths?.length
+      ? image.shadow.paths.map((part) => ({ image: { ...image, path: part.path, stroke: part.stroke },
+          source: part.fill ? source : undefined }))
+      : [{ image, source }];
     paintShadowLayer(
       ctx,
       image.shadow,
-      imagePoints(image),
-      image.stroke?.width ?? 0,
+      parts.flatMap((part) => imagePoints(part.image)),
+      parts.reduce((reach, part) => Math.max(reach, part.image.stroke?.width ?? 0), 0),
       deviceScale,
       shadowBudget,
-      (scratch) => drawImageContent(scratch, image, source)
+      (scratch) => {
+        for (const part of parts) drawImageContent(scratch, part.image, part.source);
+      }
     );
   }
   drawImageContent(ctx, image, source);

@@ -919,6 +919,64 @@ describe('PPTX shape shadows', () => {
     } finally { restore(); }
   });
 
+  test('layered fills share one shadow mask and one budget charge', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.stroke = undefined;
+      shape.shadow!.paths = [
+        { path: shape.path, fill: true }, { path: shape.path, fill: true },
+      ];
+      await paintSlide(ctx, display, 3, 1, { maxShadowPixels: 120 * 120 });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:fill', 'mask:fill', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:fill',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('an empty first layer still casts the later open stroke shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const display = list({ color: '#00000066' });
+      const shape = display.primitives[0] as ShapePrimitive;
+      shape.shadow!.paths = [{ path: shape.path.slice(0, 4), fill: false, stroke: shape.stroke }];
+      shape.fill = undefined;
+      shape.stroke = undefined;
+      await paintSlide(ctx, display, 3, 1);
+      expect(surfaces).toHaveLength(1);
+      expect(calls).toEqual([
+        'mask:stroke', 'mask:tint:source-in:#00000066', 'main:shadow:blur(0px):108,108',
+      ]);
+    } finally { restore(); }
+  });
+
+  test('picture layers combine bitmap alpha before tinting their shadow', async () => {
+    const { calls, surfaces, ctx, restore } = harness();
+    try {
+      const shape = list(undefined).primitives[0] as ShapePrimitive;
+      const display: SlideDisplayList = {
+        contractVersion: 1, width: 160, height: 160,
+        primitives: [{
+          kind: 'image', objectId: 2, name: 'mark', x: 40, y: 40, w: 40, h: 40,
+          assetId: 'mark', shadow: { color: '#00000066', paths: [
+            { path: shape.path, fill: true }, { path: shape.path, fill: true },
+          ] },
+        }],
+      };
+      await paintSlide(ctx, display, 3, 1, {
+        resolveImage: () => ({} as CanvasImageSource), maxShadowPixels: 120 * 120,
+      });
+      expect(surfaces).toEqual([[120, 120]]);
+      expect(calls).toEqual([
+        'mask:shadow:none:40,40', 'mask:shadow:none:40,40', 'mask:tint:source-in:#00000066',
+        'main:shadow:blur(0px):120,120', 'main:shadow:none:40,40',
+      ]);
+    } finally { restore(); }
+  });
+
   test('a context without filters paints one shadow from the combined source alpha', async () => {
     const { calls, ctx, restore } = harness(false);
     try {

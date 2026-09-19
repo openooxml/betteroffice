@@ -468,7 +468,14 @@ impl DeckSession {
         validate_rect(draft.rect)?;
         crate::model::validate_xml_text(&draft.name)?;
         let aspect_ratio = draft.rect.width as f64 / draft.rect.height as f64;
-        if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none() {
+        if preset_geometry_to_path(&draft.geometry, &Default::default(), aspect_ratio).is_none()
+            && ooxml_drawingml::preset_geometry_layers(
+                &draft.geometry,
+                &Default::default(),
+                aspect_ratio,
+            )
+            .is_none()
+        {
             return Err(EditError::InvalidGeometry(format!(
                 "unsupported preset geometry {}",
                 draft.geometry

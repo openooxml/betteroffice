@@ -132,6 +132,18 @@ pub struct Shadow {
     pub scale_x: f32,
     #[serde(default = "unit_scale", skip_serializing_if = "is_unit_scale")]
     pub scale_y: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<ShadowPath>,
+}
+
+/// Paths composited before a layered preset's shadow is blurred.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShadowPath {
+    pub path: Vec<GeometryPathCommand>,
+    pub fill: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<Stroke>,
 }
 
 fn unit_scale() -> f32 {

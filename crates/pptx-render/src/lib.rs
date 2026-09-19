@@ -169,11 +169,14 @@ struct ComposedRun {
 pub fn compile_json(slide_json: &str) -> Result<String, String> {
     let slide: ComposedSlide = serde_json::from_str(slide_json)
         .map_err(|error| format!("invalid composed slide: {error}"))?;
-    serde_json::to_string(&compile(slide))
+    serde_json::to_string(&compile(slide)?)
         .map_err(|error| format!("could not serialize display list: {error}"))
 }
 
-fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
+fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
+    if slide.shapes.len() > layout::MAX_RENDER_SHAPES {
+        return Err("composed slide exceeds the shape limit".to_owned());
+    }
     let mut primitives = Vec::with_capacity(slide.shapes.len() * 2);
     for shape in slide.shapes {
         match shape {
@@ -253,9 +256,12 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             },
             ComposedShape::Unknown { base } => primitives.push(placeholder(base, None)),
         }
+        if primitives.len() > layout::MAX_RENDER_SHAPES {
+            return Err("composed slide exceeds the shape limit after expansion".to_owned());
+        }
     }
 
-    SurfaceDisplayList {
+    Ok(SurfaceDisplayList {
         contract_version: CONTRACT_VERSION,
         width: slide.width_px,
         height: slide.height_px,
@@ -265,7 +271,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
             })
         }),
         primitives,
-    }
+    })
 }
 
 fn geometry_path(
@@ -427,6 +433,28 @@ impl From<ComposedStroke> for Stroke {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn composed_slides_limit_inputs_and_expanded_paths() {
+        let cube = serde_json::json!({
+            "kind": "shape", "id": 1, "name": "cube", "geometry": "cube",
+            "rect": { "x": 0, "y": 0, "w": 100, "h": 100 }, "rotationDeg": 0
+        });
+        let compose = |count| {
+            let json = serde_json::json!({"widthPx": 100, "heightPx": 100, "shapes": vec![cube.clone(); count]});
+            compile_json(&json.to_string())
+        };
+        let limit = layout::MAX_RENDER_SHAPES;
+        let output: SurfaceDisplayList =
+            serde_json::from_str(&compose(limit / 4).unwrap()).unwrap();
+        assert_eq!(output.primitives.len(), limit);
+        assert!(
+            compose(limit / 4 + 1)
+                .unwrap_err()
+                .contains("after expansion")
+        );
+        assert!(compose(limit + 1).unwrap_err().contains("shape limit"));
+    }
 
     #[test]
     fn composed_pictures_keep_their_effects() {
