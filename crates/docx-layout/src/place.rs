@@ -34,6 +34,7 @@
 
 use crate::LayoutError;
 use crate::hooks;
+use crate::keep_together::{paragraph_is_unbreakable, paragraph_widow_control};
 use crate::page_flow::{PageFlowGeometry, Paginator};
 use crate::paragraph_spacing::{
     apply_contextual_spacing_measured, get_spacing_after, get_spacing_before,
@@ -836,20 +837,9 @@ fn layout_paragraph(
     let paragraph_height = lines.iter().fold(0.0, |sum, line| {
         sum + line.line_height + line.float_skip_before.unwrap_or(0.0)
     });
-    let widow_control = lines.len() >= 2
-        && block
-            .attrs
-            .as_ref()
-            .and_then(|attrs| attrs.widow_control)
-            .unwrap_or(true);
+    let widow_control = paragraph_widow_control(block, measure);
 
-    if block
-        .attrs
-        .as_ref()
-        .and_then(|attrs| attrs.keep_lines)
-        .unwrap_or(false)
-        || (widow_control && lines.len() < 4)
-    {
+    if paragraph_is_unbreakable(block, measure) {
         let state_idx = paginator.get_current();
         let state = paginator.state(state_idx);
         let capacity = state.content_limit - state.content_top;
