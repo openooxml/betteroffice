@@ -183,7 +183,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                 text,
             } => {
                 let transform = transform(&base);
-                let path = geometry_path(
+                let (path, geometry_fallback) = geometry_path(
                     &geometry,
                     &adjust_values,
                     f64::from(base.rect.w) / f64::from(base.rect.h),
@@ -200,6 +200,7 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     h: base.rect.h,
                     geometry,
                     path,
+                    geometry_fallback,
                     adjust_values,
                     fill,
                     stroke: stroke.map(Into::into),
@@ -264,16 +265,19 @@ fn geometry_path(
     geometry: &str,
     adjust_values: &BTreeMap<String, f32>,
     aspect_ratio: f64,
-) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+) -> (Vec<ooxml_drawingml::GeometryPathCommand>, bool) {
     let adjustments = adjust_values
         .iter()
         .map(|(key, value)| (key.clone(), f64::from(*value)))
         .collect();
-    ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
-        .or_else(|| {
+    match ooxml_drawingml::preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+        Some(path) => (path, false),
+        None => (
             ooxml_drawingml::preset_geometry_to_path("rect", &Default::default(), aspect_ratio)
-        })
-        .unwrap_or_default()
+                .unwrap_or_default(),
+            true,
+        ),
+    }
 }
 
 fn transform(base: &ShapeBase) -> Transform {
@@ -452,6 +456,17 @@ mod tests {
         assert_eq!(output["primitives"][1]["kind"], "textBox");
         assert_eq!(output["primitives"][1]["objectId"], 7);
         assert_eq!(output["primitives"][1]["anchor"], "center");
+    }
+
+    #[test]
+    fn composed_unknown_preset_reports_its_rectangle_fallback() {
+        let json = r#"{"widthPx":100,"heightPx":100,"shapes":[{"kind":"shape","id":7,"name":"Arc","rect":{"x":0,"y":0,"w":10,"h":10},"rotationDeg":0,"geometry":"arc"}]}"#;
+        let output: serde_json::Value =
+            serde_json::from_str(&compile_json(json).expect("compile")).expect("display list json");
+        let shape = &output["primitives"][0];
+        assert_eq!(shape["geometry"], "arc");
+        assert_eq!(shape["geometryFallback"], true);
+        assert_eq!(shape["path"].as_array().unwrap().len(), 5);
     }
 
     #[test]

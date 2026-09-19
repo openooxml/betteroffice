@@ -523,6 +523,15 @@ impl<'a> LayoutBuilder<'a> {
         };
         match shape.kind {
             ShapeKind::Shape => {
+                let paths = custom_paths(original);
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &shape.geometry,
+                    &shape.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if shape.geometry == "custom" && !paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -535,11 +544,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: shape.geometry.clone(),
-                        path: geometry_path(
-                            &shape.geometry,
-                            &shape.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: shape
                             .adjust_values
                             .iter()
@@ -550,7 +556,7 @@ impl<'a> LayoutBuilder<'a> {
                         shadow,
                         transform,
                     },
-                    custom_paths(original),
+                    paths,
                     picture,
                 )?;
             }
@@ -674,6 +680,14 @@ impl<'a> LayoutBuilder<'a> {
                             transform.flip_v,
                         )
                     });
+                let (path, mut geometry_fallback) = geometry_path_with_fallback(
+                    &value.geometry,
+                    &value.adjust_values,
+                    f64::from(rect.w) / f64::from(rect.h),
+                );
+                if value.geometry == "custom" && !value.paths.is_empty() {
+                    geometry_fallback = false;
+                }
                 self.push_shape(
                     Primitive::Shape {
                         clip: None,
@@ -686,11 +700,8 @@ impl<'a> LayoutBuilder<'a> {
                         w: rect.w,
                         h: rect.h,
                         geometry: value.geometry.clone(),
-                        path: geometry_path(
-                            &value.geometry,
-                            &value.adjust_values,
-                            f64::from(rect.w) / f64::from(rect.h),
-                        ),
+                        path,
+                        geometry_fallback,
                         adjust_values: value
                             .adjust_values
                             .iter()
@@ -818,6 +829,7 @@ impl<'a> LayoutBuilder<'a> {
                     path: mask
                         .clone()
                         .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0)),
+                    geometry_fallback: false,
                     adjust_values: BTreeMap::new(),
                     fill: None,
                     stroke: Some(outline),
@@ -886,6 +898,7 @@ impl<'a> LayoutBuilder<'a> {
                 h: rect.h,
                 geometry: "custom".to_owned(),
                 path: op.path,
+                geometry_fallback: false,
                 adjust_values: BTreeMap::new(),
                 fill: op.fill.map(|color| Paint::Solid { color }),
                 stroke: op.stroke.map(|stroke| Stroke {
@@ -1533,6 +1546,7 @@ fn cell_fill(object_id: u32, rect: PxRect, fill: Paint) -> Primitive {
             &BTreeMap::new(),
             f64::from(rect.w) / f64::from(rect.h),
         ),
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: Some(fill),
         stroke: None,
@@ -1557,6 +1571,7 @@ fn cell_border(object_id: u32, from: (f32, f32), to: (f32, f32), stroke: Stroke)
             GeometryPathCommand::Move { x: 0.0, y: 0.0 },
             GeometryPathCommand::Line { x: 1.0, y: 1.0 },
         ],
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill: None,
         stroke: Some(stroke),
@@ -3808,13 +3823,25 @@ fn geometry_path(
     adjustments: &BTreeMap<String, f64>,
     aspect_ratio: f64,
 ) -> Vec<ooxml_drawingml::GeometryPathCommand> {
+    geometry_path_with_fallback(geometry, adjustments, aspect_ratio).0
+}
+
+fn geometry_path_with_fallback(
+    geometry: &str,
+    adjustments: &BTreeMap<String, f64>,
+    aspect_ratio: f64,
+) -> (Vec<ooxml_drawingml::GeometryPathCommand>, bool) {
     let adjustments = adjustments
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect();
-    preset_geometry_to_path(geometry, &adjustments, aspect_ratio)
-        .or_else(|| preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio))
-        .unwrap_or_default()
+    match preset_geometry_to_path(geometry, &adjustments, aspect_ratio) {
+        Some(path) => (path, false),
+        None => (
+            preset_geometry_to_path("rect", &HashMap::new(), aspect_ratio).unwrap_or_default(),
+            true,
+        ),
+    }
 }
 
 fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {

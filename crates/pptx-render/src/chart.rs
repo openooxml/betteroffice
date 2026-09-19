@@ -265,6 +265,7 @@ impl ChartSink<'_> {
             h: h as f32,
             geometry: geometry.to_owned(),
             path,
+            geometry_fallback: false,
             adjust_values: Default::default(),
             fill,
             stroke,

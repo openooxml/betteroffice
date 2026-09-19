@@ -1212,6 +1212,7 @@ mod tests {
                     adjust_values: Default::default(),
                     path: ooxml_drawingml::preset_geometry_to_path(kind, &Default::default(), 2.5)
                         .unwrap(),
+                    geometry_fallback: false,
                     fill: None,
                     stroke: Some(stroke),
                     transform: SlideTransform::default(),
@@ -1364,6 +1365,7 @@ mod tests {
                 h: 20.0,
                 geometry: "custom".into(),
                 path,
+                geometry_fallback: false,
                 clip: Some(rect(0.0, 0.0, 1.0, 1.0)),
                 even_odd: true,
                 adjust_values: Default::default(),
@@ -1433,6 +1435,7 @@ mod tests {
                     GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                     GeometryPathCommand::Close,
                 ],
+                geometry_fallback: false,
                 adjust_values: Default::default(),
                 fill: Some(SlidePaint::Solid {
                     color: "#4472C4".into(),
@@ -1488,6 +1491,7 @@ mod tests {
                 GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                 GeometryPathCommand::Close,
             ],
+            geometry_fallback: false,
             adjust_values: Default::default(),
             fill: Some(SlidePaint::Solid {
                 color: "#4472C4".into(),
@@ -1564,6 +1568,7 @@ mod tests {
                 GeometryPathCommand::Line { x: 0.0, y: 1.0 },
                 GeometryPathCommand::Close,
             ],
+            geometry_fallback: false,
             adjust_values: Default::default(),
             fill: fill.map(|color| SlidePaint::Solid {
                 color: color.into(),
@@ -2097,6 +2102,7 @@ mod tests {
                     GeometryPathCommand::Line { x: 1.0, y: 1.0 },
                     GeometryPathCommand::Close,
                 ],
+                geometry_fallback: false,
                 adjust_values: Default::default(),
                 fill: Some(SlidePaint::Solid {
                     color: "#ff0000".into(),

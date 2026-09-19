@@ -336,6 +336,8 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
+  /** The authored preset is unsupported and `path` is a rectangle fallback. */
+  geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
   adjustValues?: Record<string, number>;

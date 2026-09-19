@@ -136,6 +136,7 @@ fn shape(x: f32, y: f32, w: f32, h: f32, fill: Option<Paint>, stroke: Option<Str
         h,
         geometry: "rect".into(),
         path: rect_path(),
+        geometry_fallback: false,
         adjust_values: BTreeMap::new(),
         fill,
         stroke,
