@@ -16,7 +16,8 @@
 //!   font-bearing contribution claims it, and only a strictly larger size
 //!   displaces it. Ascent, descent and leading are per-contribution maxima,
 //!   so even a text run with no characters raises the line box. A line with
-//!   no font-bearing run at all falls back to a 0.8/0.2 em ascent/descent
+//!   no font-bearing run at all takes the paragraph mark's face, as Word
+//!   does, and only without one falls back to a 0.8/0.2 em ascent/descent
 //!   split on a [`DEFAULT_SINGLE_LINE_RATIO`] basis.
 //! - The emitted `ascent`/`descent` are the *spacing-ruled* pair, not the raw
 //!   content metrics, so `ascent + descent <= lineHeight` always holds: an
@@ -69,6 +70,9 @@ pub(super) struct FillParams<'a> {
     pub first_line_width: f32,
     /// Default font size used to seed line metrics.
     pub default_font_size_pt: f32,
+    /// The paragraph mark's own face and size, used for a line that ends up
+    /// carrying no font-bearing run. `None` falls back to a synthetic box.
+    pub mark_font: Option<(FontId, f32)>,
     pub compat: &'a CompatIn,
     /// Custom tab stops (`attrs.tabs`), positions in twips.
     pub tabs: &'a [TabStopIn],
@@ -664,6 +668,23 @@ impl Filler<'_> {
         }
     }
 
+    /// Box for a line with no font-bearing run: Word sizes it from the
+    /// paragraph mark, so a line carrying only floats, hidden runs or a
+    /// trailing break measures like an empty paragraph. Without a resolved
+    /// mark face it falls back to a 0.8/0.2 em split.
+    fn markless_box(&self, size_px: f32) -> wm::LineBox {
+        if let Some((font, size_pt)) = self.p.mark_font
+            && let Ok(metrics) = self.p.store.metrics(font)
+        {
+            return wm::single_line_box(metrics, pt_to_px(size_pt), &self.compat);
+        }
+        wm::LineBox {
+            ascent: size_px * 0.8,
+            descent: size_px * 0.2,
+            leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
+        }
+    }
+
     /// Closes the current line: resolve typography from its largest font,
     /// apply the spacing rule, let any taller image grow the box, attach
     /// float offsets, segments and skip, and push the row. Advances the
@@ -704,12 +725,7 @@ impl Filler<'_> {
                 descent: self.cur.max_descent,
                 leading: self.cur.max_below_baseline - self.cur.max_descent,
             },
-            // Fontless lines use a 0.8/0.2 em split.
-            None => wm::LineBox {
-                ascent: size_px * 0.8,
-                descent: size_px * 0.2,
-                leading: size_px * (DEFAULT_SINGLE_LINE_RATIO - 1.0),
-            },
+            None => self.markless_box(size_px),
         };
         let content = self.snap_content_box(content);
         let ruled = wm::apply_spacing_rule(content, &self.rule);
@@ -1184,6 +1200,7 @@ mod tests {
             body_width: width,
             first_line_width: width,
             default_font_size_pt: 12.0,
+            mark_font: None,
             compat: &compat,
             tabs: &[],
             indent_left_px: 0.0,

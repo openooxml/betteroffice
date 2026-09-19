@@ -398,7 +398,7 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 1)]);
 
-    // A trailing soft return uses the fontless 0.8/0.2 em fallback.
+    // A trailing soft return takes the paragraph mark's own face.
     let v = measure(
         json!([{ "kind": "text", "text": "0" }, { "kind": "lineBreak" }]),
         200.0,
@@ -406,21 +406,9 @@ fn soft_return_forces_new_line() {
     .unwrap();
     assert_eq!(spans(&v), vec![(0, 0, 1, 0), (2, 0, 2, 0)]);
     let last = &v["lines"][1];
-    approx(
-        last["ascent"].as_f64().unwrap(),
-        16.0 * 0.8,
-        "fallback ascent",
-    );
-    approx(
-        last["descent"].as_f64().unwrap(),
-        16.0 * 0.2,
-        "fallback descent",
-    );
-    approx(
-        last["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "fallback lineHeight",
-    );
+    approx(last["ascent"].as_f64().unwrap(), ASC, "mark ascent");
+    approx(last["descent"].as_f64().unwrap(), DESC, "mark descent");
+    approx(last["lineHeight"].as_f64().unwrap(), LH, "mark lineHeight");
 }
 
 // 5. multi-run line: metrics follow the largest font on the line
@@ -1882,27 +1870,27 @@ fn own_line_image_takes_its_own_line() {
             0.0,
             "own-line image adds no width",
         );
-        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × 3.2 descent
+        // maxImageHeightPx = 100 + 6 + 6 = 112; alone → + 2 × mark descent
         approx(
             img["lineHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2,
+            112.0 + 2.0 * DESC,
             "own-line height",
         );
         approx(
             img["ascent"].as_f64().unwrap(),
-            112.0 + 3.2,
+            112.0 + DESC,
             "own-line ascent",
         );
-        approx(img["descent"].as_f64().unwrap(), 3.2, "fallback descent");
-        // trailing empty line at the metrics-less fallback height
+        approx(img["descent"].as_f64().unwrap(), DESC, "mark descent");
+        // trailing empty line at the paragraph mark's height
         approx(
             v["lines"][1]["lineHeight"].as_f64().unwrap(),
-            16.0 * 1.15,
+            LH,
             "trailing empty line",
         );
         approx(
             v["totalHeight"].as_f64().unwrap(),
-            112.0 + 2.0 * 3.2 + 16.0 * 1.15,
+            112.0 + 2.0 * DESC + LH,
             "total height",
         );
     }
@@ -1929,10 +1917,10 @@ fn own_line_image_finishes_the_current_line_first() {
         LH,
         "text line kept",
     );
-    // image alone: 80 + 2 × 3.2 (no distances), no width advance
+    // image alone: 80 + 2 × mark descent (no distances), no width advance
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        80.0 + 2.0 * 3.2,
+        80.0 + 2.0 * DESC,
         "image line height",
     );
     approx(
@@ -1942,7 +1930,7 @@ fn own_line_image_finishes_the_current_line_first() {
     );
     approx(
         v["lines"][2]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
+        LH,
         "trailing empty line",
     );
 }
@@ -1972,6 +1960,41 @@ fn own_line_image_width_counts_after_a_tab() {
     );
 }
 
+// 24d′. a paragraph carrying only an anchored float keeps the paragraph
+// mark's line height, the way an empty paragraph does.
+#[test]
+fn float_only_paragraph_keeps_the_mark_line_height() {
+    let v = measure(
+        json!([{
+            "kind": "image",
+            "width": 50.0,
+            "height": 400.0,
+            "wrapType": "square",
+            "displayMode": "float",
+            "position": {}
+        }]),
+        200.0,
+    )
+    .unwrap();
+    assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
+    approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "no width");
+    approx(
+        v["lines"][0]["lineHeight"].as_f64().unwrap(),
+        LH,
+        "mark height",
+    );
+    approx(
+        v["lines"][0]["ascent"].as_f64().unwrap(),
+        ASC,
+        "mark ascent",
+    );
+    approx(
+        v["lines"][0]["descent"].as_f64().unwrap(),
+        DESC,
+        "mark descent",
+    );
+}
+
 // 24d. a dimensionless image measures as zero size
 #[test]
 fn dimensionless_image_is_zero_size() {
@@ -1981,8 +2004,8 @@ fn dimensionless_image_is_zero_size() {
     approx(v["lines"][0]["width"].as_f64().unwrap(), 0.0, "zero width");
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        16.0 * 1.15,
-        "no growth (fallback height)",
+        LH,
+        "no growth (mark height)",
     );
 
     // inline after text: contributes nothing to the line width or height
