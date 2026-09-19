@@ -23,7 +23,8 @@
 //!   `exact`, floored `atLeast` or sub-single box moves the pair rather than
 //!   overflowing the box. An image-grown line overrides both and the
 //!   identity still holds.
-//! - A tall inline image sits on the baseline with text descent below it.
+//! - A tall inline image sits on the baseline with text descent below it;
+//!   alone on its line it takes the image's own height and nothing more.
 //!   Block images retain a descent buffer above and below their footprint.
 //! - Float geometry is probed per line at the running Y with a fixed
 //!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
@@ -732,6 +733,12 @@ impl Filler<'_> {
             {
                 line_height = image_h + buffer * 2.0;
                 ascent = image_h + buffer;
+            } else if self.cur.max_font.is_none() {
+                // Word's box for an inline image alone on its line is exactly
+                // the image: the paragraph mark buys no descent under it.
+                descent = 0.0;
+                line_height = image_h;
+                ascent = image_h;
             } else {
                 line_height = image_h + buffer;
                 ascent = image_h;

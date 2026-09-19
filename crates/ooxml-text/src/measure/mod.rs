@@ -79,8 +79,8 @@
 //! An inline image adds its declared width to the line advance and grows the
 //! line box by its declared height, ignoring wrap distances. One wider than the
 //! column keeps that height, overflows the margin the way Word's own rasters
-//! do, and never wraps off an empty line. Alone on a line it takes a descent
-//! buffer above and below; flowing with text it seats on the baseline. A
+//! do, and never wraps off an empty line. Alone on a line its box is exactly
+//! the image; flowing with text it seats on the baseline. A
 //! `topAndBottom` or block image takes its own line at its declared height plus
 //! wrap distances (default 6px), adds no width, and opens a fresh line after
 //! it. An anchored floating image is positioned by the host, so it contributes

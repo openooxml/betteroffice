@@ -1673,11 +1673,11 @@ fn inline_image_grows_the_line_box() {
     approx(line["width"].as_f64().unwrap(), 50.0, "image width");
     approx(
         line["lineHeight"].as_f64().unwrap(),
-        103.2,
-        "alone: image height plus descent",
+        100.0,
+        "alone: exactly the image",
     );
     approx(line["ascent"].as_f64().unwrap(), 100.0, "alone ascent");
-    approx(line["descent"].as_f64().unwrap(), 3.2, "alone descent");
+    approx(line["descent"].as_f64().unwrap(), 0.0, "alone descent");
 
     // image flowing with text: baseline-seated, text descent below only
     let v = measure(
@@ -1783,7 +1783,7 @@ fn inline_image_wrapping_keeps_the_declared_box() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 22), (1, 0, 1, 1)]);
     approx(
         v["lines"][1]["lineHeight"].as_f64().unwrap(),
-        30.0 + 3.2,
+        30.0,
         "wrapped image line",
     );
 
@@ -1796,7 +1796,7 @@ fn inline_image_wrapping_keeps_the_declared_box() {
     assert_eq!(spans(&v), vec![(0, 0, 0, 1)]);
     approx(
         v["lines"][0]["lineHeight"].as_f64().unwrap(),
-        100.0 + 3.2,
+        100.0,
         "declared height reserved",
     );
     approx(
