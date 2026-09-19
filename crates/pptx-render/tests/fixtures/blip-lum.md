@@ -37,8 +37,7 @@ row 10–11 levels darker than the reference and nothing else moves.
 | contrast −50 % (280,220) | `03A7DF` | `03A7DF` | `4194B0` | `4193AF` |
 | bright 3 %, contrast 77 % (136,280) | `808080` | `808080` | `949494` | `949494` |
 
-`blip-lum.before.png` was rendered on main `1f30ea03`; the after image uses this
-implementation.
+Review: [PR #352](https://github.com/openooxml/betteroffice/pull/352).
 
 Each swatch is eight source pixels wide so that a cell centre is exact under any
 image filter. Sampling a one-pixel-per-swatch strip is not: both backends

@@ -14,8 +14,7 @@ wrap width is the only thing that varies between them.
   the margin with `marR="0"` and wraps at the full 600 px; its second wraps at
   384 px.
 
-`paragraph-right-margin.before.png` and `.after.png` are this slide rendered at
-96 DPI without and with the fix.
+Review: [PR #348](https://github.com/openooxml/betteroffice/pull/348).
 
 `marR` is measured from the right edge of the text box, so it narrows the line
 without moving its start. LibreOffice breaks all five paragraphs at the same

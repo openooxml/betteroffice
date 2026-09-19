@@ -23,6 +23,7 @@ white edges intact. See [MS-OI29500, §2.1.1287](https://officeprotocoldoc.z19.w
 | useA=0, half alpha (232,280) | `E8E8E8` | `E86868` |
 | grayscale (40,340) | `03A7DF` | `7C7C7C` |
 
-`blip-effects.before.png` was rendered on main `2c90c17f`; the after image uses
-this implementation. The display-list comparison has eight images, seven with
+Review: [PR #312](https://github.com/openooxml/betteroffice/pull/312).
+
+The display-list comparison has eight images, seven with
 effects added and one unchanged control. No other primitive fields change.

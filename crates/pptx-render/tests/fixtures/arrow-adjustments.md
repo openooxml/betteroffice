@@ -49,6 +49,4 @@ identically and deserialize across revisions. External Python `zipfile`
 comparison verifies all 537 package parts on each revision's no-edit save;
 ZIP directory entries are not package parts.
 
-| Main | Fixed |
-| --- | --- |
-| ![Main](arrow-adjustments.before.png) | ![Fixed](arrow-adjustments.after.png) |
+Review: [PR #339](https://github.com/openooxml/betteroffice/pull/339).

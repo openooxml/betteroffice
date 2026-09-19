@@ -27,8 +27,7 @@ to `(1140, 120)`. Its head measures 20 × 12 px and its tail 12 × 20 px. On mai
 its stroke JSON is `{"color":"#315EFB","width":4.0}`. With line ends enabled,
 only `headEnd` and `tailEnd` are added. Both plain lines keep exactly that JSON.
 
-`line-ends-before.png` and `line-ends-after.png` replay slide 1's actual display
-lists through the main and branch canvas implementations at 1× scale.
+Review: [PR #281](https://github.com/openooxml/betteroffice/pull/281).
 
 # Picture crop and mask
 

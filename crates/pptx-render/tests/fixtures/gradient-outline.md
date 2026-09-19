@@ -10,9 +10,7 @@ The control at `(96, 432, 768, 192)` remains an 8 px `#C00000` stroke with no pa
 
 The images use the same Liberation Sans font bytes and the Rust raster backend:
 
-| Before | After |
-| --- | --- |
-| ![Before](gradient-outline.before.png) | ![After](gradient-outline.after.png) |
+Review: [PR #322](https://github.com/openooxml/betteroffice/pull/322).
 
 At `(96, 336)`, `(480, 336)`, and `(863, 336)`, main paints white. The fixed
 renderer paints `(192, 0, 0)`, `(255, 192, 0)`, and `(31, 122, 61)`, respectively.

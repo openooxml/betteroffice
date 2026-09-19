@@ -19,6 +19,4 @@ The square `75000` cases must have a normalized first line endpoint at `(0.25, 0
 
 The screenshots render slide 1 through the native PPTX raster backend with the tracked Liberation Sans font. Before uses main commit `387f2392c44e31e459264663fafd65581c8346a6`; after uses the corrected geometry.
 
-| Before | After |
-| --- | --- |
-| ![Before](preset-adjustments.before.png) | ![After](preset-adjustments.after.png) |
+Review: [PR #279](https://github.com/openooxml/betteroffice/pull/279).

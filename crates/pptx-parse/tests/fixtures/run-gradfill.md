@@ -23,9 +23,7 @@ ramps; a single-color gradient renders exactly. The writer retains the authored
 ramps when text or other formatting changes, including adjacent runs separated
 by a soft line break, and replaces the fill when the resolved color changes.
 
-![Before](../../../pptx-render/tests/fixtures/run-gradfill-before.png)
-
-![After](../../../pptx-render/tests/fixtures/run-gradfill-after.png)
+Review: [PR #299](https://github.com/openooxml/betteroffice/pull/299).
 
 The before image uses `origin/main` at `1d0f41d9`. Both images use the tracked
 `LiberationSans-Regular.ttf`, registered as Arial. The font's SHA-256 is

@@ -13,8 +13,10 @@ Compared with main `069e4d66` using the same Liberation Sans font files:
 
 The title stays centered at x=640 and retains `#008044`. The inherited text retains `#802020`, the mixed runs retain `#112233`, and the body retains `#224466`. Shape autofit no longer shrinks tracked text; growing its stored box remains a separate autofit feature.
 
-`run-spacing.before.png` and `run-spacing.after.png` were rendered with the Rust raster backend. Tests cover parsing, tracking, wrapping, hard breaks, ligatures, mixed runs, autofit, editing, and source recovery from the committed main v10 update.
+Review: [PR #325](https://github.com/openooxml/betteroffice/pull/325).
 
-The original green-solutions title (object 29) also grows from 511.27078 to 671.27075 px while retaining its x=640 center and white `#FFFFFF` paint. Only that text primitive changes. Its screenshots are `run-spacing-green.before.png` and `run-spacing-green.after.png`.
+Tests cover parsing, tracking, wrapping, hard breaks, ligatures, mixed runs, autofit, editing, and source recovery from the committed main v10 update.
+
+The original green-solutions title (object 29) also grows from 511.27078 to 671.27075 px while retaining its x=640 center and white `#FFFFFF` paint. Only that text primitive changes.
 
 On swot-analysis, only objects 42–49 change. STRENGTH grows from 132 to 160 px with 4 px gaps and retains `#0094C8`; the four body blocks keep their 16 px font and `#595959` colour while wrapping from five to seven lines. All other primitives are identical. These measurements verify tracking, not the remaining reference-renderer differences in shape autosizing or font metrics.

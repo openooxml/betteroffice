@@ -6,9 +6,7 @@ The PR ships schema 5. Legacy v1/v2 updates commit schema 3, then main's schema 
 
 `master-style-deck.pptx` is the contributor's original repro. Its master rectangle gains a black fill and a black 2 px outline. The red oval keeps its explicit fill and gains a `#030E13`, 2 px outline. Text, geometry and paths stay unchanged; font reference colours retain the behaviour from main’s PR #283.
 
-| Before | After |
-| --- | --- |
-| ![Before](master-style-before.png) | ![After](master-style-after.png) |
+Review: [PR #253](https://github.com/openooxml/betteroffice/pull/253).
 
 `style-matrix-deck.pptx` extends the recovered fixture with distinct style slots, two placeholder colour stops surrounding a literal gradient stop, explicit fill barriers, partial outlines, inherited placeholder properties and picture outlines. Its second slide retains the original inheritance controls.
 
