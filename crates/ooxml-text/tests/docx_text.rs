@@ -931,6 +931,23 @@ fn kern_features_gate_pair_kerning_in_shaping() {
     );
 }
 
+/// Turning kerning off routes rustybuzz 0.20.1 through the legacy `kern`
+/// table, which reverses a backward buffer and then skips the un-reverse.
+/// RTL glyphs must still come back in visual order.
+#[test]
+fn kern_off_keeps_rtl_glyphs_in_visual_order() {
+    let (store, id) = store_with_font();
+    let clusters = |features: &[ShapeFeature]| {
+        shape_with_direction(&store, id, "אבג", 16.0, features, ShapeDirection::Rtl)
+            .unwrap()
+            .iter()
+            .map(|g| g.cluster)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(clusters(&kern_features(true)), vec![4, 2, 0]);
+    assert_eq!(clusters(&kern_features(false)), vec![4, 2, 0]);
+}
+
 /// Word 16.113 (macOS) measures a face claiming an East Asian code page at
 /// 1.3 x the hhea ascent-to-descent span, half-leading split, ignoring the
 /// win and sTypo families and hhea.lineGap.

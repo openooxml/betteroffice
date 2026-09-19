@@ -1524,7 +1524,6 @@ struct RunFormattingIn {
     #[serde(default)]
     horizontal_scale: Option<f64>,
     #[serde(default)]
-    #[allow(dead_code)]
     kerning_min_pt: Option<f64>,
     #[serde(default)]
     imprint: Option<bool>,
@@ -3100,6 +3099,17 @@ fn script_scale_of(fmt: &RunFormattingIn) -> f64 {
 
 fn effective_font_px_of(fmt: &RunFormattingIn) -> f64 {
     font_px_of(fmt) * script_scale_of(fmt)
+}
+
+/// Paint-side twin of the measurement kerning gate: Word applies pair kerning
+/// only above a nonzero `w:kern` threshold, so an absent one shapes `kern=0`.
+fn kern_features_of(fmt: &RunFormattingIn, size_px: f64) -> Vec<ooxml_text::ShapeFeature> {
+    ooxml_text::kern_features(fmt.kerning_min_pt.is_some_and(|threshold| {
+        ooxml_text::kern_enabled(
+            (size_px * 1.5).round() as u32,
+            (threshold * 2.0).round() as u32,
+        )
+    }))
 }
 
 fn fallback_scalar_count(text: &str, all_caps: Option<bool>) -> usize {
@@ -6964,6 +6974,7 @@ fn try_emit_glyph_runs(
     }
 
     let size_px = effective_font_px_of(fmt);
+    let features = kern_features_of(fmt, size_px);
     let ws_px = word_spacing.as_ref().map(num_f64).unwrap_or(0.0);
     let direction = shape_direction_for_level(bidi_level);
     let rtl = if direction == ooxml_text::ShapeDirection::Rtl {
@@ -7072,7 +7083,7 @@ fn try_emit_glyph_runs(
             font,
             &sub_text,
             size_px as f32,
-            &[],
+            &features,
             direction,
         ) {
             Ok(g) => g,

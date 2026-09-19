@@ -791,12 +791,12 @@ fn prepare_text_run(
         let Some(mut font) = resolve_with_fallback(store, chain, first) else {
             return Err(MeasureError::Unsupported("empty font chain".to_string()));
         };
-        let mut features = run.kerning_min_pt.map_or_else(Vec::new, |threshold| {
-            kern_features(kern_enabled(
+        let mut features = kern_features(run.kerning_min_pt.is_some_and(|threshold| {
+            kern_enabled(
                 (font_size_pt * 2.0).round() as u32,
                 (threshold * 2.0).round() as u32,
-            ))
-        });
+            )
+        }));
         if input.authoritative_shaping
             && run.small_caps
             && !run.all_caps
