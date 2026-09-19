@@ -7,8 +7,8 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId, VAlign,
-    Workbook as WorkbookModel,
+    FormatCode, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
+    VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -3110,11 +3110,26 @@ fn edit_cell_state(
     cell: CellRef,
     input: &str,
 ) -> CellState {
-    let mut state = cell_state_for_input_no_eval(input);
-    state.style = workbook
+    let style = workbook
         .sheet(sheet)
         .and_then(|sheet| sheet.cell(cell))
         .and_then(|cell| cell.style);
+    let number_format = workbook.styles.resolved_format(style).number_format;
+    let mut state = if !input.is_empty()
+        && matches!(
+            number_format,
+            FormatCode::Builtin(49) | FormatCode::Custom("@")
+        ) {
+        CellState {
+            value: CellValue::Text {
+                value: input.strip_prefix('\'').unwrap_or(input).to_string(),
+            },
+            ..Default::default()
+        }
+    } else {
+        cell_state_for_input_no_eval(input)
+    };
+    state.style = style;
     state
 }
 

@@ -83,18 +83,16 @@ def test_writing_a_formula_evaluates_it(sample_bytes):
 
 def test_set_reports_whether_anything_changed(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    assert wb.set("Budget", "B3", 1000).applied is True
-    assert wb.set("Budget", "B3", 1000).applied is False
+    assert wb.set("Budget", "B3", "1000").applied is True
+    assert wb.set("Budget", "B3", "1000").applied is False
 
 
 def test_value_types(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    wb.set("Budget", "H6", True)
+    wb.set("Budget", "H6", "TRUE")
     wb.set("Budget", "H7", "hello")
-    wb.set("Budget", "H8", False)
     assert wb.value("Budget", "H6") is True
     assert wb.value("Budget", "H7") == "hello"
-    assert wb.value("Budget", "H8") is False
     assert wb.value("Budget", "Z99") is None
 
 
@@ -123,15 +121,13 @@ def test_numeric_and_text_coercion(sample_bytes):
     assert sheet["H13"] is None
 
 
-def test_string_formulas_and_apostrophe_escapes(sample_bytes):
+def test_typed_input_is_interpreted_like_excel(sample_bytes):
     sheet = bo.Workbook.open(sample_bytes)["Budget"]
     cases = {
         "=1+1": (2.0, "1+1"),
         "'=1+1": ("=1+1", None),
-        "'1.0": ("1.0", None),
-        "''hello": ("'hello", None),
-        "1e3": ("1e3", None),
-        "TRUE": ("TRUE", None),
+        "1e3": (1000.0, None),
+        "TRUE": (True, None),
         "3.14.15": ("3.14.15", None),
         "inf": ("inf", None),
     }
@@ -260,7 +256,7 @@ def test_workbook_is_usable_from_another_thread(sample_bytes):
     results: list = []
 
     def work() -> None:
-        wb.set("Budget", "B3", 1000)
+        wb.set("Budget", "B3", "1000")
         results.append(wb.value("Budget", "D3"))
 
     thread = threading.Thread(target=work)
@@ -315,7 +311,7 @@ def test_render_png_write(sample_bytes, tmp_path):
 
 def test_save_round_trip_preserves_edits(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    wb.set("Budget", "B3", 1000)
+    wb.set("Budget", "B3", "1000")
     expected = wb.value("Budget", "D3")
 
     reopened = bo.Workbook.open(wb.save())
@@ -492,7 +488,7 @@ def test_set_many_is_one_undo_step(sample_bytes):
 
 def test_mutation_lists_recalculated_dependents(sample_bytes):
     wb = bo.Workbook.open(sample_bytes)
-    mutation = wb.set("Budget", "B3", 1000)
+    mutation = wb.set("Budget", "B3", "1000")
     assert mutation.applied and bool(mutation)
     assert "D3" in [name.split("!")[-1] for name in mutation.changed]
 

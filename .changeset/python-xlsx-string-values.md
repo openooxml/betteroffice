@@ -1,5 +1,7 @@
 ---
 '@betteroffice/python-xlsx': patch
+'@betteroffice/xlsx': patch
+'@betteroffice/rust-crates': patch
 ---
 
-Preserve Python strings as text in cell assignments, batches, and proposals so numeric strings retain their decimal places and leading zeros. Formula strings and apostrophe escapes remain supported; use Python numbers and booleans to write those types, and `None` to clear a cell.
+Honor Text cell formatting when entering values, including numeric strings, booleans, and formula-looking text. General cells retain Excel-style input coercion. Apply the same format-aware behavior to cell assignments, batches, and proposals.

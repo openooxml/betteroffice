@@ -57,7 +57,12 @@ SheetKey = Union[int, str]
 
 
 class Sheet:
-    """One sheet. Assign Python values or formulas beginning with ``=``."""
+    """One sheet, bound to its workbook.
+
+    Assigning writes what a user would type, so a leading ``=`` makes a formula
+    and recalculates its dependents. Indexing reads the current value, which for
+    an untouched cell is whatever the file cached.
+    """
 
     __slots__ = ("_index", "_workbook")
 
@@ -162,7 +167,7 @@ class Workbook:
         *,
         now_serial: "float | None" = None,
     ) -> Mutation:
-        """Set a Python value or a formula beginning with ``=``."""
+        """Set a cell from what a user would type."""
         return self._inner.set(sheet, address, _as_input(value), now_serial=now_serial)
 
     def render_png(
@@ -386,7 +391,7 @@ class Workbook:
 
 
 def _as_input(value: object) -> str:
-    """Encode a Python value for the engine's editor input parser."""
+    """Coerce a Python value to the string a user would have typed."""
     if value is None:
         return ""
     if value is True:
@@ -394,7 +399,7 @@ def _as_input(value: object) -> str:
     if value is False:
         return "FALSE"
     if isinstance(value, str):
-        return value if value.startswith(("=", "'")) else "'" + value
+        return value
     if isinstance(value, (datetime.date, datetime.time, datetime.timedelta)):
         raise TypeError(
             f"{type(value).__name__} is not supported yet; write the Excel "
