@@ -7,6 +7,12 @@
 //! Word's line rule, and when the substitute's advances are already close: the
 //! view moves vertical metrics only, so correcting the pitch of a much
 //! narrower or wider face moves a document past Word rather than onto it.
+//!
+//! A family Word has no face for still measures at something: Word substitutes,
+//! and the entry carries that substitute's metrics, read off the document's own
+//! `w:altName` where Word ships that face and otherwise identified against
+//! Word's reference render. A family whose substitute could not be identified
+//! is left out.
 
 use crate::font_store::RequestedLineMetrics;
 
@@ -46,6 +52,13 @@ const MINGLIU_1024: RequestedLineMetrics = ea(1024, 820, -204);
 const YU_2048: RequestedLineMetrics = ea(2048, 1802, -455);
 /// Malgun Gothic.
 const MALGUN_2048: RequestedLineMetrics = ea(2048, 2229, -495);
+/// NanumGothic, the Office cloud font Word downloads for `나눔고딕`.
+const NANUM_GOTHIC_1000: RequestedLineMetrics = ea(1000, 844, -156);
+/// NanumMyeongjo, the Office cloud font Word downloads for `나눔명조`.
+const NANUM_MYEONGJO_1024: RequestedLineMetrics = ea(1024, 819, -205);
+/// Arial Unicode MS — what Word substitutes for a Hangul-bearing family it has
+/// no face for and cannot resolve through `w:altName` either.
+const ARIAL_UNICODE_2048: RequestedLineMetrics = ea(2048, 2189, -555);
 
 /// Requested family (lowercased) -> the vertical metrics Word measures it with.
 const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
@@ -139,6 +152,22 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         ],
         KOREAN_1024,
     ),
+    (
+        &["나눔고딕", "nanumgothic", "nanum gothic"],
+        NANUM_GOTHIC_1000,
+    ),
+    (
+        &["나눔명조", "nanummyeongjo", "nanum myeongjo"],
+        NANUM_MYEONGJO_1024,
+    ),
+    // Hancom's HCR Dotum, which Word never ships: both corpus documents that
+    // name it declare `바탕` as its alternate, and Word's reference render
+    // draws it in Batang.
+    (&["한컴돋움"], KOREAN_1024),
+    // The Polaris/Hancom Batang compatibility face. Word has neither it nor
+    // the `폴라리스바탕` its `w:altName` names, and falls back to Arial
+    // Unicode MS.
+    (&["폴라리스새바탕-함초롬바탕호환"], ARIAL_UNICODE_2048),
 ];
 
 /// The Segoe UI family — UI, Symbol and Emoji ship the same vertical design.
@@ -275,8 +304,34 @@ mod tests {
             "Cambria Math",
             "Gigi",
             "HGPｺﾞｼｯｸM",
+            "제주고딕",
+            "폴라리스바탕",
         ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
+        }
+    }
+
+    /// Korean families Word either downloads from the cloud font catalog or
+    /// substitutes for, none of which `@betteroffice/fonts` maps to a bundled
+    /// face: a miss measures them with the Latin last-resort win box.
+    #[test]
+    fn covers_the_korean_families_that_reach_the_last_resort_face() {
+        for (family, span_em) in [
+            ("나눔고딕", 1.0),
+            ("NanumGothic", 1.0),
+            ("나눔명조", 1.0),
+            ("NanumMyeongjo", 1.0),
+            ("한컴돋움", 1.0),
+            ("폴라리스새바탕-함초롬바탕호환", 2744.0 / 2048.0),
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert!(metrics.east_asian, "{family}");
+            let measured = (f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender))
+                / f32::from(metrics.units_per_em);
+            assert!(
+                (measured - span_em).abs() < 1e-4,
+                "{family}: {measured} vs {span_em}"
+            );
         }
     }
 
