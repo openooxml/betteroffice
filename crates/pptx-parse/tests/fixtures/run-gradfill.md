@@ -25,7 +25,7 @@ by a soft line break, and replaces the fill when the resolved color changes.
 
 Review: [PR #299](https://github.com/openooxml/betteroffice/pull/299).
 
-The before image uses `origin/main` at `1d0f41d9`. Both images use the tracked
+The comparison in that PR uses `origin/main` at `1d0f41d9`. Both renders use the tracked
 `LiberationSans-Regular.ttf`, registered as Arial. The font's SHA-256 is
 `76d04c18ea243f426b7de1f3ad208e927008f961dc5945e5aad352d0dfde8ee8`.
 

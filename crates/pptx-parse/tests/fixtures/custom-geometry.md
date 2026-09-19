@@ -15,7 +15,7 @@ The quarter ellipse uses radii `(80,30)` in a `200 × 100` path space and a 90-d
 
 Review: [PR #285](https://github.com/openooxml/betteroffice/pull/285).
 
-The before image was generated using `origin/main` at `387f2392`.
+The before image in that PR was generated using `origin/main` at `387f2392`.
 The version-2 update fixture was regenerated with current `origin/main` at
 `54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4`, using client ID 285. It is stored at
 `crates/pptx-edit/tests/fixtures/deck-custom-schema-v2.update.bin`. The fixture

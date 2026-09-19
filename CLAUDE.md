@@ -6,10 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Review artifacts
 
-Follow the [review artifact rules](AGENTS.md#review-artifacts). Attach screenshots,
-before/after comparisons, recordings, and logs to the PR; never commit them as
-review evidence. Keep required product assets and automated test fixtures or
-golden baselines. If uploads are unavailable, say so and omit the attachment.
+See [AGENTS.md](AGENTS.md#review-artifacts) for the review artifact policy and upload commands.
 
 ## Commands
 

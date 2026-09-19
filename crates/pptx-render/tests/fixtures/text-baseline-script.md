@@ -13,8 +13,9 @@ italic, and bold italic fonts registered as Arial:
 | Lowered `2` | 22.6667 px / 374.1195 px | 13.1467 px / 379.7862 px |
 
 Every run remains `#475467`. The text box is object 5,
-`slide:0:256:shape:3`, at `(80, 344, 600, 112)` px. The before and after PNGs
-use the same fonts and renderer settings. Of the 60 slides in all 21 tracked
+`slide:0:256:shape:3`, at `(80, 344, 600, 112)` px. The comparison in
+[PR #331](https://github.com/openooxml/betteroffice/pull/331) uses the same fonts
+and renderer settings. Of the 60 slides in all 21 tracked
 PPTX fixtures, 59 display lists are byte-identical; only this subtitle changes.
 
 `cargo test -p betteroffice-pptx-render baseline` checks the fixture, explicit
