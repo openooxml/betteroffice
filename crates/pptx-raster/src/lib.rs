@@ -1059,6 +1059,11 @@ fn stroke_paint(
         Stroke {
             width: stroke.width,
             dash: dash.flatten(),
+            line_join: match stroke.join.as_deref() {
+                Some("round") => tiny_skia::LineJoin::Round,
+                Some("bevel") => tiny_skia::LineJoin::Bevel,
+                _ => tiny_skia::LineJoin::Miter,
+            },
             ..Stroke::default()
         },
     )))
@@ -1158,6 +1163,7 @@ mod tests {
         for kind in ["line", "rect", "image"] {
             let mut list = empty_list(240.0, 160.0);
             let stroke = SlideStroke {
+                join: None,
                 color: "#00FF00".into(),
                 width: 8.0,
                 dashed: false,
@@ -1789,6 +1795,7 @@ mod tests {
     #[test]
     fn outline_shadows_keep_the_center_hollow() {
         let stroke = SlideStroke {
+            join: None,
             paint: None,
             color: "#C00000".into(),
             width: 2.0,
@@ -1834,6 +1841,7 @@ mod tests {
             40.0,
             None,
             Some(SlideStroke {
+                join: None,
                 color: "#FF0000".into(),
                 width: 8.0,
                 paint: None,
@@ -1958,6 +1966,7 @@ mod tests {
                         2.0,
                     ),
                     stroke: Some(SlideStroke {
+                        join: None,
                         color: "#ff00ff".into(),
                         width: 2.0,
                         dashed: false,

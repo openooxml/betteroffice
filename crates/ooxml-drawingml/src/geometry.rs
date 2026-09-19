@@ -3,6 +3,31 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::GeometryPathCommand;
 
+mod presets;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PresetPathFill {
+    Normal,
+    None,
+    DarkenLess,
+    LightenLess,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PresetGeometryPath {
+    pub commands: Vec<GeometryPathCommand>,
+    pub fill: PresetPathFill,
+    pub stroke: bool,
+}
+
+pub fn preset_geometry_layers(
+    shape_type: &str,
+    adjustments: &HashMap<String, f64>,
+    aspect_ratio: f64,
+) -> Option<Vec<PresetGeometryPath>> {
+    presets::paths(shape_type, adjustments, aspect_ratio)
+}
+
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 /// The `vf` that puts a hexagon's corners on its frame; larger values would leave it.
@@ -67,7 +92,7 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
         ],
         _ => star_preset(shape_type)
             .map(|star| vec![("adj", star.adjustment)])
-            .unwrap_or_default(),
+            .unwrap_or_else(|| presets::defaults(shape_type).to_vec()),
     };
     values
         .into_iter()
@@ -298,7 +323,10 @@ pub fn preset_geometry_to_path(
         "flowChartConnector" => preset_geometry_to_path("ellipse", adjustments, aspect_ratio)?,
         "flowChartInputOutput" | "flowChartManualInput" => parallelogram(0.25),
         "flowChartTerminator" => rounded_rect(aspect_ratio, 0.5),
-        _ => return None,
+        _ => {
+            let paths = preset_geometry_layers(shape_type, adjustments, aspect_ratio)?;
+            paths.into_iter().next()?.commands
+        }
     };
     Some(result)
 }
@@ -348,9 +376,11 @@ fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> 
             x: 1.0 - rx,
             y: 0.0,
         },
-        C::Quad {
-            cpx: 1.0,
-            cpy: 0.0,
+        C::Cubic {
+            cp1x: 1.0 - rx + rx * ELLIPSE_KAPPA,
+            cp1y: 0.0,
+            cp2x: 1.0,
+            cp2y: ry * (1.0 - ELLIPSE_KAPPA),
             x: 1.0,
             y: ry,
         },
@@ -358,23 +388,29 @@ fn rounded_rect(aspect_ratio: f64, adjustment: f64) -> Vec<GeometryPathCommand> 
             x: 1.0,
             y: 1.0 - ry,
         },
-        C::Quad {
-            cpx: 1.0,
-            cpy: 1.0,
+        C::Cubic {
+            cp1x: 1.0,
+            cp1y: 1.0 - ry + ry * ELLIPSE_KAPPA,
+            cp2x: 1.0 - rx + rx * ELLIPSE_KAPPA,
+            cp2y: 1.0,
             x: 1.0 - rx,
             y: 1.0,
         },
         C::Line { x: rx, y: 1.0 },
-        C::Quad {
-            cpx: 0.0,
-            cpy: 1.0,
+        C::Cubic {
+            cp1x: rx * (1.0 - ELLIPSE_KAPPA),
+            cp1y: 1.0,
+            cp2x: 0.0,
+            cp2y: 1.0 - ry + ry * ELLIPSE_KAPPA,
             x: 0.0,
             y: 1.0 - ry,
         },
         C::Line { x: 0.0, y: ry },
-        C::Quad {
-            cpx: 0.0,
-            cpy: 0.0,
+        C::Cubic {
+            cp1x: 0.0,
+            cp1y: ry * (1.0 - ELLIPSE_KAPPA),
+            cp2x: rx * (1.0 - ELLIPSE_KAPPA),
+            cp2y: 0.0,
             x: rx,
             y: 0.0,
         },
@@ -597,11 +633,17 @@ impl Outline {
         let last = elliptical_parameter(start + sweep, wr, hr);
         let cx = self.cursor.0 - wr * first.cos();
         let cy = self.cursor.1 - hr * first.sin();
-        let quadrants = (last - first).abs() / FRAC_PI_2 - SEGMENT_SLACK;
-        let steps = quadrants.ceil().clamp(1.0, 8.0) as usize;
-        for step in 0..steps {
-            let from = first + (last - first) * step as f64 / steps as f64;
-            let to = first + (last - first) * (step + 1) as f64 / steps as f64;
+        let forward = last >= first;
+        let mut from = first;
+        for step in 0..8 {
+            let quadrant = from / FRAC_PI_2;
+            let to = if step == 7 {
+                last
+            } else if forward {
+                (((quadrant + SEGMENT_SLACK).floor() + 1.0) * FRAC_PI_2).min(last)
+            } else {
+                (((quadrant - SEGMENT_SLACK).ceil() - 1.0) * FRAC_PI_2).max(last)
+            };
             let alpha = 4.0 / 3.0 * ((to - from) / 4.0).tan();
             let start_point = (cx + wr * from.cos(), cy + hr * from.sin());
             let end_point = (cx + wr * to.cos(), cy + hr * to.sin());
@@ -613,6 +655,10 @@ impl Outline {
                 end_point.0,
                 end_point.1,
             );
+            if to == last {
+                break;
+            }
+            from = to;
         }
         self
     }
@@ -1096,7 +1142,7 @@ mod tests {
         let GeometryPathCommand::Move { x: rx, .. } = path[0] else {
             panic!("round rectangle must begin with a move");
         };
-        let GeometryPathCommand::Quad { y: ry, .. } = path[2] else {
+        let GeometryPathCommand::Cubic { y: ry, .. } = path[2] else {
             panic!("round rectangle must curve its first corner");
         };
         (rx, ry)
@@ -1458,51 +1504,6 @@ mod tests {
         assert!((actual - expected).abs() < 1e-9, "{actual} != {expected}");
     }
 
-    fn assert_path_close(
-        actual: &[GeometryPathCommand],
-        expected: &[GeometryPathCommand],
-        tolerance: f64,
-    ) {
-        assert_eq!(actual.len(), expected.len());
-        for (actual, expected) in actual.iter().zip(expected) {
-            match (actual, expected) {
-                (
-                    GeometryPathCommand::Move { x, y },
-                    GeometryPathCommand::Move {
-                        x: expected_x,
-                        y: expected_y,
-                    },
-                )
-                | (
-                    GeometryPathCommand::Line { x, y },
-                    GeometryPathCommand::Line {
-                        x: expected_x,
-                        y: expected_y,
-                    },
-                ) => {
-                    assert!((x - expected_x).abs() < tolerance);
-                    assert!((y - expected_y).abs() < tolerance);
-                }
-                (
-                    GeometryPathCommand::Quad { cpx, cpy, x, y },
-                    GeometryPathCommand::Quad {
-                        cpx: expected_cpx,
-                        cpy: expected_cpy,
-                        x: expected_x,
-                        y: expected_y,
-                    },
-                ) => {
-                    assert!((cpx - expected_cpx).abs() < tolerance);
-                    assert!((cpy - expected_cpy).abs() < tolerance);
-                    assert!((x - expected_x).abs() < tolerance);
-                    assert!((y - expected_y).abs() < tolerance);
-                }
-                (GeometryPathCommand::Close, GeometryPathCommand::Close) => {}
-                _ => panic!("path command variants differ"),
-            }
-        }
-    }
-
     #[test]
     fn compiles_common_presets_and_rejects_unknown_shapes() {
         let adjustments = HashMap::new();
@@ -1556,10 +1557,26 @@ mod tests {
     }
 
     #[test]
-    fn square_round_rect_matches_previous_output() {
+    fn round_rect_corners_follow_circular_arcs() {
         let path = preset_geometry_to_path("roundRect", &HashMap::new(), 1.0).unwrap();
-        let previous = rounded_rect(1.0, 1.0 / 6.0);
-        assert_path_close(&path, &previous, 0.000_01);
+        let GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } = path[2]
+        else {
+            panic!("expected a circular corner");
+        };
+        let radius = ROUND_RECT_ADJUSTMENT;
+        let midpoint_x = ((1.0 - radius) + 3.0 * cp1x + 3.0 * cp2x + x) / 8.0;
+        let midpoint_y = (3.0 * cp1y + 3.0 * cp2y + y) / 8.0;
+        assert_close(
+            (midpoint_x - (1.0 - radius)).hypot(midpoint_y - radius),
+            radius,
+        );
     }
 
     #[test]

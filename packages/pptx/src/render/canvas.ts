@@ -486,6 +486,7 @@ function strokeCurrentPath(
   ctx.strokeStyle = stroke.paint ? paintStyle(ctx, stroke.paint, x, y, width, height) : stroke.color;
   ctx.lineWidth = stroke.width;
   ctx.setLineDash(stroke.dashed ? [Math.max(3, stroke.width * 2), Math.max(2, stroke.width)] : []);
+  ctx.lineJoin = stroke.join ?? 'miter';
   ctx.stroke();
 }
 

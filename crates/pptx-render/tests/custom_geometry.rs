@@ -129,7 +129,7 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
     assert!(!geometry_fallback);
 
     let mut deck = deck;
-    deck.slides[0].shapes[0].geometry = "arc".into();
+    deck.slides[0].shapes[0].geometry = "unknownPreset".into();
     let rendered = renderer.layout_slide(session.package(), &deck, 0).unwrap();
     let Primitive::Shape {
         geometry,
@@ -140,7 +140,7 @@ fn custom_paths_keep_coordinates_paints_and_fallbacks() {
     else {
         panic!()
     };
-    assert_eq!(geometry, "arc");
+    assert_eq!(geometry, "unknownPreset");
     assert_eq!(*path, rectangle);
     assert!(geometry_fallback);
 }

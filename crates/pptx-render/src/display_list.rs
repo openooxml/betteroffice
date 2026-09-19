@@ -99,6 +99,8 @@ pub struct Stroke {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paint: Option<Paint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_end: Option<StrokeEnd>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tail_end: Option<StrokeEnd>,

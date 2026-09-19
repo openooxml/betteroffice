@@ -994,6 +994,7 @@ impl<'a> LayoutBuilder<'a> {
                 adjust_values: BTreeMap::new(),
                 fill: op.fill.map(|color| Paint::Solid { color }),
                 stroke: op.stroke.map(|stroke| Stroke {
+                    join: None,
                     color: stroke.color,
                     paint: None,
                     width: ((stroke.width * crop.2 * f64::from(rect.w)) as f32).max(1.0),
@@ -1039,7 +1040,16 @@ impl<'a> LayoutBuilder<'a> {
         if paths.is_empty()
             || !matches!(&primitive, Primitive::Shape { geometry, .. } if geometry == "custom")
         {
-            self.primitives.push(picture_filled(primitive, picture));
+            for (index, (primitive, has_fill)) in crate::geometry::preset_primitives(primitive)
+                .into_iter()
+                .enumerate()
+            {
+                if index > 0 {
+                    self.charge_shape()?;
+                }
+                let picture = picture.filter(|_| has_fill);
+                self.primitives.push(picture_filled(primitive, picture));
+            }
             return Ok(());
         }
         for (index, custom) in paths.iter().enumerate() {
@@ -3759,6 +3769,7 @@ fn stroke(outline: &ShapeOutline, theme: &Theme) -> Option<Stroke> {
         .map(|width| width as f32 / EMU_PER_CSS_PIXEL)
         .unwrap_or(1.0);
     Some(Stroke {
+        join: outline.join.clone(),
         color,
         width,
         dashed: outline

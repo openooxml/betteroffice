@@ -1691,3 +1691,22 @@ test('keeps inline revision marks inside their run at bidi boundaries and applie
   expect(rectangles).toEqual([{ x: 0, width: 20, color: '#fee2e2cc' }, { x: 0, width: 20, color: '#b91c1c' }]);
   expect(rotations).toEqual([Math.PI / 6, Math.PI / 6]);
 });
+
+test('stroke joins follow each shape and reset for legacy display lists', async () => {
+  const joins: string[] = [];
+  const state: Record<string, any> = {};
+  const ctx = new Proxy(state, {
+    get: (target, key) => key === 'stroke'
+      ? () => joins.push(target.lineJoin)
+      : target[key as string] ?? (() => undefined),
+    set: (target, key, value) => { target[key as string] = value; return true; },
+  }) as CanvasRenderingContext2D;
+  const primitives: ShapePrimitive[] = (['round', 'bevel', undefined] as const).map((join, index) => ({
+    kind: 'shape', objectId: index, name: 'Tip', geometry: 'swooshArrow',
+    x: index * 20, y: 0, w: 20, h: 20,
+    path: [{ type: 'move', x: 0, y: 1 }, { type: 'line', x: 1, y: 0 }],
+    stroke: { color: '#000000', width: 1, join },
+  }));
+  await paintSlide(ctx, { contractVersion: 1, width: 60, height: 20, primitives }, 1, 1);
+  expect(joins).toEqual(['round', 'bevel', 'miter']);
+});

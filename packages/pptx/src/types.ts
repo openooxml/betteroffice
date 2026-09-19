@@ -301,6 +301,7 @@ export interface Stroke {
   width: number;
   dashed?: boolean;
   paint?: Paint;
+  join?: 'round' | 'bevel' | 'miter';
   headEnd?: StrokeEnd;
   tailEnd?: StrokeEnd;
 }

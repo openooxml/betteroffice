@@ -170,6 +170,7 @@ impl PlotSink for ChartSink<'_> {
                     ],
                     None,
                     Some(Stroke {
+                        join: None,
                         color,
                         width: width as f32,
                         dashed: false,
@@ -199,6 +200,7 @@ impl PlotSink for ChartSink<'_> {
                     .collect(),
                 Some(Paint::Solid { color: fill }),
                 stroke.map(|stroke| Stroke {
+                    join: None,
                     color: stroke.color,
                     width: stroke.width as f32,
                     dashed: false,

@@ -2,6 +2,7 @@
 
 mod chart;
 mod display_list;
+mod geometry;
 mod image_effects;
 mod layout;
 mod metafile;
@@ -115,6 +116,8 @@ struct ComposedStroke {
     width_px: f32,
     #[serde(default)]
     dash: bool,
+    #[serde(default)]
+    join: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,25 +191,29 @@ fn compile(slide: ComposedSlide) -> SurfaceDisplayList {
                     &adjust_values,
                     f64::from(base.rect.w) / f64::from(base.rect.h),
                 );
-                primitives.push(Primitive::Shape {
-                    clip: None,
-                    even_odd: false,
-                    object_id: base.id,
-                    shape_id: None,
-                    name: base.name,
-                    x: base.rect.x,
-                    y: base.rect.y,
-                    w: base.rect.w,
-                    h: base.rect.h,
-                    geometry,
-                    path,
-                    geometry_fallback,
-                    adjust_values,
-                    fill,
-                    stroke: stroke.map(Into::into),
-                    shadow: None,
-                    transform,
-                });
+                primitives.extend(
+                    geometry::preset_primitives(Primitive::Shape {
+                        clip: None,
+                        even_odd: false,
+                        object_id: base.id,
+                        shape_id: None,
+                        name: base.name,
+                        x: base.rect.x,
+                        y: base.rect.y,
+                        w: base.rect.w,
+                        h: base.rect.h,
+                        geometry,
+                        path,
+                        geometry_fallback,
+                        adjust_values,
+                        fill,
+                        stroke: stroke.map(Into::into),
+                        shadow: None,
+                        transform,
+                    })
+                    .into_iter()
+                    .map(|(primitive, _)| primitive),
+                );
                 if let Some(text) = text {
                     primitives.push(text_primitive(base.id, base.rect, transform, text));
                 }
@@ -410,6 +417,7 @@ impl From<ComposedStroke> for Stroke {
             width: stroke.width_px,
             dashed: stroke.dash,
             paint: None,
+            join: stroke.join,
             head_end: None,
             tail_end: None,
         }
@@ -460,11 +468,11 @@ mod tests {
 
     #[test]
     fn composed_unknown_preset_reports_its_rectangle_fallback() {
-        let json = r#"{"widthPx":100,"heightPx":100,"shapes":[{"kind":"shape","id":7,"name":"Arc","rect":{"x":0,"y":0,"w":10,"h":10},"rotationDeg":0,"geometry":"arc"}]}"#;
+        let json = r#"{"widthPx":100,"heightPx":100,"shapes":[{"kind":"shape","id":7,"name":"Unknown","rect":{"x":0,"y":0,"w":10,"h":10},"rotationDeg":0,"geometry":"unknownPreset"}]}"#;
         let output: serde_json::Value =
             serde_json::from_str(&compile_json(json).expect("compile")).expect("display list json");
         let shape = &output["primitives"][0];
-        assert_eq!(shape["geometry"], "arc");
+        assert_eq!(shape["geometry"], "unknownPreset");
         assert_eq!(shape["geometryFallback"], true);
         assert_eq!(shape["path"].as_array().unwrap().len(), 5);
     }
