@@ -18,6 +18,33 @@
   <a href="https://openooxml.org"><img src="https://betteroffice.dev/api/badge?label=&amp;message=openooxml.org&amp;color=0a0a0a" alt="openooxml.org"></a>
 </p>
 
+## Features
+
+- **Documents, spreadsheets, and slides.** Open, edit, render, and save DOCX,
+  XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched
+  file parts losslessly when round-tripping.
+
+- **Agent editing with human review.** Review attributed agent edits through
+  tracked changes, inline diffs, and before-and-after previews. Accept or
+  reject changes directly in the editor.
+
+- **Real-time collaboration.** People and agents edit the same file together,
+  with live cursors and selections. Concurrent changes merge automatically,
+  and offline edits sync when peers reconnect.
+
+- **Undo and redo.** Navigate editing history and undo accepted agent
+  proposals as a single step.
+
+- **Embed or automate.** Drop React editors into your app, build on the
+  framework-free JavaScript cores, or use Rust and Python APIs for headless
+  processing and agent workflows.
+
+- **Open source and self-hostable.** Apache-2.0 licensed, with control over
+  your document storage, deployment, and collaboration infrastructure.
+
+[Try it out](https://demo.betteroffice.dev), or
+[explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
+
 ## Packages
 
 ### Documents — `.docx`
