@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::GeometryPathCommand;
 
@@ -6,6 +7,31 @@ const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const ROUND_RECT_ADJUSTMENT: f64 = 0.166_67;
 /// The `vf` that puts a hexagon's corners on its frame; larger values would leave it.
 const HEXAGON_VERTICAL_FACTOR: f64 = 1.154_7;
+/// ECMA-376 angle units in a half turn.
+const HALF_TURN_UNITS: f64 = 10_800_000.0;
+const THREE_QUARTER_TURN: f64 = PI + FRAC_PI_2;
+/// Float noise in the parameter span, so a half turn stays two cubic segments and not three.
+const SEGMENT_SLACK: f64 = 1e-9;
+/// Past this ratio a frame is degenerate, and the spec's unbounded arithmetic would overflow.
+const MAX_FRAME_EXTENT: f64 = 1e12;
+/// ECMA-376 leaves a callout's tail unpinned; this keeps it finite without cramping it.
+const MAX_CALLOUT_OFFSET: f64 = 100.0;
+/// The frame `cloudCallout`'s body path declares, in its own `w`/`h` units.
+const CLOUD_FRAME: f64 = 43200.0;
+/// `cloudCallout`'s body, as ECMA-376 states it: `wR`, `hR`, `stAng`, `swAng` per `arcTo`.
+const CLOUD_ARCS: [[f64; 4]; 11] = [
+    [6753.0, 9190.0, -11_429_249.0, 7_426_832.0],
+    [5333.0, 7267.0, -8_646_143.0, 5_396_714.0],
+    [4365.0, 5945.0, -8_748_475.0, 5_983_381.0],
+    [4857.0, 6595.0, -7_859_164.0, 7_034_504.0],
+    [5333.0, 7273.0, -4_722_533.0, 6_541_615.0],
+    [6775.0, 9220.0, -2_776_035.0, 7_816_140.0],
+    [5785.0, 7867.0, 37_501.0, 6_842_000.0],
+    [6752.0, 9215.0, 1_347_096.0, 6_910_353.0],
+    [7720.0, 10543.0, 3_974_558.0, 4_542_661.0],
+    [4360.0, 5918.0, -16_496_525.0, 8_804_134.0],
+    [4345.0, 5945.0, -14_809_710.0, 9_151_131.0],
+];
 
 pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, f64> {
     let values = match shape_type {
@@ -20,6 +46,25 @@ pub fn preset_geometry_default_adjustments(shape_type: &str) -> HashMap<String, 
             vec![("adj1", 0.5), ("adj2", 0.5)]
         }
         "chevron" | "homePlate" => vec![("adj", 0.5)],
+        "donut" => vec![("adj", 0.25)],
+        "noSmoking" => vec![("adj", 0.1875)],
+        "foldedCorner" => vec![("adj", 0.166_67)],
+        "corner" => vec![("adj1", 0.5), ("adj2", 0.5)],
+        "mathMultiply" => vec![("adj1", 0.2352)],
+        "ribbon" => vec![("adj1", 0.166_67), ("adj2", 0.5)],
+        "ellipseRibbon" => vec![("adj1", 0.25), ("adj2", 0.5), ("adj3", 0.125)],
+        "bentArrow" => vec![
+            ("adj1", 0.25),
+            ("adj2", 0.25),
+            ("adj3", 0.25),
+            ("adj4", 0.4375),
+        ],
+        "cloudCallout" | "wedgeEllipseCallout" => vec![("adj1", -0.208_33), ("adj2", 0.625)],
+        "wedgeRoundRectCallout" => vec![
+            ("adj1", -0.208_33),
+            ("adj2", 0.625),
+            ("adj3", ROUND_RECT_ADJUSTMENT),
+        ],
         _ => star_preset(shape_type)
             .map(|star| vec![("adj", star.adjustment)])
             .unwrap_or_default(),
@@ -228,6 +273,17 @@ pub fn preset_geometry_to_path(
                 (0.0, 1.0),
             ])
         }
+        "donut" => donut(Frame::new(aspect_ratio), adjustments),
+        "noSmoking" => no_smoking(Frame::new(aspect_ratio), adjustments),
+        "corner" => corner(Frame::new(aspect_ratio), adjustments),
+        "foldedCorner" => folded_corner(Frame::new(aspect_ratio), adjustments),
+        "mathMultiply" => math_multiply(Frame::new(aspect_ratio), adjustments),
+        "bentArrow" => bent_arrow(Frame::new(aspect_ratio), adjustments),
+        "ribbon" => ribbon(Frame::new(aspect_ratio), adjustments),
+        "ellipseRibbon" => ellipse_ribbon(Frame::new(aspect_ratio), adjustments),
+        "cloudCallout" => cloud_callout(Frame::new(aspect_ratio), adjustments),
+        "wedgeEllipseCallout" => wedge_ellipse_callout(Frame::new(aspect_ratio), adjustments),
+        "wedgeRoundRectCallout" => wedge_round_rect_callout(Frame::new(aspect_ratio), adjustments),
         "flowChartProcess"
         | "flowChartAlternateProcess"
         | "flowChartPredefinedProcess"
@@ -424,10 +480,509 @@ fn clamp_fraction(value: Option<f64>, fallback: f64) -> f64 {
 }
 
 fn pin(value: Option<f64>, fallback: f64, max: f64) -> f64 {
-    value
-        .filter(|value| value.is_finite())
-        .unwrap_or(fallback)
-        .clamp(0.0, max)
+    pin_between(value, fallback, 0.0, max)
+}
+
+fn pin_between(value: Option<f64>, fallback: f64, min: f64, max: f64) -> f64 {
+    unpinned(value, fallback).clamp(min, max.max(min))
+}
+
+/// An ECMA-376 adjust the spec leaves unbounded; only a non-finite value falls back.
+fn unpinned(value: Option<f64>, fallback: f64) -> f64 {
+    value.filter(|value| value.is_finite()).unwrap_or(fallback)
+}
+
+fn callout_offset(value: Option<f64>, fallback: f64) -> f64 {
+    unpinned(value, fallback).clamp(-MAX_CALLOUT_OFFSET, MAX_CALLOUT_OFFSET)
+}
+
+fn ooxml_angle(units: f64) -> f64 {
+    units * PI / HALF_TURN_UNITS
+}
+
+/// The distance from an ellipse's centre to its outline along a polar angle.
+fn polar_radius(wr: f64, hr: f64, angle: f64) -> f64 {
+    let extent = (hr * angle.cos()).hypot(wr * angle.sin());
+    if extent > 0.0 { wr * hr / extent } else { 0.0 }
+}
+
+/// The ellipse parameter that lands on a polar angle, kept continuous across whole turns.
+fn elliptical_parameter(angle: f64, wr: f64, hr: f64) -> f64 {
+    if wr <= 0.0 || hr <= 0.0 {
+        return angle;
+    }
+    let offset = (wr * angle.sin()).atan2(hr * angle.cos()) - angle;
+    angle + offset - TAU * (offset / TAU).round()
+}
+
+/// The shape frame in shortest-side units, so ECMA-376's `ss` is 1 and `w`/`h` are at least 1.
+#[derive(Clone, Copy)]
+struct Frame {
+    w: f64,
+    h: f64,
+}
+
+impl Frame {
+    fn new(aspect_ratio: f64) -> Self {
+        Self {
+            w: width_in_shortest_sides(aspect_ratio).min(MAX_FRAME_EXTENT),
+            h: height_in_shortest_sides(aspect_ratio).min(MAX_FRAME_EXTENT),
+        }
+    }
+}
+
+/// Transcribes an ECMA-376 `pathLst` in frame units, normalizing each point to the unit frame.
+struct Outline {
+    frame: Frame,
+    commands: Vec<GeometryPathCommand>,
+    cursor: (f64, f64),
+}
+
+impl Outline {
+    fn new(frame: Frame) -> Self {
+        Self {
+            frame,
+            commands: Vec::new(),
+            cursor: (0.0, 0.0),
+        }
+    }
+
+    fn at(&self, x: f64, y: f64) -> (f64, f64) {
+        (x / self.frame.w, y / self.frame.h)
+    }
+
+    fn move_to(mut self, x: f64, y: f64) -> Self {
+        self.cursor = (x, y);
+        let (x, y) = self.at(x, y);
+        self.commands.push(GeometryPathCommand::Move { x, y });
+        self
+    }
+
+    fn line_to(mut self, x: f64, y: f64) -> Self {
+        self.cursor = (x, y);
+        let (x, y) = self.at(x, y);
+        self.commands.push(GeometryPathCommand::Line { x, y });
+        self
+    }
+
+    fn quad_to(mut self, cpx: f64, cpy: f64, x: f64, y: f64) -> Self {
+        self.cursor = (x, y);
+        let (cpx, cpy) = self.at(cpx, cpy);
+        let (x, y) = self.at(x, y);
+        self.commands
+            .push(GeometryPathCommand::Quad { cpx, cpy, x, y });
+        self
+    }
+
+    fn cubic_to(mut self, cp1x: f64, cp1y: f64, cp2x: f64, cp2y: f64, x: f64, y: f64) -> Self {
+        self.cursor = (x, y);
+        let (cp1x, cp1y) = self.at(cp1x, cp1y);
+        let (cp2x, cp2y) = self.at(cp2x, cp2y);
+        let (x, y) = self.at(x, y);
+        self.commands.push(GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        });
+        self
+    }
+
+    /// ECMA-376 `arcTo`: `stAng`/`swAng` are polar angles, and the ellipse is centred so that
+    /// `start` lands on the pen position.
+    fn arc_to(mut self, wr: f64, hr: f64, start: f64, sweep: f64) -> Self {
+        let first = elliptical_parameter(start, wr, hr);
+        let last = elliptical_parameter(start + sweep, wr, hr);
+        let cx = self.cursor.0 - wr * first.cos();
+        let cy = self.cursor.1 - hr * first.sin();
+        let quadrants = (last - first).abs() / FRAC_PI_2 - SEGMENT_SLACK;
+        let steps = quadrants.ceil().clamp(1.0, 8.0) as usize;
+        for step in 0..steps {
+            let from = first + (last - first) * step as f64 / steps as f64;
+            let to = first + (last - first) * (step + 1) as f64 / steps as f64;
+            let alpha = 4.0 / 3.0 * ((to - from) / 4.0).tan();
+            let start_point = (cx + wr * from.cos(), cy + hr * from.sin());
+            let end_point = (cx + wr * to.cos(), cy + hr * to.sin());
+            self = self.cubic_to(
+                start_point.0 - alpha * wr * from.sin(),
+                start_point.1 + alpha * hr * from.cos(),
+                end_point.0 + alpha * wr * to.sin(),
+                end_point.1 - alpha * hr * to.cos(),
+                end_point.0,
+                end_point.1,
+            );
+        }
+        self
+    }
+
+    fn close(mut self) -> Self {
+        self.commands.push(GeometryPathCommand::Close);
+        self
+    }
+
+    fn finish(self) -> Vec<GeometryPathCommand> {
+        self.commands
+    }
+}
+
+fn frame_polygon(frame: Frame, points: &[(f64, f64)]) -> Vec<GeometryPathCommand> {
+    polygon(
+        &points
+            .iter()
+            .map(|&(x, y)| (x / frame.w, y / frame.h))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn donut(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
+    let dr = pin(adjustments.get("adj").copied(), 0.25, 0.5);
+    Outline::new(frame)
+        .move_to(0.0, hd2)
+        .arc_to(wd2, hd2, PI, TAU)
+        .close()
+        .move_to(dr, hd2)
+        .arc_to(wd2 - dr, hd2 - dr, PI, -TAU)
+        .close()
+        .finish()
+}
+
+fn no_smoking(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
+    let dr = pin(adjustments.get("adj").copied(), 0.1875, 0.5);
+    let (iwd2, ihd2) = (wd2 - dr, hd2 - dr);
+    let diagonal = frame.h.atan2(frame.w);
+    let half_gap = (dr / 2.0).atan2(polar_radius(iwd2, ihd2, diagonal));
+    let (start, sweep) = (diagonal - half_gap, 2.0 * half_gap - PI);
+    let reach = polar_radius(iwd2, ihd2, start);
+    let (dx, dy) = (reach * start.cos(), reach * start.sin());
+    Outline::new(frame)
+        .move_to(0.0, hd2)
+        .arc_to(wd2, hd2, PI, TAU)
+        .close()
+        .move_to(wd2 + dx, hd2 + dy)
+        .arc_to(iwd2, ihd2, start, sweep)
+        .close()
+        .move_to(wd2 - dx, hd2 - dy)
+        .arc_to(iwd2, ihd2, start - PI, sweep)
+        .close()
+        .finish()
+}
+
+fn corner(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let leg = pin(adjustments.get("adj1").copied(), 0.5, h);
+    let x1 = pin(adjustments.get("adj2").copied(), 0.5, w);
+    let y1 = h - leg;
+    frame_polygon(
+        frame,
+        &[(0.0, 0.0), (x1, 0.0), (x1, y1), (w, y1), (w, h), (0.0, h)],
+    )
+}
+
+fn folded_corner(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let dy2 = pin(adjustments.get("adj").copied(), ROUND_RECT_ADJUSTMENT, 0.5);
+    let dy1 = dy2 / 5.0;
+    let (x1, y2) = (w - dy2, h - dy2);
+    let (x2, y1) = (x1 + dy1, y2 + dy1);
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(w, 0.0)
+        .line_to(w, y2)
+        .line_to(x1, h)
+        .line_to(0.0, h)
+        .close()
+        .move_to(x1, h)
+        .line_to(x2, y1)
+        .line_to(w, y2)
+        .close()
+        .finish()
+}
+
+fn math_multiply(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    const ARM_FRACTION: f64 = 0.519_65;
+    let (w, h) = (frame.w, frame.h);
+    let (hc, vc) = (w / 2.0, h / 2.0);
+    let th = pin(adjustments.get("adj1").copied(), 0.2352, ARM_FRACTION);
+    let angle = h.atan2(w);
+    let (sa, ca, ta) = (angle.sin(), angle.cos(), angle.tan());
+    let arm = w.hypot(h) * (1.0 - ARM_FRACTION);
+    let (xm, ym) = (ca * arm / 2.0, sa * arm / 2.0);
+    let (dx, dy) = (sa * th / 2.0, ca * th / 2.0);
+    let (xa, ya) = (xm - dx, ym + dy);
+    let (xb, yb) = (xm + dx, ym - dy);
+    let yc = (hc - xb) * ta + yb;
+    let (xd, xe) = (w - xb, w - xa);
+    let reach = (vc - ya) / ta;
+    let (xf, xl) = (xe - reach, xa + reach);
+    let (yg, yh, yi) = (h - ya, h - yb, h - yc);
+    frame_polygon(
+        frame,
+        &[
+            (xa, ya),
+            (xb, yb),
+            (hc, yc),
+            (xd, yb),
+            (xe, ya),
+            (xf, vc),
+            (xe, yg),
+            (xd, yh),
+            (hc, yi),
+            (xb, yh),
+            (xa, yg),
+            (xl, vc),
+        ],
+    )
+}
+
+fn bent_arrow(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let aw2 = pin(adjustments.get("adj2").copied(), 0.25, 0.5);
+    let th = pin(adjustments.get("adj1").copied(), 0.25, 2.0 * aw2);
+    let ah = pin(adjustments.get("adj3").copied(), 0.25, 0.5);
+    let dh2 = aw2 - th / 2.0;
+    let bend = pin(
+        adjustments.get("adj4").copied(),
+        0.4375,
+        (w - ah).min(h - dh2),
+    );
+    let inner = (bend - th).max(0.0);
+    let (x3, x4) = (th + inner, w - ah);
+    let y3 = dh2 + th;
+    let (y4, y5) = (y3 + dh2, dh2 + bend);
+    Outline::new(frame)
+        .move_to(0.0, h)
+        .line_to(0.0, y5)
+        .arc_to(bend, bend, PI, FRAC_PI_2)
+        .line_to(x4, dh2)
+        .line_to(x4, 0.0)
+        .line_to(w, aw2)
+        .line_to(x4, y4)
+        .line_to(x4, y3)
+        .line_to(x3, y3)
+        .arc_to(inner, inner, THREE_QUARTER_TURN, -FRAC_PI_2)
+        .line_to(th, h)
+        .close()
+        .finish()
+}
+
+fn ribbon(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let a1 = pin(
+        adjustments.get("adj1").copied(),
+        ROUND_RECT_ADJUSTMENT,
+        0.333_33,
+    );
+    let a2 = pin_between(adjustments.get("adj2").copied(), 0.5, 0.25, 0.75);
+    let (wd8, wd32) = (w / 8.0, w / 32.0);
+    let dx2 = w * a2 / 2.0;
+    let (x2, x9) = (w / 2.0 - dx2, w / 2.0 + dx2);
+    let (x3, x8) = (x2 + wd32, x9 - wd32);
+    let (x5, x6) = (x2 + wd8, x9 - wd8);
+    let (x4, x7) = (x5 - wd32, x6 + wd32);
+    let (y1, y2) = (h * a1 / 2.0, h * a1);
+    let y4 = h - y2;
+    let y3 = y4 / 2.0;
+    let hr = h * a1 / 4.0;
+    let y5 = h - hr;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .line_to(x4, 0.0)
+        .arc_to(wd32, hr, THREE_QUARTER_TURN, PI)
+        .line_to(x3, y1)
+        .arc_to(wd32, hr, THREE_QUARTER_TURN, -PI)
+        .line_to(x8, y2)
+        .arc_to(wd32, hr, FRAC_PI_2, -PI)
+        .line_to(x7, y1)
+        .arc_to(wd32, hr, FRAC_PI_2, PI)
+        .line_to(w, 0.0)
+        .line_to(w - wd8, y3)
+        .line_to(w, y4)
+        .line_to(x9, y4)
+        .line_to(x9, y5)
+        .arc_to(wd32, hr, 0.0, FRAC_PI_2)
+        .line_to(x3, h)
+        .arc_to(wd32, hr, FRAC_PI_2, FRAC_PI_2)
+        .line_to(x2, y4)
+        .line_to(0.0, y4)
+        .line_to(wd8, y3)
+        .close()
+        .finish()
+}
+
+fn ellipse_ribbon(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let (hc, wd8) = (w / 2.0, w / 8.0);
+    let a1 = clamp_fraction(adjustments.get("adj1").copied(), 0.25);
+    let a2 = pin_between(adjustments.get("adj2").copied(), 0.5, 0.25, 0.75);
+    let a3 = pin_between(
+        adjustments.get("adj3").copied(),
+        0.125,
+        (a1 - (1.0 - a1) / 2.0).max(0.0),
+        a1,
+    );
+    let x2 = hc - w * a2 / 2.0;
+    let x3 = x2 + wd8;
+    let (x4, x5, x6) = (w - x3, w - x2, w - wd8);
+    let dy1 = h * a3;
+    let slope = 4.0 * dy1 / w;
+    let rise = |x: f64| slope * (x - x * x / w);
+    let y1 = rise(x3);
+    let (cx1, cy1) = (x3 / 2.0, slope * x3 / 2.0);
+    let cx2 = w - cx1;
+    let depth = h * a1;
+    let dy3 = depth - dy1;
+    let tail_rise = rise(x2);
+    let y3 = tail_rise + dy3;
+    let cy3 = 2.0 * dy1 + dy3 - tail_rise;
+    let rh = h - depth;
+    let y2 = (dy1 * 14.0 / 16.0 + rh) / 2.0;
+    let (y5, y6) = (tail_rise + rh, y3 + rh);
+    let cx4 = x2 / 2.0;
+    let (cy4, cx5) = (slope * cx4 + rh, w - cx4);
+    let cy6 = cy3 + rh;
+    Outline::new(frame)
+        .move_to(0.0, 0.0)
+        .quad_to(cx1, cy1, x3, y1)
+        .line_to(x2, y3)
+        .quad_to(hc, cy3, x5, y3)
+        .line_to(x4, y1)
+        .quad_to(cx2, cy1, w, 0.0)
+        .line_to(x6, y2)
+        .line_to(w, rh)
+        .quad_to(cx5, cy4, x5, y5)
+        .line_to(x5, y6)
+        .quad_to(hc, cy6, x2, y6)
+        .line_to(x2, y5)
+        .quad_to(cx4, cy4, 0.0, rh)
+        .line_to(wd8, y2)
+        .close()
+        .finish()
+}
+
+fn cloud_callout(frame: Frame, adjustments: &HashMap<String, f64>) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let square = Frame {
+        w: CLOUD_FRAME,
+        h: CLOUD_FRAME,
+    };
+    let mut body = Outline::new(square).move_to(3900.0, 14370.0);
+    for [wr, hr, start, sweep] in CLOUD_ARCS {
+        body = body.arc_to(wr, hr, ooxml_angle(start), ooxml_angle(sweep));
+    }
+    let mut commands = body.close().finish();
+    let (hc, vc) = (w / 2.0, h / 2.0);
+    let dx_pos = w * callout_offset(adjustments.get("adj1").copied(), -0.208_33);
+    let dy_pos = h * callout_offset(adjustments.get("adj2").copied(), 0.625);
+    let (x_pos, y_pos) = (hc + dx_pos, vc + dy_pos);
+    let pointer = dy_pos.atan2(dx_pos);
+    let edge = (hc * pointer.sin()).atan2(vc * pointer.cos());
+    let g6 = hc + hc * edge.cos() - x_pos;
+    let g7 = vc + vc * edge.sin() - y_pos;
+    let span = g6.hypot(g7);
+    let (ux, uy) = if span > 0.0 {
+        (g6 / span, g7 / span)
+    } else {
+        (0.0, 0.0)
+    };
+    let third = (span - 6600.0 / 21600.0) / 3.0;
+    let (small, medium, large) = (600.0 / 21600.0, 1200.0 / 21600.0, 1800.0 / 21600.0);
+    let near = third + large;
+    let far = 4800.0 / 21600.0 + 2.0 * third;
+    let bubbles = [
+        (x_pos, y_pos, small),
+        (x_pos + near * ux, y_pos + near * uy, medium),
+        (x_pos + far * ux, y_pos + far * uy, large),
+    ];
+    for (cx, cy, r) in bubbles {
+        commands.extend(
+            Outline::new(frame)
+                .move_to(cx + r, cy)
+                .arc_to(r, r, 0.0, TAU)
+                .close()
+                .finish(),
+        );
+    }
+    commands
+}
+
+fn wedge_ellipse_callout(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+) -> Vec<GeometryPathCommand> {
+    const TAIL_HALF_WIDTH: f64 = 660_000.0;
+    let (wd2, hd2) = (frame.w / 2.0, frame.h / 2.0);
+    let dx_pos = frame.w * callout_offset(adjustments.get("adj1").copied(), -0.208_33);
+    let dy_pos = frame.h * callout_offset(adjustments.get("adj2").copied(), 0.625);
+    let pointer = (dy_pos * frame.w).atan2(dx_pos * frame.h);
+    let gap = ooxml_angle(TAIL_HALF_WIDTH);
+    let on_edge = |angle: f64| (wd2 * angle.cos(), hd2 * angle.sin());
+    let (dx1, dy1) = on_edge(pointer + gap);
+    let (dx2, dy2) = on_edge(pointer - gap);
+    let (lead, trail) = (dy1.atan2(dx1), dy2.atan2(dx2));
+    let sweep = if trail > lead {
+        trail - lead
+    } else {
+        trail - lead + TAU
+    };
+    Outline::new(frame)
+        .move_to(wd2 + dx_pos, hd2 + dy_pos)
+        .line_to(wd2 + dx1, hd2 + dy1)
+        .arc_to(wd2, hd2, lead, sweep)
+        .close()
+        .finish()
+}
+
+fn wedge_round_rect_callout(
+    frame: Frame,
+    adjustments: &HashMap<String, f64>,
+) -> Vec<GeometryPathCommand> {
+    let (w, h) = (frame.w, frame.h);
+    let (hc, vc) = (w / 2.0, h / 2.0);
+    let dx_pos = w * callout_offset(adjustments.get("adj1").copied(), -0.208_33);
+    let dy_pos = h * callout_offset(adjustments.get("adj2").copied(), 0.625);
+    let (x_pos, y_pos) = (hc + dx_pos, vc + dy_pos);
+    let steeper = dy_pos.abs() - (dx_pos * h / w).abs() > 0.0;
+    let pick = |flag: bool, when: f64, otherwise: f64| if flag { when } else { otherwise };
+    let x1 = w * pick(dx_pos > 0.0, 7.0, 2.0) / 12.0;
+    let x2 = w * pick(dx_pos > 0.0, 10.0, 5.0) / 12.0;
+    let y1 = h * pick(dy_pos > 0.0, 7.0, 2.0) / 12.0;
+    let y2 = h * pick(dy_pos > 0.0, 10.0, 5.0) / 12.0;
+    let xl = pick(steeper, 0.0, pick(dx_pos > 0.0, 0.0, x_pos));
+    let xt = pick(steeper, pick(dy_pos > 0.0, x1, x_pos), x1);
+    let xr = pick(steeper, w, pick(dx_pos > 0.0, x_pos, w));
+    let xb = pick(steeper, pick(dy_pos > 0.0, x_pos, x1), x1);
+    let yl = pick(steeper, y1, pick(dx_pos > 0.0, y1, y_pos));
+    let yt = pick(steeper, pick(dy_pos > 0.0, 0.0, y_pos), 0.0);
+    let yr = pick(steeper, y1, pick(dx_pos > 0.0, y_pos, y1));
+    let yb = pick(steeper, pick(dy_pos > 0.0, y_pos, h), h);
+    let u1 = pin(adjustments.get("adj3").copied(), ROUND_RECT_ADJUSTMENT, 0.5);
+    Outline::new(frame)
+        .move_to(0.0, u1)
+        .arc_to(u1, u1, PI, FRAC_PI_2)
+        .line_to(x1, 0.0)
+        .line_to(xt, yt)
+        .line_to(x2, 0.0)
+        .line_to(w - u1, 0.0)
+        .arc_to(u1, u1, THREE_QUARTER_TURN, FRAC_PI_2)
+        .line_to(w, y1)
+        .line_to(xr, yr)
+        .line_to(w, y2)
+        .line_to(w, h - u1)
+        .arc_to(u1, u1, 0.0, FRAC_PI_2)
+        .line_to(x2, h)
+        .line_to(xb, yb)
+        .line_to(x1, h)
+        .line_to(u1, h)
+        .arc_to(u1, u1, FRAC_PI_2, FRAC_PI_2)
+        .line_to(0.0, y2)
+        .line_to(xl, yl)
+        .line_to(0.0, y1)
+        .close()
+        .finish()
 }
 
 fn arrow(

@@ -94,7 +94,9 @@
 //! # Float exclusion zones
 //!
 //! `floatingZones` and `paragraphYOffset` place the paragraph in the float
-//! group's coordinate space. Intersecting zones are resolved per line at the
+//! group's coordinate space; `paragraphYOffset` is the paragraph's top, so
+//! `spacing.before` lies inside that space and is tested with the first line.
+//! Intersecting zones are resolved per line at the
 //! running Y with a fixed probe height of `pt_to_px(defaults.fontSize)` —
 //! never the line's own fonts, which are unknown until the line closes. That
 //! running Y advances by each finalized line's *text* height, so image

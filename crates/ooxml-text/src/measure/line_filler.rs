@@ -31,7 +31,9 @@
 //!   default-font-size estimate, then re-tested against `fullWidthBlock` bands
 //!   once the line closes and its box is known. That running Y advances by each
 //!   line's *text* height, so image growth never shifts the next probe; float
-//!   skips do, since they move the line itself.
+//!   skips do, since they move the line itself. The first line's box reaches up
+//!   to the paragraph top, so `spacing.before` is tested with it and spent
+//!   again below whatever the line clears.
 //! - `totalHeight` is Σ (line height + `floatSkipBefore`) plus
 //!   `spacing.before` and `spacing.after`.
 
@@ -155,31 +157,54 @@ struct Filler<'a> {
     pending_float_skip: f32,
 }
 
+/// Paragraph space-before in px, floored at zero.
+fn space_before(p: &FillParams) -> f32 {
+    p.spacing
+        .and_then(|spacing| spacing.before)
+        .unwrap_or(0.0)
+        .max(0.0)
+}
+
+/// Absolute top of the box a line is tested against. `cumulative` counts from
+/// the paragraph's text top, so space-before is added back; `lead` is the part
+/// of that space the box reclaims, which is all of it for the first line.
+fn float_probe_top(p: &FillParams, cumulative: f32, lead: f32) -> f32 {
+    p.paragraph_y_offset + cumulative + space_before(p) - lead
+}
+
 /// Hops the running Y past any float leaving less than
-/// [`floats::MIN_WRAP_SEGMENT_WIDTH`] of usable room. The skipped pixels are
-/// added to both the running Y and the pending `floatSkipBefore`.
+/// [`floats::MIN_WRAP_SEGMENT_WIDTH`] of usable room. `lead` extends the probe
+/// box up to the paragraph top for the first line: Word tests space-before
+/// together with that line and spends it again below whatever the line clears.
+/// The skipped pixels are added to both the running Y and the pending
+/// `floatSkipBefore`. Returns the line's resolved top, which callers resolve
+/// margins at — derived from the hop, not re-added, so a line landing on a
+/// zone edge does not round back inside it.
 fn skip_obstructing_floats(
     p: &FillParams,
     line_height: f32,
+    lead: f32,
     line_max_width: f32,
     cumulative: &mut f32,
     pending: &mut f32,
-) {
+) -> f32 {
     if p.zones.is_empty() {
-        return;
+        return float_probe_top(p, *cumulative, 0.0);
     }
-    let absolute_y = p.paragraph_y_offset + *cumulative;
-    let skip = floats::find_clear_line_y(
+    let absolute_y = float_probe_top(p, *cumulative, lead);
+    let clear = floats::find_clear_line_y(
         absolute_y,
-        line_height,
+        line_height + lead,
         p.zones,
         line_max_width,
         floats::MIN_WRAP_SEGMENT_WIDTH,
-    ) - absolute_y;
-    if skip > 0.0 {
-        *cumulative += skip;
-        *pending += skip;
+    );
+    if clear <= absolute_y {
+        return float_probe_top(p, *cumulative, 0.0);
     }
+    *cumulative += clear - absolute_y;
+    *pending += clear - absolute_y;
+    clear + lead
 }
 
 /// Probe height for zone intersection tests: the default font size in px,
@@ -201,15 +226,16 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
     let mut cumulative_height = 0.0f32;
     let mut pending_float_skip = 0.0f32;
     let estimated = estimated_line_height(&p);
-    skip_obstructing_floats(
+    let first_top = skip_obstructing_floats(
         &p,
         estimated,
+        space_before(&p),
         p.first_line_width,
         &mut cumulative_height,
         &mut pending_float_skip,
     );
     let first_margins = floats::floating_margins(
-        cumulative_height,
+        first_top - p.paragraph_y_offset,
         estimated,
         p.zones,
         p.paragraph_y_offset,
@@ -302,7 +328,12 @@ pub(super) fn empty_paragraph_extent(
     }
 
     let (zones, paragraph_y_offset) = floats;
-    let skip = floats::clear_full_width_band_y(paragraph_y_offset, line_height, zones)
+    // Space-before is part of the box Word tests, and is spent again below.
+    let before = spacing
+        .and_then(|value| value.before)
+        .unwrap_or(0.0)
+        .max(0.0);
+    let skip = floats::clear_full_width_band_y(paragraph_y_offset, before + line_height, zones)
         - paragraph_y_offset;
     let float_skip_before = (skip > 0.0).then_some(skip);
 
@@ -413,24 +444,75 @@ impl Filler<'_> {
     }
 
     /// Places a tab against the stop grid, recomputing its width after wrapping.
+    ///
+    /// A `start` stop that leaves the word after it no room takes the tab to
+    /// the next line with it — Word never strands that word at the paragraph
+    /// indent while its tab sits on the line above. Content too wide for a
+    /// whole line cannot be stranded, so the tab keeps its line for that.
     fn fill_tab_run(&mut self, run_index: usize, t: PreparedTab) -> Result<(), MeasureError> {
         let ri = run_index as u32;
         let following = self.following_width_after(run_index);
-        let mut tab_width = self.tab_width(following);
-        if self.cur.width + tab_width > self.cur.available + WRAP_SLACK_PX {
+        let mut tab = self.tab_width(following);
+        let word = if tab.reserves_following {
+            0.0
+        } else {
+            self.first_word_after(run_index)
+        };
+        let overflows = self.cur.width + tab.width > self.cur.available + WRAP_SLACK_PX;
+        let strands_word = self.cur.width > 0.0
+            && word > 0.0
+            && word <= self.cur.available + WRAP_SLACK_PX
+            && self.cur.width + tab.width + word > self.cur.available + WRAP_SLACK_PX;
+        if overflows || strands_word {
             self.start_new_line(ri, 0)?;
-            tab_width = self.tab_width(following);
+            tab = self.tab_width(following);
         }
 
         self.update_max_font(t.font_size_pt, t.metrics_font, 0.0);
-        self.record_atomic(ri, 0, 1, tab_width, t.bidi_level);
-        self.cur.width += tab_width;
+        self.record_atomic(ri, 0, 1, tab.width, t.bidi_level);
+        self.cur.width += tab.width;
         self.cur.tail_run = ri;
         self.cur.tail_char = 1;
         Ok(())
     }
 
-    fn tab_width(&self, following: f32) -> f32 {
+    /// Width of what the tab has to fit beside it on this line: the span up to
+    /// the first break opportunity, which can run past the end of one text run.
+    /// Unlike [`Self::following_width_after`], which sums declared width for an
+    /// `end` stop to anchor on, this counts only content that shares the line —
+    /// an own-line image never does, and a floating one carries no line width.
+    fn first_word_after(&self, tab_index: usize) -> f32 {
+        let mut width = 0.0f32;
+        for prun in &self.p.prepared[tab_index + 1..] {
+            match prun {
+                PreparedRun::Tab(_) | PreparedRun::LineBreak | PreparedRun::OwnLineImage(_) => {
+                    break;
+                }
+                PreparedRun::Text(t) => {
+                    if t.chars.is_empty() {
+                        continue;
+                    }
+                    let end = t.breaks.first().copied().unwrap_or(t.chars.len());
+                    width += visible_span_width(&t.chars[..end], t.letter_spacing);
+                    if !t.breaks.is_empty() {
+                        break;
+                    }
+                }
+                PreparedRun::Field(f) => {
+                    width += f.width;
+                    break;
+                }
+                PreparedRun::InlineImage(img) => {
+                    width += img.width;
+                    break;
+                }
+                PreparedRun::SkippedImage { .. } | PreparedRun::Hidden { .. } => {}
+            }
+        }
+        width
+    }
+
+    fn tab_width(&self, following: f32) -> tabs::TabAdvance {
         let line_x = self.cur.width + self.cur.left_offset;
         let is_first_line = self.lines.is_empty();
         let content_x = self.p.indent_left_px
@@ -812,18 +894,24 @@ impl Filler<'_> {
         if self.p.zones.is_empty() {
             return;
         }
-        let top = self.p.paragraph_y_offset + self.cumulative_height;
-        let skip = floats::clear_full_width_band_y(top, line_height, self.p.zones) - top;
-        if skip <= 0.0 {
+        let lead = if self.lines.is_empty() {
+            space_before(self.p)
+        } else {
+            0.0
+        };
+        let top = float_probe_top(self.p, self.cumulative_height, lead);
+        let clear = floats::clear_full_width_band_y(top, line_height + lead, self.p.zones);
+        if clear <= top {
             return;
         }
+        let skip = clear - top;
         let full = if self.lines.is_empty() {
             self.p.first_line_width
         } else {
             self.p.body_width
         };
         let margins = floats::floating_margins(
-            self.cumulative_height + skip,
+            clear + lead - self.p.paragraph_y_offset,
             line_height,
             self.p.zones,
             self.p.paragraph_y_offset,
@@ -914,15 +1002,16 @@ impl Filler<'_> {
     fn start_new_line(&mut self, run: u32, char_utf16: u32) -> Result<(), MeasureError> {
         self.finalize_line()?;
         let estimated = estimated_line_height(self.p);
-        skip_obstructing_floats(
+        let line_top = skip_obstructing_floats(
             self.p,
             estimated,
+            0.0,
             self.p.body_width,
             &mut self.cumulative_height,
             &mut self.pending_float_skip,
         );
         let margins = floats::floating_margins(
-            self.cumulative_height,
+            line_top - self.p.paragraph_y_offset,
             estimated,
             self.p.zones,
             self.p.paragraph_y_offset,

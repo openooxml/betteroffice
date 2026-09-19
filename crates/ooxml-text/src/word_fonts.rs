@@ -7,6 +7,9 @@
 //! Word's line rule, and when the substitute's advances are already close: the
 //! view moves vertical metrics only, so correcting the pitch of a much
 //! narrower or wider face moves a document past Word rather than onto it.
+//! Gigi is the measured counter-example — its span is 1.382 em against the
+//! last-resort face's 1.150, and correcting it alone lands one corpus document
+//! on an extra page.
 //!
 //! A family Word has no face for carries its substitute's metrics, taken from
 //! the document's `w:altName` or identified against Word's reference render.
@@ -45,8 +48,10 @@ const JIS_256: RequestedLineMetrics = ea(256, 220, -36);
 const KOREAN_1024: RequestedLineMetrics = ea(1024, 879, -145);
 /// MingLiU and its variants — one em at 1024 units.
 const MINGLIU_1024: RequestedLineMetrics = ea(1024, 820, -204);
-/// Yu Gothic, Yu Gothic Medium/Light and Yu Mincho.
+/// Yu Gothic and Yu Gothic Medium/Light. Yu Mincho is a separate design.
 const YU_2048: RequestedLineMetrics = ea(2048, 1802, -455);
+/// Yu Mincho — a sixth taller than Yu Gothic, not the same span.
+const YU_MINCHO_2048: RequestedLineMetrics = ea(2048, 2038, -598);
 /// Malgun Gothic.
 const MALGUN_2048: RequestedLineMetrics = ea(2048, 2229, -495);
 /// NanumGothic, the Office cloud font Word downloads for `나눔고딕`.
@@ -81,14 +86,48 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
             "yu gothic medium",
             "yu gothic light",
             "游ゴシック",
-            "yu mincho",
-            "游明朝",
+        ],
+        YU_2048,
+    ),
+    (&["yu mincho", "游明朝"], YU_MINCHO_2048),
+    (
+        &["yu gothic ui", "yu gothic ui semilight"],
+        ea(2048, 2210, -514),
+    ),
+    // BIZ UD and Ryumin: Office ships no Mac face, and Word lays every one of
+    // them out with Yu Gothic (measured off its own exports).
+    (
+        &[
+            "biz udゴシック",
+            "biz udpゴシック",
+            "biz udgothic",
+            "biz udpgothic",
+            "biz ud明朝 medium",
+            "biz udp明朝 medium",
+            "biz udmincho medium",
+            "biz udpmincho medium",
+            "ryuminpr5-regular",
         ],
         YU_2048,
     ),
     (
-        &["yu gothic ui", "yu gothic ui semilight"],
-        ea(2048, 2210, -514),
+        &["ud デジタル 教科書体 np-b", "ud digi kyokasho np-b"],
+        ea(2048, 1802, -567),
+    ),
+    // The HG family shares the 256-unit design of MS Gothic/Mincho.
+    (
+        &[
+            "hg丸ｺﾞｼｯｸm-pro",
+            "hgmarugothicmpro",
+            "hgpｺﾞｼｯｸm",
+            "hgpgothicm",
+            "hgp創英角ｺﾞｼｯｸub",
+            "hgpsoeikakugothicub",
+            "hg創英角ﾎﾟｯﾌﾟ体",
+            "hgp創英角ﾎﾟｯﾌﾟ体",
+            "hgs創英角ﾎﾟｯﾌﾟ体",
+        ],
+        JIS_256,
     ),
     // Simplified Chinese — the SimSun family shares the JIS 256-unit design.
     (
@@ -156,6 +195,8 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         &["나눔명조", "nanummyeongjo", "nanum myeongjo"],
         NANUM_MYEONGJO_1024,
     ),
+    // Jeju Gothic: Word ships none and falls back to Malgun Gothic.
+    (&["제주고딕"], MALGUN_2048),
     // HCR Dotum: Word ships none; both corpus documents alias it to Batang.
     (&["한컴돋움"], KOREAN_1024),
     // Polaris/Hancom Batang compatibility face; Word falls back to Arial Unicode MS.
@@ -185,6 +226,20 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["lucida sans unicode"], latin(2048, 2246, -901, 0)),
     (&["georgia"], latin(2048, 1878, -449, 0)),
     (&["comic sans ms"], latin(2048, 2257, -597, 0)),
+    (&["century"], latin(2048, 2019, -442, 0)),
+    (&["century gothic"], latin(2048, 1989, -451, 0)),
+    (&["century schoolbook"], latin(2048, 2018, -443, 0)),
+    (&["arial narrow"], latin(2048, 1888, -431, 0)),
+    (&["agency fb"], latin(2048, 1889, -410, 0)),
+    (&["cambria math"], latin(2048, 1595, -455, 353)),
+    (&["calibri light"], latin(2048, 1536, -512, 452)),
+    (&["roboto"], latin(2048, 1900, -500, 0)),
+    (
+        &["lucida bright", "lucida sans"],
+        latin(2048, 1900, -432, 0),
+    ),
+    (&["lucida calligraphy"], latin(2048, 1900, -666, 0)),
+    (&["wingdings 3"], latin(2048, 1900, -432, 0)),
 ];
 
 /// Vertical metrics Word measures `family` with, or `None` for a family this
@@ -275,10 +330,11 @@ mod tests {
     }
 
     /// Bundled families keep the metric-compatible face's own metrics, Word's
-    /// own aliases resolve to a bundled face, and a family whose span depends
-    /// on which reading of the line rule applies is deliberately absent.
+    /// own aliases resolve to a bundled face, and a family this table has no
+    /// usable measurement for — Gigi's span is measured but withheld, see the
+    /// module doc — is absent.
     #[test]
-    fn leaves_bundled_aliased_and_ambiguous_families_alone() {
+    fn leaves_bundled_aliased_and_unmeasured_families_alone() {
         for family in [
             "Arial",
             "Times New Roman",
@@ -287,20 +343,57 @@ mod tests {
             "Courier New",
             "Helvetica",
             "Times",
-            "Lucida Bright",
-            "Lucida Sans",
-            "Century",
-            "Century Gothic",
-            "Arial Narrow",
-            "Roboto",
-            "Cambria Math",
             "Gigi",
-            "HGPｺﾞｼｯｸM",
-            "제주고딕",
             "폴라리스바탕",
         ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
         }
+    }
+
+    /// Spans read off the font programs Word embeds in its own exports of the
+    /// visual-fidelity corpus. Each of these families measured with the
+    /// last-resort face's 1.1499 em span before, which moved every line below
+    /// it; Yu Mincho measured with Yu Gothic's 1.102 em.
+    #[test]
+    fn covers_the_families_word_embeds_in_its_own_exports() {
+        for (family, upem, ascender, descender, line_gap, east_asian) in [
+            ("Lucida Bright", 2048u16, 1900i16, -432i16, 0i16, false),
+            ("Lucida Sans", 2048, 1900, -432, 0, false),
+            ("Lucida Calligraphy", 2048, 1900, -666, 0, false),
+            ("Century", 2048, 2019, -442, 0, false),
+            ("Century Gothic", 2048, 1989, -451, 0, false),
+            ("Century Schoolbook", 2048, 2018, -443, 0, false),
+            ("Arial Narrow", 2048, 1888, -431, 0, false),
+            ("Agency FB", 2048, 1889, -410, 0, false),
+            ("Cambria Math", 2048, 1595, -455, 353, false),
+            ("Calibri Light", 2048, 1536, -512, 452, false),
+            ("Roboto", 2048, 1900, -500, 0, false),
+            ("Wingdings 3", 2048, 1900, -432, 0, false),
+            ("Yu Mincho", 2048, 2038, -598, 0, true),
+            ("游明朝", 2048, 2038, -598, 0, true),
+            ("UD デジタル 教科書体 NP-B", 2048, 1802, -567, 0, true),
+            ("HGPｺﾞｼｯｸM", 256, 220, -36, 0, true),
+            ("HG丸ｺﾞｼｯｸM-PRO", 256, 220, -36, 0, true),
+            ("HGP創英角ｺﾞｼｯｸUB", 256, 220, -36, 0, true),
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert_eq!(metrics.units_per_em, upem, "{family} upem");
+            assert_eq!(metrics.hhea_ascender, ascender, "{family} ascender");
+            assert_eq!(metrics.hhea_descender, descender, "{family} descender");
+            assert_eq!(metrics.hhea_line_gap, line_gap, "{family} line gap");
+            assert_eq!(metrics.east_asian, east_asian, "{family} east asian");
+        }
+    }
+
+    /// Families Word has no face for, measured against the face its own export
+    /// substituted: Jeju Gothic becomes Malgun Gothic, and the BIZ UD and
+    /// Ryumin families all become Yu Gothic.
+    #[test]
+    fn covers_the_japanese_and_korean_families_word_substitutes() {
+        for family in ["BIZ UDPゴシック", "BIZ UDゴシック", "BIZ UDP明朝 Medium"] {
+            assert_eq!(requested_line_metrics(family), Some(YU_2048), "{family}");
+        }
+        assert_eq!(requested_line_metrics("제주고딕"), Some(MALGUN_2048));
     }
 
     /// Korean families Word either downloads from the cloud font catalog or
@@ -377,6 +470,7 @@ mod tests {
             ("MingLiU", 1.0),
             ("Batang", 1.0),
             ("Yu Gothic", 2257.0 / 2048.0),
+            ("Yu Mincho", 2636.0 / 2048.0),
             ("Meiryo", 1.5),
             ("Meiryo UI", 1.27),
             ("Malgun Gothic", 2724.0 / 2048.0),

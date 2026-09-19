@@ -1131,18 +1131,58 @@ fn a_latin_view_pins_the_win_box_to_the_requested_span() {
 
 #[test]
 fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
-    for family in [
-        "HGPｺﾞｼｯｸM",
-        "BIZ UDPゴシック",
-        "Arial",
-        "Lucida Bright",
-        "Helvetica",
-    ] {
+    for family in ["Arial", "Times New Roman", "Helvetica", "폴라리스바탕"] {
         assert!(
             ooxml_text::word_fonts::requested_line_metrics(family).is_none(),
             "{family}"
         );
     }
+}
+
+/// The Word faces the visual-fidelity corpus names and no bundled face stands
+/// in for: each measured at the last-resort Liberation span before, so every
+/// line under one sat high by the difference.
+#[test]
+fn a_substituted_corpus_face_measures_at_the_span_word_embeds() {
+    let (mut store, base) = store_with_font();
+    let size_px = 32.0;
+    for (family, span_em) in [
+        ("Century Gothic", 2440.0 / 2048.0),
+        ("Lucida Sans", 2332.0 / 2048.0),
+        ("Lucida Calligraphy", 2566.0 / 2048.0),
+        ("Arial Narrow", 2319.0 / 2048.0),
+        ("Cambria Math", 2403.0 / 2048.0),
+    ] {
+        let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
+        let view = store.register_substitute(base, requested).expect(family);
+        let line = single_line_box(
+            store.metrics(view).unwrap(),
+            size_px,
+            &CompatFlags::default(),
+        );
+        assert!(
+            (line.height() - size_px * span_em).abs() < 0.01,
+            "{family}: {} vs {}",
+            line.height(),
+            size_px * span_em
+        );
+    }
+}
+
+/// Yu Mincho is a sixth taller than Yu Gothic; measuring it with Yu Gothic's
+/// span shortened every Mincho line in a Japanese document.
+#[test]
+fn yu_mincho_does_not_measure_at_yu_gothics_span() {
+    let gothic = ooxml_text::word_fonts::requested_line_metrics("Yu Gothic").unwrap();
+    let mincho = ooxml_text::word_fonts::requested_line_metrics("Yu Mincho").unwrap();
+    assert_eq!(
+        mincho,
+        ooxml_text::word_fonts::requested_line_metrics("游明朝").unwrap()
+    );
+    assert_ne!(mincho, gothic);
+    assert_eq!(mincho.hhea_ascender, 2038);
+    assert_eq!(mincho.hhea_descender, -598);
+    assert!(mincho.east_asian);
 }
 
 #[test]

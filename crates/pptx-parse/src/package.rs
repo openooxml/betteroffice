@@ -11,7 +11,7 @@ use crate::drawing::{common_slide_data, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::table_style::parse_table_styles;
-use crate::theme::{parse_format_scheme, parse_theme};
+use crate::theme::{parse_background_pictures, parse_format_scheme, parse_theme};
 use crate::xml::{ParseBudget, XmlElement, parse_xml};
 use crate::{ParseLimits, PptxError};
 
@@ -96,6 +96,8 @@ fn parse_package(
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
             notes,
         });
@@ -131,6 +133,8 @@ fn parse_package(
                 .filter_map(|relationship| relationship.resolved_target.clone())
                 .collect(),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
             text_styles: parse_text_styles(&root),
         });
@@ -172,6 +176,8 @@ fn parse_package(
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
             background: data.background,
+            background_picture: data.background_picture,
+            background_reference: data.background_reference,
             shapes: data.shapes,
         });
     }
@@ -187,10 +193,15 @@ fn parse_package(
     let mut themes = Vec::with_capacity(theme_paths.len());
     for part_path in theme_paths {
         let root = parse_part(&parts, &part_path, &mut budget)?;
+        let theme_relationships = relationships
+            .get(&part_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         themes.push(ThemePart {
-            part_path,
             theme: parse_theme(&root),
             format_scheme: parse_format_scheme(&root),
+            background_pictures: parse_background_pictures(&root, theme_relationships),
+            part_path,
         });
     }
 
@@ -925,6 +936,8 @@ mod tests {
                 layout_part_path: Some(layout.to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: vec![chart_shape(id)],
                 notes: String::new(),
             }
@@ -953,6 +966,8 @@ mod tests {
                 master_part_path: Some("ppt/slideMasters/master1.xml".to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
             },
             SlideLayout {
@@ -962,6 +977,8 @@ mod tests {
                 master_part_path: Some("ppt/slideMasters/master2.xml".to_owned()),
                 show_master_shapes: true,
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
             },
         ];
@@ -972,6 +989,8 @@ mod tests {
                 theme_part_path: Some("ppt/theme/theme1.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout1.xml".to_owned()],
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
             },
@@ -981,6 +1000,8 @@ mod tests {
                 theme_part_path: Some("ppt/theme/theme2.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout2.xml".to_owned()],
                 background: None,
+                background_picture: None,
+                background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
             },
@@ -994,11 +1015,13 @@ mod tests {
                 part_path: "ppt/theme/theme1.xml".to_owned(),
                 theme: first_theme,
                 format_scheme: Default::default(),
+                background_pictures: Vec::new(),
             },
             ThemePart {
                 part_path: "ppt/theme/theme2.xml".to_owned(),
                 theme: second_theme,
                 format_scheme: Default::default(),
+                background_pictures: Vec::new(),
             },
         ];
         let relationships = BTreeMap::from([
