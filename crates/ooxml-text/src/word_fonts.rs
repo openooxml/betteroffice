@@ -7,6 +7,9 @@
 //! Word's line rule, and when the substitute's advances are already close: the
 //! view moves vertical metrics only, so correcting the pitch of a much
 //! narrower or wider face moves a document past Word rather than onto it.
+//!
+//! A family Word has no face for carries its substitute's metrics, taken from
+//! the document's `w:altName` or identified against Word's reference render.
 
 use crate::font_store::RequestedLineMetrics;
 
@@ -46,6 +49,12 @@ const MINGLIU_1024: RequestedLineMetrics = ea(1024, 820, -204);
 const YU_2048: RequestedLineMetrics = ea(2048, 1802, -455);
 /// Malgun Gothic.
 const MALGUN_2048: RequestedLineMetrics = ea(2048, 2229, -495);
+/// NanumGothic, the Office cloud font Word downloads for `나눔고딕`.
+const NANUM_GOTHIC_1000: RequestedLineMetrics = ea(1000, 844, -156);
+/// NanumMyeongjo, the Office cloud font Word downloads for `나눔명조`.
+const NANUM_MYEONGJO_1024: RequestedLineMetrics = ea(1024, 819, -205);
+/// Arial Unicode MS, Word's fallback for a Hangul family it has no face for.
+const ARIAL_UNICODE_2048: RequestedLineMetrics = ea(2048, 2189, -555);
 
 /// Requested family (lowercased) -> the vertical metrics Word measures it with.
 const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
@@ -139,6 +148,18 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         ],
         KOREAN_1024,
     ),
+    (
+        &["나눔고딕", "nanumgothic", "nanum gothic"],
+        NANUM_GOTHIC_1000,
+    ),
+    (
+        &["나눔명조", "nanummyeongjo", "nanum myeongjo"],
+        NANUM_MYEONGJO_1024,
+    ),
+    // HCR Dotum: Word ships none; both corpus documents alias it to Batang.
+    (&["한컴돋움"], KOREAN_1024),
+    // Polaris/Hancom Batang compatibility face; Word falls back to Arial Unicode MS.
+    (&["폴라리스새바탕-함초롬바탕호환"], ARIAL_UNICODE_2048),
 ];
 
 /// The Segoe UI family — UI, Symbol and Emoji ship the same vertical design.
@@ -275,8 +296,33 @@ mod tests {
             "Cambria Math",
             "Gigi",
             "HGPｺﾞｼｯｸM",
+            "제주고딕",
+            "폴라리스바탕",
         ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
+        }
+    }
+
+    /// Korean families Word either downloads from the cloud font catalog or
+    /// substitutes for, none of which `@betteroffice/fonts` maps to a bundled
+    /// face. Ascender and descender are pinned separately: the East Asian line
+    /// box reads them individually and painting takes its baseline from the
+    /// ascent, so an equal span is not enough to hold the text in place.
+    #[test]
+    fn covers_the_korean_families_that_reach_the_last_resort_face() {
+        for (family, upem, ascender, descender) in [
+            ("나눔고딕", 1000u16, 844i16, -156i16),
+            ("NanumGothic", 1000, 844, -156),
+            ("나눔명조", 1024, 819, -205),
+            ("NanumMyeongjo", 1024, 819, -205),
+            ("한컴돋움", 1024, 879, -145),
+            ("폴라리스새바탕-함초롬바탕호환", 2048, 2189, -555),
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert!(metrics.east_asian, "{family}");
+            assert_eq!(metrics.units_per_em, upem, "{family} upem");
+            assert_eq!(metrics.hhea_ascender, ascender, "{family} ascender");
+            assert_eq!(metrics.hhea_descender, descender, "{family} descender");
         }
     }
 
