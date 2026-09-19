@@ -7736,6 +7736,18 @@ fn emit_paragraph_floating_images(
     }
 }
 
+/// Word keeps a text-wrapping float on its anchor's page: a box that would
+/// hang off the bottom is pushed back so its bottom sits on the page edge,
+/// and the top clamp wins for a box taller than the page. A `wrapNone` float
+/// is left where the anchor puts it — Word lets it run past the margin, off
+/// the page edge, and simply stops drawing it once it clears the sheet.
+fn clamp_wrapped_float_y(y: f64, height: f64, wrap: Option<&str>, page_height: f64) -> f64 {
+    if !matches!(wrap, Some("square" | "tight" | "through" | "topAndBottom")) {
+        return y;
+    }
+    y.min(page_height - height).max(0.0)
+}
+
 fn emit_floating_image(
     prims: &mut Vec<Primitive>,
     block: &ParagraphBlockIn,
@@ -7746,12 +7758,17 @@ fn emit_floating_image(
     let block_ref = BlockRef::of(&block.id);
     let (x, y) = resolve_anchored_position(imr, frag_y - geom.margin_top, geom);
     let page_x = geom.margin_left + x;
-    let page_y = geom.margin_top + y;
     let rot = imr
         .rotation_deg
         .unwrap_or_else(|| rotation_degrees(imr.transform.as_deref()));
     let layout_width = image_layout_width(imr);
     let layout_height = image_layout_height(imr);
+    let page_y = clamp_wrapped_float_y(
+        geom.margin_top + y,
+        layout_height,
+        imr.wrap_type.as_deref(),
+        geom.page_height,
+    );
     let mut attrs = block_ref.attrs();
     attrs.doc_start = imr.pm_start;
     attrs.doc_end = imr.pm_end;
@@ -10410,6 +10427,35 @@ fn normalize_integral_json_numbers(value: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wrapping_float_is_clamped_to_the_page_and_wrap_none_is_not() {
+        // Word 16.112 on a 792 pt page, 100 pt float: a wrapSquare anchor at
+        // 720.4 / 775.6 / 830.8 all render at 692; wrapNone renders where the
+        // anchor puts it and vanishes once it clears the sheet.
+        for square in [720.38, 775.57, 830.8] {
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("square"), 792.0),
+                692.0
+            );
+            assert_eq!(
+                clamp_wrapped_float_y(square, 100.0, Some("inFront"), 792.0),
+                square
+            );
+        }
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 100.0, Some("square"), 792.0),
+            665.18
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(-34.8, 100.0, Some("square"), 792.0),
+            0.0
+        );
+        assert_eq!(
+            clamp_wrapped_float_y(665.18, 900.0, Some("square"), 792.0),
+            0.0
+        );
+    }
 
     #[test]
     fn resident_adapter_normalizes_integral_json_numbers() {
