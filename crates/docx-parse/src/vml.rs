@@ -311,20 +311,17 @@ pub fn parse_vml_image_content(
             .map(|value| truncate_utf8(value, 4_096).to_owned());
 
         if positioned {
-            let left = css_length_to_px(
-                style
-                    .get("margin-left")
-                    .or_else(|| style.get("left"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
-            let top = css_length_to_px(
-                style
-                    .get("margin-top")
-                    .or_else(|| style.get("top"))
-                    .map(String::as_str),
-            )
-            .and_then(pixels_to_emu);
+            // `left`/`top` are group-child coordinates, never anchor offsets.
+            let anchor_left = css_length_to_px(style.get("margin-left").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let anchor_top = css_length_to_px(style.get("margin-top").map(String::as_str))
+                .and_then(pixels_to_emu);
+            let left = anchor_left.or_else(|| {
+                css_length_to_px(style.get("left").map(String::as_str)).and_then(pixels_to_emu)
+            });
+            let top = anchor_top.or_else(|| {
+                css_length_to_px(style.get("top").map(String::as_str)).and_then(pixels_to_emu)
+            });
             image.position = Some(ImagePosition {
                 use_simple_pos: None,
                 simple_pos: None,
@@ -348,7 +345,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_left,
                     offset: left,
                 },
                 vertical: PositionAxis {
@@ -359,7 +356,7 @@ pub fn parse_vml_image_content(
                     )
                     .to_owned(),
                     alignment: None,
-                    pos_offset: None,
+                    pos_offset: anchor_top,
                     offset: top,
                 },
             });
@@ -1056,7 +1053,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_positioned_vml_image_and_pinned_offset_typo() {
+    fn parses_positioned_vml_image_and_mirrors_the_legacy_offset() {
         let media = build_media_map(&[("word/media/logo.png".to_owned(), vec![0; 24])]);
         let relationships = RelationshipMap::from([(
             "rId7".to_owned(),
@@ -1073,9 +1070,40 @@ mod tests {
         let image = parse_vml_image_content(&picture, Some(&relationships), Some(&media)).unwrap();
         assert_eq!(image.size.width, 914_400.0);
         assert_eq!(image.size.height, 914_400.0);
-        assert_eq!(image.position.unwrap().horizontal.offset, Some(19_050.0));
+        let horizontal = image.position.unwrap().horizontal;
+        assert_eq!(horizontal.pos_offset, Some(19_050.0));
+        assert_eq!(horizontal.offset, Some(19_050.0));
         assert_eq!(image.crop.unwrap().left, Some(0.5));
         assert_eq!(image.transform.unwrap().rotation, Some(45.0));
+    }
+
+    #[test]
+    fn header_vml_shape_keeps_its_word_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:shape id="_x0000_s1025" style="position:absolute;margin-left:-10.55pt;margin-top:42.75pt;width:505pt;height:133pt;mso-position-horizontal-relative:text;mso-position-vertical-relative:text"><v:imagedata r:id="rId2"/></v:shape></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.relative_to, "character");
+        assert_eq!(position.horizontal.pos_offset, Some(-133_985.0));
+        assert_eq!(position.vertical.relative_to, "paragraph");
+        assert_eq!(position.vertical.pos_offset, Some(542_925.0));
+    }
+
+    #[test]
+    fn grouped_vml_child_coordinates_are_not_anchor_offsets() {
+        let picture = root(
+            r#"<w:pict xmlns:w="w" xmlns:v="v" xmlns:r="r" xmlns:o="o"><v:group style="position:absolute;margin-left:36pt;margin-top:770.6pt;width:540pt;height:1.5pt"><v:shape id="Picture 41" style="position:absolute;left:2476;top:4038;width:6952;height:3368"><v:imagedata r:id="rId2"/></v:shape></v:group></w:pict>"#,
+        );
+        let position = parse_vml_image_content(&picture, None, None)
+            .unwrap()
+            .position
+            .unwrap();
+        assert_eq!(position.horizontal.pos_offset, None);
+        assert_eq!(position.vertical.pos_offset, None);
+        assert_eq!(position.horizontal.offset, Some(23_583_900.0));
     }
 
     #[test]
