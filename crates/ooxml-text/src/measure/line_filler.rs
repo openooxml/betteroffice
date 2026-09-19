@@ -203,8 +203,13 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
         &mut cumulative_height,
         &mut pending_float_skip,
     );
-    let first_margins =
-        floats::floating_margins(cumulative_height, estimated, p.zones, p.paragraph_y_offset);
+    let first_margins = floats::floating_margins(
+        cumulative_height,
+        estimated,
+        p.zones,
+        p.paragraph_y_offset,
+        p.first_line_width,
+    );
     let first_available = floats::available_width(&first_margins, p.first_line_width).max(1.0);
 
     let mut filler = Filler {
@@ -222,7 +227,7 @@ pub(super) fn fill(p: FillParams) -> Result<ParagraphExtentOut, MeasureError> {
             max_below_baseline: 0.0,
             max_image_height_px: 0.0,
             available: first_available,
-            left_offset: first_margins.left,
+            left_offset: first_margins.text_left(),
             right_offset: first_margins.right,
             segment_zones: first_margins.segments,
             contributions: Vec::new(),
@@ -802,6 +807,7 @@ impl Filler<'_> {
             line_height,
             self.p.zones,
             self.p.paragraph_y_offset,
+            full,
         );
         let available = floats::available_width(&margins, full).max(1.0);
         if available + WRAP_SLACK_PX < self.cur.available {
@@ -810,7 +816,7 @@ impl Filler<'_> {
         self.cumulative_height += skip;
         self.pending_float_skip += skip;
         self.cur.available = available;
-        self.cur.left_offset = margins.left;
+        self.cur.left_offset = margins.text_left();
         self.cur.right_offset = margins.right;
         self.cur.segment_zones = margins.segments;
     }
@@ -900,6 +906,7 @@ impl Filler<'_> {
             estimated,
             self.p.zones,
             self.p.paragraph_y_offset,
+            self.p.body_width,
         );
         let available = floats::available_width(&margins, self.p.body_width).max(1.0);
         self.cur = LineState {
@@ -916,7 +923,7 @@ impl Filler<'_> {
             max_below_baseline: 0.0,
             max_image_height_px: 0.0,
             available,
-            left_offset: margins.left,
+            left_offset: margins.text_left(),
             right_offset: margins.right,
             segment_zones: margins.segments,
             contributions: Vec::new(),

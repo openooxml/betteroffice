@@ -7,8 +7,9 @@
 //! synthetic extent, exactly as an `"invalid: "` error used to.
 
 use ooxml_text::measure::{
-    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatZoneIn, FontChains, IndentIn, MeasureRequest,
-    RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn, TabStopIn,
+    AttrsIn, BlockIn, CompatIn, DefaultsIn, FloatSegmentIn, FloatZoneIn, FontChains, IndentIn,
+    MeasureRequest, RotationBoundsIn, RunFontSlotsIn, RunIn, RunLanguageSlotsIn, SpacingIn,
+    TabStopIn,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -114,7 +115,20 @@ fn zone_in(zone: &FloatingZone) -> Option<FloatZoneIn> {
         right_margin: finite(zone.right_margin)?,
         top_y: finite(zone.top_y)?,
         bottom_y: finite(zone.bottom_y)?,
-        segments: None,
+        segments: match zone.segments.as_slice() {
+            [] => None,
+            strips => Some(
+                strips
+                    .iter()
+                    .map(|strip| {
+                        Some(FloatSegmentIn {
+                            left_offset: finite(strip.left_offset)?,
+                            available_width: finite(strip.available_width)?,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+        },
         full_width_block: zone.full_width_block,
     })
 }
@@ -819,6 +833,7 @@ mod parity_tests {
             right_margin: 10.0,
             top_y: -5.0,
             bottom_y: 40.0,
+            segments: Vec::new(),
             full_width_block: false,
         }];
         assert_parity(
@@ -1114,6 +1129,7 @@ mod parity_tests {
                     right_margin: 8.0,
                     top_y: -4.0,
                     bottom_y: 60.0,
+                    segments: Vec::new(),
                     full_width_block: full_width,
                 }]
             });
@@ -1322,6 +1338,7 @@ mod parity_tests {
                         right_margin: zone[1],
                         top_y: zone[2],
                         bottom_y: zone[3],
+                        segments: Vec::new(),
                         full_width_block: false,
                     }]
                 });

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::cell_layout::{nested_table_float_offset, nested_table_horizontal_offset};
+use crate::floating_objects::MIN_WRAP_SEGMENT_WIDTH;
 use crate::table_grid::{resolve_cell_grid, resolve_table_column_widths, resolve_table_width_px};
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
@@ -23,12 +24,21 @@ fn anchored_shape(shape: &ShapeBlock) -> bool {
     shape.position.is_some() || shape.wrap_type.is_some()
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FloatStrip {
+    pub(crate) left_offset: f64,
+    pub(crate) available_width: f64,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct FloatingZone {
     pub(crate) left_margin: f64,
     pub(crate) right_margin: f64,
     pub(crate) top_y: f64,
     pub(crate) bottom_y: f64,
+    /// Usable strips when the float sits inside the text column and text runs
+    /// past it on both sides; empty means the side margins describe the zone.
+    pub(crate) segments: Vec<FloatStrip>,
     pub(crate) full_width_block: bool,
 }
 
@@ -824,6 +834,16 @@ fn extract_floating_zones(
     Ok(zones)
 }
 
+/// Whether a line runs past a float rather than stopping at its wider side.
+/// Both strips must be worth wrapping into, and the band the renderer cannot
+/// jump has to be narrower than the strip the one-sided fallback would throw
+/// away — otherwise keeping one side is the closer approximation.
+fn flows_past(strip_left: f64, strip_right: f64, band: f64) -> bool {
+    strip_left >= MIN_WRAP_SEGMENT_WIDTH
+        && strip_right >= MIN_WRAP_SEGMENT_WIDTH
+        && band < strip_left.min(strip_right)
+}
+
 fn extract_shape_zone(
     shape: &ShapeBlock,
     block_index: usize,
@@ -890,15 +910,37 @@ fn extract_shape_zone(
     }
     let full_width_block = shape.wrap_type.as_deref() == Some("topAndBottom")
         || (left <= 0.0 && right >= content_width);
+    let mut segments = Vec::new();
     let (left_margin, right_margin) = if full_width_block {
         (0.0, 0.0)
     } else {
+        let strip_left = left.max(0.0);
+        let strip_right = (content_width - right).max(0.0);
         let text_on_left = match shape.wrap_text.as_deref() {
             Some("left") => true,
             Some("right") => false,
-            _ => left > content_width - right,
+            // `bothSides` is the schema default and the only value that puts
+            // text past an interior float; `largest` keeps one side.
+            None | Some("bothSides")
+                if flows_past(strip_left, strip_right, (right - left).max(0.0)) =>
+            {
+                segments = vec![
+                    FloatStrip {
+                        left_offset: 0.0,
+                        available_width: strip_left,
+                    },
+                    FloatStrip {
+                        left_offset: right.max(0.0),
+                        available_width: strip_right,
+                    },
+                ];
+                false
+            }
+            _ => strip_left > strip_right,
         };
-        if text_on_left {
+        if !segments.is_empty() {
+            (0.0, 0.0)
+        } else if text_on_left {
             (0.0, (content_width - left).max(0.0))
         } else {
             (right.max(0.0), 0.0)
@@ -910,6 +952,7 @@ fn extract_shape_zone(
             right_margin,
             top_y,
             bottom_y,
+            segments,
             full_width_block,
         },
         anchor_block_index: block_index,
@@ -965,6 +1008,7 @@ fn extract_image_zones(
                 right_margin,
                 top_y: top_y - image.dist_top.unwrap_or(0.0),
                 bottom_y: top_y + image.height + image.dist_bottom.unwrap_or(0.0),
+                segments: Vec::new(),
                 full_width_block: false,
             },
             anchor_block_index: block_index,
@@ -1050,6 +1094,7 @@ fn table_floating_zone_at_x(
         right_margin,
         top_y: top_y - floating.top_from_text.unwrap_or(0.0),
         bottom_y: top_y + measure.total_height + floating.bottom_from_text.unwrap_or(0.0),
+        segments: Vec::new(),
         full_width_block: false,
     }
 }
@@ -1089,6 +1134,7 @@ fn extract_text_box_zone(
                 right_margin: 0.0,
                 top_y: (raw_top - text_box.dist_top.unwrap_or(0.0)).max(0.0),
                 bottom_y,
+                segments: Vec::new(),
                 full_width_block: true,
             },
             anchor_block_index: block_index,
@@ -1119,6 +1165,7 @@ fn extract_text_box_zone(
             right_margin,
             top_y: top_y - text_box.dist_top.unwrap_or(0.0),
             bottom_y: top_y + height + text_box.dist_bottom.unwrap_or(0.0),
+            segments: Vec::new(),
             full_width_block: false,
         },
         anchor_block_index: block_index,
@@ -2294,5 +2341,67 @@ mod tests {
         assert_eq!(extent.lines[0].ascent, 12.8);
         assert_eq!(extent.lines[0].descent, 3.2);
         assert_eq!(extent.total_height, 23.4);
+    }
+
+    fn wrapped_shape(wrap_text: Option<&str>, x: f64, width: f64) -> ShapeBlock {
+        serde_json::from_value(json!({
+            "id": "s",
+            "shapeType": "rect",
+            "geometryPath": [],
+            "width": width,
+            "height": 40.0,
+            "children": [],
+            "wrapType": "square",
+            "wrapText": wrap_text,
+            "wrapDistances": {"top": 0, "bottom": 0, "left": 12, "right": 12},
+            "position": {
+                "horizontal": {"relativeTo": "column", "posOffset": x},
+                "vertical": {"relativeTo": "paragraph", "posOffset": 0}
+            }
+        }))
+        .unwrap()
+    }
+
+    fn shape_zone(wrap_text: Option<&str>, x: f64, width: f64) -> FloatingZone {
+        let mut zones = Vec::new();
+        extract_shape_zone(
+            &wrapped_shape(wrap_text, x, width),
+            0,
+            600.0,
+            None,
+            None,
+            &mut zones,
+        );
+        zones.pop().expect("zone").zone
+    }
+
+    #[test]
+    fn a_narrow_interior_both_sides_float_keeps_a_strip_on_each_side() {
+        let zone = shape_zone(None, 300.0, 6.0);
+        assert_eq!(
+            zone.segments
+                .iter()
+                .map(|strip| (strip.left_offset, strip.available_width))
+                .collect::<Vec<_>>(),
+            vec![(0.0, 288.0), (318.0, 282.0)]
+        );
+        assert_eq!((zone.left_margin, zone.right_margin), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_float_wider_than_the_side_it_would_cost_keeps_one_side() {
+        let zone = shape_zone(None, 200.0, 220.0);
+        assert!(zone.segments.is_empty());
+        assert_eq!((zone.left_margin, zone.right_margin), (0.0, 412.0));
+    }
+
+    #[test]
+    fn largest_and_one_sided_wraps_never_split_the_line() {
+        for wrap_text in ["largest", "left", "right"] {
+            assert!(
+                shape_zone(Some(wrap_text), 300.0, 6.0).segments.is_empty(),
+                "{wrap_text} must keep a single side"
+            );
+        }
     }
 }
