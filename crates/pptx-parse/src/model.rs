@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, TableStyleList, Theme,
-    ThemeFormatScheme,
+    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, StyleReference,
+    TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,6 +137,10 @@ pub struct Slide {
     pub layout_part_path: Option<String>,
     pub show_master_shapes: bool,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
@@ -151,6 +155,10 @@ pub struct SlideLayout {
     pub master_part_path: Option<String>,
     pub show_master_shapes: bool,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
 }
 
@@ -162,6 +170,10 @@ pub struct SlideMaster {
     pub theme_part_path: Option<String>,
     pub layout_part_paths: Vec<String>,
     pub background: Option<ShapeFill>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_picture: Option<Box<PictureFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     pub text_styles: TextStyleSet,
 }
@@ -174,6 +186,9 @@ pub struct ThemePart {
     /// Absent from packages serialized before `a:fmtScheme` was parsed.
     #[serde(default, skip_serializing_if = "ThemeFormatScheme::is_empty")]
     pub format_scheme: ThemeFormatScheme,
+    /// `a:bgFillStyleLst` picture entries, indexed as `p:bgRef` names them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub background_pictures: Vec<Option<PictureFill>>,
 }
 
 /// A chart part resolved against one referenced presentation theme.
