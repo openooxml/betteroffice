@@ -1,26 +1,12 @@
 //! Vertical metrics of the faces Word ships but this package does not bundle,
 //! keyed by the requested family. Read off `head` and `hhea` of Word's own
-//! copies — `Microsoft Word.app/Contents/Resources/DFonts` (16.113), the Office
-//! cloud font cache, and the macOS faces Word embeds under their own name.
-//! FangSong and DFKai-SB are Windows-only and take their family's span. A
-//! family with no entry keeps its substitute's own metrics.
+//! copies and cross-checked against the font programs it embeds in its exports.
+//! A family with no entry keeps its substitute's own metrics.
 //!
-//! A Latin family is listed only when its span is the same under either
-//! reading of Word's line rule — `usWin` box plus external leading, or the
-//! hhea span plus line gap. That holds when the two agree outright, and for a
-//! `USE_TYPO_METRICS` face whose sTypo family equals its hhea family. A face
-//! where the readings disagree is left out: no entry reproduces today's
-//! behaviour exactly, a wrong span does not.
-//!
-//! Word aliases some families to a face this package already bundles —
-//! Helvetica and Times resolve to Arial and Times New Roman in its own
-//! exports — so those names are deliberately absent.
-//!
-//! The view moves vertical metrics only; the substitute keeps its own
-//! advances. An entry is therefore worth having only where those advances are
-//! already close. Gigi is left out on that ground: it is 12% narrower than
-//! Liberation Sans over the document that uses it, so correcting the pitch
-//! alone moves that document a page past Word rather than onto it.
+//! A family is listed only when its span is the same under either reading of
+//! Word's line rule, and when the substitute's advances are already close: the
+//! view moves vertical metrics only, so correcting the pitch of a much
+//! narrower or wider face moves a document past Word rather than onto it.
 
 use crate::font_store::RequestedLineMetrics;
 
@@ -161,7 +147,6 @@ const SEGOE_UI_2048: RequestedLineMetrics = latin(2048, 2210, -514, 0);
 /// Requested Latin family (lowercased) -> the vertical metrics Word measures
 /// it with. Every entry's span is unambiguous (see the module doc).
 const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
-    // Office cloud fonts.
     (&["lato"], latin(2000, 1974, -426, 0)),
     (&["open sans"], latin(2048, 2189, -600, 0)),
     (&["source sans pro"], latin(1000, 984, -273, 0)),
@@ -170,7 +155,6 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         &["segoe ui", "segoe ui symbol", "segoe ui emoji"],
         SEGOE_UI_2048,
     ),
-    // Faces Word ships in DFonts.
     (&["aptos", "aptos display"], latin(2048, 1923, -577, 0)),
     (&["tahoma"], latin(2048, 2049, -423, 0)),
     (&["verdana"], latin(2048, 2059, -430, 0)),
@@ -178,7 +162,6 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["symbol"], latin(2048, 2059, -450, 0)),
     (&["wingdings"], latin(2048, 1841, -432, 0)),
     (&["lucida sans unicode"], latin(2048, 2246, -901, 0)),
-    // macOS faces Word embeds under their own name.
     (&["georgia"], latin(2048, 1878, -449, 0)),
     (&["comic sans ms"], latin(2048, 2257, -597, 0)),
 ];

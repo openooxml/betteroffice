@@ -317,17 +317,9 @@ impl FontStore {
 
     /// A measurement view of `base` carrying `requested`'s line metrics. Shares
     /// `base`'s bytes, so glyphs and advances are unchanged; hosts put the
-    /// returned id at the head of the fallback chain.
-    ///
-    /// An East Asian family moves the hhea span and claims the East Asian code
-    /// pages, which is all the East Asian pitch reads. A Latin family is
-    /// measured from the win box plus external leading, so the view mirrors the
-    /// requested hhea ascender/descender into `usWinAscent`/`usWinDescent` and
-    /// carries its line gap: the win box then spans exactly the requested
-    /// ascender to descender and the leading is exactly the requested gap, for
-    /// any substitute. It also clears the East Asian code pages, so a Latin
-    /// family never takes the East Asian pitch off a substitute that claims
-    /// them.
+    /// returned id at the head of the fallback chain. A Latin entry mirrors the
+    /// span into the win box and clears the East Asian code pages, so the view
+    /// measures the same under either line rule whatever the substitute claims.
     pub fn register_substitute(
         &mut self,
         base: FontId,
