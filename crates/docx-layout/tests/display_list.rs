@@ -1726,7 +1726,7 @@ fn structural_revisions_emit_pinned_primitives() {
                 text: Some("¶".to_string()),
                 fill: Some("#2e7d32".to_string()),
                 x: 62.0,
-                y: 66.0,
+                y: 62.0,
                 w: 8.0,
                 h: 0.0,
             },
@@ -2008,28 +2008,28 @@ fn table_cell_content_insets_border_and_honors_valign() {
 
     // left cell: cx 50 + left-border 1 + padLeft 7 = 58. vAlign bottom:
     // avail = 60 - 1 - 1 = 58, content 20 → offset 38; content top =
-    // 50 + padTop 1 + 38 = 89; baseline = 89 + half-leading 2 + ascent 12 = 103.
+    // 50 + padTop 1 + 38 = 89; baseline = 89 + ascent 12 = 101.
     assert!(
         (sig.1 - 58.0).abs() < 0.01,
         "sig x {} (want 58: cx+border+pad)",
         sig.1
     );
     assert!(
-        (sig.3 - 103.0).abs() < 0.01,
-        "sig baseline {} (want 103: bottom vAlign)",
+        (sig.3 - 101.0).abs() < 0.01,
+        "sig baseline {} (want 101: bottom vAlign)",
         sig.3
     );
 
     // right cell: cx 150 + no border + padLeft 7 = 157; top-anchored →
-    // content top 50 + 1 = 51; baseline = 51 + 2 + 12 = 65.
+    // content top 50 + 1 = 51; baseline = 51 + 12 = 63.
     assert!(
         (date.1 - 157.0).abs() < 0.01,
         "date x {} (want 157: no left border)",
         date.1
     );
     assert!(
-        (date.3 - 65.0).abs() < 0.01,
-        "date baseline {} (want 65: top-anchored)",
+        (date.3 - 63.0).abs() < 0.01,
+        "date baseline {} (want 63: top-anchored)",
         date.3
     );
 }
@@ -2099,7 +2099,7 @@ fn nested_floating_table_offsets_are_relative_to_the_cell_content() {
 fn carried_table_borders_preserve_cell_content_across_slices() {
     use serde_json::json;
 
-    for (alignment, first_baseline) in [("top", 14.0), ("center", 42.0), ("bottom", 70.0)] {
+    for (alignment, first_baseline) in [("top", 12.0), ("center", 40.0), ("bottom", 68.0)] {
         let paragraphs: Vec<_> = (0..4)
             .map(|index| {
                 json!({ "kind": "paragraph", "id": 70 + index,
@@ -2151,11 +2151,11 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
                     first_baseline + index as f64 * 20.0,
                     "{alignment}, page {page_index}, line {index}"
                 );
-                if baseline - 14.0 >= height || baseline + 6.0 <= 0.0 {
+                if baseline - 12.0 >= height || baseline + 8.0 <= 0.0 {
                     continue;
                 }
                 assert!(
-                    baseline >= 14.0 && baseline + 6.0 <= height,
+                    baseline >= 12.0 && baseline + 8.0 <= height,
                     "{alignment}, line {index} crosses the fragment clip"
                 );
                 seen.push(index);
@@ -2169,8 +2169,8 @@ fn carried_table_borders_preserve_cell_content_across_slices() {
 #[test]
 fn cell_paragraphs_stack_with_collapsed_spacing() {
     // a: after 10; b: before 25 (wins over prev after 10) + after 30; c: before
-    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4 → leading 2,
-    // baseline = lineTop + 14). content top = cy 50 + padTop 1 = 51.
+    // 5 (loses to prev after 30). Line box 20 (ascent 12, descent 4, the rest
+    // leading below → baseline = lineTop + 12). content top = cy 50 + padTop 1 = 51.
     let para = |id: u64, ch: &str, before: f64, after: f64, pm: i64| {
         serde_json::json!({
             "kind": "paragraph", "id": id, "pmStart": pm, "pmEnd": pm + 3,
@@ -2215,25 +2215,25 @@ fn cell_paragraphs_stack_with_collapsed_spacing() {
             .3
     };
 
-    // a: top 0 → baseline 51 + 14 = 65.
+    // a: top 0 → baseline 51 + 12 = 63.
     assert!(
-        (base("a") - 65.0).abs() < 0.01,
-        "a baseline {} (want 65)",
+        (base("a") - 63.0).abs() < 0.01,
+        "a baseline {} (want 63)",
         base("a")
     );
     // b: gap max(after 10, before 25) = 25 → top 20 + 25 = 45 → baseline
-    // 51 + 45 + 14 = 110 (before wins the collapse).
+    // 51 + 45 + 12 = 108 (before wins the collapse).
     assert!(
-        (base("b") - 110.0).abs() < 0.01,
-        "b baseline {} (want 110)",
+        (base("b") - 108.0).abs() < 0.01,
+        "b baseline {} (want 108)",
         base("b")
     );
     // c: gap max(after 30, before 5) = 30 → top 45 + 20 + 30 = 95 → baseline
-    // 51 + 95 + 14 = 160 (after wins). The old line-height-only stack put it at
-    // 51 + 40 + 14 = 105, one after-spacing block too high.
+    // 51 + 95 + 12 = 158 (after wins). The old line-height-only stack put it at
+    // 51 + 40 + 12 = 103, one after-spacing block too high.
     assert!(
-        (base("c") - 160.0).abs() < 0.01,
-        "c baseline {} (want 160)",
+        (base("c") - 158.0).abs() < 0.01,
+        "c baseline {} (want 158)",
         base("c")
     );
 }
@@ -2748,8 +2748,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
     );
 
     // inner paragraphs at content origin: x = 100 + border 2 + padLeft 7 = 109;
-    // first para top = 50 + 2 + 4 = 56 → baseline 56 + half-leading 4 + ascent 12
-    // = 72; second para stacks by totalHeight 24 → baseline 96.
+    // first para top = 50 + 2 + 4 = 56 → baseline 56 + ascent 12 = 68; second
+    // para stacks by totalHeight 24 → baseline 92.
     let t = text_prims(prims);
     let alpha = t.iter().find(|x| x.0 == "Alpha").expect("Alpha inner text");
     let bravo = t.iter().find(|x| x.0 == "Bravo").expect("Bravo inner text");
@@ -2759,8 +2759,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         alpha.1
     );
     assert!(
-        (alpha.3 - 72.0).abs() < 0.01,
-        "Alpha baseline {} (want 72)",
+        (alpha.3 - 68.0).abs() < 0.01,
+        "Alpha baseline {} (want 68)",
         alpha.3
     );
     assert!(
@@ -2769,8 +2769,8 @@ fn text_box_fragment_emits_container_and_inner_text() {
         bravo.1
     );
     assert!(
-        (bravo.3 - 96.0).abs() < 0.01,
-        "Bravo baseline {} (want 96)",
+        (bravo.3 - 92.0).abs() < 0.01,
+        "Bravo baseline {} (want 92)",
         bravo.3
     );
 
@@ -3054,4 +3054,56 @@ fn modern_text_effects_thread_to_text_primitives() {
         })
         .expect("text primitive");
     assert_eq!(text.attrs.modern_effects.as_ref(), Some(&effects));
+}
+
+/// Word hangs an `auto` line's first baseline off the box top: raising the
+/// multiple grows the box downward and leaves the baseline put. Measured on
+/// Word 16.113, Arial 72pt, 1-inch top margin — 139.552pt under w:line 240,
+/// 276, 288, 360 and 480 alike (spread 0.045pt), against the model's
+/// 72 + (1854 + 67) / 2048 x 72 = 139.535pt, inside the 0.25pt device grid.
+#[test]
+fn auto_spacing_keeps_the_first_baseline_at_the_top_of_a_taller_box() {
+    const WORD_BASELINE_PT: f64 = 139.552;
+    const ASCENT: f64 = 1921.0 / 2048.0 * 72.0;
+    const DESCENT: f64 = 434.0 / 2048.0 * 72.0;
+    const SINGLE: f64 = ASCENT + DESCENT;
+
+    for multiple in [1.0_f64, 1.15, 1.2, 1.5, 2.0] {
+        let height = SINGLE * multiple;
+        let input = serde_json::json!({
+            "measured": [{
+                "block": { "kind": "paragraph", "id": 1, "pmStart": 1, "pmEnd": 7,
+                    "runs": [{ "kind": "text", "text": "Hxdpq", "pmStart": 1, "pmEnd": 6 }] },
+                "measure": { "kind": "paragraph", "totalHeight": height, "lines": [
+                    { "headRun": 0, "headChar": 0, "tailRun": 0, "tailChar": 5,
+                      "width": 200.0, "ascent": ASCENT, "descent": DESCENT,
+                      "lineHeight": height }
+                ] }
+            }],
+            "options": {},
+            "layout": { "pages": [{ "size": { "w": 612.0, "h": 792.0 }, "margins": {},
+                "fragments": [
+                    { "kind": "paragraph", "blockId": 1, "x": 72.0, "y": 72.0,
+                      "width": 468.0, "height": height, "fromLine": 0, "toLine": 1,
+                      "pmStart": 1, "pmEnd": 7 }
+                ] }] }
+        })
+        .to_string();
+
+        let dl = build_dl(&input);
+        let baseline = text_prims(&dl.pages[0].primitives)
+            .first()
+            .expect("one text primitive")
+            .3;
+        assert!(
+            (baseline - (72.0 + ASCENT)).abs() < 0.01,
+            "multiple {multiple}: baseline {baseline} (want {})",
+            72.0 + ASCENT
+        );
+        assert!(
+            (baseline - WORD_BASELINE_PT).abs() <= 0.25,
+            "multiple {multiple}: baseline {baseline} is off Word's {WORD_BASELINE_PT} \
+             by more than its 0.25pt device grid"
+        );
+    }
 }

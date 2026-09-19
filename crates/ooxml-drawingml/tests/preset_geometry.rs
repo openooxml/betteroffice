@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use ooxml_drawingml::{GeometryPathCommand, preset_geometry_to_path};
+use ooxml_drawingml::{
+    GeometryPathCommand, preset_geometry_default_adjustments, preset_geometry_to_path,
+};
 use proptest::prelude::*;
 use proptest::sample::select;
 
@@ -70,7 +72,52 @@ const PRESETS: &[&str] = &[
     "flowChartInputOutput",
     "flowChartManualInput",
     "flowChartTerminator",
+    "donut",
+    "noSmoking",
+    "corner",
+    "foldedCorner",
+    "mathMultiply",
+    "bentArrow",
+    "ribbon",
+    "ellipseRibbon",
+    "cloudCallout",
+    "wedgeEllipseCallout",
+    "wedgeRoundRectCallout",
 ];
+
+/// Presets added here whose ECMA-376 definition curves rather than only turning corners.
+const NEW_PRESETS: &[&str] = &[
+    "donut",
+    "noSmoking",
+    "corner",
+    "foldedCorner",
+    "mathMultiply",
+    "bentArrow",
+    "ribbon",
+    "ellipseRibbon",
+    "cloudCallout",
+    "wedgeEllipseCallout",
+    "wedgeRoundRectCallout",
+];
+
+/// Callouts whose ECMA-376 tail target is unpinned, so it points outside the frame by design.
+const CALLOUTS: &[&str] = &[
+    "cloudCallout",
+    "wedgeEllipseCallout",
+    "wedgeRoundRectCallout",
+];
+
+/// Presets whose ECMA-376 curve stays inside the frame while a control point of it does not.
+const HULL_OUTSIDE_FRAME: &[&str] = &["ellipseRibbon", "noSmoking"];
+
+/// Points sampled along each curve when a test needs the outline rather than its hull.
+const CURVE_SAMPLES: usize = 24;
+
+/// ECMA-376 lets `mathMultiply`'s arms overrun the frame near the top of its adjust.
+const SPEC_OVERRUNS_FRAME: &[&str] = &["mathMultiply"];
+
+/// `cloudCallout`'s body overruns the 43200 frame its own path declares by about 1%.
+const BODY_SLACK: f64 = 0.02;
 
 /// Connectors whose ECMA-376 adjusts are unpinned, so they may route outside the frame.
 const UNPINNED_CONNECTORS: &[&str] = &["bentConnector", "curvedConnector"];
@@ -149,12 +196,21 @@ fn adjustments() -> impl Strategy<Value = HashMap<String, f64>> {
         proptest::option::of(any_adjust()),
         proptest::option::of(any_adjust()),
         proptest::option::of(any_adjust()),
+        proptest::option::of(any_adjust()),
+        proptest::option::of(any_adjust()),
     )
-        .prop_map(|(adj, adj1, adj2, vf)| {
-            [("adj", adj), ("adj1", adj1), ("adj2", adj2), ("vf", vf)]
-                .into_iter()
-                .filter_map(|(name, value)| Some((name.to_owned(), value?)))
-                .collect()
+        .prop_map(|(adj, adj1, adj2, adj3, adj4, vf)| {
+            [
+                ("adj", adj),
+                ("adj1", adj1),
+                ("adj2", adj2),
+                ("adj3", adj3),
+                ("adj4", adj4),
+                ("vf", vf),
+            ]
+            .into_iter()
+            .filter_map(|(name, value)| Some((name.to_owned(), value?)))
+            .collect()
         })
 }
 
@@ -243,6 +299,96 @@ fn feature(shape: &str, adjust: &str, path: &[GeometryPathCommand]) -> f64 {
     }
 }
 
+/// Splits a path at each `Move`, so a ring and its hole can be compared.
+fn subpaths(path: &[GeometryPathCommand]) -> Vec<Vec<GeometryPathCommand>> {
+    let mut out: Vec<Vec<GeometryPathCommand>> = Vec::new();
+    for command in path {
+        if matches!(command, GeometryPathCommand::Move { .. }) || out.is_empty() {
+            out.push(Vec::new());
+        }
+        out.last_mut()
+            .expect("a subpath is open")
+            .push(command.clone());
+    }
+    out
+}
+
+/// The outline itself, with every curve flattened.
+fn sample(path: &[GeometryPathCommand]) -> Vec<(f64, f64)> {
+    use GeometryPathCommand as C;
+    let mut points = Vec::new();
+    let (mut cursor, mut opened) = ((0.0, 0.0), (0.0, 0.0));
+    for command in path {
+        match *command {
+            C::Move { x, y } => {
+                cursor = (x, y);
+                opened = cursor;
+                points.push(cursor);
+            }
+            C::Line { x, y } => {
+                cursor = (x, y);
+                points.push(cursor);
+            }
+            C::Quad { cpx, cpy, x, y } => {
+                for step in 1..=CURVE_SAMPLES {
+                    let t = step as f64 / CURVE_SAMPLES as f64;
+                    let u = 1.0 - t;
+                    points.push((
+                        u * u * cursor.0 + 2.0 * u * t * cpx + t * t * x,
+                        u * u * cursor.1 + 2.0 * u * t * cpy + t * t * y,
+                    ));
+                }
+                cursor = (x, y);
+            }
+            C::Cubic {
+                cp1x,
+                cp1y,
+                cp2x,
+                cp2y,
+                x,
+                y,
+            } => {
+                for step in 1..=CURVE_SAMPLES {
+                    let t = step as f64 / CURVE_SAMPLES as f64;
+                    let u = 1.0 - t;
+                    points.push((
+                        u * u * u * cursor.0
+                            + 3.0 * u * u * t * cp1x
+                            + 3.0 * u * t * t * cp2x
+                            + t * t * t * x,
+                        u * u * u * cursor.1
+                            + 3.0 * u * u * t * cp1y
+                            + 3.0 * u * t * t * cp2y
+                            + t * t * t * y,
+                    ));
+                }
+                cursor = (x, y);
+            }
+            C::Close => {
+                cursor = opened;
+                points.push(cursor);
+            }
+        }
+    }
+    points
+}
+
+fn signed_area(points: &[(f64, f64)]) -> f64 {
+    points
+        .iter()
+        .zip(points.iter().cycle().skip(1))
+        .map(|(a, b)| a.0 * b.1 - b.0 * a.1)
+        .sum::<f64>()
+        / 2.0
+}
+
+fn bounds(points: &[(f64, f64)]) -> (f64, f64, f64, f64) {
+    points.iter().fold(
+        (f64::MAX, f64::MAX, f64::MIN, f64::MIN),
+        |(l, t, r, b), &(x, y)| (l.min(x), t.min(y), r.max(x), b.max(y)),
+    )
+}
+
 proptest! {
     #[test]
     fn every_preset_emits_finite_coordinates(
@@ -306,7 +452,10 @@ proptest! {
         let pinned = PRESETS
             .iter()
             .filter(|shape| !UNPINNED_CONNECTORS.iter().any(|prefix| shape.starts_with(prefix)))
-            .filter(|shape| !FRAME_SCALED_STARS.contains(shape));
+            .filter(|shape| !FRAME_SCALED_STARS.contains(shape))
+            .filter(|shape| !CALLOUTS.contains(shape))
+            .filter(|shape| !SPEC_OVERRUNS_FRAME.contains(shape))
+            .filter(|shape| !HULL_OUTSIDE_FRAME.contains(shape));
         for shape in pinned {
             for (x, y) in coordinates(&draw(shape, &adjustments, aspect)) {
                 prop_assert!(
@@ -334,5 +483,189 @@ proptest! {
             larger > smaller,
             "{shape} {adjust}: {low} gives {smaller}, {high} gives {larger} (spec max {max})"
         );
+    }
+}
+
+proptest! {
+    #[test]
+    fn a_pinned_outline_stays_inside_its_frame(
+        adjustments in adjustments(),
+        aspect in aspect(),
+    ) {
+        let pinned = PRESETS
+            .iter()
+            .filter(|shape| !UNPINNED_CONNECTORS.iter().any(|prefix| shape.starts_with(prefix)))
+            .filter(|shape| !FRAME_SCALED_STARS.contains(shape))
+            .filter(|shape| !CALLOUTS.contains(shape))
+            .filter(|shape| !SPEC_OVERRUNS_FRAME.contains(shape));
+        for shape in pinned {
+            for (x, y) in sample(&draw(shape, &adjustments, aspect)) {
+                prop_assert!(
+                    (-TOLERANCE..=1.0 + TOLERANCE).contains(&x)
+                        && (-TOLERANCE..=1.0 + TOLERANCE).contains(&y),
+                    "{shape} outline left its frame at ({x}, {y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_new_preset_closes_every_subpath(
+        adjustments in adjustments(),
+        aspect in any_aspect(),
+    ) {
+        for shape in NEW_PRESETS {
+            for part in subpaths(&draw(shape, &adjustments, aspect)) {
+                prop_assert!(
+                    matches!(part.first(), Some(GeometryPathCommand::Move { .. })),
+                    "{shape} opened a subpath without a move"
+                );
+                prop_assert!(
+                    matches!(part.last(), Some(GeometryPathCommand::Close)),
+                    "{shape} left a subpath open: {part:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_ring_hole_is_wound_against_its_ring(
+        shape in select(&["donut", "noSmoking"][..]),
+        adj in 0.02f64..0.45,
+        aspect in aspect(),
+    ) {
+        let parts = subpaths(&draw(shape, &named(&[("adj", adj)]), aspect));
+        prop_assert!(parts.len() >= 2, "{shape} drew no hole");
+        let ring = signed_area(&sample(&parts[0]));
+        for hole in &parts[1..] {
+            let area = signed_area(&sample(hole));
+            prop_assert!(
+                ring * area < 0.0,
+                "{shape} hole winds with its ring: ring {ring}, hole {area}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_donut_hole_shrinks_as_its_adjust_grows(
+        a in 0.02f64..0.45,
+        b in 0.02f64..0.45,
+        aspect in aspect(),
+    ) {
+        prop_assume!((a - b).abs() > 1e-3);
+        let hole = |adj: f64| {
+            let parts = subpaths(&draw("donut", &named(&[("adj", adj)]), aspect));
+            signed_area(&sample(&parts[1])).abs()
+        };
+        let (low, high) = (a.min(b), a.max(b));
+        prop_assert!(
+            hole(high) < hole(low),
+            "donut hole grew from adj {low} to {high}: {} then {}",
+            hole(low),
+            hole(high)
+        );
+    }
+
+    #[test]
+    fn a_callout_tail_leaves_its_body(
+        shape in select(CALLOUTS),
+        aspect in aspect(),
+    ) {
+        let defaults = preset_geometry_default_adjustments(shape);
+        let reach = defaults["adj2"] + 0.5;
+        let (_, _, _, bottom) = bounds(&sample(&draw(shape, &defaults, aspect)));
+        prop_assert!(
+            bottom >= reach - TOLERANCE && bottom < reach + BODY_SLACK * 2.0,
+            "{shape} tail reached {bottom}, not the default adjust's {reach}"
+        );
+    }
+
+    #[test]
+    fn a_callout_body_stays_inside_its_frame(
+        shape in select(CALLOUTS),
+        aspect in aspect(),
+    ) {
+        let centred = draw(shape, &named(&[("adj1", 0.0), ("adj2", 0.0)]), aspect);
+        let (left, top, right, bottom) = bounds(&sample(&centred));
+        prop_assert!(
+            left > -BODY_SLACK && top > -BODY_SLACK
+                && right < 1.0 + BODY_SLACK && bottom < 1.0 + BODY_SLACK,
+            "{shape} body left its frame: {left}..{right} by {top}..{bottom}"
+        );
+        prop_assert!(
+            right - left > 0.95 && bottom - top > 0.95,
+            "{shape} body does not fill its frame: {left}..{right} by {top}..{bottom}"
+        );
+    }
+
+    #[test]
+    fn a_corner_notch_is_measured_off_the_shortest_side(
+        a1 in 0.0f64..=1.0,
+        a2 in 0.0f64..=1.0,
+        aspect in aspect(),
+    ) {
+        let (width, height) = (width_in_shortest_sides(aspect), height_in_shortest_sides(aspect));
+        let (adj1, adj2) = (a1 * height, a2 * width);
+        let v = vertices(&draw("corner", &named(&[("adj1", adj1), ("adj2", adj2)]), aspect));
+        prop_assert!((v[1].0 * width - adj2).abs() < TOLERANCE, "arm {:?} for adj2 {adj2}", v[1]);
+        prop_assert!(
+            ((1.0 - v[2].1) * height - adj1).abs() < TOLERANCE,
+            "leg {:?} for adj1 {adj1}",
+            v[2]
+        );
+    }
+
+    #[test]
+    fn math_multiply_turns_onto_itself(adj in 0.0f64..=0.519_65, aspect in aspect()) {
+        let v = vertices(&draw("mathMultiply", &named(&[("adj1", adj)]), aspect));
+        let turned = v.iter().map(|&(x, y)| (1.0 - x, 1.0 - y)).collect::<Vec<_>>();
+        prop_assert!(same_polygon(&v, &turned), "mathMultiply is lopsided: {v:?}");
+    }
+
+    #[test]
+    fn a_folded_corner_winds_its_fold_with_its_body(
+        adj in 0.0f64..=0.5,
+        aspect in aspect(),
+    ) {
+        let parts = subpaths(&draw("foldedCorner", &named(&[("adj", adj)]), aspect));
+        prop_assert_eq!(parts.len(), 2, "foldedCorner lost its fold");
+        let (body, fold) = (signed_area(&sample(&parts[0])), signed_area(&sample(&parts[1])));
+        prop_assert!(
+            body * fold >= 0.0,
+            "foldedCorner fold would punch a hole: body {body}, fold {fold}"
+        );
+    }
+
+    #[test]
+    fn a_bent_arrow_reaches_its_frame_edge(
+        adjustments in adjustments(),
+        aspect in aspect(),
+    ) {
+        let v = vertices(&draw("bentArrow", &adjustments, aspect));
+        let (left, top, right, bottom) = bounds(&v);
+        prop_assert!((left).abs() < TOLERANCE && (right - 1.0).abs() < TOLERANCE, "x span {left}..{right}");
+        prop_assert!((top).abs() < TOLERANCE && (bottom - 1.0).abs() < TOLERANCE, "y span {top}..{bottom}");
+    }
+
+    #[test]
+    fn a_curved_preset_is_not_a_polygon(
+        adjustments in adjustments(),
+        aspect in aspect(),
+    ) {
+        let curved = ["donut", "noSmoking", "ribbon", "ellipseRibbon", "cloudCallout",
+                      "wedgeEllipseCallout", "wedgeRoundRectCallout", "bentArrow"];
+        for shape in curved {
+            let path = draw(shape, &adjustments, aspect);
+            let curves = path
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        GeometryPathCommand::Quad { .. } | GeometryPathCommand::Cubic { .. }
+                    )
+                })
+                .count();
+            prop_assert!(curves > 0, "{shape} drew only straight edges");
+        }
     }
 }

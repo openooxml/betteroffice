@@ -4,10 +4,11 @@ use std::sync::Arc;
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
-    ShapeFill, ShapeOutline, ShapeStyle, TableCellBorder, TableCellBorders as StyleCellBorders,
-    TableCellPosition, TableCellStyle, TableStyleFlags, Theme, ThemeFormatScheme,
-    normalize_table_column_widths, preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
-    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
+    ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
+    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyleFlags,
+    Theme, ThemeFormatScheme, normalize_table_column_widths, preset_geometry_to_path,
+    resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex, resolve_theme_font_ref,
+    style_fill, style_outline,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
@@ -40,6 +41,8 @@ const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 /// Size a super/subscript run shapes at, relative to its own `sz`.
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
 const MIN_AUTOFIT_SCALE: f32 = 0.5;
+/// `p:bgRef/@idx` counts `a:bgFillStyleLst` entries from here.
+const BACKGROUND_FILL_BASE: u32 = 1_001;
 /// Compatibility line pitch in ems.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
@@ -203,11 +206,41 @@ impl SlideRenderer {
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
             .unwrap_or(&default_format_scheme);
-        let background = parsed_slide
-            .and_then(|slide| slide.background.as_ref())
-            .or_else(|| layout.and_then(|layout| layout.background.as_ref()))
-            .or_else(|| master.and_then(|master| master.background.as_ref()))
+        let background_source = [
+            parsed_slide.map(BackgroundSource::from_slide),
+            layout.map(BackgroundSource::from_layout),
+            master.map(BackgroundSource::from_master),
+        ]
+        .into_iter()
+        .flatten()
+        .find(BackgroundSource::is_declared);
+        let background_fill =
+            background_source
+                .as_ref()
+                .and_then(|source| match source.reference {
+                    Some(reference) => Some(style_fill(format_scheme, reference, theme)),
+                    None => source.fill.cloned(),
+                });
+        let background_picture = background_source.as_ref().and_then(|source| {
+            source.picture.or_else(|| {
+                let index = source.reference?.index.checked_sub(BACKGROUND_FILL_BASE)?;
+                theme_part?
+                    .background_pictures
+                    .get(index as usize)?
+                    .as_ref()
+            })
+        });
+        // A referenced picture style carries no colour of its own, so keep the
+        // reference's own colour for the fills we cannot paint, such as a tile.
+        let background = background_fill
+            .as_ref()
             .and_then(|fill| paint(fill, theme))
+            .or_else(|| {
+                background_source
+                    .as_ref()
+                    .and_then(|source| source.fill)
+                    .and_then(|fill| paint(fill, theme))
+            })
             .or_else(|| {
                 Some(Paint::Solid {
                     color: "#ffffff".to_owned(),
@@ -235,8 +268,30 @@ impl SlideRenderer {
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
         };
         let root_space = Space::root();
-        let show_master = parsed_slide.is_none_or(|slide| slide.show_master_shapes)
-            && layout.is_none_or(|layout| layout.show_master_shapes);
+        if let Some(picture) = background_picture
+            && let Some(asset_id) = picture.media_part_path.clone()
+        {
+            builder.primitives.push(Primitive::Image {
+                object_id: 0,
+                shape_id: None,
+                name: "Background".to_owned(),
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+                asset_id: Some(asset_id),
+                effects: Vec::new(),
+                crop: picture_fill_crop(picture),
+                path: None,
+                stroke: None,
+                shadow: None,
+                transform: Transform::default(),
+            });
+        }
+        // `p:sld/@showMasterSp` hides the layout's own decoration as well as the
+        // master's, because the master reaches the slide through the layout.
+        let show_layout = parsed_slide.is_none_or(|slide| slide.show_master_shapes);
+        let show_master = show_layout && layout.is_none_or(|layout| layout.show_master_shapes);
         if show_master && let Some(master) = master {
             for (index, shape) in master.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
@@ -248,7 +303,7 @@ impl SlideRenderer {
                 }
             }
         }
-        if let Some(layout) = layout {
+        if show_layout && let Some(layout) = layout {
             for (index, shape) in layout.shapes.iter().enumerate() {
                 if node_placeholder(shape).is_none() {
                     builder.render_parsed_shape(
@@ -322,6 +377,43 @@ pub enum HitTestResult {
         story_id: String,
         position: u32,
     },
+}
+
+/// The first of slide, layout and master that declares `p:bg`.
+struct BackgroundSource<'a> {
+    fill: Option<&'a ShapeFill>,
+    picture: Option<&'a PictureFill>,
+    reference: Option<&'a StyleReference>,
+}
+
+impl<'a> BackgroundSource<'a> {
+    fn from_slide(slide: &'a Slide) -> Self {
+        Self {
+            fill: slide.background.as_ref(),
+            picture: slide.background_picture.as_deref(),
+            reference: slide.background_reference.as_ref(),
+        }
+    }
+
+    fn from_layout(layout: &'a SlideLayout) -> Self {
+        Self {
+            fill: layout.background.as_ref(),
+            picture: layout.background_picture.as_deref(),
+            reference: layout.background_reference.as_ref(),
+        }
+    }
+
+    fn from_master(master: &'a SlideMaster) -> Self {
+        Self {
+            fill: master.background.as_ref(),
+            picture: master.background_picture.as_deref(),
+            reference: master.background_reference.as_ref(),
+        }
+    }
+
+    fn is_declared(&self) -> bool {
+        self.fill.is_some() || self.picture.is_some() || self.reference.is_some()
+    }
 }
 
 pub struct RenderedSlide {
@@ -5400,6 +5492,120 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("{shape_id} was not drawn"))
+    }
+
+    #[test]
+    fn hiding_master_shapes_drops_the_layout_decoration_too() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_301).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.layouts[0]
+            .shapes
+            .push(package.slides[0].shapes[0].clone());
+        let shown = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&shown)
+                .iter()
+                .any(|id| id.starts_with("layout:"))
+        );
+        package.slides[0].show_master_shapes = false;
+        let hidden = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert!(
+            painted_shape_ids(&hidden)
+                .iter()
+                .all(|id| !id.starts_with("layout:") && !id.starts_with("master:"))
+        );
+        assert_eq!(
+            hidden.display_list.background,
+            shown.display_list.background
+        );
+    }
+
+    #[test]
+    fn a_background_picture_paints_first_from_the_slide_or_the_theme() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_302).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let picture = PictureFill {
+            relationship_id: None,
+            media_part_path: Some("ppt/media/image1.png".to_owned()),
+            crop: PictureCrop::default(),
+            fill_rect: PictureCrop {
+                top: -6_000,
+                bottom: -6_000,
+                ..PictureCrop::default()
+            },
+        };
+        package.slides[0].background_picture = Some(Box::new(picture.clone()));
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        let Primitive::Image {
+            object_id,
+            asset_id,
+            x,
+            y,
+            w,
+            h,
+            crop,
+            ..
+        } = &rendered.display_list.primitives[0]
+        else {
+            panic!("the background paints before every shape")
+        };
+        assert_eq!(*object_id, 0);
+        assert_eq!(asset_id.as_deref(), Some("ppt/media/image1.png"));
+        assert_eq!(
+            (*x, *y, *w, *h),
+            (
+                0.0,
+                0.0,
+                rendered.display_list.width,
+                rendered.display_list.height
+            )
+        );
+        assert!(crop.top > 0.0 && crop.bottom > 0.0);
+
+        package.slides[0].background_picture = None;
+        package.slides[0].background = None;
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].background_pictures = vec![None, None, Some(picture)];
+        let referenced = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            referenced.display_list.primitives[0],
+            rendered.display_list.primitives[0]
+        );
+    }
+
+    #[test]
+    fn an_unpaintable_background_style_keeps_the_reference_colour() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_303).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        let color = ColorValue {
+            rgb: Some("123456".to_owned()),
+            ..ColorValue::default()
+        };
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "theme".to_owned(),
+            color: Some(color),
+            gradient: None,
+        });
+        package.slides[0].background_reference = Some(StyleReference {
+            index: 1_003,
+            color: None,
+        });
+        package.themes[0].format_scheme.background_fills =
+            vec![None, None, Some(ShapeFill::named("picture"))];
+        package.themes[0].background_pictures = Vec::new();
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#123456".to_owned()
+            })
+        );
     }
 
     #[test]

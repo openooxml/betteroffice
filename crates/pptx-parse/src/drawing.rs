@@ -42,6 +42,8 @@ impl GuideValue {
 pub(crate) struct CommonSlideData {
     pub name: Option<String>,
     pub background: Option<ShapeFill>,
+    pub background_picture: Option<Box<PictureFill>>,
+    pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
 }
 
@@ -56,9 +58,21 @@ pub(crate) fn common_slide_data(
     let name = common
         .and_then(|value| value.attribute("name"))
         .map(str::to_owned);
-    let background = common
-        .and_then(|value| value.child("bg"))
-        .and_then(parse_background);
+    let background_element = common.and_then(|value| value.child("bg"));
+    let background = background_element.and_then(parse_background);
+    let background_picture = background_element
+        .and_then(|value| value.child("bgPr"))
+        .and_then(|value| parse_picture_fill(value, relationships))
+        .map(Box::new);
+    let background_reference = background_element
+        .and_then(|value| value.child("bgRef"))
+        .map(|reference| StyleReference {
+            index: reference
+                .attribute("idx")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_default(),
+            color: parse_color_container(reference),
+        });
     let mut shapes = if let Some(tree) = common.and_then(|value| value.child("spTree")) {
         parse_shape_children(tree, relationships, part, budget, elements)?
     } else {
@@ -68,6 +82,8 @@ pub(crate) fn common_slide_data(
     Ok(CommonSlideData {
         name,
         background,
+        background_picture,
+        background_reference,
         shapes,
     })
 }
@@ -841,6 +857,14 @@ fn parse_picture_fill(element: &XmlElement, relationships: &[Relationship]) -> O
     let fill = element
         .child_elements()
         .find(|child| is_fill_element(child))?;
+    picture_fill_element(fill, relationships)
+}
+
+/// Resolves one stretched `a:blipFill`, wherever it is declared.
+pub(crate) fn picture_fill_element(
+    fill: &XmlElement,
+    relationships: &[Relationship],
+) -> Option<PictureFill> {
     if fill.local_name() != "blipFill" || fill.child("tile").is_some() {
         return None;
     }

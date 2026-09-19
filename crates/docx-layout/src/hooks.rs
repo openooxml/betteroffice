@@ -576,6 +576,19 @@ pub fn layout_floating_table(
     paginator.push_fragment_direct(fragment);
 
     if full_width {
+        let band_bottom = y + measure.total_height + finite(floating.bottom_from_text);
+        let current = paginator.state(state_idx);
+        let reflowable = vertical == "page"
+            && floating.tblp_y.is_some_and(f64::is_finite)
+            && y >= current.content_top
+            && band_bottom <= current.content_limit;
+        if reflowable
+            && paginator
+                .clear_float_band(state_idx, y, band_bottom)
+                .is_some()
+        {
+            return Ok(());
+        }
         // Charges the band to the page even when it opens above the pen; flow
         // already emitted into it keeps its place.
         let pen_y = paginator.state(state_idx).pen_y;

@@ -1315,45 +1315,6 @@ fn measure_shape(
     })
 }
 
-/// Preserves space-before when a float pushes the first line down.
-fn measure_cell_paragraph_with_floats(
-    paragraph: &ParagraphBlock,
-    content_width: f64,
-    config: &MeasurementConfig,
-    zones: &[FloatingZone],
-    y: f64,
-    before: f64,
-) -> Result<ParagraphExtent, String> {
-    let mut shift = 0.0;
-    let mut remaining = zones.len();
-    loop {
-        let mut extent = measure_paragraph_with_context(
-            paragraph,
-            content_width,
-            config,
-            (!zones.is_empty()).then_some(zones),
-            y + shift,
-        )?;
-        let first_skip = extent
-            .lines
-            .first()
-            .and_then(|line| line.float_skip_before)
-            .unwrap_or(0.0);
-        if before > 0.0 && first_skip > 0.0 && remaining > 0 {
-            shift += first_skip + before;
-            remaining -= 1;
-            continue;
-        }
-        if shift > 0.0
-            && let Some(first) = extent.lines.first_mut()
-        {
-            first.float_skip_before = Some(first_skip + shift);
-            extent.total_height += shift;
-        }
-        return Ok(extent);
-    }
-}
-
 fn measure_cell_blocks_with_table_floats(
     blocks: &mut [LayoutBlock],
     content_width: f64,
@@ -1373,16 +1334,17 @@ fn measure_cell_blocks_with_table_floats(
         };
         let before = spacing.and_then(|spacing| spacing.before).unwrap_or(0.0);
         let after = spacing.and_then(|spacing| spacing.after).unwrap_or(0.0);
-        y += previous_after.max(before);
+        // `y` tracks the paragraph's top, space-before included, which is the
+        // origin the measurer probes float zones from.
+        y += (previous_after - before).max(0.0);
         let extent = match &*block {
             LayoutBlock::Paragraph(paragraph) => {
-                BlockExtent::Paragraph(measure_cell_paragraph_with_floats(
+                BlockExtent::Paragraph(measure_paragraph_with_context(
                     paragraph,
                     content_width,
                     config,
-                    &zones,
+                    (!zones.is_empty()).then_some(zones.as_slice()),
                     y,
-                    before,
                 )?)
             }
             _ => measure_block(block, content_width, config)?,
@@ -1405,7 +1367,7 @@ fn measure_cell_blocks_with_table_floats(
             zone.bottom_y += y;
             zones.push(zone);
         } else {
-            y += extent_height(&extent) - before - after;
+            y += extent_height(&extent) - after;
         }
         previous_after = after;
         measured.push(extent);
@@ -2113,6 +2075,127 @@ mod tests {
             assert_eq!(paragraph.lines[0].left_offset.unwrap_or(0.0), 0.0);
             assert_eq!(paragraph.lines[0].float_skip_before.unwrap_or(0.0), 0.0);
         }
+    }
+
+    /// Word 16.113, probed at twip resolution: the box a paragraph's first
+    /// line is tested against runs from the paragraph top through the line's
+    /// bottom, so it covers space-before. A `topAndBottom` band reaching into
+    /// that box — including the band the paragraph anchors itself — moves the
+    /// line below the band and spends space-before again underneath it, at
+    /// every band height probed from 0.5pt to 200pt. A band starting exactly
+    /// at the line's bottom leaves it alone.
+    #[test]
+    fn a_full_width_band_reaching_a_paragraph_moves_its_first_line_below() {
+        let font_id = crate::register_measure_font(include_bytes!(
+            "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
+        ))
+        .unwrap();
+        let config = MeasurementConfig {
+            font_chains: BTreeMap::from([("liberation sans|0|0".to_owned(), vec![font_id])]),
+            defaults: json!({"fontFamily":"Liberation Sans","fontSize":12}),
+            ..MeasurementConfig::default()
+        };
+        let measure = |offset: f64, height: f64, before: f64| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":200,"height":height,"wrapType":"topAndBottom",
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                             "vertical":{"relativeTo":"paragraph","posOffset":offset}}},
+                {"kind":"paragraph","id":"anchor","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"anchor"}]},
+                {"kind":"paragraph","id":"tail","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"tail"}]}
+            ]))
+            .unwrap();
+            let measures =
+                measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap();
+            let skips: Vec<f64> = measures[1..]
+                .iter()
+                .map(|measure| {
+                    let BlockExtent::Paragraph(paragraph) = measure else {
+                        panic!()
+                    };
+                    paragraph.lines[0].float_skip_before.unwrap_or(0.0)
+                })
+                .collect();
+            (skips[0], skips[1])
+        };
+        let close = |actual: f64, expected: f64, label: &str| {
+            assert!(
+                (actual - expected).abs() < 1e-3,
+                "{label}: {actual} vs {expected}"
+            );
+        };
+        let before = 4.5;
+        let line = {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"paragraph","id":"anchor","runs":[{"kind":"text","text":"anchor"}]}
+            ]))
+            .unwrap();
+            let BlockExtent::Paragraph(paragraph) =
+                &measure_blocks_with_floats(&mut blocks, &[200.0], &config, None).unwrap()[0]
+            else {
+                panic!()
+            };
+            paragraph.lines[0].line_height
+        };
+        let twip = 0.05 * 96.0 / 72.0;
+
+        // A band starting at the line's bottom clears it; one twip higher does not.
+        close(measure(before + line, 1.0, before).0, 0.0, "at the bottom");
+        let overlapping = before + line - twip;
+        close(
+            measure(overlapping, 1.0, before).0,
+            overlapping + 1.0,
+            "one twip into the line",
+        );
+        // The push clears the whole band, whatever its height.
+        for height in [0.5, 8.0, 96.0, 266.0] {
+            close(
+                measure(before, height, before).0,
+                before + height,
+                "band height",
+            );
+        }
+        // Space-before alone reaching a band moves the line that follows it.
+        let (anchor_skip, tail_skip) = measure(1.0, 1.0, before);
+        close(anchor_skip, 2.0, "space-before overlap");
+        close(tail_skip, 0.0, "tail clear of the band");
+        // A band clear of the paragraph top and of the line leaves both alone.
+        let above = measure(-4.0, 1.0, before);
+        close(above.0, 0.0, "band above the paragraph");
+        close(above.1, 0.0, "tail below a band above the paragraph");
+
+        // A band reaching only the second line moves that line to the band
+        // bottom, with no space-before spent under it.
+        let wrapped = |offset: f64| {
+            let mut blocks: Vec<LayoutBlock> = serde_json::from_value(json!([
+                {"kind":"shape","id":"band","shapeType":"rect","geometryPath":[],"children":[],
+                 "width":200,"height":2,"wrapType":"topAndBottom",
+                 "position":{"horizontal":{"relativeTo":"column","posOffset":0},
+                             "vertical":{"relativeTo":"paragraph","posOffset":offset}}},
+                {"kind":"paragraph","id":"anchor","attrs":{"spacing":{"before":before}},
+                 "runs":[{"kind":"text","text":"alpha beta gamma delta epsilon zeta eta theta"}]}
+            ]))
+            .unwrap();
+            let BlockExtent::Paragraph(paragraph) =
+                &measure_blocks_with_floats(&mut blocks, &[200.0; 2], &config, None).unwrap()[1]
+            else {
+                panic!()
+            };
+            (
+                paragraph.lines[0].float_skip_before.unwrap_or(0.0),
+                paragraph.lines[1].float_skip_before.unwrap_or(0.0),
+            )
+        };
+        let second_bottom = before + 2.0 * line;
+        close(wrapped(second_bottom).1, 0.0, "at the second line's bottom");
+        let reaching = second_bottom - twip;
+        close(
+            wrapped(reaching).1,
+            reaching + 2.0 - before - line,
+            "one twip into the second line",
+        );
     }
 
     /// Word 16.113 paints a `wrapNone` anchor over its cell and leaves the row
