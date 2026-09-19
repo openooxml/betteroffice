@@ -5,6 +5,63 @@ use pptx_render::{Primitive, SlideRenderer};
 const FIXTURE: &[u8] = include_bytes!("../../pptx-parse/tests/fixtures/picture-fill.pptx");
 
 #[test]
+fn picture_fills_keep_fallback_diagnostics_through_layout_and_hydration() {
+    for geometry in ["custom", "ellipse", "cube", "rect", "unknownPreset"] {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        package.slides[0].shapes.truncate(1);
+        let pptx_parse::ShapeNode::Shape(shape) = &mut package.slides[0].shapes[0] else {
+            panic!()
+        };
+        shape.geometry = geometry.into();
+        let session = DeckSession::from_package_with_source(package, FIXTURE, 644).unwrap();
+        let renderer = SlideRenderer::new();
+        let before = renderer
+            .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list;
+        let images: Vec<_> = before
+            .primitives
+            .iter()
+            .filter(|p| matches!(p, Primitive::Image { .. }))
+            .collect();
+        assert!(!images.is_empty(), "{geometry}");
+        for image in images {
+            let Primitive::Image {
+                geometry_fallback,
+                path,
+                shape_id,
+                ..
+            } = image
+            else {
+                panic!()
+            };
+            assert_eq!(
+                *geometry_fallback,
+                geometry == "unknownPreset",
+                "{geometry}"
+            );
+            assert!(shape_id.is_some());
+            if *geometry_fallback {
+                assert_eq!(
+                    path.as_ref().unwrap(),
+                    &ooxml_drawingml::preset_geometry_to_path("rect", &Default::default(), 1.0)
+                        .unwrap()
+                );
+            }
+            let json = serde_json::to_value(image).unwrap();
+            assert_eq!(json.get("geometryFallback").is_some(), *geometry_fallback);
+        }
+        let restored =
+            DeckSession::open_from_update(&session.encode_state_as_update_v1(), 645).unwrap();
+        let after = renderer
+            .layout_slide(restored.package(), &restored.snapshot().unwrap(), 0)
+            .unwrap()
+            .display_list;
+        assert_eq!(before, after, "{geometry}");
+    }
+}
+
+#[test]
 fn a_picture_filled_shape_paints_its_blip_through_its_own_outline() {
     let session = DeckSession::open(FIXTURE, 286).unwrap();
     let renderer = SlideRenderer::new();

@@ -242,6 +242,8 @@ pub enum Primitive {
         crop: ImageCrop,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<Vec<GeometryPathCommand>>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        geometry_fallback: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stroke: Option<Stroke>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -466,34 +468,33 @@ mod tests {
 
     #[test]
     fn geometry_fallback_is_optional_and_only_serializes_when_active() {
-        let legacy = r#"{"kind":"shape","objectId":1,"name":"Arc","x":0.0,"y":0.0,"w":10.0,"h":10.0,"geometry":"arc","path":[]}"#;
-        let mut shape: Primitive = serde_json::from_str(legacy).unwrap();
-        assert!(matches!(
-            shape,
-            Primitive::Shape {
-                geometry_fallback: false,
-                ..
+        for legacy in [
+            r#"{"kind":"shape","objectId":1,"name":"Arc","x":0.0,"y":0.0,"w":10.0,"h":10.0,"geometry":"arc","path":[]}"#,
+            r#"{"kind":"image","objectId":1,"name":"Photo","x":0.0,"y":0.0,"w":10.0,"h":10.0}"#,
+        ] {
+            let mut primitive: Primitive = serde_json::from_str(legacy).unwrap();
+            assert_eq!(serde_json::to_string(&primitive).unwrap(), legacy);
+            let (Primitive::Shape {
+                geometry_fallback, ..
             }
-        ));
-        assert_eq!(serde_json::to_string(&shape).unwrap(), legacy);
-
-        let Primitive::Shape {
-            geometry_fallback, ..
-        } = &mut shape
-        else {
-            unreachable!()
-        };
-        *geometry_fallback = true;
-        assert!(
-            serde_json::to_string(&shape)
-                .unwrap()
-                .contains(r#""geometryFallback":true"#)
-        );
+            | Primitive::Image {
+                geometry_fallback, ..
+            }) = &mut primitive
+            else {
+                unreachable!()
+            };
+            assert!(!*geometry_fallback);
+            *geometry_fallback = true;
+            let json = serde_json::to_string(&primitive).unwrap();
+            assert!(json.contains(r#""geometryFallback":true"#));
+            assert_eq!(serde_json::from_str::<Primitive>(&json).unwrap(), primitive);
+        }
     }
 
     #[test]
     fn an_uncropped_rectangular_image_serializes_as_it_did_before_crops_existed() {
         let mut image = Primitive::Image {
+            geometry_fallback: false,
             object_id: 90,
             shape_id: Some("slide:0:256:shape:9".into()),
             name: "Media fixture".into(),

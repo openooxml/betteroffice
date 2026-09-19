@@ -1264,6 +1264,7 @@ mod tests {
             let h = if kind == "line" { 0.0 } else { 80.0 };
             list.primitives.push(if kind == "image" {
                 Primitive::Image {
+                    geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
                     name: kind.into(),
@@ -1818,6 +1819,7 @@ mod tests {
         let images = AssetMap::from([("mark", bytes.as_slice())]);
         let mut list = empty_list(300.0, 200.0);
         list.primitives.push(Primitive::Image {
+            geometry_fallback: false,
             object_id: 1,
             shape_id: None,
             name: "Mark".into(),
@@ -1869,6 +1871,7 @@ mod tests {
 
     fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {
         Primitive::Image {
+            geometry_fallback: false,
             object_id: 1,
             shape_id: None,
             name: "shadow probe".into(),
@@ -2109,6 +2112,7 @@ mod tests {
         for flip_h in [false, true] {
             for parent_clip in [false, true] {
                 let image = Primitive::Image {
+                    geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
                     name: "Photo".into(),
@@ -2200,6 +2204,7 @@ mod tests {
         for asset_id in [None, Some("ppt/media/image1.png")] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
+                geometry_fallback: false,
                 object_id: 1,
                 shape_id: None,
                 name: "picture".into(),

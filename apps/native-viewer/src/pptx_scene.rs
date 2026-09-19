@@ -1489,6 +1489,7 @@ mod tests {
             height: 200.0,
             background: None,
             primitives: vec![Primitive::Image {
+                geometry_fallback: false,
                 object_id: 1,
                 shape_id: None,
                 name: "Photo".to_owned(),

@@ -338,7 +338,7 @@ export interface ShapePrimitive extends PrimitiveBase {
   name: string;
   geometry: string;
   path: GeometryPathCommand[];
-  /** The authored preset is unsupported and `path` is a rectangle fallback. */
+  /** An unsupported outline or clip was replaced by a rectangle. */
   geometryFallback?: boolean;
   clip?: GeometryPathCommand[];
   evenOdd?: boolean;
@@ -372,6 +372,8 @@ export interface ImagePrimitive extends PrimitiveBase {
   crop?: ImageCrop;
   /** Outline the picture is masked to, when its `spPr` gives it one. */
   path?: GeometryPathCommand[];
+  /** The authored mask is unsupported and uses a rectangle fallback. */
+  geometryFallback?: boolean;
   stroke?: Stroke;
   shadow?: Shadow;
 }

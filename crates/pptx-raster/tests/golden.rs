@@ -321,6 +321,7 @@ fn golden_image() {
     check(
         "image",
         &slide(vec![Primitive::Image {
+            geometry_fallback: false,
             object_id: 3,
             shape_id: Some("pic-1".into()),
             name: "picture".into(),
@@ -352,6 +353,7 @@ fn golden_picture_shadow() {
     check(
         "picture-shadow",
         &slide(vec![Primitive::Image {
+            geometry_fallback: false,
             object_id: 5,
             shape_id: Some("pic-2".into()),
             name: "hollow mark".into(),
@@ -384,6 +386,7 @@ fn golden_picture_fill() {
     check(
         "picture-fill",
         &slide(vec![Primitive::Image {
+            geometry_fallback: false,
             object_id: 4,
             shape_id: Some("shape-2".into()),
             name: "ring".into(),

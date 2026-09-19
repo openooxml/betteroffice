@@ -231,6 +231,7 @@ fn compile(slide: ComposedSlide) -> Result<SurfaceDisplayList, String> {
             } => {
                 let transform = transform(&base);
                 primitives.push(Primitive::Image {
+                    geometry_fallback: false,
                     object_id: base.id,
                     shape_id: None,
                     name: base.name,
