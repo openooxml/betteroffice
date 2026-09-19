@@ -21,7 +21,7 @@ import {
 export const MARKDOWN_MEDIA_TYPE = "text/markdown; charset=utf-8";
 
 function named(items: { name: string; desc: string }[]): string {
-  return items.map((item) => `- **${item.name}** — ${item.desc}`).join("\n");
+  return items.map((item) => `- **${item.name}.** ${item.desc}`).join("\n");
 }
 
 export function homepageMarkdown(): string {
@@ -72,9 +72,11 @@ ${ecosystems}
 
 ${FOUNDATION.prose}
 
-[Visual fidelity results](${BENCHMARKS})
-
 ${named(CAPABILITIES)}
+
+[Try it out](${DEMO}), or [explore the docs](${DOCS}) for setup, APIs, and format support.
+
+See how published releases and source builds compare with Microsoft Office in our [visual fidelity results](${BENCHMARKS}).
 
 ## ${COLLABORATION.heading}
 

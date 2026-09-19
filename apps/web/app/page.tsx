@@ -244,11 +244,6 @@ export default function Home() {
             {FOUNDATION.heading}
           </h2>
           <p className={secP}>{FOUNDATION.prose}</p>
-          <p className="mt-4 text-[0.8125rem] text-ink">
-            <a href={BENCHMARKS} className={bodyLink}>Visual fidelity results</a> compare
-            published releases and source builds with Microsoft Office on selected
-            corpus files.
-          </p>
         </Reveal>
         <Reveal delay={0.1}>
           <ul className={`${grid} mt-8 list-none`}>
@@ -261,6 +256,14 @@ export default function Home() {
               </li>
             ))}
           </ul>
+          <p className="mt-6 text-[0.8125rem] text-ink">
+            <a href={DEMO} className={bodyLink}>Try it out</a>, or{" "}
+            <a href={DOCS} className={bodyLink}>explore the docs</a> for setup, APIs, and format support.
+          </p>
+          <p className="mt-3 text-[0.8125rem] text-ink">
+            See how published releases and source builds compare with Microsoft Office in our{" "}
+            <a href={BENCHMARKS} className={bodyLink}>visual fidelity results</a>.
+          </p>
         </Reveal>
       </section>
 

@@ -101,36 +101,36 @@ export const PACKAGES = [
 ];
 
 export const FOUNDATION = {
-  label: "Foundation",
-  heading: "Built on our own engines",
+  label: "Features",
+  heading: "Office editing for people and agents",
   prose:
-    "BetterOffice is built by OpenOOXML, the open-source project writing native OOXML engines in Rust — parsing, layout, editing and rendering, from the file format up. Owning the whole stack is what makes the output Word-faithful.",
+    "OpenOOXML's Rust engines power every BetterOffice editor, from opening and editing files to layout and rendering. The same engines run in your browser and in headless workflows.",
 };
 
 export const CAPABILITIES = [
   {
-    name: "Own engines",
-    desc: "We build the OOXML engines ourselves, in Rust — from the file format up. No wrapper around someone else's suite.",
+    name: "Documents, spreadsheets, and slides",
+    desc: "Open, edit, render, and save DOCX, XLSX and PPTX files with high fidelity. Native OOXML editing preserves untouched file parts losslessly when round-tripping.",
   },
   {
-    name: "Native OOXML editing",
-    desc: "Documents are edited in their own format. No lossy conversion on open, none on save.",
-  },
-  {
-    name: "Word-faithful output",
-    desc: "What you see is what Word shows — layout, pagination and styling match the original.",
+    name: "Agent editing with human review",
+    desc: "Review attributed agent edits through tracked changes, inline diffs, and before-and-after previews. Accept or reject changes directly in the editor.",
   },
   {
     name: "Real-time collaboration",
-    desc: "The document is a CRDT — concurrent edits merge in the engine, not on a server.",
+    desc: "People and agents edit the same file together, with live cursors and selections. Concurrent changes merge automatically, and offline edits sync when peers reconnect.",
   },
   {
-    name: "Agent-ready",
-    desc: "Runs headless too — parse, edit and render documents server-side or inside agent pipelines.",
+    name: "Undo and redo",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step.",
   },
   {
-    name: "Apache 2.0",
-    desc: "Permissive license, developed in the open, self-hostable without exceptions.",
+    name: "Embed or automate",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
+  },
+  {
+    name: "Open source and self-hostable",
+    desc: "Apache-2.0 licensed, with control over your document storage, deployment, and collaboration infrastructure.",
   },
 ];
 
