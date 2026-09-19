@@ -801,6 +801,44 @@ function noteRefMarkTypes(run: Run): string[] {
   return marks;
 }
 
+function unitsText(units: readonly InlineUnit[]): string {
+  return units
+    .map((unit) => {
+      if (unit.kind === 'text') return unit.text;
+      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
+      return String(id ?? '');
+    })
+    .join('');
+}
+
+/**
+ * `w:br w:type="page"|"column"`, which the story carries as a block embed
+ * beside the paragraph instead of as an inline unit.
+ */
+function flowBreakType(content: RunContent): 'page' | 'column' | null {
+  if (content.type !== 'break') return null;
+  return content.breakType === 'page' || content.breakType === 'column' ? content.breakType : null;
+}
+
+/**
+ * Where a run's flow breaks sit in its text. They occupy no story unit, so
+ * the save projection rebuilds them from these offsets.
+ */
+function flowBreakOffsets(run: Run): Array<{ offset: number; type: 'page' | 'column' }> {
+  if (!run.content.some((content) => flowBreakType(content) !== null)) return [];
+  const breaks: Array<{ offset: number; type: 'page' | 'column' }> = [];
+  let offset = 0;
+  for (const content of run.content) {
+    const type = flowBreakType(content);
+    if (type !== null) {
+      breaks.push({ offset, type });
+      continue;
+    }
+    offset += unitsText(runContentToUnits(content, [])).length;
+  }
+  return breaks;
+}
+
 function runBoundary(
   run: Run,
   styleFormatting: TextFormatting | undefined,
@@ -811,17 +849,12 @@ function runBoundary(
   const keys = units.map((unit) => marksKey(unit.marks));
   if (keys.some((key) => key !== keys[0])) return null;
   const marks = noteRefMarkTypes(run);
-  const text = units
-    .map((unit) => {
-      if (unit.kind === 'text') return unit.text;
-      const id = unit.payload.footnoteRefId ?? unit.payload.endnoteRefId;
-      return String(id ?? '');
-    })
-    .join('');
+  const breaks = flowBreakOffsets(run);
   const key = keys[0];
   return {
-    text,
+    text: unitsText(units),
     ...(marks.length > 0 ? { noteMarks: marks } : {}),
+    ...(breaks.length > 0 ? { breaks } : {}),
     ...(key !== undefined ? { marksKey: key } : {}),
     ...(run.formatting ? { formatting: run.formatting } : {}),
     ...(run.propertyChanges ? { propertyChanges: run.propertyChanges } : {}),

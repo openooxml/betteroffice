@@ -1,7 +1,9 @@
-//! Word keeps a paragraph's space-before when a hard `w:br w:type="page"`
-//! run opens it, and drops it when the page turned by itself. Measured
-//! against Word 16.113 (oxi-ja-policies-01 page 45: +12.00pt for
-//! `w:before="240"`, pages 6/10/43: +6.00pt for `w:before="120"`).
+//! Word keeps a paragraph's space-before when the paragraph breaks the page
+//! itself — by a hard `w:br w:type="page"` run or by `w:pageBreakBefore` —
+//! and drops it when the page turned by itself. What it keeps is the
+//! collapsed gap less the previous paragraph's space-after. Measured against
+//! Word 16.113 (oxi-ja-policies-01 page 45: +12.00pt for `w:before="240"`,
+//! page 46: +6.00pt for `w:before="120"`, and hand-authored probes).
 
 use docx_edit::{EngineSession, bridge::RenderEnv, seed_from_docx};
 use serde_json::{Value, json};
@@ -116,6 +118,41 @@ fn a_column_break_run_keeps_the_paragraph_space_before() {
     let (page, y) = target(&render(&document(body)));
     assert_eq!(page, 2);
     assert!((y - CONTENT_TOP - SPACE_BEFORE).abs() < 0.01, "{y}");
+}
+
+#[test]
+fn a_page_break_before_property_keeps_the_paragraph_space_before() {
+    for fillers in [1, 10, 40] {
+        let body = format!(
+            "{}<w:p><w:pPr><w:pageBreakBefore/><w:spacing w:before=\"480\"/></w:pPr><w:r><w:t>TARGET</w:t></w:r></w:p>",
+            "<w:p><w:r><w:t>FILLER</w:t></w:r></w:p>".repeat(fillers)
+        );
+        let (page, y) = target(&render(&document(&body)));
+        assert_eq!(page, 2, "{fillers} fillers");
+        assert!(
+            (y - CONTENT_TOP - SPACE_BEFORE).abs() < 0.01,
+            "{fillers} fillers: {y}"
+        );
+    }
+}
+
+/// Word lays the collapsed gap out from the bottom up, so the break carries
+/// only `max(0, before - after)`. Measured with 0/12/24/36pt space-after
+/// against 24pt space-before.
+#[test]
+fn an_authored_break_spends_the_previous_space_after() {
+    for (after, kept) in [(0, 32.0), (240, 16.0), (480, 0.0), (720, 0.0)] {
+        for break_markup in [("<w:pageBreakBefore/>", ""), ("", BREAK)] {
+            let (property, run) = break_markup;
+            let body = format!(
+                "<w:p><w:pPr><w:spacing w:after=\"{after}\"/></w:pPr><w:r><w:t>FILLER</w:t></w:r></w:p>\
+                 <w:p><w:pPr>{property}<w:spacing w:before=\"480\"/></w:pPr>{run}<w:r><w:t>TARGET</w:t></w:r></w:p>"
+            );
+            let (page, y) = target(&render(&document(&body)));
+            assert_eq!(page, 2, "after {after}");
+            assert!((y - CONTENT_TOP - kept).abs() < 0.01, "after {after}: {y}");
+        }
+    }
 }
 
 /// The break is a run, not `w:pPr`, so the save projection must not learn a

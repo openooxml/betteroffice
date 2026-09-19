@@ -58,15 +58,16 @@ What to install for which language, with a first example each:
 - `packages/` — the TypeScript editor packages
 - `bindings/` — the Python bindings
 - `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo` — editor playground
 - `apps/docs` — documentation
 
 ## Development
 
 ```bash
 bun install
-bun run build:xlsx-wasm # compile the ignored spreadsheet wasm asset
-bun run build:docx-wasm # compile the ignored document wasm assets
-bun run dev          # web app
+bun run dev:demo     # editor playground; builds the wasm bundles on first run
+bun run dev          # betteroffice.dev site (no wasm needed)
+bun run dev:docs     # documentation site
 bun run rust:check   # fmt + clippy + tests for the engines
 ```
 
@@ -79,9 +80,9 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 | Format | Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
 | --- | --- | ---: | ---: | --- | ---: | ---: |
-| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7540 | 63/63 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7742 | 63/63 |
-| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.8769 | 9/9 |
-| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [adb3af81](https://github.com/openooxml/betteroffice/commit/adb3af81aa12b98ae2c04807e5437cdc059ccfac) | 0.7695 | 8/8 |
+| DOCX | [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | 0.7540 | 63/63 | [91cd1d01](https://github.com/openooxml/betteroffice/commit/91cd1d0107d22e3cfe2a5e8537b349eba6caaea6) | 0.8060 | 63/63 |
+| PPTX | [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8769 | 9/9 | [91cd1d01](https://github.com/openooxml/betteroffice/commit/91cd1d0107d22e3cfe2a5e8537b349eba6caaea6) | 0.8778 | 9/9 |
+| XLSX | [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7695 | 8/8 | [91cd1d01](https://github.com/openooxml/betteroffice/commit/91cd1d0107d22e3cfe2a5e8537b349eba6caaea6) | 0.7695 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 

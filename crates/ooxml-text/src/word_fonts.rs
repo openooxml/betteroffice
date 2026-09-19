@@ -1,29 +1,51 @@
-//! Vertical metrics of the East Asian faces Word ships, keyed by the requested
-//! family. Read off `head` and `hhea` of Word's own `DFonts` copies (16.113);
-//! FangSong and DFKai-SB are Windows-only and take their family's span.
+//! Vertical metrics of the faces Word ships but this package does not bundle,
+//! keyed by the requested family. Read off `head` and `hhea` of Word's own
+//! copies and cross-checked against the font programs it embeds in its exports.
 //! A family with no entry keeps its substitute's own metrics.
+//!
+//! A family is listed only when its span is the same under either reading of
+//! Word's line rule, and when the substitute's advances are already close: the
+//! view moves vertical metrics only, so correcting the pitch of a much
+//! narrower or wider face moves a document past Word rather than onto it.
 
 use crate::font_store::RequestedLineMetrics;
 
-const fn m(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> RequestedLineMetrics {
+const fn ea(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> RequestedLineMetrics {
     RequestedLineMetrics {
         units_per_em,
         hhea_ascender,
         hhea_descender,
+        hhea_line_gap: 0,
+        east_asian: true,
+    }
+}
+
+const fn latin(
+    units_per_em: u16,
+    hhea_ascender: i16,
+    hhea_descender: i16,
+    hhea_line_gap: i16,
+) -> RequestedLineMetrics {
+    RequestedLineMetrics {
+        units_per_em,
+        hhea_ascender,
+        hhea_descender,
+        hhea_line_gap,
+        east_asian: false,
     }
 }
 
 /// The classic 256-unit Japanese and Simplified Chinese bitmap-era faces, all
 /// exactly one em from ascender to descender.
-const JIS_256: RequestedLineMetrics = m(256, 220, -36);
+const JIS_256: RequestedLineMetrics = ea(256, 220, -36);
 /// Batang/Gulim and their fixed-pitch variants — also exactly one em.
-const KOREAN_1024: RequestedLineMetrics = m(1024, 879, -145);
+const KOREAN_1024: RequestedLineMetrics = ea(1024, 879, -145);
 /// MingLiU and its variants — one em at 1024 units.
-const MINGLIU_1024: RequestedLineMetrics = m(1024, 820, -204);
+const MINGLIU_1024: RequestedLineMetrics = ea(1024, 820, -204);
 /// Yu Gothic, Yu Gothic Medium/Light and Yu Mincho.
-const YU_2048: RequestedLineMetrics = m(2048, 1802, -455);
+const YU_2048: RequestedLineMetrics = ea(2048, 1802, -455);
 /// Malgun Gothic.
-const MALGUN_2048: RequestedLineMetrics = m(2048, 2229, -495);
+const MALGUN_2048: RequestedLineMetrics = ea(2048, 2229, -495);
 
 /// Requested family (lowercased) -> the vertical metrics Word measures it with.
 const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
@@ -42,8 +64,8 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         ],
         JIS_256,
     ),
-    (&["meiryo", "メイリオ"], m(2048, 2171, -901)),
-    (&["meiryo ui"], m(2048, 2171, -430)),
+    (&["meiryo", "メイリオ"], ea(2048, 2171, -901)),
+    (&["meiryo ui"], ea(2048, 2171, -430)),
     (
         &[
             "yu gothic",
@@ -57,7 +79,7 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     ),
     (
         &["yu gothic ui", "yu gothic ui semilight"],
-        m(2048, 2210, -514),
+        ea(2048, 2210, -514),
     ),
     // Simplified Chinese — the SimSun family shares the JIS 256-unit design.
     (
@@ -75,11 +97,11 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
         ],
         JIS_256,
     ),
-    (&["microsoft yahei", "微软雅黑"], m(2048, 2167, -536)),
-    (&["microsoft yahei ui"], m(2048, 2080, -521)),
-    (&["dengxian", "等线"], m(2048, 1659, -475)),
+    (&["microsoft yahei", "微软雅黑"], ea(2048, 2167, -536)),
+    (&["microsoft yahei ui"], ea(2048, 2080, -521)),
+    (&["dengxian", "等线"], ea(2048, 1659, -475)),
     // Traditional Chinese.
-    (&["microsoft jhenghei", "微軟正黑體"], m(2048, 2203, -521)),
+    (&["microsoft jhenghei", "微軟正黑體"], ea(2048, 2203, -521)),
     (
         &[
             "mingliu",
@@ -119,6 +141,31 @@ const EAST_ASIAN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     ),
 ];
 
+/// The Segoe UI family — UI, Symbol and Emoji ship the same vertical design.
+const SEGOE_UI_2048: RequestedLineMetrics = latin(2048, 2210, -514, 0);
+
+/// Requested Latin family (lowercased) -> the vertical metrics Word measures
+/// it with. Every entry's span is unambiguous (see the module doc).
+const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
+    (&["lato"], latin(2000, 1974, -426, 0)),
+    (&["open sans"], latin(2048, 2189, -600, 0)),
+    (&["source sans pro"], latin(1000, 984, -273, 0)),
+    (&["playfair display"], latin(1000, 1082, -251, 0)),
+    (
+        &["segoe ui", "segoe ui symbol", "segoe ui emoji"],
+        SEGOE_UI_2048,
+    ),
+    (&["aptos", "aptos display"], latin(2048, 1923, -577, 0)),
+    (&["tahoma"], latin(2048, 2049, -423, 0)),
+    (&["verdana"], latin(2048, 2059, -430, 0)),
+    (&["trebuchet ms"], latin(2048, 1923, -455, 0)),
+    (&["symbol"], latin(2048, 2059, -450, 0)),
+    (&["wingdings"], latin(2048, 1841, -432, 0)),
+    (&["lucida sans unicode"], latin(2048, 2246, -901, 0)),
+    (&["georgia"], latin(2048, 1878, -449, 0)),
+    (&["comic sans ms"], latin(2048, 2257, -597, 0)),
+];
+
 /// Vertical metrics Word measures `family` with, or `None` for a family this
 /// table does not cover. Matching is case-insensitive and trimmed, the same
 /// normalization hosts apply to a `w:rFonts` name.
@@ -126,6 +173,7 @@ pub fn requested_line_metrics(family: &str) -> Option<RequestedLineMetrics> {
     let key = family.trim().to_lowercase();
     EAST_ASIAN_FACES
         .iter()
+        .chain(LATIN_FACES)
         .find(|(names, _)| names.contains(&key.as_str()))
         .map(|&(_, metrics)| metrics)
 }
@@ -205,10 +253,73 @@ mod tests {
         assert_eq!(requested_line_metrics("ＭＳ 明朝"), expected);
     }
 
+    /// Bundled families keep the metric-compatible face's own metrics, Word's
+    /// own aliases resolve to a bundled face, and a family whose span depends
+    /// on which reading of the line rule applies is deliberately absent.
     #[test]
-    fn leaves_latin_and_unlisted_east_asian_families_alone() {
-        for family in ["Arial", "Times New Roman", "Calibri", "Century", "HGPｺﾞｼｯｸM"] {
+    fn leaves_bundled_aliased_and_ambiguous_families_alone() {
+        for family in [
+            "Arial",
+            "Times New Roman",
+            "Calibri",
+            "Cambria",
+            "Courier New",
+            "Helvetica",
+            "Times",
+            "Lucida Bright",
+            "Lucida Sans",
+            "Century",
+            "Century Gothic",
+            "Arial Narrow",
+            "Roboto",
+            "Cambria Math",
+            "Gigi",
+            "HGPｺﾞｼｯｸM",
+        ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
+        }
+    }
+
+    #[test]
+    fn latin_entries_do_not_claim_the_east_asian_pitch() {
+        for family in ["Lato", "Open Sans", "Verdana", "Wingdings"] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert!(!metrics.east_asian, "{family}");
+        }
+        assert!(
+            requested_line_metrics("MS Mincho")
+                .expect("mincho")
+                .east_asian
+        );
+    }
+
+    #[test]
+    fn latin_spans_match_the_faces_word_ships() {
+        for (family, span_em) in [
+            ("Lato", 2400.0 / 2000.0),
+            ("Open Sans", 2789.0 / 2048.0),
+            ("Source Sans Pro", 1257.0 / 1000.0),
+            ("Playfair Display", 1333.0 / 1000.0),
+            ("Segoe UI", 2724.0 / 2048.0),
+            ("Segoe UI Symbol", 2724.0 / 2048.0),
+            ("Aptos", 2500.0 / 2048.0),
+            ("Tahoma", 2472.0 / 2048.0),
+            ("Verdana", 2489.0 / 2048.0),
+            ("Trebuchet MS", 2378.0 / 2048.0),
+            ("Symbol", 2509.0 / 2048.0),
+            ("Wingdings", 2273.0 / 2048.0),
+            ("Lucida Sans Unicode", 3147.0 / 2048.0),
+            ("Georgia", 2327.0 / 2048.0),
+            ("Comic Sans MS", 2854.0 / 2048.0),
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            let measured = (f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender)
+                + f32::from(metrics.hhea_line_gap))
+                / f32::from(metrics.units_per_em);
+            assert!(
+                (measured - span_em).abs() < 1e-4,
+                "{family}: {measured} vs {span_em}"
+            );
         }
     }
 
