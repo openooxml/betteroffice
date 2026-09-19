@@ -13,9 +13,12 @@ pub enum AuthoredBreak {
 }
 
 impl AuthoredBreak {
-    /// Word keeps space-before across a hard break run, not an automatic one.
+    /// Word keeps space-before across either authored break, and only across
+    /// an automatic one does it not. The two differ solely under
+    /// `w:suppressSpBfAfterPgBrk` (§17.15.1.87), which suppresses the run but
+    /// not the property; it is unparsed here and unset in every corpus file.
     pub fn keeps_leading_spacing(self) -> bool {
-        matches!(self, Self::HardBreakRun)
+        matches!(self, Self::HardBreakRun | Self::PageBreakBefore)
     }
 }
 
@@ -124,7 +127,7 @@ mod tests {
             Some(AuthoredBreak::HardBreakRun)
         );
         assert!(AuthoredBreak::HardBreakRun.keeps_leading_spacing());
-        assert!(!AuthoredBreak::PageBreakBefore.keeps_leading_spacing());
+        assert!(AuthoredBreak::PageBreakBefore.keeps_leading_spacing());
     }
 
     #[test]

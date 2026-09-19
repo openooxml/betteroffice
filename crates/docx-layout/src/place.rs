@@ -8,10 +8,10 @@
 //!
 //! Each block is processed in a fixed order: record a checkpoint if placement
 //! stands at a pristine page start; force a page when the block carries
-//! `w:pageBreakBefore` or opens with a hard `w:br w:type="page"` run, the
-//! latter keeping the paragraph's space-before on the new page; at the head
-//! of a keep-with-next group, force a page when
-//! the group would otherwise straddle the boundary; then dispatch to the placer.
+//! `w:pageBreakBefore` or opens with a hard `w:br w:type="page"` run, either
+//! carrying the paragraph's space-before onto the new page; at the head of a
+//! keep-with-next group, force a page when the group would otherwise straddle
+//! the boundary; then dispatch to the placer.
 //! A section break reads the *next* section's configuration and break type,
 //! falling back to the current break's when the plan has no successor. Column
 //! balancing runs over the range up to the next section break, both at the start
@@ -503,7 +503,8 @@ fn place(
             checkpoints.push(checkpoint);
         }
         let fragments_before = paginator.page_fragment_counts();
-        // pageBreakBefore, or a hard page-break run, forces a fresh page
+        // pageBreakBefore, or a hard page-break run, forces a fresh page and
+        // keeps the paragraph's space-before net of the previous space-after
         if let Some(authored) = hooks::breaks_before_block(&mb.block)? {
             paginator.force_authored_page_break(authored.keeps_leading_spacing());
         }
@@ -805,7 +806,7 @@ fn layout_paragraph(
     if lines.is_empty() {
         // no measured lines: a zero-height fragment still advances the pen by
         // its spacing
-        let space_before = paginator.leading_spacing(get_spacing_before(block));
+        let space_before = get_spacing_before(block);
         let space_after = get_spacing_after(block);
         let state_idx = paginator.get_current();
         let column_index = paginator.state(state_idx).column_index;
@@ -814,7 +815,8 @@ fn layout_paragraph(
         let fragment = Fragment::Paragraph(ParagraphFragment {
             block_id: block.id.clone(),
             x: paginator.get_column_x(column_index),
-            y: pen_y + space_before,
+            // add_fragment resolves the real y; leading spacing is its job
+            y: pen_y + paginator.leading_spacing(space_before),
             width: paginator.get_content_width(),
             height: 0.0,
             from_line: 0,
@@ -1295,46 +1297,49 @@ mod pagination_rule_tests {
             .iter()
             .find(|checkpoint| checkpoint.page_index == 1)
             .unwrap();
-        assert!(checkpoint.flow.suppress_leading_spacing);
+        assert!(checkpoint.flow.leading_spacing_spent.is_infinite());
     }
 
-    /// Measured against Word 16.113 (oxi-ja-policies-01 page 45, and a
-    /// hand-authored probe): a paragraph opened by `w:br w:type="page"` keeps
-    /// its space-before on the new page, however full the previous page was.
+    /// Measured against Word 16.113 (oxi-ja-policies-01 pages 40 and 45, and
+    /// hand-authored probes): a paragraph that breaks the page itself, by
+    /// `w:br w:type="page"` or by `w:pageBreakBefore`, keeps its space-before
+    /// on the new page, however full the previous page was.
     #[test]
-    fn a_leading_hard_page_break_run_keeps_leading_spacing() {
-        for filler in [1, 5, 9] {
-            let mut measured = vec![paragraph(0, filler, 10.0, json!({}))];
-            measured.push(paragraph(
-                1,
-                1,
-                10.0,
-                json!({"spacing":{"before":20},"pageBreakBeforeRun":true}),
-            ));
-            let mut value = input(measured);
-            let result = layout_document(&mut value).unwrap();
-            assert_eq!(result.pages.len(), 2, "filler {filler}");
-            let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
-                panic!()
-            };
-            assert_eq!(after_break.y, 30.0, "filler {filler}");
-            let recorded = layout_document_checkpointed(&mut value).unwrap();
-            let checkpoint = recorded
-                .checkpoints
-                .iter()
-                .find(|checkpoint| checkpoint.page_index == 1)
-                .unwrap();
-            assert!(!checkpoint.flow.suppress_leading_spacing, "filler {filler}");
+    fn a_paragraph_that_breaks_its_own_page_keeps_leading_spacing() {
+        for attrs in [
+            json!({"spacing":{"before":20},"pageBreakBeforeRun":true}),
+            json!({"spacing":{"before":20},"pageBreakBefore":true}),
+        ] {
+            for filler in [1, 5, 9] {
+                let mut measured = vec![paragraph(0, filler, 10.0, json!({}))];
+                measured.push(paragraph(1, 1, 10.0, attrs.clone()));
+                let mut value = input(measured);
+                let result = layout_document(&mut value).unwrap();
+                assert_eq!(result.pages.len(), 2, "filler {filler}");
+                let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                    panic!()
+                };
+                assert_eq!(after_break.y, 30.0, "filler {filler}");
+                let recorded = layout_document_checkpointed(&mut value).unwrap();
+                let checkpoint = recorded
+                    .checkpoints
+                    .iter()
+                    .find(|checkpoint| checkpoint.page_index == 1)
+                    .unwrap();
+                assert_eq!(
+                    checkpoint.flow.leading_spacing_spent, 0.0,
+                    "filler {filler}"
+                );
+            }
         }
     }
 
     #[test]
-    fn automatic_and_paragraph_page_breaks_discard_leading_spacing() {
+    fn an_automatic_page_break_discards_leading_spacing() {
         for attrs in [
             json!({"spacing":{"before":20}}),
             json!({"spacing":{"before":20},"keepNext":true}),
             json!({"spacing":{"before":20},"keepLines":true}),
-            json!({"spacing":{"before":20},"pageBreakBefore":true}),
         ] {
             let mut value = input(vec![
                 paragraph(1, 1, 85.0, json!({"spacing":{"after":30}})),
@@ -1351,6 +1356,66 @@ mod pagination_rule_tests {
             };
             assert_eq!(heading.y, 10.0);
             assert_eq!(body.y, 30.0);
+        }
+    }
+
+    /// Measured against Word 16.113 (hand-authored probes, prev space-after
+    /// 0/12/24/36pt against 6/24/48pt space-before): the collapsed gap is
+    /// spent from the bottom up, so an authored break carries only
+    /// `max(0, before - after)` onto the new page.
+    #[test]
+    fn an_authored_break_spends_the_previous_space_after() {
+        for (after, before, expected) in [
+            (0.0, 24.0, 34.0),
+            (12.0, 24.0, 22.0),
+            (24.0, 24.0, 10.0),
+            (36.0, 24.0, 10.0),
+            (36.0, 48.0, 22.0),
+        ] {
+            for attrs in [
+                json!({"spacing":{"before":before},"pageBreakBefore":true}),
+                json!({"spacing":{"before":before},"pageBreakBeforeRun":true}),
+            ] {
+                let mut value = input(vec![
+                    paragraph(1, 1, 10.0, json!({"spacing":{"after":after}})),
+                    paragraph(2, 1, 10.0, attrs),
+                ]);
+                let result = layout_document(&mut value).unwrap();
+                assert_eq!(result.pages.len(), 2, "after {after} before {before}");
+                let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                    panic!()
+                };
+                assert_eq!(after_break.y, expected, "after {after} before {before}");
+            }
+        }
+    }
+
+    /// Measured against Word 16.113: `w:contextualSpacing` between same-style
+    /// neighbours zeroes the space-before before pagination, so an authored
+    /// break has nothing to carry; a different previous style leaves it whole.
+    #[test]
+    fn contextual_spacing_leaves_an_authored_break_nothing_to_carry() {
+        let target = json!({
+            "styleId": "List", "effectiveStyleId": "List", "contextualSpacing": true,
+            "spacing": {"before": 20}, "pageBreakBefore": true
+        });
+        for (previous, expected) in [
+            (
+                json!({"styleId": "List", "effectiveStyleId": "List", "contextualSpacing": true}),
+                10.0,
+            ),
+            (json!({"styleId": "Body", "effectiveStyleId": "Body"}), 30.0),
+        ] {
+            let mut value = input(vec![
+                paragraph(1, 1, 10.0, previous),
+                paragraph(2, 1, 10.0, target.clone()),
+            ]);
+            let result = layout_document(&mut value).unwrap();
+            assert_eq!(result.pages.len(), 2);
+            let Fragment::Paragraph(after_break) = &result.pages[1].fragments[0] else {
+                panic!()
+            };
+            assert_eq!(after_break.y, expected);
         }
     }
 
