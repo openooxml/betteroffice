@@ -2250,6 +2250,43 @@ fn small_caps_scales_uppercased_lowercase() {
     );
 }
 
+// ---- pair kerning (w:kern) ----------------------------------------------
+
+// 25b. Word kerns only above a nonzero w:kern threshold, so a run that
+// carries none measures at the plain hmtx sum — "AV" is a kerned pair in the
+// fixture, so a missing gate would show up as a narrower line
+#[test]
+fn absent_kerning_threshold_measures_unkerned() {
+    let v = measure(json!([{ "kind": "text", "text": "AV" }]), 200.0).unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        WA * 2.0,
+        "no w:kern",
+    );
+
+    let v = measure(
+        json!([{ "kind": "text", "text": "AV", "kerningMinPt": 1.0 }]),
+        200.0,
+    )
+    .unwrap();
+    let kerned = v["lines"][0]["width"].as_f64().unwrap();
+    assert!(
+        kerned < WA * 2.0 - 1e-3,
+        "w:kern at or below the font size tightens AV: got {kerned}"
+    );
+
+    let v = measure(
+        json!([{ "kind": "text", "text": "AV", "kerningMinPt": 14.0 }]),
+        200.0,
+    )
+    .unwrap();
+    approx(
+        v["lines"][0]["width"].as_f64().unwrap(),
+        WA * 2.0,
+        "w:kern above the font size",
+    );
+}
+
 // ---- RTL / bidi ---------------------------------------------------------
 //
 // Liberation Sans covers Hebrew. Hand-computed hmtx advances (fontTools on

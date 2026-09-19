@@ -133,6 +133,8 @@
 //!
 //! Word applies pair kerning only when the run's `w:kern` half-point
 //! threshold (rPr, §17.3.2) is nonzero and the font size is at or above it.
+//! An absent `w:kern` reads as zero — kerning off, not "unspecified, shape
+//! however the font prefers".
 //! [`mod@crate::shape`] applies default OpenType features (which include GPOS
 //! pair kerning via the `kern` feature) unconditionally; callers gate it
 //! per run by passing [`kern_features`]`(kern_enabled(..))` as the feature

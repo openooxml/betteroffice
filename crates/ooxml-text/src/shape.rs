@@ -140,7 +140,7 @@ pub fn shape_with_properties(
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
 
-    let glyphs: Vec<_> = glyphs
+    let mut glyphs: Vec<_> = glyphs
         .glyph_infos()
         .iter()
         .zip(glyphs.glyph_positions())
@@ -152,6 +152,15 @@ pub fn shape_with_properties(
             y_offset: pos.y_offset as f32 * scale,
         })
         .collect();
+    // rustybuzz 0.20.1 reverses a backward buffer for the legacy `kern` table
+    // and then skips the un-reverse when kerning was turned off, so a `kern=0`
+    // RTL run can come back in logical order. Visual order is the contract.
+    if direction == ShapeDirection::Rtl
+        && let (Some(first), Some(last)) = (glyphs.first(), glyphs.last())
+        && first.cluster < last.cluster
+    {
+        glyphs.reverse();
+    }
     if let Some(cache_key) = cache_key {
         store.cache_shape(cache_key, &glyphs);
     }

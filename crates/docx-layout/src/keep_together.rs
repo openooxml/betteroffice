@@ -9,8 +9,10 @@
 //! actually demands: every member paragraph in full (spacing before, measured
 //! height, spacing after) plus one witness slice of the follower — never the
 //! follower in full, since the binding is only to where it begins. The witness
-//! is a paragraph's first line, a table's initial header/body slice, the height of an
-//! image or text box, and nothing at all for any other follower kind.
+//! is a paragraph's shortest legally placeable leading slice
+//! ([`paragraph_min_leading_slice`]), a table's initial header/body slice, the
+//! height of an image or text box, and nothing at all for any other follower
+//! kind.
 //!
 //! Spacing follows the shared paragraph-spacing helpers used by placement.
 
@@ -18,7 +20,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::paragraph_spacing::{get_spacing_after, get_spacing_before, is_empty_paragraph};
 use crate::table_row_break::{build_table_row_break_info, first_table_fragment_height};
-use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock};
+use crate::types::{BlockExtent, LayoutBlock, MeasuredBlock, ParagraphBlock, ParagraphExtent};
+
+/// Lines below which widow/orphan control forbids every internal break, since
+/// each side of one needs two lines.
+const WIDOW_CONTROL_MIN_LINES: usize = 2;
 
 /// A maximal keep-with-next run and its follower.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,22 +125,64 @@ pub fn analyze_keep_with_next(measured: &[MeasuredBlock]) -> KeepWithNextScan {
     }
 }
 
+/// Whether widow/orphan control governs this paragraph: `w:widowControl`
+/// (ECMA-376 §17.3.1.44) defaults on, and one line has nothing to protect.
+pub fn paragraph_widow_control(block: &ParagraphBlock, measure: &ParagraphExtent) -> bool {
+    measure.lines.len() >= WIDOW_CONTROL_MIN_LINES
+        && block
+            .attrs
+            .as_ref()
+            .and_then(|attrs| attrs.widow_control)
+            .unwrap_or(true)
+}
+
+/// Whether a paragraph refuses every internal page break: `w:keepLines`, or
+/// widow/orphan control on a paragraph too short to leave two lines on both
+/// sides of one.
+pub fn paragraph_is_unbreakable(block: &ParagraphBlock, measure: &ParagraphExtent) -> bool {
+    block
+        .attrs
+        .as_ref()
+        .and_then(|attrs| attrs.keep_lines)
+        .unwrap_or(false)
+        || (paragraph_widow_control(block, measure)
+            && measure.lines.len() < 2 * WIDOW_CONTROL_MIN_LINES)
+}
+
+/// Height (px) of the shortest leading slice a paragraph may legally place:
+/// every line when it refuses to split, two under widow/orphan control, else
+/// one. Placement and the keepNext witness both read this so they cannot
+/// disagree about how much of a follower must come along.
+pub fn paragraph_min_leading_slice(block: &ParagraphBlock, measure: &ParagraphExtent) -> f64 {
+    let lines = if paragraph_is_unbreakable(block, measure) {
+        measure.lines.len()
+    } else if paragraph_widow_control(block, measure) {
+        WIDOW_CONTROL_MIN_LINES
+    } else {
+        1
+    };
+    measure
+        .lines
+        .iter()
+        .take(lines)
+        .map(|line| line.line_height + line.float_skip_before.unwrap_or(0.0))
+        .sum()
+}
+
 /// Vertical space (px) the group needs for its keepNext contract to hold on a
 /// single page: the members in full plus the follower's witness slice.
 pub fn measure_keep_with_next_group(group: &KeepWithNextGroup, measured: &[MeasuredBlock]) -> f64 {
-    // follower's witness line first: zero when there is no follower, or when
+    // follower's witness slice first: zero when there is no follower, or when
     // it is not a laid-out paragraph
-    let follower_measure = group
-        .follower
-        .and_then(|index| measured.get(index))
-        .map(|mb| &mb.measure);
-    let witness_line = match follower_measure {
-        Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => p.lines[0].line_height,
-        Some(BlockExtent::Table(table)) => match group
-            .follower
-            .and_then(|index| measured.get(index))
-            .map(|measured| &measured.block)
-        {
+    let follower = group.follower.and_then(|index| measured.get(index));
+    let witness_line = match follower.map(|mb| &mb.measure) {
+        Some(BlockExtent::Paragraph(p)) if !p.lines.is_empty() => {
+            match follower.map(|mb| &mb.block) {
+                Some(LayoutBlock::Paragraph(block)) => paragraph_min_leading_slice(block, p),
+                _ => p.lines[0].line_height,
+            }
+        }
+        Some(BlockExtent::Table(table)) => match follower.map(|mb| &mb.block) {
             Some(LayoutBlock::Table(block)) => {
                 first_table_fragment_height(block, table, &build_table_row_break_info(block, table))
             }
@@ -371,5 +419,107 @@ mod tests {
             page_content_height: 864.0,
             page_has_content: true,
         }));
+    }
+
+    fn make_heading_with_space_before(before: f64) -> LayoutBlock {
+        paragraph(
+            vec![text_run("Heading")],
+            Some(ParagraphAttrs {
+                keep_next: Some(true),
+                keep_lines: Some(true),
+                spacing: Some(ParagraphSpacing {
+                    before: Some(before),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn witnesses_a_follower_widow_control_refuses_to_split_in_full() {
+        let blocks = vec![
+            make_heading_with_space_before(18.6667),
+            make_paragraph_block("Follower", false),
+        ];
+        let measures = vec![
+            make_paragraph_measure(vec![make_line(18.4), make_line(18.4)]),
+            make_paragraph_measure(vec![
+                make_line(16.8667),
+                make_line(16.8667),
+                make_line(16.8667),
+            ]),
+        ];
+        let measured = to_measured_blocks(blocks, measures);
+
+        let scan = analyze_keep_with_next(&measured);
+        let group = scan
+            .groups_by_head
+            .get(&0)
+            .expect("group headed at block 0");
+
+        // Three lines leave no legal internal break, so the witness is all of
+        // them: 50.6001 + 18.6667 before + 36.8 heading.
+        let group_height = measure_keep_with_next_group(group, &measured);
+        assert!((group_height - 106.0668).abs() < 1e-3, "{group_height}");
+
+        // oxi-en-legal-01 page 142: the pen stands at 885.68 px under a
+        // 990 px content limit, so 104.32 px is left of an 835 px column.
+        assert!(keep_with_next_group_must_advance(KeepWithNextFit {
+            group_height,
+            available_height: 104.32,
+            page_content_height: 835.0,
+            page_has_content: true,
+        }));
+    }
+
+    #[test]
+    fn witnesses_only_two_lines_of_a_follower_widow_control_can_split() {
+        let blocks = vec![
+            make_heading_with_space_before(18.6667),
+            make_paragraph_block("Follower", false),
+        ];
+        let measures = vec![
+            make_paragraph_measure(vec![make_line(18.4), make_line(18.4)]),
+            make_paragraph_measure(vec![make_line(20.0); 4]),
+        ];
+        let measured = to_measured_blocks(blocks, measures);
+
+        let scan = analyze_keep_with_next(&measured);
+        let group = scan
+            .groups_by_head
+            .get(&0)
+            .expect("group headed at block 0");
+
+        let group_height = measure_keep_with_next_group(group, &measured);
+        assert!((group_height - 95.4667).abs() < 1e-3, "{group_height}");
+    }
+
+    #[test]
+    fn witnesses_one_line_when_the_follower_turns_widow_control_off() {
+        let blocks = vec![
+            make_heading_with_space_before(18.6667),
+            paragraph(
+                vec![text_run("Follower")],
+                Some(ParagraphAttrs {
+                    widow_control: Some(false),
+                    ..Default::default()
+                }),
+            ),
+        ];
+        let measures = vec![
+            make_paragraph_measure(vec![make_line(18.4), make_line(18.4)]),
+            make_paragraph_measure(vec![make_line(16.8667); 3]),
+        ];
+        let measured = to_measured_blocks(blocks, measures);
+
+        let scan = analyze_keep_with_next(&measured);
+        let group = scan
+            .groups_by_head
+            .get(&0)
+            .expect("group headed at block 0");
+
+        let group_height = measure_keep_with_next_group(group, &measured);
+        assert!((group_height - 72.3334).abs() < 1e-3, "{group_height}");
     }
 }
