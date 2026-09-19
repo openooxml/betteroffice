@@ -3,6 +3,7 @@
 #[cfg(feature = "chart")]
 pub mod chart;
 mod color;
+mod emit;
 mod geometry;
 #[cfg(feature = "tiff")]
 pub mod media;
@@ -14,6 +15,7 @@ mod table_style;
 mod theme;
 
 pub use color::*;
+pub use emit::*;
 pub use geometry::*;
 pub use picture::*;
 pub use shape::*;

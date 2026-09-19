@@ -347,6 +347,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-vsdx-export"
+version = "0.1.0"
+dependencies = [
+ "betteroffice-docx-parse",
+ "betteroffice-drawingml",
+ "betteroffice-opc",
+ "betteroffice-pptx-parse",
+ "betteroffice-vsdx-parse",
+ "betteroffice-vsdx-render",
+ "betteroffice-vsdx-resolve",
+ "serde_json",
+]
+
+[[package]]
 name = "betteroffice-vsdx-formula"
 version = "0.2.0"
 
