@@ -1,9 +1,16 @@
 ---
 title: Visio VSDX
-description: Visio packages and their supported surfaces.
+description: Work with Visio diagrams using the source-preview packages
 ---
 
-The VSDX engine processes Visio diagram packages. The packages are available from source and are not yet published on npm or crates.io; the crate READMEs describe the supported operations and remaining limitations.
+VSDX support is available from source. [Try the diagram editor](https://demo.betteroffice.dev/vsdx)
+or build the packages from the repository. The packages are not yet published on
+npm, crates.io, or PyPI.
+
+## Rust packages
+
+See the [crate READMEs](https://github.com/openooxml/betteroffice/tree/main/crates/betteroffice-vsdx)
+for API details and supported operations.
 
 | Crate | Purpose |
 | --- | --- |
@@ -15,10 +22,19 @@ The VSDX engine processes Visio diagram packages. The packages are available fro
 | `betteroffice-vsdx-edit` | Transactional editing and collaboration |
 | `betteroffice-vsdx-formula` | Bounded formula parsing |
 
+## JavaScript and React
+
 `@betteroffice/vsdx` provides the Wasm engine and Canvas display-list painter. Initialize the Wasm module before opening a diagram.
 
 `@betteroffice/vsdx-react` provides the React editor. Its strings are supplied by `@betteroffice/vsdx-i18n`. Pass font bytes to the editor so layout and painting use the same faces.
 
-The Python binding in `bindings/python-vsdx` reads pages, shapes, cells, and connections. It is held out of the PyPI release train. Build it from the repository with `python -m pip install ./bindings/python-vsdx`.
+## Python
 
-Visio redaction is not supported. The redaction CLI rejects VSDX files before writing or uploading output.
+The Python binding reads pages, shapes, cells, and connections. Build it from a
+repository checkout:
+
+```bash
+python -m pip install ./bindings/python-vsdx
+```
+
+VSDX files are not supported by the redaction CLI.
