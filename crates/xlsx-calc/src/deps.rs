@@ -16,11 +16,9 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     out
 }
 
-/// true when argument `index` is read for where it sits rather than what it
-/// holds, so it carries no data dependency: `ROW`, `COLUMN`, `ROWS` and
-/// `COLUMNS` answer a reference's position, and `OFFSET` takes its anchor's
-/// coordinates -- what `OFFSET` reads is the rectangle it resolves to, which
-/// [`offset_target`] supplies instead.
+/// true when argument `index` is read for where it sits, not what it holds,
+/// so it carries no data dependency: any reference under `ROW`/`COLUMN`/
+/// `ROWS`/`COLUMNS`, and `OFFSET`'s anchor.
 pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
     let positional = match name.to_ascii_uppercase().as_str() {
         "ROW" | "COLUMN" | "ROWS" | "COLUMNS" => true,
@@ -79,10 +77,9 @@ fn walk(
     }
 }
 
-/// what an OFFSET call reads, decided without evaluating it. the outer `None`
-/// means an argument is not a literal, so only evaluation can resolve the
-/// target and the caller must treat the formula as volatile; `Some(None)` means
-/// the literals resolve to #REF!, which reads nothing.
+/// what an OFFSET reads, without evaluating it. `None`: an argument is not a
+/// literal, so the caller must treat the formula as volatile. `Some(None)`:
+/// the literals resolve to #REF!.
 pub(crate) fn offset_target(args: &[Expr]) -> Option<Option<(Option<String>, CellRange)>> {
     if args.len() < 3 || args.len() > 5 {
         return Some(None);

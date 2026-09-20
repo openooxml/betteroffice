@@ -184,11 +184,9 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// OFFSET(reference, rows, cols, [height], [width]): the rectangle `rows` down
-/// and `cols` right of `reference`, sized `height` x `width` (defaults: the
-/// reference's own size, negatives extend back from the shifted corner). a zero
-/// size or a rectangle off the sheet is #REF!. like a bare range, a multi-cell
-/// result in scalar context is #VALUE! -- there is no implicit intersection.
+/// OFFSET(reference, rows, cols, [height], [width]): a negative size extends
+/// back from the shifted corner; a zero size or a rectangle off the sheet is
+/// #REF!, and a multi-cell result in scalar context is #VALUE!.
 pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match offset_area(args, ctx) {
         Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
