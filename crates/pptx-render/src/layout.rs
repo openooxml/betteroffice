@@ -3264,7 +3264,6 @@ fn distance_to_interval(value: f32, start: f32, end: f32) -> f32 {
     }
 }
 
-/// Depth-first walk over a part's shape tree, in document order.
 fn walk_nodes<'a>(nodes: &'a [ShapeNode], visit: &mut impl FnMut(&'a ShapeNode)) {
     for node in nodes {
         visit(node);
@@ -3274,7 +3273,6 @@ fn walk_nodes<'a>(nodes: &'a [ShapeNode], visit: &mut impl FnMut(&'a ShapeNode))
     }
 }
 
-/// First node per source id in document order.
 fn slide_node_index(nodes: &[ShapeNode]) -> HashMap<u32, &ShapeNode> {
     let mut index = HashMap::new();
     walk_nodes(nodes, &mut |node| {

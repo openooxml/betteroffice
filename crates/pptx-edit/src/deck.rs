@@ -264,9 +264,7 @@ impl DeckSession {
         snapshot_doc(&self.doc, &self.package)
     }
 
-    /// The slice of [`Self::snapshot`] a single-slide render needs: deck
-    /// dimensions plus that slide's shape/story state. Skips walking the
-    /// deck's other slides, stories, and comments. `None` when
+    /// Deck dimensions plus that slide's shape/story state. `None` when
     /// `slide_index` is outside the deck's slide order.
     pub fn slide_snapshot(&self, slide_index: usize) -> EditResult<Option<SlideRenderSnapshot>> {
         let txn = self.doc.transact();

@@ -62,9 +62,25 @@ pub struct PptxPackage {
     pub(crate) parts: Vec<PackagePart>,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
-    /// Part-path lookup tables built on first use; never serialized.
+    /// Part-path lookup hints built on first use; never serialized.
+    /// Verified on every hit — post-build mutations fall back to a scan.
     #[serde(skip)]
     pub(crate) index: PartIndex,
+}
+
+/// `index[path]` as a hint into `items`, verified by `part_path`, with a
+/// linear scan as the fallback so a stale hint can never be wrong.
+fn indexed<'a, T>(
+    items: &'a [T],
+    index: &HashMap<String, usize>,
+    path: &str,
+    part_path: impl Fn(&T) -> &str,
+) -> Option<&'a T> {
+    index
+        .get(path)
+        .and_then(|&i| items.get(i))
+        .filter(|item| part_path(item) == path)
+        .or_else(|| items.iter().find(|item| part_path(item) == path))
 }
 
 impl PptxPackage {
@@ -74,67 +90,71 @@ impl PptxPackage {
 
     /// First slide part with this path.
     pub fn slide_part(&self, part_path: &str) -> Option<&Slide> {
-        self.part_index()
-            .slides
-            .get(part_path)
-            .map(|&index| &self.slides[index])
+        indexed(&self.slides, &self.part_index().slides, part_path, |s| {
+            &s.part_path
+        })
     }
 
     /// First layout part with this path.
     pub fn layout_part(&self, part_path: &str) -> Option<&SlideLayout> {
-        self.part_index()
-            .layouts
-            .get(part_path)
-            .map(|&index| &self.layouts[index])
+        indexed(&self.layouts, &self.part_index().layouts, part_path, |l| {
+            &l.part_path
+        })
     }
 
     /// First master part with this path.
     pub fn master_part(&self, part_path: &str) -> Option<&SlideMaster> {
-        self.part_index()
-            .masters
-            .get(part_path)
-            .map(|&index| &self.masters[index])
+        indexed(&self.masters, &self.part_index().masters, part_path, |m| {
+            &m.part_path
+        })
     }
 
     /// First master that lists `layout`'s part path among its layouts.
     pub fn layout_master(&self, layout: &SlideLayout) -> Option<&SlideMaster> {
+        let path = layout.part_path.as_str();
+        let hosts = |m: &SlideMaster| m.layout_part_paths.iter().any(|p| p == path);
         self.part_index()
             .masters_by_layout
-            .get(layout.part_path.as_str())
-            .map(|&index| &self.masters[index])
+            .get(path)
+            .and_then(|&i| self.masters.get(i))
+            .filter(|m| hosts(m))
+            .or_else(|| self.masters.iter().find(|m| hosts(m)))
     }
 
     /// First theme part with this path.
     pub fn theme_part(&self, part_path: &str) -> Option<&ThemePart> {
-        self.part_index()
-            .themes
-            .get(part_path)
-            .map(|&index| &self.themes[index])
+        indexed(&self.themes, &self.part_index().themes, part_path, |t| {
+            &t.part_path
+        })
     }
 
     /// First media part with this path.
     pub fn media_part(&self, part_path: &str) -> Option<&MediaPart> {
-        self.part_index()
-            .media
-            .get(part_path)
-            .map(|&index| &self.media[index])
+        indexed(&self.media, &self.part_index().media, part_path, |m| {
+            &m.part_path
+        })
     }
 
     /// First chart part with this path resolved against `theme_part_path`.
     pub fn chart_part(&self, part_path: &str, theme_part_path: Option<&str>) -> Option<&ChartPart> {
+        let matches = |part: &ChartPart| {
+            part.part_path == part_path && part.theme_part_path.as_deref() == theme_part_path
+        };
         self.part_index()
             .charts
-            .get(part_path)?
-            .iter()
-            .map(|&index| &self.charts[index])
-            .find(|part| part.theme_part_path.as_deref() == theme_part_path)
+            .get(part_path)
+            .and_then(|candidates| {
+                candidates
+                    .iter()
+                    .filter_map(|&i| self.charts.get(i))
+                    .find(|part| matches(part))
+            })
+            .or_else(|| self.charts.iter().find(|part| matches(part)))
     }
 
     pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
-        self.part_index()
-            .parts
-            .get(path)
-            .map(|&index| self.parts[index].bytes.as_slice())
+        indexed(&self.parts, &self.part_index().parts, path, |p| &p.path)
+            .map(|part| part.bytes.as_slice())
     }
 
     /// False for packages recovered from a collaboration update, which carry
