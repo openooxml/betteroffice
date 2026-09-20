@@ -13,7 +13,7 @@ use yrs::{
 use crate::model::validate_xml_text;
 use crate::{
     CaretAnchor, DeckSession, EditError, EditResult, KIND, PARA_ID, PILCROW_KIND,
-    ParagraphSnapshot, STORIES, StorySnapshot, TextReceipt, TextRunSnapshot, TextStyle,
+    ParagraphSnapshot, STORIES, StorySnapshot, TextCaps, TextReceipt, TextRunSnapshot, TextStyle,
     TextStylePatch,
 };
 
@@ -669,7 +669,7 @@ fn insert_styled_text(
     }
 }
 
-fn style_values(style: &TextStyle) -> [(&'static str, Any); 8] {
+fn style_values(style: &TextStyle) -> [(&'static str, Any); 9] {
     [
         ("bold", style.bold.map(Any::Bool).unwrap_or(Any::Null)),
         ("italic", style.italic.map(Any::Bool).unwrap_or(Any::Null)),
@@ -704,6 +704,13 @@ fn style_values(style: &TextStyle) -> [(&'static str, Any); 8] {
         (
             "baseline",
             style.baseline_pct.map(Any::Number).unwrap_or(Any::Null),
+        ),
+        (
+            "caps",
+            style
+                .caps
+                .map(|caps| Any::from(caps.as_attribute()))
+                .unwrap_or(Any::Null),
         ),
     ]
 }
@@ -745,6 +752,7 @@ fn style_from_run_properties(properties: &RunProperties, theme: Option<&Theme>) 
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
@@ -758,6 +766,10 @@ fn style_from_attrs(attrs: Option<&Attrs>) -> TextStyle {
         underline: attrs.and_then(|attrs| any_string(attrs.get("underline"))),
         spacing_pt: attrs.and_then(|attrs| any_number(attrs.get("spacing"))),
         baseline_pct: attrs.and_then(|attrs| any_number(attrs.get("baseline"))),
+        caps: attrs
+            .and_then(|attrs| any_string(attrs.get("caps")))
+            .as_deref()
+            .and_then(TextCaps::from_attribute),
     }
 }
 

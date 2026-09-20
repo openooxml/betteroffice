@@ -2229,6 +2229,7 @@ fn segment_matches(element: &XmlElement, segment: &RunSegment<'_>, theme: Option
         && source.font_size_pt == target.font_size_pt
         && source.spacing_pt == target.spacing_pt
         && source.underline == target.underline
+        && source.caps == target.caps
         && source.font_family == target.font_family
         && resolve_color_value_to_hex_with_theme(source.color.as_ref(), theme)
             == resolve_color_value_to_hex_with_theme(target.color.as_ref(), theme)
@@ -2752,6 +2753,12 @@ fn apply_run_properties(
             base.attributes.remove("baseline");
         }
     }
+    match properties.caps {
+        Some(caps) => base.set_attribute("cap", caps.as_attribute()),
+        None => {
+            base.attributes.remove("cap");
+        }
+    }
     let toggles = [("b", properties.bold), ("i", properties.italic)];
     for (name, value) in toggles {
         match value {
@@ -2941,6 +2948,10 @@ fn run_properties_element(properties: &RunProperties, prefixes: &Prefixes) -> Op
     }
     if let Some(underline) = &properties.underline {
         element.set_attribute("u", underline.clone());
+        present = true;
+    }
+    if let Some(caps) = properties.caps {
+        element.set_attribute("cap", caps.as_attribute());
         present = true;
     }
     if let Some(color) = properties

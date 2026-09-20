@@ -11,14 +11,15 @@ use ooxml_drawingml::{
     style_fill, style_outline,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
+    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
     GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
     Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow,
+    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps, TextOverflow,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -2017,6 +2018,9 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    /// Size the line box and percentage line spacing read. Small caps shape
+    /// smaller than the run was authored at without shortening its line.
+    line_font_size_pt: f32,
     /// `spc`: tracking added after every cluster, in points.
     spacing_pt: f32,
     baseline_shift_px: f32,
@@ -2024,6 +2028,7 @@ struct ResolvedStyle {
     italic: bool,
     underline: bool,
     color: String,
+    caps: TextCaps,
 }
 
 fn resolve_content(
@@ -2073,17 +2078,17 @@ fn resolve_content(
                 *restart |= *start_at != 1;
             }
         }
+        let language = properties
+            .default_run
+            .as_ref()
+            .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            runs.push(ResolvedRun {
-                text: run.text.clone(),
-                start,
-                style,
-            });
+            push_cased_runs(&mut runs, &run.text, start, language, style);
         }
         if runs.is_empty() {
             runs.push(ResolvedRun {
@@ -2123,6 +2128,88 @@ fn resolve_content(
         story_offset = story_offset.saturating_add(1);
     }
     Ok(ResolvedContent { paragraphs })
+}
+
+/// Cases one run for drawing. `a:rPr/@cap` is a display property: the stored
+/// run text keeps the author's casing, so only the runs handed to the shaper
+/// change and the save projection is untouched.
+fn push_cased_runs(
+    out: &mut Vec<ResolvedRun>,
+    text: &str,
+    start: u32,
+    language: Option<&str>,
+    style: ResolvedStyle,
+) {
+    if text.is_empty() || style.caps == TextCaps::None {
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start,
+            style,
+        });
+        return;
+    }
+    if style.caps == TextCaps::All {
+        out.push(ResolvedRun {
+            text: display_uppercase(text, language),
+            start,
+            style,
+        });
+        return;
+    }
+    let mut small = style.clone();
+    small.font_size_pt = style.font_size_pt * WORD_SMALL_CAPS_ADVANCE_SCALE;
+    let mut offset = start;
+    for (lowercase, segment) in case_segments(text) {
+        let cased = display_uppercase(segment, language);
+        let length = utf16_len(&cased);
+        out.push(ResolvedRun {
+            text: cased,
+            start: offset,
+            style: if lowercase {
+                small.clone()
+            } else {
+                style.clone()
+            },
+        });
+        offset = offset.saturating_add(length);
+    }
+}
+
+/// Uppercases for drawing only, keeping every character's UTF-16 width so the
+/// display list still reports the authored story offsets. A character whose
+/// uppercase form is wider (ß → SS) stays as authored.
+fn display_uppercase(text: &str, language: Option<&str>) -> String {
+    text.chars()
+        .map(|character| {
+            let mut upper = uppercase_for_language(character, language).into_iter();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) if single.len_utf16() == character.len_utf16() => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+/// Splits `text` where its characters stop being lowercase, so small caps can
+/// draw the lowercase stretches at a reduced size.
+fn case_segments(text: &str) -> Vec<(bool, &str)> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut current = None;
+    for (index, character) in text.char_indices() {
+        let lowercase = character.is_lowercase();
+        if current != Some(lowercase) {
+            if let Some(previous) = current {
+                segments.push((previous, &text[start..index]));
+            }
+            start = index;
+            current = Some(lowercase);
+        }
+    }
+    if let Some(previous) = current {
+        segments.push((previous, &text[start..]));
+    }
+    segments
 }
 
 fn resolve_bullet_style(
@@ -2228,6 +2315,7 @@ fn resolve_style(
         family: face.family.clone(),
         face,
         font_size_pt,
+        line_font_size_pt: font_size_pt,
         spacing_pt,
         baseline_shift_px,
         bold,
@@ -2238,6 +2326,10 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
         color,
+        caps: direct
+            .caps
+            .or_else(|| fallback.and_then(|value| value.caps))
+            .unwrap_or(TextCaps::None),
     })
 }
 
@@ -3045,7 +3137,7 @@ fn style_line_box(
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(
         metrics,
-        points_to_px(style.font_size_pt * scale),
+        points_to_px(style.line_font_size_pt * scale),
         &CompatFlags::default(),
     ))
 }
@@ -3054,7 +3146,7 @@ fn style_line_box(
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .map(|cluster| points_to_px(cluster.style.line_font_size_pt * scale))
         .fold(0.0_f32, f32::max)
 }
 
@@ -3526,6 +3618,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.baseline_pct.is_some() {
         target.baseline_pct = source.baseline_pct;
     }
+    if source.caps.is_some() {
+        target.caps = source.caps;
+    }
 }
 
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -3538,6 +3633,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
@@ -4533,12 +4629,14 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    line_font_size_pt: 18.0,
                     spacing_pt: 0.0,
                     baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
                     color: "#000000".to_owned(),
+                    caps: TextCaps::None,
                 },
             }],
         }
@@ -4757,12 +4855,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let mut variants = vec![style.clone(); 7];
         variants[0].color = "#A99A72".to_owned();
@@ -4838,12 +4938,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
             color: "#A99A72".to_owned(),
+            caps: TextCaps::None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
@@ -4899,12 +5001,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
+            line_font_size_pt: 24.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {
