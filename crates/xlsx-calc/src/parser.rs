@@ -47,6 +47,8 @@ pub enum Expr {
     Percent(Box<Expr>),
     FuncCall {
         name: String,
+        /// resolved builtin, bound once at parse time; `None` = unknown name.
+        func: Option<crate::functions::Func>,
         args: Vec<Expr>,
     },
 }
@@ -240,12 +242,14 @@ impl Parser<'_> {
     }
 
     fn func_call(&mut self, name: String, depth: usize) -> Result<ParsedExpr, ParseError> {
+        let func = crate::functions::resolve(&name);
         self.expect(&TokKind::LParen, "'(' after function name")?;
         let mut args = Vec::new();
         if matches!(self.peek().map(|t| &t.kind), Some(TokKind::RParen)) {
             self.advance();
             return Ok(ParsedExpr::leaf(Expr::FuncCall {
                 name,
+                func,
                 args: Vec::new(),
             }));
         }
@@ -267,6 +271,7 @@ impl Parser<'_> {
         Ok(ParsedExpr {
             expr: Expr::FuncCall {
                 name,
+                func,
                 args: args.into_iter().map(|arg| arg.expr).collect(),
             },
             depth: ast_depth,
@@ -407,7 +412,7 @@ mod tests {
     #[test]
     fn function_calls_parse_args() {
         match parse("SUM(1, A1, 2+3)") {
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 assert_eq!(name, "SUM");
                 assert_eq!(args.len(), 3);
             }

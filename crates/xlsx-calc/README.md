@@ -12,9 +12,11 @@ semantics. No GPL/AGPL or proprietary spreadsheet source was consulted.
 - `lexer.rs` / `parser.rs` — source → position-tagged tokens → `Expr`.
 - `eval.rs` — the evaluator and coercion machinery (`to_number`, `to_text`,
   `to_bool`, `cmp_values`), range/`Area` access, and error propagation. It owns
-  no functions; `Expr::FuncCall` dispatches into `functions::lookup`.
-- `functions/` — the builtin library. `mod.rs` holds the name → implementation
-  registry and shared argument collectors; one module per category
+  no functions; `Expr::FuncCall` carries a `Func` interned at parse time and
+  dispatches via `Func::call`.
+- `functions/` — the builtin library. `mod.rs` holds the name → `Func` registry
+  (`resolve`), the `Func` → implementation dispatch (`Func::call`), and shared
+  argument collectors; one module per category
   (`math`, `stats`, `text`, `datetime`, `logical`, `lookups`, `info`) plus
   `criteria.rs` (the shared Excel criteria-string parser and the *IF/*IFS
   driver).

@@ -313,7 +313,7 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
     let mut uses = Vec::new();
     while let Some(expression) = expressions.pop() {
         match expression {
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 let upper = name.to_ascii_uppercase();
                 if VOLATILE_FNS.contains(&upper.as_str()) {
                     return true;

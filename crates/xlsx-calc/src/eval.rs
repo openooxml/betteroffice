@@ -214,8 +214,8 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Ok(n) => num(n / 100.0),
             Err(e) => err(e),
         },
-        Expr::FuncCall { name, args } => match crate::functions::lookup(name) {
-            Some(f) => f(args, ctx),
+        Expr::FuncCall { func, args, .. } => match func {
+            Some(f) => f.call(args, ctx),
             None => err(ErrorValue::Name),
         },
     }
