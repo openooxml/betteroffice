@@ -9,6 +9,7 @@ pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::ChartSpace;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use xlsx_model::numfmt::{builtin_format_code, format_value};
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::Sheet;
+use xlsx_model::workbook::{Hyperlink, Sheet};
 use xlsx_model::{
     CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
 };
@@ -422,6 +423,7 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
+    let link_index = HyperlinkIndex::new(&sheet_ref.hyperlinks);
     let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
     if print.is_some() {
         for merge in &sheet_ref.merges {
@@ -585,7 +587,7 @@ where
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
-        let hyperlink = sheet_ref.hyperlink_at(at);
+        let hyperlink = link_index.at(at);
         let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
             hyperlink
                 .filter(|link| link.range.start == at)
@@ -627,6 +629,7 @@ where
             &geom,
             &cols,
             sheet_ref,
+            &link_index,
             styles,
             wb.date_system,
             at,
@@ -938,8 +941,8 @@ fn visible_anchors<'a>(
 
 /// whether the painter draws a hyperlink's own label at `at`, which it does
 /// only at the link range's start and only when the cell has no text of its own.
-fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
-    sheet.hyperlink_at(at).is_some_and(|link| {
+fn draws_hyperlink_label(links: &HyperlinkIndex, at: CellRef) -> bool {
+    links.at(at).is_some_and(|link| {
         link.range.start == at && link.display.as_ref().is_some_and(|d| !d.is_empty())
     })
 }
@@ -958,6 +961,7 @@ fn spill_clip(
     geom: &GridGeometry,
     cols: &AxisLayout,
     sheet: &Sheet,
+    links: &HyperlinkIndex,
     styles: &Stylesheet,
     date_system: xlsx_model::DateSystem,
     at: CellRef,
@@ -986,7 +990,7 @@ fn spill_clip(
             && sheet
                 .cell(neighbour)
                 .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
-            && !draws_hyperlink_label(sheet, neighbour)
+            && !draws_hyperlink_label(links, neighbour)
     };
     let pane = cols.tracks[anchor].pinned;
     let mut first = anchor;
@@ -1023,6 +1027,109 @@ fn spill_clip(
         w: span.end - span.start,
         h: cell_box.clip.h,
     })
+}
+
+/// hyperlink lookup for one render pass. `entries` holds `(row, start_col,
+/// end_col, link index)` grouped by row — sorted by start column when a row's
+/// ranges do not overlap, so lookups binary-search; otherwise kept in
+/// `hyperlinks` order and scanned. ranges taller than `LINK_ROW_CAP` rows stay
+/// out of `entries` and are scanned in `hyperlinks` order, so one huge range
+/// cannot dominate the index build. either way `at` returns the same
+/// first-in-`hyperlinks`-order match a linear scan would.
+struct HyperlinkIndex<'a> {
+    links: &'a [Hyperlink],
+    rows: BTreeMap<u32, LinkRow>,
+    entries: Vec<(u32, u32, u32, u32)>,
+    scanned: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct LinkRow {
+    /// span of this row's links in `HyperlinkIndex::entries`.
+    start: u32,
+    end: u32,
+    /// true when the row's ranges are column-disjoint, so its entries are
+    /// sorted by start column and at most one can cover a queried cell.
+    by_col: bool,
+}
+
+/// a range spanning more rows than this is scanned instead of indexed per row.
+const LINK_ROW_CAP: u32 = 64;
+
+impl<'a> HyperlinkIndex<'a> {
+    fn new(links: &'a [Hyperlink]) -> Self {
+        let mut entries: Vec<(u32, u32, u32, u32)> = Vec::new();
+        let mut scanned = Vec::new();
+        for (index, link) in links.iter().enumerate() {
+            let range = link.range;
+            if range.end.row - range.start.row >= LINK_ROW_CAP {
+                scanned.push(index as u32);
+                continue;
+            }
+            for row in range.start.row..=range.end.row {
+                entries.push((row, range.start.col, range.end.col, index as u32));
+            }
+        }
+        entries.sort_by_key(|entry| (entry.0, entry.1));
+        let mut rows = BTreeMap::new();
+        let mut i = 0;
+        while i < entries.len() {
+            let mut j = i + 1;
+            while j < entries.len() && entries[j].0 == entries[i].0 {
+                j += 1;
+            }
+            let group = &mut entries[i..j];
+            let by_col = group.windows(2).all(|w| w[0].2 < w[1].1);
+            if !by_col {
+                group.sort_by_key(|entry| entry.3);
+            }
+            rows.insert(
+                entries[i].0,
+                LinkRow {
+                    start: i as u32,
+                    end: j as u32,
+                    by_col,
+                },
+            );
+            i = j;
+        }
+        Self {
+            links,
+            rows,
+            entries,
+            scanned,
+        }
+    }
+
+    /// the first link in `hyperlinks` order (if any) that covers `at`.
+    fn at(&self, at: CellRef) -> Option<&'a Hyperlink> {
+        let in_row = self.rows.get(&at.row).and_then(|row| {
+            let entries = &self.entries[row.start as usize..row.end as usize];
+            if row.by_col {
+                let p = entries.partition_point(|entry| entry.1 <= at.col);
+                p.checked_sub(1)
+                    .and_then(|i| entries.get(i))
+                    .filter(|entry| entry.2 >= at.col)
+                    .map(|entry| entry.3)
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| entry.1 <= at.col && at.col <= entry.2)
+                    .map(|entry| entry.3)
+            }
+        });
+        let scanned = self
+            .scanned
+            .iter()
+            .copied()
+            .find(|&i| self.links[i as usize].range.contains(at));
+        let index = match (in_row, scanned) {
+            (Some(m), Some(s)) => m.min(s),
+            (Some(m), None) => m,
+            (None, s) => s?,
+        };
+        Some(&self.links[index as usize])
+    }
 }
 
 /// viewport-local `(x, y, w, h)` of a cell's box, spanning its merged range
@@ -2031,5 +2138,35 @@ mod tests {
         assert_eq!(texts[0].0, "merged");
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert!((texts[0].1.w - dc * 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hyperlink_index_matches_a_linear_scan() {
+        let link = |a1: &str, tag: &str| Hyperlink {
+            range: CellRange::parse_a1(a1).unwrap(),
+            external_target: Some(tag.to_string()),
+            location: None,
+            tooltip: None,
+            display: None,
+        };
+        let links = vec![
+            link("B2:D4", "wide"),
+            link("C3", "nested"),
+            link("A1:A200", "tall"),
+            link("D4:E4", "dup"),
+            link("B2:D4", "dup2"),
+        ];
+        let index = HyperlinkIndex::new(&links);
+        for row in 0..6u32 {
+            for col in 0..6u32 {
+                let at = CellRef::new(row, col);
+                let want = links
+                    .iter()
+                    .find(|l| l.range.contains(at))
+                    .and_then(|l| l.external_target.as_deref());
+                let got = index.at(at).and_then(|l| l.external_target.as_deref());
+                assert_eq!(got, want, "at {at:?}");
+            }
+        }
     }
 }
