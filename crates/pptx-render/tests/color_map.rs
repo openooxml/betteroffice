@@ -11,7 +11,7 @@ const PRESENTATION: &str = "http://schemas.openxmlformats.org/presentationml/200
 /// The `Blue` scheme and inverted `p:clrMap` measured in the
 /// `pptarena-054-original` corpus deck, whose slides PowerPoint paints on
 /// `dk2` = `#17406D` with `lt1` = white title text.
-fn deck(color_map: &str, override_mapping: &str) -> Vec<u8> {
+fn deck(color_map: &str, layout_mapping: &str, override_mapping: &str) -> Vec<u8> {
     let parts: Vec<(String, Vec<u8>)> = vec![
         (
             "[Content_Types].xml".to_owned(),
@@ -56,7 +56,7 @@ fn deck(color_map: &str, override_mapping: &str) -> Vec<u8> {
         (
             "ppt/slideLayouts/slideLayout1.xml".to_owned(),
             format!(
-                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout xmlns:a="{DRAWING}" xmlns:r="{OFFICE}" xmlns:p="{PRESENTATION}" type="title"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"#
+                r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sldLayout xmlns:a="{DRAWING}" xmlns:r="{OFFICE}" xmlns:p="{PRESENTATION}" type="title"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/></p:spTree></p:cSld>{layout_mapping}</p:sldLayout>"#
             )
             .into_bytes(),
         ),
@@ -131,7 +131,7 @@ const MASTER_MAPPING: &str = "<p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>";
 
 #[test]
 fn an_inverted_master_colour_map_swaps_background_and_text_slots() {
-    let list = render(&deck(INVERTED, MASTER_MAPPING));
+    let list = render(&deck(INVERTED, MASTER_MAPPING, MASTER_MAPPING));
     assert_eq!(
         list.background,
         Some(Paint::Solid {
@@ -149,7 +149,7 @@ fn an_inverted_master_colour_map_swaps_background_and_text_slots() {
 
 #[test]
 fn an_identity_master_colour_map_leaves_every_slot_alone() {
-    let list = render(&deck(IDENTITY, MASTER_MAPPING));
+    let list = render(&deck(IDENTITY, MASTER_MAPPING, MASTER_MAPPING));
     assert_eq!(
         list.background,
         Some(Paint::Solid {
@@ -169,6 +169,7 @@ fn an_identity_master_colour_map_leaves_every_slot_alone() {
 fn a_slide_override_mapping_wins_over_the_master() {
     let list = render(&deck(
         INVERTED,
+        MASTER_MAPPING,
         r#"<p:clrMapOvr><a:overrideClrMapping bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr>"#,
     ));
     assert_eq!(
@@ -178,4 +179,54 @@ fn a_slide_override_mapping_wins_over_the_master() {
         })
     );
     assert_eq!(title_color(&list), "#000000");
+}
+
+const INVERTED_OVERRIDE: &str = r#"<p:clrMapOvr><a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr>"#;
+
+/// `pptarena-031-original`'s shape: an identity master, the inversion declared
+/// on the layout, and a slide that inherits it.
+#[test]
+fn a_layout_override_reaches_a_slide_that_inherits_it() {
+    let list = render(&deck(IDENTITY, INVERTED_OVERRIDE, MASTER_MAPPING));
+    assert_eq!(
+        list.background,
+        Some(Paint::Solid {
+            color: "#17406D".to_owned()
+        })
+    );
+    assert_eq!(
+        band_fill(&list),
+        Some(&Paint::Solid {
+            color: "#000000".to_owned()
+        })
+    );
+    assert_eq!(title_color(&list), "#FFFFFF");
+}
+
+/// The save projection resolves colours too, so an untouched mapped deck must
+/// still re-serialize byte-identically.
+#[test]
+fn a_mapped_deck_saves_byte_identically_when_untouched() {
+    let bytes = deck(IDENTITY, INVERTED_OVERRIDE, MASTER_MAPPING);
+    let session = DeckSession::open(&bytes, 900).unwrap();
+    let saved = session.save().unwrap();
+    let part = |zip: &[u8], name: &str| {
+        ooxml_opc::unzip_parts(zip)
+            .unwrap()
+            .into_iter()
+            .find(|(path, _)| path == name)
+            .map(|(_, body)| body)
+            .unwrap()
+    };
+    for name in [
+        "ppt/slides/slide1.xml",
+        "ppt/slideLayouts/slideLayout1.xml",
+        "ppt/slideMasters/slideMaster1.xml",
+    ] {
+        assert_eq!(
+            part(&saved, name),
+            part(&bytes, name),
+            "{name} changed on save"
+        );
+    }
 }

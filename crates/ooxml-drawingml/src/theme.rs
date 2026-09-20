@@ -129,9 +129,8 @@ impl Default for ThemeFontScheme {
     }
 }
 
-/// `p:clrMap`, which decides the `a:clrScheme` slot every `tx1`/`bg1`-style
-/// scheme colour resolves against. Only entries that differ from the identity
-/// mapping are stored, so an empty map resolves each slot to itself.
+/// `p:clrMap`: the `a:clrScheme` slot each `tx1`/`bg1`-style name resolves to.
+/// Only non-identity entries are stored, so an empty map is the identity.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ColorMap(IndexMap<String, String>);
