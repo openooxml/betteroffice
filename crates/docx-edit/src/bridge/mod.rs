@@ -2362,7 +2362,7 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
                 (RawRunKind::Text(previous_text), RawRunKind::Text(text))
                     if previous.story_end == run.story_start
                         && previous.pm_end == run.pm_start
-                        && formatting_equal(&previous.formatting, &run.formatting)
+                        && previous.formatting == run.formatting
                         && previous.inline_sdt_widget == run.inline_sdt_widget =>
                 {
                     previous_text.push_str(text);
@@ -2380,11 +2380,6 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
         }
     }
     result
-}
-
-fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
-    serde_json::to_value(left).expect("RunFormatting serializes")
-        == serde_json::to_value(right).expect("RunFormatting serializes")
 }
 
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
