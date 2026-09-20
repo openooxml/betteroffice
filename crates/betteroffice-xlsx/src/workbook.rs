@@ -184,8 +184,7 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
-    /// Source container bytes, kept so unchanged members can be re-emitted
-    /// with their original compressed payload on save.
+    /// Source bytes for verbatim member passthrough on save.
     source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
     preserved_undo: Vec<PreservedStateHistory>,

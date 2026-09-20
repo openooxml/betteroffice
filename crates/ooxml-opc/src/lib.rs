@@ -175,8 +175,7 @@ fn write_deflated(
         .map_err(|e| format!("write {name}: {e}"))
 }
 
-/// Original container bytes, retained so unchanged members re-emit verbatim
-/// on save; a write cache, not model content, so equality is always true.
+/// Source bytes retained so unchanged members re-emit verbatim on save; equality is always true.
 #[derive(Clone, Default)]
 pub struct SourceContainer(std::sync::Arc<[u8]>);
 
@@ -206,11 +205,8 @@ impl PartialEq for SourceContainer {
 
 impl Eq for SourceContainer {}
 
-/// As [`rezip_parts`], but entries whose inflated bytes still equal the
-/// same-named member of `source` are copied verbatim — original compressed
-/// payload, method, and timestamps intact — instead of being re-deflated.
-/// Unchanged members keep their stored/compressed form; changed or new parts
-/// are deflated as usual. An unreadable `source` falls back to full rezip.
+/// As [`rezip_parts`], but unchanged members copy the source's compressed
+/// payload verbatim; unreadable `source` falls back to full rezip.
 pub fn rezip_parts_preserving(
     entries: &[(String, Vec<u8>)],
     source: &[u8],
@@ -237,8 +233,7 @@ pub fn rezip_parts_preserving(
     Ok(cursor.into_inner())
 }
 
-/// Copy `name`'s compressed source member into `writer` when its inflated
-/// content still equals `bytes`; false means the caller should re-deflate.
+/// Copy `name`'s compressed source member into `writer`; false means re-deflate.
 fn copy_unchanged_member(
     archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
     writer: &mut zip::ZipWriter<&mut Cursor<Vec<u8>>>,
@@ -427,7 +422,6 @@ mod tests {
         let source = stored_zip(&entries, "word/media/image1.png");
         let out = rezip_parts_preserving(&entries, &source).expect("rezip");
         assert_eq!(unzip_parts(&out).unwrap(), entries);
-        // Stored members keep their method; so do deflated ones.
         assert_eq!(
             entry_method(&out, "word/media/image1.png"),
             zip::CompressionMethod::Stored
