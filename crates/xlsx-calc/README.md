@@ -57,6 +57,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `POWER`, `SQRT`, `EXP` | Non-finite result → `#NUM!`; `SQRT` of a negative → `#NUM!`. |
 | `LN`, `LOG10`, `LOG(n, [base])` | Non-positive input → `#NUM!`; `LN`/`LOG10` use the dedicated libm routine. |
 | `PI` | — |
+| `TANH` | Hyperbolic tangent. |
 
 ### Statistics
 

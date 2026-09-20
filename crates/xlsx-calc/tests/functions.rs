@@ -137,10 +137,17 @@ fn math_functions() {
         ("FLOOR(2.9, 1)", n(2.0)),
         ("CEILING(-2.5, -1)", n(-3.0)),
         ("ABS(-7)", n(7.0)),
+        ("TANH(0)", n(0.0)),
+        ("TANH(\"abc\")", e(ErrorValue::Value)),
+        ("TANH(1, 2)", e(ErrorValue::Value)),
     ]);
     approx("PI()", std::f64::consts::PI);
     approx("LN(EXP(1))", 1.0);
     approx("EXP(0)", 1.0);
+    approx("TANH(1)", 0.761_594_155_955_764_9);
+    approx("TANH(-2.5)", -0.986_614_298_151_430_3);
+    approx("TANH(20)", 1.0);
+    approx("TANH(TRUE)", 0.761_594_155_955_764_9);
 }
 
 #[test]

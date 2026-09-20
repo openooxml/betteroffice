@@ -46,6 +46,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "LOG" => math::log,
         "LOG10" => math::log10,
         "PI" => math::pi,
+        "TANH" => math::tanh,
         "AVERAGE" => stats::average,
         "COUNT" => stats::count,
         "COUNTA" => stats::counta,

@@ -347,3 +347,7 @@ fn directional(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) -> Ce
     let factor = 10f64.powi(digits);
     finite(rule(x * factor) / factor)
 }
+
+pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::tanh)
+}
