@@ -14,6 +14,8 @@ All text is `#2040B0` in Arial (Liberation Sans for the regression checks). Each
 
 Expanded spacing leaves the first baseline at the font's natural ascent; compressed spacing scales the line box. The integration tests also check exact spacing at 50% autofit and zero spacing overriding the master.
 
-`line-spacing.before.png` is rendered on main `2c90c17f`; `line-spacing.after.png` uses this branch. The comparison checks every display-list field: only line y, height, baseline and glyph y-offsets change; the control shape is identical.
+Review: [PR #314](https://github.com/openooxml/betteroffice/pull/314).
+
+The comparison checks every display-list field: only line y, height, baseline and glyph y-offsets change; the control shape is identical.
 
 The valid spacing ranges follow the [Open XML SDK DrawingML schema](https://github.com/dotnet/Open-XML-SDK/blob/main/data/schemas/schemas_openxmlformats_org_drawingml_2006_main.json). Point units are documented in [SpacingPoints](https://learn.microsoft.com/en-us/dotnet/api/documentformat.openxml.drawing.spacingpoints).

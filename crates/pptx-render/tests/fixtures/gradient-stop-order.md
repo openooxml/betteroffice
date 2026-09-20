@@ -16,8 +16,8 @@ stops, slide 1's pixels at `(0,90)`, `(160,90)`, and `(319,90)` are `#EE0011`,
 `#7F0080`, and `#1100EE`. Slide 2's center `(160,90)` is `#404040`, its left
 edge `(0,90)` is `#292929`, and its corner `(0,0)` is `#262626`.
 
-[Before](gradient-stop-order.before.png) and
-[after](gradient-stop-order.after.png) are slide 1's native raster output at 1×.
+Review: [PR #306](https://github.com/openooxml/betteroffice/pull/306).
+
 Slide 3's display list and PNG remain byte-identical. Only
 `background.stops` changes on slides 1 and 2; saving without edits preserves
 every original ZIP part and its XML stop order.

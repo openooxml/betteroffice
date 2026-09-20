@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test';
 import { renderSection, updateReadme } from './readme.mjs';
 
+const row = (label: string, published: string, current: string) =>
+  `<tr><td>${label}</td><td align="right">${published}</td><td align="right">${current}</td></tr>`;
+
 const commit = 'a'.repeat(40);
 function report() {
   const comparison = {
@@ -34,11 +37,10 @@ test('generates every format and never reuses scores for a different release or 
   const section = renderSection(input);
   expect(section).not.toContain('0.8000');
   expect(section).toContain('#### PPTX');
-  expect(section).toContain('| [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) |');
-  expect(section).toContain('| [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) |');
-  expect(section).toContain('| — |');
-  expect(section).toMatch(/^\| SSIM \| — \| — \|$/m);
-  expect(section).toMatch(/^\| Scored\/total \| 0\/1 \| 0\/1 \|$/m);
+  expect(section).toContain('pptx/v/0.0.4"');
+  expect(section).toContain('xlsx/v/0.1.0"');
+  expect(section).toContain(row('SSIM', '—', '—'));
+  expect(section).toContain(row('Scored/total', '0/1', '0/1'));
 });
 
 test('reports DOCX page agreement apart from SSIM, and only where pages are known', () => {
@@ -63,12 +65,12 @@ test('reports DOCX page agreement apart from SSIM, and only where pages are know
   // two exact, one two pages short, one page over: 2/4 exact, error 3
   input.samples = [paged(4, 4, 'a'), paged(9, 9, 'b'), paged(5, 3, 'c'), paged(2, 3, 'd')] as any;
   const section = renderSection(input);
-  expect(section).toMatch(/^\| Exact page counts \| — \| 2\/4 \|$/m);
-  expect(section).toMatch(/^\| Absolute page error \| — \| 3 \|$/m);
+  expect(section).toContain(row('Exact page counts', '—', '2/4'));
+  expect(section).toContain(row('Absolute page error', '—', '3'));
   // a comparison without page counts contributes to SSIM but not to page agreement
   input.samples = [paged(4, 4, 'a'), report().samples[0]] as any;
   const mixed = renderSection(input);
-  expect(mixed).toMatch(/^\| Exact page counts \| — \| 1\/1 \|$/m);
+  expect(mixed).toContain(row('Exact page counts', '—', '1/1'));
 });
 
 test('replaces and moves the generated block without touching other sections', () => {
@@ -107,13 +109,13 @@ test('keeps each format tied to its own published version and comparison', () =>
     });
   }
   const section = renderSection(input);
-  expect(section).toMatch(
-    /pptx\/v\/0\.0\.4\) \| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
-  );
-  expect(section).toMatch(
-    /xlsx\/v\/0\.1\.0\) \| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
-  );
-  expect(section).toMatch(/^\| SSIM \| 0\.8000 \| 0\.8000 \|$/m);
+  const pptx = section.slice(section.indexOf('#### PPTX'), section.indexOf('#### XLSX'));
+  expect(pptx).toContain(row('SSIM', '0.9100', '0.9100'));
+  expect(pptx).toContain(row('Scored/total', '1/1', '1/1'));
+  const xlsx = section.slice(section.indexOf('#### XLSX'));
+  expect(xlsx).toContain(row('SSIM', '0.8700', '0.8700'));
+  expect(xlsx).toContain(row('Scored/total', '1/1', '1/1'));
+  expect(section).toContain(row('SSIM', '0.8000', '0.8000'));
 });
 
 test('all failures show no score and cannot carry an invented zero', () => {
@@ -131,8 +133,8 @@ test('all failures show no score and cannot carry an invented zero', () => {
   };
   const section = renderSection(failedReport);
   expect(section).not.toContain('0.0000');
-  expect(section).toMatch(/^\| SSIM \| — \| — \|$/m);
-  expect(section).toMatch(/^\| Exact page counts \| — \| — \|$/m);
+  expect(section).toContain(row('SSIM', '—', '—'));
+  expect(section).toContain(row('Exact page counts', '—', '—'));
   expect(section).not.toContain('Could not render');
   expect(() =>
     renderSection({
@@ -169,7 +171,7 @@ test('omits failure diagnostics from the README', () => {
   expect(section).not.toContain('https://example.com');
   expect(section).not.toContain('extra row');
   expect(section).not.toContain('Failed or missing');
-  expect(section).not.toContain('| Sample | Channel | Stage | Error |');
+  expect(section).not.toContain('<td>Sample</td>');
 });
 
 test('duplicate and invalid successful comparisons cannot be published', () => {

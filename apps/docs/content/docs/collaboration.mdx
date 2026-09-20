@@ -1,17 +1,13 @@
 ---
 title: Collaboration
-description: Connect DOCX, XLSX, and PPTX editors through a shared sync-v1 relay; VSDX collaboration is in development
+description: Connect editors through a shared transport and deploy a collaboration relay
 ---
 
-BetterOffice exposes the same collaboration boundary for DOCX, XLSX, and PPTX:
-an editor-owned Yrs replica, a sync-v1 provider, and a caller-owned binary
-transport. The backend routes frames by room and never parses Office files.
+BetterOffice editors synchronize through a Yrs CRDT. Each editor exposes its
+replica to a collaboration provider, which exchanges updates over a transport
+you supply. A relay routes those updates between peers in the same room.
 
-VSDX's framework-free core has a convergent Yrs CRDT and WebAssembly boundary in
-development. Its React editor exposes the provider integration, and a live demo
-is available. Local two-browser validation covers reconnecting after offline edits and saving the converged document.
-
-## Architecture
+## How updates flow
 
 1. The editor publishes its replica through `collaboration.onReplica`.
 2. The format provider converts replica updates to Yjs sync-v1 frames.
@@ -45,14 +41,16 @@ can accept another frame.
 
 ## Connect an editor
 
-The provider import differs by format; the transport contract does not.
+Import `CollaborationProvider` from the package for your format:
 
 | Format | Provider import |
 | --- | --- |
 | DOCX | `@betteroffice/docx/collaboration` |
 | XLSX | `@betteroffice/xlsx/collaboration` |
 | PPTX | `@betteroffice/pptx` |
-| VSDX | `@betteroffice/vsdx` |
+| VSDX (source preview) | `@betteroffice/vsdx` |
+
+[VSDX packages](./vsdx) are available from source.
 
 Create the provider when the editor publishes its replica:
 
@@ -68,7 +66,7 @@ const onReplica = (replica) => {
 };
 ```
 
-Pass the same collaboration shape to any React editor:
+Pass the collaboration options to your editor:
 
 ```tsx
 const collaboration = { clientId, initialUpdate, onReplica };
@@ -86,9 +84,8 @@ shared starting state for that document. The demo generates these states with
 Call `provider.destroy()` and disconnect the transport when the editor unmounts
 or changes rooms.
 
-## Production boundary
+## Production setup
 
-The reference relay is intentionally small. Add authentication before resolving
-a room, authorize each room ID, enforce connection and storage quotas, and define
-a snapshot or compaction policy for long-lived documents. The included relay
-retains at most 512 frames or 16 MiB per room.
+Before deploying, add authentication and room authorization, set connection and
+storage quotas, and plan how to snapshot or compact long-lived documents. The
+reference relay retains at most 512 frames or 16 MiB per room.

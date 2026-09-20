@@ -1,6 +1,6 @@
 ---
 title: Python
-description: betteroffice-docx, betteroffice-xlsx, and betteroffice-pptx on PyPI — read, edit, lay out, render, and save
+description: Read, edit, render, and save Office files with Python
 ---
 
 ```bash
@@ -9,16 +9,15 @@ pip install betteroffice-xlsx
 pip install betteroffice-pptx
 ```
 
-All three formats are on PyPI. The Rust engine is compiled into each wheel: no
-Word, no Excel, no PowerPoint, no LibreOffice subprocess, no COM. Wheels are
-built for Linux (x86_64, aarch64), macOS (arm64, x86_64), and Windows (x86_64)
-against the stable ABI for CPython 3.9 and up.
+Each package includes its Rust engine and runs independently of Microsoft Office.
+Wheels support CPython 3.9 and later on Linux (x86_64, aarch64), macOS (arm64,
+x86_64), and Windows (x86_64).
 
 [`betteroffice-xlsx`](https://pypi.org/project/betteroffice-xlsx/) is the
-workbook distribution, and the rest of this page walks through it;
-[DOCX](#docx) and [PPTX](#pptx) follow at the end.
+spreadsheet package. Start with the workbook example below, or jump to
+[DOCX](#docx) or [PPTX](#pptx).
 
-## Formulas calculate
+## Edit a workbook
 
 ```python
 from betteroffice_xlsx import Workbook
@@ -30,18 +29,18 @@ sheet["B1"] = 10
 sheet["B2"] = 32
 sheet["B3"] = "=SUM(B1:B2)"
 
-print(sheet["B3"])           # 42.0, computed here
-print(sheet.formula("B3"))   # 'SUM(B1:B2)'
+print(sheet["B3"])
+print(sheet.formula("B3"))
 
 wb.save_path("budget-out.xlsx")
 ```
 
-Writing a cell recalculates its dependents. A cell you have not touched keeps
-whatever the authoring application cached, stale or not; `Workbook.open_recalculated`
-or a later `recalculate()` evaluates the whole workbook with this engine instead.
-Values come back as `None`, `float`, `str`, `bool`, or a `CellError` that compares
-equal to its code, so `#DIV/0!` as a value stays distinguishable from a cell
-holding that text.
+This prints `42.0` and `SUM(B1:B2)`. Editing a cell recalculates its dependents;
+other cells retain their cached results. Use `Workbook.open_recalculated` or
+`recalculate()` to evaluate the whole workbook.
+
+Cell values are returned as `None`, `float`, `str`, `bool`, or `CellError`. Errors
+remain distinct from text values such as the string `"#DIV/0!"`.
 
 ## Render a sheet
 
@@ -50,63 +49,53 @@ png = wb.render_png("Sheet1", scale=2.0, range="A1:H40")
 png.write("preview.png")
 ```
 
-This is the same grid layout and display list the browser editor uses, and the
-raster backend embeds Carlito to measure and draw cell text, so nothing has to be
-registered first. Opening, recalculating, rendering, and saving release the GIL,
-so they run in parallel across threads instead of serializing your workers.
+Spreadsheet rendering uses the bundled Carlito font. Opening, recalculating,
+rendering, and saving release the GIL, allowing these operations to run across
+Python threads.
 
-## What a save keeps
+## Saving
 
-`save()` returns bytes and `save_path()` writes a file. The parts the model does
-not represent — charts, pivot tables, comments, macros, custom XML — are kept,
-and sheets an edit did not touch are copied through byte for byte. A sheet you do
-edit keeps its unmodeled row, column, and cell markup: only the cells, rows, and
-columns the edit actually changed are rewritten, and the rest of the sheet is
-kept byte for byte. A sheet whose rows or cells lack `r` attributes or arrive out of
-order, or that was replayed from collaboration updates, is reserialized from the
-model instead.
+`save()` returns bytes; `save_path()` writes a file. Both preserve untouched
+package parts, including charts, pivot tables, comments, macros, and custom XML.
+Changed worksheets are patched to retain unmodified row, column, and cell markup.
+Worksheets with missing or out-of-order row or cell addresses, and worksheets
+reconstructed from collaboration updates, are serialized from the model instead.
 
 ## Collaboration and agent proposals
 
-`Workbook.open_collaborative` makes the workbook a Yrs replica and exposes the
-byte-level primitives — `state_vector`, `state_as_update`, `diff`,
-`apply_update` — rather than a transport, so it drops into a WebSocket server, a
-queue, or a test harness without committing you to asyncio. `propose` stages an
-agent's edits with the before and after text of each one, and nothing reaches the
-sheet until `accept_proposal` applies it as a single undo step.
+`Workbook.open_collaborative` creates a Yrs replica. Use `state_vector`,
+`state_as_update`, `diff`, and `apply_update` to exchange updates over your
+transport.
 
-The package README on PyPI carries the full API table, the openpyxl comparison,
-and the error hierarchy.
+`propose` stages agent edits with before-and-after text for review.
+`accept_proposal` applies the edits as a single undo step.
+
+See the [package README](https://pypi.org/project/betteroffice-xlsx/) for the full
+API, error types, and an openpyxl comparison.
 
 ## DOCX
 
 [`betteroffice-docx`](https://pypi.org/project/betteroffice-docx/) reads
-paragraphs, tables, and sections, rewrites the text of
-a plain single-run paragraph, and saves back to DOCX with everything the model
-does not represent reused from the package it opened. It paginates and
-rasterizes too: the layout pass takes an already-measured projection of the
-document, because the Rust crates do not lower the DOCX model into measured
-blocks yet, and `render_png` draws one page of the resulting display list. No
-font is compiled into that wheel, and a page whose text names a family you never
-registered is an error rather than a page of invisible text.
+paragraphs, tables, and sections, edits plain single-run paragraphs, and saves
+DOCX files while preserving unsupported package content.
+
+`layout` paginates an input containing measured blocks and layout options.
+`render_png` renders a page from that layout. Register the required fonts before
+rendering; a missing font produces an error.
 
 ## PPTX
 
 [`betteroffice-pptx`](https://pypi.org/project/betteroffice-pptx/) reads decks,
-edits shapes and text, saves the edits back to `.pptx` bytes, and lays slides
-out into the same display-list contract the canvas paints. `render_slide` fails
-until `register_font` has supplied at least one face — no font is compiled into
-that wheel. `render_png` rasterizes a slide to PNG bytes from that same layout,
-resolving pictures out of the package, so only fonts need registering. A `Presentation` is also pinned to the thread that opened it, and
-must be released there.
+edits shapes and text, and saves `.pptx` files. `render_slide` returns a display
+list; `render_png` produces PNG bytes and reads embedded images from the file.
+Call `register_font` with at least one font face before rendering.
 
-Comments read and write in both PowerPoint formats. `comments()` returns every
-comment on the deck and `comment_flavor` reports which system it uses: `legacy`
-reads in every version of PowerPoint plus LibreOffice and Google Slides, while
-`modern` carries replies and a resolved state but only shows in PowerPoint 365.
-A file commits to one at its first comment and never carries both, so
-`set_comment_flavor` only works while the deck has no comments, and
-`reply_to_comment` and `set_comment_status` raise on a legacy deck.
+A `Presentation` must be used and released on the thread that opened it.
+
+`comments()` returns the deck's comments, and `comment_flavor` identifies the
+legacy or modern format. Modern comments support replies and resolved status in
+PowerPoint 365. Set the format with `set_comment_flavor` before adding comments.
+`reply_to_comment` and `set_comment_status` raise an error on legacy decks.
 
 ```python
 from betteroffice_pptx import Presentation
@@ -124,6 +113,4 @@ deck.add_comment(
 deck.save_path("reviewed.pptx")
 ```
 
-Positions are EMU, like every other coordinate in the API. `created` is
-caller-supplied rather than read from a clock, so the same edits replay to the
-same bytes.
+Positions use EMUs. Supply the creation timestamp through `created`.

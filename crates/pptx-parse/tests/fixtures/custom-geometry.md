@@ -13,11 +13,9 @@ The mixed shape's first path uses a `200 × 100` coordinate space against a `190
 
 The quarter ellipse uses radii `(80,30)` in a `200 × 100` path space and a 90-degree sweep. Its normalized cubic controls are `(0.9,0.3656854249492381)` and `(0.7209138999323174,0.5)`, with endpoint `(0.5,0.5)`.
 
-![Before](../../../pptx-render/tests/fixtures/custom-geometry-before.png)
+Review: [PR #285](https://github.com/openooxml/betteroffice/pull/285).
 
-![After](../../../pptx-render/tests/fixtures/custom-geometry-after.png)
-
-The before image was generated using `origin/main` at `387f2392`.
+The before image in that PR was generated using `origin/main` at `387f2392`.
 The version-2 update fixture was regenerated with current `origin/main` at
 `54fdaa00c8242d58db61418ac3bc3b2ad6d50cb4`, using client ID 285. It is stored at
 `crates/pptx-edit/tests/fixtures/deck-custom-schema-v2.update.bin`. The fixture

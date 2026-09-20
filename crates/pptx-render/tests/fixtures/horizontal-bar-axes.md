@@ -38,6 +38,4 @@ Slide 3 is byte-identical to main. No model, snapshot format, or writer changes
 are needed. External ZIP-part comparison of the no-edit save preserves all
 parts, including the chart XML.
 
-`horizontal-bar-axes.before.png` and `horizontal-bar-axes.after.png` show slide 1
-on main and the completed branch. The `secondary.before.png` image shows the
-contributor's layout of slide 4; `secondary.after.png` shows its completed layout.
+Review: [PR #310](https://github.com/openooxml/betteroffice/pull/310).

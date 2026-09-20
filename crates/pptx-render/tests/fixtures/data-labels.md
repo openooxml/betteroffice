@@ -21,5 +21,4 @@ On main `1d0f41d9`, slides 1, 2, and 5 contain 19 chart text primitives instead
 of 13. Slide 4 contains 19 instead of 14. Slide 3 remains at 19. The unwanted
 text is `#222222`; removing it does not change any bar's path, bounds, or paint.
 
-`data-labels-before.png` and `data-labels-after.png` render slide 1 on main and
-the fixed branch using the tracked Liberation Sans font as Arial, at 1× scale.
+Review: [PR #305](https://github.com/openooxml/betteroffice/pull/305).

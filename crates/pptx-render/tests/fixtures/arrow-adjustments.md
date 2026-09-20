@@ -33,7 +33,8 @@ The contributor's shaft scaling shrank the four yellow shafts from 80 px to
 the issue arrow, defaults and square geometry, every direction, and head
 adjustments below zero, above one, and above the shape's length.
 
-The screenshots use the native PPTX raster backend at 96 DPI. Display-list
+The screenshots in [PR #339](https://github.com/openooxml/betteroffice/pull/339)
+use the native PPTX raster backend at 96 DPI. Display-list
 isolation registers the tracked Liberation Sans, Liberation Serif, Liberation
 Mono, Carlito, and Caladea faces in the same order on both revisions, including
 their bold and italic variants and common Office aliases. Across all 31
@@ -49,6 +50,4 @@ identically and deserialize across revisions. External Python `zipfile`
 comparison verifies all 537 package parts on each revision's no-edit save;
 ZIP directory entries are not package parts.
 
-| Main | Fixed |
-| --- | --- |
-| ![Main](arrow-adjustments.before.png) | ![Fixed](arrow-adjustments.after.png) |
+Review: [PR #339](https://github.com/openooxml/betteroffice/pull/339).

@@ -21,10 +21,6 @@ At 19098 the ratio is 0.38196, a regular pentagram's: each inner vertex lies on 
 line joining two outer points. `adj` 50000 draws a decagon, and 80000 pins to the same.
 The first shape's bottom points land at y = 210 px, the frame's bottom edge.
 
-`star-inner-radius.lo.png` is LibreOffice 26.8's render of slide 1, the reference.
-The before and after PNGs render slide 1 through the native PPTX raster backend at
-96 DPI, at `7c2bb80d` and with the fix.
+Review: [PR #466](https://github.com/openooxml/betteroffice/pull/466).
 
-| LibreOffice | Before | After |
-| --- | --- | --- |
-| ![LibreOffice](star-inner-radius.lo.png) | ![Before](star-inner-radius.before.png) | ![After](star-inner-radius.after.png) |
+The comparison uses LibreOffice 26.8 and native PPTX raster output at 96 DPI.

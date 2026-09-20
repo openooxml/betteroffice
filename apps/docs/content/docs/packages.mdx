@@ -3,9 +3,8 @@ title: Packages
 description: What to install from npm, crates.io, and PyPI, and what each package does
 ---
 
-Every BetterOffice package is a face on the same Rust engines — one parser, one
-editing core, and one layout pass per format. What changes between registries is
-the runtime you call them from and how much of the pipeline is exposed.
+BetterOffice provides DOCX, XLSX, and PPTX packages for JavaScript, Rust, and
+Python. Choose a runtime below, then select the packages for your file format.
 
 | Runtime | Install | Guide |
 | --- | --- | --- |
@@ -13,7 +12,7 @@ the runtime you call them from and how much of the pipeline is exposed.
 | Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
 | Python | `pip install betteroffice-docx` | [Python](./python) |
 
-## What exists per format
+## Packages by format
 
 | Format | npm | crates.io | PyPI |
 | --- | --- | --- | --- |
@@ -30,17 +29,16 @@ Rust crates are not yet published.
 
 ## Fonts
 
-Word documents overwhelmingly reference the MS core fonts, whose binaries cannot
-be redistributed. These packages ship the open metric-compatible replacements —
-same advance widths, so line breaks and pagination match Word.
+The font packages provide open, metric-compatible alternatives to common
+Microsoft fonts, plus Hebrew, Arabic, and CJK coverage.
 
-| Package | Size | Contents |
-| --- | --- | --- |
-| `@betteroffice/fonts` | 7.9 MB | Carlito, Caladea, Liberation Sans/Serif/Mono, Noto Hebrew/Arabic |
-| `@betteroffice/fonts-cjk` | 33 MB | Noto Sans SC/TC/JP/KR, Noto Serif SC |
+| Package | Contents |
+| --- | --- |
+| `@betteroffice/fonts` | Carlito, Caladea, Liberation Sans/Serif/Mono, Noto Hebrew/Arabic |
+| `@betteroffice/fonts-cjk` | Noto Sans SC/TC/JP/KR, Noto Serif SC |
 
-The engine loads no fonts on its own and never reaches for a font package.
-Install `@betteroffice/fonts` and hand it over once, before any editor mounts:
+For the DOCX editor, install `@betteroffice/fonts` and configure it before
+mounting the editor:
 
 ```ts
 import { configureDefaultFonts } from "@betteroffice/docx/layout";
@@ -49,26 +47,25 @@ import * as fonts from "@betteroffice/fonts";
 configureDefaultFonts({ fonts });
 ```
 
-Add a `baseUrl` alongside it to fetch the binaries from your own CDN instead of
-the package assets; the module stays required either way, because it carries the
-manifest that maps a Word font name to a face. Add `@betteroffice/fonts-cjk`
-only for Chinese, Japanese, or Korean text — it is separate so nobody installs
-33 MB they do not need.
+To host the font files on your own CDN, pass `baseUrl` alongside `fonts`. The
+module provides the font manifest and is required with either asset location.
+Install `@betteroffice/fonts-cjk` when you need Chinese, Japanese, or Korean text.
+Both packages are optional and must be installed explicitly.
 
-Unconfigured, families a document does not embed measure with synthetic metrics
-and pagination will not match Word. Neither package is installed automatically;
-both are declared optional peers.
+Missing font bytes can cause fallback measurements and different pagination.
+See the language guides for font setup in other formats and runtimes.
 
-## Picking one
+## Choose an API
 
-- **An editor UI in a React app** — the `-react` packages. They own the toolbar,
-  canvas, selection, keyboard, and review UI.
-- **Your own UI in the browser** — the framework-free cores. Same engine, no
-  React: display lists, hit-testing, and a document handle.
-- **A server, a CLI, or a pipeline in Rust** — the three facade crates.
-- **A server, a notebook, or an agent in Python** — the three `betteroffice-*`
-  distributions on PyPI.
-- **One stage of the pipeline** — the per-layer crates, published individually.
+- **React editor:** use a `-react` package for the toolbar, canvas, selection,
+  keyboard controls, and review UI.
+- **Custom JavaScript UI:** use a framework-free core for editing, display lists,
+  and hit-testing.
+- **Native Rust:** use a `betteroffice-docx`, `betteroffice-xlsx`, or
+  `betteroffice-pptx` crate.
+- **Python scripts and services:** use the corresponding package on PyPI.
+- **Individual engine components:** use the parsing, editing, or rendering crates
+  listed in the [Rust guide](./rust#the-layers).
 
 [Release notes](https://github.com/openooxml/betteroffice/releases) and each
 package's changelog record shipped changes.

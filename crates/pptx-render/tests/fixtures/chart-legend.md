@@ -26,14 +26,14 @@ North has values `[12, 19, 7]` and colour `#6254E7`; South has values
 widths and title alignment. The shared geometry tests additionally check pie
 and radar regions, column legends and returned plot width.
 
-The before image uses main at `069e4d66`; the after image uses this change.
-Both render slide 1 with the same Liberation Sans regular and bold fonts under
+[PR #316](https://github.com/openooxml/betteroffice/pull/316) compares main at
+`069e4d66` with the fix. Both render slide 1 with the same Liberation Sans regular and bold fonts under
 the deck's Calibri family, at 96 dpi. The title's shaped centre moves from
 `131.095` to the frame centre, `384`. The legend swatches move from the right
 column at `(574, 132)` and `(574, 147)` to the bottom band at `y=417`.
 The plot grows from 420 to 516 pixels wide and shrinks from 274 to 252 pixels
 high. The retained 8px outer margin accounts for the 96px width increase.
 
-The long-label images show slide 5 before and after the review corrections.
+The long-label comparison in that PR shows slide 5 before and after the review corrections.
 The contributor's single row overlaps the two labels and clips the second at
 the chart edge; the corrected layout gives each entry a complete row.

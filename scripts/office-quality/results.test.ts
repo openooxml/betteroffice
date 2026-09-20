@@ -79,8 +79,8 @@ test('capture and comparison failures preserve later samples and the other chann
     samples,
   };
   const section = renderSection(JSON.parse(JSON.stringify(report)));
-  expect(section).toMatch(
-    /xlsx\/v\/0\.1\.0\) \| 0\.8000 \| 1\/3 .*\| 0\.8000 \| 3\/3 \|$/m
+  expect(section).toContain(
+    '<tr><td>Scored/total</td><td align="right">1/3</td><td align="right">3/3</td></tr>'
   );
   expect(section).not.toContain('capture-fails');
   expect(section).not.toContain('compare-fails');
