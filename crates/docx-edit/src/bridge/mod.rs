@@ -2382,9 +2382,37 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
     result
 }
 
+/// Structural equality, keeping the serialized verdict only where the two
+/// differ: serde_json encodes non-finite `f64` as `null`, so `NaN` or
+/// mismatched infinities in the same field coalesced under it. Malformed
+/// `Any` attributes can still seed such numbers into a formatting.
 fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
-    serde_json::to_value(left).expect("RunFormatting serializes")
-        == serde_json::to_value(right).expect("RunFormatting serializes")
+    left == right
+        || (has_nonfinite(left)
+            && has_nonfinite(right)
+            && serde_json::to_value(left).expect("RunFormatting serializes")
+                == serde_json::to_value(right).expect("RunFormatting serializes"))
+}
+
+fn has_nonfinite(formatting: &RunFormatting) -> bool {
+    formatting
+        .comment_ids
+        .as_ref()
+        .is_some_and(|ids| ids.iter().any(|id| !id.is_finite()))
+        || [
+            formatting.font_size,
+            formatting.font_size_cs,
+            formatting.letter_spacing,
+            formatting.position_px,
+            formatting.horizontal_scale,
+            formatting.kerning_min_pt,
+            formatting.footnote_ref_id,
+            formatting.endnote_ref_id,
+            formatting.change_revision_id,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
 }
 
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
