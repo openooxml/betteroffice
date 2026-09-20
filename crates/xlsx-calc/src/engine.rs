@@ -180,8 +180,10 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
     (order, cycle)
 }
 
-/// evaluate one formula node; `None` when the cell has no formula or it no
-/// longer parses (cached value left untouched).
+/// evaluate one formula node; `None` when the cell has no formula, it no
+/// longer parses, or the engine could not evaluate it — a budget cut-off or a
+/// function it does not implement — and the file carries a cached value. an
+/// engine gap must not overwrite what the authoring app computed.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -197,14 +199,11 @@ fn eval_node(
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.now_serial = now_serial;
     let value = evaluate(&expr, &ctx);
-    if !ctx.has_unhandled_budget_error() {
-        return (Some(value), ctx.exhausted());
+    let incomplete = ctx.has_unhandled_budget_error() || ctx.used_unsupported_function();
+    if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
+        return (None, ctx.exhausted());
     }
-    if matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
-        (Some(value), true)
-    } else {
-        (None, true)
-    }
+    (Some(value), ctx.exhausted())
 }
 
 /// write `value` only if it differs from the stored value; returns whether
@@ -273,6 +272,55 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));
         (wb, SheetId(0))
+    }
+
+    /// set a formula cell that already carries the value its authoring app
+    /// computed, as a parsed file does.
+    fn put_cached_formula(wb: &mut Workbook, sheet: SheetId, cell: &str, f: &str, v: CellValue) {
+        wb.sheet_mut(sheet).unwrap().set_cell(
+            a1(cell),
+            Cell {
+                value: v,
+                formula: Some(f.to_string()),
+                style: None,
+            },
+        );
+    }
+
+    /// `WEBSERVICE` stands in for any function the engine does not implement,
+    /// and is one it never will.
+    #[test]
+    fn an_unimplemented_function_keeps_the_cached_value() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 7.0);
+        put_cached_formula(&mut wb, s, "B1", "WEBSERVICE(A1)/10", num(4.9));
+        put_formula(&mut wb, s, "C1", "B1*2");
+        let r = rebuild_and_recalc_all(&mut wb, None).1;
+        assert_eq!(value(&wb, s, "B1"), num(4.9));
+        assert_eq!(value(&wb, s, "C1"), num(9.8));
+        assert!(!changed_a1(&r).contains(&"B1".to_string()));
+    }
+
+    #[test]
+    fn an_unimplemented_function_without_a_cached_value_reports_name() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "WEBSERVICE(1)");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(
+            value(&wb, s, "A1"),
+            CellValue::Error {
+                value: xlsx_model::ErrorValue::Name
+            }
+        );
+    }
+
+    #[test]
+    fn a_supported_function_still_overwrites_a_stale_cached_value() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_cached_formula(&mut wb, s, "B1", "SUM(A1,A1)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(4.0));
     }
 
     #[test]
