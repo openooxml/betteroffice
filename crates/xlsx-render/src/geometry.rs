@@ -70,6 +70,7 @@ fn autofit_rows(sheet: &Sheet, styles: &Stylesheet, default_pt: f64) -> BTreeMap
         }
         let size = cell
             .style
+            .or_else(|| sheet.col_style(at.col))
             .and_then(|style| styles.font_for(style))
             .and_then(|font| font.size_pt)
             .unwrap_or(DEFAULT_FONT_SIZE_PT);

@@ -1,6 +1,6 @@
 use betteroffice_xlsx::{
-    Cell, CellRange, CellRef, CellValue, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink,
-    PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
+    Cell, CellRange, CellRef, CellValue, ColStyle, DrawCmd, Error, FreezePane, GridGeometry,
+    Hyperlink, PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, Color, Fill, Stylesheet, Xf};
 use xlsx_render::geometry::{autofit_row_height_pt, row_pt_to_px};
@@ -422,4 +422,87 @@ fn a_sheet_that_pins_its_default_row_height_keeps_every_unsized_row_there() {
     let geometry = GridGeometry::new(&model.sheets[0], &model.styles);
     assert_eq!(geometry.row_y(1), row_pt_to_px(15.0));
     assert_eq!(geometry.row_y(2), row_pt_to_px(30.0));
+}
+
+#[test]
+fn a_column_style_fills_the_cells_it_formats() {
+    let mut sheet = Sheet::new("Tinted");
+    sheet.col_styles = vec![ColStyle {
+        first: 0,
+        last: 1,
+        xf: 0,
+    }];
+    sheet.set_cell(
+        CellRef::new(1, 0),
+        Cell {
+            value: CellValue::Text {
+                value: "Plain".into(),
+            },
+            style: Some(1),
+            ..Cell::default()
+        },
+    );
+    let mut styles = Stylesheet::default();
+    styles.fills = vec![Fill::Solid(Color::Rgb("#204060".into())), Fill::None];
+    styles.cell_xfs = vec![
+        Xf {
+            fill: Some(0),
+            ..Xf::default()
+        },
+        Xf {
+            fill: Some(1),
+            ..Xf::default()
+        },
+    ];
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        styles,
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let list = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:C3").unwrap(),
+            &metrics(),
+            false,
+        )
+        .unwrap();
+    let tinted = list
+        .commands
+        .iter()
+        .filter_map(|cmd| match cmd {
+            DrawCmd::FillRect {
+                x, y, w, h, color, ..
+            } if color == "#204060" => Some((*x, *y, *w, *h)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let row = row_pt_to_px(14.0);
+    let col_b = tinted
+        .iter()
+        .filter(|rect| rect.0 > 0.0)
+        .collect::<Vec<_>>();
+    assert_eq!(col_b.len(), 1, "column B fills in one run: {tinted:?}");
+    assert!(
+        col_b[0].1 == 0.0 && col_b[0].3 >= 3.0 * row,
+        "column B fills from the top through every printed row: {col_b:?}"
+    );
+    let col_a = tinted
+        .iter()
+        .filter(|rect| rect.0 == 0.0)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        col_a.len(),
+        2,
+        "column A fills around the cell that overrides it: {tinted:?}"
+    );
+    assert!(
+        (col_a[0].3 - row).abs() < 0.01 && (col_a[1].1 - 2.0 * row).abs() < 0.01,
+        "column A skips the row its own cell formats: {col_a:?}"
+    );
+    assert!(
+        !tinted.iter().any(|rect| rect.0 > 2.0 * 64.0),
+        "the unstyled column C takes no fill: {tinted:?}"
+    );
 }

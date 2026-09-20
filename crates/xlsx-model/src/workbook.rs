@@ -67,6 +67,15 @@ pub struct SheetFormat {
     pub custom_height: bool,
 }
 
+/// a `<col>` run that names a style: the `cellXfs` index every cell from
+/// `first` through `last` inherits when it declares none of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColStyle {
+    pub first: ColId,
+    pub last: ColId,
+    pub xf: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
@@ -78,6 +87,9 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
+    /// `<col>` runs naming a style, in source order; read by the renderer,
+    /// never the writer.
+    pub col_styles: Vec<ColStyle>,
     pub charts: Vec<SheetChart>,
 }
 
@@ -91,6 +103,23 @@ impl Sheet {
 
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
         self.cells.get(&(at.row, at.col))
+    }
+
+    /// the style a column's `<col>` run gives every cell that declares none;
+    /// later runs win, matching how excel resolves overlapping runs.
+    pub fn col_style(&self, col: ColId) -> Option<u32> {
+        self.col_styles
+            .iter()
+            .rev()
+            .find(|run| (run.first..=run.last).contains(&col))
+            .map(|run| run.xf)
+    }
+
+    /// the style that governs a cell: its own, else its column's.
+    pub fn effective_style(&self, at: CellRef) -> Option<u32> {
+        self.cell(at)
+            .and_then(|cell| cell.style)
+            .or_else(|| self.col_style(at.col))
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {

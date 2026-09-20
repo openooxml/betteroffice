@@ -6,8 +6,9 @@ use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, MAX_COLS,
-    MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
+    MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -99,6 +100,7 @@ struct WorkbookBase {
     fingerprints: BTreeMap<i64, Vec<String>>,
     freeze_panes: Vec<Option<FreezePane>>,
     formats: Vec<SheetFormat>,
+    col_styles: Vec<Vec<ColStyle>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
@@ -191,6 +193,11 @@ impl WorkbookBase {
             fingerprints,
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             formats: model.sheets.iter().map(|sheet| sheet.format).collect(),
+            col_styles: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.col_styles.clone())
+                .collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -1044,6 +1051,10 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.formats.get(base))
                 .copied()
                 .unwrap_or_default();
+            let col_styles = base_sheet
+                .and_then(|base| self.base.col_styles.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let hyperlinks = base_sheet
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
@@ -1063,6 +1074,7 @@ impl WorkbookAuthority {
                 SheetFallbacks {
                     freeze_pane,
                     format,
+                    col_styles,
                     hyperlinks,
                     charts,
                     hidden_dimensions,
@@ -2653,6 +2665,7 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
 struct SheetFallbacks<'a> {
     freeze_pane: Option<FreezePane>,
     format: SheetFormat,
+    col_styles: &'a [ColStyle],
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
@@ -2663,6 +2676,7 @@ impl Default for SheetFallbacks<'_> {
         Self {
             freeze_pane: None,
             format: SheetFormat::default(),
+            col_styles: &[],
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
@@ -2726,6 +2740,7 @@ fn materialize_sheet<T: ReadTxn>(
         }
     }
     sheet.format = fallbacks.format;
+    sheet.col_styles = fallbacks.col_styles.to_vec();
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {

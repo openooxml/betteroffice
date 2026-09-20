@@ -507,8 +507,12 @@ where
         }
     }
 
+    emit_column_fills(&mut commands, sheet_ref, styles, &rows, &cols);
+
     for &(at, cell) in &anchors {
-        let Some(style) = cell.style else { continue };
+        let Some(style) = cell.style.or_else(|| sheet_ref.col_style(at.col)) else {
+            continue;
+        };
         let Some(Fill::Solid(color)) = styles.fill_for(style) else {
             continue;
         };
@@ -912,6 +916,68 @@ fn ellipsize(text: &str, budget: f32, size: f32) -> String {
     let keep = ((budget / char_w) as i32 - 1).max(0) as usize;
     let prefix: String = text.chars().take(keep).collect();
     format!("{prefix}…")
+}
+
+/// the fill a `<col>` run gives every position it formats that holds no cell
+/// of its own, emitted as one rect per run of such rows.
+fn emit_column_fills(
+    commands: &mut Vec<DrawCmd>,
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    rows: &AxisLayout,
+    cols: &AxisLayout,
+) {
+    if sheet.col_styles.is_empty() {
+        return;
+    }
+    for col in &cols.tracks {
+        let Some(style) = sheet.col_style(col.index) else {
+            continue;
+        };
+        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
+            continue;
+        };
+        let Some(hex) = styles.resolve_color(color) else {
+            continue;
+        };
+        let mut run: Option<(f32, f32, u32)> = None;
+        for row in &rows.tracks {
+            let at = CellRef::new(row.index, col.index);
+            let owned = sheet.cell(at).is_some() || covering_merge(&sheet.merges, at).is_some();
+            match run {
+                Some((start, _, last)) if !owned && row.index == last + 1 => {
+                    run = Some((start, row.end, row.index));
+                }
+                _ => {
+                    if let Some((start, end, _)) = run.take()
+                        && end > start
+                    {
+                        commands.push(DrawCmd::FillRect {
+                            x: col.start,
+                            y: start,
+                            w: (col.end - col.start).max(0.0),
+                            h: end - start,
+                            color: hex.clone(),
+                            clip: None,
+                        });
+                    }
+                    run = (!owned).then_some((row.start, row.end, row.index));
+                }
+            }
+        }
+        if let Some((start, end, _)) = run
+            && end > start
+        {
+            commands.push(DrawCmd::FillRect {
+                x: col.start,
+                y: start,
+                w: (col.end - col.start).max(0.0),
+                h: end - start,
+                color: hex,
+                clip: None,
+            });
+        }
+    }
 }
 
 /// visible cells that draw: inside the range and not a covered merge cell
