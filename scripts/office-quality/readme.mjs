@@ -162,8 +162,11 @@ export function updateReadme(readme, section) {
     begin >= 0
       ? readme.slice(0, begin) + readme.slice(end + END.length)
       : readme.replace(/^## Visual fidelity\n[\s\S]*?(?=^## |$(?![\s\S]))/m, '');
-  const position = stripped.indexOf('## Contributing\n');
-  if (position < 0) throw new Error('README has no Contributing section');
+  const packages = /^## Packages\r?\n/m.exec(stripped);
+  if (!packages) throw new Error('README has no Packages section');
+  const afterPackages = packages.index + packages[0].length;
+  const nextSection = /^## /m.exec(stripped.slice(afterPackages));
+  const position = nextSection ? afterPackages + nextSection.index : stripped.length;
   return `${stripped.slice(0, position).trimEnd()}\n\n${section}\n\n${stripped.slice(
     position
   )}`;

@@ -82,27 +82,6 @@ What to install for which language, with a first example each:
 [crates.io](https://docs.betteroffice.dev/docs/rust),
 [PyPI](https://docs.betteroffice.dev/docs/python).
 
-## Structure
-
-- `crates/` — the Rust engines
-- `packages/` — the TypeScript editor packages
-- `bindings/` — the Python bindings
-- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
-- `apps/demo` — editor playground
-- `apps/docs` — documentation
-
-## Development
-
-```bash
-bun install
-bun run dev:demo     # editor playground; builds the wasm bundles on first run
-bun run dev          # betteroffice.dev site (no wasm needed)
-bun run dev:docs     # documentation site
-bun run rust:check   # fmt + clippy + tests for the engines
-```
-
-Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
-
 <!-- BEGIN GENERATED VISUAL FIDELITY -->
 ## Benchmarks
 
@@ -141,6 +120,29 @@ Page agreement is reported on its own because a document either paginates as Wor
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
 <!-- END GENERATED VISUAL FIDELITY -->
+
+## Structure
+
+- `crates/` — the Rust engines
+- `packages/` — the TypeScript editor packages
+- `bindings/` — the Python bindings
+- `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
+- `apps/demo` — editor playground
+- `apps/docs` — documentation
+
+## Development
+
+```bash
+bun install
+bun run dev:demo     # editor playground; builds the wasm bundles on first run
+bun run dev          # betteroffice.dev site (no wasm needed)
+bun run dev:docs     # documentation site
+bun run rust:check   # fmt + clippy + tests for the engines
+```
+
+Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
+
+
 
 ## Contributing
 

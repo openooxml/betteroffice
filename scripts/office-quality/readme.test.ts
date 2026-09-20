@@ -76,11 +76,12 @@ test('reports DOCX page agreement apart from SSIM, and only where pages are know
 test('replaces and moves the generated block without touching other sections', () => {
   const section = renderSection(report());
   const readme =
-    '# Project\n\n## Visual fidelity\n\nOld text.\n\n## Development\n\nCommands.\n\n## Contributing\n\nPolicy.\n';
+    '# Project\n\n## Packages\n\n### DOCX\n\nPackage list.\n\n## Development\n\nCommands.\n\n## Visual fidelity\n\nOld text.\n\n## Contributing\n\nPolicy.\n';
   const updated = updateReadme(readme, section);
   expect(updated).not.toContain('Old text.');
-  expect(updated).toContain('Commands.\n\n<!-- BEGIN GENERATED');
-  expect(updated).toContain('<!-- END GENERATED VISUAL FIDELITY -->\n\n## Contributing');
+  expect(updated).toContain('Package list.\n\n<!-- BEGIN GENERATED');
+  expect(updated).toContain('<!-- END GENERATED VISUAL FIDELITY -->\n\n## Development');
+  expect(updated).toContain('Commands.\n\n## Contributing');
   expect(updated.endsWith('Policy.\n')).toBe(true);
   expect(updateReadme(updated, section)).toBe(updated);
 });
