@@ -46,7 +46,8 @@ const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
 /// `p:bgRef/@idx` counts `a:bgFillStyleLst` entries from here.
 const BACKGROUND_FILL_BASE: u32 = 1_001;
-/// Compatibility line pitch in ems.
+/// Single-spaced line pitch in ems. Measured from PowerPoint 16.113 PDF exports:
+/// 1.2 em for every face, not the face's own ascent plus descent plus line gap.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
@@ -1808,13 +1809,6 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.autofit.as_ref()))
     }
 
-    fn compat_line_spacing(&self) -> bool {
-        cascade_value(self.primary, self.layout, self.master, |body| {
-            body.compat_line_spacing
-        })
-        .unwrap_or(false)
-    }
-
     fn inset_left(&self) -> Option<i64> {
         cascade_value(self.primary, self.layout, self.master, |body| {
             body.inset_left
@@ -1993,7 +1987,6 @@ struct ResolvedParagraph {
     line_spacing: Option<LineSpacing>,
     space_before: Option<LineSpacing>,
     space_after: Option<LineSpacing>,
-    compat_line_spacing: bool,
     line_space_reduction: f32,
     indent_px: f32,
     marker: Option<String>,
@@ -2057,7 +2050,6 @@ fn resolve_content(
             "more than {MAX_TEXT_RUNS} text runs"
         )));
     }
-    let compat_line_spacing = cascade.compat_line_spacing();
     let line_space_reduction = autofit_line_space_reduction(cascade.autofit());
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
@@ -2112,7 +2104,6 @@ fn resolve_content(
             line_spacing: properties.line_spacing,
             space_before: properties.space_before,
             space_after: properties.space_after,
-            compat_line_spacing,
             line_space_reduction,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
             bullet_style: marker
@@ -2620,11 +2611,10 @@ fn layout_paragraph(
             TextAlign::Right => x + (width - natural_width).max(0.0),
             TextAlign::Left | TextAlign::Justify => x,
         };
-        let line_box = spaced_line_box(
-            clusters_line_box(fonts, slice, scale)?,
-            paragraph,
-            line_font_size_px(slice, scale),
-            scale,
+        let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
+        let line_box = shifted_line_box(
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale), scale),
+            extents,
         );
         let mut caret_stops = vec![CaretStop {
             position: slice[0].start,
@@ -2689,7 +2679,6 @@ fn prepend_bullet(
         line_spacing: None,
         space_before: None,
         space_after: None,
-        compat_line_spacing: false,
         line_space_reduction: 0.0,
         indent_px: 0.0,
         marker: None,
@@ -3103,10 +3092,12 @@ fn clusters_line_box(
     fonts: &FontStore,
     clusters: &[ShapedCluster],
     scale: f32,
-) -> Result<ooxml_text::LineBox, RenderError> {
+) -> Result<(ooxml_text::LineBox, ShiftExtents), RenderError> {
     let mut ascent: f32 = 0.0;
     let mut descent: f32 = 0.0;
     let mut leading: f32 = 0.0;
+    let mut shifted_ascent: f32 = 0.0;
+    let mut shifted_descent: f32 = 0.0;
     let mut seen = HashSet::new();
     for cluster in clusters {
         if !seen.insert(cluster.run_index) {
@@ -3114,15 +3105,40 @@ fn clusters_line_box(
         }
         let line = style_line_box(fonts, &cluster.style, scale)?;
         let shift = cluster.style.baseline_shift_px * scale;
-        ascent = ascent.max((line.ascent + shift).max(0.0));
-        descent = descent.max((line.descent - shift).max(0.0));
+        ascent = ascent.max(line.ascent);
+        descent = descent.max(line.descent);
         leading = leading.max(line.leading);
+        shifted_ascent = shifted_ascent.max((line.ascent + shift).max(0.0));
+        shifted_descent = shifted_descent.max((line.descent - shift).max(0.0));
     }
-    Ok(ooxml_text::LineBox {
-        ascent,
-        descent,
-        leading,
-    })
+    Ok((
+        ooxml_text::LineBox {
+            ascent,
+            descent,
+            leading,
+        },
+        ShiftExtents {
+            ascent: (shifted_ascent - ascent).max(0.0),
+            descent: (shifted_descent - descent).max(0.0),
+        },
+    ))
+}
+
+/// How far super/subscript ink reaches past the unshifted line box.
+#[derive(Clone, Copy, Default)]
+struct ShiftExtents {
+    ascent: f32,
+    descent: f32,
+}
+
+/// Spacing sets the pitch of the unshifted box; shifted ink then pushes the
+/// edges back out so a raised or lowered run is never clipped.
+fn shifted_line_box(line: ooxml_text::LineBox, extents: ShiftExtents) -> ooxml_text::LineBox {
+    ooxml_text::LineBox {
+        ascent: line.ascent + extents.ascent,
+        descent: line.descent + extents.descent,
+        leading: line.leading,
+    }
 }
 
 fn style_line_box(
@@ -3177,15 +3193,11 @@ fn spaced_line_box(
     size_px: f32,
     scale: f32,
 ) -> ooxml_text::LineBox {
-    let reduction = paragraph.line_space_reduction;
-    if content.height() <= 0.0 || (paragraph.line_spacing.is_none() && reduction <= 0.0) {
+    if content.height() <= 0.0 {
         return content;
     }
-    let single = if paragraph.compat_line_spacing {
-        SINGLE_LINE_PITCH_EM * size_px
-    } else {
-        content.height()
-    };
+    let reduction = paragraph.line_space_reduction;
+    let single = SINGLE_LINE_PITCH_EM * size_px;
     let target = match paragraph.line_spacing {
         Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
         Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
@@ -4732,7 +4744,6 @@ mod tests {
             line_spacing: None,
             space_before: None,
             space_after: None,
-            compat_line_spacing: false,
             line_space_reduction: 0.0,
             indent_px: 0.0,
             marker: None,
@@ -4997,7 +5008,6 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
                 marker: None,
@@ -5074,7 +5084,6 @@ mod tests {
                 line_spacing: None,
                 space_before: None,
                 space_after: None,
-                compat_line_spacing: false,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
                 marker: None,
@@ -5137,7 +5146,6 @@ mod tests {
                 space_before: None,
                 space_after: None,
                 line_spacing: None,
-                compat_line_spacing: false,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
                 marker: None,
@@ -6741,22 +6749,23 @@ mod tests {
             1_524_000,
             true,
         );
-        let (font_based, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (no_compat, _) = wrapped_text_box(8_017, percent(0.8), None, 1_524_000, false);
+        let (tighter, _) = wrapped_text_box(8_018, percent(0.6), None, 1_524_000, true);
         let pitch = |lines: &[PositionedTextLine]| {
             assert!(lines.len() > 1, "expected the text to wrap");
             lines[1].y - lines[0].y
         };
         let size_px = points_to_px(size_pt);
 
-        assert!((pitch(&single) - single[0].height).abs() < 0.01);
+        assert!((pitch(&single) - 1.2 * size_px).abs() < 0.05);
         assert!((pitch(&tight) - 0.8 * 1.2 * size_px).abs() < 0.05);
-        assert!((pitch(&font_based) - 0.8 * single[0].height).abs() < 0.05);
+        assert!((pitch(&no_compat) - pitch(&tight)).abs() < 0.05);
         assert!(pitch(&tight) < pitch(&single));
         assert!((pitch(&loose) - points_to_px(40.0)).abs() < 0.05);
 
-        let share = (tight[0].baseline - tight[0].y) / pitch(&tight);
-        let font_share = (single[0].baseline - single[0].y) / single[0].height;
-        assert!((share - font_share).abs() < 0.01);
+        let share =
+            |lines: &[PositionedTextLine]| (lines[0].baseline - lines[0].y) / lines[0].height;
+        assert!((share(&tight) - share(&tighter)).abs() < 0.01);
     }
 
     #[test]
