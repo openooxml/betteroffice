@@ -43,9 +43,40 @@ After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main
 gh workflow run visual-fidelity.yml --ref main -f branch=main
 ```
 
-Keep `--ref main`; set `branch` to the repository branch to measure. The optional `samples` input selects explicit samples. A preparation job freezes the source revision, package versions, and corpus metadata. DOCX, PPTX, and XLSX then evaluate in parallel, each with its own asset cache and 90-minute budget. Each browser capture retains its 600-second deadline.
+Keep `--ref main`; set `branch` to the repository branch to measure. The optional `samples` input selects explicit samples. A preparation job freezes the source revision, package versions, the published DOCX package's npm `gitHead`, and corpus metadata. DOCX, PPTX, and XLSX then evaluate in parallel, each with its own asset cache and 90-minute budget. Each browser capture retains its 600-second deadline. Two independent native build jobs feed up to four DOCX benchmark jobs, with whole documents distributed by reference page count. Every timed competitor for a document runs sequentially on the same worker; browser capture and compilation run on other workers.
 
 The final job requires every selected format and sample, combines the original comparisons, and updates the [README scores](../../README.md#benchmarks) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. Score JSON and generated Markdown are retained for 30 days; per-format reports and optional commit PNGs are transferred as seven-day artifacts.
+
+## Native DOCX and LibreOffice
+
+The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX and XLSX keep their existing fidelity comparisons.
+
+Both BetterOffice executables use the same [`native/main.rs`](native/main.rs) host, compiled in release mode (`opt-level=3`, thin LTO), against the frozen current source and the exact source of the published npm version. The host reads the original DOCX, imports it into the engine, loads fonts, lays out the document, constructs the display list, rasterizes page one, PNG-encodes it, and writes the file. All of that work and process startup are timed. No prepared layout, display list, resident engine, Wasm, or browser is supplied to the executable. Unsupported raster operations, skipped images, blank output for a nonblank reference, and invalid output dimensions count as failures.
+
+LibreOffice uses the official prebuilt Linux 26.2.3.2 release, verified against its pinned SHA-256, on Ubuntu 24.04. Its native CLI imports the same DOCX and exports page one directly through [`writer_png_Export`](https://help.libreoffice.org/latest/en-US/text/shared/guide/graphic_export_params.html). Each document has an isolated LibreOffice profile, initialized during the discarded warmup. No resident office server is used. PNG export requests the reference page's physical size at 96 DPI; validation permits the native exporters' one-pixel rounding difference without resampling.
+
+The driver discards one warmup per engine/document, then starts five fresh processes per engine, rotating execution order. Timings include process startup and file I/O; validation, scoring, installation, and builds are outside the timer. OS file caches remain warm. The row is an arithmetic mean of per-document means, using only documents that complete every trial in all three engines. `Timed/total` reports each engine's coverage, and the footnote states the common subset. A failed trial removes that document from all three aggregate means; it never becomes a zero or a partial average. There are no speedup thresholds or cached timing results. Hosted-runner timing varies, so compare columns within the same run rather than treating small changes between runs as regressions.
+
+The current source's bundled fonts are frozen once and shared by both native builds and LibreOffice. Linux workers use a Fontconfig configuration restricted to that bundle, including its Word-family aliases. Build metadata records source/binary/host hashes, Rust version and optimization settings; reports record fonts, LibreOffice build, runner image, architecture, and comparison-library versions. Local macOS LibreOffice uses system font discovery and reports that distinction.
+
+LibreOffice fidelity separately exports the entire document to PDF, rasterizes every page through the pinned PyMuPDF version at 150 DPI, and uses the same Word references, grayscale SSIM, page penalties, and at-most-one-pixel edge adjustment as the existing DOCX comparison. It does not replace the Office references. Sources and references are hash-verified. Scoring omits redundant HTML-gallery PNGs and logs page progress; individual LibreOffice renders remain in artifacts. All selected documents are attempted on every run. Failures stay visible in coverage and diagnostics.
+
+The reconciler requires every planned shard and document, matching plan hashes, builds, font bundles, versions, and measurement settings before updating the README or R2. Download `docx-benchmark-diagnostics-*` for per-trial durations, commands, logs, first-page native PNGs, and full LibreOffice renders. These artifacts expire after seven days. `docx-native-*` contains the executable builds and font bundle. Artifacts are never committed.
+
+To run a local shard after preparing `plan.json` and checking out its published `gitHead`:
+
+```sh
+bun scripts/office-quality/native-fonts.ts .source/native-fonts
+node scripts/office-quality/build-native.mjs . .source/native/commit
+node scripts/office-quality/build-native.mjs /path/to/published-checkout .source/native/published
+QUALITY_PLAN=.source/office-quality/plan/plan.json QUALITY_SHARD=0 \
+  QUALITY_OUTPUT=.source/docx-benchmark node scripts/office-quality/docx-benchmark.mjs
+QUALITY_OUTPUT=.source/docx-benchmark QUALITY_NATIVE=.source/native \
+  QUALITY_FONTS=.source/native-fonts/manifest.json \
+  python3 scripts/office-quality/docx_benchmark.py
+```
+
+Set `SOFFICE` to the native LibreOffice executable when it is not available as `libreoffice`. Use a fresh output directory for each run. `docxShards(plan)` in `docx-benchmark.mjs` lists the complete shard assignment; small explicit selections create fewer workers automatically.
 
 ## Published renders and the viewer
 
