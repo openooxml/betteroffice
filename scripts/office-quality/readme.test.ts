@@ -107,7 +107,6 @@ test('keeps each format tied to its own published version and comparison', () =>
     });
   }
   const section = renderSection(input);
-  // every format now uses the same vertical shape: one row per metric
   const pptx = section.slice(section.indexOf('#### PPTX'), section.indexOf('#### XLSX'));
   expect(pptx).toMatch(/^\| SSIM \| 0\.9100 \| 0\.9100 \|$/m);
   expect(pptx).toMatch(/^\| Scored\/total \| 1\/1 \| 1\/1 \|$/m);
