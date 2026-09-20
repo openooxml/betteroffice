@@ -1752,7 +1752,7 @@ fn proposal_previews_use_target_number_formats() {
     assert_eq!(proposal.edits[0].old_text, "10");
     assert_eq!(proposal.edits[0].new_text, "48.40%");
     assert_eq!(proposal.edits[1].old_text, "5");
-    assert_eq!(proposal.edits[1].new_text, "7/1/2026");
+    assert_eq!(proposal.edits[1].new_text, "7/1/26");
 
     workbook
         .accept_proposal(&proposal.id, false, CalculationOptions::default())
