@@ -310,8 +310,8 @@ fn reference_dim(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(&Area) -> usize)
 }
 
 /// TRANSPOSE(array): flips rows and columns. the engine has no array value, so
-/// only a 1x1 input has a representable result; anything larger is #VALUE!,
-/// like every other array in scalar context. blanks transpose to 0.
+/// only a 1x1 input has a representable result; a wider one is the array form,
+/// which is not implemented. blanks transpose to 0.
 pub(crate) fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
@@ -321,7 +321,10 @@ pub(crate) fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             Ok(value) => value,
             Err(error) => return err(error),
         },
-        Some(_) => return err(ErrorValue::Value),
+        Some(_) => {
+            ctx.record_unsupported_function();
+            return err(ErrorValue::Value);
+        }
         None => evaluate(&args[0], ctx),
     };
     match value {

@@ -156,12 +156,13 @@ impl<'a> EvalContext<'a> {
         self.unhandled_budget_errors.get() != 0
     }
 
-    /// whether this evaluation named a function the engine does not implement.
+    /// whether this evaluation reached a function the engine cannot answer --
+    /// one it does not implement, or one whose result it cannot represent.
     pub(crate) fn used_unsupported_function(&self) -> bool {
         self.unsupported_functions.get()
     }
 
-    fn record_unsupported_function(&self) {
+    pub(crate) fn record_unsupported_function(&self) {
         self.unsupported_functions.set(true);
     }
 

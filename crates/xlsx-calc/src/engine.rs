@@ -314,6 +314,20 @@ mod tests {
         );
     }
 
+    /// the array form of a supported function is still a gap in the engine, so
+    /// it must leave the cached value alone exactly as an unknown name does.
+    /// `nanogpt-excel` reaches this through
+    /// `SUMPRODUCT(OFFSET(...), TRANSPOSE(OFFSET(...)))`.
+    #[test]
+    fn an_array_result_the_engine_cannot_represent_keeps_the_cached_value() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_num(&mut wb, s, "A2", 3.0);
+        put_cached_formula(&mut wb, s, "B1", "SUMPRODUCT(TRANSPOSE(A1:A2))", num(5.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+    }
+
     #[test]
     fn a_supported_function_still_overwrites_a_stale_cached_value() {
         let (mut wb, s) = one_sheet();
