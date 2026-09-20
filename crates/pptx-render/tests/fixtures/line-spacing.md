@@ -5,14 +5,14 @@ All text is `#2040B0` in Arial (Liberation Sans for the regression checks). Each
 | Shape | Source | Font size | Expected pitch |
 | --- | --- | --- | --- |
 | 2 | Master title style, 80%, `compatLnSpc=1` | 32 pt | 40.96 px |
-| 3 | Master title style, 80%, `compatLnSpc=0` | 32 pt | 39.25 px |
+| 3 | Master title style, 80%, `compatLnSpc=0` | 32 pt | 40.96 px |
 | 4 | Direct paragraph, 72 pt exact | 32 pt | 96 px |
 | 5 | Layout paragraph, 120%, inherited `compatLnSpc=1` | 32 pt | 61.44 px |
 | 6 | Direct paragraph overrides layout, 150% | 32 pt | 76.8 px |
-| 7 | No explicit or inherited spacing | 24 pt | 36.796875 px |
+| 7 | No explicit or inherited spacing | 24 pt | 38.4 px |
 | 8 | Shape list style, 60%, `compatLnSpc=1` | 18 pt | 17.28 px |
 
-Expanded spacing leaves the first baseline at the font's natural ascent; compressed spacing scales the line box. The integration tests also check exact spacing at 50% autofit and zero spacing overriding the master.
+Percentage spacing measures a single line as 1.2 em, so `compatLnSpc` no longer changes the pitch. Expanded spacing leaves the first baseline at the font's natural ascent; compressed spacing scales the line box. The integration tests also check exact spacing at 50% autofit and zero spacing overriding the master.
 
 Review: [PR #314](https://github.com/openooxml/betteroffice/pull/314).
 
