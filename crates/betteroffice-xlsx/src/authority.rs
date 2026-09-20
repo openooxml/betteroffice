@@ -29,7 +29,7 @@ use yrs::{
 const META: &str = "xlsx";
 const CELL_FORMATS: &str = "xlsx:cell-formats";
 const SHEET_ORDER: &str = "xlsx:sheet-order";
-const SHEETS: &str = "xlsx:sheets";
+pub(crate) const SHEETS: &str = "xlsx:sheets";
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 3;
 /// The schema each feature first appeared in. These are frozen: gating a
 /// feature on the current version instead would silently reclassify the
@@ -41,7 +41,7 @@ const SCHEMA_VERSION: i64 = 6;
 const BASE_FINGERPRINT: &str = "baseFingerprint";
 const STRUCTURE_GENERATION: &str = "structureGeneration";
 const CHARTS: &str = "charts";
-const CONTENTS: &str = "contents";
+pub(crate) const CONTENTS: &str = "contents";
 const COL_WIDTHS: &str = "colWidths";
 const FREEZE_PANE: &str = "freezePane";
 const HYPERLINKS: &str = "hyperlinks";
@@ -497,7 +497,7 @@ enum HistoryAction {
 }
 
 pub(crate) struct WorkbookAuthority {
-    doc: Doc,
+    pub(crate) doc: Doc,
     base: WorkbookBase,
     history: SheetOrderHistory,
     next_sheet_id: u64,
@@ -2694,15 +2694,27 @@ fn sync_cell_formats(
     stylesheet: &Stylesheet,
 ) -> Result<(), String> {
     let (key, payload) = cell_format_entry(&CellFormat::default())?;
-    map.try_update(txn, key, payload);
+    update_cell_format_entry(map, txn, key, payload);
     for index in 0..stylesheet.cell_xfs.len() {
         let index =
             u32::try_from(index).map_err(|_| "cell format table is too large".to_string())?;
         let format = stylesheet.cell_format(Some(index));
         let (key, payload) = cell_format_entry(&format)?;
-        map.try_update(txn, key, payload);
+        update_cell_format_entry(map, txn, key, payload);
     }
     Ok(())
+}
+
+fn update_cell_format_entry(
+    map: &MapRef,
+    txn: &mut TransactionMut<'_>,
+    key: String,
+    payload: String,
+) {
+    let unchanged = matches!(map.get(txn, key.as_str()), Some(Out::Any(Any::String(existing))) if existing.as_ref() == payload.as_str());
+    if !unchanged {
+        map.try_update(txn, key, payload);
+    }
 }
 
 fn materialize_cell_formats<T: ReadTxn>(
@@ -4594,5 +4606,153 @@ mod tests {
             "one undo must consume exactly the one entry, not drain a longer stack"
         );
         let _ = merged;
+    }
+
+    fn two_cell_model() -> WorkbookModel {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(1, 1),
+            Cell {
+                value: CellValue::Number { value: 2.0 },
+                ..Cell::default()
+            },
+        );
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(Xf::default());
+        model.sheets.push(sheet);
+        model
+    }
+
+    fn set_number(cell: CellRef, value: f64) -> Op {
+        Op::SetCell {
+            sheet: SheetId(0),
+            at: cell,
+            cell: xlsx_ops::CellState {
+                value: CellValue::Number { value },
+                formula: None,
+                style: None,
+            },
+        }
+    }
+
+    fn sync_pair(sender: &mut WorkbookAuthority, receiver: &mut WorkbookAuthority, ops: &[Op]) {
+        let update = sender
+            .apply_ops(ops, SyncOrigin::User)
+            .unwrap()
+            .expect("the ops emit an update");
+        let staged = receiver.stage_updates_v1(&[update.as_slice()]).unwrap();
+        receiver
+            .apply_staged_update_v1(&staged.commit_update)
+            .unwrap();
+    }
+
+    #[test]
+    fn staged_remote_content_write_scopes_the_receipt() {
+        let model = two_cell_model();
+        let mut sender = WorkbookAuthority::from_model_with_client_id(&model, 41).unwrap();
+        let receiver = WorkbookAuthority::from_model_with_client_id(&model, 42).unwrap();
+        let update = sender
+            .apply_ops(&[set_number(CellRef::new(3, 1), 7.0)], SyncOrigin::User)
+            .unwrap()
+            .expect("the edit emits an update");
+        let staged = receiver.stage_updates_v1(&[update.as_slice()]).unwrap();
+        assert!(staged.effective);
+        assert_eq!(
+            staged
+                .scope
+                .0
+                .as_ref()
+                .and_then(|scope| scope.get("sheet:0")),
+            Some(&BTreeSet::from([(3, 1)])),
+            "the receipt scope names exactly the cells the update wrote",
+        );
+    }
+
+    #[test]
+    fn staged_remote_style_write_stays_scoped_when_the_format_is_known() {
+        let model = two_cell_model();
+        let mut sender = WorkbookAuthority::from_model_with_client_id(&model, 43).unwrap();
+        let mut receiver = WorkbookAuthority::from_model_with_client_id(&model, 44).unwrap();
+        let format = xlsx_ops::NumberFormatMutation::Percent;
+        let apply = |at: CellRef| Op::SetRangeNumberFormat {
+            sheet: SheetId(0),
+            range: CellRange::new(at, at),
+            format: format.clone(),
+        };
+        sync_pair(&mut sender, &mut receiver, &[apply(CellRef::new(0, 0))]);
+        let update = sender
+            .apply_ops(&[apply(CellRef::new(1, 0))], SyncOrigin::User)
+            .unwrap()
+            .expect("restyling a cell emits an update");
+        let staged = receiver.stage_updates_v1(&[update.as_slice()]).unwrap();
+        assert!(staged.effective);
+        assert_eq!(
+            staged
+                .scope
+                .0
+                .as_ref()
+                .and_then(|scope| scope.get("sheet:0")),
+            Some(&BTreeSet::from([(1, 0)])),
+            "an update reusing an interned format touches only the styled cell",
+        );
+    }
+
+    #[test]
+    fn staged_remote_format_catalog_write_drops_the_scope() {
+        let model = two_cell_model();
+        let mut sender = WorkbookAuthority::from_model_with_client_id(&model, 45).unwrap();
+        let receiver = WorkbookAuthority::from_model_with_client_id(&model, 46).unwrap();
+        let update = sender
+            .apply_ops(
+                &[Op::SetRangeNumberFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+                    format: xlsx_ops::NumberFormatMutation::Percent,
+                }],
+                SyncOrigin::User,
+            )
+            .unwrap()
+            .expect("the format op emits an update");
+        let staged = receiver.stage_updates_v1(&[update.as_slice()]).unwrap();
+        assert!(staged.effective);
+        assert!(
+            staged.scope.0.is_none(),
+            "a new catalog entry can renumber styles on untouched cells, so the receipt must widen to a full diff",
+        );
+    }
+
+    #[test]
+    fn staged_remote_nested_map_swap_drops_the_scope() {
+        let model = two_cell_model();
+        let sender = WorkbookAuthority::from_model_with_client_id(&model, 47).unwrap();
+        let receiver = WorkbookAuthority::from_model_with_client_id(&model, 48).unwrap();
+        {
+            let mut txn = sender.doc.transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.insert(&mut txn, CONTENTS, MapPrelim::default());
+        }
+        let update = sender
+            .encode_diff_v1(&receiver.encode_state_vector_v1())
+            .unwrap();
+        let staged = receiver.stage_updates_v1(&[update.as_slice()]).unwrap();
+        assert!(
+            staged.effective,
+            "emptied contents change the materialized model"
+        );
+        assert!(
+            staged.scope.0.is_none(),
+            "a swapped cell map can rewrite every cell, so the receipt must widen to a full diff",
+        );
     }
 }

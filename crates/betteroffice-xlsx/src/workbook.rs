@@ -3674,6 +3674,9 @@ fn invalidates_proposals(op: &Op) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authority::{CONTENTS, SHEETS};
+    use sha2::{Digest, Sha256};
+    use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact};
 
     #[test]
     fn contains_lowercased_matches_std_lowercase_semantics() {
@@ -3760,5 +3763,251 @@ mod tests {
         // Word-final 'Σ' lowercases to 'ς' (U+03C2), not 'σ' (U+03C3).
         assert!(contains_lowercased("ΟΔΟΣ", "ο\u{3c2}"));
         assert!(!contains_lowercased("ΟΔΟΣ", "ο\u{3c3}"));
+    }
+
+    fn seeded_model() -> WorkbookModel {
+        let mut sheet = Sheet::new("Data");
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(0, 1),
+            Cell {
+                value: CellValue::Number { value: 2.0 },
+                formula: Some("A1*2".into()),
+                ..Cell::default()
+            },
+        );
+        sheet.set_cell(
+            CellRef::new(1, 1),
+            Cell {
+                value: CellValue::Number { value: 2.0 },
+                ..Cell::default()
+            },
+        );
+        let mut model = WorkbookModel::default();
+        model.styles.cell_xfs.push(xlsx_model::Xf::default());
+        model.sheets.push(sheet);
+        model
+    }
+
+    fn pair(model: &WorkbookModel) -> (Workbook, Workbook) {
+        (
+            Workbook::from_model_collaborative(model.clone(), 11).unwrap(),
+            Workbook::from_model_collaborative(model.clone(), 12).unwrap(),
+        )
+    }
+
+    fn send(sender: &mut Workbook, receiver: &mut Workbook) -> MutationResult {
+        let update = sender
+            .encode_diff_v1(&receiver.encode_state_vector_v1())
+            .unwrap();
+        receiver
+            .apply_update_v1(&update, CalculationOptions::default())
+            .unwrap()
+    }
+
+    fn changed_cells(result: &MutationResult) -> Vec<(u32, u32)> {
+        result
+            .changed
+            .iter()
+            .map(|address| (address.cell.row, address.cell.col))
+            .collect()
+    }
+
+    fn cell_value(workbook: &Workbook, row: u32, col: u32) -> Option<CellValue> {
+        workbook
+            .sheet(SheetId(0))
+            .ok()
+            .and_then(|sheet| sheet.cell(CellRef::new(row, col)))
+            .map(|cell| cell.value.clone())
+    }
+
+    #[test]
+    fn remote_content_write_reports_only_the_touched_cell() {
+        let (mut local, mut remote) = pair(&seeded_model());
+        send(&mut local, &mut remote);
+        local
+            .edit_cell(
+                SheetId(0),
+                CellRef::new(4, 3),
+                "9",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let result = send(&mut local, &mut remote);
+        assert!(result.applied);
+        assert_eq!(changed_cells(&result), vec![(4, 3)]);
+        assert_eq!(
+            cell_value(&remote, 4, 3),
+            Some(CellValue::Number { value: 9.0 })
+        );
+    }
+
+    #[test]
+    fn remote_style_write_reports_only_the_styled_cells() {
+        let (mut local, mut remote) = pair(&seeded_model());
+        send(&mut local, &mut remote);
+        local
+            .apply_ops(
+                vec![Op::SetRangeNumberFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::new(CellRef::new(3, 2), CellRef::new(4, 2)),
+                    format: NumberFormatMutation::Percent,
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let result = send(&mut local, &mut remote);
+        assert!(result.applied);
+        assert_eq!(changed_cells(&result), vec![(3, 2), (4, 2)]);
+        assert!(
+            remote
+                .sheet(SheetId(0))
+                .unwrap()
+                .cell(CellRef::new(3, 2))
+                .unwrap()
+                .style
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn pending_remote_update_resolves_into_a_single_receipt() {
+        let (mut local, mut remote) = pair(&seeded_model());
+        send(&mut local, &mut remote);
+        let options = CalculationOptions::default();
+        let base_vector = local.encode_state_vector_v1();
+        local
+            .edit_cell(SheetId(0), CellRef::new(3, 0), "10", options)
+            .unwrap();
+        let first = local.encode_diff_v1(&base_vector).unwrap();
+        let first_vector = local.encode_state_vector_v1();
+        local
+            .edit_cell(SheetId(0), CellRef::new(3, 0), "11", options)
+            .unwrap();
+        let second = local.encode_diff_v1(&first_vector).unwrap();
+
+        let pending = remote.apply_update_v1(&second, options).unwrap();
+        assert!(
+            !pending.applied,
+            "an update missing a dependency may not announce any cell yet"
+        );
+        let resolved = remote.apply_update_v1(&first, options).unwrap();
+        assert!(resolved.applied);
+        assert_eq!(
+            changed_cells(&resolved),
+            vec![(3, 0)],
+            "the receipt must cover the delivered update and the pending one it resolved"
+        );
+        assert_eq!(
+            cell_value(&remote, 3, 0),
+            Some(CellValue::Number { value: 11.0 })
+        );
+    }
+
+    #[test]
+    fn collaborative_undo_and_redo_report_the_same_cells_as_a_full_diff() {
+        let (mut workbook, _) = pair(&seeded_model());
+        let options = CalculationOptions::default();
+        let edit = workbook
+            .edit_cell(SheetId(0), CellRef::new(0, 0), "7", options)
+            .unwrap();
+        assert_eq!(changed_cells(&edit), vec![(0, 1)]);
+        let undone = workbook.undo(options).unwrap();
+        assert_eq!(changed_cells(&undone), vec![(0, 0), (0, 1)]);
+        assert_eq!(
+            cell_value(&workbook, 0, 1),
+            Some(CellValue::Number { value: 2.0 })
+        );
+        let redone = workbook.redo(options).unwrap();
+        assert_eq!(changed_cells(&redone), vec![(0, 0), (0, 1)]);
+        assert_eq!(
+            cell_value(&workbook, 0, 1),
+            Some(CellValue::Number { value: 14.0 })
+        );
+    }
+
+    fn catalog_key(pattern: &str) -> String {
+        let payload = serde_json::to_string(&CellFormat {
+            number_format: NumberFormat::Custom {
+                pattern: pattern.into(),
+            },
+            ..CellFormat::default()
+        })
+        .unwrap();
+        format!("{:x}", Sha256::digest(payload.as_bytes()))
+    }
+
+    #[test]
+    fn format_catalog_renumber_reports_renumbered_cells() {
+        let high_pattern = "0.00";
+        let low_pattern = (0..10_000_u32)
+            .map(|index| format!("0.{index:05}"))
+            .find(|pattern| catalog_key(pattern) < catalog_key(high_pattern))
+            .expect("a pattern whose catalog key sorts before the seeded one exists");
+        let (mut local, mut remote) = pair(&seeded_model());
+        send(&mut local, &mut remote);
+        let format = |pattern: &str| Op::SetRangeNumberFormat {
+            sheet: SheetId(0),
+            range: CellRange::new(CellRef::new(0, 0), CellRef::new(0, 0)),
+            format: NumberFormatMutation::Custom {
+                pattern: pattern.into(),
+            },
+        };
+        local
+            .apply_ops(vec![format(high_pattern)], CalculationOptions::default())
+            .unwrap();
+        send(&mut local, &mut remote);
+        local
+            .apply_ops(
+                vec![Op::SetRangeNumberFormat {
+                    sheet: SheetId(0),
+                    range: CellRange::new(CellRef::new(5, 5), CellRef::new(5, 5)),
+                    format: NumberFormatMutation::Custom {
+                        pattern: low_pattern,
+                    },
+                }],
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        let result = send(&mut local, &mut remote);
+        assert!(result.applied);
+        assert_eq!(
+            changed_cells(&result),
+            vec![(0, 0), (5, 5)],
+            "the new catalog key renumbers the seeded style, and the receipt must report it"
+        );
+    }
+
+    #[test]
+    fn swapped_contents_map_is_rejected_without_touching_state() {
+        let (mut local, mut remote) = pair(&seeded_model());
+        send(&mut local, &mut remote);
+        {
+            let mut txn = local.authority.doc.transact_mut();
+            let sheets = txn.get_map(SHEETS).unwrap();
+            let sheet = sheets
+                .get(&txn, "sheet:0")
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .unwrap();
+            sheet.insert(&mut txn, CONTENTS, MapPrelim::default());
+        }
+        let update = local
+            .encode_diff_v1(&remote.encode_state_vector_v1())
+            .unwrap();
+        assert!(matches!(
+            remote.apply_update_v1(&update, CalculationOptions::default()),
+            Err(Error::CollaborativeStructureChanged)
+        ));
+        assert_eq!(
+            cell_value(&remote, 0, 0),
+            Some(CellValue::Number { value: 1.0 }),
+            "a rejected swap leaves the installed state untouched"
+        );
     }
 }
