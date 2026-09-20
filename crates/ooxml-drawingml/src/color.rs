@@ -71,7 +71,8 @@ pub fn resolve_color_value_to_hex_with_theme(
 ) -> Option<String> {
     let color = color?;
     let rgb = color.rgb.as_deref().or_else(|| {
-        color.theme_color.as_deref().map(|slot| {
+        color.theme_color.as_deref().map(|name| {
+            let slot = theme.map_or(name, |theme| theme.color_map.resolve(name));
             theme
                 .and_then(|theme| theme.color_scheme.get(slot))
                 .unwrap_or_else(|| default_theme_color(slot))

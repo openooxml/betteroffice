@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, StyleReference,
-    TableStyleList, Theme, ThemeFormatScheme,
+    ColorMap, ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline,
+    StyleReference, TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
@@ -136,6 +136,9 @@ pub struct Slide {
     pub name: Option<String>,
     pub layout_part_path: Option<String>,
     pub show_master_shapes: bool,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the slide inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map: Option<ColorMap>,
     pub background: Option<ShapeFill>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_picture: Option<Box<PictureFill>>,
@@ -154,6 +157,9 @@ pub struct SlideLayout {
     pub layout_type: Option<String>,
     pub master_part_path: Option<String>,
     pub show_master_shapes: bool,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the layout inherits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map: Option<ColorMap>,
     pub background: Option<ShapeFill>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_picture: Option<Box<PictureFill>>,
@@ -169,6 +175,9 @@ pub struct SlideMaster {
     pub name: Option<String>,
     pub theme_part_path: Option<String>,
     pub layout_part_paths: Vec<String>,
+    /// `p:clrMap`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map: Option<ColorMap>,
     pub background: Option<ShapeFill>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_picture: Option<Box<PictureFill>>,

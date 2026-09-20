@@ -263,6 +263,30 @@ fn edited_outlines_override_the_resolved_style() {
 }
 
 #[test]
+fn a_layout_colour_map_override_recolours_the_slide_it_carries() {
+    const OVERRIDE: &str = concat!(
+        r#"<a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2" "#,
+        r#"accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" "#,
+        r#"accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/>"#
+    );
+    let mapped = |mapping: &str| {
+        let mut parts = ooxml_opc::unzip_parts(MASTER).unwrap();
+        for (path, bytes) in &mut parts {
+            if path == "ppt/slideLayouts/slideLayout1.xml" {
+                *bytes = String::from_utf8(bytes.clone())
+                    .unwrap()
+                    .replace("<a:masterClrMapping/>", mapping)
+                    .into_bytes();
+            }
+        }
+        let bytes = ooxml_opc::rezip_parts(&parts).unwrap();
+        render(&DeckSession::open(&bytes, 8016).unwrap()).background
+    };
+    assert_eq!(mapped("<a:masterClrMapping/>"), solid("#FFFFFF"));
+    assert_eq!(mapped(OVERRIDE), solid("#000000"));
+}
+
+#[test]
 fn theme_reference_and_style_alpha_reach_fills_gradients_and_outlines() {
     for (style_alpha, suffix) in [(false, "80"), (true, "40")] {
         let mut parts = ooxml_opc::unzip_parts(MATRIX).unwrap();

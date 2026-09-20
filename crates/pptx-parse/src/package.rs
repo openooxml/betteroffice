@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::{TableStyleList, Theme};
+use ooxml_drawingml::{ColorMap, MAPPED_COLOR_NAMES, TableStyleList, Theme};
 
 use crate::chart::parse_chart_part;
 use crate::comments::{
@@ -95,6 +95,7 @@ fn parse_package(
                 relationship_types::SLIDE_LAYOUT,
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
+            color_map: parse_color_map_override(&root),
             background: data.background,
             background_picture: data.background_picture,
             background_reference: data.background_reference,
@@ -132,6 +133,7 @@ fn parse_package(
                 .filter(|relationship| relationship.has_type(relationship_types::SLIDE_LAYOUT))
                 .filter_map(|relationship| relationship.resolved_target.clone())
                 .collect(),
+            color_map: parse_color_map(root.child("clrMap")),
             background: data.background,
             background_picture: data.background_picture,
             background_reference: data.background_reference,
@@ -175,6 +177,7 @@ fn parse_package(
                 relationship_types::SLIDE_MASTER,
             ),
             show_master_shapes: bool_attribute(&root, "showMasterSp", true),
+            color_map: parse_color_map_override(&root),
             background: data.background,
             background_picture: data.background_picture,
             background_reference: data.background_reference,
@@ -385,6 +388,28 @@ fn parse_table_style_part(
         return Ok(TableStyleList::default());
     };
     Ok(parse_table_styles(&parse_xml(bytes, &path, budget)?))
+}
+
+/// The `p:clrMap`/`a:overrideClrMapping` attribute for each mapped name.
+const COLOR_MAP_ATTRIBUTES: [&str; 12] = [
+    "bg1", "tx1", "bg2", "tx2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+    "hlink", "folHlink",
+];
+
+fn parse_color_map(element: Option<&XmlElement>) -> Option<ColorMap> {
+    let element = element?;
+    let mut map = ColorMap::default();
+    for (attribute, name) in COLOR_MAP_ATTRIBUTES.iter().zip(MAPPED_COLOR_NAMES) {
+        if let Some(slot) = element.attribute(attribute) {
+            map.set(name, slot);
+        }
+    }
+    Some(map)
+}
+
+/// A `p:clrMapOvr` holding `a:masterClrMapping` inherits, and maps nothing.
+fn parse_color_map_override(root: &XmlElement) -> Option<ColorMap> {
+    parse_color_map(root.child("clrMapOvr")?.child("overrideClrMapping"))
 }
 
 fn parse_presentation(
@@ -935,6 +960,7 @@ mod tests {
                 name: None,
                 layout_part_path: Some(layout.to_owned()),
                 show_master_shapes: true,
+                color_map: None,
                 background: None,
                 background_picture: None,
                 background_reference: None,
@@ -965,6 +991,7 @@ mod tests {
                 layout_type: None,
                 master_part_path: Some("ppt/slideMasters/master1.xml".to_owned()),
                 show_master_shapes: true,
+                color_map: None,
                 background: None,
                 background_picture: None,
                 background_reference: None,
@@ -976,6 +1003,7 @@ mod tests {
                 layout_type: None,
                 master_part_path: Some("ppt/slideMasters/master2.xml".to_owned()),
                 show_master_shapes: true,
+                color_map: None,
                 background: None,
                 background_picture: None,
                 background_reference: None,
@@ -988,6 +1016,7 @@ mod tests {
                 name: None,
                 theme_part_path: Some("ppt/theme/theme1.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout1.xml".to_owned()],
+                color_map: None,
                 background: None,
                 background_picture: None,
                 background_reference: None,
@@ -999,6 +1028,7 @@ mod tests {
                 name: None,
                 theme_part_path: Some("ppt/theme/theme2.xml".to_owned()),
                 layout_part_paths: vec!["ppt/slideLayouts/layout2.xml".to_owned()],
+                color_map: None,
                 background: None,
                 background_picture: None,
                 background_reference: None,

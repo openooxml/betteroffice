@@ -202,6 +202,21 @@ impl SlideRenderer {
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
         let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        let color_map = parsed_slide
+            .and_then(|slide| slide.color_map.clone())
+            .or_else(|| layout.and_then(|layout| layout.color_map.clone()))
+            .or_else(|| master.and_then(|master| master.color_map.clone()))
+            .unwrap_or_default();
+        let mapped_theme;
+        let theme = if color_map.is_default() {
+            theme
+        } else {
+            mapped_theme = Theme {
+                color_map,
+                ..theme.clone()
+            };
+            &mapped_theme
+        };
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)

@@ -11,6 +11,7 @@ pub(crate) fn parse_theme(root: &XmlElement) -> Theme {
         name: root.attribute("name").unwrap_or("Office Theme").to_owned(),
         color_scheme: parse_color_scheme(elements.and_then(|value| value.child("clrScheme"))),
         font_scheme: parse_font_scheme(elements.and_then(|value| value.child("fontScheme"))),
+        ..Theme::default()
     }
 }
 

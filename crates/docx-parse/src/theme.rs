@@ -40,6 +40,7 @@ pub fn parse_theme_element(root: Option<&XmlElement>) -> Theme {
         font_scheme: parse_font_scheme(
             theme_elements.and_then(|element| element.child("a", "fontScheme")),
         ),
+        ..Theme::default()
     }
 }
 

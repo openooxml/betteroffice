@@ -129,12 +129,76 @@ impl Default for ThemeFontScheme {
     }
 }
 
+/// The names a colour mapping can point somewhere else, in the order
+/// `p:clrMap` and `a:overrideClrMapping` spell their attributes.
+pub const MAPPED_COLOR_NAMES: [&str; 12] = [
+    "background1",
+    "text1",
+    "background2",
+    "text2",
+    "accent1",
+    "accent2",
+    "accent3",
+    "accent4",
+    "accent5",
+    "accent6",
+    "hlink",
+    "folHlink",
+];
+
+const DEFAULT_COLOR_MAP: [&str; 12] = [
+    "lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6",
+    "hlink", "folHlink",
+];
+
+/// `p:clrMap` on a master and `a:overrideClrMapping` on a layout or slide: the
+/// theme slot each mapped name stands for. A dark layout is this mapping with
+/// `background1` on `dk1`, not a second theme.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColorMap {
+    slots: [String; 12],
+}
+
+impl Default for ColorMap {
+    fn default() -> Self {
+        Self {
+            slots: DEFAULT_COLOR_MAP.map(str::to_owned),
+        }
+    }
+}
+
+impl ColorMap {
+    pub fn set(&mut self, name: &str, slot: &str) {
+        if let Some(index) = MAPPED_COLOR_NAMES.iter().position(|entry| *entry == name) {
+            self.slots[index] = slot.to_owned();
+        }
+    }
+
+    /// The theme slot `name` reads as. Names outside the mapping, `dk1` and
+    /// `lt1` among them, address their slot directly and pass through.
+    pub fn resolve<'a>(&'a self, name: &'a str) -> &'a str {
+        MAPPED_COLOR_NAMES
+            .iter()
+            .position(|entry| *entry == name)
+            .map_or(name, |index| self.slots[index].as_str())
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.slots
+            .iter()
+            .zip(DEFAULT_COLOR_MAP)
+            .all(|(slot, default)| slot == default)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Theme {
     pub name: String,
     pub color_scheme: ThemeColorScheme,
     pub font_scheme: ThemeFontScheme,
+    #[serde(default, skip_serializing_if = "ColorMap::is_default")]
+    pub color_map: ColorMap,
 }
 
 impl Default for Theme {
@@ -143,11 +207,13 @@ impl Default for Theme {
             name: "Office Theme".to_owned(),
             color_scheme: ThemeColorScheme::default(),
             font_scheme: ThemeFontScheme::default(),
+            color_map: ColorMap::default(),
         }
     }
 }
 
 pub fn get_theme_color(theme: Option<&Theme>, slot: &str) -> String {
+    let slot = theme.map_or(slot, |theme| theme.color_map.resolve(slot));
     if let Some(value) = theme.and_then(|theme| theme.color_scheme.get(slot)) {
         return value.to_owned();
     }
@@ -264,6 +330,28 @@ mod tests {
         theme.font_scheme.major_font.latin = "Calibri".to_owned();
         theme.font_scheme.minor_font.latin = "Calibri Light".to_owned();
         theme
+    }
+
+    #[test]
+    fn a_colour_map_moves_only_the_names_it_maps() {
+        let mut map = ColorMap::default();
+        assert!(map.is_default());
+        assert_eq!(map.resolve("background1"), "lt1");
+        map.set("background1", "dk1");
+        map.set("text1", "lt1");
+        assert!(!map.is_default());
+        assert_eq!(map.resolve("background1"), "dk1");
+        assert_eq!(map.resolve("text1"), "lt1");
+        for name in ["dk1", "lt1", "phClr", "accent1"] {
+            assert_eq!(map.resolve(name), name);
+        }
+        let theme = Theme {
+            color_map: map,
+            ..Theme::default()
+        };
+        assert_eq!(get_theme_color(Some(&theme), "background1"), "000000");
+        assert_eq!(get_theme_color(Some(&theme), "text1"), "FFFFFF");
+        assert_eq!(get_theme_color(Some(&theme), "lt1"), "FFFFFF");
     }
 
     #[test]
