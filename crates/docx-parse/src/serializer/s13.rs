@@ -564,9 +564,7 @@ fn find_max_relationship_id(xml: &str) -> u64 {
     maximum
 }
 
-/// Where an entry attribute value lives: a span of the source part XML, or a
-/// span of a staged element in `RelationshipsIndex::appended` (element index,
-/// start, end). Attribute reads therefore never allocate.
+/// Attribute location: source XML span or staged `appended` element span.
 #[derive(Clone, Copy, Debug)]
 enum Attr {
     Span(usize, usize),
@@ -613,14 +611,8 @@ impl RelationshipEntry {
     }
 }
 
-/// Parsed view of one `.rels` part. Attributes are extracted as spans in a
-/// single pass and appends update the same bookkeeping, so per-item lookups
-/// never rescan the XML. `entries[..existing_count]` are the relationships
-/// present in the source part; later entries mirror staged `appended`
-/// elements. Staged entries are visible to `contains_id`, `id_for_target` and
-/// `xml_contains` (matching the previous read-back semantics), but never to
-/// `external_hyperlink_id` or `existing_position`, which query source state.
-/// Lookup maps build lazily, so append-only callers pay no map cost.
+/// A `.rels` part's entries plus staged appends; lookup maps build lazily.
+/// Staged entries stay invisible to `external_hyperlink_id`/`existing_position`.
 #[derive(Debug, Default)]
 struct RelationshipsIndex {
     xml: String,
@@ -1969,5 +1961,57 @@ mod tests {
         assert!(relationships.contains("Target=\"https://b.example\""));
         assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
         assert_eq!(parts["word/media/image2.png"], [4, 5, 6]);
+    }
+
+    #[test]
+    fn shared_header_rels_dedupe_watermark_media_relationship() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let watermark = json!({
+            "kind": "picture",
+            "dataUrl": "data:image/png;base64,AQID",
+            "scale": 1.0,
+            "washout": true
+        });
+        let header_entry = |rel: &str, kind: &str| {
+            json!([rel, {
+                "type": "header",
+                "hdrFtrType": kind,
+                "content": [],
+                "watermark": watermark.clone()
+            }])
+        };
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("x", None)] },
+            "headerEntries": [
+                header_entry("rIdHeaderA", "default"),
+                header_entry("rIdHeaderB", "first"),
+            ],
+            "relationshipEntries": [
+                ["rIdHeaderA", {
+                    "id": "rIdHeaderA",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+                ["rIdHeaderB", {
+                    "id": "rIdHeaderB",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+            ],
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = write_docx_s13(request, &original).expect("save");
+        let parts = part_map(&saved);
+
+        let rels = String::from_utf8_lossy(&parts["word/_rels/header1.xml.rels"]);
+        let media_rels: Vec<&str> = relationship_tags(&rels)
+            .filter(|tag| xml_attribute(tag, "Target") == Some("media/image1.png"))
+            .collect();
+        assert_eq!(media_rels.len(), 1, "{rels}");
+        assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
     }
 }
