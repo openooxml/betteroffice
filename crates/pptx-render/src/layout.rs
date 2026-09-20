@@ -1895,6 +1895,19 @@ impl BodyCascade<'_> {
         })
     }
 
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
+        [self.primary, self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .find_map(|body| {
+                body.paragraphs
+                    .get(index)
+                    .and_then(|paragraph| paragraph.end_properties.as_ref())
+            })
+    }
+
     fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
         let mut properties = self
             .master_slide
@@ -2140,15 +2153,14 @@ fn resolve_content(
             push_cased_runs(&mut runs, &run.text, start, language, style);
         }
         if runs.is_empty() {
+            let end_style = cascade
+                .end_run_properties(index)
+                .map(|end| style_from_properties(end, theme))
+                .unwrap_or_default();
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
-                style: resolve_style(
-                    renderer,
-                    theme,
-                    &TextStyle::default(),
-                    properties.default_run.as_ref(),
-                )?,
+                style: resolve_style(renderer, theme, &end_style, properties.default_run.as_ref())?,
             });
         }
         let alignment = paragraph
