@@ -50,6 +50,7 @@ use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, 
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
+use crate::segments::SegKind;
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
@@ -128,35 +129,18 @@ enum AdjacentStoryUnit {
     Pilcrow,
 }
 
-/// Whether the layout gives an embed its own block.
-fn is_block_embed(kind: &str) -> bool {
-    matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
-}
-
-/// Resolves a paragraph to its story span by walking the public segment view.
+/// Resolves a paragraph to its story span via the committed segment index.
 /// Story-scoped: a `para_id` that lives in another story is "not found".
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
-    let mut offset: u32 = 0;
-    let mut para_start: u32 = 0;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if properties.para_id == para_id {
-                    return Ok(ParaSpan {
-                        start: para_start,
-                        pilcrow: offset,
-                    });
-                }
-                offset += 1;
-                para_start = offset;
-            }
-            SegmentContent::OtherEmbed { .. } => offset += 1,
-        }
-    }
-    Err(js_err(format!(
-        "paragraph {para_id:?} was not found in story {story:?}"
-    )))
+    doc.segment_index(story)
+        .map_err(js_err)?
+        .para_span(para_id)
+        .map(|(start, pilcrow)| ParaSpan { start, pilcrow })
+        .ok_or_else(|| {
+            js_err(format!(
+                "paragraph {para_id:?} was not found in story {story:?}"
+            ))
+        })
 }
 
 /// `Loc { story, paraId, offset }` -> transient story-global index.
@@ -175,35 +159,17 @@ fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Resul
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
-    let mut cursor = 0_u32;
-    let mut para_start = 0_u32;
-    let mut node_start = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if index <= cursor {
-                    return Ok(IndexedLoc {
-                        para_id: properties.para_id,
-                        offset: index.saturating_sub(para_start),
-                        node_offset: index.saturating_sub(node_start),
-                    });
-                }
-                cursor += 1;
-                para_start = cursor;
-                node_start = cursor;
-            }
-            SegmentContent::OtherEmbed { ref kind, .. } => {
-                if cursor == node_start && is_block_embed(kind) {
-                    node_start = cursor + 1;
-                }
-                cursor += 1;
-            }
-        }
-    }
-    Err(js_err(format!(
-        "selection index {index} does not resolve in story {story:?}"
-    )))
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    let para = segments.para_at(index).ok_or_else(|| {
+        js_err(format!(
+            "selection index {index} does not resolve in story {story:?}"
+        ))
+    })?;
+    Ok(IndexedLoc {
+        para_id: para.para_id.to_string(),
+        offset: index.saturating_sub(para.start),
+        node_offset: index.saturating_sub(para.node_start),
+    })
 }
 
 fn adjacent_story_unit(
@@ -212,66 +178,40 @@ fn adjacent_story_unit(
     index: u32,
     direction: DeleteDirection,
 ) -> Result<Option<AdjacentStoryUnit>, JsValue> {
-    let mut cursor = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => {
-                let units: Vec<u16> = text.encode_utf16().collect();
-                let end = cursor + units.len() as u32;
-                let relative = match direction {
-                    DeleteDirection::Backward if index > cursor && index <= end => {
-                        Some((index - cursor) as usize)
-                    }
-                    DeleteDirection::Forward if index >= cursor && index < end => {
-                        Some((index - cursor) as usize)
-                    }
-                    _ => None,
-                };
-                if let Some(relative) = relative {
-                    let width = match direction {
-                        DeleteDirection::Backward
-                            if relative > 1
-                                && (0xdc00..=0xdfff).contains(&units[relative - 1])
-                                && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
-                        {
-                            2
-                        }
-                        DeleteDirection::Forward
-                            if relative + 1 < units.len()
-                                && (0xd800..=0xdbff).contains(&units[relative])
-                                && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
-                        {
-                            2
-                        }
-                        _ => 1,
-                    };
-                    return Ok(Some(AdjacentStoryUnit::Content(width)));
+    let segments = doc.segment_index(story).map_err(js_err)?;
+    let position = match direction {
+        DeleteDirection::Backward => index.checked_sub(1),
+        DeleteDirection::Forward => Some(index),
+    };
+    let Some(segment) = position.and_then(|pos| segments.segment_at(pos)) else {
+        return Ok(None);
+    };
+    Ok(Some(match &segment.kind {
+        SegKind::Text(text) => {
+            let units: Vec<u16> = text.encode_utf16().collect();
+            let relative = (index - segment.start) as usize;
+            let width = match direction {
+                DeleteDirection::Backward
+                    if relative > 1
+                        && (0xdc00..=0xdfff).contains(&units[relative - 1])
+                        && (0xd800..=0xdbff).contains(&units[relative - 2]) =>
+                {
+                    2
                 }
-                cursor = end;
-            }
-            SegmentContent::Pilcrow(_) => {
-                let adjacent = match direction {
-                    DeleteDirection::Backward => index == cursor + 1,
-                    DeleteDirection::Forward => index == cursor,
-                };
-                if adjacent {
-                    return Ok(Some(AdjacentStoryUnit::Pilcrow));
+                DeleteDirection::Forward
+                    if relative + 1 < units.len()
+                        && (0xd800..=0xdbff).contains(&units[relative])
+                        && (0xdc00..=0xdfff).contains(&units[relative + 1]) =>
+                {
+                    2
                 }
-                cursor += 1;
-            }
-            SegmentContent::OtherEmbed { .. } => {
-                let adjacent = match direction {
-                    DeleteDirection::Backward => index == cursor + 1,
-                    DeleteDirection::Forward => index == cursor,
-                };
-                if adjacent {
-                    return Ok(Some(AdjacentStoryUnit::Content(1)));
-                }
-                cursor += 1;
-            }
+                _ => 1,
+            };
+            AdjacentStoryUnit::Content(width)
         }
-    }
-    Ok(None)
+        SegKind::Pilcrow => AdjacentStoryUnit::Pilcrow,
+        SegKind::Embed => AdjacentStoryUnit::Content(1),
+    }))
 }
 
 /// Per-peer selection state. These sticky positions are deliberately held

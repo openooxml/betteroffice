@@ -11,7 +11,7 @@ use yrs::{
     Update,
 };
 
-use crate::{EditingDoc, SegmentContent, story_ref};
+use crate::{EditingDoc, story_ref};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TypingInference {
@@ -146,27 +146,11 @@ struct InsertedContent {
 }
 
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<(String, u32), String> {
-    let mut cursor = 0_u32;
-    let mut para_start = 0_u32;
-    for segment in doc
-        .story_segments(story)
+    doc.segment_index(story)
         .map_err(|error| error.to_string())?
-    {
-        match segment.content {
-            SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if index <= cursor {
-                    return Ok((properties.para_id, index.saturating_sub(para_start)));
-                }
-                cursor += 1;
-                para_start = cursor;
-            }
-            SegmentContent::OtherEmbed { .. } => cursor += 1,
-        }
-    }
-    Err(format!(
-        "selection index {index} does not resolve in story {story:?}"
-    ))
+        .para_at(index)
+        .map(|para| (para.para_id.to_string(), index.saturating_sub(para.start)))
+        .ok_or_else(|| format!("selection index {index} does not resolve in story {story:?}"))
 }
 
 #[cfg(test)]
