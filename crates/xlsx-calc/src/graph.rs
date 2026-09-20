@@ -38,19 +38,30 @@ const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 /// larger ranges stay in `spans` and are probed per lookup.
 const MAX_EXPANDED_RANGE_CELLS: u64 = 1024;
 
+/// aggregate bound on expanded point-index entries per sheet; beyond it new
+/// ranges go to `spans`, so graph-build memory stays bounded regardless of
+/// how many small-range edges a formula-heavy sheet registers.
+const MAX_EXPANDED_CELLS_PER_SHEET: u64 = 262_144;
+
 /// reverse edges into one sheet, indexed so `dependents_of` is near O(hits)
 /// instead of scanning every range on the sheet.
 #[derive(Default)]
 struct SheetDeps {
     /// covered cell -> dependent formula nodes, for small ranges.
     cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
-    /// `(range, dependent)` pairs for ranges too large to expand.
+    /// `(range, dependent)` pairs for ranges too large to expand or registered
+    /// after the expansion budget ran out.
     spans: Vec<(CellRange, NodeKey)>,
+    /// point-index entries currently held in `cells`.
+    expanded: u64,
 }
 
 impl SheetDeps {
     fn insert(&mut self, range: CellRange, node: NodeKey) {
-        if range_cells(&range) > MAX_EXPANDED_RANGE_CELLS {
+        let cells = range_cells(&range);
+        if cells > MAX_EXPANDED_RANGE_CELLS
+            || self.expanded.saturating_add(cells) > MAX_EXPANDED_CELLS_PER_SHEET
+        {
             self.spans.push((range, node));
             return;
         }
@@ -59,18 +70,24 @@ impl SheetDeps {
                 self.cells.entry((row, col)).or_default().push(node);
             }
         }
+        self.expanded += cells;
     }
 
     fn remove(&mut self, range: &CellRange, node: NodeKey) {
+        // a range may live in `spans` either because it is large or because the
+        // expansion budget was full when it was inserted.
+        self.spans.retain(|(r, n)| !(*n == node && r == range));
         if range_cells(range) > MAX_EXPANDED_RANGE_CELLS {
-            self.spans.retain(|(_, n)| *n != node);
             return;
         }
+        let mut freed = 0u64;
         for row in range.start.row..=range.end.row {
             for col in range.start.col..=range.end.col {
                 let drained = match self.cells.get_mut(&(row, col)) {
                     Some(nodes) => {
+                        let before = nodes.len();
                         nodes.retain(|n| *n != node);
+                        freed += (before - nodes.len()) as u64;
                         nodes.is_empty()
                     }
                     None => false,
@@ -80,6 +97,7 @@ impl SheetDeps {
                 }
             }
         }
+        self.expanded = self.expanded.saturating_sub(freed);
     }
 
     /// nodes reading `target`: expanded hits plus large-range probes, sorted
