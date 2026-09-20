@@ -34,6 +34,81 @@ impl NodeKey {
 /// edit; cells calling them re-evaluate on every recalc.
 const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 
+/// ranges covering at most this many cells are expanded into the point index;
+/// larger ranges stay in `spans` and are probed per lookup.
+const MAX_EXPANDED_RANGE_CELLS: u64 = 1024;
+
+/// reverse edges into one sheet, indexed so `dependents_of` is near O(hits)
+/// instead of scanning every range on the sheet.
+#[derive(Default)]
+struct SheetDeps {
+    /// covered cell -> dependent formula nodes, for small ranges.
+    cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
+    /// `(range, dependent)` pairs for ranges too large to expand.
+    spans: Vec<(CellRange, NodeKey)>,
+}
+
+impl SheetDeps {
+    fn insert(&mut self, range: CellRange, node: NodeKey) {
+        if range_cells(&range) > MAX_EXPANDED_RANGE_CELLS {
+            self.spans.push((range, node));
+            return;
+        }
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                self.cells.entry((row, col)).or_default().push(node);
+            }
+        }
+    }
+
+    fn remove(&mut self, range: &CellRange, node: NodeKey) {
+        if range_cells(range) > MAX_EXPANDED_RANGE_CELLS {
+            self.spans.retain(|(_, n)| *n != node);
+            return;
+        }
+        for row in range.start.row..=range.end.row {
+            for col in range.start.col..=range.end.col {
+                let drained = match self.cells.get_mut(&(row, col)) {
+                    Some(nodes) => {
+                        nodes.retain(|n| *n != node);
+                        nodes.is_empty()
+                    }
+                    None => false,
+                };
+                if drained {
+                    self.cells.remove(&(row, col));
+                }
+            }
+        }
+    }
+
+    /// nodes reading `target`: expanded hits plus large-range probes, sorted
+    /// and deduplicated.
+    fn dependents_of(&self, target: CellRef) -> impl Iterator<Item = NodeKey> + '_ {
+        let mut nodes: Vec<NodeKey> = self
+            .cells
+            .get(&(target.row, target.col))
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        nodes.extend(
+            self.spans
+                .iter()
+                .filter(move |(range, _)| range.contains(target))
+                .map(|(_, node)| *node),
+        );
+        nodes.sort_unstable();
+        nodes.dedup();
+        nodes.into_iter()
+    }
+}
+
+fn range_cells(range: &CellRange) -> u64 {
+    (range.end.row as u64 - range.start.row as u64 + 1)
+        .saturating_mul(range.end.col as u64 - range.start.col as u64 + 1)
+}
+
 pub struct DepGraph {
     /// sheet name -> id, snapshot at build time.
     names: HashMap<String, SheetId>,
@@ -41,8 +116,8 @@ pub struct DepGraph {
     defined_name_indices: HashMap<(Option<SheetId>, String), usize>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
     deps: HashMap<NodeKey, Vec<(SheetId, CellRange)>>,
-    /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
-    by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
+    /// reverse index by sheet: dependents of the cells read into that sheet.
+    by_sheet: HashMap<SheetId, SheetDeps>,
     /// formula cells that must re-evaluate every recalc regardless of edits.
     volatile: HashSet<NodeKey>,
 }
@@ -103,8 +178,8 @@ impl DepGraph {
         *self = Self::build(wb);
     }
 
-    /// formula cells that directly read `cell` on `sheet`; may contain
-    /// duplicates, callers dedup.
+    /// formula cells that directly read `cell` on `sheet`, deduplicated in
+    /// deterministic order.
     pub fn dependents_of(
         &self,
         sheet: SheetId,
@@ -114,9 +189,8 @@ impl DepGraph {
         self.by_sheet
             .get(&sheet)
             .into_iter()
-            .flatten()
-            .filter(move |(range, _)| range.contains(target))
-            .map(|(_, node)| (node.sheet, node.cell()))
+            .flat_map(move |deps| deps.dependents_of(target))
+            .map(|node| (node.sheet, node.cell()))
     }
 
     /// whether a cell is a (parseable) formula node.
@@ -141,7 +215,7 @@ impl DepGraph {
         };
         let edges = self.resolve_edges(key.sheet, &expr);
         for (sid, range) in &edges {
-            self.by_sheet.entry(*sid).or_default().push((*range, key));
+            self.by_sheet.entry(*sid).or_default().insert(*range, key);
         }
         if self.is_volatile(key.sheet, &expr) {
             self.volatile.insert(key);
@@ -152,9 +226,9 @@ impl DepGraph {
     /// drop a node's edges from every index it appears in.
     fn uninstall(&mut self, key: NodeKey) {
         if let Some(edges) = self.deps.remove(&key) {
-            for (sid, _) in &edges {
-                if let Some(list) = self.by_sheet.get_mut(sid) {
-                    list.retain(|(_, node)| *node != key);
+            for (sid, range) in &edges {
+                if let Some(deps) = self.by_sheet.get_mut(sid) {
+                    deps.remove(range, key);
                 }
             }
         }
@@ -414,7 +488,7 @@ mod tests {
         }
         assert!(deps_a1(&graph, "Data", "W1", &wb).is_empty());
         assert!(deps_a1(&graph, "Sheet1", "S1", &wb).is_empty());
-        assert_eq!(graph.by_sheet[&SheetId(1)].len(), 1);
+        assert_eq!(graph.by_sheet[&SheetId(1)].spans.len(), 1);
         assert_eq!(wb.sheets[1].iter_cells().count(), 0);
     }
 
