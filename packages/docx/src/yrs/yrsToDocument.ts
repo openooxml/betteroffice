@@ -1879,11 +1879,92 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
+/** A projected block plus a fingerprint of the story inputs it was built from. */
+interface ProjectedBlockMemo {
+  /** Bucket key for locating same-container candidates (first cell story / child story). */
+  key?: string;
+  /** Snapshot of the raw story inputs the block was built from. */
+  inputs?: readonly unknown[];
+  /** Container cell/child content arrays in payload order (tables, block SDTs). */
+  children?: readonly BlockContent[][];
+}
+
+interface ProjectedStory {
+  commentsKey: string;
+  blocks: BlockContent[];
+}
+
+/** Per-session projection reuse state shared across `yrsToDocument` calls. */
+interface SessionProjectionMemo {
+  /** An op without story scope ran; every story counts dirty except `clean` ones. */
+  wholesale: boolean;
+  clean: Set<string>;
+  dirty: Set<string>;
+  stories: Map<string, ProjectedStory>;
+}
+
+const projectedBlocks = new WeakMap<BlockContent, ProjectedBlockMemo>();
+const sessionProjectionMemos = new WeakMap<YrsSession, SessionProjectionMemo>();
+
+function sessionProjectionMemo(session: YrsSession): SessionProjectionMemo {
+  let memo = sessionProjectionMemos.get(session);
+  if (!memo) {
+    memo = { wholesale: true, clean: new Set(), dirty: new Set(), stories: new Map() };
+    sessionProjectionMemos.set(session, memo);
+  }
+  return memo;
+}
+
+/** Structural equality over JSON-shaped story inputs — allocation-free sig check. */
+function sameJson(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    return a.length === b.length && a.every((entry, index) => sameJson(entry, b[index]));
+  }
+  const left = asObject(a);
+  const right = asObject(b);
+  if (!left || !right) return false;
+  const keys = Object.keys(left);
+  return (
+    keys.length === Object.keys(right).length &&
+    keys.every((key) => key in right && sameJson(left[key], right[key]))
+  );
+}
+
+const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
+
+/** Stories a committed op touched; `all` invalidates the whole session. */
+export function noteYrsStoriesDirty(
+  session: YrsSession,
+  stories: 'all' | string | Iterable<string>
+): void {
+  const memo = sessionProjectionMemo(session);
+  if (stories === 'all') {
+    memo.wholesale = true;
+    memo.clean.clear();
+    memo.dirty.clear();
+    memo.stories.clear();
+    return;
+  }
+  const queue = typeof stories === 'string' ? [stories] : [...stories];
+  for (let index = 0; index < queue.length; index += 1) {
+    const story = queue[index]!;
+    memo.dirty.add(story);
+    memo.clean.delete(story);
+    memo.stories.delete(story);
+    const parent = NESTED_STORY_ID.exec(story)?.[1];
+    if (parent) queue.push(parent);
+  }
+}
+
+const EMPTY_BLOCKS: BlockContent[] = [];
+
 class SaveContext {
   readonly storyIds: Set<string>;
   private readonly baseParagraphs: Map<string, Paragraph>;
   private readonly baseStories: Map<string, readonly BlockContent[]>;
   private readonly comments: Map<string, Array<{ id: number; start: number; end: number }>>;
+  private readonly memo: SessionProjectionMemo;
 
   constructor(
     private readonly session: YrsSession,
@@ -1893,18 +1974,86 @@ class SaveContext {
     this.baseParagraphs = collectBaseParagraphs(base);
     this.baseStories = collectBaseStories(base);
     this.comments = commentRanges(session, base.package.document.comments);
+    this.memo = sessionProjectionMemo(session);
+  }
+
+  private storyIsClean(storyId: string): boolean {
+    return this.memo.wholesale
+      ? this.memo.clean.has(storyId)
+      : !this.memo.dirty.has(storyId);
+  }
+
+  private cellContents(payload: TablePayload): BlockContent[][] {
+    const contents: BlockContent[][] = [];
+    for (const row of Array.isArray(payload.rows) ? payload.rows : []) {
+      for (const cell of Array.isArray(row.cells) ? row.cells : []) {
+        contents.push(
+          cell.story !== undefined && this.storyIds.has(cell.story)
+            ? this.storyToBlocks(cell.story)
+            : EMPTY_BLOCKS
+        );
+      }
+    }
+    return contents;
   }
 
   storyToBlocks(storyId: string): BlockContent[] {
-    const blocks: BlockContent[] = [];
     const baseBlocks = this.baseStories.get(storyId);
+    const storyComments = this.comments.get(storyId) ?? [];
+    const commentsKey = storyComments.length === 0 ? '' : stableStringify(storyComments);
+    const priorStory = this.memo.stories.get(storyId);
+    // Nested stories are mapped positionally, so a different array means
+    // drift, not divergence — mutation paths mark them dirty anyway. A root
+    // story on a different array is genuine divergence and forces a fresh
+    // projection.
+    if (
+      priorStory !== undefined &&
+      priorStory.commentsKey === commentsKey &&
+      this.storyIsClean(storyId) &&
+      (NESTED_STORY_ID.test(storyId) ||
+        baseBlocks === undefined ||
+        baseBlocks === priorStory.blocks)
+    ) {
+      return priorStory.blocks;
+    }
+    const blocks: BlockContent[] = [];
     const baseParagraphBlocks = baseBlocks?.filter((block): block is Paragraph => block.type === 'paragraph');
     const segments = this.session.storySegments(storyId);
-    const storyComments = this.comments.get(storyId) ?? [];
     let items: InlineItem[] = [];
     let paragraphStart = 0;
     let paragraphIndex = 0;
     let storyOffset = 0;
+    let candidatesByKey: Map<string, BlockContent[]> | null = null;
+
+    const candidatesFor = (key: string): BlockContent[] => {
+      if (!candidatesByKey) {
+        candidatesByKey = new Map();
+        for (const block of baseBlocks ?? []) {
+          const blockKey = projectedBlocks.get(block)?.key;
+          if (blockKey === undefined) continue;
+          const bucket = candidatesByKey.get(blockKey);
+          if (bucket) bucket.push(block);
+          else candidatesByKey.set(blockKey, [block]);
+        }
+      }
+      return candidatesByKey.get(key) ?? [];
+    };
+
+    const reuseContainer = (
+      key: string,
+      inputs: readonly unknown[],
+      children: readonly BlockContent[][]
+    ): BlockContent | undefined =>
+      candidatesFor(key).find((block) => {
+        const memo = projectedBlocks.get(block);
+        return (
+          memo?.inputs !== undefined &&
+          memo.children !== undefined &&
+          sameJson(memo.inputs, inputs) &&
+          memo.children.length === children.length &&
+          memo.children.every((child, index) => child === children[index])
+        );
+      });
 
     const paragraphCommentBoundaries = (end: number): CommentBoundary[] => {
       const boundaries: CommentBoundary[] = [];
@@ -1943,17 +2092,42 @@ class SaveContext {
           segment.paraId === generatedId && !this.baseParagraphs.has(segment.paraId)
             ? ''
             : segment.paraId;
-        blocks.push(
-          paragraphFromStory(
+        const baseParagraph =
+          this.baseParagraphs.get(segment.paraId) ??
+          (segment.paraId === generatedId ? baseParagraphBlocks?.[paragraphIndex] : undefined);
+        const boundaries = paragraphCommentBoundaries(storyOffset);
+        const inputs = [
+          segment.paraId,
+          savedParaId,
+          segment.properties,
+          segment.attributes,
+          items,
+          boundaries,
+        ] as const;
+        const priorMemo =
+          baseParagraph !== undefined ? projectedBlocks.get(baseParagraph) : undefined;
+        let paragraph: Paragraph;
+        if (
+          baseParagraph !== undefined &&
+          priorMemo?.inputs !== undefined &&
+          sameJson(priorMemo.inputs, inputs)
+        ) {
+          paragraph = baseParagraph;
+        } else {
+          // Projection mutates `item.payload`; pin the pre-mutation inputs.
+          const snapshot = inputs.map((input, index) =>
+            index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
+          );
+          paragraph = paragraphFromStory(
             savedParaId,
             segment.properties,
             items,
-            paragraphCommentBoundaries(storyOffset),
-            this.baseParagraphs.get(segment.paraId) ?? (segment.paraId === generatedId
-              ? baseParagraphBlocks?.[paragraphIndex]
-              : undefined)
-          )
-        );
+            boundaries,
+            baseParagraph
+          );
+          projectedBlocks.set(paragraph, { inputs: snapshot });
+        }
+        blocks.push(paragraph);
         items = [];
         paragraphIndex += 1;
         storyOffset += 1;
@@ -1962,34 +2136,73 @@ class SaveContext {
       }
 
       if (segment.embedKind === 'table') {
-        blocks.push(tableFromPayload(this, segment.payload as TablePayload));
+        const payload = segment.payload as TablePayload;
+        const inputs = [segment.attributes, payload] as const;
+        const firstCell = Array.isArray(payload.rows) ? payload.rows[0]?.cells?.[0] : undefined;
+        const key = `T${firstCell?.story ?? ''}`;
+        const contents =
+          candidatesFor(key).length > 0 ? this.cellContents(payload) : undefined;
+        const reused =
+          contents !== undefined
+            ? (reuseContainer(key, inputs, contents) as Table | undefined)
+            : undefined;
+        let table: Table;
+        if (reused) {
+          table = reused;
+        } else {
+          table = tableFromPayload(this, payload);
+          projectedBlocks.set(table, {
+            key,
+            inputs,
+            children: contents ?? this.cellContents(payload),
+          });
+        }
+        blocks.push(table);
       } else if (segment.embedKind === 'blockSdt') {
         const childStory = asString(segment.payload.story);
-        let properties = sdtAttrsToProps(segment.payload);
-        let content =
-          childStory && this.storyIds.has(childStory) ? this.storyToBlocks(childStory) : [];
-        const authoredValue = contentControlValue(segment.payload.value);
-        if (authoredValue) {
-          try {
-            const applied = applyContentControlValue(properties, authoredValue);
-            properties = applied.properties;
-            content = applied.content;
-          } catch {
-            // Retain the child story if the authored value is invalid.
+        const childContent =
+          childStory && this.storyIds.has(childStory)
+            ? this.storyToBlocks(childStory)
+            : EMPTY_BLOCKS;
+        const inputs = [segment.attributes, segment.payload] as const;
+        const reused = reuseContainer(`S${childStory ?? ''}`, inputs, [childContent]);
+        if (reused) {
+          blocks.push(reused);
+        } else {
+          let properties = sdtAttrsToProps(segment.payload);
+          let content = childContent;
+          const authoredValue = contentControlValue(segment.payload.value);
+          if (authoredValue) {
+            try {
+              const applied = applyContentControlValue(properties, authoredValue);
+              properties = applied.properties;
+              content = applied.content;
+            } catch {
+              // Retain the child story if the authored value is invalid.
+            }
           }
+          const block: BlockContent = {
+            type: 'blockSdt',
+            properties,
+            content: content === EMPTY_BLOCKS ? [] : content,
+          };
+          // Rebind the child's entry to the embedded array for the next projection.
+          if (content !== childContent && childStory !== undefined) {
+            const childEntry = this.memo.stories.get(childStory);
+            if (childEntry) childEntry.blocks = block.content;
+          }
+          projectedBlocks.set(block, {
+            key: `S${childStory ?? ''}`,
+            inputs,
+            children: [block.content],
+          });
+          blocks.push(block);
         }
-        blocks.push({
-          type: 'blockSdt',
-          properties,
-          content,
-        });
       } else if (segment.embedKind === 'opaque') {
         const blob = asObject(segment.payload.blob);
         if (blob?.type === 'pageBreak') blocks.push(pageBreakParagraph());
         else {
-          // Opaque authored blocks have no editable yrs sub-story yet. Carry a
-          // same-position base block when it is still structurally compatible;
-          // this keeps block SDTs lossless until they become native.
+          // Carry a same-position base block while block SDTs stay opaque.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
             blocks.push(baseBlock);
@@ -2011,7 +2224,11 @@ class SaveContext {
       const trailing = buildParagraphContent(items);
       if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
     }
-    return restoreRawBlocks(blocks, baseBlocks ?? []);
+    const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
+    this.memo.stories.set(storyId, { commentsKey, blocks: projected });
+    this.memo.dirty.delete(storyId);
+    this.memo.clean.add(storyId);
+    return projected;
   }
 }
 

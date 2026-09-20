@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use ooxml_drawingml::{TableStyleList, Theme};
+use ooxml_drawingml::{ColorMap, TableStyleList, Theme};
 
 use crate::chart::parse_chart_part;
 use crate::comments::{
@@ -99,6 +99,7 @@ fn parse_package(
             background_picture: data.background_picture,
             background_reference: data.background_reference,
             shapes: data.shapes,
+            color_map_override: parse_color_map_override(&root),
             notes,
         });
     }
@@ -137,6 +138,7 @@ fn parse_package(
             background_reference: data.background_reference,
             shapes: data.shapes,
             text_styles: parse_text_styles(&root),
+            color_map: parse_color_map(&root),
         });
     }
 
@@ -179,6 +181,7 @@ fn parse_package(
             background_picture: data.background_picture,
             background_reference: data.background_reference,
             shapes: data.shapes,
+            color_map_override: parse_color_map_override(&root),
         });
     }
 
@@ -255,6 +258,7 @@ fn parse_package(
         comment_flavor: deck_comments.flavor,
         relationships,
         parts,
+        source_container: ooxml_opc::SourceContainer::new(data.to_vec()),
         shape_elements: if has_connectors {
             shape_elements
         } else {
@@ -336,7 +340,8 @@ pub fn write_pptx(package: &PptxPackage) -> Result<Vec<u8>, PptxError> {
         .iter()
         .map(|part| (part.path.clone(), part.bytes.clone()))
         .collect::<Vec<_>>();
-    ooxml_opc::rezip_parts(&parts).map_err(PptxError::Container)
+    ooxml_opc::rezip_parts_preserving(&parts, package.source_container.as_bytes())
+        .map_err(PptxError::Container)
 }
 
 fn parse_package_relationships(
@@ -743,6 +748,94 @@ fn bool_attribute(element: &XmlElement, name: &str, default: bool) -> bool {
     }
 }
 
+/// The `p:clrMap` in effect for a slide: its own `p:clrMapOvr`, else its
+/// layout's, else the master's. Every projection resolves scheme colours
+/// through this one predicate.
+pub fn effective_color_map(
+    slide: Option<&Slide>,
+    layout: Option<&SlideLayout>,
+    master: Option<&SlideMaster>,
+) -> ColorMap {
+    slide
+        .and_then(|slide| slide.color_map_override.clone())
+        .or_else(|| layout.and_then(|layout| layout.color_map_override.clone()))
+        .or_else(|| master.map(|master| master.color_map.clone()))
+        .unwrap_or_default()
+}
+
+/// The theme a slide's colours resolve against: its master's theme part
+/// carrying [`effective_color_map`].
+pub fn slide_theme(
+    package: &PptxPackage,
+    slide_part_path: Option<&str>,
+    layout_part_path: Option<&str>,
+) -> Theme {
+    let slide = slide_part_path
+        .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
+    let layout = layout_part_path
+        .or_else(|| slide.and_then(|slide| slide.layout_part_path.as_deref()))
+        .and_then(|path| {
+            package
+                .layouts
+                .iter()
+                .find(|layout| layout.part_path == path)
+        })
+        .or_else(|| package.layouts.first());
+    let master = master_for_layout(package, layout);
+    let base = master
+        .and_then(|master| master.theme_part_path.as_deref())
+        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .or_else(|| package.themes.first());
+    Theme {
+        color_map: effective_color_map(slide, layout, master),
+        ..base.map(|part| part.theme.clone()).unwrap_or_default()
+    }
+}
+
+/// The master a layout belongs to, by relationship then by back-reference.
+pub fn master_for_layout<'a>(
+    package: &'a PptxPackage,
+    layout: Option<&SlideLayout>,
+) -> Option<&'a SlideMaster> {
+    layout
+        .and_then(|layout| layout.master_part_path.as_deref())
+        .and_then(|path| {
+            package
+                .masters
+                .iter()
+                .find(|master| master.part_path == path)
+        })
+        .or_else(|| {
+            layout.and_then(|layout| {
+                package.masters.iter().find(|master| {
+                    master
+                        .layout_part_paths
+                        .iter()
+                        .any(|path| path == &layout.part_path)
+                })
+            })
+        })
+        .or_else(|| package.masters.first())
+}
+
+fn parse_color_map(root: &XmlElement) -> ColorMap {
+    root.child("clrMap").map(color_map).unwrap_or_default()
+}
+
+fn parse_color_map_override(root: &XmlElement) -> Option<ColorMap> {
+    root.child("clrMapOvr")
+        .and_then(|element| element.child("overrideClrMapping"))
+        .map(color_map)
+}
+
+fn color_map(element: &XmlElement) -> ColorMap {
+    let mut map = ColorMap::default();
+    for (name, slot) in &element.attributes {
+        map.set(name, slot);
+    }
+    map
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -939,6 +1032,7 @@ mod tests {
                 background_picture: None,
                 background_reference: None,
                 shapes: vec![chart_shape(id)],
+                color_map_override: None,
                 notes: String::new(),
             }
         }
@@ -969,6 +1063,7 @@ mod tests {
                 background_picture: None,
                 background_reference: None,
                 shapes: Vec::new(),
+                color_map_override: None,
             },
             SlideLayout {
                 part_path: "ppt/slideLayouts/layout2.xml".to_owned(),
@@ -980,6 +1075,7 @@ mod tests {
                 background_picture: None,
                 background_reference: None,
                 shapes: Vec::new(),
+                color_map_override: None,
             },
         ];
         let masters = vec![
@@ -993,6 +1089,7 @@ mod tests {
                 background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
+                color_map: ColorMap::default(),
             },
             SlideMaster {
                 part_path: "ppt/slideMasters/master2.xml".to_owned(),
@@ -1004,6 +1101,7 @@ mod tests {
                 background_reference: None,
                 shapes: Vec::new(),
                 text_styles: TextStyleSet::default(),
+                color_map: ColorMap::default(),
             },
         ];
         let mut first_theme = Theme::default();

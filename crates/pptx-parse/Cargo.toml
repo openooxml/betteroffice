@@ -15,6 +15,7 @@ categories = ["parser-implementations", "encoding"]
 name = "pptx_parse"
 
 [dependencies]
+base64 = "0.22"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
 ooxml-opc.workspace = true
 quick-xml = { version = "0.41", features = ["encoding"] }

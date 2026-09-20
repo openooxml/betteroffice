@@ -10,9 +10,10 @@ import {
 export interface RustTextEngine {
   registerFont(bytes: Uint8Array): number;
   /**
-   * Measurement view of `id` carrying the vertical metrics Word measures
-   * `family` with; `id` when the engine knows none. Optional so a host that
-   * predates it still measures, with the substitute's own metrics.
+   * Measurement view of `id` carrying the vertical metrics and advance pitch
+   * Word measures `family` with; `id` when the engine knows none. Optional so
+   * a host that predates it still measures, with the substitute's own
+   * metrics.
    */
   registerSubstituteFont?(id: number, family: string): number;
   clearFonts(): void;

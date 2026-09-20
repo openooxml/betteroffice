@@ -535,10 +535,12 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
     })
 }
 
-/// Register a measurement view of `base` carrying the vertical metrics Word
-/// measures `requested_family` with, and return its id; returns `base`
-/// unchanged for a family with no known metrics. Hosts call this for a face
-/// they substituted, and put the result at the head of that family's chain.
+/// Register a measurement view of `base` carrying the vertical metrics and
+/// advance pitch Word measures `requested_family` with, and return its id;
+/// returns `base` unchanged for a family with no known metrics. Hosts call
+/// this for a face they substituted, and put the result at the head of that
+/// family's chain. Pagination, the display list and glyph outlines all read
+/// this one store, so a widened view measures and paints at one pitch.
 #[wasm_bindgen]
 pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
     let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
@@ -560,6 +562,13 @@ pub fn clear_measure_fonts() {
     MEASURE_FONTS.with(|store| {
         *store.borrow_mut() = ooxml_text::FontStore::new();
     });
+    measure_blocks::clear_extent_cache();
+}
+
+/// Unique id of the current measurement font store, for caches keyed by store
+/// contents. Changes whenever [`clear_measure_fonts`] installs a new store.
+pub(crate) fn measure_store_id() -> u64 {
+    MEASURE_FONTS.with(|store| store.borrow().id())
 }
 
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON

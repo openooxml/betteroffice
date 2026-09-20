@@ -5,6 +5,7 @@
 //! paragraph remains authored exactly as it appeared in the source package.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -17,20 +18,23 @@ use crate::image::Image;
 use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
-use crate::paragraph::ParagraphContent;
+use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
+use crate::table::{Table, TableCell};
 use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
+use super::paragraph::serialize_paragraph;
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
     serialize_endnotes_part, serialize_footnotes_part, serialize_header_footer_part,
 };
+use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
 use super::xml_writer::escape_xml;
 
@@ -137,15 +141,25 @@ pub fn write_docx_s13_parts(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let serialized_document = serialize_document_part(&request.document, &mut context)?;
     let document_xml = if let Some(selective) = request.selective.as_ref() {
         let original = package
             .text("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
-        build_patched_document_xml(&original, &serialized_document, &selective.changed_para_ids)
-            .ok_or_else(|| save_error("selective document patch is unsafe"))?
+        match build_selective_document_xml(
+            &request.document,
+            &original,
+            &selective.changed_para_ids,
+            &mut context,
+        )? {
+            Some(patched) => patched,
+            None => {
+                let serialized = serialize_document_part(&request.document, &mut context)?;
+                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
+                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+            }
+        }
     } else {
-        serialized_document
+        serialize_document_part(&request.document, &mut context)?
     };
     package.set_text("word/document.xml", document_xml);
 
@@ -195,7 +209,8 @@ pub fn write_docx_s13_parts(
         }
     }
 
-    ooxml_opc::rezip_parts_borrowed(&package.refs()).map_err(ParseError::Container)
+    ooxml_opc::rezip_parts_preserving(&package.refs(), original_docx)
+        .map_err(ParseError::Container)
 }
 
 /// Edits overlay borrowed `original` entries so unchanged parts are never copied.
@@ -411,22 +426,15 @@ fn ensure_header_footer_parts(
     }
 
     let path = "word/_rels/document.xml.rels";
-    let mut relationships_xml = read_rels_or_stub(package, path);
-    let mut changed = false;
+    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, path));
     for (relationship_id, relationship_type, target, _) in parts {
-        if relationships_xml.contains(&format!("Id=\"{relationship_id}\"")) {
+        if relationships.xml_contains(&format!("Id=\"{relationship_id}\"")) {
             continue;
         }
-        let entry = format!(
-            "<Relationship Id=\"{relationship_id}\" Type=\"{relationship_type}\" Target=\"{target}\"/>"
-        );
-        if let Some(updated) = append_before(&relationships_xml, "</Relationships>", &entry) {
-            relationships_xml = updated;
-            changed = true;
-        }
+        relationships.push_new(relationship_id.to_owned(), relationship_type, target, None);
     }
-    if changed {
-        package.set_text(path, relationships_xml);
+    if let Some(updated) = relationships.serialize() {
+        package.set_text(path, updated);
     }
     Ok(())
 }
@@ -453,14 +461,16 @@ fn ensure_numbering_part(numbering: Option<&NumberingDefinitions>, package: &mut
     }
 
     let path = "word/_rels/document.xml.rels";
-    let relationships_xml = read_rels_or_stub(package, path);
-    if !relationships_xml.contains("Target=\"numbering.xml\"") {
-        let relationship_id = format!("rId{}", find_max_relationship_id(&relationships_xml) + 1);
-        let entry = format!(
-            "<Relationship Id=\"{relationship_id}\" Type=\"{}\" Target=\"numbering.xml\"/>",
-            relationship_types::NUMBERING
+    let mut relationships = RelationshipsIndex::parse(read_rels_or_stub(package, path));
+    if !relationships.xml_contains("Target=\"numbering.xml\"") {
+        let relationship_id = relationships.next_id();
+        relationships.push_new(
+            relationship_id,
+            relationship_types::NUMBERING,
+            "numbering.xml".to_owned(),
+            None,
         );
-        if let Some(updated) = append_before(&relationships_xml, "</Relationships>", &entry) {
+        if let Some(updated) = relationships.serialize() {
             package.set_text(path, updated);
         }
     }
@@ -547,25 +557,19 @@ fn ensure_comment_parts(package: &mut Package) {
     }
 
     let path = "word/_rels/document.xml.rels";
-    let Some(mut relationships_xml) = package.text(path) else {
+    let Some(relationships_xml) = package.text(path) else {
         return;
     };
-    let mut changed = false;
+    let mut relationships = RelationshipsIndex::parse(relationships_xml);
     for (_, _, target, relationship_type) in parts {
-        if relationships_xml.contains(target) {
+        if relationships.xml_contains(target) {
             continue;
         }
-        let relationship_id = format!("rId{}", find_max_relationship_id(&relationships_xml) + 1);
-        let entry = format!(
-            "<Relationship Id=\"{relationship_id}\" Type=\"{relationship_type}\" Target=\"{target}\"/>"
-        );
-        if let Some(updated) = append_before(&relationships_xml, "</Relationships>", &entry) {
-            relationships_xml = updated;
-            changed = true;
-        }
+        let relationship_id = relationships.next_id();
+        relationships.push_new(relationship_id, relationship_type, target.to_owned(), None);
     }
-    if changed {
-        package.set_text(path, relationships_xml);
+    if let Some(updated) = relationships.serialize() {
+        package.set_text(path, updated);
     }
 }
 
@@ -623,6 +627,253 @@ fn find_max_relationship_id(xml: &str) -> u64 {
         cursor = start + digits.len().max(1);
     }
     maximum
+}
+
+/// Attribute location: source XML span or staged `appended` element span.
+#[derive(Clone, Copy, Debug)]
+enum Attr {
+    Span(usize, usize),
+    Appended(usize, usize, usize),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RelationshipEntry {
+    id: Option<Attr>,
+    relationship_type: Option<Attr>,
+    target: Option<Attr>,
+    target_mode: Option<Attr>,
+}
+
+impl RelationshipEntry {
+    fn parse(xml: &str, tag: &str) -> Self {
+        let attr = |name: &str| {
+            xml_attribute(tag, name).map(|value| {
+                let start = value.as_ptr() as usize - xml.as_ptr() as usize;
+                Attr::Span(start, start + value.len())
+            })
+        };
+        Self {
+            id: attr("Id"),
+            relationship_type: attr("Type"),
+            target: attr("Target"),
+            target_mode: attr("TargetMode"),
+        }
+    }
+
+    fn staged(element_position: usize, element: &str) -> Self {
+        let attr = |name: &str| {
+            xml_attribute(element, name).map(|value| {
+                let start = value.as_ptr() as usize - element.as_ptr() as usize;
+                Attr::Appended(element_position, start, start + value.len())
+            })
+        };
+        Self {
+            id: attr("Id"),
+            relationship_type: attr("Type"),
+            target: attr("Target"),
+            target_mode: attr("TargetMode"),
+        }
+    }
+}
+
+/// A `.rels` part's entries plus staged appends; lookup maps build lazily.
+/// Staged entries stay invisible to `external_hyperlink_id`/`existing_position`.
+#[derive(Debug, Default)]
+struct RelationshipsIndex {
+    xml: String,
+    entries: Vec<RelationshipEntry>,
+    existing_count: usize,
+    next_number: u64,
+    appended: Vec<String>,
+    by_id: Option<HashMap<String, usize>>,
+    external_hyperlink_ids: Option<HashMap<String, String>>,
+    normalized_target_ids: Option<HashMap<String, String>>,
+}
+
+impl RelationshipsIndex {
+    fn parse(xml: String) -> Self {
+        let entries: Vec<RelationshipEntry> = relationship_tags(&xml)
+            .map(|tag| RelationshipEntry::parse(&xml, tag))
+            .collect();
+        Self {
+            next_number: find_max_relationship_id(&xml) + 1,
+            existing_count: entries.len(),
+            entries,
+            xml,
+            ..Self::default()
+        }
+    }
+
+    fn attr<'a>(&'a self, attr: &Option<Attr>) -> Option<&'a str> {
+        match attr {
+            Some(Attr::Span(start, end)) => self.xml.get(*start..*end),
+            Some(Attr::Appended(entry, start, end)) => self.appended.get(*entry)?.get(*start..*end),
+            None => None,
+        }
+    }
+
+    fn id<'a>(&'a self, entry: &RelationshipEntry) -> Option<&'a str> {
+        self.attr(&entry.id)
+    }
+
+    fn target<'a>(&'a self, entry: &RelationshipEntry) -> Option<&'a str> {
+        self.attr(&entry.target)
+    }
+
+    fn target_matches(&self, entry: &RelationshipEntry, href: &str) -> bool {
+        self.target(entry)
+            .is_some_and(|target| decode_xml_entities(target) == href)
+    }
+
+    fn is_external_hyperlink(&self, entry: &RelationshipEntry) -> bool {
+        self.attr(&entry.relationship_type) == Some(relationship_types::HYPERLINK)
+            && self.attr(&entry.target_mode) == Some("External")
+    }
+
+    fn ids(&mut self) -> &HashMap<String, usize> {
+        if self.by_id.is_none() {
+            let mut map = HashMap::with_capacity(self.entries.len());
+            for (position, entry) in self.entries.iter().enumerate() {
+                if let Some(id) = self.id(entry) {
+                    map.entry(id.to_owned()).or_insert(position);
+                }
+            }
+            self.by_id = Some(map);
+        }
+        self.by_id.as_ref().unwrap()
+    }
+
+    fn position(&mut self, id: &str) -> Option<usize> {
+        self.ids().get(id).copied()
+    }
+
+    fn contains_id(&mut self, id: &str) -> bool {
+        self.ids().contains_key(id)
+    }
+
+    fn existing_position(&mut self, id: &str) -> Option<usize> {
+        let position = self.position(id)?;
+        (position < self.existing_count).then_some(position)
+    }
+
+    fn entry(&self, position: usize) -> &RelationshipEntry {
+        &self.entries[position]
+    }
+
+    fn external_hyperlink_id(&mut self, href: &str) -> Option<String> {
+        if self.external_hyperlink_ids.is_none() {
+            let mut map = HashMap::new();
+            for position in 0..self.existing_count {
+                let entry = self.entries[position];
+                if self.is_external_hyperlink(&entry)
+                    && let (Some(target), Some(id)) = (self.target(&entry), self.id(&entry))
+                {
+                    map.entry(decode_xml_entities(target))
+                        .or_insert_with(|| id.to_owned());
+                }
+            }
+            self.external_hyperlink_ids = Some(map);
+        }
+        self.external_hyperlink_ids
+            .as_ref()
+            .unwrap()
+            .get(href)
+            .cloned()
+    }
+
+    fn id_for_target(&mut self, target: &str) -> Option<String> {
+        if self.normalized_target_ids.is_none() {
+            let mut map = HashMap::new();
+            for position in 0..self.entries.len() {
+                let entry = self.entries[position];
+                if let (Some(candidate), Some(id)) = (self.target(&entry), self.id(&entry)) {
+                    map.entry(normalize_media_target(candidate).to_owned())
+                        .or_insert_with(|| id.to_owned());
+                }
+            }
+            self.normalized_target_ids = Some(map);
+        }
+        self.normalized_target_ids
+            .as_ref()
+            .unwrap()
+            .get(normalize_media_target(target))
+            .cloned()
+    }
+
+    fn xml_contains(&self, needle: &str) -> bool {
+        self.xml.contains(needle) || self.appended.iter().any(|entry| entry.contains(needle))
+    }
+
+    fn next_id(&self) -> String {
+        format!("rId{}", self.next_number)
+    }
+
+    fn push_new(
+        &mut self,
+        id: String,
+        relationship_type: &str,
+        target: String,
+        target_mode: Option<&str>,
+    ) {
+        let element = format!(
+            "<Relationship Id=\"{id}\" Type=\"{relationship_type}\" Target=\"{target}\"{}/>",
+            target_mode
+                .map(|mode| format!(" TargetMode=\"{mode}\""))
+                .unwrap_or_default()
+        );
+        if let Some(number) = id.strip_prefix("rId").and_then(|suffix| {
+            suffix
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u64>()
+                .ok()
+        }) {
+            self.next_number = self.next_number.max(number + 1);
+        }
+        let position = self.entries.len();
+        let entry = RelationshipEntry::staged(self.appended.len(), &element);
+        self.entries.push(entry);
+        self.appended.push(element);
+        if self.by_id.is_none() && self.normalized_target_ids.is_none() {
+            return;
+        }
+        let entry = &self.entries[position];
+        let id = self.id(entry).map(str::to_owned);
+        let target = self.target(entry).map(str::to_owned);
+        if let Some(map) = self.by_id.as_mut()
+            && let Some(id) = id.clone()
+        {
+            map.entry(id).or_insert(position);
+        }
+        if let Some(map) = self.normalized_target_ids.as_mut()
+            && let (Some(target), Some(id)) = (target, id)
+        {
+            map.entry(normalize_media_target(&target).to_owned())
+                .or_insert(id);
+        }
+    }
+
+    fn try_append_new(
+        &mut self,
+        id: String,
+        relationship_type: &str,
+        target: String,
+        target_mode: Option<&str>,
+    ) -> Option<String> {
+        if !self.xml.contains("</Relationships>") {
+            return None;
+        }
+        self.push_new(id, relationship_type, target, target_mode);
+        append_before(&self.xml, "</Relationships>", &self.appended.concat())
+    }
+
+    fn serialize(&self) -> Option<String> {
+        if self.appended.is_empty() {
+            return None;
+        }
+        append_before(&self.xml, "</Relationships>", &self.appended.concat())
+    }
 }
 
 fn process_new_images(
@@ -697,9 +948,8 @@ fn process_image_part<'a>(
     image_number: &mut u64,
     extensions: &mut HashSet<String>,
 ) -> Result<(), ParseError> {
-    let relationships_xml = read_rels_or_stub(package, relationships_path);
-    let mut relationship_id = find_max_relationship_id(&relationships_xml);
-    let mut entries = Vec::new();
+    let mut relationships =
+        RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path));
     for blocks in stories {
         visit_new_images(blocks, &mut |image| {
             let Some(source) = image
@@ -711,26 +961,50 @@ fn process_image_part<'a>(
             };
             let (bytes, extension) = decode_image_data_url(source)?;
             *image_number += 1;
-            relationship_id += 1;
             let filename = format!("image{image_number}.{extension}");
-            let new_relationship_id = format!("rId{relationship_id}");
+            let new_relationship_id = relationships.next_id();
             package.set(format!("word/media/{filename}"), bytes);
-            entries.push(format!(
-                "<Relationship Id=\"{new_relationship_id}\" Type=\"{}\" Target=\"media/{filename}\"/>",
-                relationship_types::IMAGE
-            ));
+            relationships.push_new(
+                new_relationship_id.clone(),
+                relationship_types::IMAGE,
+                format!("media/{filename}"),
+                None,
+            );
             extensions.insert(extension);
             image.relationship_id = new_relationship_id;
             Ok(())
         })?;
     }
-    if !entries.is_empty()
-        && let Some(updated) =
-            append_before(&relationships_xml, "</Relationships>", &entries.concat())
-    {
+    if let Some(updated) = relationships.serialize() {
         package.set_text(relationships_path, updated);
     }
     Ok(())
+}
+
+fn run_has_drawing_image(run: &Run) -> bool {
+    run.content
+        .iter()
+        .any(|content| matches!(content, RunContent::Drawing { .. }))
+}
+
+fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => {
+            paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => run_has_drawing_image(run),
+                ParagraphContent::Tracked(tracked) => tracked.content.iter().any(
+                    |inline| matches!(inline, InlineNode::Run(run) if run_has_drawing_image(run)),
+                ),
+                _ => false,
+            })
+        }
+        BlockContent::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| blocks_have_drawing_image(&cell.content))
+        }),
+        BlockContent::BlockSdt(_) | BlockContent::RawXml(_) => false,
+    })
 }
 
 fn visit_new_images(
@@ -738,9 +1012,12 @@ fn visit_new_images(
     visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for block in blocks {
+        if !blocks_have_drawing_image(std::slice::from_ref(block)) {
+            continue;
+        }
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     match content {
                         ParagraphContent::Inline(InlineNode::Run(run)) => {
                             visit_run_images(run, visit)?
@@ -757,7 +1034,7 @@ fn visit_new_images(
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_new_images(&mut cell.content, visit)?;
                     }
@@ -886,6 +1163,7 @@ fn process_new_watermark_images(
     let mut image_number = find_max_image_number(package);
     let mut extensions = HashSet::new();
     let mut written_media = HashMap::<String, String>::new();
+    let mut rels_parts: IndexMap<String, RelationshipsIndex> = IndexMap::new();
 
     for (relationship_id, story) in &mut request.header_entries {
         let Some(Watermark::Picture {
@@ -905,11 +1183,15 @@ fn process_new_watermark_images(
         }
         let story_path = resolve_relative_path(&package.document_path, &relationship.target)?;
         let relationships_path = relationship_part_path(&story_path);
-        let relationships_xml = read_rels_or_stub(package, &relationships_path);
+        let rels = rels_parts
+            .entry(relationships_path.clone())
+            .or_insert_with(|| {
+                RelationshipsIndex::parse(read_rels_or_stub(package, &relationships_path))
+            });
 
         if watermark_relationship_id
             .as_ref()
-            .is_some_and(|id| relationship_element_for_id(&relationships_xml, id).is_some())
+            .is_some_and(|id| rels.contains_id(id))
         {
             continue;
         }
@@ -940,24 +1222,19 @@ fn process_new_watermark_images(
         let Some(filename) = filename else { continue };
         let target = format!("media/{filename}");
 
-        if let Some(existing) = relationship_tags(&relationships_xml).find_map(|tag| {
-            let candidate = xml_attribute(tag, "Target")?;
-            (normalize_media_target(candidate) == normalize_media_target(&target))
-                .then(|| xml_attribute(tag, "Id").map(str::to_owned))
-                .flatten()
-        }) {
+        if let Some(existing) = rels.id_for_target(&target) {
             *watermark_relationship_id = Some(existing);
             continue;
         }
 
-        let new_relationship_id =
-            format!("rId{}", find_max_relationship_id(&relationships_xml) + 1);
-        let entry = format!(
-            "<Relationship Id=\"{new_relationship_id}\" Type=\"{}\" Target=\"{target}\"/>",
-            relationship_types::IMAGE
-        );
-        if let Some(updated) = append_before(&relationships_xml, "</Relationships>", &entry) {
-            package.set_text(relationships_path, updated);
+        let new_relationship_id = rels.next_id();
+        if let Some(updated) = rels.try_append_new(
+            new_relationship_id.clone(),
+            relationship_types::IMAGE,
+            target,
+            None,
+        ) {
+            package.set_text(&relationships_path, updated);
             *watermark_relationship_id = Some(new_relationship_id);
         }
     }
@@ -978,10 +1255,6 @@ fn normalize_media_target(target: &str) -> &str {
                 .or_else(|| target.strip_prefix('/'))
                 .unwrap_or(target)
         })
-}
-
-fn relationship_element_for_id<'a>(xml: &'a str, relationship_id: &str) -> Option<&'a str> {
-    relationship_tags(xml).find(|tag| xml_attribute(tag, "Id") == Some(relationship_id))
 }
 
 fn relationship_tags(xml: &str) -> impl Iterator<Item = &str> {
@@ -1087,9 +1360,8 @@ fn process_hyperlink_part<'a>(
     relationships_path: &str,
     stories: impl Iterator<Item = &'a mut Vec<BlockContent>>,
 ) {
-    let relationships_xml = read_rels_or_stub(package, relationships_path);
-    let mut relationship_id = find_max_relationship_id(&relationships_xml);
-    let mut entries = Vec::new();
+    let mut relationships =
+        RelationshipsIndex::parse(read_rels_or_stub(package, relationships_path));
     for blocks in stories {
         visit_hyperlinks(blocks, &mut |hyperlink| {
             // Bookmark anchors resolve inside the owning story and never need
@@ -1105,7 +1377,8 @@ fn process_hyperlink_part<'a>(
             let current = hyperlink
                 .relationship_id
                 .as_deref()
-                .and_then(|id| relationship_element_for_id(&relationships_xml, id));
+                .and_then(|id| relationships.existing_position(id))
+                .map(|position| *relationships.entry(position));
             let Some(href) = hyperlink.href.as_deref() else {
                 if current.is_none() {
                     hyperlink.relationship_id = None;
@@ -1113,76 +1386,72 @@ fn process_hyperlink_part<'a>(
                 return;
             };
 
-            if relationship_targets_href(current, href)
-                || current.is_some_and(|tag| {
-                    !relationship_is_external_hyperlink(tag)
-                        && relationship_target_matches(Some(tag), href)
-                })
+            if current
+                .as_ref()
+                .is_some_and(|entry| relationships.target_matches(entry, href))
             {
                 return;
             }
-            if let Some(existing) = relationship_tags(&relationships_xml).find_map(|tag| {
-                relationship_targets_href(Some(tag), href)
-                    .then(|| xml_attribute(tag, "Id").map(str::to_owned))
-                    .flatten()
-            }) {
+            if let Some(existing) = relationships.external_hyperlink_id(href) {
                 hyperlink.relationship_id = Some(existing);
                 return;
             }
 
-            relationship_id += 1;
-            let new_relationship_id = format!("rId{relationship_id}");
-            entries.push(format!(
-                "<Relationship Id=\"{new_relationship_id}\" Type=\"{}\" Target=\"{}\" TargetMode=\"External\"/>",
+            let new_relationship_id = relationships.next_id();
+            relationships.push_new(
+                new_relationship_id.clone(),
                 relationship_types::HYPERLINK,
-                escape_xml(href)
-            ));
+                escape_xml(href),
+                Some("External"),
+            );
             hyperlink.relationship_id = Some(new_relationship_id);
         });
     }
-    if !entries.is_empty()
-        && let Some(updated) =
-            append_before(&relationships_xml, "</Relationships>", &entries.concat())
-    {
+    if let Some(updated) = relationships.serialize() {
         package.set_text(relationships_path, updated);
+    }
+}
+
+fn block_has_hyperlink(block: &BlockContent) -> bool {
+    match block {
+        BlockContent::Paragraph(paragraph) => paragraph
+            .content
+            .iter()
+            .any(|content| matches!(content, ParagraphContent::Inline(InlineNode::Hyperlink(_)))),
+        BlockContent::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| cell.content.iter().any(block_has_hyperlink))
+        }),
+        BlockContent::BlockSdt(sdt) => sdt.content.iter().any(block_has_hyperlink),
+        BlockContent::RawXml(_) => false,
     }
 }
 
 fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyperlink)) {
     for block in blocks {
+        if !block_has_hyperlink(block) {
+            continue;
+        }
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     if let ParagraphContent::Inline(InlineNode::Hyperlink(hyperlink)) = content {
                         visit(hyperlink);
                     }
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_hyperlinks(&mut cell.content, visit);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut sdt.content, visit),
+            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut Arc::make_mut(sdt).content, visit),
             BlockContent::RawXml(_) => {}
         }
     }
-}
-
-fn relationship_is_external_hyperlink(tag: &str) -> bool {
-    xml_attribute(tag, "Type") == Some(relationship_types::HYPERLINK)
-        && xml_attribute(tag, "TargetMode") == Some("External")
-}
-
-fn relationship_target_matches(tag: Option<&str>, href: &str) -> bool {
-    tag.and_then(|tag| xml_attribute(tag, "Target"))
-        .is_some_and(|target| decode_xml_entities(target) == href)
-}
-
-fn relationship_targets_href(tag: Option<&str>, href: &str) -> bool {
-    tag.is_some_and(relationship_is_external_hyperlink) && relationship_target_matches(tag, href)
 }
 
 fn decode_xml_entities(value: &str) -> String {
@@ -1270,6 +1539,314 @@ pub fn build_patched_document_xml(
         patched.replace_range(span.start..span.end, replacement);
     }
     Some(patched)
+}
+
+/// Census of every `w:p` a full serialize would emit for this model. The walk
+/// mirrors the serializer's emission rules (table-cell fallbacks included) so
+/// a count mismatch proves the model no longer lines up with the source part;
+/// `allocates_ids` flags generated `wp:docPr/@id` draws that would move the
+/// seeded id allocator relative to a whole-document serialize.
+#[derive(Default)]
+struct SelectiveParagraphIndex<'a> {
+    count: usize,
+    by_id: HashMap<String, Vec<Paragraph>>,
+    changed: HashSet<&'a str>,
+    allocates_ids: bool,
+}
+
+impl<'a> SelectiveParagraphIndex<'a> {
+    fn new(changed_ids: &'a [String]) -> Self {
+        Self {
+            changed: changed_ids.iter().map(String::as_str).collect(),
+            ..Self::default()
+        }
+    }
+
+    fn story(&mut self, blocks: &[BlockContent]) -> Option<()> {
+        for block in blocks {
+            match block {
+                BlockContent::Paragraph(paragraph) => self.paragraph(paragraph)?,
+                BlockContent::Table(table) => self.table(table)?,
+                BlockContent::BlockSdt(sdt) => {
+                    self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
+                    self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
+                    self.story(&sdt.content)?;
+                }
+                BlockContent::RawXml(raw) => self.fragment(&raw.xml)?,
+            }
+        }
+        Some(())
+    }
+
+    fn table(&mut self, table: &Table) -> Option<()> {
+        for row in &table.rows {
+            for cell in &row.cells {
+                self.cell(cell)?;
+            }
+        }
+        Some(())
+    }
+
+    fn cell(&mut self, cell: &TableCell) -> Option<()> {
+        // Mirrors `serialize_table_cell`: block SDTs emit nothing and an
+        // otherwise empty cell still emits a `<w:p/>` fallback.
+        let mut emitted = false;
+        for block in &cell.content {
+            match block {
+                BlockContent::Paragraph(paragraph) => {
+                    self.paragraph(paragraph)?;
+                    emitted = true;
+                }
+                BlockContent::Table(table) => {
+                    self.table(table)?;
+                    emitted = true;
+                }
+                BlockContent::BlockSdt(_) => {}
+                BlockContent::RawXml(raw) => {
+                    self.fragment(&raw.xml)?;
+                    emitted = true;
+                }
+            }
+        }
+        if !emitted {
+            self.count += 1;
+        }
+        Some(())
+    }
+
+    fn paragraph(&mut self, paragraph: &Paragraph) -> Option<()> {
+        self.count += 1;
+        if let Some(id) = emitted_paragraph_id(paragraph)
+            && self.changed.contains(id)
+        {
+            self.by_id
+                .entry(id.to_owned())
+                .or_default()
+                .push(paragraph.clone());
+        }
+        for content in &paragraph.content {
+            match content {
+                ParagraphContent::Inline(node) => self.inline(node)?,
+                ParagraphContent::Tracked(change) => {
+                    if matches!(
+                        change.node_type.as_str(),
+                        "insertion" | "deletion" | "moveFrom" | "moveTo"
+                    ) {
+                        for item in &change.content {
+                            match item {
+                                InlineNode::Run(run) => self.run(run)?,
+                                InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink)?,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn inline(&mut self, node: &InlineNode) -> Option<()> {
+        match node {
+            InlineNode::Run(run) => self.run(run),
+            InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink),
+            InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => Some(()),
+            InlineNode::SimpleField(field) => {
+                for run in &field.content {
+                    self.run(run)?;
+                }
+                Some(())
+            }
+            InlineNode::ComplexField(field) => {
+                for run in &field.field_code {
+                    self.run(run)?;
+                }
+                match field
+                    .structured_result
+                    .as_ref()
+                    .filter(|result| result.blocks.is_none())
+                    .and_then(|result| result.inline.as_ref())
+                {
+                    Some(nodes) => {
+                        for node in nodes {
+                            self.inline(node)?;
+                        }
+                    }
+                    None => {
+                        for run in &field.field_result {
+                            self.run(run)?;
+                        }
+                    }
+                }
+                Some(())
+            }
+            InlineNode::InlineSdt(sdt) => {
+                self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
+                self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
+                for item in &sdt.content {
+                    self.inline(item)?;
+                }
+                Some(())
+            }
+            InlineNode::Math(math) => {
+                if !math.omml_xml.is_empty() {
+                    validate_math_subtree(&math.omml_xml).ok()?;
+                    self.count += count_paragraph_elements(&math.omml_xml)?;
+                }
+                Some(())
+            }
+            InlineNode::RawXml(raw) => self.fragment(&raw.xml),
+        }
+    }
+
+    /// Hyperlink serialization only emits Run/BookmarkStart/BookmarkEnd
+    /// children; only runs can carry nested paragraphs or generated ids.
+    fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
+        for child in &hyperlink.children {
+            if let InlineNode::Run(run) = child {
+                self.run(run)?;
+            }
+        }
+        Some(())
+    }
+
+    fn run(&mut self, run: &Run) -> Option<()> {
+        for content in &run.content {
+            match content {
+                RunContent::Drawing { image } => {
+                    if image.id.as_deref().is_none_or(str::is_empty) {
+                        self.allocates_ids = true;
+                    }
+                }
+                RunContent::Shape { shape } => {
+                    if shape.id.as_deref().is_none_or(str::is_empty) {
+                        self.allocates_ids = true;
+                    }
+                    if let Some(text_body) = shape.text_body.as_ref() {
+                        for value in &text_body.content {
+                            let block: BlockContent = serde_json::from_value(value.clone()).ok()?;
+                            self.story(std::slice::from_ref(&block))?;
+                        }
+                    }
+                }
+                RunContent::HorizontalRule { rule } => self.fragment(&rule.xml)?,
+                RunContent::Chart { chart } => {
+                    self.raw_subtree_required(chart.drawing_xml.as_deref(), "drawing")?;
+                }
+                RunContent::OpaqueDrawing { xml, .. } => self.fragment(xml)?,
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn fragment(&mut self, xml: &str) -> Option<()> {
+        validate_replayed_fragment(xml).ok()?;
+        self.count += count_paragraph_elements(xml)?;
+        Some(())
+    }
+
+    fn raw_subtree(&mut self, xml: Option<&str>, local_name: &'static str) -> Option<()> {
+        let Some(xml) = xml else { return Some(()) };
+        validate_raw_subtree(xml, "w", local_name).ok()?;
+        self.count += count_paragraph_elements(xml)?;
+        Some(())
+    }
+
+    fn raw_subtree_required(&mut self, xml: Option<&str>, local_name: &'static str) -> Option<()> {
+        validate_raw_subtree(xml?, "w", local_name).ok()?;
+        self.count += count_paragraph_elements(xml?)?;
+        Some(())
+    }
+}
+
+/// `w14:paraId` exactly as the paragraph serializer would emit it: the typed
+/// id first, then the first replayed attribute of that name.
+fn emitted_paragraph_id(paragraph: &Paragraph) -> Option<&str> {
+    if let Some(id) = paragraph.para_id.as_deref().filter(|id| !id.is_empty()) {
+        return Some(id);
+    }
+    paragraph
+        .extra_attributes
+        .iter()
+        .find(|attribute| attribute.name == "w14:paraId")
+        .map(|attribute| attribute.value.as_str())
+}
+
+/// Count `<w:p>` element starts in an already-validated fragment, skipping
+/// comments and CDATA like `index_paragraphs` does.
+fn count_paragraph_elements(xml: &str) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(relative) = bytes[cursor..].iter().position(|byte| *byte == b'<') else {
+            break;
+        };
+        let start = cursor + relative;
+        if bytes[start..].starts_with(b"<!--") {
+            cursor = find_bytes(bytes, start + 4, b"-->")? + 3;
+            continue;
+        }
+        if bytes[start..].starts_with(b"<![CDATA[") {
+            cursor = find_bytes(bytes, start + 9, b"]]>")? + 3;
+            continue;
+        }
+        let end = find_tag_end(bytes, start)?;
+        if is_open_paragraph_tag(&bytes[start..=end]) {
+            count += 1;
+        }
+        cursor = end + 1;
+    }
+    Some(count)
+}
+
+/// Splice only the changed `w14:paraId` paragraphs into the untouched source
+/// part. `None` whenever the result cannot be proven identical to the
+/// serialize-then-patch path (whose behavior and errors the fallback preserves).
+fn build_selective_document_xml(
+    document: &DocumentBody,
+    original_xml: &str,
+    changed_ids: &[String],
+    context: &mut SerializerContext,
+) -> Result<Option<String>, ParseError> {
+    let mut index = SelectiveParagraphIndex::new(changed_ids);
+    if index.story(&document.content).is_none() || index.allocates_ids {
+        return Ok(None);
+    }
+    if changed_ids.is_empty() {
+        return Ok(Some(original_xml.to_owned()));
+    }
+    let Some(original) = index_paragraphs(original_xml) else {
+        return Ok(None);
+    };
+    if index.count != original.count {
+        return Ok(None);
+    }
+
+    let mut replacements = Vec::with_capacity(changed_ids.len());
+    for id in changed_ids {
+        let Some(&span) = original
+            .by_id
+            .get(id)
+            .filter(|spans| spans.len() == 1)
+            .and_then(|spans| spans.first())
+        else {
+            return Ok(None);
+        };
+        let Some([paragraph]) = index.by_id.get(id).map(Vec::as_slice) else {
+            return Ok(None);
+        };
+        replacements.push((span, serialize_paragraph(paragraph, context)?));
+    }
+    replacements.sort_unstable_by(|(left, _), (right, _)| right.start.cmp(&left.start));
+
+    let mut patched = original_xml.to_owned();
+    for (span, replacement) in replacements {
+        patched.replace_range(span.start..span.end, &replacement);
+    }
+    Ok(Some(patched))
 }
 
 /// Updates direct-child core-property text using a fixed clock.
@@ -1738,5 +2315,123 @@ mod tests {
             String::from_utf8_lossy(&parts["word/_rels/document.xml.rels"])
                 .contains("Id=\"rIdHeader\"")
         );
+    }
+
+    #[test]
+    fn multiple_new_relationships_in_one_save_get_unique_ids() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [{
+                "type": "paragraph",
+                "content": [
+                    {
+                        "type": "hyperlink",
+                        "href": "https://a.example",
+                        "children": [{
+                            "type": "run",
+                            "content": [{ "type": "text", "text": "first" }]
+                        }]
+                    },
+                    {
+                        "type": "hyperlink",
+                        "href": "https://b.example",
+                        "children": [{
+                            "type": "run",
+                            "content": [{ "type": "text", "text": "second" }]
+                        }]
+                    }
+                ]
+            }, image_paragraph("data:image/png;base64,AQID"), image_paragraph("data:image/png;base64,BAUG")] },
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = write_docx_s13(request, &original).expect("save");
+        let parts = part_map(&saved);
+        let document = String::from_utf8_lossy(&parts["word/document.xml"]);
+        let relationships = String::from_utf8_lossy(&parts["word/_rels/document.xml.rels"]);
+
+        let hyperlink_ids: Vec<String> = XmlTagIter::new(&document, "w:hyperlink")
+            .filter_map(|tag| xml_attribute(tag, "r:id").map(str::to_owned))
+            .collect();
+        assert_eq!(hyperlink_ids.len(), 2);
+        assert_ne!(hyperlink_ids[0], hyperlink_ids[1]);
+        let media_ids: Vec<String> = XmlTagIter::new(&document, "a:blip")
+            .filter_map(|tag| xml_attribute(tag, "r:embed").map(str::to_owned))
+            .collect();
+        assert_eq!(media_ids.len(), 2);
+        assert_ne!(media_ids[0], media_ids[1]);
+
+        let declared: Vec<&str> = relationship_tags(&relationships)
+            .filter_map(|tag| xml_attribute(tag, "Id"))
+            .collect();
+        for relationship_id in hyperlink_ids.iter().chain(&media_ids) {
+            assert!(
+                declared.iter().any(|id| id == relationship_id),
+                "missing relationship {relationship_id}"
+            );
+        }
+        let mut unique = declared.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(declared.len(), unique.len());
+        assert!(relationships.contains("Target=\"https://a.example\""));
+        assert!(relationships.contains("Target=\"https://b.example\""));
+        assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
+        assert_eq!(parts["word/media/image2.png"], [4, 5, 6]);
+    }
+
+    #[test]
+    fn shared_header_rels_dedupe_watermark_media_relationship() {
+        let original = base_package(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>",
+        );
+        let watermark = json!({
+            "kind": "picture",
+            "dataUrl": "data:image/png;base64,AQID",
+            "scale": 1.0,
+            "washout": true
+        });
+        let header_entry = |rel: &str, kind: &str| {
+            json!([rel, {
+                "type": "header",
+                "hdrFtrType": kind,
+                "content": [],
+                "watermark": watermark.clone()
+            }])
+        };
+        let request: S13SaveRequest = serde_json::from_value(json!({
+            "determinism": determinism(),
+            "document": { "content": [text_paragraph("x", None)] },
+            "headerEntries": [
+                header_entry("rIdHeaderA", "default"),
+                header_entry("rIdHeaderB", "first"),
+            ],
+            "relationshipEntries": [
+                ["rIdHeaderA", {
+                    "id": "rIdHeaderA",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+                ["rIdHeaderB", {
+                    "id": "rIdHeaderB",
+                    "type": relationship_types::HEADER,
+                    "target": "header1.xml"
+                }],
+            ],
+            "options": { "updateModifiedDate": false }
+        }))
+        .expect("request");
+        let saved = write_docx_s13(request, &original).expect("save");
+        let parts = part_map(&saved);
+
+        let rels = String::from_utf8_lossy(&parts["word/_rels/header1.xml.rels"]);
+        let media_rels: Vec<&str> = relationship_tags(&rels)
+            .filter(|tag| xml_attribute(tag, "Target") == Some("media/image1.png"))
+            .collect();
+        assert_eq!(media_rels.len(), 1, "{rels}");
+        assert_eq!(parts["word/media/image1.png"], [1, 2, 3]);
     }
 }

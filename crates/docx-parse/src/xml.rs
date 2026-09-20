@@ -322,7 +322,11 @@ impl XmlElement {
     }
 
     pub fn matches_name(&self, namespace: &str, local: &str) -> bool {
-        self.name == format!("{namespace}:{local}") || self.local_name() == local
+        self.name
+            .strip_prefix(namespace)
+            .and_then(|rest| rest.strip_prefix(':'))
+            == Some(local)
+            || self.local_name() == local
     }
 
     pub fn child(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -365,9 +369,15 @@ impl XmlElement {
 
     pub fn attribute(&self, namespace: Option<&str>, name: &str) -> Option<&str> {
         namespace
-            .and_then(|namespace| self.attributes.get(&format!("{namespace}:{name}")))
-            .or_else(|| self.attributes.get(name))
-            .map(String::as_str)
+            .and_then(|namespace| {
+                self.attributes.iter().find_map(|(key, value)| {
+                    key.strip_prefix(namespace)
+                        .and_then(|rest| rest.strip_prefix(':'))
+                        .filter(|local| *local == name)
+                        .map(|_| value.as_str())
+                })
+            })
+            .or_else(|| self.attributes.get(name).map(String::as_str))
     }
 
     pub fn attribute_any<'a>(&'a self, names: &[&str]) -> Option<&'a str> {

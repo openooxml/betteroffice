@@ -1,5 +1,7 @@
 //! S6 body projection.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -147,7 +149,7 @@ fn project_s6_blocks(blocks: &mut [BlockContent], depth: usize) {
     for block in blocks {
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     match content {
                         ParagraphContent::Inline(node) => project_s6_inline(node, depth + 1),
                         ParagraphContent::Tracked(change) => {
@@ -159,8 +161,10 @@ fn project_s6_blocks(blocks: &mut [BlockContent], depth: usize) {
                     }
                 }
             }
-            BlockContent::Table(table) => *table = crate::table::Table::empty(),
-            BlockContent::BlockSdt(sdt) => project_s6_blocks(&mut sdt.content, depth + 1),
+            BlockContent::Table(table) => *table = Arc::new(crate::table::Table::empty()),
+            BlockContent::BlockSdt(sdt) => {
+                project_s6_blocks(&mut Arc::make_mut(sdt).content, depth + 1)
+            }
             BlockContent::RawXml(_) => {}
         }
     }

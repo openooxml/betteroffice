@@ -1,6 +1,7 @@
 //! S9 full package orchestration and the versioned read-facade wire model.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -71,7 +72,7 @@ pub struct S9PackageWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_separators: Option<Vec<Note>>,
     pub relationship_entries: Vec<(String, Relationship)>,
-    pub media_entries: Vec<(String, MediaFile)>,
+    pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
 }
 
@@ -532,15 +533,19 @@ fn dedupe_blocks(
 ) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => dedupe_paragraph(paragraph, seen, ids),
+            BlockContent::Paragraph(paragraph) => {
+                dedupe_paragraph(Arc::make_mut(paragraph), seen, ids)
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         dedupe_blocks(&mut cell.content, seen, ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut sdt.content, seen, ids),
+            BlockContent::BlockSdt(sdt) => {
+                dedupe_blocks(&mut Arc::make_mut(sdt).content, seen, ids)
+            }
             BlockContent::RawXml(_) => {}
         }
     }
@@ -689,7 +694,7 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
-fn canonical_media(entries: &[(String, MediaFile)]) -> Result<CanonicalValue, ParseError> {
+fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
     entries
         .iter()
         .map(|(key, file)| {

@@ -2,6 +2,7 @@
 //! comment-range integrity.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -95,7 +96,7 @@ pub fn parse_comments(
         let content = block_content
             .iter()
             .filter_map(|block| match block {
-                BlockContent::Paragraph(paragraph) => Some(paragraph.clone()),
+                BlockContent::Paragraph(paragraph) => Some(paragraph.as_ref().clone()),
                 _ => None,
             })
             .collect();
@@ -299,20 +300,33 @@ pub fn remove_orphan_comment_ranges(blocks: &mut [BlockContent], comment_ids: &[
 fn prune_blocks(blocks: &mut [BlockContent], comment_ids: &HashSet<u64>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => paragraph.content.retain(|content| {
-                let ParagraphContent::CommentRange(marker) = content else {
-                    return true;
-                };
-                comment_ids.contains(&number_key(marker.id))
-            }),
+            BlockContent::Paragraph(paragraph) => {
+                if !paragraph.content.iter().any(|content| {
+                    matches!(
+                        content,
+                        ParagraphContent::CommentRange(marker)
+                            if !comment_ids.contains(&number_key(marker.id))
+                    )
+                }) {
+                    continue;
+                }
+                Arc::make_mut(paragraph).content.retain(|content| {
+                    let ParagraphContent::CommentRange(marker) = content else {
+                        return true;
+                    };
+                    comment_ids.contains(&number_key(marker.id))
+                })
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         prune_blocks(&mut cell.content, comment_ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => prune_blocks(&mut sdt.content, comment_ids),
+            BlockContent::BlockSdt(sdt) => {
+                prune_blocks(&mut Arc::make_mut(sdt).content, comment_ids)
+            }
             BlockContent::RawXml(_) => {}
         }
     }

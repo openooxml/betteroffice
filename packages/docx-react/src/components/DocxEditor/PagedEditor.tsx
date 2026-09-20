@@ -76,6 +76,7 @@ import {
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { resolveImageLayoutAttrs } from '@betteroffice/docx/docx';
 import type { RenderedDomContext } from '../../plugin-api/types';
+import { EMPTY_ANCHOR_POSITIONS } from './commentFactories';
 import {
   DEFAULT_PAGE_WIDTH,
   DEFAULT_PAGE_GAP,
@@ -421,6 +422,13 @@ export interface PagedEditorRef {
 // =============================================================================
 // COMPONENT (module-scope helpers live in per-domain files — see imports)
 // =============================================================================
+
+const SIDEBAR_ANCHOR_EMIT_MS = 150;
+const SIDEBAR_ANCHOR_STALE_MS = 400;
+const EMPTY_TRACKED_CHANGES_RESULT: TrackedChangesResult = {
+  entries: [],
+  commentToRevision: new Map(),
+};
 
 /**
  * PagedEditor - Main paginated editing component.
@@ -1492,6 +1500,9 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Under direct yrs input, the session's sticky comment coverage and revision
     // ranges are projected to the body/HF display-list regions without touching
     // an editor view.
+    const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastAnchorEmitAtRef = useRef(0);
+    const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
     useEffect(() => {
       const session = yrsCore.session;
       if (!session || !displayListQueries || !onAnchorPositionsChange) {
@@ -1509,14 +1520,31 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
+        const canvasByPage = new Map<number, HTMLCanvasElement>();
+        for (const canvas of host.querySelectorAll<HTMLCanvasElement>(
+          'canvas[data-page-index]'
+        )) {
+          const pageIndex = Number(canvas.dataset.pageIndex);
+          if (Number.isFinite(pageIndex)) canvasByPage.set(pageIndex, canvas);
+        }
         const projectY = (rect: DisplayListRect): number | null => {
-          const pageRect = resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
+          const pageRect =
+            canvasByPage.get(rect.pageIndex)?.getBoundingClientRect() ??
+            resolveDisplayPageClientRect(host, displayListQueries, rect.pageIndex);
           const pageSize = displayListQueries.pageSize(rect.pageIndex);
           if (!pageRect || !pageSize || pageSize.height <= 0) return null;
           return pageRect.top - targetRect.top + rect.y * (pageRect.height / pageSize.height);
         };
-        const projection = createYrsSidebarProjection(session);
         const revisions = session.listRevisions();
+        if (sidebarCommentIds.length === 0 && revisions.length === 0) {
+          onYrsTrackedChangesChange?.(EMPTY_TRACKED_CHANGES_RESULT);
+          if (lastAnchorPositionsRef.current !== EMPTY_ANCHOR_POSITIONS) {
+            lastAnchorPositionsRef.current = EMPTY_ANCHOR_POSITIONS;
+            onAnchorPositionsChange(EMPTY_ANCHOR_POSITIONS);
+          }
+          return;
+        }
+        const projection = createYrsSidebarProjection(session);
         onYrsTrackedChangesChange?.(extractTrackedChangesFromYrs(revisions, projection));
         const hfRegions = new Map<string, 'header' | 'footer'>();
         for (const rId of document?.package?.headers?.keys() ?? []) {
@@ -1525,23 +1553,46 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         for (const rId of document?.package?.footers?.keys() ?? []) {
           if (!hfRegions.has(rId)) hfRegions.set(rId, 'footer');
         }
-        onAnchorPositionsChange(
-          computeAnchorPositionsFromYrs(
-            session,
-            sidebarCommentIds,
-            revisions,
-            projection,
-            displayListQueries,
-            hfRegions,
-            projectY
-          )
+        const positions = computeAnchorPositionsFromYrs(
+          session,
+          sidebarCommentIds,
+          revisions,
+          projection,
+          displayListQueries,
+          hfRegions,
+          projectY
         );
+        const previous = lastAnchorPositionsRef.current;
+        const unchanged =
+          previous !== null &&
+          previous.size === positions.size &&
+          [...positions].every(([key, y]) => previous.get(key) === y);
+        if (unchanged) return;
+        lastAnchorPositionsRef.current = positions;
+        onAnchorPositionsChange(positions);
       };
-      emit();
-      void displayListQueries.whenReady().then(emit, () => undefined);
+      const scheduleEmit = (): void => {
+        if (anchorEmitTimerRef.current !== null) return;
+        if (performance.now() - lastAnchorEmitAtRef.current >= SIDEBAR_ANCHOR_STALE_MS) {
+          lastAnchorEmitAtRef.current = performance.now();
+          emit();
+          return;
+        }
+        anchorEmitTimerRef.current = setTimeout(() => {
+          anchorEmitTimerRef.current = null;
+          lastAnchorEmitAtRef.current = performance.now();
+          emit();
+        }, SIDEBAR_ANCHOR_EMIT_MS);
+      };
+      scheduleEmit();
+      void displayListQueries.whenReady().then(scheduleEmit, () => undefined);
       return () => {
         cancelled = true;
         if (hostRaf !== null) cancelAnimationFrame(hostRaf);
+        if (anchorEmitTimerRef.current !== null) {
+          clearTimeout(anchorEmitTimerRef.current);
+          anchorEmitTimerRef.current = null;
+        }
       };
     }, [
       canvasHostRef,

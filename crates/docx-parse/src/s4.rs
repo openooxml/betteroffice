@@ -1,5 +1,7 @@
 //! S4 drawing and media projection.
 
+use std::sync::Arc;
+
 use base64::Engine as _;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -25,7 +27,7 @@ const MAX_DRAWING_LEAVES: usize = 100_000;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct S4Projection {
-    pub media_entries: Vec<(String, MediaFile)>,
+    pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
     pub xml_parts: Vec<S4XmlPart>,
     pub smart_art_warnings: Vec<String>,
