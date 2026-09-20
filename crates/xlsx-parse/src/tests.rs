@@ -9,10 +9,29 @@ use xlsx_model::{
 
 use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
 use crate::{
-    ParseError, SaveEdits, SharedStringCells, SheetAxes, parse_workbook,
-    parse_workbook_with_package, serialize_workbook,
+    ParseError, SaveEdits, SharedStringCells, SheetAxes, serialize_workbook,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
+
+/// Materializes entries a borrowed-entry save returns, so a fixture stays
+/// usable after the parse; production callers hand ownership to
+/// `crate::parse_workbook_with_package` instead.
+fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> {
+    parts
+        .iter()
+        .map(|(path, bytes)| (path.clone(), bytes.as_ref().to_vec()))
+        .collect()
+}
+
+fn parse_workbook_with_package(
+    parts: &[(String, impl AsRef<[u8]>)],
+) -> Result<crate::ParsedWorkbook, ParseError> {
+    crate::parse_workbook_with_package(owned_parts(parts))
+}
+
+fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, ParseError> {
+    crate::parse_workbook(&owned_parts(parts))
+}
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
@@ -1229,13 +1248,14 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
-fn part_bytes(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()
         .find(|(name, _)| name == path)
         .unwrap_or_else(|| panic!("missing {path}"))
         .1
-        .clone()
+        .as_ref()
+        .to_vec()
 }
 
 /// The parser models a subset of row, column and cell markup. An edit to one
@@ -1353,7 +1373,7 @@ fn set_number(workbook: &mut Workbook, sheet: usize, address: &str, value: f64) 
     );
 }
 
-fn sheet_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+fn sheet_text<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> String {
     String::from_utf8(part_bytes(parts, path)).unwrap()
 }
 
@@ -1901,14 +1921,15 @@ fn writes_a_strict_theme_for_a_strict_package() {
     );
 }
 
-fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
+fn content_types_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "[Content_Types].xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -2093,14 +2114,15 @@ fn resolves_shared_strings_through_the_workbook_relationship() {
     );
 }
 
-fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
+fn shared_strings_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "xl/sharedStrings.xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -4249,6 +4271,7 @@ fn save_shared(
             moved_references: false,
         },
     )
+    .map(|parts| parts.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect())
 }
 
 /// One chart part cannot hold two sheets' references at once. A save where the

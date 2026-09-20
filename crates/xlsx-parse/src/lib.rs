@@ -19,7 +19,7 @@ pub use package::PreservedPackage;
 pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use reference::UnpatchableReference;
 pub use write::{
-    SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
+    SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
@@ -37,11 +37,12 @@ pub struct ParsedWorkbook {
     pub legacy_dimensions: Vec<LegacySheetDimensions>,
 }
 
-/// Parses the model and captures source package state.
+/// Parses the model and captures source package state, taking ownership of
+/// `parts` as the package's single retained copy.
 pub fn parse_workbook_with_package(
-    parts: &[(String, Vec<u8>)],
+    parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(parts)?;
+    let parsed = read::parse_workbook_indexed(&parts)?;
     let package = PreservedPackage::capture(
         parts,
         &parsed.workbook,

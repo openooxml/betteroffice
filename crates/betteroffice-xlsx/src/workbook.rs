@@ -229,7 +229,7 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let parsed = xlsx_parse::parse_workbook_with_package(&parts)?;
+        let parsed = xlsx_parse::parse_workbook_with_package(parts)?;
         Self::from_source(
             parsed.workbook,
             Some(parsed.package),
@@ -662,9 +662,9 @@ impl Workbook {
     pub fn save(&self) -> Result<Vec<u8>> {
         validate_model(&self.model)?;
         validate_chart_source(&self.model, self.source_package.is_some())?;
-        let parts = match &self.source_package {
+        match &self.source_package {
             Some(package) => {
-                xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+                let parts = xlsx_parse::serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
                     &self.model,
                     package,
                     &self.preserved.origins,
@@ -675,13 +675,15 @@ impl Workbook {
                         moved_references: self.moved_references_since_open,
                     },
                     self.active_sheet,
-                )?
+                )?;
+                ooxml_opc::rezip_parts_borrowed(&parts).map_err(Error::Package)
             }
-            None => {
-                xlsx_parse::serialize_workbook_with_active_sheet(&self.model, self.active_sheet)?
-            }
-        };
-        ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
+            None => ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook_with_active_sheet(
+                &self.model,
+                self.active_sheet,
+            )?)
+            .map_err(Error::Package),
+        }
     }
 
     pub fn model(&self) -> &WorkbookModel {
