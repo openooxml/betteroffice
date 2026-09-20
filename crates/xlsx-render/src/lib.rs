@@ -1377,10 +1377,22 @@ impl<'a> FrameStyles<'a> {
         let border = style
             .and_then(|s| styles.border_for(s))
             .map(|border| ResolvedBorder {
-                top: border.top.as_ref().map(|edge| Self::resolve_edge(styles, edge)),
-                left: border.left.as_ref().map(|edge| Self::resolve_edge(styles, edge)),
-                bottom: border.bottom.as_ref().map(|edge| Self::resolve_edge(styles, edge)),
-                right: border.right.as_ref().map(|edge| Self::resolve_edge(styles, edge)),
+                top: border
+                    .top
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                left: border
+                    .left
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                bottom: border
+                    .bottom
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
+                right: border
+                    .right
+                    .as_ref()
+                    .map(|edge| Self::resolve_edge(styles, edge)),
             });
         let (h, v, wrap_or_shrink) = style
             .and_then(|s| styles.alignment_for(s))
