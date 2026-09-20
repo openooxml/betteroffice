@@ -72,21 +72,29 @@ export function renderSection(report) {
       current: score(samples, 'commit', report.commit),
     };
   };
-  const ssimTable = (format) => {
-    const { versionLink, published, current } = measure(format);
-    return `| Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
-| --- | ---: | ---: | --- | ---: | ---: |
-| ${versionLink} | ${published.value} | ${published.count}/${published.total} | ${commitLink} | ${current.value} | ${current.count}/${current.total} |`;
-  };
-  const docx = measure('docx');
   const pages = (side) => (side.paged ? `${side.exact}/${side.paged}` : '—');
   const pageError = (side) => (side.paged ? String(side.pageError) : '—');
-  const docxTable = `| | Latest published ${docx.versionLink} | Latest commit ${commitLink} |
-| --- | ---: | ---: |
-| Exact page counts | ${pages(docx.published)} | ${pages(docx.current)} |
-| Absolute page error | ${pageError(docx.published)} | ${pageError(docx.current)} |
-| SSIM | ${docx.published.value} | ${docx.current.value} |
-| Scored/total | ${docx.published.count}/${docx.published.total} | ${docx.current.count}/${docx.current.total} |`;
+  const table = (format, extraRows = []) => {
+    const { versionLink, published, current } = measure(format);
+    const rows = [
+      ...extraRows.map(([label, cell]) => [label, cell(published), cell(current)]),
+      ['SSIM', published.value, current.value],
+      [
+        'Scored/total',
+        `${published.count}/${published.total}`,
+        `${current.count}/${current.total}`,
+      ],
+    ];
+    return [
+      `| | Latest published ${versionLink} | Latest commit ${commitLink} |`,
+      '| --- | ---: | ---: |',
+      ...rows.map(([label, a, b]) => `| ${label} | ${a} | ${b} |`),
+    ].join('\n');
+  };
+  const docxTable = table('docx', [
+    ['Exact page counts', pages],
+    ['Absolute page error', pageError],
+  ]);
   return `${BEGIN}
 ## Benchmarks
 
@@ -102,11 +110,11 @@ ${docxTable}
 
 #### PPTX
 
-${ssimTable('pptx')}
+${table('pptx')}
 
 #### XLSX
 
-${ssimTable('xlsx')}
+${table('xlsx')}
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 

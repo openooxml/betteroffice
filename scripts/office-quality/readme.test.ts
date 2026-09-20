@@ -34,8 +34,8 @@ test('generates every format and never reuses scores for a different release or 
   const section = renderSection(input);
   expect(section).not.toContain('0.8000');
   expect(section).toContain('#### PPTX');
-  expect(section).toContain('| [0.0.4](https://www.npmjs.com/package/@betteroffice/pptx/v/0.0.4) |');
-  expect(section).toContain('| [0.1.0](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.1.0) |');
+  expect(section).toContain('pptx/v/0.0.4)');
+  expect(section).toContain('xlsx/v/0.1.0)');
   expect(section).toContain('| — |');
   expect(section).toMatch(/^\| SSIM \| — \| — \|$/m);
   expect(section).toMatch(/^\| Scored\/total \| 0\/1 \| 0\/1 \|$/m);
@@ -107,12 +107,12 @@ test('keeps each format tied to its own published version and comparison', () =>
     });
   }
   const section = renderSection(input);
-  expect(section).toMatch(
-    /pptx\/v\/0\.0\.4\) \| 0\.9100 \| 1\/1 .*\| 0\.9100 \| 1\/1 \|$/m
-  );
-  expect(section).toMatch(
-    /xlsx\/v\/0\.1\.0\) \| 0\.8700 \| 1\/1 .*\| 0\.8700 \| 1\/1 \|$/m
-  );
+  // every format now uses the same vertical shape: one row per metric
+  const pptx = section.slice(section.indexOf('#### PPTX'), section.indexOf('#### XLSX'));
+  expect(pptx).toMatch(/^\| SSIM \| 0\.9100 \| 0\.9100 \|$/m);
+  expect(pptx).toMatch(/^\| Scored\/total \| 1\/1 \| 1\/1 \|$/m);
+  const xlsx = section.slice(section.indexOf('#### XLSX'));
+  expect(xlsx).toMatch(/^\| SSIM \| 0\.8700 \| 0\.8700 \|$/m);
   expect(section).toMatch(/^\| SSIM \| 0\.8000 \| 0\.8000 \|$/m);
 });
 

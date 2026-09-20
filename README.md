@@ -124,15 +124,17 @@ Page agreement is reported on its own because a document either paginates as Wor
 
 #### PPTX
 
-| Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
-| --- | ---: | ---: | --- | ---: | ---: |
-| [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | 0.8778 | 9/9 | [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) | 0.9016 | 9/9 |
+| | Latest published [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | Latest commit [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) |
+| --- | ---: | ---: |
+| SSIM | 0.8778 | 0.9016 |
+| Scored/total | 9/9 | 9/9 |
 
 #### XLSX
 
-| Latest published version | SSIM | Scored/total | Latest commit | SSIM | Scored/total |
-| --- | ---: | ---: | --- | ---: | ---: |
-| [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | 0.7656 | 8/8 | [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) | 0.7656 | 8/8 |
+| | Latest published [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | Latest commit [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) |
+| --- | ---: | ---: |
+| SSIM | 0.7656 | 0.7656 |
+| Scored/total | 8/8 | 8/8 |
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 
