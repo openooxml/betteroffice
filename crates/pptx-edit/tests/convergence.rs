@@ -491,3 +491,59 @@ fn comment_ids_are_deterministic_per_client_not_random() {
     assert_eq!(second.comment_id, "comment:606:1");
     assert_ne!(mine.comment_id, second.comment_id);
 }
+
+#[test]
+fn apply_update_resyncs_staged_clone_after_deletion_only_local_edit() {
+    use yrs::{Map, ReadTxn, Text, Transact};
+
+    let local = DeckSession::open(FIXTURE, 505).unwrap();
+    let remote = DeckSession::open(FIXTURE, 606).unwrap();
+    let story_id = first_text_story(&local);
+
+    remote
+        .insert_text(
+            &EditCtx::local("remote"),
+            &story_id,
+            0,
+            "R",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    local
+        .apply_update_v1(
+            &remote
+                .encode_diff_v1(&local.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+
+    {
+        let mut txn = local.yrs_doc().transact_mut();
+        let stories = txn.get_map("pptx:stories").unwrap();
+        let text = stories
+            .get(&txn, &story_id)
+            .unwrap()
+            .cast::<yrs::TextRef>()
+            .unwrap();
+        let len = text.len(&txn).min(4);
+        text.remove_range(&mut txn, 0, len);
+    }
+
+    remote
+        .insert_text(
+            &EditCtx::local("remote"),
+            &story_id,
+            0,
+            "S",
+            &TextStyle::default(),
+        )
+        .unwrap();
+    let applied = local
+        .apply_update_v1(
+            &remote
+                .encode_diff_v1(&local.encode_state_vector_v1())
+                .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(applied, local.snapshot().unwrap());
+}

@@ -196,8 +196,7 @@ impl DeckSession {
             package: Arc::new(package),
             ..session
         };
-        // The import passes may have rewritten `packageJson` — re-record the
-        // bytes the session has proven to parse.
+        // Re-record proven `packageJson` bytes after import passes.
         *session.package_json.borrow_mut() = deck::package_json_bytes(&session.doc)?;
         Ok(session)
     }
@@ -241,8 +240,7 @@ impl DeckSession {
         let validated = {
             let staged = self.staged.borrow();
             let staged = staged.as_ref().expect("staged doc synced");
-            // The mut transaction must drop — committing the update — before
-            // validation opens a read transaction on the same store.
+            // Drop the mut txn (committing) before validation reads the store.
             let applied = staged
                 .transact_mut_with(REMOTE_ORIGIN)
                 .apply_update(incoming)
@@ -268,21 +266,18 @@ impl DeckSession {
         Ok(snapshot)
     }
 
-    /// Brings `staged` to `doc`'s state — a diff replay after local edits, a
-    /// full re-hydrate when the clone has drifted sideways or is missing.
+    /// Diff-replays `doc`'s state into `staged`; re-hydrates on drift.
     fn sync_staged(&self) -> EditResult<()> {
-        let doc_sv = self.doc.transact().state_vector();
-        let staged_sv = self
-            .staged
-            .borrow()
-            .as_ref()
-            .map(|staged| staged.transact().state_vector());
-        match staged_sv {
+        let doc_state = DocState::of(&self.doc);
+        let staged_state = self.staged.borrow().as_ref().map(DocState::of);
+        match staged_state {
             None => self.rebuild_staged(),
-            Some(staged_sv) if staged_sv == doc_sv => Ok(()),
-            Some(staged_sv) if state_vector_exceeds(&staged_sv, &doc_sv) => self.rebuild_staged(),
-            Some(staged_sv) => {
-                let diff = self.doc.transact().encode_diff_v1(&staged_sv);
+            Some(staged_state) if staged_state == doc_state => Ok(()),
+            Some(staged_state) if state_vector_exceeds(&staged_state.sv, &doc_state.sv) => {
+                self.rebuild_staged()
+            }
+            Some(staged_state) => {
+                let diff = self.doc.transact().encode_diff_v1(&staged_state.sv);
                 let caught_up = decode_update_v1(&diff).and_then(|update| {
                     self.staged
                         .borrow()
@@ -297,7 +292,7 @@ impl DeckSession {
                         .staged
                         .borrow()
                         .as_ref()
-                        .map(|staged| staged.transact().state_vector() == doc_sv)
+                        .map(|staged| DocState::of(staged) == doc_state)
                         .unwrap_or(false);
                 if synced {
                     Ok(())
@@ -388,6 +383,24 @@ fn validate_client_id(client_id: u64) -> EditResult<()> {
 
 fn state_vector_exceeds(a: &StateVector, b: &StateVector) -> bool {
     a.iter().any(|(client, clock)| *clock > b.get(client))
+}
+
+/// Replication fingerprint: the state vector misses deletion-only edits, so
+/// the delete set is compared alongside it.
+#[derive(PartialEq)]
+struct DocState {
+    sv: StateVector,
+    ds: Vec<u8>,
+}
+
+impl DocState {
+    fn of(doc: &Doc) -> Self {
+        let snapshot = doc.transact().snapshot();
+        Self {
+            sv: snapshot.state_map,
+            ds: snapshot.delete_set.encode_v1(),
+        }
+    }
 }
 
 fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {
