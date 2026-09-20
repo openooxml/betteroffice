@@ -945,12 +945,16 @@ fn visible_anchors<'a>(
     cells
 }
 
-/// per-frame point -> merge index covering every cell in the visible ranges
-/// (the only cells queried per frame); out-of-range lookups fall back to the
-/// same linear scan callers used before.
+/// bound on indexed coverage entries; past it the index is abandoned and
+/// lookups fall back to the linear scan, so a giant merged range cannot drive
+/// per-frame memory.
+const MAX_INDEXED_CELLS: usize = 1 << 16;
+
+/// merge lookup indexed over the frame's visible ranges.
 struct MergeIndex<'a> {
     merges: &'a [CellRange],
     covers: HashMap<(u32, u32), CellRange>,
+    complete: bool,
     rows: &'a AxisLayout,
     cols: &'a AxisLayout,
 }
@@ -958,7 +962,8 @@ struct MergeIndex<'a> {
 impl<'a> MergeIndex<'a> {
     fn new(sheet: &'a Sheet, rows: &'a AxisLayout, cols: &'a AxisLayout) -> Self {
         let mut covers = HashMap::new();
-        for merge in &sheet.merges {
+        let mut complete = true;
+        'build: for merge in &sheet.merges {
             for row_range in &rows.ranges {
                 for col_range in &cols.ranges {
                     let row_lo = merge.start.row.max(row_range.start);
@@ -967,6 +972,11 @@ impl<'a> MergeIndex<'a> {
                     let col_hi = merge.end.col.saturating_add(1).min(col_range.end);
                     for row in row_lo..row_hi {
                         for col in col_lo..col_hi {
+                            if covers.len() >= MAX_INDEXED_CELLS {
+                                covers.clear();
+                                complete = false;
+                                break 'build;
+                            }
                             covers.entry((row, col)).or_insert(*merge);
                         }
                     }
@@ -976,20 +986,22 @@ impl<'a> MergeIndex<'a> {
         MergeIndex {
             merges: &sheet.merges,
             covers,
+            complete,
             rows,
             cols,
         }
     }
 
-    /// the merge covering `at`; a miss inside the indexed ranges means the
-    /// cell is unmerged, so only out-of-range cells need the linear scan.
+    /// the merge covering `at`; in-range misses are unmerged cells.
     fn covering(&self, at: CellRef) -> Option<CellRange> {
         if self.merges.is_empty() {
             return None;
         }
         match self.covers.get(&(at.row, at.col)) {
             Some(merge) => Some(*merge),
-            None if self.rows.contains(at.row) && self.cols.contains(at.col) => None,
+            None if self.complete && self.rows.contains(at.row) && self.cols.contains(at.col) => {
+                None
+            }
             None => covering_merge(self.merges, at),
         }
     }
@@ -1116,7 +1128,6 @@ fn cell_box(
 struct ResolvedXf {
     format_code: Arc<str>,
     font: Option<ResolvedFont>,
-    /// resolved `#rrggbb` fill, `None` for non-solid/unresolvable fills.
     fill: Option<Arc<str>>,
     border: Option<ResolvedBorder>,
     h: Option<HAlign>,
@@ -1148,12 +1159,11 @@ struct ResolvedBorderEdge {
     color: Arc<str>,
 }
 
-/// per-frame xf cache: the stylesheet is immutable for the frame's duration,
-/// so each style id resolves exactly once. xf ids are dense, so a vec index
-/// beats hashing.
+/// per-frame xf cache: each style id resolves once. sparse map — cell style
+/// ids are workbook-controlled `u32`s, so indexing a vec by them is unsafe.
 struct FrameStyles<'a> {
     styles: &'a Stylesheet,
-    xfs: Vec<Option<Arc<ResolvedXf>>>,
+    xfs: HashMap<u32, Arc<ResolvedXf>>,
     none: Option<Arc<ResolvedXf>>,
 }
 
@@ -1161,7 +1171,7 @@ impl<'a> FrameStyles<'a> {
     fn new(styles: &'a Stylesheet) -> Self {
         FrameStyles {
             styles,
-            xfs: Vec::new(),
+            xfs: HashMap::new(),
             none: None,
         }
     }
@@ -1169,15 +1179,11 @@ impl<'a> FrameStyles<'a> {
     fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
         match style {
             Some(style) => {
-                let index = style as usize;
-                if index >= self.xfs.len() {
-                    self.xfs.resize_with(index + 1, || None);
-                }
-                if self.xfs[index].is_none() {
+                if !self.xfs.contains_key(&style) {
                     let resolved = self.resolve(Some(style));
-                    self.xfs[index] = Some(Arc::new(resolved));
+                    self.xfs.insert(style, Arc::new(resolved));
                 }
-                self.xfs[index].as_ref().unwrap()
+                self.xfs.get(&style).unwrap()
             }
             None => {
                 if self.none.is_none() {
