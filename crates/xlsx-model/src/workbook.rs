@@ -262,7 +262,11 @@ impl Workbook {
 
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
-    fn value<'a>(&'a self, sheet: SheetId, at: CellRef) -> Cow<'a, CellValue>;
+    fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
+    /// `value` as a borrow when the provider can lend its stored cell.
+    fn value_cow<'a>(&'a self, sheet: SheetId, at: CellRef) -> Cow<'a, CellValue> {
+        Cow::Owned(self.value(sheet, at))
+    }
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
@@ -271,7 +275,14 @@ pub trait CellProvider {
 }
 
 impl CellProvider for Workbook {
-    fn value(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+    fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
+        self.sheet(sheet)
+            .and_then(|s| s.cell(at))
+            .map(|c| c.value.clone())
+            .unwrap_or_default()
+    }
+
+    fn value_cow<'a>(&'a self, sheet: SheetId, at: CellRef) -> Cow<'a, CellValue> {
         self.sheet(sheet)
             .and_then(|s| s.cell(at))
             .map(|c| Cow::Borrowed(&c.value))
@@ -346,10 +357,10 @@ mod tests {
 
         let id = wb.sheet_id("Data").unwrap();
         assert_eq!(wb.sheet_id("data"), Some(id));
-        assert_eq!(*wb.value(id, a1), CellValue::Number { value: 42.0 });
+        assert_eq!(wb.value(id, a1), CellValue::Number { value: 42.0 });
         assert_eq!(wb.formula(id, a1), Some("40+2"));
         assert_eq!(
-            *wb.value(id, CellRef::parse_a1("Z9").unwrap()),
+            wb.value(id, CellRef::parse_a1("Z9").unwrap()),
             CellValue::Empty
         );
         assert!(wb.sheet_id("Nope").is_none());

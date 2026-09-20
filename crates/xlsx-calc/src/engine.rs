@@ -208,7 +208,7 @@ fn eval_node(
     ctx.parse_cache = Some(graph.asts());
     let value = evaluate(&expr, &ctx);
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
-    if incomplete && !matches!(*wb.value(u.0, cell_of(u)), CellValue::Empty) {
+    if incomplete && !matches!(*wb.value_cow(u.0, cell_of(u)), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
     (Some(value), ctx.exhausted())
@@ -217,7 +217,7 @@ fn eval_node(
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
 fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
-    if *wb.value(u.0, cell_of(u)) == value {
+    if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
@@ -269,7 +269,7 @@ mod tests {
     }
 
     fn value(wb: &Workbook, sheet: SheetId, cell: &str) -> CellValue {
-        wb.value(sheet, a1(cell)).into_owned()
+        wb.value_cow(sheet, a1(cell)).into_owned()
     }
 
     fn changed_a1(r: &RecalcResult) -> Vec<String> {
@@ -806,13 +806,13 @@ mod tests {
             );
         }
         let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
-        assert_eq!(*wb.value(s, CellRef::new(N - 1, 0)), num((N - 1) as f64));
+        assert_eq!(wb.value(s, CellRef::new(N - 1, 0)), num((N - 1) as f64));
 
         let start = Instant::now();
         put_num(&mut wb, s, "A1", 1.0);
         let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
         let elapsed = start.elapsed();
-        assert_eq!(*wb.value(s, CellRef::new(N - 1, 0)), num(N as f64));
+        assert_eq!(wb.value(s, CellRef::new(N - 1, 0)), num(N as f64));
         assert_eq!(r.changed.len(), (N - 1) as usize);
         assert!(elapsed.as_secs_f64() < 1.0, "recalc took {elapsed:?}");
     }

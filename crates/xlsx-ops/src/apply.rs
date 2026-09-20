@@ -1039,13 +1039,13 @@ mod tests {
         };
         let inv = apply(&mut wb, &op).unwrap();
         assert_eq!(
-            *wb.value(SheetId(0), r("B2")),
+            wb.value(SheetId(0), r("B2")),
             CellValue::Number { value: 42.0 }
         );
         for iop in &inv.0 {
             apply(&mut wb, iop).unwrap();
         }
-        assert_eq!(*wb.value(SheetId(0), r("B2")), CellValue::Empty);
+        assert_eq!(wb.value(SheetId(0), r("B2")), CellValue::Empty);
         assert!(wb.sheet(SheetId(0)).unwrap().used_range().is_none());
     }
 
@@ -1085,7 +1085,7 @@ mod tests {
         };
         let inv = apply(&mut wb, &op).unwrap();
         assert_eq!(
-            *wb.value(SheetId(0), r("A4")),
+            wb.value(SheetId(0), r("A4")),
             CellValue::Number { value: 6.0 }
         );
 
@@ -1096,7 +1096,7 @@ mod tests {
         let orig = &before.sheets[0];
         assert_eq!(after.used_range(), orig.used_range());
         assert_eq!(
-            *wb.value(SheetId(0), r("A6")),
+            wb.value(SheetId(0), r("A6")),
             CellValue::Number { value: 6.0 }
         );
         assert_eq!(after.merges, orig.merges);
@@ -1133,7 +1133,7 @@ mod tests {
         };
         let inv = apply(&mut wb, &op).unwrap();
         assert_eq!(
-            *wb.value(SheetId(0), r("A5")),
+            wb.value(SheetId(0), r("A5")),
             CellValue::Text { value: "x".into() }
         );
         assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A5:B5");
@@ -1143,7 +1143,7 @@ mod tests {
         }
         assert_eq!(wb.sheets[0].used_range(), before);
         assert_eq!(
-            *wb.value(SheetId(0), r("A3")),
+            wb.value(SheetId(0), r("A3")),
             CellValue::Text { value: "x".into() }
         );
         assert_eq!(wb.sheets[0].hyperlinks[0].range.to_a1(), "A3:B3");
@@ -1336,7 +1336,7 @@ mod tests {
         }
         assert_eq!(wb.sheets.len(), 2);
         assert_eq!(
-            *wb.value(SheetId(1), r("A1")),
+            wb.value(SheetId(1), r("A1")),
             CellValue::Number { value: 9.0 }
         );
         assert_eq!(wb.sheets[1].merges, before.merges);
@@ -1877,7 +1877,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            *wb.value(SheetId(0), r("A4")),
+            wb.value(SheetId(0), r("A4")),
             CellValue::Number { value: 6.0 }
         );
         assert!(wb.sheet(SheetId(0)).unwrap().cell(r("A3")).is_none());
@@ -1889,11 +1889,11 @@ mod tests {
         assert_eq!(restores, 2, "rows 3 and 4 must come back");
         apply_ops(&mut wb, &inverse.0).unwrap();
         assert_eq!(
-            *wb.value(SheetId(0), r("A3")),
+            wb.value(SheetId(0), r("A3")),
             CellValue::Number { value: 3.0 }
         );
         assert_eq!(
-            *wb.value(SheetId(0), r("A4")),
+            wb.value(SheetId(0), r("A4")),
             CellValue::Number { value: 4.0 }
         );
     }

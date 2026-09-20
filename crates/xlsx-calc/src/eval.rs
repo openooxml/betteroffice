@@ -105,9 +105,7 @@ impl<'a> EvalContext<'a> {
         }
     }
 
-    /// `names` is shared across every context of one recalc pass so a name is
-    /// bound and evaluated at most once per pass instead of once per
-    /// referencing cell.
+    /// `names` is shared across one pass's contexts so a name binds once.
     pub(crate) fn with_budget(
         provider: &'a dyn CellProvider,
         sheet: SheetId,
@@ -330,9 +328,7 @@ struct DefinedNameBinding {
     sheet: SheetId,
 }
 
-/// per-pass defined-name state: the re-entry stack plus memoized parsed
-/// bindings and evaluated values, shared by every context a recalc pass
-/// creates. `None` bindings record lookup/parse failures so they error once.
+/// defined-name parse/eval memo shared across a recalc pass's contexts.
 /// each memoized value carries the unsupported-function gap its expansion
 /// recorded, which a hit replays.
 #[derive(Default)]
@@ -342,12 +338,8 @@ pub(crate) struct DefinedNameState {
     bindings: RefCell<HashMap<DefinedNameKey, Option<Rc<DefinedNameBinding>>>>,
 }
 
-/// a name's value is stable for the life of a recalc pass: its dependencies
-/// are evaluated before every referencing cell (the dep graph expands name
-/// references into edges, so topo order covers them). the memo is shared
-/// across the pass's contexts, so each name expands at most once — without it
-/// a chain of `A=B+B` definitions costs 2^n, and a `Name=SUM(range)` used by
-/// n cells costs n full evaluations.
+/// a name's value is stable within a recalc pass (dep edges order referrers
+/// after it), so it expands at most once per pass.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
@@ -366,8 +358,7 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
     let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
-    // a budget-exhausted result is per-context (each node has its own visit
-    // cap), so it must not poison the shared memo.
+    // a budget-exhausted result is per-context; it must not poison the memo.
     if !ctx.exhausted() {
         ctx.defined_names
             .values
@@ -452,7 +443,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_provider_value(ctx.provider.value(sid, cell)).into_owned()
+    normalize_provider_value(ctx.provider.value_cow(sid, cell)).into_owned()
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -673,7 +664,7 @@ impl Area {
         col: usize,
     ) -> Cow<'a, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
-        normalize_provider_value(ctx.provider.value(self.sheet, cell))
+        normalize_provider_value(ctx.provider.value_cow(self.sheet, cell))
     }
 
     /// all values in row-major order.
@@ -740,8 +731,7 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
 fn normalize_provider_value(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
     let error = match &*value {
         CellValue::Number { value } if !value.is_finite() => Some(ErrorValue::Num),
-        // a char count is only possible past the byte cap, so short texts skip
-        // the scan entirely
+        // char count can only exceed the cap past the byte cap
         CellValue::Text { value }
             if value.len() > MAX_CELL_TEXT_CHARS && value.chars().count() > MAX_CELL_TEXT_CHARS =>
         {

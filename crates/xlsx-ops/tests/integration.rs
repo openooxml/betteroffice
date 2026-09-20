@@ -94,7 +94,7 @@ fn full_workbook_round_trip_via_undo_stack() {
     stack.undo(&mut wb).unwrap();
     assert_eq!(wb.sheets[0].used_range(), baseline.sheets[0].used_range());
     assert_eq!(
-        *wb.value(SheetId(0), r("A1")),
+        wb.value(SheetId(0), r("A1")),
         CellValue::Number { value: 1.0 }
     );
     assert!(wb.sheets[0].merges.is_empty());
@@ -180,13 +180,13 @@ fn apply_returns_replayable_inverse() {
     };
     let inverse = apply(&mut wb, &op).unwrap();
     assert_eq!(
-        *wb.value(SheetId(0), r("D4")),
+        wb.value(SheetId(0), r("D4")),
         CellValue::Bool { value: true }
     );
     for iop in &inverse.0 {
         apply(&mut wb, iop).unwrap();
     }
-    assert_eq!(*wb.value(SheetId(0), r("D4")), CellValue::Empty);
+    assert_eq!(wb.value(SheetId(0), r("D4")), CellValue::Empty);
 }
 
 #[test]
