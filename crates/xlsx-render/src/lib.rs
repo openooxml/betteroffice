@@ -937,14 +937,22 @@ fn visible_anchors<'a>(
 }
 
 /// the merge (if any) that covers a cell.
+/// whether the painter draws a hyperlink's own label at `at`, which it does
+/// only at the link range's start and only when the cell has no text of its own.
+fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
+    sheet.hyperlink_at(at).is_some_and(|link| {
+        link.range.start == at && link.display.as_ref().is_some_and(|d| !d.is_empty())
+    })
+}
+
 fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
     merges.iter().copied().find(|m| m.contains(at))
 }
 
 /// Excel lets text that outgrows its cell run into the blank cells beside it,
 /// towards whichever side its alignment points. The run stops at the first
-/// neighbour that draws something, at a merge, and at the edge of the columns
-/// this frame lays out; anything but plain text, a wrap and a shrink stay boxed.
+/// neighbour that draws something, at a merge, at a frozen-pane split, and at
+/// the edge of the columns this frame lays out.
 #[allow(clippy::too_many_arguments)]
 fn spill_clip(
     geom: &GridGeometry,
@@ -978,10 +986,13 @@ fn spill_clip(
             && sheet
                 .cell(neighbour)
                 .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
+            && !draws_hyperlink_label(sheet, neighbour)
     };
+    let pane = cols.tracks[anchor].pinned;
     let mut first = anchor;
     if matches!(align, Align::Right | Align::Center) {
         while first > 0
+            && cols.tracks[first - 1].pinned == pane
             && cols.tracks[first - 1].index + 1 == cols.tracks[first].index
             && blank(cols.tracks[first - 1].index)
         {
@@ -991,6 +1002,7 @@ fn spill_clip(
     let mut last = anchor;
     if matches!(align, Align::Left | Align::Center) {
         while last + 1 < cols.tracks.len()
+            && cols.tracks[last + 1].pinned == pane
             && cols.tracks[last].index + 1 == cols.tracks[last + 1].index
             && blank(cols.tracks[last + 1].index)
         {
@@ -1268,7 +1280,7 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
 mod tests {
     use super::*;
     use xlsx_model::Hyperlink;
-    use xlsx_model::styles::{Alignment, Xf};
+    use xlsx_model::styles::{Alignment, HAlign, Xf};
     use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
@@ -1333,6 +1345,89 @@ mod tests {
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert_eq!(long_text.x, dc * 2.0);
         assert_eq!(long_text.w, dc * 5.0);
+    }
+
+    /// A neighbour the painter draws is not blank, whatever draws it: it also
+    /// paints a hyperlink's own label where the cell carries no text.
+    #[test]
+    fn spilling_text_stops_at_a_hyperlink_label() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let clip_of = |sheet: Sheet| {
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            build_display_list(&wb, SheetId(0), &vp)
+                .unwrap()
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text { text, clip, .. } if text == long => Some(clip.w),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 1), text_cell(long));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("D1:D1").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Open".into()),
+        });
+        assert_eq!(clip_of(sheet), dc * 2.0);
+    }
+
+    /// A frozen split is a pane boundary: Excel does not run text across it,
+    /// and `span` clamps a pinned start to the frozen extent, so a spill that
+    /// crossed the split would be clipped away from where its text sits.
+    #[test]
+    fn spilling_text_stops_at_a_frozen_split() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let mut styles = Stylesheet::default();
+        styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.freeze_pane = Some(FreezePane {
+            rows: 0,
+            cols: 1,
+            top_left: CellRef::new(0, 1),
+        });
+        let mut cell = text_cell(long);
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 1), cell);
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles = styles;
+        let clip = build_display_list(&wb, SheetId(0), &vp)
+            .unwrap()
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(clip.x, dc, "the run must not reach into the frozen column");
     }
 
     #[test]
