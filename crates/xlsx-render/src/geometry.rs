@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 
-use xlsx_model::styles::Stylesheet;
+use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{ColId, RowId};
 
@@ -47,36 +47,41 @@ pub fn autofit_row_height_pt(size_pt: f64) -> f64 {
 const AUTOFIT_LINE_RATIO: f64 = 1.4615;
 const AUTOFIT_LEADING_PT: f64 = 2.0769;
 
-/// floors a rescaled height to whole points, absorbing the float error a ratio
-/// of quarter-point heights leaves just under an exact integer (75.0 x 11/15
-/// evaluates to 54.999...).
+/// floors to whole points, absorbing the float error a ratio leaves just under
+/// an exact integer (90.0 x 14/15 evaluates to 62.999...).
 fn floor_pt(pt: f64) -> f64 {
     (pt + 1e-9).floor()
 }
 
-/// a stored `ht` is expressed against the sheet's `defaultRowHeight`; when that
-/// default is a cached hint excel recomputes, every stored height is rescaled
-/// with it and floored to whole points. the ratio needs excel's own fitted
-/// height for the normal font, and [`autofit_row_height_pt`] is measured on
-/// calibri, so a sheet whose normal font names another face keeps its heights.
+/// the font `cellXfs[0]` resolves to: what a cell inheriting the normal style renders in.
+fn normal_font(styles: &Stylesheet) -> Option<&Font> {
+    styles.font_for(0).or_else(|| styles.fonts.first())
+}
+
+/// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
+/// cached hint it recomputes; `None` keeps stored heights. gated on calibri
+/// because [`autofit_row_height_pt`] is a calibri measurement.
 fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
     }
-    let declared = sheet.format.default_row_height_pt.filter(|&pt| pt > 0.0)?;
-    let normal = styles.fonts.first();
+    let declared = sheet
+        .format
+        .default_row_height_pt
+        .filter(|pt| pt.is_finite() && *pt > 0.0)?;
+    let normal = normal_font(styles);
     if !normal
         .and_then(|font| font.name.as_deref())
         .is_none_or(|name| name.eq_ignore_ascii_case("calibri"))
     {
         return None;
     }
-    let fitted = autofit_row_height_pt(
-        normal
-            .and_then(|font| font.size_pt)
-            .unwrap_or(DEFAULT_FONT_SIZE_PT),
-    );
-    (fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+    let size = normal
+        .and_then(|font| font.size_pt)
+        .filter(|pt| pt.is_finite() && *pt > 0.0)
+        .unwrap_or(DEFAULT_FONT_SIZE_PT);
+    let fitted = autofit_row_height_pt(size);
+    (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
 }
 
 /// rows excel auto-fits, with the height each takes: every row that carries no
@@ -414,6 +419,46 @@ mod tests {
         styles.fonts[0].name = Some("Arial".into());
         let unmeasured = GridGeometry::new(&sheet, &styles);
         assert!((unmeasured.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_normal_face_comes_from_the_first_cell_format_not_the_font_table() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Font::default()
+        });
+        styles.fonts.push(Font {
+            name: Some("Comic Sans MS".into()),
+            size_pt: Some(30.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(1),
+            ..Xf::default()
+        });
+        let mut sheet = sheet_with(&[], &[(0, 15.0)]);
+        sheet.format.default_row_height_pt = Some(15.0);
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_non_finite_measurement_leaves_stored_heights_alone() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(f64::INFINITY),
+            ..Font::default()
+        });
+        let mut sheet = sheet_with(&[], &[(0, 15.0)]);
+        sheet.format.default_row_height_pt = Some(15.0);
+        assert!((GridGeometry::new(&sheet, &styles).row_y(1) - row_pt_to_px(14.0)).abs() < 0.001);
+
+        sheet.format.default_row_height_pt = Some(f64::INFINITY);
+        styles.fonts[0].size_pt = Some(11.0);
+        assert!((GridGeometry::new(&sheet, &styles).row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
     }
 
     #[test]
