@@ -8,13 +8,14 @@ export interface TextEngineFontSink {
    */
   registerFont(bytes: Uint8Array): number;
   /**
-   * Register a measurement view of `id` carrying the vertical metrics Word
-   * measures `family` with, and return its id — the engine's answer to a face
-   * this host had to substitute. Returns `id` for a family whose metrics the
-   * engine does not know. Optional so partial sinks (tests, older hosts) keep
-   * working; without it a substitute measures with its own metrics.
+   * Register a measurement view of `id` carrying the vertical metrics and
+   * advance pitch Word measures `family` with, and return its id — the
+   * engine's answer to a face this host had to substitute. Returns `id` for a
+   * family whose metrics the engine does not know. Optional so partial sinks
+   * (tests, older hosts) keep working; without it a substitute measures with
+   * its own metrics.
    */
-  registerSubstituteFont?(id: number, family: string): number;
+  registerSubstituteFont?(id: number, family: string, bold: boolean, italic: boolean): number;
 }
 
 /**
@@ -361,7 +362,7 @@ export class TextMeasureFontRegistry {
       );
     }
     if (loader) {
-      const id = await this.registerBundled(key, loader, family);
+      const id = await this.registerBundled(key, loader, family, bold, italic);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
     }
@@ -383,7 +384,7 @@ export class TextMeasureFontRegistry {
       );
     }
     if (lastResort) {
-      const id = await this.registerLastResort(key, lastResort, family);
+      const id = await this.registerLastResort(key, lastResort, family, bold, italic);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
     }
@@ -449,11 +450,11 @@ export class TextMeasureFontRegistry {
    * the head. Falls back to `base` when the sink or the engine has no metrics
    * for the family, which is how every face measured before this existed.
    */
-  private measuredAs(base: number, family: string): number {
+  private measuredAs(base: number, family: string, bold: boolean, italic: boolean): number {
     const substitute = this.sink.registerSubstituteFont;
     if (!substitute) return base;
     try {
-      return substitute.call(this.sink, base, family);
+      return substitute.call(this.sink, base, family, bold, italic);
     } catch (error) {
       console.warn(
         `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
@@ -504,7 +505,9 @@ export class TextMeasureFontRegistry {
   private registerBundled(
     key: string,
     loader: () => Promise<ArrayBuffer>,
-    family: string
+    family: string,
+    bold: boolean,
+    italic: boolean
   ): Promise<number | null> {
     let pending = this.bundledIds.get(key);
     if (!pending) {
@@ -512,7 +515,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family);
+          return this.measuredAs(await this.registerBuffer(bytes), family, bold, italic);
         } catch (error) {
           console.warn(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
@@ -534,7 +537,9 @@ export class TextMeasureFontRegistry {
   private registerLastResort(
     key: string,
     loader: () => Promise<ArrayBuffer>,
-    family: string
+    family: string,
+    bold: boolean,
+    italic: boolean
   ): Promise<number | null> {
     let pending = this.lastResortIds.get(key);
     if (!pending) {
@@ -542,7 +547,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family);
+          return this.measuredAs(await this.registerBuffer(bytes), family, bold, italic);
         } catch {
           console.warn(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +

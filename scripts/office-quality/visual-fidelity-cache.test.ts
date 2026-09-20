@@ -7,12 +7,20 @@ const workflow = await readFile(
 );
 
 test('fidelity asset cache restores latest prefix and saves only changed digests', () => {
-  expect(workflow).toContain('actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830');
-  expect(workflow).toContain('actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830');
+  expect(workflow).toContain(
+    'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830'
+  );
+  expect(workflow).toContain(
+    'actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830'
+  );
   expect(workflow).toContain('path: ${{ runner.temp }}/fidelity-assets');
-  expect(workflow).toContain('fidelity-assets-v1-');
-  expect(workflow).toContain('key: fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-');
-  expect(workflow).toContain('fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-${{ steps.asset-cache.outputs.digest }}');
+  expect(workflow).toContain('fidelity-assets-v2-');
+  expect(workflow).toContain(
+    'key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-'
+  );
+  expect(workflow).toContain(
+    'fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-${{ steps.asset-cache.outputs.digest }}'
+  );
   expect(workflow).toContain('cache-matched-key');
   expect(workflow).toContain("steps.asset-cache.outputs.digest != ''");
   expect(workflow).not.toContain('github.run_id');
@@ -20,7 +28,9 @@ test('fidelity asset cache restores latest prefix and saves only changed digests
 });
 
 test('asset cache digest comes from cached blob names without extra manifest fetch', () => {
-  expect(workflow).toContain('node scripts/office-quality/asset-cache.mjs "${RUNNER_TEMP}/fidelity-assets"');
+  expect(workflow).toContain(
+    'node scripts/office-quality/asset-cache.mjs "${RUNNER_TEMP}/fidelity-assets"'
+  );
   expect(workflow).toContain('echo "digest=${digest}"');
   expect(workflow).not.toContain('corpus.betteroffice.dev/collections');
   expect(workflow).not.toContain('steps.corpus.outputs.sha');
@@ -40,6 +50,7 @@ test('branch-head guard, least privilege, and score artifacts are unchanged', ()
   expect(workflow).toContain('contents: read');
   const artifacts = workflow.slice(workflow.indexOf('actions/upload-artifact@'));
   expect(artifacts).toContain('.source/office-quality/ci/report.json');
-  expect(artifacts).toContain('.source/office-quality/ci/section.md');
-  expect(artifacts).not.toContain('fidelity-assets');
+  expect(artifacts).toContain('${{ runner.temp }}/fidelity-report/section.md');
+  expect(artifacts).toContain('name: visual-fidelity-report-${{ matrix.format }}');
+  expect(artifacts).toContain('name: visual-fidelity-renders-${{ matrix.format }}');
 });

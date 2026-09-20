@@ -139,6 +139,7 @@ pub fn shape_with_properties(
 
     let upem = store.metrics(font)?.units_per_em as f32;
     let scale = size / upem;
+    let horizontal = scale * store.advance_scale(font)?;
 
     let mut glyphs: Vec<_> = glyphs
         .glyph_infos()
@@ -147,8 +148,8 @@ pub fn shape_with_properties(
         .map(|(info, pos)| ShapedGlyph {
             glyph_id: info.glyph_id,
             cluster: info.cluster,
-            x_advance: pos.x_advance as f32 * scale,
-            x_offset: pos.x_offset as f32 * scale,
+            x_advance: pos.x_advance as f32 * horizontal,
+            x_offset: pos.x_offset as f32 * horizontal,
             y_offset: pos.y_offset as f32 * scale,
         })
         .collect();

@@ -8,13 +8,8 @@ on:
         default: main
         required: true
         type: string
-      collection:
-        description: Public corpus collection to benchmark
-        default: office-quality
-        required: true
-        type: string
       samples:
-        description: Optional JSON array of sample folders overriding the collection
+        description: Optional JSON array of sample folders from the unified corpus
         default: ''
         required: false
         type: string
@@ -32,12 +27,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  measure:
+  prepare:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 10
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
+      formats: ${{ steps.plan.outputs.formats }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -56,20 +52,64 @@ jobs:
           test "$source_sha" = "$remote_sha"
           echo "sha=$source_sha" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+
+      - name: Freeze the corpus and package versions
+        id: plan
+        env:
+          QUALITY_SAMPLES: ${{ inputs.samples }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-plan
+        run: |
+          node scripts/office-quality/plan.mjs
+          node --input-type=module - <<'JS'
+          import { appendFile, readFile } from 'node:fs/promises';
+          const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
+          await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
+          JS
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan/plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  measure:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        format: ${{ fromJSON(needs.prepare.outputs.formats) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+
       - name: Restore fidelity asset cache
         id: fidelity-cache
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/fidelity-assets
-          key: fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-
+          key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-
           restore-keys: |
-            fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-
+            fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-
 
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: "1.3.14"
 
-      - uses: actions/setup-node@v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "24"
 
@@ -83,7 +123,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: wasm
+          shared-key: wasm-${{ matrix.format }}
 
       - uses: ./.github/actions/wasm-toolchain
 
@@ -91,13 +131,13 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - name: Build the renderer and install comparison tools
+      - name: Build the format renderer and install comparison tools
+        env:
+          QUALITY_FORMAT: ${{ matrix.format }}
         run: |
           bun install --frozen-lockfile
           bun run build:fonts
-          bun run build:docx
-          bun run build:pptx
-          bun run build:xlsx
+          bun run "build:$QUALITY_FORMAT"
           bunx playwright install --with-deps chromium
           python -m pip install -r scripts/office-quality/requirements.txt
 
@@ -106,28 +146,13 @@ jobs:
           bun test scripts/office-quality
           python -m unittest discover -s scripts/office-quality -p 'test_*.py'
 
-      - name: Measure the latest release and source commit
+      - name: Measure the format against the latest release
         env:
-          QUALITY_COLLECTION: ${{ inputs.collection }}
-          QUALITY_SAMPLES: ${{ inputs.samples }}
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_FORMAT: ${{ matrix.format }}
           QUALITY_OUTPUT: .source/office-quality/ci
           QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
-        run: |
-          node scripts/office-quality/run.mjs
-          cat .source/office-quality/ci/section.md >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Publish the commit renders
-        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
-        continue-on-error: true
-        env:
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
-          QUALITY_OUTPUT: .source/office-quality/ci
-          QUALITY_RENDER_BUCKET: betteroffice-fidelity
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          node scripts/office-quality/publish-renders.mjs
+        run: node scripts/office-quality/run.mjs
 
       - name: Compute fidelity asset cache digest
         id: asset-cache
@@ -137,27 +162,39 @@ jobs:
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       - name: Save fidelity asset cache
-        if: always() && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v1-{0}-{1}-{2}', runner.os, inputs.collection, steps.asset-cache.outputs.digest)
+        if: always() && steps.asset-cache.outputs.digest != '' && steps.fidelity-cache.outputs.cache-matched-key != format('fidelity-assets-v2-{0}-{1}-{2}', runner.os, matrix.format, steps.asset-cache.outputs.digest)
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ${{ runner.temp }}/fidelity-assets
-          key: fidelity-assets-v1-${{ runner.os }}-${{ inputs.collection }}-${{ steps.asset-cache.outputs.digest }}
+          key: fidelity-assets-v2-${{ runner.os }}-${{ matrix.format }}-${{ steps.asset-cache.outputs.digest }}
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - name: Upload the format report
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: visual-fidelity
-          path: |
-            .source/office-quality/ci/report.json
-            .source/office-quality/ci/section.md
+          name: visual-fidelity-report-${{ matrix.format }}
+          path: .source/office-quality/ci/report.json
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
+
+      - name: Upload the format renders
+        if: inputs.publish_renders
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: visual-fidelity-renders-${{ matrix.format }}
+          path: |
+            .source/office-quality/ci/report.json
+            .source/office-quality/ci/*/commit/page_*.png
+          include-hidden-files: true
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
   publish:
-    needs: measure
+    needs: [prepare, measure]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -166,13 +203,92 @@ jobs:
 
       - name: Require the measured branch head
         env:
-          SOURCE_SHA: ${{ needs.measure.outputs.source-sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source-sha }}
         run: test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: contains(fromJSON(needs.prepare.outputs.formats), 'docx')
+        with:
+          name: visual-fidelity-report-docx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-docx
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+        with:
+          name: visual-fidelity-report-pptx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-pptx
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+        with:
+          name: visual-fidelity-report-xlsx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-report-xlsx
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'docx')
+        with:
+          name: visual-fidelity-renders-docx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-docx
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+        with:
+          name: visual-fidelity-renders-pptx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-pptx
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: inputs.publish_renders && contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')
+        with:
+          name: visual-fidelity-renders-xlsx
+          path: ${{ runner.temp }}/fidelity-parts/visual-fidelity-renders-xlsx
+
+      - name: Reconcile the format reports
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_PARTS: ${{ runner.temp }}/fidelity-parts
+          QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-report
+          QUALITY_REQUIRE_RENDERS: ${{ inputs.publish_renders }}
+        run: |
+          node scripts/office-quality/merge.mjs
+          cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
           name: visual-fidelity
-          path: ${{ runner.temp }}/fidelity-report
+          path: |
+            ${{ runner.temp }}/fidelity-report/report.json
+            ${{ runner.temp }}/fidelity-report/section.md
+          if-no-files-found: error
+          retention-days: 30
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
+        with:
+          bun-version: "1.3.14"
+
+      - name: Install the publisher dependencies
+        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
+        run: |
+          bun install --frozen-lockfile
+          bunx --no-install wrangler --version
+
+      - name: Publish the reconciled commit renders
+        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-report
+          QUALITY_RENDER_BUCKET: betteroffice-fidelity
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: node scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
         run: |

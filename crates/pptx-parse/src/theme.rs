@@ -1,4 +1,6 @@
-use ooxml_drawingml::{Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, ThemeFormatScheme};
+use ooxml_drawingml::{
+    ColorMap, Theme, ThemeColorScheme, ThemeFont, ThemeFontScheme, ThemeFormatScheme,
+};
 
 use crate::drawing::{parse_fill_element, parse_outline_element, picture_fill_element};
 use crate::model::PictureFill;
@@ -11,6 +13,7 @@ pub(crate) fn parse_theme(root: &XmlElement) -> Theme {
         name: root.attribute("name").unwrap_or("Office Theme").to_owned(),
         color_scheme: parse_color_scheme(elements.and_then(|value| value.child("clrScheme"))),
         font_scheme: parse_font_scheme(elements.and_then(|value| value.child("fontScheme"))),
+        color_map: ColorMap::default(),
     }
 }
 

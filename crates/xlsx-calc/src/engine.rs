@@ -195,6 +195,7 @@ fn eval_node(
         return (None, false);
     };
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
+    ctx.cell = Some(cell_of(u));
     ctx.now_serial = now_serial;
     let value = evaluate(&expr, &ctx);
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
@@ -369,6 +370,21 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(4.0));
     }
 
+    /// OFFSET reads its anchor's coordinates, not its value, so a cell may
+    /// offset from itself: Greptile flagged `A1=SUM(OFFSET(A1,1,0,3,1))`
+    /// reporting A1 as cyclic and zeroing a valid result.
+    #[test]
+    fn a_cell_may_offset_from_its_own_position() {
+        let (mut wb, s) = one_sheet();
+        for (cell, v) in [("A2", 1.0), ("A3", 2.0), ("A4", 3.0)] {
+            put_num(&mut wb, s, cell, v);
+        }
+        put_formula(&mut wb, s, "A1", "SUM(OFFSET(A1,1,0,3,1))");
+        let report = rebuild_and_recalc_all(&mut wb, None).1;
+        assert!(report.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
     #[test]
     fn chain_propagates_transitively() {
         let (mut wb, s) = one_sheet();
@@ -416,6 +432,42 @@ mod tests {
         let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A5"))], None);
         assert_eq!(value(&wb, s, "B1"), num(110.0));
         assert_eq!(changed_a1(&r), vec!["B1"]);
+    }
+
+    #[test]
+    fn static_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3", "A4"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_formula(&mut wb, s, "B1", "SUM(OFFSET(A1, 1, 0, 3, 1))");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(9.0));
+
+        put_num(&mut wb, s, "A3", 100.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(106.0));
+        assert_eq!(changed_a1(&r), vec!["B1"]);
+    }
+
+    #[test]
+    fn unresolvable_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_num(&mut wb, s, "D1", 2.0);
+        put_formula(&mut wb, s, "B1", "OFFSET(A1, D1, 0)");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(3.0));
+
+        put_num(&mut wb, s, "A3", 30.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(30.0));
+
+        put_num(&mut wb, s, "D1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
     }
 
     #[test]
@@ -541,6 +593,30 @@ mod tests {
     }
 
     #[test]
+    fn referenceless_row_and_column_resolve_against_the_calling_cell() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "C7", "ROW()");
+        put_formula(&mut wb, s, "D8", "COLUMN()");
+        put_formula(&mut wb, s, "E9", "ROW()*100+COLUMN()");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C7"), num(7.0));
+        assert_eq!(value(&wb, s, "D8"), num(4.0));
+        assert_eq!(value(&wb, s, "E9"), num(905.0));
+    }
+
+    #[test]
+    fn row_of_a_reference_is_positional_not_a_read() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "X1", "ROW($X$1)+COLUMN($X$1)+ROWS($X$1:$X$4)");
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "ROW()-ROW($A$1)");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "X1"), num(1.0 + 24.0 + 4.0));
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+    }
+
+    #[test]
     fn incremental_set_formula_updates_live_edges() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 1.0);
@@ -590,6 +666,25 @@ mod tests {
         assert_ne!(value(&wb, s, "C1"), sentinel);
         assert_ne!(value(&wb, s, "D1"), sentinel);
         assert_eq!(changed_a1(&r), vec!["B1", "C1", "D1"]);
+    }
+
+    #[test]
+    fn randbetween_redraws_on_every_recalc() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "RANDBETWEEN(1, 1000000)");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(graph.volatile_cells().count(), 1);
+
+        let sentinel = num(-1.0);
+        set_cached(&mut wb, s, "B1", sentinel.clone());
+        put_num(&mut wb, s, "A1", 2.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        assert_eq!(changed_a1(&r), vec!["B1"]);
+        match value(&wb, s, "B1") {
+            CellValue::Number { value } => assert!((1.0..=1_000_000.0).contains(&value)),
+            other => panic!("expected a number, got {other:?}"),
+        }
     }
 
     #[test]

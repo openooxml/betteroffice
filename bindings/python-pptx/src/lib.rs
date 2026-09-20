@@ -204,6 +204,7 @@ fn text_style(
         underline,
         spacing_pt: None,
         baseline_pct: None,
+        caps: None,
     }
 }
 

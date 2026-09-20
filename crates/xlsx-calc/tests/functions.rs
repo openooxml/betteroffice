@@ -137,10 +137,17 @@ fn math_functions() {
         ("FLOOR(2.9, 1)", n(2.0)),
         ("CEILING(-2.5, -1)", n(-3.0)),
         ("ABS(-7)", n(7.0)),
+        ("TANH(0)", n(0.0)),
+        ("TANH(\"abc\")", e(ErrorValue::Value)),
+        ("TANH(1, 2)", e(ErrorValue::Value)),
     ]);
     approx("PI()", std::f64::consts::PI);
     approx("LN(EXP(1))", 1.0);
     approx("EXP(0)", 1.0);
+    approx("TANH(1)", 0.761_594_155_955_764_9);
+    approx("TANH(-2.5)", -0.986_614_298_151_430_3);
+    approx("TANH(20)", 1.0);
+    approx("TANH(TRUE)", 0.761_594_155_955_764_9);
 }
 
 #[test]
@@ -282,6 +289,98 @@ fn lookup_functions() {
     ]);
 }
 
+/// without a calling cell the referenceless forms stay #VALUE!; `ROWS`/`COLUMNS`
+/// have no referenceless form at all.
+#[test]
+fn referenceless_position_needs_a_calling_cell() {
+    check(&[
+        ("ROW()", e(ErrorValue::Value)),
+        ("COLUMN()", e(ErrorValue::Value)),
+        ("ROWS()", e(ErrorValue::Value)),
+        ("COLUMNS()", e(ErrorValue::Value)),
+        ("ROW(A1,B1)", e(ErrorValue::Value)),
+    ]);
+}
+
+#[test]
+fn offset_shifts_a_single_cell() {
+    check(&[
+        ("OFFSET(A1, 2, 0)", n(30.0)),
+        ("OFFSET(A1, 0, 2)", n(1.0)),
+        ("OFFSET(A1, 1, 1)", t("banana")),
+        ("OFFSET(C3, -2, -2)", n(10.0)),
+        ("OFFSET($A$1, 4, 0)", n(50.0)),
+        ("offset(A1, 2, 0)", n(30.0)),
+    ]);
+}
+
+#[test]
+fn offset_sizes_default_to_the_reference() {
+    check(&[
+        ("ROW(OFFSET(E1:F4, 1, 0))", n(2.0)),
+        ("COLUMN(OFFSET(E1:F4, 0, 2))", n(7.0)),
+        ("ROWS(OFFSET(E1:F4, 1, 0))", n(4.0)),
+        ("COLUMNS(OFFSET(E1:F4, 1, 0))", n(2.0)),
+        ("ROWS(OFFSET(A1, 1, 0))", n(1.0)),
+        ("COLUMNS(OFFSET(A:B, 0, 1))", n(2.0)),
+        ("COLUMN(OFFSET(A:B, 0, 1))", n(2.0)),
+    ]);
+}
+
+#[test]
+fn offset_resizes_and_extends_backwards() {
+    check(&[
+        ("SUM(OFFSET(A1, 1, 0, 3, 1))", n(90.0)),
+        ("SUM(OFFSET(A1, 1, 0, 3))", n(90.0)),
+        ("SUM(OFFSET(A3, 0, 0, -3, 1))", n(60.0)),
+        ("ROW(OFFSET(A5, 0, 0, -3, 1))", n(3.0)),
+        ("ROWS(OFFSET(A5, 0, 0, -3, 1))", n(3.0)),
+        ("COLUMN(OFFSET(C1, 0, 0, 1, -3))", n(1.0)),
+        ("COLUMNS(OFFSET(C1, 0, 0, 1, -3))", n(3.0)),
+        ("ROWS(OFFSET(A1, 0, 0, 2, 3))", n(2.0)),
+        ("COLUMNS(OFFSET(A1, 0, 0, 2, 3))", n(3.0)),
+    ]);
+}
+
+#[test]
+fn offset_rejects_empty_and_off_sheet_rectangles() {
+    check(&[
+        ("OFFSET(A1, 0, 0, 0, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, 1, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, Z9, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, -1, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, -1)", e(ErrorValue::Ref)),
+        ("OFFSET(A2, 0, 0, -3, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 1048576, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 16384)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, 1048577, 1)", e(ErrorValue::Ref)),
+        ("SUM(OFFSET(A1, -1, 0))", e(ErrorValue::Ref)),
+    ]);
+}
+
+#[test]
+fn offset_argument_errors_and_scalar_context() {
+    check(&[
+        ("OFFSET(A1, 0, 0, 2, 1)", e(ErrorValue::Value)),
+        ("OFFSET(5, 1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1, 1, 1, 1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1/0, 0)", e(ErrorValue::Div0)),
+        ("OFFSET(A1, 0, 0, NA(), 1)", e(ErrorValue::NA)),
+    ]);
+}
+
+#[test]
+fn offset_feeds_the_other_reference_functions() {
+    check(&[
+        ("VLOOKUP(2, OFFSET(E1, 0, 0, 4, 2), 2, FALSE)", t("two")),
+        ("MATCH(30, OFFSET(A1, 0, 0, 5, 1), 0)", n(3.0)),
+        ("INDEX(OFFSET(A1, 0, 0, 5, 1), 4)", n(40.0)),
+        ("SUM(OFFSET(OFFSET(A1, 1, 0), 1, 0, 2, 1))", n(70.0)),
+        ("AVERAGE(OFFSET(A1, 0, 0, 5, 1))", n(30.0)),
+    ]);
+}
+
 #[test]
 fn info_functions() {
     check(&[
@@ -340,5 +439,172 @@ fn transpose_of_a_multi_cell_area_has_no_representable_result() {
         ("SUM(TRANSPOSE(A1:A5))", e(ErrorValue::Value)),
         ("SUMPRODUCT(C1:C5, TRANSPOSE(A1:A5))", e(ErrorValue::Value)),
         ("ROWS(TRANSPOSE(E1:F4))", e(ErrorValue::Value)),
+    ]);
+}
+
+/// matrix fixture: a 2x3 at M1:O2, a 3x2 at M4:N6, a 2x1 at M8:M9, and
+/// one-row operands at M11:N11 (trailing text) and M13:N13 (trailing blank).
+fn matrix_fixture() -> Workbook {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    let put = |s: &mut Sheet, a1: &str, v: CellValue| {
+        s.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: v,
+                ..Cell::default()
+            },
+        );
+    };
+    for (a1, v) in [
+        ("M1", 1.0),
+        ("N1", 2.0),
+        ("O1", 3.0),
+        ("M2", 4.0),
+        ("N2", 5.0),
+        ("O2", 6.0),
+        ("M4", 7.0),
+        ("N4", 8.0),
+        ("M5", 9.0),
+        ("N5", 10.0),
+        ("M6", 11.0),
+        ("N6", 12.0),
+        ("M8", 1.0),
+        ("M9", 1.0),
+        ("M11", 1.0),
+        ("M13", 1.0),
+    ] {
+        put(&mut s, a1, n(v));
+    }
+    put(&mut s, "N11", t("x"));
+    put(&mut s, "N15", b(true));
+    put(&mut s, "M15", n(1.0));
+    wb.sheets.push(s);
+    wb
+}
+
+fn eval_matrix(src: &str) -> CellValue {
+    let wb = matrix_fixture();
+    let expr = parse_formula(src).expect("parse");
+    let ctx = EvalContext::new(&wb, SheetId(0));
+    evaluate(&expr, &ctx)
+}
+
+/// M1:O2 times M4:N6 is [[58, 64], [139, 154]]; each element is checked by
+/// multiplying the matching row and column, so every product is covered.
+#[test]
+fn mmult_multiplies_a_2x3_by_a_3x2() {
+    for (src, expected) in [
+        ("MMULT(M1:O1, M4:M6)", 58.0),
+        ("MMULT(M1:O1, N4:N6)", 64.0),
+        ("MMULT(M2:O2, M4:M6)", 139.0),
+        ("MMULT(M2:O2, N4:N6)", 154.0),
+    ] {
+        assert_eq!(eval_matrix(src), n(expected), "{src}");
+    }
+}
+
+/// the engine stores one value per cell, so a wider product yields its
+/// top-left element: what excel caches in the array formula's anchor cell.
+#[test]
+fn mmult_returns_the_top_left_element_of_a_wider_product() {
+    assert_eq!(eval_matrix("MMULT(M1:O2, M4:N6)"), n(58.0));
+}
+
+#[test]
+fn mmult_rejects_mismatched_and_non_numeric_operands() {
+    for src in [
+        "MMULT(M1:O2, M1:O2)",
+        "MMULT(M11:N11, M8:M9)",
+        "MMULT(M13:N13, M8:M9)",
+        "MMULT(M15:N15, M8:M9)",
+        "MMULT(M1:O1)",
+        "MMULT(M1:O1, M4:M6, M4:M6)",
+    ] {
+        assert_eq!(eval_matrix(src), e(ErrorValue::Value), "{src}");
+    }
+}
+
+/// an argument that is not a reference is a 1x1 matrix, and an argument that
+/// evaluates to an error propagates it -- so an unsupported inner function
+/// still surfaces `#NAME?` rather than being masked as `#VALUE!`.
+#[test]
+fn mmult_handles_scalar_and_erroring_arguments() {
+    assert_eq!(eval_matrix("MMULT(3, 4)"), n(12.0));
+    assert_eq!(eval_matrix("MMULT(1/0, M8:M9)"), e(ErrorValue::Div0));
+    assert_eq!(eval_matrix("MMULT(M1:O1, NOSUCH())"), e(ErrorValue::Name));
+    assert_eq!(eval_matrix("MMULT(NOSUCH(), M8:M9)"), e(ErrorValue::Name));
+}
+
+fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
+    let wb = fixture();
+    let expr = parse_formula(src).expect("parse");
+    let mut ctx = EvalContext::new(&wb, SheetId(0));
+    ctx.rand_seed = seed;
+    (0..count)
+        .map(|_| match evaluate(&expr, &ctx) {
+            CellValue::Number { value } => value,
+            other => panic!("formula {src:?}: expected number, got {other:?}"),
+        })
+        .collect()
+}
+
+/// the rounding and error rules here were measured against Excel for Mac over
+/// 400 draws per case: `bottom > top` errors before any rounding, the draw
+/// spans `ceil(bottom)..=floor(top)`, and an empty span yields `ceil(bottom)`.
+#[test]
+fn randbetween_matches_excels_rounding() {
+    check(&[
+        ("RANDBETWEEN(5, 5)", n(5.0)),
+        ("RANDBETWEEN(1.8, 2.2)", n(2.0)),
+        ("RANDBETWEEN(2.9, 3.1)", n(3.0)),
+        ("RANDBETWEEN(-0.5, 0.5)", n(0.0)),
+        ("RANDBETWEEN(1.5, 1.6)", n(2.0)),
+        ("RANDBETWEEN(2.2, 2.2)", n(3.0)),
+        ("RANDBETWEEN(-1.5, -1.4)", n(-1.0)),
+        ("RANDBETWEEN(0.1, 0.9)", n(1.0)),
+        ("RANDBETWEEN(-0.9, -0.1)", n(0.0)),
+        ("RANDBETWEEN(2.5, 2.1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(3, 1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(1)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(1, 2, 3)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(\"x\", 2)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(A1, A1)", n(10.0)),
+    ]);
+}
+
+#[test]
+fn randbetween_covers_its_range_and_never_leaves_it() {
+    for (src, want) in [
+        ("RANDBETWEEN(1.2, 3.8)", vec![2.0, 3.0]),
+        ("RANDBETWEEN(-3.5, -1.2)", vec![-3.0, -2.0]),
+        ("RANDBETWEEN(-1, 1)", vec![-1.0, 0.0, 1.0]),
+    ] {
+        let mut seen: Vec<f64> = draws(src, None, 2_000);
+        for value in &seen {
+            assert!(want.contains(value), "formula {src:?} drew {value}");
+        }
+        seen.sort_by(f64::total_cmp);
+        seen.dedup();
+        assert_eq!(seen, want, "formula {src:?} never covered its range");
+    }
+}
+
+#[test]
+fn randbetween_replays_a_pinned_seed() {
+    let src = "RANDBETWEEN(1, 1000000)";
+    assert_eq!(draws(src, Some(7), 16), draws(src, Some(7), 16));
+    assert_ne!(draws(src, Some(7), 16), draws(src, Some(8), 16));
+    assert_ne!(draws(src, None, 16), draws(src, None, 16));
+}
+/// an argument that cannot become an area may still have said why: OFFSET
+/// past the sheet edge is #REF!, and the count must not flatten it to #VALUE!.
+#[test]
+fn reference_counts_propagate_their_arguments_error() {
+    check(&[
+        ("ROWS(OFFSET(A1,-1,0))", e(ErrorValue::Ref)),
+        ("COLUMNS(OFFSET(A1,0,-1))", e(ErrorValue::Ref)),
+        ("ROWS(1/0)", e(ErrorValue::Div0)),
+        ("ROWS(5)", e(ErrorValue::Value)),
     ]);
 }
