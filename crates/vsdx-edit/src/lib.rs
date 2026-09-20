@@ -2605,6 +2605,108 @@ mod tests {
         assert_eq!(value_formula(&session, &row).as_deref(), Some("\"Amp\""));
     }
 
+    fn probe(session: &DiagramSession, cells: &[&str]) -> Vec<CellWriteProbe> {
+        let queries = cells
+            .iter()
+            .map(|name| CellWriteQuery {
+                locator: CellLocator {
+                    sheet: CellSheet::Page(0),
+                    shape_id: None,
+                    section: None,
+                    section_index: None,
+                    row: None,
+                    cell_name: (*name).to_owned(),
+                },
+                gesture: None,
+            })
+            .collect::<Vec<_>>();
+        session
+            .probe_cell_writes("page:1", "page:1:shape:1", &queries)
+            .unwrap()
+    }
+
+    #[test]
+    fn a_reference_named_like_guard_does_not_block_a_write() {
+        let session = session();
+        add_cell(&session, "GuardWidth", Some("2"), Some("2"));
+        add_cell(&session, "Width", Some("User.GuardWidth*2"), Some("4"));
+        let probes = probe(&session, &["Width"]);
+        assert!(probes[0].allowed, "{probes:?}");
+        assert_eq!(probes[0].target_cell_name.as_deref(), Some("Width"));
+        assert!(probes[0].reason.is_none(), "{probes:?}");
+    }
+
+    #[test]
+    fn a_guarded_cell_reports_why_it_refuses() {
+        let session = session();
+        add_cell(&session, "Width", Some("GUARD(2)"), Some("2"));
+        let probes = probe(&session, &["Width"]);
+        assert!(!probes[0].allowed, "{probes:?}");
+        assert!(probes[0].target_cell_name.is_none(), "{probes:?}");
+        assert!(
+            probes[0]
+                .reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("GUARD"),
+            "{probes:?}"
+        );
+    }
+
+    #[test]
+    fn a_probe_follows_setatref_to_the_cell_a_write_would_land_on() {
+        let session = session();
+        add_cell(&session, "LineTarget", Some("2"), Some("2"));
+        add_cell(
+            &session,
+            "LineColor",
+            Some("SETATREF(LineTarget)"),
+            Some("2"),
+        );
+        add_cell(
+            &session,
+            "Locked",
+            Some("SETATREF(LockedTarget)"),
+            Some("2"),
+        );
+        add_cell(&session, "LockedTarget", Some("GUARD(2)"), Some("2"));
+        let probes = probe(&session, &["LineColor", "Locked"]);
+        assert!(probes[0].allowed, "{probes:?}");
+        assert_eq!(probes[0].target_cell_name.as_deref(), Some("LineTarget"));
+        assert!(!probes[1].allowed, "{probes:?}");
+    }
+
+    #[test]
+    fn a_lock_refuses_the_gesture_its_cell_names() {
+        let session = session();
+        add_cell(&session, "LockWidth", Some("1"), Some("1"));
+        add_cell(&session, "Width", Some("2"), Some("2"));
+        add_cell(&session, "Height", Some("2"), Some("2"));
+        let probes = probe(&session, &["Width", "Height"]);
+        assert!(!probes[0].allowed, "{probes:?}");
+        assert!(probes[1].allowed, "{probes:?}");
+    }
+
+    #[test]
+    fn a_probe_writes_nothing() {
+        let session = session();
+        add_cell(&session, "Width", Some("2"), Some("2"));
+        let before = session.undo_depth();
+        probe(&session, &["Width"]);
+        assert_eq!(session.undo_depth(), before);
+        let snapshot = session.snapshot().unwrap();
+        assert_eq!(
+            snapshot.pages[0].shapes[0]
+                .cells
+                .iter()
+                .find(|cell| cell.name == "Width")
+                .unwrap()
+                .formula
+                .as_deref(),
+            Some("2")
+        );
+    }
+
     #[test]
     fn guarded_property_value_refuses_edits() {
         let session = session();

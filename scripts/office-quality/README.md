@@ -2,6 +2,10 @@
 
 Compare DOCX, PPTX, and XLSX renders against Microsoft Office. Inputs and generated files stay in ignored `.source/office-quality/`; references come from the public corpus.
 
+## Scoring
+
+SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
+
 ## Local benchmark
 
 Run from the repository root with Bun, Node.js, Python 3.13, and the project's Rust/Wasm toolchain installed:
@@ -55,7 +59,7 @@ Both BetterOffice executables use the same [`native/main.rs`](native/main.rs) ho
 
 LibreOffice uses the official prebuilt Linux 26.2.3.2 release, verified against its pinned SHA-256, on Ubuntu 24.04. Its native CLI imports the same DOCX and exports page one directly through [`writer_png_Export`](https://help.libreoffice.org/latest/en-US/text/shared/guide/graphic_export_params.html). Each document has an isolated LibreOffice profile, initialized during the discarded warmup. No resident office server is used. PNG export requests the reference page's physical size at 96 DPI; validation permits the native exporters' one-pixel rounding difference without resampling.
 
-The driver discards one warmup per engine/document, then starts five fresh processes per engine, rotating execution order. Timings include process startup and file I/O; validation, scoring, installation, and builds are outside the timer. OS file caches remain warm. The row is an arithmetic mean of per-document means, using only documents that complete every trial in all three engines. `Timed/total` reports each engine's coverage, and the footnote states the common subset. A failed trial removes that document from all three aggregate means; it never becomes a zero or a partial average. There are no speedup thresholds or cached timing results. Hosted-runner timing varies, so compare columns within the same run rather than treating small changes between runs as regressions.
+The driver discards one warmup per engine/document, then starts five fresh processes per engine, rotating execution order. Timings include process startup and file I/O; validation, scoring, installation, and builds are outside the timer. OS file caches remain warm. The row is an arithmetic mean of per-document means, using only documents that complete every trial in all three engines. Per-engine timing coverage and the common subset are recorded in the report artifacts. A failed trial removes that document from all three aggregate means; it never becomes a zero or a partial average. There are no speedup thresholds or cached timing results. Hosted-runner timing varies, so compare columns within the same run rather than treating small changes between runs as regressions.
 
 The current source's bundled fonts are frozen once and shared by both native builds and LibreOffice. Linux workers use a Fontconfig configuration restricted to that bundle, including its Word-family aliases. Build metadata records source/binary/host hashes, Rust version and optimization settings; reports record fonts, LibreOffice build, runner image, architecture, and comparison-library versions. Local macOS LibreOffice uses system font discovery and reports that distinction.
 
@@ -88,6 +92,11 @@ renders/<sha>/<sample>/page_0001.png
 renders/<sha>/report.json
 renders/latest.json
 ```
+
+Uploads use Bun’s S3 client with the existing `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN` secrets. The publisher verifies the account or user token,
+then derives its S3 credentials as [documented by Cloudflare](https://developers.cloudflare.com/r2/api/tokens/#get-s3-api-credentials-from-an-api-token).
+Bucket-scoped Object Read & Write access to `betteroffice-fidelity` is sufficient.
 
 `latest.json` names the current SHA, its report key, and the published page count per sample. It is
 written last, so it never points at an incomplete upload. Every published SHA is kept.

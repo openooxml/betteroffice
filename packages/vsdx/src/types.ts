@@ -20,6 +20,12 @@ export interface CellFormulaReceipt { pageId: string; shapeId: string; cellName:
 export interface ShapeDataWrite { rowName?: string; rowIndex?: number; sectionIndex?: number; formula: string; }
 /** Per-row outcome of a shape-data batch; `refusal` is set when the row was not written. */
 export interface ShapeDataReceipt { pageId: string; shapeId: string; rowName: string | null; rowIndex: number | null; sectionIndex: number | null; before: string | null; after: string | null; refusal: string | null; }
+/** The user action a probe asks about; the cell name picks one when absent. */
+export type MutationGesture = 'cellEdit' | 'moveX' | 'moveY' | 'resizeWidth' | 'resizeHeight' | 'resizeAspect' | 'rotate' | 'textEdit' | 'format' | 'delete';
+/** One cell to probe, with the gesture to probe it as. */
+export interface CellWriteQuery extends CellLocator { gesture?: MutationGesture; }
+/** What the engine's mutation policy would do with a write to one cell, without writing it. */
+export interface CellWriteProbe { cellName: string; allowed: boolean; targetCellName: string | null; refusal: 'guard' | 'lock' | 'unsupported' | null; reason: string | null; }
 export interface ShapeReceipt { pageId: string; shapeId: string; fromIndex: number | null; toIndex: number | null; }
 export interface TextReceipt { pageId: string; shapeId: string; before: string; after: string; }
 export interface ConnectedShapeReceipt { shape: ShapeReceipt; connector: ShapeReceipt; }
