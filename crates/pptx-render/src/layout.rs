@@ -2595,7 +2595,7 @@ fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked:
         key_f32(&mut key, paragraph.margin_left_px);
         key_f32(&mut key, paragraph.margin_right_px);
         key_f32(&mut key, paragraph.indent_px);
-        key.push(u8::from(paragraph.compat_line_spacing));
+        key_f32(&mut key, paragraph.line_space_reduction);
         key_spacing(&mut key, &paragraph.line_spacing);
         key_spacing(&mut key, &paragraph.space_before);
         key_spacing(&mut key, &paragraph.space_after);
