@@ -321,14 +321,9 @@ export function registerMeasureFont(bytes: Uint8Array): number {
  * substituted. Returns `base` unchanged for a family whose metrics the engine
  * does not know.
  */
-export function registerSubstituteMeasureFont(
-  base: number,
-  family: string,
-  bold: boolean,
-  italic: boolean
-): number {
+export function registerSubstituteMeasureFont(base: number, family: string): number {
   state.ensure();
-  return register_substitute_measure_font(base, family, bold, italic);
+  return register_substitute_measure_font(base, family);
 }
 
 /** Drop every registered measurement font (ids restart at 0). Callers must re-register before the next `measureParagraphJson`. */

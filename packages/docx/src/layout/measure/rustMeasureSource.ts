@@ -15,7 +15,7 @@ export interface RustTextEngine {
    * a host that predates it still measures, with the substitute's own
    * metrics.
    */
-  registerSubstituteFont?(id: number, family: string, bold: boolean, italic: boolean): number;
+  registerSubstituteFont?(id: number, family: string): number;
   clearFonts(): void;
 }
 
@@ -70,8 +70,8 @@ export function createRustMeasureSource(options: {
     {
       registerFont: (bytes) => engine.registerFont(bytes),
       ...(engine.registerSubstituteFont && {
-        registerSubstituteFont: (id, family, bold, italic) =>
-          engine.registerSubstituteFont!(id, family, bold, italic),
+        registerSubstituteFont: (id, family) =>
+          engine.registerSubstituteFont!(id, family),
       }),
     },
     { bundled: options.bundled ?? resolveDefaultFontProvider },

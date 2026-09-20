@@ -542,19 +542,14 @@ pub fn register_measure_font(bytes: &[u8]) -> Result<u32, JsValue> {
 /// family's chain. Pagination, the display list and glyph outlines all read
 /// this one store, so a widened view measures and paints at one pitch.
 #[wasm_bindgen]
-pub fn register_substitute_measure_font(
-    base: u32,
-    requested_family: &str,
-    bold: bool,
-    italic: bool,
-) -> Result<u32, JsValue> {
+pub fn register_substitute_measure_font(base: u32, requested_family: &str) -> Result<u32, JsValue> {
     let Some(requested) = ooxml_text::word_fonts::requested_line_metrics(requested_family) else {
         return Ok(base);
     };
     MEASURE_FONTS.with(|store| {
         store
             .borrow_mut()
-            .register_substitute(ooxml_text::FontId::from_u32(base), requested, bold, italic)
+            .register_substitute(ooxml_text::FontId::from_u32(base), requested)
             .map(|id| id.to_u32())
             .map_err(|e| JsValue::from_str(&e.to_string()))
     })
