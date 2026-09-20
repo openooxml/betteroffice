@@ -173,7 +173,5 @@ with `~` escaping a literal `*`, `?`, or `~`.
   (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads. A **defined
   name** counts as a direct reference, so `ROW(MyName)` is not expanded: a name
   bound to a computed reference keeps no edge to what that reference reads.
-  `OFFSET` already marks such a cell volatile, so it still re-evaluates every
-  recalc.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
