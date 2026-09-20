@@ -121,6 +121,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "COLUMN" => lookups::column,
         "ROWS" => lookups::rows,
         "COLUMNS" => lookups::columns,
+        "TRANSPOSE" => lookups::transpose,
         "ISBLANK" => info::isblank,
         "ISNUMBER" => info::isnumber,
         "ISTEXT" => info::istext,

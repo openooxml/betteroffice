@@ -131,6 +131,7 @@ is not yet wired — a follow-up.
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
 | `ROW` / `COLUMN([ref])` | **A reference is required** — the evaluator has no notion of the calling cell, so the no-arg form is `#VALUE!`. |
 | `ROWS` / `COLUMNS(area)` | Dimension counts. |
+| `TRANSPOSE(array)` | **1x1 only** — the evaluator has no array value, so a multi-cell argument is `#VALUE!`. Blanks transpose to `0`. |
 
 ### Information
 
@@ -164,5 +165,9 @@ with `~` escaping a literal `*`, `?`, or `~`.
   the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+- **Array results** have no representation: `CellValue` is scalar and recalc
+  writes one value per cell, so `TRANSPOSE` (and any future `MMULT`) can only
+  answer the 1x1 case. Anything larger is `#VALUE!`, the same answer a bare
+  range gets in scalar context.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
