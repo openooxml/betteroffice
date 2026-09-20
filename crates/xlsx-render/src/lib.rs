@@ -936,7 +936,6 @@ fn visible_anchors<'a>(
     cells
 }
 
-/// the merge (if any) that covers a cell.
 /// whether the painter draws a hyperlink's own label at `at`, which it does
 /// only at the link range's start and only when the cell has no text of its own.
 fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
@@ -945,6 +944,7 @@ fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
     })
 }
 
+/// the merge (if any) that covers a cell.
 fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
     merges.iter().copied().find(|m| m.contains(at))
 }

@@ -330,6 +330,22 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(99.0));
     }
 
+    /// A memoized name must replay the gap its evaluation recorded, or a
+    /// second use returns the memo without it and the cache is overwritten.
+    #[test]
+    fn a_handled_gap_behind_a_defined_name_still_marks_its_second_use() {
+        let (mut wb, s) = one_sheet();
+        wb.defined_names.push(xlsx_model::DefinedName {
+            name: "Gap".to_string(),
+            formula: "WEBSERVICE(1)".to_string(),
+            local_sheet: None,
+            hidden: false,
+        });
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(Gap,0)+Gap", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+    }
+
     #[test]
     fn a_supported_function_still_overwrites_a_stale_cached_value() {
         let (mut wb, s) = one_sheet();

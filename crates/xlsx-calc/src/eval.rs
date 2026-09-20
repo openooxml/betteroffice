@@ -52,7 +52,7 @@ pub struct EvalContext<'a> {
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, CellValue>>>,
+    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
 }
 
@@ -171,7 +171,7 @@ impl<'a> EvalContext<'a> {
         self.unsupported_functions.get() != 0
     }
 
-    fn record_unsupported_function(&self) {
+    pub(crate) fn record_unsupported_function(&self) {
         self.unsupported_functions
             .set(self.unsupported_functions.get().saturating_add(1));
     }
@@ -261,23 +261,30 @@ struct DefinedNameBinding {
 }
 
 /// a name's value is stable for the life of a context, so each one is expanded
-/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n.
+/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n. a
+/// hit replays the engine gap the expansion recorded, which a handler may have
+/// cleared since.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some(cached) = ctx.defined_name_values.borrow().get(&key) {
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
+        if *gap {
+            ctx.record_unsupported_function();
+        }
         return cached.clone();
     }
     let binding = match bind_defined_name(key, name, ctx) {
         Ok(binding) => binding,
         Err(error) => return err(error),
     };
+    let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
+    let gap = ctx.unsupported_checkpoint() > checkpoint;
     ctx.defined_name_values
         .borrow_mut()
-        .insert(binding.key, value.clone());
+        .insert(binding.key, (value.clone(), gap));
     value
 }
 
