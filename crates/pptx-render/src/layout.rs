@@ -13,7 +13,10 @@ use ooxml_drawingml::{
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
 };
-use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
+use pptx_edit::{
+    DeckSnapshot, ShapeKind, ShapeSnapshot, SlideRenderSnapshot, SlideSnapshot, StorySnapshot,
+    TextStyle,
+};
 use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
     GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
@@ -161,44 +164,58 @@ impl SlideRenderer {
             .slides
             .get(slide_index)
             .ok_or(RenderError::SlideNotFound(slide_index))?;
+        self.layout_scoped(
+            package,
+            deck_slide,
+            deck.width_emu,
+            deck.height_emu,
+            slide_index,
+        )
+    }
+
+    /// Renders a `SlideRenderSnapshot` from `DeckSession::slide_snapshot`,
+    /// avoiding the full-deck snapshot [`Self::layout_slide`] requires.
+    pub fn layout_slide_scoped(
+        &self,
+        package: &PptxPackage,
+        slide: &SlideRenderSnapshot,
+    ) -> Result<RenderedSlide, RenderError> {
+        self.layout_scoped(
+            package,
+            &slide.slide,
+            slide.width_emu,
+            slide.height_emu,
+            slide.slide_index,
+        )
+    }
+
+    fn layout_scoped(
+        &self,
+        package: &PptxPackage,
+        deck_slide: &SlideSnapshot,
+        width_emu: i64,
+        height_emu: i64,
+        slide_index: usize,
+    ) -> Result<RenderedSlide, RenderError> {
         let parsed_slide = deck_slide
             .source_part_path
             .as_deref()
-            .and_then(|path| package.slides.iter().find(|slide| slide.part_path == path));
+            .and_then(|path| package.slide_part(path));
         let layout_path = deck_slide
             .layout_part_path
             .as_deref()
             .or_else(|| parsed_slide.and_then(|slide| slide.layout_part_path.as_deref()));
         let layout = layout_path
-            .and_then(|path| {
-                package
-                    .layouts
-                    .iter()
-                    .find(|layout| layout.part_path == path)
-            })
+            .and_then(|path| package.layout_part(path))
             .or_else(|| package.layouts.first());
         let master = layout
             .and_then(|layout| layout.master_part_path.as_deref())
-            .and_then(|path| {
-                package
-                    .masters
-                    .iter()
-                    .find(|master| master.part_path == path)
-            })
-            .or_else(|| {
-                layout.and_then(|layout| {
-                    package.masters.iter().find(|master| {
-                        master
-                            .layout_part_paths
-                            .iter()
-                            .any(|path| path == &layout.part_path)
-                    })
-                })
-            })
+            .and_then(|path| package.master_part(path))
+            .or_else(|| layout.and_then(|layout| package.layout_master(layout)))
             .or_else(|| package.masters.first());
         let theme_part = master
             .and_then(|master| master.theme_part_path.as_deref())
-            .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+            .and_then(|path| package.theme_part(path))
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
         let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
@@ -246,8 +263,8 @@ impl SlideRenderer {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = emu_to_px(deck.width_emu);
-        let height = emu_to_px(deck.height_emu);
+        let width = emu_to_px(width_emu);
+        let height = emu_to_px(height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -255,8 +272,15 @@ impl SlideRenderer {
             format_scheme,
             theme_part_path: theme_part.map(|part| part.part_path.as_str()),
             master,
-            layout,
-            parsed_slide,
+            slide_nodes: parsed_slide
+                .map(|slide| slide_node_index(&slide.shapes))
+                .unwrap_or_default(),
+            layout_placeholders: layout
+                .map(|part| PlaceholderIndex::build(&part.shapes))
+                .unwrap_or_default(),
+            master_placeholders: master
+                .map(|part| PlaceholderIndex::build(&part.shapes))
+                .unwrap_or_default(),
             primitives: Vec::new(),
             hit_regions: Vec::new(),
             shape_count: 0,
@@ -464,8 +488,11 @@ struct LayoutBuilder<'a> {
     format_scheme: &'a ThemeFormatScheme,
     theme_part_path: Option<&'a str>,
     master: Option<&'a SlideMaster>,
-    layout: Option<&'a SlideLayout>,
-    parsed_slide: Option<&'a Slide>,
+    /// Source slide nodes by id, so inheritance lookup doesn't re-walk the
+    /// slide's shape tree per snapshot shape.
+    slide_nodes: HashMap<u32, &'a ShapeNode>,
+    layout_placeholders: PlaceholderIndex<'a>,
+    master_placeholders: PlaceholderIndex<'a>,
     primitives: Vec<Primitive>,
     hit_regions: Vec<HitRegion>,
     shape_count: usize,
@@ -535,19 +562,16 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         let original = (shape.source_id != 0)
-            .then(|| {
-                self.parsed_slide
-                    .and_then(|slide| find_node(&slide.shapes, shape.source_id))
-            })
+            .then(|| self.slide_nodes.get(&shape.source_id).copied())
             .flatten();
-        let layout_node = shape.placeholder.as_ref().and_then(|placeholder| {
-            self.layout
-                .and_then(|layout| find_placeholder(&layout.shapes, placeholder))
-        });
-        let master_node = shape.placeholder.as_ref().and_then(|placeholder| {
-            self.master
-                .and_then(|master| find_placeholder(&master.shapes, placeholder))
-        });
+        let layout_node = shape
+            .placeholder
+            .as_ref()
+            .and_then(|placeholder| self.layout_placeholders.find(placeholder));
+        let master_node = shape
+            .placeholder
+            .as_ref()
+            .and_then(|placeholder| self.master_placeholders.find(placeholder));
         let resolved = resolved_transform_value(shape, original, layout_node, master_node);
         let rect = space.map_transform(&resolved);
         if shape.kind == ShapeKind::Group {
@@ -1017,11 +1041,7 @@ impl<'a> LayoutBuilder<'a> {
 
     fn metafile(&mut self, media_part_path: Option<&str>) -> Option<Arc<MetafileDrawing>> {
         let part_path = media_part_path?;
-        let part = self
-            .package
-            .media
-            .iter()
-            .find(|part| part.part_path == part_path)?;
+        let part = self.package.media_part(part_path)?;
         if !is_metafile(&part.bytes) {
             return None;
         }
@@ -1400,12 +1420,7 @@ impl<'a> LayoutBuilder<'a> {
             return None;
         };
         self.package
-            .charts
-            .iter()
-            .find(|part| {
-                &part.part_path == part_path
-                    && part.theme_part_path.as_deref() == self.theme_part_path
-            })
+            .chart_part(part_path, self.theme_part_path)
             .map(|part| &part.chart)
     }
 
@@ -3249,34 +3264,81 @@ fn distance_to_interval(value: f32, start: f32, end: f32) -> f32 {
     }
 }
 
-fn find_node(nodes: &[ShapeNode], id: u32) -> Option<&ShapeNode> {
+/// Depth-first walk over a part's shape tree, in document order.
+fn walk_nodes<'a>(nodes: &'a [ShapeNode], visit: &mut impl FnMut(&'a ShapeNode)) {
     for node in nodes {
-        if node.id() == id {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_node(&group.children, id)
-        {
-            return Some(found);
+        visit(node);
+        if let ShapeNode::Group(group) = node {
+            walk_nodes(&group.children, visit);
         }
     }
-    None
 }
 
-fn find_placeholder<'a>(nodes: &'a [ShapeNode], target: &Placeholder) -> Option<&'a ShapeNode> {
-    for node in nodes {
-        if node_placeholder(node).is_some_and(|value| placeholders_match(value, target)) {
-            return Some(node);
-        }
-        if let ShapeNode::Group(group) = node
-            && let Some(found) = find_placeholder(&group.children, target)
-        {
-            return Some(found);
+/// First node per source id in document order.
+fn slide_node_index(nodes: &[ShapeNode]) -> HashMap<u32, &ShapeNode> {
+    let mut index = HashMap::new();
+    walk_nodes(nodes, &mut |node| {
+        index.entry(node.id()).or_insert(node);
+    });
+    index
+}
+
+/// Placeholder lookups over a part's shape tree, built once per render so
+/// per-shape inheritance checks don't re-walk the tree. Matches the first
+/// node in document order, exactly like a linear scan.
+#[derive(Default)]
+struct PlaceholderIndex<'a> {
+    /// Earliest node carrying each numeric placeholder index.
+    by_index: HashMap<u32, (usize, &'a ShapeNode)>,
+    /// Earliest index-less node per normalized placeholder type.
+    by_type_unindexed: HashMap<&'a str, (usize, &'a ShapeNode)>,
+    /// Earliest node per normalized placeholder type, indexed or not.
+    by_type: HashMap<&'a str, (usize, &'a ShapeNode)>,
+}
+
+impl<'a> PlaceholderIndex<'a> {
+    fn build(nodes: &'a [ShapeNode]) -> Self {
+        let mut index = Self::default();
+        let mut ordinal = 0;
+        walk_nodes(nodes, &mut |node| {
+            let position = ordinal;
+            ordinal += 1;
+            let Some(placeholder) = node_placeholder(node) else {
+                return;
+            };
+            let key = normalize_placeholder_type(placeholder.placeholder_type.as_deref());
+            if let Some(value) = placeholder.index {
+                index.by_index.entry(value).or_insert((position, node));
+            } else {
+                index
+                    .by_type_unindexed
+                    .entry(key)
+                    .or_insert((position, node));
+            }
+            index.by_type.entry(key).or_insert((position, node));
+        });
+        index
+    }
+
+    /// Earliest node matching `target`: a node with the same index, or an
+    /// index-less node with the same normalized type. Without a target index
+    /// any node with a matching normalized type qualifies.
+    fn find(&self, target: &Placeholder) -> Option<&'a ShapeNode> {
+        let key = normalize_placeholder_type(target.placeholder_type.as_deref());
+        if let Some(index) = target.index {
+            [self.by_index.get(&index), self.by_type_unindexed.get(&key)]
+                .into_iter()
+                .flatten()
+                .min_by_key(|(position, _)| *position)
+                .map(|(_, node)| *node)
+        } else {
+            self.by_type.get(&key).map(|(_, node)| *node)
         }
     }
-    None
 }
 
+/// The matching rule [`PlaceholderIndex`] encodes in its maps.
+#[cfg(test)]
 fn placeholders_match(left: &Placeholder, right: &Placeholder) -> bool {
     match (left.index, right.index) {
         (Some(left), Some(right)) => left == right,

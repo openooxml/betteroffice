@@ -184,6 +184,16 @@ pub struct DeckSnapshot {
     pub comments: Vec<CommentSnapshot>,
 }
 
+/// One slide's render snapshot from `DeckSession::slide_snapshot`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SlideRenderSnapshot {
+    pub width_emu: i64,
+    pub height_emu: i64,
+    /// The slide's position in deck order; feeds `slidenum` fields.
+    pub slide_index: usize,
+    pub slide: SlideSnapshot,
+}
+
 fn legacy_comment_flavor(flavor: &CommentFlavor) -> bool {
     *flavor == CommentFlavor::Legacy
 }

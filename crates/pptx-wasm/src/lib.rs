@@ -40,10 +40,17 @@ impl PptxRenderer {
         slide_index: u32,
     ) -> Result<String, JsValue> {
         let session = document.session();
-        let deck = session.snapshot().map_err(js_error)?;
+        let slide = session
+            .slide_snapshot(slide_index as usize)
+            .map_err(js_error)?
+            .ok_or_else(|| {
+                js_error(pptx_render::RenderError::SlideNotFound(
+                    slide_index as usize,
+                ))
+            })?;
         let rendered = self
             .renderer
-            .layout_slide(session.package(), &deck, slide_index as usize)
+            .layout_slide_scoped(session.package(), &slide)
             .map_err(js_error)?;
         let json = serde_json::to_string(&rendered.display_list).map_err(js_error)?;
         self.rendered = Some(rendered);
@@ -70,13 +77,17 @@ impl PptxRenderer {
             .session()
             .proposal_preview_session(id)
             .map_err(js_error)?;
+        let slide = preview
+            .slide_snapshot(slide_index as usize)
+            .map_err(js_error)?
+            .ok_or_else(|| {
+                js_error(pptx_render::RenderError::SlideNotFound(
+                    slide_index as usize,
+                ))
+            })?;
         let rendered = self
             .renderer
-            .layout_slide(
-                preview.package(),
-                &preview.snapshot().map_err(js_error)?,
-                slide_index as usize,
-            )
+            .layout_slide_scoped(preview.package(), &slide)
             .map_err(js_error)?;
         serde_json::to_string(&rendered.display_list).map_err(js_error)
     }

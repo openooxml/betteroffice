@@ -19,7 +19,8 @@ use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN, PendingMedia,
     PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
     ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
+    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideRenderSnapshot, SlideSnapshot,
+    TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.1;
@@ -230,35 +231,16 @@ fn theme_for_layout<'a>(
     layout_part_path: Option<&str>,
 ) -> Option<&'a Theme> {
     let layout = layout_part_path
-        .and_then(|path| {
-            package
-                .layouts
-                .iter()
-                .find(|layout| layout.part_path == path)
-        })
+        .and_then(|path| package.layout_part(path))
         .or_else(|| package.layouts.first());
     let master = layout
         .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
+        .and_then(|path| package.master_part(path))
+        .or_else(|| layout.and_then(|layout| package.layout_master(layout)))
         .or_else(|| package.masters.first());
     master
         .and_then(|master| master.theme_part_path.as_deref())
-        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
+        .and_then(|path| package.theme_part(path))
         .map(|part| &part.theme)
         .or_else(|| package.themes.first().map(|part| &part.theme))
 }
@@ -280,6 +262,34 @@ fn insert_json<T: serde::Serialize>(
 impl DeckSession {
     pub fn snapshot(&self) -> EditResult<DeckSnapshot> {
         snapshot_doc(&self.doc, &self.package)
+    }
+
+    /// The slice of [`Self::snapshot`] a single-slide render needs: deck
+    /// dimensions plus that slide's shape/story state. Skips walking the
+    /// deck's other slides, stories, and comments. `None` when
+    /// `slide_index` is outside the deck's slide order.
+    pub fn slide_snapshot(&self, slide_index: usize) -> EditResult<Option<SlideRenderSnapshot>> {
+        let txn = self.doc.transact();
+        let meta = required_map(&txn, META)?;
+        let order = required_order(&txn)?;
+        let slides = required_map(&txn, SLIDES)?;
+        let shapes = required_map(&txn, SHAPES)?;
+        let stories = required_map(&txn, STORIES)?;
+        let mut seen = HashSet::new();
+        let Some(slide_id) = string_array_ref(&order, &txn)
+            .into_iter()
+            .filter(|id| seen.insert(id.clone()))
+            .nth(slide_index)
+        else {
+            return Ok(None);
+        };
+        let slide = snapshot_slide(&txn, &slides, &shapes, &stories, &self.package, &slide_id)?;
+        Ok(Some(SlideRenderSnapshot {
+            width_emu: required_i64(&meta, &txn, "widthEmu")?,
+            height_emu: required_i64(&meta, &txn, "heightEmu")?,
+            slide_index,
+            slide,
+        }))
     }
 
     pub fn insert_slide(
@@ -1549,41 +1559,9 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         if !seen_slides.insert(slide_id.clone()) {
             continue;
         }
-        let slide = slides
-            .get(&txn, &slide_id)
-            .and_then(|value| value.cast::<MapRef>().ok())
-            .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
-        let source_part_path = map_string(&slide, &txn, "sourcePartPath");
-        let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
-        let theme = theme_for_layout(package, layout_part_path.as_deref());
-        let shape_order = slide_shape_order(&slide, &txn)?;
-        let mut shape_snapshots = Vec::new();
-        for shape_id in live_shape_order(&shape_order, &txn)? {
-            shape_snapshots.push(snapshot_shape(
-                &shapes,
-                &stories,
-                &txn,
-                &shape_id,
-                &mut HashSet::new(),
-                theme,
-            )?);
-        }
-        let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {
-            package
-                .slides
-                .iter()
-                .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-                .map(|source| source.notes.clone())
-                .unwrap_or_default()
-        });
-        slide_snapshots.push(SlideSnapshot {
-            id: slide_id,
-            source_part_path,
-            layout_part_path,
-            name: map_string(&slide, &txn, "name"),
-            notes,
-            shapes: shape_snapshots,
-        });
+        slide_snapshots.push(snapshot_slide(
+            &txn, &slides, &shapes, &stories, package, &slide_id,
+        )?);
     }
     Ok(DeckSnapshot {
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
@@ -1591,6 +1569,50 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         slides: slide_snapshots,
         comment_flavor: snapshot_flavor(&txn)?,
         comments: snapshot_comments(&txn)?,
+    })
+}
+
+fn snapshot_slide<T: ReadTxn>(
+    txn: &T,
+    slides: &MapRef,
+    shapes: &MapRef,
+    stories: &MapRef,
+    package: &PptxPackage,
+    slide_id: &str,
+) -> EditResult<SlideSnapshot> {
+    let slide = slides
+        .get(txn, slide_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
+    let source_part_path = map_string(&slide, txn, "sourcePartPath");
+    let layout_part_path = map_string(&slide, txn, "layoutPartPath");
+    let theme = theme_for_layout(package, layout_part_path.as_deref());
+    let shape_order = slide_shape_order(&slide, txn)?;
+    let mut shape_snapshots = Vec::new();
+    for shape_id in live_shape_order(&shape_order, txn)? {
+        shape_snapshots.push(snapshot_shape(
+            shapes,
+            stories,
+            txn,
+            &shape_id,
+            &mut HashSet::new(),
+            theme,
+        )?);
+    }
+    let notes = map_string(&slide, txn, "notes").unwrap_or_else(|| {
+        source_part_path
+            .as_deref()
+            .and_then(|path| package.slide_part(path))
+            .map(|source| source.notes.clone())
+            .unwrap_or_default()
+    });
+    Ok(SlideSnapshot {
+        id: slide_id.to_owned(),
+        source_part_path,
+        layout_part_path,
+        name: map_string(&slide, txn, "name"),
+        notes,
+        shapes: shape_snapshots,
     })
 }
 

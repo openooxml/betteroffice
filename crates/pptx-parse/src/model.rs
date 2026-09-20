@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
@@ -61,14 +62,79 @@ pub struct PptxPackage {
     pub(crate) parts: Vec<PackagePart>,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
+    /// Part-path lookup tables built on first use; never serialized.
+    #[serde(skip)]
+    pub(crate) index: PartIndex,
 }
 
 impl PptxPackage {
-    pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
-        self.parts
+    fn part_index(&self) -> &PackageIndex {
+        self.index.0.get_or_init(|| PackageIndex::build(self))
+    }
+
+    /// First slide part with this path.
+    pub fn slide_part(&self, part_path: &str) -> Option<&Slide> {
+        self.part_index()
+            .slides
+            .get(part_path)
+            .map(|&index| &self.slides[index])
+    }
+
+    /// First layout part with this path.
+    pub fn layout_part(&self, part_path: &str) -> Option<&SlideLayout> {
+        self.part_index()
+            .layouts
+            .get(part_path)
+            .map(|&index| &self.layouts[index])
+    }
+
+    /// First master part with this path.
+    pub fn master_part(&self, part_path: &str) -> Option<&SlideMaster> {
+        self.part_index()
+            .masters
+            .get(part_path)
+            .map(|&index| &self.masters[index])
+    }
+
+    /// First master that lists `layout`'s part path among its layouts.
+    pub fn layout_master(&self, layout: &SlideLayout) -> Option<&SlideMaster> {
+        self.part_index()
+            .masters_by_layout
+            .get(layout.part_path.as_str())
+            .map(|&index| &self.masters[index])
+    }
+
+    /// First theme part with this path.
+    pub fn theme_part(&self, part_path: &str) -> Option<&ThemePart> {
+        self.part_index()
+            .themes
+            .get(part_path)
+            .map(|&index| &self.themes[index])
+    }
+
+    /// First media part with this path.
+    pub fn media_part(&self, part_path: &str) -> Option<&MediaPart> {
+        self.part_index()
+            .media
+            .get(part_path)
+            .map(|&index| &self.media[index])
+    }
+
+    /// First chart part with this path resolved against `theme_part_path`.
+    pub fn chart_part(&self, part_path: &str, theme_part_path: Option<&str>) -> Option<&ChartPart> {
+        self.part_index()
+            .charts
+            .get(part_path)?
             .iter()
-            .find(|part| part.path == path)
-            .map(|part| part.bytes.as_slice())
+            .map(|&index| &self.charts[index])
+            .find(|part| part.theme_part_path.as_deref() == theme_part_path)
+    }
+
+    pub fn part_bytes(&self, path: &str) -> Option<&[u8]> {
+        self.part_index()
+            .parts
+            .get(path)
+            .map(|&index| self.parts[index].bytes.as_slice())
     }
 
     /// False for packages recovered from a collaboration update, which carry
@@ -95,6 +161,74 @@ impl PptxPackage {
 pub(crate) struct PackagePart {
     pub path: String,
     pub bytes: Vec<u8>,
+}
+
+/// `part_path` lookup tables over a [`PptxPackage`], keeping the first part
+/// for each path so lookups match a linear scan.
+#[derive(Debug, Default)]
+pub(crate) struct PackageIndex {
+    slides: HashMap<String, usize>,
+    layouts: HashMap<String, usize>,
+    masters: HashMap<String, usize>,
+    masters_by_layout: HashMap<String, usize>,
+    themes: HashMap<String, usize>,
+    media: HashMap<String, usize>,
+    charts: HashMap<String, Vec<usize>>,
+    parts: HashMap<String, usize>,
+}
+
+impl PackageIndex {
+    fn build(package: &PptxPackage) -> Self {
+        let mut index = Self::default();
+        for (i, part) in package.slides.iter().enumerate() {
+            index.slides.entry(part.part_path.clone()).or_insert(i);
+        }
+        for (i, part) in package.layouts.iter().enumerate() {
+            index.layouts.entry(part.part_path.clone()).or_insert(i);
+        }
+        for (i, part) in package.masters.iter().enumerate() {
+            index.masters.entry(part.part_path.clone()).or_insert(i);
+            for layout_path in &part.layout_part_paths {
+                index
+                    .masters_by_layout
+                    .entry(layout_path.clone())
+                    .or_insert(i);
+            }
+        }
+        for (i, part) in package.themes.iter().enumerate() {
+            index.themes.entry(part.part_path.clone()).or_insert(i);
+        }
+        for (i, part) in package.media.iter().enumerate() {
+            index.media.entry(part.part_path.clone()).or_insert(i);
+        }
+        for (i, part) in package.charts.iter().enumerate() {
+            index
+                .charts
+                .entry(part.part_path.clone())
+                .or_default()
+                .push(i);
+        }
+        for (i, part) in package.parts.iter().enumerate() {
+            index.parts.entry(part.path.clone()).or_insert(i);
+        }
+        index
+    }
+}
+
+/// Lazily filled [`PackageIndex`]. A cache never affects equality or cloning.
+#[derive(Debug, Default)]
+pub(crate) struct PartIndex(OnceLock<PackageIndex>);
+
+impl Clone for PartIndex {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for PartIndex {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -38,9 +38,12 @@ impl Presentation {
 
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
+        let slide = preview
+            .slide_snapshot(slide_index)?
+            .ok_or(pptx_render::RenderError::SlideNotFound(slide_index))?;
         Ok(self
             .renderer
-            .layout_slide(preview.package(), &preview.snapshot()?, slide_index)?)
+            .layout_slide_scoped(preview.package(), &slide)?)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -430,10 +433,13 @@ impl Presentation {
     }
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
-        let snapshot = self.session.snapshot()?;
+        let slide = self
+            .session
+            .slide_snapshot(slide_index)?
+            .ok_or(pptx_render::RenderError::SlideNotFound(slide_index))?;
         Ok(self
             .renderer
-            .layout_slide(self.session.package(), &snapshot, slide_index)?)
+            .layout_slide_scoped(self.session.package(), &slide)?)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their

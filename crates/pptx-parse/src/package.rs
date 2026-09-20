@@ -260,6 +260,7 @@ fn parse_package(
         } else {
             ShapeElements::WithoutConnectors
         },
+        ..Default::default()
     })
 }
 
