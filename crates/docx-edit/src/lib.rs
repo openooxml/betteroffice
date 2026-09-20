@@ -319,11 +319,8 @@ impl EditingDoc {
         }
     }
 
-    /// Paragraph and embed geometry cached against the last committed epoch.
-    /// Rebuilds lazily once the transaction observer's epoch advances. A
-    /// mutating transaction's uncommitted writes are invisible here, so ops
-    /// may only consult the index at validation time — before their first
-    /// write — or from a read transaction.
+    /// Paragraph/embed geometry at the last committed epoch; uncommitted
+    /// writes are invisible to it.
     pub(crate) fn para_index_in<T: ReadTxn>(&self, txn: &T) -> Arc<index::ParaIndex> {
         let epoch = self.doc_epoch.load(Ordering::Relaxed);
         let mut guard = self

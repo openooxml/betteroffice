@@ -1,12 +1,6 @@
 //! Cached paragraph and embed geometry over the committed document.
-//!
-//! Every `paraId`- and index-keyed lookup that used to re-materialize a
-//! story's segments resolves against this snapshot instead; the yrs doc
-//! remains the source of truth. A `Doc` update observer advances the epoch
-//! on each committed transaction — local ops, remote updates, and undo/redo
-//! alike — and the next lookup rebuilds lazily. The cache cannot see a
-//! transaction's uncommitted writes, so mutating ops may only consult it at
-//! validation time, before their first write, or from a read transaction.
+//! Rebuilt lazily after each committed transaction; mutating ops may
+//! consult it only at validation time, before their first write.
 
 use std::collections::HashMap;
 
@@ -31,8 +25,8 @@ pub(crate) struct IndexedPara {
     pub start: u32,
     /// Story index of the paragraph's pilcrow embed.
     pub pilcrow: u32,
-    /// `start` advanced past leading consecutive block embeds — the
-    /// node-offset base `index_loc` reports (read by the wasm surface only).
+    /// `start` advanced past leading consecutive block embeds; the base
+    /// `index_loc` reports node offsets against.
     #[cfg_attr(not(feature = "wasm"), allow(dead_code))]
     pub node_start: u32,
     pub map: MapRef,
@@ -78,11 +72,10 @@ impl StoryIndex {
 pub(crate) struct ParaIndex {
     /// [`EditingDoc::doc_epoch`] value the snapshot was built against.
     pub epoch: u64,
-    /// Stories sorted by id — the iteration order the previous full scans
-    /// used for every resolved set.
+    /// Stories sorted by id.
     pub stories: Vec<StoryIndex>,
-    /// `para_id` -> (story slot, para slot); first occurrence wins when a
-    /// divergent merge left duplicate ids behind.
+    /// `para_id` -> (story slot, para slot); first occurrence wins on
+    /// duplicate ids.
     by_para: HashMap<String, (usize, usize)>,
 }
 
@@ -120,8 +113,7 @@ impl ParaIndex {
         self.stories.iter().find(|story| story.story_id == story_id)
     }
 
-    /// `para_id` resolved inside `story_id` — a para that lives in another
-    /// story is not found, matching the story-scoped scans this replaces.
+    /// `para_id` resolved inside `story_id`.
     pub fn para_in(&self, story_id: &str, para_id: &str) -> Option<&IndexedPara> {
         self.story(story_id)?
             .paras
@@ -129,8 +121,7 @@ impl ParaIndex {
             .find(|para| para.para_id == para_id)
     }
 
-    /// `para_id` resolved across every story — the first in sorted-story
-    /// order, as the previous whole-document scans returned.
+    /// `para_id` resolved across every story, first in sorted-story order.
     pub fn para_anywhere(&self, para_id: &str) -> Option<(&StoryIndex, &IndexedPara)> {
         let (story_slot, para_slot) = *self.by_para.get(para_id)?;
         let story = &self.stories[story_slot];
