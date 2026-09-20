@@ -300,6 +300,43 @@ pub(crate) fn int(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::floor)
 }
 
+/// QUOTIENT(numerator, denominator): the integer part of the division,
+/// truncated toward zero.
+pub(crate) fn quotient(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(_), Ok(0.0)) => err(ErrorValue::Div0),
+        (Ok(n), Ok(d)) => finite((n / d).trunc()),
+        (Err(e), _) | (_, Err(e)) => err(e),
+    }
+}
+
+/// SERIESSUM(x, n, m, coefficients): sum of `a_i * x^(n + (i-1) * m)`.
+pub(crate) fn seriessum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 4 {
+        return err(ErrorValue::Value);
+    }
+    let (x, n, m) = match (
+        nth_number(args, ctx, 0),
+        nth_number(args, ctx, 1),
+        nth_number(args, ctx, 2),
+    ) {
+        (Ok(x), Ok(n), Ok(m)) => (x, n, m),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
+    };
+    let coefficients = match collect_numbers(&args[3..], ctx) {
+        Ok(c) => c,
+        Err(e) => return err(e),
+    };
+    let mut total = 0.0;
+    for (i, a) in coefficients.iter().enumerate() {
+        total += a * x.powf(n + (i as f64) * m);
+    }
+    finite(total)
+}
+
 /// TRUNC(number, [digits]); digits default 0. truncates toward zero.
 pub(crate) fn trunc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     directional(args, ctx, |scaled| scaled.trunc())
