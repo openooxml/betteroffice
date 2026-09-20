@@ -187,7 +187,7 @@ pub fn write_docx_s13(
         }
     }
 
-    ooxml_opc::rezip_parts(&package.parts).map_err(ParseError::Container)
+    ooxml_opc::rezip_parts_preserving(&package.parts, original_docx).map_err(ParseError::Container)
 }
 
 #[derive(Clone, Debug)]

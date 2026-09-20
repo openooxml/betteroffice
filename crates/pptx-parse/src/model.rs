@@ -59,6 +59,10 @@ pub struct PptxPackage {
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
+    /// Source container bytes, kept so unchanged members can be re-emitted
+    /// with their original compressed payload on save.
+    #[serde(skip)]
+    pub(crate) source_container: Option<ooxml_opc::SourceContainer>,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
 }

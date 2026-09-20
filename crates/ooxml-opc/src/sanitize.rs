@@ -4,7 +4,7 @@ use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
-use crate::{rezip_parts, unzip_parts};
+use crate::{rezip_parts_preserving, unzip_parts};
 
 const CONTENT_TYPES_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/content-types";
@@ -88,7 +88,7 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
             *bytes = neutralize_fields(bytes, path, &mut xml_budget)?;
         }
     }
-    rezip_parts(&parts)
+    rezip_parts_preserving(&parts, data)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1202,6 +1202,7 @@ fn write(writer: &mut Writer<Vec<u8>>, event: Event<'_>, path: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rezip_parts;
 
     fn content_types(part_name: &str, content_type: &str) -> (String, Vec<u8>) {
         (

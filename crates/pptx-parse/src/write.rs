@@ -361,7 +361,11 @@ pub fn write_pptx_with_edits(
         }
     }
     parts.extend(new_parts);
-    ooxml_opc::rezip_parts(&parts).map_err(PptxError::Container)
+    match &package.source_container {
+        Some(source) => ooxml_opc::rezip_parts_preserving(&parts, source.as_bytes()),
+        None => ooxml_opc::rezip_parts(&parts),
+    }
+    .map_err(PptxError::Container)
 }
 
 struct MintedSlide {

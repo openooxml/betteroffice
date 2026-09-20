@@ -184,6 +184,9 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
+    /// Source container bytes, kept so unchanged members can be re-emitted
+    /// with their original compressed payload on save.
+    source_container: Option<ooxml_opc::SourceContainer>,
     preserved: PreservedSheetState,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
@@ -230,7 +233,7 @@ impl Workbook {
             }
         }
         let parsed = xlsx_parse::parse_workbook_with_package(&parts)?;
-        Self::from_source(
+        let mut workbook = Self::from_source(
             parsed.workbook,
             Some(parsed.package),
             parsed.active_sheet,
@@ -238,7 +241,9 @@ impl Workbook {
             client_id,
             &parsed.legacy_dimensions,
             parsed.legacy_styles.as_ref(),
-        )
+        )?;
+        workbook.source_container = Some(ooxml_opc::SourceContainer::new(bytes.to_vec()));
+        Ok(workbook)
     }
 
     pub fn open_recalculated(bytes: &[u8], options: CalculationOptions) -> Result<Self> {
@@ -348,6 +353,7 @@ impl Workbook {
             pending_remote_updates: Vec::new(),
             model,
             source_package,
+            source_container: None,
             preserved,
             preserved_undo: Vec::new(),
             preserved_redo: Vec::new(),
@@ -685,7 +691,11 @@ impl Workbook {
                 xlsx_parse::serialize_workbook_with_active_sheet(&self.model, self.active_sheet)?
             }
         };
-        ooxml_opc::rezip_parts(&parts).map_err(Error::Package)
+        match &self.source_container {
+            Some(source) => ooxml_opc::rezip_parts_preserving(&parts, source.as_bytes()),
+            None => ooxml_opc::rezip_parts(&parts),
+        }
+        .map_err(Error::Package)
     }
 
     pub fn model(&self) -> &WorkbookModel {

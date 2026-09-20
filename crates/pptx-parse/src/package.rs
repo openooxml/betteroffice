@@ -258,6 +258,7 @@ fn parse_package(
         comment_flavor: deck_comments.flavor,
         relationships,
         parts,
+        source_container: Some(ooxml_opc::SourceContainer::new(data.to_vec())),
         shape_elements: if has_connectors {
             shape_elements
         } else {
@@ -339,7 +340,11 @@ pub fn write_pptx(package: &PptxPackage) -> Result<Vec<u8>, PptxError> {
         .iter()
         .map(|part| (part.path.clone(), part.bytes.clone()))
         .collect::<Vec<_>>();
-    ooxml_opc::rezip_parts(&parts).map_err(PptxError::Container)
+    match &package.source_container {
+        Some(source) => ooxml_opc::rezip_parts_preserving(&parts, source.as_bytes()),
+        None => ooxml_opc::rezip_parts(&parts),
+    }
+    .map_err(PptxError::Container)
 }
 
 fn parse_package_relationships(
