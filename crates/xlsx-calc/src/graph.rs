@@ -34,40 +34,24 @@ impl NodeKey {
 /// edit; cells calling them re-evaluate on every recalc.
 const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 
-/// ranges covering at most this many cells are expanded into the point index;
-/// larger ranges stay in `spans` and are probed per lookup.
+/// ranges covering at most this many cells go to the point index.
 const MAX_EXPANDED_RANGE_CELLS: u64 = 1024;
 
-/// aggregate bound on expanded point-index entries per sheet; beyond it new
-/// ranges go to `spans`, so graph-build memory stays bounded regardless of
-/// how many small-range edges a formula-heavy sheet registers.
+/// aggregate bound on expanded point-index entries per sheet.
 const MAX_EXPANDED_CELLS_PER_SHEET: u64 = 262_144;
 
-/// unexpanded ranges index by SPAN_TILE x SPAN_TILE grid tiles; a lookup probes
-/// one tile instead of scanning every range on the sheet.
 const SPAN_TILE_ROWS: u32 = 8192;
 const SPAN_TILE_COLS: u32 = 512;
-
-/// ranges covering more tiles than this are probed by every lookup, keeping
-/// per-span insert cost bounded for sheet-sized ranges.
 const MAX_SPAN_TILES: u64 = 512;
-
-/// aggregate bound on tile index entries per sheet; beyond it new ranges go to
-/// `wide`, so span-index memory stays bounded regardless of how many broad
-/// references a formula-heavy sheet registers.
 const MAX_SPAN_INDEX_ENTRIES: u64 = 1_048_576;
 
-/// tile index over unexpanded ranges: each range is stored once and tiles hold
-/// slot indices, so lookup cost tracks ranges overlapping the target's tile.
 #[derive(Default)]
 struct SpanIndex {
-    /// each unexpanded range stored once; `None` slots are removed and reused.
     spans: Vec<Option<(CellRange, NodeKey)>>,
     /// tile -> slots of the ranges overlapping it.
     tiles: HashMap<(u32, u32), Vec<u32>>,
-    /// tile count per slot, for removal.
+    /// (range, node) -> slot, for removal.
     slots: HashMap<(CellRange, NodeKey), usize>,
-    /// freed slots in `spans`.
     free: Vec<usize>,
     /// tile index entries currently held.
     indexed: u64,
@@ -136,7 +120,7 @@ impl SpanIndex {
         self.free.push(slot);
     }
 
-    /// ranges possibly covering `target`: the target tile's slots plus `wide`.
+    /// ranges possibly covering `target`.
     fn overlapping(&self, target: CellRef) -> impl Iterator<Item = &(CellRange, NodeKey)> {
         self.tiles
             .get(&(target.row / SPAN_TILE_ROWS, target.col / SPAN_TILE_COLS))
@@ -203,8 +187,7 @@ impl SheetDeps {
         self.expanded = self.expanded.saturating_sub(freed);
     }
 
-    /// nodes reading `target`: expanded hits plus large-range probes, sorted
-    /// and deduplicated.
+    /// nodes reading `target`, deduplicated.
     fn dependents_of(&self, target: CellRef) -> impl Iterator<Item = NodeKey> + '_ {
         let mut nodes: Vec<NodeKey> = self
             .cells
