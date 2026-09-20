@@ -6,7 +6,8 @@ use std::collections::{HashMap, HashSet};
 use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
 use crate::deps::{offset_target, positional_argument, references};
-use crate::parser::{Expr, parse_formula};
+use crate::eval::{ParseCache, parse_cached};
+use crate::parser::Expr;
 
 /// a formula cell, normalized so `$`-anchoring never splits a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -46,6 +47,9 @@ pub struct DepGraph {
     by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
     /// formula cells that must re-evaluate every recalc regardless of edits.
     volatile: HashSet<NodeKey>,
+    /// parsed formula text -> ast, shared with recalc eval so each formula
+    /// parses once across graph construction and every subsequent recalc.
+    asts: ParseCache,
 }
 
 impl DepGraph {
@@ -72,6 +76,7 @@ impl DepGraph {
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
+            asts: ParseCache::default(),
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
@@ -135,9 +140,14 @@ impl DepGraph {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
     }
 
+    /// parsed asts shared with `engine::run_recalc` evaluation.
+    pub(crate) fn asts(&self) -> &ParseCache {
+        &self.asts
+    }
+
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Ok(expr) = parse_formula(src) else {
+        let Some(expr) = parse_cached(&self.asts, src) else {
             return;
         };
         let edges = self.resolve_edges(key.sheet, &expr);
@@ -219,7 +229,8 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Ok(expression) = parse_formula(
+            let Some(expression) = parse_cached(
+                &self.asts,
                 defined
                     .formula
                     .strip_prefix('=')
@@ -266,7 +277,8 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Ok(expression) = parse_formula(
+            let Some(expression) = parse_cached(
+                &self.asts,
                 defined
                     .formula
                     .strip_prefix('=')

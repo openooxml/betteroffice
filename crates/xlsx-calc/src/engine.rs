@@ -6,9 +6,11 @@ use std::rc::Rc;
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
 
-use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
+use crate::eval::{
+    EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, ParseCache, evaluate,
+    parse_cached,
+};
 use crate::graph::DepGraph;
-use crate::parser::parse_formula;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// forced to `0` by cycle participation.
@@ -99,7 +101,7 @@ fn run_recalc(
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
     let mut limited_cells = Vec::new();
     for u in &order {
-        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget));
+        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget), graph.asts());
         if limited {
             limited_cells.push((u.0, cell_of(*u)));
         }
@@ -187,16 +189,18 @@ fn eval_node(
     u: Key,
     now_serial: Option<f64>,
     budget: Rc<EvaluationBudget>,
+    asts: &ParseCache,
 ) -> (Option<CellValue>, bool) {
-    let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
+    let Some(src) = wb.formula(u.0, cell_of(u)) else {
         return (None, false);
     };
-    let Ok(expr) = parse_formula(&src) else {
+    let Some(expr) = parse_cached(asts, src) else {
         return (None, false);
     };
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.cell = Some(cell_of(u));
     ctx.now_serial = now_serial;
+    ctx.parse_cache = Some(asts);
     let value = evaluate(&expr, &ctx);
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
     if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
