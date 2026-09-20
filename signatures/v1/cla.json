@@ -53,12 +53,6 @@
       "id": 131532657,
       "signed_at": "2026-09-19T18:54:55Z",
       "pull_request_no": 634
-    },
-    {
-      "name": "devin-ai-integration[bot]",
-      "id": 158243242,
-      "signed_at": "2026-09-20T01:44:32Z",
-      "pull_request_no": 655
     }
   ]
 }
