@@ -115,26 +115,29 @@ Use the [Office visual quality harness](scripts/office-quality/README.md) to exp
 
 Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
 
-| | Latest published [0.2.1](https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1) | Latest commit [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) |
-| --- | ---: | ---: |
-| Exact page counts | 48/63 | 59/63 |
-| Absolute page error | 32 | 4 |
-| SSIM | 0.7540 | 0.8167 |
-| Scored/total | 63/63 | 63/63 |
+<table>
+<tr><th width="180"></th><th width="230" align="right">Latest published <a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a></th><th width="230" align="right">Latest commit <a href="https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8">82734507</a></th></tr>
+<tr><td>Exact page counts</td><td align="right">48/63</td><td align="right">59/63</td></tr>
+<tr><td>Absolute page error</td><td align="right">32</td><td align="right">4</td></tr>
+<tr><td>SSIM</td><td align="right">0.7540</td><td align="right">0.8167</td></tr>
+<tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td></tr>
+</table>
 
 #### PPTX
 
-| | Latest published [0.1.1](https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1) | Latest commit [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) |
-| --- | ---: | ---: |
-| SSIM | 0.8778 | 0.9016 |
-| Scored/total | 9/9 | 9/9 |
+<table>
+<tr><th width="180"></th><th width="230" align="right">Latest published <a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a></th><th width="230" align="right">Latest commit <a href="https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8">82734507</a></th></tr>
+<tr><td>SSIM</td><td align="right">0.8778</td><td align="right">0.9016</td></tr>
+<tr><td>Scored/total</td><td align="right">9/9</td><td align="right">9/9</td></tr>
+</table>
 
 #### XLSX
 
-| | Latest published [0.2.1](https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1) | Latest commit [82734507](https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8) |
-| --- | ---: | ---: |
-| SSIM | 0.7656 | 0.7656 |
-| Scored/total | 8/8 | 8/8 |
+<table>
+<tr><th width="180"></th><th width="230" align="right">Latest published <a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a></th><th width="230" align="right">Latest commit <a href="https://github.com/openooxml/betteroffice/commit/827345077223a76da40bf4cadc540e87bd01d7c8">82734507</a></th></tr>
+<tr><td>SSIM</td><td align="right">0.7656</td><td align="right">0.7656</td></tr>
+<tr><td>Scored/total</td><td align="right">8/8</td><td align="right">8/8</td></tr>
+</table>
 
 SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. All formats use pinned CDN fonts. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
 

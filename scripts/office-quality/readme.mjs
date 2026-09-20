@@ -7,6 +7,13 @@ export const BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
 export const END = '<!-- END GENERATED VISUAL FIDELITY -->';
 export const FORMATS = ['docx', 'pptx', 'xlsx'];
 
+// Pinned so DOCX's longer labels cannot widen its table past PPTX's and XLSX's.
+const LABEL_PX = 180;
+const VALUE_PX = 230;
+
+// Anchors rather than markdown links: markdown is inert inside an HTML block.
+const link = (text, href) => `<a href="${href}">${text}</a>`;
+
 function score(samples, channel, revision) {
   const scores = [];
   for (const sample of samples) {
@@ -59,7 +66,10 @@ export function renderSection(report) {
   if (!/^[a-f0-9]{40}$/.test(report.commit))
     throw new Error('Expected a full commit SHA');
   const short = report.commit.slice(0, 8);
-  const commitLink = `[${short}](https://github.com/openooxml/betteroffice/commit/${report.commit})`;
+  const commitLink = link(
+    short,
+    `https://github.com/openooxml/betteroffice/commit/${report.commit}`
+  );
   const measure = (format) => {
     const version = report.versions[format];
     if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version))
@@ -67,7 +77,10 @@ export function renderSection(report) {
     const samples = report.samples.filter((sample) => sample.format === format);
     return {
       version,
-      versionLink: `[${version}](https://www.npmjs.com/package/@betteroffice/${format}/v/${version})`,
+      versionLink: link(
+        version,
+        `https://www.npmjs.com/package/@betteroffice/${format}/v/${version}`
+      ),
       published: score(samples, 'published', version),
       current: score(samples, 'commit', report.commit),
     };
@@ -85,10 +98,15 @@ export function renderSection(report) {
         `${current.count}/${current.total}`,
       ],
     ];
+    const value = (text) => `<td align="right">${text}</td>`;
+    const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
     return [
-      `| | Latest published ${versionLink} | Latest commit ${commitLink} |`,
-      '| --- | ---: | ---: |',
-      ...rows.map(([label, a, b]) => `| ${label} | ${a} | ${b} |`),
+      '<table>',
+      `<tr><th width="${LABEL_PX}"></th>${head(
+        `Latest published ${versionLink}`
+      )}${head(`Latest commit ${commitLink}`)}</tr>`,
+      ...rows.map(([label, a, b]) => `<tr><td>${label}</td>${value(a)}${value(b)}</tr>`),
+      '</table>',
     ].join('\n');
   };
   const docxTable = table('docx', [
