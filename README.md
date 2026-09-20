@@ -92,32 +92,34 @@ What to install for which language, with a first example each:
 Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/1a953dcb309914920a85013b00ed9928a080e469">1a953dcb</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/docx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/cc7cd2fb4cc971dcb10c29fbe7c31ec60a19cd77">cc7cd2fb</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
 <tr><td>Exact page counts</td><td align="right">48/63</td><td align="right">63/63</td><td align="right">45/63</td></tr>
 <tr><td>Absolute page error</td><td align="right">32</td><td align="right">0</td><td align="right">56</td></tr>
 <tr><td>SSIM</td><td align="right">0.7540</td><td align="right">0.8366</td><td align="right">0.7749</td></tr>
 <tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
-<tr><td>Render time (avg)</td><td align="right">483 ms</td><td align="right">478 ms</td><td align="right">705 ms</td></tr>
+<tr><td>Render time (avg)</td><td align="right">523 ms</td><td align="right">517 ms</td><td align="right">788 ms</td></tr>
 </table>
 
 
 ### PPTX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/1a953dcb309914920a85013b00ed9928a080e469">1a953dcb</a>)</th></tr>
-<tr><td>SSIM</td><td align="right">0.8667</td><td align="right">0.8779</td></tr>
-<tr><td>Scored/total</td><td align="right">88/103</td><td align="right">103/103</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/pptx/v/0.1.1">0.1.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/cc7cd2fb4cc971dcb10c29fbe7c31ec60a19cd77">cc7cd2fb</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.8667</td><td align="right">0.8854</td><td align="right">0.9043</td></tr>
+<tr><td>Scored/total</td><td align="right">88/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
+<tr><td>Render time (avg)</td><td align="right">203 ms</td><td align="right">209 ms</td><td align="right">1308 ms</td></tr>
 </table>
 
 ### XLSX
 
 <table>
-<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/1a953dcb309914920a85013b00ed9928a080e469">1a953dcb</a>)</th></tr>
-<tr><td>SSIM</td><td align="right">0.7695</td><td align="right">0.7869</td></tr>
-<tr><td>Scored/total</td><td align="right">8/8</td><td align="right">8/8</td></tr>
+<tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/cc7cd2fb4cc971dcb10c29fbe7c31ec60a19cd77">cc7cd2fb</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
+<tr><td>SSIM</td><td align="right">0.7002</td><td align="right">0.7370</td><td align="right">—</td></tr>
+<tr><td>Scored/total</td><td align="right">205/208</td><td align="right">205/208</td><td align="right">—</td></tr>
+<tr><td>Recalc time (avg)</td><td align="right">81 ms</td><td align="right">95 ms</td><td align="right">457 ms</td></tr>
 </table>
 
-For scoring, render timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
+For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
 
 <!-- END GENERATED VISUAL FIDELITY -->
 
