@@ -2089,9 +2089,7 @@ impl Workbook {
         Ok(staged)
     }
 
-    /// Rebuild the authority on the current model after a failed sync: yrs
-    /// commits a dropped transaction, so a mid-sync error can leave the doc
-    /// half-written. Standalone workbooks carry no client id or legacy dims.
+    /// Rebuild the authority after a failed sync may have half-written it.
     fn restore_authority(&mut self) {
         if let Ok(authority) = WorkbookAuthority::from_source(&self.model, None, &[]) {
             self.authority = authority;

@@ -494,9 +494,7 @@ impl WorkbookAuthority {
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
     }
 
-    /// Syncs ops the caller already applied to `model`, skipping the scratch
-    /// materialization `apply_ops` stages for validation; `want_update` skips
-    /// encoding a diff nobody is listening for.
+    /// Syncs operations already applied to the model.
     pub(crate) fn sync_applied(
         &mut self,
         model: &WorkbookModel,

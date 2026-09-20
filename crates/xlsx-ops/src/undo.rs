@@ -44,8 +44,7 @@ impl UndoStack {
         self.commit_ops(wb, &tx.ops)
     }
 
-    /// apply borrowed ops directly, skipping the transaction clone a caller
-    /// holding `&[Op]` would make to build one.
+    /// apply borrowed ops without building a throwaway transaction.
     pub fn commit_ops(&mut self, wb: &mut Workbook, ops: &[Op]) -> Result<(), OpError> {
         let inverse = apply_ops(wb, ops)?;
         self.undo.push(inverse);
