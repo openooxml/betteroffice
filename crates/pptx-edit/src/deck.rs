@@ -897,6 +897,21 @@ impl DeckSession {
 }
 
 pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)> {
+    let (package, snapshot) = validate_doc_impl(doc, None)?;
+    Ok((package.expect("package_from_meta decodes"), snapshot))
+}
+
+/// Validates the doc and returns the snapshot it computed internally.
+/// Passing the session's parsed package skips decoding `meta.packageJson`.
+pub(crate) fn validated_snapshot(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    validate_doc_impl(doc, Some(package)).map(|(_, snapshot)| snapshot)
+}
+
+fn validate_doc_impl(
+    doc: &Doc,
+    package: Option<&PptxPackage>,
+) -> EditResult<(Option<PptxPackage>, DeckSnapshot)> {
+    let mut owned = None;
     let package = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
@@ -904,9 +919,23 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)>
         if map_string(&meta, &txn, "fingerprint").is_none() {
             return Err(EditError::InvalidState("missing fingerprint".to_owned()));
         }
-        package_from_meta(&meta, &txn)?
+        match package {
+            Some(package) => {
+                if !matches!(
+                    meta.get(&txn, "packageJson"),
+                    Some(Out::Any(Any::Buffer(_)))
+                ) {
+                    return Err(EditError::InvalidState("missing package data".to_owned()));
+                }
+                package
+            }
+            None => {
+                owned = Some(package_from_meta(&meta, &txn)?);
+                owned.as_ref().unwrap()
+            }
+        }
     };
-    let snapshot = snapshot_doc(doc, &package)?;
+    let snapshot = snapshot_doc(doc, package)?;
     if snapshot.width_emu <= 0 || snapshot.height_emu <= 0 {
         return Err(EditError::InvalidState(
             "slide dimensions must be positive".to_owned(),
@@ -920,7 +949,7 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)>
             .map_err(|_| EditError::InvalidState(format!("story {story_id} is not text")))?;
         validate_story(&story, &txn, story_id)?;
     }
-    Ok((package, snapshot))
+    Ok((owned, snapshot))
 }
 
 /// Shared state for the pending-source import passes run by
