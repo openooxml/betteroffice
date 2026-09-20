@@ -1780,9 +1780,7 @@ mod tests {
         assert_eq!(offset(&measures[3]), 50.0);
     }
 
-    /// A section holding nothing but its own break mark is one line tall in
-    /// Word's PDF export; `oxi-en-correspondence-03` opens with such a section
-    /// and every line below it sits 25px lower than without one, at 150dpi.
+    /// A lone section-break mark still occupies one line.
     #[test]
     fn a_section_break_mark_keeps_its_line_when_it_is_all_the_section_holds() {
         let font = crate::register_measure_font(include_bytes!(
