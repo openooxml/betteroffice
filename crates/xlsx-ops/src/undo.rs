@@ -53,6 +53,15 @@ impl UndoStack {
         Ok(())
     }
 
+    /// apply and drop the most recent commit's inverse without a redo entry,
+    /// so a commit whose downstream step failed rolls itself back.
+    pub fn abort_last(&mut self, wb: &mut Workbook) -> Result<(), OpError> {
+        if let Some(inverse) = self.undo.pop() {
+            apply_ops(wb, &inverse)?;
+        }
+        Ok(())
+    }
+
     /// the ops the next `undo` would apply, so a caller that must clear a
     /// fallible gate before the workbook changes can check them first.
     pub fn next_undo(&self) -> Option<&[Op]> {
@@ -106,6 +115,17 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn abort_last_rolls_back_without_a_redo_entry() {
+        let mut wb = Workbook::default();
+        wb.sheets.push(Sheet::new("Sheet1"));
+        let mut stack = UndoStack::new();
+        stack.commit_ops(&mut wb, &[set("A1", 1.0)]).unwrap();
+        stack.abort_last(&mut wb).unwrap();
+        assert_eq!(wb.value(SheetId(0), r("A1")), CellValue::Empty);
+        assert!(!stack.can_undo() && !stack.can_redo());
     }
 
     #[test]

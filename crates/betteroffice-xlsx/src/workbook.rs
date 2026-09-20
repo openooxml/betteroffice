@@ -1232,7 +1232,15 @@ impl Workbook {
                 SyncOrigin::Undo,
                 self.has_update_listeners(),
             )
-            .map_err(authority_error)?;
+            .map_err(authority_error);
+        let update = match update {
+            Ok(update) => update,
+            Err(error) => {
+                let _ = self.undo.redo(&mut self.model);
+                self.restore_authority();
+                return Err(error);
+            }
+        };
         if let Some(history) = self.preserved_undo.pop() {
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
@@ -1275,7 +1283,15 @@ impl Workbook {
                 SyncOrigin::Redo,
                 self.has_update_listeners(),
             )
-            .map_err(authority_error)?;
+            .map_err(authority_error);
+        let update = match update {
+            Ok(update) => update,
+            Err(error) => {
+                let _ = self.undo.undo(&mut self.model);
+                self.restore_authority();
+                return Err(error);
+            }
+        };
         if let Some(history) = self.preserved_redo.pop() {
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
@@ -1974,7 +1990,15 @@ impl Workbook {
                     SyncOrigin::User,
                     self.has_update_listeners(),
                 )
-                .map_err(authority_error)?;
+                .map_err(authority_error);
+            let update = match update {
+                Ok(update) => update,
+                Err(error) => {
+                    let _ = self.undo.abort_last(&mut self.model);
+                    self.restore_authority();
+                    return Err(error);
+                }
+            };
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -2020,7 +2044,15 @@ impl Workbook {
                     SyncOrigin::Agent,
                     self.has_update_listeners(),
                 )
-                .map_err(authority_error)?;
+                .map_err(authority_error);
+            let update = match update {
+                Ok(update) => update,
+                Err(error) => {
+                    let _ = self.undo.abort_last(&mut self.model);
+                    self.restore_authority();
+                    return Err(error);
+                }
+            };
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -2055,6 +2087,15 @@ impl Workbook {
         validate_collaboration_size(&staged.update)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         Ok(staged)
+    }
+
+    /// Rebuild the authority on the current model after a failed sync: yrs
+    /// commits a dropped transaction, so a mid-sync error can leave the doc
+    /// half-written. Standalone workbooks carry no client id or legacy dims.
+    fn restore_authority(&mut self) {
+        if let Ok(authority) = WorkbookAuthority::from_source(&self.model, None, &[]) {
+            self.authority = authority;
+        }
     }
 
     /// Whether update events have listeners: encoding the diff is wasted when
