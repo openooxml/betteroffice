@@ -3,13 +3,10 @@
 use std::sync::{Arc, Mutex};
 
 use yrs::branch::{Branch, BranchPtr};
-use yrs::types::Delta;
+use yrs::types::{DeepObservable, Delta, Event, PathSegment};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{
-    Any, Assoc, ID, IndexedSequence, Map, Observable, Out, ReadTxn, StickyIndex, TextRef, Transact,
-    Update,
-};
+use yrs::{Any, Assoc, ID, IndexedSequence, Out, ReadTxn, StickyIndex, TextRef, Transact, Update};
 
 use crate::{EditingDoc, SegmentContent, story_ref};
 
@@ -57,62 +54,68 @@ pub(crate) fn apply_update_with_typing_inference(
     let mut clients = insertions.client_ids();
     let client_id = clients.next().filter(|_| clients.next().is_none());
     let changes = Arc::new(Mutex::new(Vec::<InsertedContent>::new()));
-    let subscriptions = if client_id.is_some() {
-        let txn = doc.yrs_doc().transact();
-        txn.get_map(super::STORIES)
-            .map(|stories| {
-                stories
-                    .iter(&txn)
-                    .filter_map(|(story, value)| match value {
-                        Out::YText(text) => {
-                            let story = story.to_string();
-                            let changes = Arc::clone(&changes);
-                            Some(text.observe(move |txn, event| {
-                                let mut index = 0_u32;
-                                for delta in event.delta(txn) {
-                                    match delta {
-                                        Delta::Retain(length, _) => index += length,
-                                        Delta::Deleted(_) => {}
-                                        Delta::Inserted(value, _) => {
-                                            let (length, is_text) = match value {
-                                                Out::Any(Any::String(text)) => {
-                                                    (text.encode_utf16().count() as u32, true)
-                                                }
-                                                _ => (1, false),
-                                            };
-                                            let end_index = index + length;
-                                            if let Some(id) = event
-                                                .target()
-                                                .sticky_index(txn, end_index, Assoc::Before)
-                                                .and_then(|sticky| sticky.id().copied())
-                                            {
-                                                changes.lock().unwrap().push(InsertedContent {
-                                                    id,
-                                                    story: story.clone(),
-                                                    end_index,
-                                                    is_text,
-                                                });
-                                            }
-                                            index = end_index;
+    // The inference only consumes story text insertions, and a block that does
+    // not extend the local state vector can never integrate — empty,
+    // already-known and delete-only updates skip watching entirely.
+    let subscription =
+        if client_id.is_some_and(|_| update.extends(&doc.yrs_doc().transact().state_vector())) {
+            let txn = doc.yrs_doc().transact();
+            let subscription = txn.get_map(super::STORIES).map(|stories| {
+                let changes = Arc::clone(&changes);
+                stories.observe_deep(move |txn, events| {
+                    for event in events.iter() {
+                        let Event::Text(event) = event else {
+                            continue;
+                        };
+                        let Some(story) = event.path().front().and_then(|segment| match segment {
+                            PathSegment::Key(key) => Some(key.to_string()),
+                            PathSegment::Index(_) => None,
+                        }) else {
+                            continue;
+                        };
+                        let mut index = 0_u32;
+                        for delta in event.delta(txn) {
+                            match delta {
+                                Delta::Retain(length, _) => index += length,
+                                Delta::Deleted(_) => {}
+                                Delta::Inserted(value, _) => {
+                                    let (length, is_text) = match value {
+                                        Out::Any(Any::String(text)) => {
+                                            (text.encode_utf16().count() as u32, true)
                                         }
+                                        _ => (1, false),
+                                    };
+                                    let end_index = index + length;
+                                    if let Some(id) = event
+                                        .target()
+                                        .sticky_index(txn, end_index, Assoc::Before)
+                                        .and_then(|sticky| sticky.id().copied())
+                                    {
+                                        changes.lock().unwrap().push(InsertedContent {
+                                            id,
+                                            story: story.clone(),
+                                            end_index,
+                                            is_text,
+                                        });
                                     }
+                                    index = end_index;
                                 }
-                            }))
+                            }
                         }
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+                    }
+                })
+            });
+            drop(txn);
+            subscription
+        } else {
+            None
+        };
 
     doc.yrs_doc()
         .transact_mut()
         .apply_update(update)
         .map_err(|error| error.to_string())?;
-    drop(subscriptions);
+    drop(subscription);
     let Some(client_id) = client_id else {
         return Ok(None);
     };
