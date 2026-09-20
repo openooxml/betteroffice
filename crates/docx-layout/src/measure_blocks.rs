@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -546,6 +547,16 @@ fn measure_paragraph_with_context(
     floating_zones: Option<&[FloatingZone]>,
     cumulative_y: f64,
 ) -> Result<ParagraphExtent, String> {
+    let lookup = extent_cache_lookup(
+        paragraph,
+        content_width,
+        config,
+        floating_zones,
+        cumulative_y,
+    );
+    if let ExtentLookup::Hit(extent) = lookup {
+        return Ok(extent);
+    }
     let mut extent = if !content_width.is_finite() || content_width <= 0.0 {
         synthetic_paragraph_extent(paragraph, content_width)
     } else {
@@ -559,7 +570,162 @@ fn measure_paragraph_with_context(
         .unwrap_or_else(|| synthetic_paragraph_extent(paragraph, content_width))
     };
     measure_horizontal_rules(paragraph, &mut extent);
+    if let ExtentLookup::Miss(Some(key)) = lookup {
+        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone()));
+    }
     Ok(extent)
+}
+
+const MAX_EXTENT_CACHE_ENTRIES: usize = 4_096;
+const MAX_EXTENT_CACHE_KEY_BYTES: usize = 8 * 1024 * 1024;
+/// Serialized paragraph inputs past this size are measured uncached.
+const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
+
+#[derive(Default)]
+struct ExtentCacheGeneration {
+    entries: HashMap<Vec<u8>, ParagraphExtent>,
+    key_bytes: usize,
+}
+
+impl ExtentCacheGeneration {
+    fn would_overflow(&self, key: &[u8]) -> bool {
+        self.entries.len() >= MAX_EXTENT_CACHE_ENTRIES
+            || self.key_bytes.saturating_add(key.len()) > MAX_EXTENT_CACHE_KEY_BYTES
+    }
+
+    fn insert(&mut self, key: Vec<u8>, extent: ParagraphExtent) {
+        self.entries.remove(&key);
+        self.key_bytes += key.len();
+        self.entries.insert(key, extent);
+    }
+
+    fn remove(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
+        let extent = self.entries.remove(key)?;
+        self.key_bytes = self.key_bytes.saturating_sub(key.len());
+        Some(extent)
+    }
+}
+
+/// Measured paragraph extents reused across pagination passes. The key is the
+/// full serialized input tuple, so identical table cells, repeated notes and
+/// unchanged paragraphs all share one measure. Same two-generation policy as
+/// `ooxml_text`'s shape cache: hits promote into `hot`, untouched entries age
+/// out with `cold`.
+#[derive(Default)]
+struct ExtentCache {
+    hot: ExtentCacheGeneration,
+    cold: ExtentCacheGeneration,
+}
+
+impl ExtentCache {
+    fn get(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
+        if let Some(extent) = self.hot.entries.get(key) {
+            return Some(extent.clone());
+        }
+        let extent = self.cold.remove(key)?;
+        self.insert_hot(key.to_vec(), extent.clone());
+        Some(extent)
+    }
+
+    fn insert_hot(&mut self, key: Vec<u8>, extent: ParagraphExtent) {
+        if self.hot.would_overflow(&key) {
+            self.cold = std::mem::take(&mut self.hot);
+        }
+        self.hot.insert(key, extent);
+    }
+}
+
+thread_local! {
+    /// Lives next to `MEASURE_FONTS`: the font store inside the key's id makes
+    /// entries unreachable after `clear_measure_fonts`, which also resets it.
+    static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
+    /// Key scratch reused per lookup so a hit allocates nothing.
+    static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+pub(crate) fn clear_extent_cache() {
+    EXTENT_CACHE.with(|cache| *cache.borrow_mut() = ExtentCache::default());
+}
+
+enum ExtentLookup {
+    Hit(ParagraphExtent),
+    /// `Some(key)` is the built key to insert under; `None` means the input
+    /// could not be keyed and the measure runs uncached.
+    Miss(Option<Vec<u8>>),
+}
+
+/// Key over every input a measure reads: the paragraph (runs, attrs,
+/// tracked-change marks), width, floating zones, y-offset, config contents and
+/// the font store generation. Serialization failures or oversized inputs are
+/// measured uncached rather than risking a collision.
+fn extent_cache_lookup(
+    paragraph: &ParagraphBlock,
+    content_width: f64,
+    config: &MeasurementConfig,
+    floating_zones: Option<&[FloatingZone]>,
+    cumulative_y: f64,
+) -> ExtentLookup {
+    EXTENT_KEY_BUF.with(|scratch| {
+        let key = &mut *scratch.borrow_mut();
+        key.clear();
+        if serde_json::to_writer(&mut *key, paragraph).is_err() {
+            return ExtentLookup::Miss(None);
+        }
+        if key.len() > MAX_EXTENT_KEY_BYTES {
+            return ExtentLookup::Miss(None);
+        }
+        key.extend_from_slice(&content_width.to_bits().to_le_bytes());
+        key.extend_from_slice(&cumulative_y.to_bits().to_le_bytes());
+        match floating_zones {
+            None => key.push(0),
+            Some(zones) => {
+                key.push(1);
+                key.extend_from_slice(&(zones.len() as u64).to_le_bytes());
+                for zone in zones {
+                    for value in [
+                        zone.left_margin,
+                        zone.right_margin,
+                        zone.top_y,
+                        zone.bottom_y,
+                    ] {
+                        key.extend_from_slice(&value.to_bits().to_le_bytes());
+                    }
+                    key.push(zone.full_width_block as u8);
+                    key.extend_from_slice(&(zone.segments.len() as u64).to_le_bytes());
+                    for strip in &zone.segments {
+                        key.extend_from_slice(&strip.left_offset.to_bits().to_le_bytes());
+                        key.extend_from_slice(&strip.available_width.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
+        key.extend_from_slice(&config_fingerprint(config).to_le_bytes());
+        key.extend_from_slice(&crate::measure_store_id().to_le_bytes());
+        match EXTENT_CACHE.with(|cache| cache.borrow_mut().get(key)) {
+            Some(extent) => ExtentLookup::Hit(extent),
+            None => ExtentLookup::Miss(Some(key.clone())),
+        }
+    })
+}
+
+fn fnv1a(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x00000100000001b3);
+    }
+    hash
+}
+
+fn config_fingerprint(config: &MeasurementConfig) -> u64 {
+    let mut hash = fnv1a(0xcbf29ce484222325, &[config.authoritative_shaping as u8]);
+    for (name, ids) in &config.font_chains {
+        hash = fnv1a(hash, name.as_bytes());
+        for id in ids {
+            hash = fnv1a(hash, &id.to_le_bytes());
+        }
+    }
+    hash = fnv1a(hash, config.defaults.to_string().as_bytes());
+    fnv1a(hash, config.compat.to_string().as_bytes())
 }
 
 fn measure_horizontal_rules(paragraph: &ParagraphBlock, extent: &mut ParagraphExtent) {
