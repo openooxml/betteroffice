@@ -39,14 +39,27 @@ export interface SlideCanvasLike {
   style: { width: string; height: string };
 }
 
+/** The backing store a slide needs: a fractional extent covers its last pixel. */
+export function slideBackingStore(
+  list: Pick<SlideDisplayList, 'width' | 'height'>,
+  dpr: number,
+  scale = 1
+): { width: number; height: number } {
+  return {
+    width: Math.ceil(list.width * scale * dpr),
+    height: Math.ceil(list.height * scale * dpr),
+  };
+}
+
 export function sizeCanvasForSlide(
   canvas: SlideCanvasLike,
   list: Pick<SlideDisplayList, 'width' | 'height'>,
   dpr: number,
   scale = 1
 ): void {
-  canvas.width = Math.ceil(list.width * scale * dpr);
-  canvas.height = Math.ceil(list.height * scale * dpr);
+  const store = slideBackingStore(list, dpr, scale);
+  canvas.width = store.width;
+  canvas.height = store.height;
   canvas.style.width = `${list.width * scale}px`;
   canvas.style.height = `${list.height * scale}px`;
 }
