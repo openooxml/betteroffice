@@ -1879,13 +1879,7 @@ function restoreRawBlocks(projected: BlockContent[], base: readonly BlockContent
   return projected;
 }
 
-/**
- * Reuse record for a projected block: a stable fingerprint of every story
- * input the block was built from (paragraph items/properties, container
- * payload) plus the child content arrays containers embedded. Reuse only ever
- * returns an object produced under an identical signature, so host-owned or
- * reparsed base objects (which carry no memo) can never alias stale content.
- */
+/** A projected block plus a fingerprint of the story inputs it was built from. */
 interface ProjectedBlockMemo {
   /** Bucket key for locating same-container candidates (first cell story / child story). */
   key?: string;
@@ -1939,12 +1933,7 @@ function sameJson(a: unknown, b: unknown): boolean {
 
 const NESTED_STORY_ID = /^(.*?)(?::t\d+:r\d+c\d+|:sdt\d+)$/;
 
-/**
- * Records the stories one committed session op touched so the next
- * `yrsToDocument` reuses untouched stories' blocks; `all` invalidates the
- * whole session. Nested stories propagate to their parents because a clean
- * parent's cached blocks embed the child's content.
- */
+/** Stories a committed op touched; `all` invalidates the whole session. */
 export function noteYrsStoriesDirty(
   session: YrsSession,
   stories: 'all' | string | Iterable<string>
@@ -2013,14 +2002,10 @@ class SaveContext {
     const storyComments = this.comments.get(storyId) ?? [];
     const commentsKey = storyComments.length === 0 ? '' : stableStringify(storyComments);
     const priorStory = this.memo.stories.get(storyId);
-    // A clean story projects identically while the base embeds the array this
-    // projection produced — rawXml/opaque carries are baked in and stay stable
-    // across generations. Nested (cell/SDT) stories can't verify that identity:
-    // the base maps them positionally and merged cells shift positions, so a
-    // different mapped array only means drift, not divergence — every mutation
-    // path already marks the story dirty, which is authoritative here. A root
-    // story mapped to a different array is a genuine base divergence and still
-    // forces a fresh projection.
+    // Nested stories are mapped positionally, so a different array means
+    // drift, not divergence — mutation paths mark them dirty anyway. A root
+    // story on a different array is genuine divergence and forces a fresh
+    // projection.
     if (
       priorStory !== undefined &&
       priorStory.commentsKey === commentsKey &&
@@ -2129,8 +2114,7 @@ class SaveContext {
         ) {
           paragraph = baseParagraph;
         } else {
-          // Snapshot shallowly: projection mutates `item.payload` while
-          // restoring field results; the copy pins the pre-mutation inputs.
+          // Projection mutates `item.payload`; pin the pre-mutation inputs.
           const snapshot = inputs.map((input, index) =>
             index === 4 ? (input as InlineItem[]).map((item) => ({ ...item })) : input
           );
@@ -2202,9 +2186,7 @@ class SaveContext {
             properties,
             content: content === EMPTY_BLOCKS ? [] : content,
           };
-          // The authored value substitutes the child story's projected blocks;
-          // rebind the child's entry to the embedded array so the next
-          // projection sees the same identity through the base.
+          // Rebind the child's entry to the embedded array for the next projection.
           if (content !== childContent && childStory !== undefined) {
             const childEntry = this.memo.stories.get(childStory);
             if (childEntry) childEntry.blocks = block.content;
@@ -2220,9 +2202,7 @@ class SaveContext {
         const blob = asObject(segment.payload.blob);
         if (blob?.type === 'pageBreak') blocks.push(pageBreakParagraph());
         else {
-          // Opaque authored blocks have no editable yrs sub-story yet. Carry a
-          // same-position base block when it is still structurally compatible;
-          // this keeps block SDTs lossless until they become native.
+          // Carry a same-position base block while block SDTs stay opaque.
           const baseBlock = baseBlocks?.[blocks.length];
           if (blob?.type === 'blockSdt' && baseBlock?.type === 'blockSdt') {
             blocks.push(baseBlock);
