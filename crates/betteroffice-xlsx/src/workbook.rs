@@ -6,9 +6,9 @@ use ooxml_drawingml::chart::ChartSpace;
 use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
-    Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    FormatCode, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
-    Stylesheet, VAlign, Workbook as WorkbookModel,
+    Border, BorderEdge, BorderStyle, Cell, CellFormat, CellRange, CellRef, CellValue, ChartAnchor,
+    Fill, FormatCode, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
+    SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -27,8 +27,9 @@ use xlsx_render::{
 };
 
 use crate::authority::{
-    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, SnapshotAdoption, StagedLocalUpdate,
-    StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure, is_structural_op,
+    AuthorityError, HistoryUpdate, MAX_STATE_VECTOR_ENTRIES, ScopedCells, SnapshotAdoption,
+    StagedLocalUpdate, StagedUpdate, SyncOrigin, WorkbookAuthority, WorkbookStructure,
+    is_structural_op,
 };
 use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
@@ -199,6 +200,11 @@ pub struct Workbook {
     /// replica opens the same bytes, so this is the one anchor baseline they
     /// all agree on however far their own editing has since diverged.
     opened_anchors: BTreeMap<String, ChartAnchor>,
+    /// `(sheet, row, col)` positions whose working-model cell may differ from
+    /// the shared document's: recalculation results and retained caches live
+    /// in the model alone, never syncing back. Scoped diffs against a staged
+    /// model must check them even at untouched positions.
+    divergent_cells: BTreeSet<(u32, u32, u32)>,
 }
 
 impl Workbook {
@@ -360,6 +366,7 @@ impl Workbook {
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
             opened_anchors,
+            divergent_cells: BTreeSet::new(),
         })
     }
 
@@ -406,28 +413,31 @@ impl Workbook {
         {
             self.pending_remote_updates.remove(index);
         }
-        let before = self.model.clone();
         if self.restore_snapshot(update, options)? {
-            return Ok(self.remote_mutation_result(&before, true));
+            return Ok(self.remote_mutation_result(true, None));
         }
         let staged = self.stage_remote_updates(&[update])?;
         if staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
         }
+        let mut diff = ScopedDiff::default();
         if staged.pending {
             self.validate_pending_remote_update(update)?;
             let mut applied = if staged.effective {
-                self.apply_staged_remote_update(staged, options)?.applied
+                self.apply_staged_remote_update(staged, options, &mut diff)?
+                    .applied
             } else {
                 false
             };
             self.pending_remote_updates.push(update.to_vec());
-            applied |= self.resolve_pending_remote_updates(&structure, options)?;
-            return Ok(self.remote_mutation_result(&before, applied));
+            applied |= self.resolve_pending_remote_updates(&structure, options, &mut diff)?;
+            return Ok(self.remote_mutation_result(applied, Some(&diff)));
         }
-        let mut applied = self.apply_staged_remote_update(staged, options)?.applied;
-        applied |= self.resolve_pending_remote_updates(&structure, options)?;
-        Ok(self.remote_mutation_result(&before, applied))
+        let mut applied = self
+            .apply_staged_remote_update(staged, options, &mut diff)?
+            .applied;
+        applied |= self.resolve_pending_remote_updates(&structure, options, &mut diff)?;
+        Ok(self.remote_mutation_result(applied, Some(&diff)))
     }
 
     /// Adopts a persisted snapshot, refreezing the shared structure around it.
@@ -466,6 +476,11 @@ impl Workbook {
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
+        self.divergent_cells = recalc
+            .changed
+            .iter()
+            .map(|&(sheet, cell)| (sheet.0, cell.row, cell.col))
+            .collect();
         self.authority = candidate;
         self.preserved.resize(model.sheets.len());
         self.install_model(model)?;
@@ -537,6 +552,7 @@ impl Workbook {
         &mut self,
         structure: &WorkbookStructure,
         options: CalculationOptions,
+        diff: &mut ScopedDiff,
     ) -> Result<bool> {
         let mut applied = false;
         let mut index = 0;
@@ -548,7 +564,9 @@ impl Workbook {
                 }
                 Ok(staged) if staged.pending => {
                     if staged.effective {
-                        applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                        applied |= self
+                            .apply_staged_remote_update(staged, options, diff)?
+                            .applied;
                         index = 0;
                     } else {
                         index += 1;
@@ -556,7 +574,9 @@ impl Workbook {
                 }
                 Ok(staged) => {
                     self.pending_remote_updates.remove(index);
-                    applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                    applied |= self
+                        .apply_staged_remote_update(staged, options, diff)?
+                        .applied;
                     index = 0;
                 }
                 Err(_) => {
@@ -595,6 +615,7 @@ impl Workbook {
         &mut self,
         staged: StagedUpdate,
         options: CalculationOptions,
+        diff: &mut ScopedDiff,
     ) -> Result<MutationResult> {
         if !staged.effective {
             return Ok(MutationResult::default());
@@ -605,7 +626,17 @@ impl Workbook {
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
-        calculation.changed = changed_cells_between(&self.model, &model);
+        calculation.changed = match scoped_candidates(
+            &staged.scope,
+            &staged.structure.sheet_keys,
+            &recalc.changed,
+            &self.divergent_cells,
+        ) {
+            Some(candidates) => changed_cells_at(&self.model, &model, &candidates),
+            None => changed_cells_between(&self.model, &model),
+        };
+        diff.record(&self.model, &calculation.changed);
+        self.note_recalc_changed(&recalc);
         self.authority
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
@@ -631,13 +662,17 @@ impl Workbook {
         })
     }
 
-    fn remote_mutation_result(&self, before: &WorkbookModel, applied: bool) -> MutationResult {
+    fn remote_mutation_result(&self, applied: bool, diff: Option<&ScopedDiff>) -> MutationResult {
         if !applied {
             return MutationResult::default();
         }
         MutationResult {
             applied: true,
-            changed: changed_cells_between(before, &self.model),
+            changed: match diff {
+                Some(diff) => diff.changed(&self.model),
+                // A snapshot adoption already ran its whole-model diff.
+                None => self.last_calculation.changed.clone(),
+            },
             cycle_cells: self.last_calculation.cycle_cells.clone(),
             limited_cells: self.last_calculation.limited_cells.clone(),
         }
@@ -1325,15 +1360,27 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let active_name = self.active_sheet_name();
-        let before = self.model.clone();
-        self.install_model(history.model)?;
+        let mut model = history.model;
+        let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
+        let changed = match scoped_candidates(
+            &history.scope,
+            &history.structure.sheet_keys,
+            &recalc.changed,
+            &self.divergent_cells,
+        ) {
+            Some(candidates) => changed_cells_at(&self.model, &model, &candidates),
+            None => changed_cells_between(&self.model, &model),
+        };
+        self.note_recalc_changed(&recalc);
+        self.install_model(model)?;
+        self.graph = Some(graph);
+        let result = calculation_result(&recalc);
+        self.last_calculation = result.clone();
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.preserved.forget_shared_strings();
         self.preserved.forget_axes();
         self.proposals.clear();
-        let result = self.rebuild_and_recalculate(options);
-        let changed = changed_cells_between(&before, &self.model);
         self.emit_update(UpdateEvent {
             update: history.update,
             origin: UpdateOrigin::Local,
@@ -1364,7 +1411,7 @@ impl Workbook {
                 apply_proposed_number_format(&mut preview, edit.sheet, edit.cell, format)?;
             }
         }
-        rebuild_and_recalc_all(&mut preview, options.now_serial);
+        let (_, recalc) = rebuild_and_recalc_all(&mut preview, options.now_serial);
 
         let mut edits = Vec::with_capacity(request.edits.len());
         for edit in request.edits {
@@ -1380,7 +1427,7 @@ impl Workbook {
                 new_text: display_text_at(&preview, edit.sheet, edit.cell)?,
             });
         }
-        let ghosts = proposal_ghosts(&self.model, &preview, &edits)?;
+        let ghosts = proposal_ghosts(&self.model, &preview, &edits, &recalc.changed)?;
         let proposal = Proposal {
             id: self.proposals.next_id(),
             agent_id: request.agent_id,
@@ -1472,7 +1519,7 @@ impl Workbook {
             });
         }
         if !force {
-            rebuild_and_recalc_all(&mut preview, options.now_serial);
+            let (_, recalc) = rebuild_and_recalc_all(&mut preview, options.now_serial);
             let mut refreshed = proposal.clone();
             for edit in &mut refreshed.edits {
                 edit.new_text = display_text_at(
@@ -1481,7 +1528,8 @@ impl Workbook {
                     CellRef::new(edit.row, edit.col),
                 )?;
             }
-            refreshed.ghosts = proposal_ghosts(&self.model, &preview, &refreshed.edits)?;
+            refreshed.ghosts =
+                proposal_ghosts(&self.model, &preview, &refreshed.edits, &recalc.changed)?;
             if refreshed.ghosts != proposal.ghosts {
                 let targets = refreshed
                     .edits
@@ -1943,7 +1991,7 @@ impl Workbook {
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
-            let mut model = self.authority.materialize().map_err(authority_error)?;
+            let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
@@ -1984,7 +2032,7 @@ impl Workbook {
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
-            let mut model = self.authority.materialize().map_err(authority_error)?;
+            let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
@@ -2053,9 +2101,21 @@ impl Workbook {
         self.edited_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
+        self.note_recalc_changed(&result);
         let result = calculation_result(&result);
         self.last_calculation = result.clone();
         result
+    }
+
+    /// Recalculated values live in the model alone, so every moved value
+    /// joins the set a scoped diff checks at untouched positions.
+    fn note_recalc_changed(&mut self, result: &RecalcResult) {
+        self.divergent_cells.extend(
+            result
+                .changed
+                .iter()
+                .map(|&(sheet, cell)| (sheet.0, cell.row, cell.col)),
+        );
     }
 
     fn ensure_graph(&mut self) {
@@ -2074,6 +2134,7 @@ impl Workbook {
             .iter()
             .map(|(sheet, cell)| (sheet.0, cell.row, cell.col))
             .collect();
+        self.note_recalc_changed(&result);
         self.last_calculation = calculation_result(&result);
         MutationResult {
             applied,
@@ -2362,6 +2423,106 @@ fn retain_formula_caches(current: &WorkbookModel, projected: &mut WorkbookModel)
             cell.value = value;
             sheet.set_cell(at, cell);
         }
+    }
+}
+
+/// Positions a scoped diff must check, all in sheet-index space: the cells
+/// the shared document wrote, the ones recalculation moved, and the ones
+/// whose model value is known to differ from the document's. `None` — a
+/// write escaped the scope — asks for a whole-model diff.
+fn scoped_candidates(
+    scope: &ScopedCells,
+    sheet_keys: &[String],
+    recalc_changed: &[(SheetId, CellRef)],
+    divergent: &BTreeSet<(u32, u32, u32)>,
+) -> Option<BTreeSet<(u32, u32, u32)>> {
+    let scope = scope.0.as_ref()?;
+    let order: HashMap<&str, u32> = sheet_keys
+        .iter()
+        .enumerate()
+        .map(|(index, key)| (key.as_str(), index as u32))
+        .collect();
+    let mut candidates = BTreeSet::new();
+    for (key, cells) in scope {
+        let Some(&sheet) = order.get(key.as_str()) else {
+            continue;
+        };
+        candidates.extend(cells.iter().map(|&(row, col)| (sheet, row, col)));
+    }
+    candidates.extend(
+        recalc_changed
+            .iter()
+            .map(|&(sheet, cell)| (sheet.0, cell.row, cell.col)),
+    );
+    candidates.extend(divergent.iter().copied());
+    Some(candidates)
+}
+
+/// `changed_cells_between` over just `candidates`: same cells, same order.
+fn changed_cells_at(
+    before: &WorkbookModel,
+    after: &WorkbookModel,
+    candidates: &BTreeSet<(u32, u32, u32)>,
+) -> Vec<CellAddress> {
+    candidates
+        .iter()
+        .filter_map(|&(sheet, row, col)| {
+            let cell = CellRef::new(row, col);
+            let before_cell = before
+                .sheets
+                .get(sheet as usize)
+                .and_then(|sheet| sheet.cell(cell));
+            let after_cell = after
+                .sheets
+                .get(sheet as usize)
+                .and_then(|sheet| sheet.cell(cell));
+            (before_cell != after_cell).then_some(CellAddress {
+                sheet: SheetId(sheet),
+                cell,
+            })
+        })
+        .collect()
+}
+
+/// The first pre-install state of every cell an applied staged update
+/// changed, so a multi-step `apply_update_v1` reports the same net change a
+/// single whole-model diff would — including a cell that changed and
+/// changed back — without retaining the model it replaced.
+#[derive(Default)]
+struct ScopedDiff {
+    originals: BTreeMap<(u32, u32, u32), Option<Cell>>,
+}
+
+impl ScopedDiff {
+    fn record(&mut self, before: &WorkbookModel, changed: &[CellAddress]) {
+        for address in changed {
+            self.originals
+                .entry((address.sheet.0, address.cell.row, address.cell.col))
+                .or_insert_with(|| {
+                    before
+                        .sheets
+                        .get(address.sheet.0 as usize)
+                        .and_then(|sheet| sheet.cell(address.cell))
+                        .cloned()
+                });
+        }
+    }
+
+    fn changed(&self, model: &WorkbookModel) -> Vec<CellAddress> {
+        self.originals
+            .iter()
+            .filter_map(|(&(sheet, row, col), before)| {
+                let cell = CellRef::new(row, col);
+                let now = model
+                    .sheets
+                    .get(sheet as usize)
+                    .and_then(|sheet| sheet.cell(cell));
+                (now != before.as_ref()).then_some(CellAddress {
+                    sheet: SheetId(sheet),
+                    cell,
+                })
+            })
+            .collect()
     }
 }
 
@@ -3261,6 +3422,7 @@ fn proposal_ghosts(
     committed: &WorkbookModel,
     preview: &WorkbookModel,
     edits: &[ProposedEdit],
+    recalc_changed: &[(SheetId, CellRef)],
 ) -> Result<Vec<ProposalGhost>> {
     let direct: BTreeSet<_> = edits
         .iter()
@@ -3283,7 +3445,15 @@ fn proposal_ghosts(
         })
         .collect::<Vec<_>>();
 
-    for address in changed_cells_between(committed, preview) {
+    // The preview departs from the committed model only where an edit wrote
+    // or recalculation moved a value.
+    let mut candidates = direct.clone();
+    candidates.extend(
+        recalc_changed
+            .iter()
+            .map(|&(sheet, cell)| (sheet.0, cell.row, cell.col)),
+    );
+    for address in changed_cells_at(committed, preview, &candidates) {
         let key = (address.sheet.0, address.cell.row, address.cell.col);
         if direct.contains(&key) {
             continue;

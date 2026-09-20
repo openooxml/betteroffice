@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
@@ -17,13 +17,13 @@ use yrs::block::{
 use yrs::encoding::read::{Error as DecodeError, Read};
 use yrs::encoding::write::Write;
 use yrs::sync::time::Clock;
-use yrs::types::{TYPE_REFS_ARRAY, TYPE_REFS_MAP};
+use yrs::types::{DeepObservable, Event, Observable, PathSegment, TYPE_REFS_ARRAY, TYPE_REFS_MAP};
 use yrs::undo::{Options as UndoOptions, StackItem, UndoManager};
 use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::{Encoder, EncoderV1};
 use yrs::{
     Any, Array, ArrayRef, BranchID, Doc, ID, Map, MapPrelim, MapRef, Options, Origin, Out, ReadTxn,
-    StateVector, Transact, TransactionMut, Update, WriteTxn,
+    StateVector, Subscription, Transact, TransactionMut, Update, WriteTxn,
 };
 
 const META: &str = "xlsx";
@@ -329,6 +329,7 @@ pub(crate) struct StagedUpdate {
     pub(crate) effective: bool,
     pub(crate) model: WorkbookModel,
     pub(crate) pending: bool,
+    pub(crate) scope: ScopedCells,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -336,6 +337,7 @@ pub(crate) struct StagedUpdate {
 }
 
 pub(crate) struct StagedLocalUpdate {
+    pub(crate) model: WorkbookModel,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -350,8 +352,130 @@ pub(crate) struct AuthorityCheckpoint {
 
 pub(crate) struct HistoryUpdate {
     pub(crate) model: WorkbookModel,
+    pub(crate) scope: ScopedCells,
     pub(crate) structure: WorkbookStructure,
     pub(crate) update: Vec<u8>,
+}
+
+/// Cell positions a batch of transactions wrote under a sheet's `contents`
+/// or `styles` map, in stable sheet-key space. `None` once a write escapes
+/// what a scoped diff can bound — a replaced nested map, a format-catalog
+/// entry renumbering style indices, a sheet-order move — and the caller
+/// falls back to a full diff.
+pub(crate) struct ScopedCells(pub(crate) Option<BTreeMap<String, BTreeSet<(u32, u32)>>>);
+
+/// Watches the cell-bearing roots of `doc` while it changes: `xlsx:sheets`
+/// deeply, and the format catalog and sheet order shallowly since a write to
+/// either escapes the scope.
+pub(crate) struct CellWatch {
+    state: Arc<Mutex<ScopedCells>>,
+    _subscriptions: Vec<Subscription>,
+}
+
+impl CellWatch {
+    fn on(doc: &Doc) -> Self {
+        let state = Arc::new(Mutex::new(ScopedCells(Some(BTreeMap::new()))));
+        let mut subscriptions = Vec::new();
+        // `get_or_insert_*` over `get_map`: a branch that exists only via
+        // remote-integrated items must be touched locally once or later
+        // applied updates never reach its observers.
+        let sheets = doc.get_or_insert_map(SHEETS);
+        {
+            let state = Arc::clone(&state);
+            subscriptions.push(sheets.observe_deep(move |txn, events| {
+                record_sheet_events(&state, txn, events);
+            }));
+        }
+        let formats = doc.get_or_insert_map(CELL_FORMATS);
+        {
+            let state = Arc::clone(&state);
+            subscriptions.push(formats.observe(move |_, _| {
+                scope_lock(&state).0 = None;
+            }));
+        }
+        let order = doc.get_or_insert_array(SHEET_ORDER);
+        {
+            let state = Arc::clone(&state);
+            subscriptions.push(order.observe(move |_, _| {
+                scope_lock(&state).0 = None;
+            }));
+        }
+        Self {
+            state,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn finish(self) -> ScopedCells {
+        ScopedCells(scope_lock(&self.state).0.take())
+    }
+}
+
+fn scope_lock(state: &Arc<Mutex<ScopedCells>>) -> std::sync::MutexGuard<'_, ScopedCells> {
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn record_sheet_events(
+    state: &Arc<Mutex<ScopedCells>>,
+    txn: &TransactionMut<'_>,
+    events: &yrs::types::Events<'_>,
+) {
+    let mut state = scope_lock(state);
+    let Some(mut touched) = state.0.take() else {
+        return;
+    };
+    for event in events.iter() {
+        if record_sheet_event(&mut touched, txn, event).is_err() {
+            return;
+        }
+    }
+    state.0 = Some(touched);
+}
+
+fn record_sheet_event(
+    touched: &mut BTreeMap<String, BTreeSet<(u32, u32)>>,
+    txn: &TransactionMut<'_>,
+    event: &Event,
+) -> Result<(), ()> {
+    let Event::Map(event) = event else {
+        return Err(());
+    };
+    let path = event.path();
+    match path.len() {
+        // The sheet map itself: a sheet arrived, left, or was replaced.
+        0 => Err(()),
+        // A sheet entry moved: only a replaced `contents`/`styles` map
+        // escapes the scope; names, merges, widths and the other scalars
+        // cannot move a cell.
+        1 => {
+            let swaps_cell_map = event
+                .keys(txn)
+                .keys()
+                .any(|key| matches!(key.as_ref(), CONTENTS | STYLES));
+            if swaps_cell_map { Err(()) } else { Ok(()) }
+        }
+        2 => {
+            let (Some(PathSegment::Key(sheet)), Some(PathSegment::Key(section))) =
+                (path.front(), path.get(1))
+            else {
+                return Err(());
+            };
+            if !matches!(section.as_ref(), CONTENTS | STYLES) {
+                return Ok(());
+            }
+            for key in event.keys(txn).keys() {
+                let at = parse_cell_key(key).map_err(|_| ())?;
+                touched
+                    .entry(sheet.to_string())
+                    .or_default()
+                    .insert((at.row, at.col));
+            }
+            Ok(())
+        }
+        _ => Err(()),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -480,6 +604,19 @@ impl WorkbookAuthority {
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
         let mut model = self.materialize()?;
+        // Style baselines for `sync_model` are read against the pre-batch
+        // model, matching the state a materialize here would recompute.
+        let mut pre_styles = HashMap::new();
+        for op in ops {
+            if let Op::SetCell { sheet, at, .. } = op {
+                pre_styles.entry((*sheet, *at)).or_insert_with(|| {
+                    model
+                        .sheet(*sheet)
+                        .and_then(|sheet| sheet.cell(*at))
+                        .and_then(|cell| cell.style)
+                });
+            }
+        }
         for op in ops {
             xlsx_ops::apply(&mut model, op).map_err(|error| {
                 AuthorityError::InvalidState(format!(
@@ -488,7 +625,7 @@ impl WorkbookAuthority {
             })?;
         }
         self.base.defined_names = model.defined_names.clone();
-        self.sync_model(&model, ops, origin)
+        self.sync_model(&model, ops, origin, &pre_styles)
             .map_err(AuthorityError::InvalidState)?;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
@@ -614,6 +751,7 @@ impl WorkbookAuthority {
         let before = self.encode_state_as_update_v1();
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, &before).map_err(AuthorityError::InvalidState)?;
+        let watch = CellWatch::on(&staged_doc);
         staged_doc
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
@@ -636,55 +774,83 @@ impl WorkbookAuthority {
         {
             return Err(AuthorityError::InvalidState(error));
         }
+        let scope = watch.finish();
         let after = staged.encode_state_as_update_v1();
         let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
         let after_vector = staged.doc.transact().state_vector();
         let state_vector_entries = after_vector.len();
         if pending {
-            let (current_model, current_structure) = self
-                .strict_materialize()
-                .map_err(AuthorityError::InvalidState)?;
-            if integrated.as_slice() != Update::EMPTY_V1
-                && let Ok((model, structure)) = staged.strict_materialize()
-                && (after_vector != before_vector
-                    || model != current_model
-                    || structure != current_structure)
-            {
-                return Ok(StagedUpdate {
-                    commit_update: integrated.clone(),
-                    effective: true,
-                    model,
-                    pending: true,
-                    state_bytes: after.len(),
-                    state_vector_entries,
-                    structure,
-                    update: integrated,
-                });
+            let staged_state = (integrated.as_slice() != Update::EMPTY_V1)
+                .then(|| staged.strict_materialize().ok())
+                .flatten();
+            // A moved state vector already settles `effective`; the current
+            // materialize only decides the rare update that leaves it alone.
+            match staged_state {
+                Some((model, structure)) if after_vector != before_vector => {
+                    return Ok(StagedUpdate {
+                        commit_update: integrated.clone(),
+                        effective: true,
+                        model,
+                        pending: true,
+                        scope,
+                        state_bytes: after.len(),
+                        state_vector_entries,
+                        structure,
+                        update: integrated,
+                    });
+                }
+                staged_state => {
+                    let (current_model, current_structure) = self
+                        .strict_materialize()
+                        .map_err(AuthorityError::InvalidState)?;
+                    if let Some((model, structure)) = staged_state
+                        && (model != current_model || structure != current_structure)
+                    {
+                        return Ok(StagedUpdate {
+                            commit_update: integrated.clone(),
+                            effective: true,
+                            model,
+                            pending: true,
+                            scope,
+                            state_bytes: after.len(),
+                            state_vector_entries,
+                            structure,
+                            update: integrated,
+                        });
+                    }
+                    return Ok(StagedUpdate {
+                        commit_update: Update::EMPTY_V1.to_vec(),
+                        effective: false,
+                        model: current_model,
+                        pending: true,
+                        scope,
+                        state_bytes: before.len(),
+                        state_vector_entries: self.state_vector_entries(),
+                        structure: current_structure,
+                        update: Update::EMPTY_V1.to_vec(),
+                    });
+                }
             }
-            return Ok(StagedUpdate {
-                commit_update: Update::EMPTY_V1.to_vec(),
-                effective: false,
-                model: current_model,
-                pending: true,
-                state_bytes: before.len(),
-                state_vector_entries: self.state_vector_entries(),
-                structure: current_structure,
-                update: Update::EMPTY_V1.to_vec(),
-            });
         }
         let (model, structure) = staged
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
-        let (current_model, current_structure) = self
-            .strict_materialize()
-            .map_err(AuthorityError::InvalidState)?;
+        // A moved state vector already settles `effective`; the current
+        // materialize only decides the rare update that leaves it untouched.
+        let effective = if after_vector != before_vector {
+            true
+        } else {
+            let (current_model, current_structure) = self
+                .strict_materialize()
+                .map_err(AuthorityError::InvalidState)?;
+            model != current_model || structure != current_structure
+        };
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
-            effective: after_vector != before_vector
-                || model != current_model
-                || structure != current_structure,
+            effective,
             model,
             pending,
+            scope,
             state_bytes: after.len(),
             state_vector_entries,
             structure,
@@ -713,8 +879,11 @@ impl WorkbookAuthority {
         let update = staged.doc.transact().encode_diff_v1(&state_vector);
         let state = staged.encode_state_as_update_v1();
         let state_vector_entries = staged.doc.transact().state_vector().len();
-        let structure = staged.structure()?;
+        let (model, structure) = staged
+            .materialize_internal(false)
+            .map_err(AuthorityError::InvalidState)?;
         Ok(StagedLocalUpdate {
+            model,
             state_bytes: state.len(),
             state_vector_entries,
             structure,
@@ -814,6 +983,7 @@ impl WorkbookAuthority {
         let mut undo =
             build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
                 .map_err(AuthorityError::InvalidState)?;
+        let watch = CellWatch::on(&self.doc);
         let applied = if redo {
             undo.redo_blocking()
         } else {
@@ -825,12 +995,14 @@ impl WorkbookAuthority {
         if !applied {
             return Ok(None);
         }
+        let scope = watch.finish();
         let (model, structure) = self
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok(Some(HistoryUpdate {
             model,
+            scope,
             structure,
             update,
         }))
@@ -1133,11 +1305,8 @@ impl WorkbookAuthority {
         model: &WorkbookModel,
         ops: &[Op],
         origin: SyncOrigin,
+        pre_styles: &HashMap<(SheetId, CellRef), Option<u32>>,
     ) -> Result<(), String> {
-        let authored_model = self.materialize().map_err(|error| match error {
-            AuthorityError::InvalidState(error) => error,
-            _ => "cannot materialize authored workbook".to_string(),
-        })?;
         let current_keys = self.current_sheet_keys()?;
         let (keys, history) =
             self.plan_sheet_keys(&current_keys, ops, model.sheets.len(), origin)?;
@@ -1157,10 +1326,7 @@ impl WorkbookAuthority {
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
                     (Op::SetCell { sheet, at, cell }, Some(key)) => {
-                        let current_style = authored_model
-                            .sheet(*sheet)
-                            .and_then(|sheet| sheet.cell(*at))
-                            .and_then(|cell| cell.style);
+                        let current_style = pre_styles.get(&(*sheet, *at)).copied().flatten();
                         if cell.style != current_style {
                             formatted_cells.insert((key.clone(), *at));
                         }
