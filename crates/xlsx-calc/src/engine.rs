@@ -128,9 +128,6 @@ fn run_recalc(
 /// kahn's sort over the sub-graph induced by `recompute`: returns the evaluable
 /// order and, separately, the cells caught in (or only reachable through) a cycle.
 fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>) {
-    // index the cells to re-evaluate once: each stored edge then finds the
-    // nodes inside its range directly, instead of every node scanning every
-    // edge on its sheet.
     let mut points: HashMap<SheetId, BTreeMap<RowId, Vec<ColId>>> = HashMap::new();
     for &(sheet, row, col) in recompute {
         points
