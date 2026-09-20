@@ -7,14 +7,16 @@ pub mod geometry;
 pub mod hit;
 pub mod region;
 
+use hashbrown::HashMap;
 pub use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::ChartSpace;
 use std::ops::Range;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
-use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet};
+use xlsx_model::styles::{BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{
@@ -79,7 +81,7 @@ pub struct GhostEdit {
 
 struct GhostFont {
     size: f32,
-    family: Option<String>,
+    family: Option<Arc<str>>,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -347,7 +349,7 @@ where
         y: 0.0,
         w: viewport.width,
         h: viewport.height,
-        color: BACKGROUND_COLOR.to_string(),
+        color: BACKGROUND_COLOR.into(),
         clip: None,
     });
 
@@ -364,7 +366,11 @@ where
 
     let styles = &wb.styles;
     let theme = &styles.theme;
-    let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
+    let hyperlink_color: Arc<str> = theme.slot(10).unwrap_or(HYPERLINK_COLOR).into();
+    let text_color: Arc<str> = TEXT_COLOR.into();
+    let gridline_color: Arc<str> = GRIDLINE_COLOR.into();
+    let pane_divider_color: Arc<str> = PANE_DIVIDER_COLOR.into();
+    let print_font_family: Option<Arc<str>> = print.map(|(m, _)| m.font_family.as_str().into());
     let geom = print.map_or_else(
         || GridGeometry::new(sheet_ref),
         |(metrics, _)| GridGeometry::for_print(sheet_ref, metrics),
@@ -422,7 +428,9 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
-    let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
+    let merges = MergeIndex::new(sheet_ref, &rows, &cols);
+    let mut fx = FrameStyles::new(styles);
+    let mut anchors = visible_anchors(sheet_ref, &rows, &cols, &merges);
     if print.is_some() {
         for merge in &sheet_ref.merges {
             if rows.intersects(merge.start.row, merge.end.row)
@@ -461,11 +469,10 @@ where
             y2: bottom + grid_offset,
             width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
             color: if print.is_some() {
-                TEXT_COLOR
+                text_color.clone()
             } else {
-                GRIDLINE_COLOR
-            }
-            .to_string(),
+                gridline_color.clone()
+            },
             style: None,
             clip: None,
         });
@@ -478,11 +485,10 @@ where
             y2: y + grid_offset,
             width: print.map_or(GRIDLINE_WIDTH, |(m, _)| 96.0 / m.dpi),
             color: if print.is_some() {
-                TEXT_COLOR
+                text_color.clone()
             } else {
-                GRIDLINE_COLOR
-            }
-            .to_string(),
+                gridline_color.clone()
+            },
             style: None,
             clip: None,
         });
@@ -493,14 +499,14 @@ where
             commands.extend(grid_commands.iter().cloned());
         }
         for merge in &sheet_ref.merges {
-            if let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, merge.start) {
+            if let Some(cell_box) = cell_box(&geom, &rows, &cols, &merges, merge.start) {
                 let inset = 96.0 / metrics.dpi / 2.0;
                 commands.push(DrawCmd::FillRect {
                     x: cell_box.x + inset,
                     y: cell_box.y + inset,
                     w: (cell_box.w - 2.0 * inset).max(0.0),
                     h: (cell_box.h - 2.0 * inset).max(0.0),
-                    color: BACKGROUND_COLOR.to_string(),
+                    color: BACKGROUND_COLOR.into(),
                     clip: Some(cell_box.clip),
                 });
             }
@@ -508,14 +514,10 @@ where
     }
 
     for &(at, cell) in &anchors {
-        let Some(style) = cell.style else { continue };
-        let Some(Fill::Solid(color)) = styles.fill_for(style) else {
+        let Some(hex) = fx.xf(cell.style).fill.clone() else {
             continue;
         };
-        let Some(hex) = styles.resolve_color(color) else {
-            continue;
-        };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merges, at) else {
             continue;
         };
         let clip = cell_box.clip;
@@ -557,7 +559,7 @@ where
                 x2,
                 y2,
                 width,
-                color: TEXT_COLOR.to_string(),
+                color: text_color.clone(),
                 style: None,
                 clip: None,
             });
@@ -565,8 +567,8 @@ where
     }
 
     for &(at, cell) in &anchors {
-        let Some(style) = cell.style else { continue };
-        let Some(border) = styles.border_for(style) else {
+        let xf = fx.xf(cell.style).clone();
+        let Some(border) = &xf.border else {
             continue;
         };
         emit_borders(
@@ -575,7 +577,8 @@ where
             &rows,
             &cols,
             sheet_ref,
-            styles,
+            &mut fx,
+            &merges,
             at,
             border,
         );
@@ -586,34 +589,34 @@ where
             continue;
         }
         let hyperlink = sheet_ref.hyperlink_at(at);
-        let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
-            hyperlink
-                .filter(|link| link.range.start == at)
-                .and_then(|link| link.display.clone())
-                .filter(|display| !display.is_empty())
-                .map(|display| (display, hyperlink_color.to_string()))
-        }) else {
+        let xf = &**fx.xf(cell.style);
+        let Some((text, color)) =
+            cell_display_text(xf, wb.date_system, cell, &text_color).or_else(|| {
+                hyperlink
+                    .filter(|link| link.range.start == at)
+                    .and_then(|link| link.display.clone())
+                    .filter(|display| !display.is_empty())
+                    .map(|display| (display.into(), hyperlink_color.clone()))
+            })
+        else {
             continue;
         };
         let color = if hyperlink.is_some() {
-            hyperlink_color.to_string()
+            hyperlink_color.clone()
         } else {
             color
         };
 
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merges, at) else {
             continue;
         };
-        let font = cell.style.and_then(|s| styles.font_for(s));
+        let font = xf.font.as_ref();
         let size = font
             .and_then(|f| f.size_pt)
             .map(|p| p as f32)
             .unwrap_or_else(|| print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt));
-        let align = resolve_align(styles, cell);
-        let valign = cell
-            .style
-            .and_then(|s| styles.alignment_for(s))
-            .and_then(|a| a.v);
+        let align = resolve_align(xf.h, &cell.value);
+        let valign = xf.v;
 
         let tx = match align {
             Align::Left => cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
@@ -639,8 +642,8 @@ where
             highlight: None,
             dashed_underline: false,
             font_family: font
-                .and_then(|f| f.name.clone())
-                .or_else(|| print.map(|(m, _)| m.font_family.clone())),
+                .and_then(|f| f.family.clone())
+                .or_else(|| print_font_family.clone()),
             ghost: false,
             chart: false,
         });
@@ -656,16 +659,16 @@ where
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merges, at) else {
             continue;
         };
         let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
         commands.push(DrawCmd::Text {
             x: cell_box.x + print.map_or(TEXT_PAD_PX, |(m, _)| 3.0 * 96.0 / m.dpi),
             y: text_baseline(cell_box, size, None, print.map(|(m, _)| m)),
-            text: text.clone(),
+            text: text.as_str().into(),
             font_size: size,
-            color: hyperlink_color.to_string(),
+            color: hyperlink_color.clone(),
             clip: cell_box.clip,
             align: Align::Left,
             bold: false,
@@ -674,7 +677,7 @@ where
             strike: false,
             highlight: None,
             dashed_underline: false,
-            font_family: print.map(|(m, _)| m.font_family.clone()),
+            font_family: print_font_family.clone(),
             ghost: false,
             chart: false,
         });
@@ -686,21 +689,22 @@ where
         }
         let at = CellRef::new(ghost.row, ghost.col);
         let cell = sheet_ref.cell(at);
-        let font = cell.and_then(|c| c.style).and_then(|s| styles.font_for(s));
+        let xf = fx.xf(cell.and_then(|c| c.style)).clone();
+        let font = xf.font.as_ref();
         let font = GhostFont {
             size: font
                 .and_then(|font| font.size_pt)
                 .map(|size| size as f32)
                 .unwrap_or(FONT_SIZE_PT),
-            family: font.and_then(|font| font.name.clone()),
+            family: font.and_then(|font| font.family.clone()),
             bold: font.is_some_and(|font| font.bold),
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let Some(bx) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(bx) = cell_box(&geom, &rows, &cols, &merges, at) else {
             continue;
         };
-        let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
+        let align = resolve_align(xf.h, &ghost.alignment_value);
         emit_ghost(&mut commands, ghost, bx, font, align);
     }
 
@@ -723,7 +727,7 @@ where
             x2: x,
             y2: viewport.height,
             width: PANE_DIVIDER_WIDTH,
-            color: PANE_DIVIDER_COLOR.to_string(),
+            color: pane_divider_color.clone(),
             style: None,
             clip: None,
         });
@@ -735,7 +739,7 @@ where
             x2: viewport.width,
             y2: y,
             width: PANE_DIVIDER_WIDTH,
-            color: PANE_DIVIDER_COLOR.to_string(),
+            color: pane_divider_color.clone(),
             style: None,
             clip: None,
         });
@@ -782,23 +786,20 @@ fn emit_ghost(
         commands.push(DrawCmd::Text {
             x,
             y,
-            text,
+            text: text.into(),
             font_size: size,
-            color: color.to_string(),
+            color: color.into(),
             clip,
             align,
             bold: font.bold,
             italic: font.italic,
             underline: font.underline,
             strike,
-            highlight: Some(
-                if preview {
-                    GHOST_INS_HIGHLIGHT
-                } else {
-                    GHOST_DEL_HIGHLIGHT
-                }
-                .to_string(),
-            ),
+            highlight: Some(if preview {
+                GHOST_INS_HIGHLIGHT.into()
+            } else {
+                GHOST_DEL_HIGHLIGHT.into()
+            }),
             dashed_underline: preview,
             font_family: font.family.clone(),
             ghost: preview,
@@ -909,6 +910,7 @@ fn visible_anchors<'a>(
     sheet: &'a Sheet,
     rows: &AxisLayout,
     cols: &AxisLayout,
+    merges: &MergeIndex,
 ) -> Vec<(CellRef, &'a xlsx_model::Cell)> {
     let mut cells = Vec::new();
     for row_range in &rows.ranges {
@@ -918,11 +920,61 @@ fn visible_anchors<'a>(
     }
     cells.sort_unstable_by_key(|(at, _)| (at.row, at.col));
     cells.dedup_by_key(|(at, _)| (at.row, at.col));
-    cells.retain(|(at, _)| match covering_merge(&sheet.merges, *at) {
+    cells.retain(|(at, _)| match merges.covering(*at) {
         Some(merge) => merge.start == *at,
         None => true,
     });
     cells
+}
+
+/// per-frame point -> merge index covering every cell in the visible ranges
+/// (the only cells queried per frame); out-of-range lookups fall back to the
+/// same linear scan callers used before.
+struct MergeIndex<'a> {
+    merges: &'a [CellRange],
+    covers: HashMap<(u32, u32), CellRange>,
+    rows: &'a AxisLayout,
+    cols: &'a AxisLayout,
+}
+
+impl<'a> MergeIndex<'a> {
+    fn new(sheet: &'a Sheet, rows: &'a AxisLayout, cols: &'a AxisLayout) -> Self {
+        let mut covers = HashMap::new();
+        for merge in &sheet.merges {
+            for row_range in &rows.ranges {
+                for col_range in &cols.ranges {
+                    let row_lo = merge.start.row.max(row_range.start);
+                    let row_hi = merge.end.row.saturating_add(1).min(row_range.end);
+                    let col_lo = merge.start.col.max(col_range.start);
+                    let col_hi = merge.end.col.saturating_add(1).min(col_range.end);
+                    for row in row_lo..row_hi {
+                        for col in col_lo..col_hi {
+                            covers.entry((row, col)).or_insert(*merge);
+                        }
+                    }
+                }
+            }
+        }
+        MergeIndex {
+            merges: &sheet.merges,
+            covers,
+            rows,
+            cols,
+        }
+    }
+
+    /// the merge covering `at`; a miss inside the indexed ranges means the
+    /// cell is unmerged, so only out-of-range cells need the linear scan.
+    fn covering(&self, at: CellRef) -> Option<CellRange> {
+        if self.merges.is_empty() {
+            return None;
+        }
+        match self.covers.get(&(at.row, at.col)) {
+            Some(merge) => Some(*merge),
+            None if self.rows.contains(at.row) && self.cols.contains(at.col) => None,
+            None => covering_merge(self.merges, at),
+        }
+    }
 }
 
 /// the merge (if any) that covers a cell.
@@ -936,10 +988,10 @@ fn cell_box(
     geom: &GridGeometry,
     rows: &AxisLayout,
     cols: &AxisLayout,
-    sheet: &Sheet,
+    merges: &MergeIndex,
     at: CellRef,
 ) -> Option<CellBox> {
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(merge) => (merge.end.col, merge.end.row),
         None => (at.col, at.row),
     };
@@ -959,30 +1011,170 @@ fn cell_box(
     })
 }
 
+/// everything the frame resolves once per xf id instead of once per cell.
+struct ResolvedXf {
+    format_code: Arc<str>,
+    font: Option<ResolvedFont>,
+    /// resolved `#rrggbb` fill, `None` for non-solid/unresolvable fills.
+    fill: Option<Arc<str>>,
+    border: Option<ResolvedBorder>,
+    h: Option<HAlign>,
+    v: Option<VAlign>,
+}
+
+struct ResolvedFont {
+    size_pt: Option<f64>,
+    family: Option<Arc<str>>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+    color: Option<Arc<str>>,
+}
+
+struct ResolvedBorder {
+    top: Option<ResolvedBorderEdge>,
+    left: Option<ResolvedBorderEdge>,
+    bottom: Option<ResolvedBorderEdge>,
+    right: Option<ResolvedBorderEdge>,
+}
+
+struct ResolvedBorderEdge {
+    width: f32,
+    style: Option<Arc<str>>,
+    color: Arc<str>,
+}
+
+/// per-frame xf cache: the stylesheet is immutable for the frame's duration,
+/// so each style id resolves exactly once. xf ids are dense, so a vec index
+/// beats hashing.
+struct FrameStyles<'a> {
+    styles: &'a Stylesheet,
+    xfs: Vec<Option<Arc<ResolvedXf>>>,
+    none: Option<Arc<ResolvedXf>>,
+}
+
+impl<'a> FrameStyles<'a> {
+    fn new(styles: &'a Stylesheet) -> Self {
+        FrameStyles {
+            styles,
+            xfs: Vec::new(),
+            none: None,
+        }
+    }
+
+    fn xf(&mut self, style: Option<u32>) -> &Arc<ResolvedXf> {
+        match style {
+            Some(style) => {
+                let index = style as usize;
+                if index >= self.xfs.len() {
+                    self.xfs.resize_with(index + 1, || None);
+                }
+                if self.xfs[index].is_none() {
+                    let resolved = self.resolve(Some(style));
+                    self.xfs[index] = Some(Arc::new(resolved));
+                }
+                self.xfs[index].as_ref().unwrap()
+            }
+            None => {
+                if self.none.is_none() {
+                    let resolved = self.resolve(None);
+                    self.none = Some(Arc::new(resolved));
+                }
+                self.none.as_ref().unwrap()
+            }
+        }
+    }
+
+    fn resolve(&self, style: Option<u32>) -> ResolvedXf {
+        let format_code = match style.map(|s| self.styles.format_code_for(s)) {
+            Some(FormatCode::Custom(code)) => Arc::from(code),
+            Some(FormatCode::Builtin(id)) => {
+                Arc::from(builtin_format_code(id).unwrap_or("General"))
+            }
+            None => Arc::from("General"),
+        };
+        let font = style
+            .and_then(|s| self.styles.font_for(s))
+            .map(|font| ResolvedFont {
+                size_pt: font.size_pt,
+                family: font.name.as_deref().map(Arc::from),
+                bold: font.bold,
+                italic: font.italic,
+                underline: font.underline,
+                strike: font.strike,
+                color: font
+                    .color
+                    .as_ref()
+                    .and_then(|c| self.styles.resolve_color(c))
+                    .map(Arc::from),
+            });
+        let fill = style
+            .and_then(|s| self.styles.fill_for(s))
+            .and_then(|fill| match fill {
+                Fill::Solid(color) => self.styles.resolve_color(color).map(Arc::from),
+                _ => None,
+            });
+        let border = style
+            .and_then(|s| self.styles.border_for(s))
+            .map(|border| ResolvedBorder {
+                top: border.top.as_ref().map(|edge| self.resolve_edge(edge)),
+                left: border.left.as_ref().map(|edge| self.resolve_edge(edge)),
+                bottom: border.bottom.as_ref().map(|edge| self.resolve_edge(edge)),
+                right: border.right.as_ref().map(|edge| self.resolve_edge(edge)),
+            });
+        let (h, v) = style
+            .and_then(|s| self.styles.alignment_for(s))
+            .map_or((None, None), |a| (a.h, a.v));
+        ResolvedXf {
+            format_code,
+            font,
+            fill,
+            border,
+            h,
+            v,
+        }
+    }
+
+    fn resolve_edge(&self, edge: &BorderEdge) -> ResolvedBorderEdge {
+        let (width, style) = border_stroke(edge.style);
+        ResolvedBorderEdge {
+            width,
+            style: style.map(Arc::from),
+            color: edge
+                .color
+                .as_ref()
+                .and_then(|c| self.styles.resolve_color(c))
+                .map_or_else(|| Arc::from(BORDER_COLOR), Arc::from),
+        }
+    }
+}
+
 /// display string and resolved font color for a cell, or `None` when it renders
 /// nothing. a `[Red]`-style number-format color overrides the font color.
 fn cell_display_text(
-    styles: &Stylesheet,
+    xf: &ResolvedXf,
     date_system: xlsx_model::DateSystem,
     cell: &xlsx_model::Cell,
-) -> Option<(String, String)> {
+    default_color: &Arc<str>,
+) -> Option<(Arc<str>, Arc<str>)> {
     if matches!(cell.value, CellValue::Empty) {
         return None;
     }
-    let code = format_code_for_cell(styles, cell);
-    let formatted = format_value(&cell.value, &code, date_system);
+    let formatted = format_value(&cell.value, &xf.format_code, date_system);
     if formatted.text.is_empty() {
         return None;
     }
-    let font = cell.style.and_then(|s| styles.font_for(s));
-    let color = formatted
-        .color
-        .or_else(|| {
-            font.and_then(|f| f.color.as_ref())
-                .and_then(|c| styles.resolve_color(c))
-        })
-        .unwrap_or_else(|| TEXT_COLOR.to_string());
-    Some((formatted.text, color))
+    let color = formatted.color.map_or_else(
+        || {
+            xf.font
+                .as_ref()
+                .and_then(|f| f.color.clone())
+                .unwrap_or_else(|| default_color.clone())
+        },
+        Arc::from,
+    );
+    Some((formatted.text.into(), color))
 }
 
 /// the number-format code a cell's xf resolves to; general when unset or when
@@ -1011,24 +1203,12 @@ pub fn display_text(
 
 /// horizontal anchor for a cell: an explicit xf alignment wins, otherwise the
 /// value type decides (numbers right, booleans center, text/errors left).
-fn resolve_align(styles: &Stylesheet, cell: &xlsx_model::Cell) -> Align {
-    resolve_align_with_value(styles, Some(cell), &cell.value)
-}
-
-fn resolve_align_with_value(
-    styles: &Stylesheet,
-    cell: Option<&xlsx_model::Cell>,
-    value: &CellValue,
-) -> Align {
+fn resolve_align(h: Option<HAlign>, value: &CellValue) -> Align {
     let type_default = match value {
         CellValue::Number { .. } => Align::Right,
         CellValue::Bool { .. } => Align::Center,
         _ => Align::Left,
     };
-    let h = cell
-        .and_then(|cell| cell.style)
-        .and_then(|s| styles.alignment_for(s))
-        .and_then(|a| a.h);
     match h {
         Some(HAlign::Left) | Some(HAlign::Fill) | Some(HAlign::Justify) => Align::Left,
         Some(HAlign::Right) => Align::Right,
@@ -1081,18 +1261,19 @@ fn emit_borders(
     rows: &AxisLayout,
     cols: &AxisLayout,
     sheet: &Sheet,
-    styles: &Stylesheet,
+    fx: &mut FrameStyles,
+    merges: &MergeIndex,
     at: CellRef,
-    border: &Border,
+    border: &ResolvedBorder,
 ) {
-    let Some(cell_box) = cell_box(geom, rows, cols, sheet, at) else {
+    let Some(cell_box) = cell_box(geom, rows, cols, merges, at) else {
         return;
     };
     let (x, y) = (cell_box.x, cell_box.y);
     let (x2, y2) = (x + cell_box.w, y + cell_box.h);
     let clip = cell_box.clip;
     let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(m) => (m.end.col, m.end.row),
         None => (at.col, at.row),
     };
@@ -1101,83 +1282,69 @@ fn emit_borders(
         && y >= clip.y
         && y <= clip_y2
     {
-        commands.push(border_line(clip.x, y, clip_x2, y, edge, styles));
+        commands.push(border_line(clip.x, y, clip_x2, y, edge));
     }
     if let Some(edge) = &border.left
         && x >= clip.x
         && x <= clip_x2
     {
-        commands.push(border_line(x, clip.y, x, clip_y2, edge, styles));
+        commands.push(border_line(x, clip.y, x, clip_y2, edge));
     }
     if let Some(edge) = &border.bottom
         && y2 >= clip.y
         && y2 <= clip_y2
-        && !neighbor_edge(sheet, styles, end_row + 1, at.col, |b| b.top.is_some())
+        && !neighbor_edge(sheet, fx, end_row + 1, at.col, |b| b.top.is_some())
     {
-        commands.push(border_line(clip.x, y2, clip_x2, y2, edge, styles));
+        commands.push(border_line(clip.x, y2, clip_x2, y2, edge));
     }
     if let Some(edge) = &border.right
         && x2 >= clip.x
         && x2 <= clip_x2
-        && !neighbor_edge(sheet, styles, at.row, end_col + 1, |b| b.left.is_some())
+        && !neighbor_edge(sheet, fx, at.row, end_col + 1, |b| b.left.is_some())
     {
-        commands.push(border_line(x2, clip.y, x2, clip_y2, edge, styles));
+        commands.push(border_line(x2, clip.y, x2, clip_y2, edge));
     }
 }
 
 /// true when the cell at `(row, col)` has a border satisfying `pick`.
 fn neighbor_edge(
     sheet: &Sheet,
-    styles: &Stylesheet,
+    fx: &mut FrameStyles,
     row: u32,
     col: u32,
-    pick: impl Fn(&Border) -> bool,
+    pick: impl Fn(&ResolvedBorder) -> bool,
 ) -> bool {
-    sheet
-        .cell(CellRef::new(row, col))
-        .and_then(|c| c.style)
-        .and_then(|s| styles.border_for(s))
-        .is_some_and(pick)
+    let Some(cell) = sheet.cell(CellRef::new(row, col)) else {
+        return false;
+    };
+    fx.xf(cell.style).border.as_ref().is_some_and(pick)
 }
 
-/// one border edge as a `Line`, mapping the weight to a stroke width and dash
-/// style; an unset edge color resolves to black, matching excel's automatic color.
-fn border_line(
-    x1: f32,
-    y1: f32,
-    x2: f32,
-    y2: f32,
-    edge: &BorderEdge,
-    styles: &Stylesheet,
-) -> DrawCmd {
-    let (width, style) = border_stroke(edge.style);
-    let color = edge
-        .color
-        .as_ref()
-        .and_then(|c| styles.resolve_color(c))
-        .unwrap_or_else(|| BORDER_COLOR.to_string());
+/// one resolved border edge as a `Line`; an unset edge color resolves to
+/// black, matching excel's automatic color.
+fn border_line(x1: f32, y1: f32, x2: f32, y2: f32, edge: &ResolvedBorderEdge) -> DrawCmd {
     DrawCmd::Line {
         x1,
         y1,
         x2,
         y2,
-        width,
-        color,
-        style,
+        width: edge.width,
+        color: edge.color.clone(),
+        style: edge.style.clone(),
         clip: None,
     }
 }
 
 /// map a border weight to a `(stroke width, dash style)`.
-fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
+fn border_stroke(style: BorderStyle) -> (f32, Option<&'static str>) {
     match style {
-        BorderStyle::Hair => (1.0, Some("dotted".to_string())),
+        BorderStyle::Hair => (1.0, Some("dotted")),
         BorderStyle::Thin => (1.0, None),
         BorderStyle::Medium => (2.0, None),
         BorderStyle::Thick => (3.0, None),
-        BorderStyle::Dashed => (1.0, Some("dashed".to_string())),
-        BorderStyle::Dotted => (1.0, Some("dotted".to_string())),
-        BorderStyle::Double => (1.0, Some("double".to_string())),
+        BorderStyle::Dashed => (1.0, Some("dashed")),
+        BorderStyle::Dotted => (1.0, Some("dotted")),
+        BorderStyle::Double => (1.0, Some("double")),
     }
 }
 
@@ -1242,7 +1409,7 @@ mod tests {
         let long_text = texts
             .iter()
             .find_map(|c| match c {
-                DrawCmd::Text { text, clip, .. } if text == long => Some(clip),
+                DrawCmd::Text { text, clip, .. } if &**text == long => Some(clip),
                 _ => None,
             })
             .unwrap();
@@ -1296,7 +1463,7 @@ mod tests {
                     color,
                     underline,
                     ..
-                } => Some((text.as_str(), color.as_str(), *underline)),
+                } => Some((&**text, &**color, *underline)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1368,7 +1535,7 @@ mod tests {
             .commands
             .iter()
             .filter_map(|command| match command {
-                DrawCmd::Text { text, clip, .. } => Some((text.as_str(), *clip)),
+                DrawCmd::Text { text, clip, .. } => Some((&**text, *clip)),
                 _ => None,
             })
             .collect::<Vec<_>>();
@@ -1400,13 +1567,13 @@ mod tests {
             command,
             DrawCmd::Line { x1, x2, width, color, .. }
                 if *x1 == dc && *x2 == dc && *width == PANE_DIVIDER_WIDTH
-                    && color == PANE_DIVIDER_COLOR
+                    && &**color == PANE_DIVIDER_COLOR
         )));
         assert!(dl.commands.iter().any(|command| matches!(
             command,
             DrawCmd::Line { y1, y2, width, color, .. }
                 if *y1 == dr && *y2 == dr && *width == PANE_DIVIDER_WIDTH
-                    && color == PANE_DIVIDER_COLOR
+                    && &**color == PANE_DIVIDER_COLOR
         )));
     }
 
@@ -1448,7 +1615,7 @@ mod tests {
                     strike,
                     align,
                     ..
-                } => Some((text.as_str(), color.as_str(), *strike, *align)),
+                } => Some((&**text, &**color, *strike, *align)),
                 _ => None,
             })
             .collect()
@@ -1775,7 +1942,7 @@ mod tests {
             })
             .collect();
         assert_eq!(texts.len(), 1);
-        assert_eq!(texts[0].0, "merged");
+        assert_eq!(&*texts[0].0, "merged");
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert!((texts[0].1.w - dc * 2.0).abs() < 0.01);
     }

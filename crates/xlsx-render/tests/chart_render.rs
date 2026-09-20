@@ -219,7 +219,7 @@ fn charts_clip_to_the_body_and_precede_pane_dividers() {
                     text,
                     chart: false,
                     ..
-                } if text == "under chart"
+                } if &**text == "under chart"
             )
         })
         .unwrap();
@@ -278,7 +278,7 @@ fn placeholder_fills(display_list: &DisplayList) -> usize {
         .filter(|command| {
             matches!(
                 command,
-                DrawCmd::FillRect { color, clip: Some(_), .. } if color == "#f2f2f2"
+                DrawCmd::FillRect { color, clip: Some(_), .. } if &**color == "#f2f2f2"
             )
         })
         .count()
@@ -320,7 +320,7 @@ where
 fn assert_degrades_locally(display_list: &DisplayList, label: &str) {
     assert!(display_list.commands.iter().any(|command| matches!(
         command,
-        DrawCmd::Text { text, chart: false, .. } if text == "beside the chart"
+        DrawCmd::Text { text, chart: false, .. } if &**text == "beside the chart"
     )));
     assert!(!display_list.grid.row_offsets.is_empty());
     assert_eq!(placeholder_fills(display_list), 1);
@@ -431,7 +431,7 @@ fn a_chart_anchored_off_the_grid_is_skipped_entirely() {
 
     assert!(display_list.commands.iter().any(|command| matches!(
         command,
-        DrawCmd::Text { text, chart: false, .. } if text == "beside the chart"
+        DrawCmd::Text { text, chart: false, .. } if &**text == "beside the chart"
     )));
     assert!(display_list.charts.is_empty());
     assert_eq!(placeholder_fills(&display_list), 0);
