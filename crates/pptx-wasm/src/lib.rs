@@ -40,10 +40,10 @@ impl PptxRenderer {
         slide_index: u32,
     ) -> Result<String, JsValue> {
         let session = document.session();
-        let deck = session.snapshot().map_err(js_error)?;
+        let scope = slide_scope(session, slide_index)?;
         let rendered = self
             .renderer
-            .layout_slide(session.package(), &deck, slide_index as usize)
+            .layout_scoped_slide(session.package(), &scope)
             .map_err(js_error)?;
         let json = serde_json::to_string(&rendered.display_list).map_err(js_error)?;
         self.rendered = Some(rendered);
@@ -70,13 +70,10 @@ impl PptxRenderer {
             .session()
             .proposal_preview_session(id)
             .map_err(js_error)?;
+        let scope = slide_scope(&preview, slide_index)?;
         let rendered = self
             .renderer
-            .layout_slide(
-                preview.package(),
-                &preview.snapshot().map_err(js_error)?,
-                slide_index as usize,
-            )
+            .layout_scoped_slide(preview.package(), &scope)
             .map_err(js_error)?;
         serde_json::to_string(&rendered.display_list).map_err(js_error)
     }
@@ -129,6 +126,20 @@ pub fn renderer_version() -> String {
 #[wasm_bindgen(js_name = decodeTiffPng)]
 pub fn decode_tiff_png(data: &[u8]) -> Result<Vec<u8>, JsValue> {
     ooxml_drawingml::media::decode_tiff_png(data).map_err(js_error)
+}
+
+fn slide_scope(
+    session: &pptx_edit::DeckSession,
+    slide_index: u32,
+) -> Result<pptx_edit::SlideScope, JsValue> {
+    session
+        .slide_scope(slide_index as usize)
+        .map_err(|error| match error {
+            pptx_edit::EditError::OutOfBounds { .. } => js_error(
+                pptx_render::RenderError::SlideNotFound(slide_index as usize),
+            ),
+            error => js_error(error),
+        })
 }
 
 fn js_error(error: impl std::fmt::Display) -> JsValue {

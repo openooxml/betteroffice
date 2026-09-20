@@ -19,7 +19,8 @@ use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN, PendingMedia,
     PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
     ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
+    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideScope, SlideSnapshot,
+    TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.1;
@@ -261,6 +262,11 @@ impl DeckSession {
             ids.push(slide_id);
         }
         Ok(ids)
+    }
+
+    /// Snapshot one slide without materializing the rest of the deck.
+    pub fn slide_scope(&self, slide_index: usize) -> EditResult<SlideScope> {
+        slide_scope(&self.doc, &self.package, slide_index)
     }
 
     pub fn insert_slide(
@@ -1517,6 +1523,91 @@ pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditRes
         .collect())
 }
 
+fn snapshot_slide<T: ReadTxn>(
+    slides: &MapRef,
+    shapes: &MapRef,
+    stories: &MapRef,
+    package: &PptxPackage,
+    txn: &T,
+    slide_id: &str,
+) -> EditResult<SlideSnapshot> {
+    let slide = slides
+        .get(txn, slide_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
+    let source_part_path = map_string(&slide, txn, "sourcePartPath");
+    let layout_part_path = map_string(&slide, txn, "layoutPartPath");
+    let theme = pptx_parse::slide_theme(
+        package,
+        source_part_path.as_deref(),
+        layout_part_path.as_deref(),
+    );
+    let shape_order = slide_shape_order(&slide, txn)?;
+    let mut shape_snapshots = Vec::new();
+    for shape_id in live_shape_order(&shape_order, txn)? {
+        shape_snapshots.push(snapshot_shape(
+            shapes,
+            stories,
+            txn,
+            &shape_id,
+            &mut HashSet::new(),
+            Some(&theme),
+        )?);
+    }
+    let notes = map_string(&slide, txn, "notes").unwrap_or_else(|| {
+        package
+            .slides
+            .iter()
+            .find(|source| Some(&source.part_path) == source_part_path.as_ref())
+            .map(|source| source.notes.clone())
+            .unwrap_or_default()
+    });
+    Ok(SlideSnapshot {
+        id: slide_id.to_owned(),
+        source_part_path,
+        layout_part_path,
+        name: map_string(&slide, txn, "name"),
+        notes,
+        shapes: shape_snapshots,
+    })
+}
+
+pub(crate) fn slide_scope(
+    doc: &Doc,
+    package: &PptxPackage,
+    slide_index: usize,
+) -> EditResult<SlideScope> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    let order = required_order(&txn)?;
+    let slides = required_map(&txn, SLIDES)?;
+    let shapes = required_map(&txn, SHAPES)?;
+    let stories = required_map(&txn, STORIES)?;
+    let mut seen_slides = HashSet::new();
+    let mut position = 0usize;
+    let mut slide_id = None;
+    for id in string_array_ref(&order, &txn) {
+        if !seen_slides.insert(id.clone()) {
+            continue;
+        }
+        if position == slide_index {
+            slide_id = Some(id);
+            break;
+        }
+        position += 1;
+    }
+    let slide_id = slide_id.ok_or(EditError::OutOfBounds {
+        index: slide_index.min(u32::MAX as usize) as u32,
+        length: seen_slides.len() as u32,
+    })?;
+    Ok(SlideScope {
+        index: slide_index,
+        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        width_emu: required_i64(&meta, &txn, "widthEmu")?,
+        height_emu: required_i64(&meta, &txn, "heightEmu")?,
+    })
+}
+
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -1530,45 +1621,9 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         if !seen_slides.insert(slide_id.clone()) {
             continue;
         }
-        let slide = slides
-            .get(&txn, &slide_id)
-            .and_then(|value| value.cast::<MapRef>().ok())
-            .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
-        let source_part_path = map_string(&slide, &txn, "sourcePartPath");
-        let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
-        let theme = pptx_parse::slide_theme(
-            package,
-            source_part_path.as_deref(),
-            layout_part_path.as_deref(),
-        );
-        let shape_order = slide_shape_order(&slide, &txn)?;
-        let mut shape_snapshots = Vec::new();
-        for shape_id in live_shape_order(&shape_order, &txn)? {
-            shape_snapshots.push(snapshot_shape(
-                &shapes,
-                &stories,
-                &txn,
-                &shape_id,
-                &mut HashSet::new(),
-                Some(&theme),
-            )?);
-        }
-        let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {
-            package
-                .slides
-                .iter()
-                .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-                .map(|source| source.notes.clone())
-                .unwrap_or_default()
-        });
-        slide_snapshots.push(SlideSnapshot {
-            id: slide_id,
-            source_part_path,
-            layout_part_path,
-            name: map_string(&slide, &txn, "name"),
-            notes,
-            shapes: shape_snapshots,
-        });
+        slide_snapshots.push(snapshot_slide(
+            &slides, &shapes, &stories, package, &txn, &slide_id,
+        )?);
     }
     Ok(DeckSnapshot {
         width_emu: required_i64(&meta, &txn, "widthEmu")?,

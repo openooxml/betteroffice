@@ -2,19 +2,29 @@ use std::collections::BTreeMap;
 
 use pptx_edit::{
     CaretAnchor, CommentFlavor, CommentReceipt, CommentSnapshot, DeckSession, DeckSnapshot,
-    EditCtx, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt, ShapeReceipt,
-    ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, StorySnapshot, TextReceipt,
-    TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt, UpdateEvent, UpdateSubscription,
+    EditCtx, EditError, PresetShapeDraft, ShapeAdjustReceipt, ShapeDraft, ShapeFillReceipt,
+    ShapeReceipt, ShapeRect, ShapeStroke, ShapeStrokeReceipt, SlideReceipt, SlideScope,
+    StorySnapshot, TextReceipt, TextSearchMatch, TextStyle, TextStylePatch, TransformReceipt,
+    UpdateEvent, UpdateSubscription,
 };
 use pptx_parse::{
     MediaPart, ParseLimits, PptxPackage, Presentation as PresentationModel, Slide, SlideLayout,
     SlideMaster, ThemePart,
 };
-use pptx_render::{RenderedSlide, SlideRenderer};
+use pptx_render::{RenderError, RenderedSlide, SlideRenderer};
 
 use crate::Result;
 
 const STANDALONE_CLIENT_ID: u64 = 1;
+
+fn slide_scope(session: &DeckSession, slide_index: usize) -> Result<SlideScope> {
+    session
+        .slide_scope(slide_index)
+        .map_err(|error| match error {
+            EditError::OutOfBounds { .. } => RenderError::SlideNotFound(slide_index).into(),
+            error => error.into(),
+        })
+}
 
 pub struct Presentation {
     session: DeckSession,
@@ -38,9 +48,10 @@ impl Presentation {
 
     pub fn render_proposal(&self, id: &str, slide_index: usize) -> Result<RenderedSlide> {
         let preview = self.session.proposal_preview_session(id)?;
+        let scope = slide_scope(&preview, slide_index)?;
         Ok(self
             .renderer
-            .layout_slide(preview.package(), &preview.snapshot()?, slide_index)?)
+            .layout_scoped_slide(preview.package(), &scope)?)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> Result<crate::ProposalAcceptance> {
@@ -435,10 +446,10 @@ impl Presentation {
     }
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
-        let snapshot = self.session.snapshot()?;
+        let scope = slide_scope(&self.session, slide_index)?;
         Ok(self
             .renderer
-            .layout_slide(self.session.package(), &snapshot, slide_index)?)
+            .layout_scoped_slide(self.session.package(), &scope)?)
     }
 
     /// Serializes the deck with all edits applied. Untouched slides keep their
