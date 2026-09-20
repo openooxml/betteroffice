@@ -44,3 +44,22 @@ test('only the reconciler publishes reports and renders after every format succe
   expect(publish.steps[renders]['continue-on-error']).toBeUndefined();
   expect(publish.steps[1].env.SOURCE_SHA).toBe('${{ needs.prepare.outputs.source-sha }}');
 });
+
+test('artifact directories remain stable when a run selects only one format', () => {
+  const downloads = publish.steps.filter(
+    (step: any) => step.uses?.startsWith('actions/download-artifact@')
+  );
+  expect(downloads.some((step: any) => step.with.pattern)).toBe(false);
+  for (const format of ['docx', 'pptx', 'xlsx']) {
+    for (const kind of ['report', 'renders']) {
+      const name = `visual-fidelity-${kind}-${format}`;
+      const matches = downloads.filter((step: any) => step.with.name === name);
+      expect(matches).toHaveLength(1);
+      expect(matches[0].with.path).toBe(`\${{ runner.temp }}/fidelity-parts/${name}`);
+      expect(matches[0].if).toBe(
+        (kind === 'renders' ? 'inputs.publish_renders && ' : '') +
+          `contains(fromJSON(needs.prepare.outputs.formats), '${format}')`
+      );
+    }
+  }
+});
