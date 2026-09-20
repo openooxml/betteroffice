@@ -675,13 +675,18 @@ fn first_cell_paragraph(
         })
 }
 
-/// Mirror `contextual_spacing_pair` for the `owned` side of a pair boundary:
-/// retained blocks were suppressed in place during their layout pass, so a
-/// freshly lowered block must see the same rule before equality means
-/// anything. The earlier sibling's `after` / the later sibling's `before`
-/// zero out when both sides share an effective style and carry
-/// contextualSpacing; an empty paragraph ahead of a non-floating table routes
-/// the `before` suppression to the table's first cell instead.
+/// Put extents moved out of the retained arena back; consumed in index order.
+fn restore_moved_measures(measured: &mut [MeasuredBlock], entries: Vec<MeasuredBlock>) {
+    for (consumed, entry) in entries.into_iter().enumerate() {
+        measured[consumed].measure = entry.measure;
+    }
+}
+
+/// Mirror `contextual_spacing_pair`'s writes for a freshly lowered `owned`
+/// block before it can compare equal to a retained one: `before` vs the
+/// previous sibling and `after` vs the next (the table arm uses the first
+/// cell paragraph for the style check only — canonical writes `after` on the
+/// empty paragraph and never touches the table's `before`).
 fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut LayoutBlock) {
     if let Some(LayoutBlock::Paragraph(previous)) = index.checked_sub(1).and_then(|i| blocks.get(i))
     {
@@ -690,36 +695,16 @@ fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut
                 effective_paragraph_style(paragraph) == effective_paragraph_style(previous)
                     && contextual_spacing_enabled(paragraph)
             }
-            LayoutBlock::Table(table)
-                if table.floating.is_none() && empty_paragraph_runs(previous) =>
-            {
-                first_cell_paragraph(table).is_some_and(|inner| {
-                    effective_paragraph_style(inner) == effective_paragraph_style(previous)
-                        && contextual_spacing_enabled(inner)
-                })
-            }
             _ => false,
         };
-        if suppress_before {
-            let target: Option<&mut docx_layout::types::ParagraphBlock> = match owned {
-                LayoutBlock::Paragraph(paragraph) => Some(paragraph),
-                LayoutBlock::Table(table) => table
-                    .rows
-                    .first_mut()
-                    .and_then(|row| row.cells.first_mut())
-                    .and_then(|cell| cell.blocks.first_mut())
-                    .and_then(|block| match block {
-                        LayoutBlock::Paragraph(paragraph) => Some(paragraph),
-                        _ => None,
-                    }),
-                _ => None,
-            };
-            if let Some(spacing) = target
-                .and_then(|paragraph| paragraph.attrs.as_mut())
+        if suppress_before
+            && let LayoutBlock::Paragraph(paragraph) = owned
+            && let Some(spacing) = paragraph
+                .attrs
+                .as_mut()
                 .and_then(|attrs| attrs.spacing.as_mut())
-            {
-                spacing.before = Some(0.0);
-            }
+        {
+            spacing.before = Some(0.0);
         }
     }
     let LayoutBlock::Paragraph(current) = owned else {
@@ -1247,14 +1232,11 @@ impl EngineSession {
             }
             let arena = self
                 .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
-                    // Section geometry lands on options before any measurement
-                    // so the width fallback reads it identically either way.
                     apply_section_geometry(&mut input, &regions);
                     let widths = region_measurement_widths(blocks.iter(), &input, &regions);
                     let geometry = initial_float_page_geometry(&input, &regions);
                     let default_width = widths.first().copied().unwrap_or(0.0);
-                    // Floating anchors couple a block's extent to flow position,
-                    // which the retained arena cannot revalidate per block.
+                    // floating extents depend on flow position; re-measure all
                     if docx_layout::measure_blocks::has_floating_zones(
                         blocks,
                         default_width,
@@ -1927,14 +1909,9 @@ impl EngineSession {
         })
     }
 
-    /// Rebuild the region measured arena by moving extents out of the retained
-    /// arena for every block whose measure cannot have changed: equal lowered
-    /// block (`PartialEq` masks positions), equal measurement width, identical
-    /// measurement config, and an unchanged section-break mark next to it.
-    /// Freshly lowered blocks are normalized through the same passes the
-    /// retained arena already went through — line-unit/doc-grid resolvers,
-    /// section-geometry stamps, and contextual-spacing suppression — before
-    /// comparing. `Ok(None)` means the caller must measure the whole story.
+    /// Reuse retained extents for blocks that cannot have changed (equal
+    /// normalized block, width, config, and section-break adjacency).
+    /// `Ok(None)` means the caller must measure the whole story.
     fn resident_region_measured(
         &self,
         blocks: &[LayoutBlock],
@@ -1979,9 +1956,7 @@ impl EngineSession {
             );
             let previous_entry = &mut previous.measured[index];
             if !resident_block_slots_match(&previous_entry.block, next_block) {
-                for (consumed, entry) in measured.into_iter().enumerate() {
-                    previous.measured[consumed].measure = entry.measure;
-                }
+                restore_moved_measures(&mut previous.measured, measured);
                 return Ok(None);
             }
             let width_clean = next_is_break == retained_next_is_break
@@ -2041,17 +2016,30 @@ impl EngineSession {
                             total_height: 0.0,
                         })
                     } else {
-                        docx_layout::measure_blocks::measure_block(
+                        match docx_layout::measure_blocks::measure_block(
                             &mut owned,
                             widths.get(index).copied().unwrap_or(0.0),
                             measurement,
-                        )?
+                        ) {
+                            Ok(measure) => measure,
+                            Err(error) => {
+                                restore_moved_measures(&mut previous.measured, measured);
+                                return Err(error);
+                            }
+                        }
                     };
                     let entry = MeasuredBlock {
                         block: owned,
                         measure,
                     };
-                    block_fingerprints.push(measured_fingerprint(&entry)?);
+                    let fingerprint = match measured_fingerprint(&entry) {
+                        Ok(fingerprint) => fingerprint,
+                        Err(error) => {
+                            restore_moved_measures(&mut previous.measured, measured);
+                            return Err(error);
+                        }
+                    };
+                    block_fingerprints.push(fingerprint);
                     measured.push(entry);
                     measure_calls = measure_calls.wrapping_add(1);
                 }

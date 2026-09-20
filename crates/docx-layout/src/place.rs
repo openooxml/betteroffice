@@ -359,8 +359,7 @@ pub fn layout_document_incremental(
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_index(resume.section_index);
-    // Retained pages move rather than clone; restore them if placement fails
-    // so the caller's retained layout is left untouched.
+    // move retained pages out; restored on failure so the caller's stays valid
     let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {
         previous_checkpoints,
