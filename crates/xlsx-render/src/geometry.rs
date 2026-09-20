@@ -58,9 +58,8 @@ fn normal_font(styles: &Stylesheet) -> Option<&Font> {
     styles.font_for(0).or_else(|| styles.fonts.first())
 }
 
-/// the workbook's normal font as the row grid must see it. on the print path
-/// this is the same value the text falls back to, so the two projections cannot
-/// disagree about how tall an unstyled row is.
+/// the normal font the row grid measures with; on the print path it is the
+/// same value the text falls back to, so the two cannot disagree.
 #[derive(Debug, Clone, Copy)]
 struct NormalFace<'a> {
     size_pt: f64,
@@ -81,7 +80,9 @@ impl<'a> NormalFace<'a> {
 
     fn from_metrics(metrics: &'a PrintMetrics) -> Self {
         Self {
-            size_pt: metrics.font_size_pt as f64,
+            size_pt: Some(metrics.font_size_pt as f64)
+                .filter(|pt| pt.is_finite() && *pt > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PT),
             family: Some(metrics.font_family.as_str()),
         }
     }
@@ -478,6 +479,35 @@ mod tests {
         let grid = GridGeometry::new(&sheet, &styles);
         assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(10.0))).abs() < 0.001);
         assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(11.0))).abs() > 1.0);
+    }
+
+    #[test]
+    fn printing_ignores_a_non_finite_metric_font_size() {
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: f32::INFINITY,
+            font_family: "Calibri".into(),
+            font_ascent: 14.0,
+            font_descent: 4.0,
+        };
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                value: xlsx_model::value::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
+        assert!(grid.row_y(1).is_finite());
+        assert!(
+            (grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(DEFAULT_FONT_SIZE_PT))).abs()
+                < 0.001
+        );
     }
 
     #[test]
