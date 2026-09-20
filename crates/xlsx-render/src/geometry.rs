@@ -47,6 +47,38 @@ pub fn autofit_row_height_pt(size_pt: f64) -> f64 {
 const AUTOFIT_LINE_RATIO: f64 = 1.4615;
 const AUTOFIT_LEADING_PT: f64 = 2.0769;
 
+/// floors a rescaled height to whole points, absorbing the float error a ratio
+/// of quarter-point heights leaves just under an exact integer (75.0 x 11/15
+/// evaluates to 54.999...).
+fn floor_pt(pt: f64) -> f64 {
+    (pt + 1e-9).floor()
+}
+
+/// a stored `ht` is expressed against the sheet's `defaultRowHeight`; when that
+/// default is a cached hint excel recomputes, every stored height is rescaled
+/// with it and floored to whole points. the ratio needs excel's own fitted
+/// height for the normal font, and [`autofit_row_height_pt`] is measured on
+/// calibri, so a sheet whose normal font names another face keeps its heights.
+fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
+    if sheet.format.custom_height {
+        return None;
+    }
+    let declared = sheet.format.default_row_height_pt.filter(|&pt| pt > 0.0)?;
+    let normal = styles.fonts.first();
+    if !normal
+        .and_then(|font| font.name.as_deref())
+        .is_none_or(|name| name.eq_ignore_ascii_case("calibri"))
+    {
+        return None;
+    }
+    let fitted = autofit_row_height_pt(
+        normal
+            .and_then(|font| font.size_pt)
+            .unwrap_or(DEFAULT_FONT_SIZE_PT),
+    );
+    (fitted > 0.0 && fitted != declared).then_some(fitted / declared)
+}
+
 /// rows excel auto-fits, with the height each takes: every row that carries no
 /// `ht` and is not pinned by `sheetFormatPr/@customHeight`. a declared
 /// `defaultRowHeight` is a cached hint excel recomputes, so a row with content
@@ -177,6 +209,7 @@ impl GridGeometry {
     ) -> Self {
         let default_row_px = row_pt_to_px(default_row_pt);
         let fitted = autofit_rows(sheet, styles, default_row_pt);
+        let scale = stored_height_scale(sheet, styles);
         let n_cols = sheet
             .col_widths
             .keys()
@@ -211,8 +244,8 @@ impl GridGeometry {
             let h = sheet
                 .row_heights
                 .get(&r)
-                .or_else(|| fitted.get(&r))
-                .map(|&h| row_pt_to_px(h))
+                .map(|&h| row_pt_to_px(scale.map_or(h, |s| floor_pt(h * s))))
+                .or_else(|| fitted.get(&r).map(|&h| row_pt_to_px(h)))
                 .unwrap_or(default_row_px);
             let start = row_y.last().copied().unwrap_or(0.0);
             row_y.push(start + h);
@@ -354,6 +387,47 @@ mod tests {
         sheet.row_heights.insert(1, 9.0);
         let authored = GridGeometry::new(&sheet, &styles);
         assert!((authored.row_y(2) - authored.row_y(1) - row_pt_to_px(9.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn stored_heights_rescale_with_a_recomputed_cached_default() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Font::default()
+        });
+        let mut sheet = sheet_with(&[], &[(0, 15.0), (1, 24.0), (2, 37.5)]);
+        sheet.format.default_row_height_pt = Some(15.0);
+        let rescaled = GridGeometry::new(&sheet, &styles);
+        for (row, pt) in [(0, 14.0), (1, 22.0), (2, 35.0)] {
+            assert!(
+                (rescaled.row_y(row + 1) - rescaled.row_y(row) - row_pt_to_px(pt)).abs() < 0.001
+            );
+        }
+
+        sheet.format.custom_height = true;
+        let pinned = GridGeometry::new(&sheet, &styles);
+        assert!((pinned.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+
+        sheet.format.custom_height = false;
+        styles.fonts[0].name = Some("Arial".into());
+        let unmeasured = GridGeometry::new(&sheet, &styles);
+        assert!((unmeasured.row_y(1) - row_pt_to_px(15.0)).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_rescaled_height_landing_on_an_integer_keeps_it() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Calibri".into()),
+            size_pt: Some(11.0),
+            ..Font::default()
+        });
+        let mut sheet = sheet_with(&[], &[(0, 90.0)]);
+        sheet.format.default_row_height_pt = Some(20.0);
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.row_y(1) - row_pt_to_px(63.0)).abs() < 0.001);
     }
 
     #[test]
