@@ -180,10 +180,8 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
     (order, cycle)
 }
 
-/// evaluate one formula node; `None` when the cell has no formula, it no
-/// longer parses, or the engine could not evaluate it — a budget cut-off or a
-/// function it does not implement — and the file carries a cached value. an
-/// engine gap must not overwrite what the authoring app computed.
+/// evaluate one formula node; `None` keeps the cached value, because the cell
+/// has no formula, it no longer parses, or an engine gap reached the result.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -274,8 +272,7 @@ mod tests {
         (wb, SheetId(0))
     }
 
-    /// set a formula cell that already carries the value its authoring app
-    /// computed, as a parsed file does.
+    /// a formula cell that already carries its authoring app's value.
     fn put_cached_formula(wb: &mut Workbook, sheet: SheetId, cell: &str, f: &str, v: CellValue) {
         wb.sheet_mut(sheet).unwrap().set_cell(
             a1(cell),
