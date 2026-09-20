@@ -180,10 +180,8 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
     (order, cycle)
 }
 
-/// evaluate one formula node; `None` when the cell has no formula, it no
-/// longer parses, or the engine could not evaluate it — a budget cut-off or a
-/// function it does not implement — and the file carries a cached value. an
-/// engine gap must not overwrite what the authoring app computed.
+/// evaluate one formula node; `None` keeps the cached value, because the cell
+/// has no formula, it no longer parses, or an engine gap reached the result.
 fn eval_node(
     wb: &Workbook,
     u: Key,
@@ -199,7 +197,7 @@ fn eval_node(
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.now_serial = now_serial;
     let value = evaluate(&expr, &ctx);
-    let incomplete = ctx.has_unhandled_budget_error() || ctx.used_unsupported_function();
+    let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
     if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
@@ -274,8 +272,7 @@ mod tests {
         (wb, SheetId(0))
     }
 
-    /// set a formula cell that already carries the value its authoring app
-    /// computed, as a parsed file does.
+    /// a formula cell that already carries its authoring app's value.
     fn put_cached_formula(wb: &mut Workbook, sheet: SheetId, cell: &str, f: &str, v: CellValue) {
         wb.sheet_mut(sheet).unwrap().set_cell(
             a1(cell),
@@ -326,6 +323,41 @@ mod tests {
         put_cached_formula(&mut wb, s, "B1", "SUMPRODUCT(TRANSPOSE(A1:A2))", num(5.0));
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(5.0));
+    }
+
+    /// IFERROR answers for the call it wraps, so the gap never reaches the
+    /// result and the computed value must replace the cache.
+    #[test]
+    fn a_handler_that_answers_an_unimplemented_call_writes_its_result() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(WEBSERVICE(1),0)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+    }
+
+    #[test]
+    fn a_handler_beside_an_unimplemented_call_still_keeps_the_cache() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(A1,0)+WEBSERVICE(1)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
+    }
+
+    /// A memoized name must replay the gap its evaluation recorded, or a
+    /// second use returns the memo without it and the cache is overwritten.
+    #[test]
+    fn a_handled_gap_behind_a_defined_name_still_marks_its_second_use() {
+        let (mut wb, s) = one_sheet();
+        wb.defined_names.push(xlsx_model::DefinedName {
+            name: "Gap".to_string(),
+            formula: "WEBSERVICE(1)".to_string(),
+            local_sheet: None,
+            hidden: false,
+        });
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(Gap,0)+Gap", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
     }
 
     #[test]

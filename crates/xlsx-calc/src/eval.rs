@@ -50,9 +50,9 @@ pub struct EvalContext<'a> {
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
-    unsupported_functions: Rc<Cell<bool>>,
+    unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, CellValue>>>,
+    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
 }
 
@@ -65,7 +65,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -80,7 +80,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -99,7 +99,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
@@ -156,14 +156,24 @@ impl<'a> EvalContext<'a> {
         self.unhandled_budget_errors.get() != 0
     }
 
-    /// whether this evaluation reached a function the engine cannot answer --
-    /// one it does not implement, or one whose result it cannot represent.
-    pub(crate) fn used_unsupported_function(&self) -> bool {
+    pub(crate) fn unsupported_checkpoint(&self) -> u64 {
         self.unsupported_functions.get()
     }
 
+    pub(crate) fn handle_unsupported_since(&self, checkpoint: u64) {
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().min(checkpoint));
+    }
+
+    /// whether a function the engine does not implement reached this
+    /// evaluation's result, rather than being answered by a handler.
+    pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
+        self.unsupported_functions.get() != 0
+    }
+
     pub(crate) fn record_unsupported_function(&self) {
-        self.unsupported_functions.set(true);
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().saturating_add(1));
     }
 
     fn record_budget_error(&self) {
@@ -251,23 +261,30 @@ struct DefinedNameBinding {
 }
 
 /// a name's value is stable for the life of a context, so each one is expanded
-/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n.
+/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n. a
+/// hit replays the engine gap the expansion recorded, which a handler may have
+/// cleared since.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some(cached) = ctx.defined_name_values.borrow().get(&key) {
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
+        if *gap {
+            ctx.record_unsupported_function();
+        }
         return cached.clone();
     }
     let binding = match bind_defined_name(key, name, ctx) {
         Ok(binding) => binding,
         Err(error) => return err(error),
     };
+    let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
+    let gap = ctx.unsupported_checkpoint() > checkpoint;
     ctx.defined_name_values
         .borrow_mut()
-        .insert(binding.key, value.clone());
+        .insert(binding.key, (value.clone(), gap));
     value
 }
 
