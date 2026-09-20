@@ -117,13 +117,16 @@ pub fn write_docx_s13(
     original_docx: &[u8],
 ) -> Result<Vec<u8>, ParseError> {
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
-    write_docx_s13_parts(request, &original_parts)
+    write_docx_s13_parts(request, &original_parts, Some(original_docx))
 }
 
-/// [`write_docx_s13`] seeded from already-inflated parts.
+/// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
+/// original container, when the caller still holds it, so unchanged members
+/// re-emit verbatim instead of being re-deflated.
 pub fn write_docx_s13_parts(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
+    source: Option<&[u8]>,
 ) -> Result<Vec<u8>, ParseError> {
     request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
@@ -209,8 +212,11 @@ pub fn write_docx_s13_parts(
         }
     }
 
-    ooxml_opc::rezip_parts_preserving(&package.refs(), original_docx)
-        .map_err(ParseError::Container)
+    match source {
+        Some(source) => ooxml_opc::rezip_parts_preserving(&package.refs(), source),
+        None => ooxml_opc::rezip_parts_borrowed(&package.refs()),
+    }
+    .map_err(ParseError::Container)
 }
 
 /// Edits overlay borrowed `original` entries so unchanged parts are never copied.

@@ -203,7 +203,7 @@ impl Document {
             },
             selective: None,
         };
-        write_docx_s13_parts(request, &self.original_parts).map_err(Error::from)
+        write_docx_s13_parts(request, &self.original_parts, None).map_err(Error::from)
     }
 }
 
