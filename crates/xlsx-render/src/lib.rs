@@ -9,6 +9,7 @@ pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::ChartSpace;
+use std::collections::BTreeMap;
 use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
@@ -422,7 +423,8 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
-    let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
+    let merge_index = MergeIndex::new(&sheet_ref.merges);
+    let mut anchors = visible_anchors(sheet_ref, &rows, &cols, &merge_index);
     if print.is_some() {
         for merge in &sheet_ref.merges {
             if rows.intersects(merge.start.row, merge.end.row)
@@ -493,7 +495,7 @@ where
             commands.extend(grid_commands.iter().cloned());
         }
         for merge in &sheet_ref.merges {
-            if let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, merge.start) {
+            if let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, merge.start) {
                 let inset = 96.0 / metrics.dpi / 2.0;
                 commands.push(DrawCmd::FillRect {
                     x: cell_box.x + inset,
@@ -515,7 +517,7 @@ where
         let Some(hex) = styles.resolve_color(color) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let clip = cell_box.clip;
@@ -575,6 +577,7 @@ where
             &rows,
             &cols,
             sheet_ref,
+            &merge_index,
             styles,
             at,
             border,
@@ -601,7 +604,7 @@ where
             color
         };
 
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let font = cell.style.and_then(|s| styles.font_for(s));
@@ -627,6 +630,7 @@ where
             &geom,
             &cols,
             sheet_ref,
+            &merge_index,
             styles,
             wb.date_system,
             at,
@@ -667,7 +671,7 @@ where
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
@@ -708,7 +712,7 @@ where
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let Some(bx) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(bx) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
@@ -920,6 +924,7 @@ fn visible_anchors<'a>(
     sheet: &'a Sheet,
     rows: &AxisLayout,
     cols: &AxisLayout,
+    merges: &MergeIndex,
 ) -> Vec<(CellRef, &'a xlsx_model::Cell)> {
     let mut cells = Vec::new();
     for row_range in &rows.ranges {
@@ -929,7 +934,7 @@ fn visible_anchors<'a>(
     }
     cells.sort_unstable_by_key(|(at, _)| (at.row, at.col));
     cells.dedup_by_key(|(at, _)| (at.row, at.col));
-    cells.retain(|(at, _)| match covering_merge(&sheet.merges, *at) {
+    cells.retain(|(at, _)| match merges.covering(*at) {
         Some(merge) => merge.start == *at,
         None => true,
     });
@@ -944,9 +949,105 @@ fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
     })
 }
 
-/// the merge (if any) that covers a cell.
-fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
-    merges.iter().copied().find(|m| m.contains(at))
+/// merge coverage for one render pass. `entries` holds `(row, start_col,
+/// end_col, merge index)` grouped by row — sorted by start column when a row's merges
+/// do not overlap, so lookups binary-search; otherwise kept in `merges` order
+/// and scanned. merges taller than `MERGE_ROW_CAP` rows stay out of `entries`
+/// and are scanned in `merges` order, so one huge merge cannot dominate the
+/// index build. either way `covering` returns the same first-in-`merges`-order
+/// match a linear scan would.
+struct MergeIndex<'a> {
+    merges: &'a [CellRange],
+    rows: BTreeMap<u32, MergeRow>,
+    entries: Vec<(u32, u32, u32, u32)>,
+    scanned: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct MergeRow {
+    /// span of this row's merges in `MergeIndex::entries`.
+    start: u32,
+    end: u32,
+    /// true when the row's merges are column-disjoint, so its entries are
+    /// sorted by start column and at most one can cover a queried cell.
+    by_col: bool,
+}
+
+/// a merge spanning more rows than this is scanned instead of indexed per row.
+const MERGE_ROW_CAP: u32 = 64;
+
+impl<'a> MergeIndex<'a> {
+    fn new(merges: &'a [CellRange]) -> Self {
+        let mut entries: Vec<(u32, u32, u32, u32)> = Vec::new();
+        let mut scanned = Vec::new();
+        for (index, merge) in merges.iter().enumerate() {
+            if merge.end.row - merge.start.row >= MERGE_ROW_CAP {
+                scanned.push(index as u32);
+                continue;
+            }
+            for row in merge.start.row..=merge.end.row {
+                entries.push((row, merge.start.col, merge.end.col, index as u32));
+            }
+        }
+        entries.sort_by_key(|entry| (entry.0, entry.1));
+        let mut rows = BTreeMap::new();
+        let mut i = 0;
+        while i < entries.len() {
+            let mut j = i + 1;
+            while j < entries.len() && entries[j].0 == entries[i].0 {
+                j += 1;
+            }
+            let group = &mut entries[i..j];
+            let by_col = group.windows(2).all(|w| w[0].2 < w[1].1);
+            if !by_col {
+                group.sort_by_key(|entry| entry.3);
+            }
+            rows.insert(
+                entries[i].0,
+                MergeRow {
+                    start: i as u32,
+                    end: j as u32,
+                    by_col,
+                },
+            );
+            i = j;
+        }
+        Self {
+            merges,
+            rows,
+            entries,
+            scanned,
+        }
+    }
+
+    /// the merge (if any) that covers `at`.
+    fn covering(&self, at: CellRef) -> Option<CellRange> {
+        let in_row = self.rows.get(&at.row).and_then(|row| {
+            let entries = &self.entries[row.start as usize..row.end as usize];
+            if row.by_col {
+                let p = entries.partition_point(|entry| entry.1 <= at.col);
+                p.checked_sub(1)
+                    .and_then(|i| entries.get(i))
+                    .filter(|entry| entry.2 >= at.col)
+                    .map(|entry| entry.3)
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| entry.1 <= at.col && at.col <= entry.2)
+                    .map(|entry| entry.3)
+            }
+        });
+        let scanned = self
+            .scanned
+            .iter()
+            .copied()
+            .find(|&i| self.merges[i as usize].contains(at));
+        match (in_row, scanned) {
+            (Some(m), Some(s)) => Some(self.merges[m.min(s) as usize]),
+            (Some(m), None) => Some(self.merges[m as usize]),
+            (None, s) => s.map(|i| self.merges[i as usize]),
+        }
+    }
 }
 
 /// Excel lets text that outgrows its cell run into the blank cells beside it,
@@ -958,6 +1059,7 @@ fn spill_clip(
     geom: &GridGeometry,
     cols: &AxisLayout,
     sheet: &Sheet,
+    merges: &MergeIndex,
     styles: &Stylesheet,
     date_system: xlsx_model::DateSystem,
     at: CellRef,
@@ -966,7 +1068,7 @@ fn spill_clip(
     cell_box: CellBox,
 ) -> Rect {
     if !matches!(cell.value, CellValue::Text { .. })
-        || covering_merge(&sheet.merges, at).is_some()
+        || merges.covering(at).is_some()
         || cell
             .style
             .and_then(|style| styles.alignment_for(style))
@@ -982,7 +1084,7 @@ fn spill_clip(
     };
     let blank = |col: u32| {
         let neighbour = CellRef::new(at.row, col);
-        covering_merge(&sheet.merges, neighbour).is_none()
+        merges.covering(neighbour).is_none()
             && sheet
                 .cell(neighbour)
                 .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
@@ -1031,10 +1133,10 @@ fn cell_box(
     geom: &GridGeometry,
     rows: &AxisLayout,
     cols: &AxisLayout,
-    sheet: &Sheet,
+    merges: &MergeIndex,
     at: CellRef,
 ) -> Option<CellBox> {
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(merge) => (merge.end.col, merge.end.row),
         None => (at.col, at.row),
     };
@@ -1176,18 +1278,19 @@ fn emit_borders(
     rows: &AxisLayout,
     cols: &AxisLayout,
     sheet: &Sheet,
+    merges: &MergeIndex,
     styles: &Stylesheet,
     at: CellRef,
     border: &Border,
 ) {
-    let Some(cell_box) = cell_box(geom, rows, cols, sheet, at) else {
+    let Some(cell_box) = cell_box(geom, rows, cols, merges, at) else {
         return;
     };
     let (x, y) = (cell_box.x, cell_box.y);
     let (x2, y2) = (x + cell_box.w, y + cell_box.h);
     let clip = cell_box.clip;
     let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(m) => (m.end.col, m.end.row),
         None => (at.col, at.row),
     };
