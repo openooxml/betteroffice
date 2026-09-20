@@ -318,7 +318,6 @@ fn case_insensitive_names() {
     ]);
 }
 
-/// draw repeatedly from one context, so each call advances its random stream.
 fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
     let wb = fixture();
     let expr = parse_formula(src).expect("parse");
