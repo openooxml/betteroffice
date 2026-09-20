@@ -4,6 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
@@ -47,11 +48,17 @@ pub struct EvalContext<'a> {
     pub sheet: SheetId,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
+    /// seed for the volatile random functions; `None` takes a fresh stream from
+    /// a process-local counter. set before the first draw; later writes are
+    /// ignored because the stream has already started.
+    pub rand_seed: Option<u64>,
+    random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
+    unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, CellValue>>>,
+    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
 }
 
@@ -61,9 +68,12 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -75,9 +85,12 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: Some(now_serial),
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -93,9 +106,12 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
@@ -107,9 +123,12 @@ impl<'a> EvalContext<'a> {
             provider: self.provider,
             sheet,
             now_serial: self.now_serial,
+            rand_seed: self.rand_seed,
+            random_state: Rc::clone(&self.random_state),
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
+            unsupported_functions: Rc::clone(&self.unsupported_functions),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             shared_budget: self.shared_budget.clone(),
@@ -134,6 +153,21 @@ impl<'a> EvalContext<'a> {
         true
     }
 
+    /// next draw in [0, 1) from this context's stream; advances it.
+    pub(crate) fn next_random_unit(&self) -> f64 {
+        let seed = self
+            .random_state
+            .get()
+            .or(self.rand_seed)
+            .unwrap_or_else(next_random_stream)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.random_state.set(Some(seed));
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+    }
+
     pub(crate) fn exhausted(&self) -> bool {
         self.exhausted.get()
     }
@@ -149,6 +183,26 @@ impl<'a> EvalContext<'a> {
 
     pub(crate) fn has_unhandled_budget_error(&self) -> bool {
         self.unhandled_budget_errors.get() != 0
+    }
+
+    pub(crate) fn unsupported_checkpoint(&self) -> u64 {
+        self.unsupported_functions.get()
+    }
+
+    pub(crate) fn handle_unsupported_since(&self, checkpoint: u64) {
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().min(checkpoint));
+    }
+
+    /// whether a function the engine does not implement reached this
+    /// evaluation's result, rather than being answered by a handler.
+    pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
+        self.unsupported_functions.get() != 0
+    }
+
+    pub(crate) fn record_unsupported_function(&self) {
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().saturating_add(1));
     }
 
     fn record_budget_error(&self) {
@@ -170,6 +224,14 @@ impl<'a> EvalContext<'a> {
         self.defined_name_stack.borrow_mut().pop();
         value
     }
+}
+
+/// one stream per unseeded context, so sibling cells draw different values and
+/// each recalc re-draws; a process that evaluates in the same order replays the
+/// same draws.
+fn next_random_stream() -> u64 {
+    static NEXT_STREAM: AtomicU64 = AtomicU64::new(0);
+    NEXT_STREAM.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed)
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
@@ -216,7 +278,10 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         },
         Expr::FuncCall { name, args } => match crate::functions::lookup(name) {
             Some(f) => f(args, ctx),
-            None => err(ErrorValue::Name),
+            None => {
+                ctx.record_unsupported_function();
+                err(ErrorValue::Name)
+            }
         },
     }
 }
@@ -233,23 +298,30 @@ struct DefinedNameBinding {
 }
 
 /// a name's value is stable for the life of a context, so each one is expanded
-/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n.
+/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n. a
+/// hit replays the engine gap the expansion recorded, which a handler may have
+/// cleared since.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some(cached) = ctx.defined_name_values.borrow().get(&key) {
+    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
+        if *gap {
+            ctx.record_unsupported_function();
+        }
         return cached.clone();
     }
     let binding = match bind_defined_name(key, name, ctx) {
         Ok(binding) => binding,
         Err(error) => return err(error),
     };
+    let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
+    let gap = ctx.unsupported_checkpoint() > checkpoint;
     ctx.defined_name_values
         .borrow_mut()
-        .insert(binding.key, value.clone());
+        .insert(binding.key, (value.clone(), gap));
     value
 }
 
