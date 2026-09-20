@@ -26,7 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -56,7 +56,8 @@ test('artifact directories remain stable when a run selects only one format', ()
   const downloads = publish.steps.filter(
     (step: any) => step.uses?.startsWith('actions/download-artifact@')
   );
-  expect(downloads.some((step: any) => step.with.pattern)).toBe(false);
+  expect(downloads.filter((step: any) => step.with.pattern).map((step: any) => step.with.pattern))
+    .toEqual(['docx-benchmark-report-*']);
   for (const format of ['docx', 'pptx', 'xlsx']) {
     for (const kind of ['report', 'renders']) {
       const name = `visual-fidelity-${kind}-${format}`;
@@ -69,4 +70,20 @@ test('artifact directories remain stable when a run selects only one format', ()
       );
     }
   }
+});
+
+test('native builds and paired DOCX shards are isolated from browser measurements', () => {
+  const build = workflow.jobs['native-build'];
+  const benchmark = workflow.jobs['docx-benchmark'];
+  expect(build.needs).toBe('prepare');
+  expect(build.strategy.matrix.channel).toEqual(['published', 'commit']);
+  expect(build.steps[1].with.ref).toContain('needs.prepare.outputs.docx-published-source');
+  expect(benchmark.needs).toEqual(['prepare', 'native-build']);
+  expect(benchmark.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.docx-shards) }}');
+  expect(benchmark['runs-on']).toBe('ubuntu-24.04');
+  expect(benchmark.steps.some((step: any) => step.run?.includes('playwright'))).toBe(false);
+  expect(benchmark.steps.some((step: any) => step.run?.includes('chmod +x'))).toBe(true);
+  expect(publish.if).toContain("needs.docx-benchmark.result == 'success'");
+  const merge = publish.steps.find((step: any) => step.run?.includes('merge.mjs'));
+  expect(merge.env.QUALITY_REQUIRE_DOCX_BENCHMARK).toBe('true');
 });

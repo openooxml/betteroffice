@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, samples }) {
+export function createPlan({ source_sha, commit, versions, react_version, samples, docx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -55,6 +55,8 @@ export function createPlan({ source_sha, commit, versions, react_version, sample
   const formats = FORMATS.filter((format) =>
     samples.some((sample) => sample.format === format)
   );
+  if (docx_published_source_sha !== undefined && !isSha(docx_published_source_sha))
+    throw new Error('Invalid published DOCX source revision');
   return {
     schema_version: PLAN_SCHEMA_VERSION,
     source_sha,
@@ -63,6 +65,7 @@ export function createPlan({ source_sha, commit, versions, react_version, sample
     react_version,
     formats,
     samples,
+    ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
   };
 }
 
@@ -139,6 +142,9 @@ export async function preparePlan(environment, dependencies) {
     ),
     react_version: published.at(-1).version,
     samples,
+    ...(samples.some((sample) => sample.format === 'docx')
+      ? { docx_published_source_sha: published[0].gitHead ?? 'missing' }
+      : {}),
   });
 }
 
