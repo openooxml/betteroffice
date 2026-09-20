@@ -29,7 +29,7 @@ pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
     PathStroke, Rect, scaled,
 };
-pub use geometry::{GridGeometry, PrintMetrics};
+pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
