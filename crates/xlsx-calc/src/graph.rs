@@ -52,62 +52,97 @@ const SPAN_TILE_COLS: u32 = 512;
 /// per-span insert cost bounded for sheet-sized ranges.
 const MAX_SPAN_TILES: u64 = 512;
 
-/// tile index over unexpanded ranges: lookup cost tracks ranges overlapping the
-/// target's tile rather than every span on the sheet.
+/// aggregate bound on tile index entries per sheet; beyond it new ranges go to
+/// `wide`, so span-index memory stays bounded regardless of how many broad
+/// references a formula-heavy sheet registers.
+const MAX_SPAN_INDEX_ENTRIES: u64 = 1_048_576;
+
+/// tile index over unexpanded ranges: each range is stored once and tiles hold
+/// slot indices, so lookup cost tracks ranges overlapping the target's tile.
 #[derive(Default)]
 struct SpanIndex {
-    /// tile -> ranges overlapping it.
-    tiles: HashMap<(u32, u32), Vec<(CellRange, NodeKey)>>,
+    /// each unexpanded range stored once; `None` slots are removed and reused.
+    spans: Vec<Option<(CellRange, NodeKey)>>,
+    /// tile -> slots of the ranges overlapping it.
+    tiles: HashMap<(u32, u32), Vec<u32>>,
+    /// tile count per slot, for removal.
+    slots: HashMap<(CellRange, NodeKey), usize>,
+    /// freed slots in `spans`.
+    free: Vec<usize>,
+    /// tile index entries currently held.
+    indexed: u64,
     /// ranges covering too many tiles to index; probed by every lookup.
     wide: Vec<(CellRange, NodeKey)>,
 }
 
+fn span_tiles(range: &CellRange) -> (u32, u32, u32, u32, u64) {
+    let row_lo = range.start.row / SPAN_TILE_ROWS;
+    let row_hi = range.end.row / SPAN_TILE_ROWS;
+    let col_lo = range.start.col / SPAN_TILE_COLS;
+    let col_hi = range.end.col / SPAN_TILE_COLS;
+    (
+        row_lo,
+        row_hi,
+        col_lo,
+        col_hi,
+        (row_hi as u64 - row_lo as u64 + 1) * (col_hi as u64 - col_lo as u64 + 1),
+    )
+}
+
 impl SpanIndex {
     fn insert(&mut self, range: CellRange, node: NodeKey) {
-        let row_lo = range.start.row / SPAN_TILE_ROWS;
-        let row_hi = range.end.row / SPAN_TILE_ROWS;
-        let col_lo = range.start.col / SPAN_TILE_COLS;
-        let col_hi = range.end.col / SPAN_TILE_COLS;
-        let tiles = (row_hi as u64 - row_lo as u64 + 1) * (col_hi as u64 - col_lo as u64 + 1);
-        if tiles > MAX_SPAN_TILES {
+        let (row_lo, row_hi, col_lo, col_hi, tiles) = span_tiles(&range);
+        if tiles > MAX_SPAN_TILES || self.indexed.saturating_add(tiles) > MAX_SPAN_INDEX_ENTRIES {
             self.wide.push((range, node));
             return;
         }
+        let slot = match self.free.pop() {
+            Some(slot) => {
+                self.spans[slot] = Some((range, node));
+                slot
+            }
+            None => {
+                self.spans.push(Some((range, node)));
+                self.spans.len() - 1
+            }
+        };
         for r in row_lo..=row_hi {
             for c in col_lo..=col_hi {
-                self.tiles.entry((r, c)).or_default().push((range, node));
+                self.tiles.entry((r, c)).or_default().push(slot as u32);
             }
         }
+        self.indexed += tiles;
+        self.slots.insert((range, node), slot);
     }
 
     fn remove(&mut self, range: &CellRange, node: NodeKey) {
-        let row_lo = range.start.row / SPAN_TILE_ROWS;
-        let row_hi = range.end.row / SPAN_TILE_ROWS;
-        let col_lo = range.start.col / SPAN_TILE_COLS;
-        let col_hi = range.end.col / SPAN_TILE_COLS;
-        let tiles = (row_hi as u64 - row_lo as u64 + 1) * (col_hi as u64 - col_lo as u64 + 1);
-        if tiles > MAX_SPAN_TILES {
+        let Some(slot) = self.slots.remove(&(*range, node)) else {
             self.wide.retain(|(r, n)| !(*n == node && r == range));
             return;
-        }
+        };
+        let (row_lo, row_hi, col_lo, col_hi, tiles) = span_tiles(range);
         for r in row_lo..=row_hi {
             for c in col_lo..=col_hi {
                 if let Some(list) = self.tiles.get_mut(&(r, c)) {
-                    list.retain(|(rr, n)| !(*n == node && rr == range));
+                    list.retain(|i| *i as usize != slot);
                     if list.is_empty() {
                         self.tiles.remove(&(r, c));
                     }
                 }
             }
         }
+        self.indexed = self.indexed.saturating_sub(tiles);
+        self.spans[slot] = None;
+        self.free.push(slot);
     }
 
-    /// ranges possibly covering `target`: the target tile's bucket plus `wide`.
+    /// ranges possibly covering `target`: the target tile's slots plus `wide`.
     fn overlapping(&self, target: CellRef) -> impl Iterator<Item = &(CellRange, NodeKey)> {
         self.tiles
             .get(&(target.row / SPAN_TILE_ROWS, target.col / SPAN_TILE_COLS))
             .into_iter()
             .flatten()
+            .filter_map(|i| self.spans[*i as usize].as_ref())
             .chain(self.wide.iter())
     }
 }
