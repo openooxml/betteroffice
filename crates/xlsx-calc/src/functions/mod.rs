@@ -19,10 +19,15 @@ pub mod text;
 pub type BuiltIn = fn(&[Expr], &EvalContext<'_>) -> CellValue;
 
 /// resolve a function name (case-insensitive) to its implementation; aliases
-/// map to the same function.
+/// map to the same function. excel stores post-2007 functions under an
+/// `_xlfn.` prefix, `_xlfn._xlws.` for the worksheet-only set; the prefix
+/// belongs to the stored name, not to the function.
 pub fn lookup(name: &str) -> Option<BuiltIn> {
     let upper = name.to_ascii_uppercase();
-    Some(match upper.as_str() {
+    let upper = upper.strip_prefix("_XLFN.").map_or(upper.as_str(), |rest| {
+        rest.strip_prefix("_XLWS.").unwrap_or(rest)
+    });
+    Some(match upper {
         "SUM" => math::sum,
         "SUMIF" => math::sumif,
         "SUMIFS" => math::sumifs,
