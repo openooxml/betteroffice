@@ -363,7 +363,7 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
         Expr::Name { scope, name } => match bound(scope, name, ctx) {
-            Some(binding) => binding.value().into_scalar(),
+            Some(binding) => binding.scalar(),
             None => evaluate_defined_name(scope, name, ctx),
         },
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),

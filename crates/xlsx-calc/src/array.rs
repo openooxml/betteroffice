@@ -104,6 +104,15 @@ impl Binding {
         (*self.value).clone()
     }
 
+    /// the single value this name shows, without copying a whole block.
+    pub(crate) fn scalar(&self) -> CellValue {
+        match &*self.value {
+            Value::Array(array) => array.at(0, 0),
+            Value::Scalar(value) => value.clone(),
+            Value::Lambda(_) => err(ErrorValue::Value),
+        }
+    }
+
     pub(crate) fn reference(&self) -> Option<&Expr> {
         self.reference.as_deref()
     }
