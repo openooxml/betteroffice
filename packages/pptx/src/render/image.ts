@@ -124,6 +124,7 @@ function dibBitmap(
   sourceWidth: number,
   sourceHeight: number
 ): Uint8Array<ArrayBuffer> | undefined {
+  if (bytes.length < 40) return;
   const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const width = data.getInt32(4, true);
   const height = data.getInt32(8, true);

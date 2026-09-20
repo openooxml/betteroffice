@@ -243,6 +243,19 @@ describe('presentation image blobs', () => {
     }
   });
 
+  test('bounds an EMF that declares an empty bitmap payload', async () => {
+    const record = stretchDibits(dib(4, 3), 4, 3).subarray(0, 80);
+    const empty = new Uint8Array(80);
+    empty.set(record);
+    const view = new DataView(empty.buffer);
+    view.setUint32(4, 80, true);
+    view.setUint32(52, 0, true);
+    view.setUint32(56, 80, true);
+    view.setUint32(60, 0, true);
+    const bytes = enhancedMetafile([empty]);
+    expect(presentationImageBlob(bytes).type).toBe('');
+  });
+
   test('bounds malformed EMF records and rejects truncated metafiles', async () => {
     const short = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
     const truncated = short.subarray(0, short.length - 2);
