@@ -909,7 +909,7 @@ impl DeckSession {
     }
 }
 
-pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
+pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)> {
     let package = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
@@ -933,9 +933,52 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
             .map_err(|_| EditError::InvalidState(format!("story {story_id} is not text")))?;
         validate_story(&story, &txn, story_id)?;
     }
-    Ok(())
+    Ok((package, snapshot))
 }
 
+/// Shared state for the pending-source import passes run by
+/// [`DeckSession::open_from_update_with_source`]: one deserialization of the
+/// doc's package plus the seeded source snapshot built at most once.
+pub(crate) struct SourceImport<'a> {
+    /// The source package the update was seeded from.
+    pub(crate) source: &'a PptxPackage,
+    /// The doc's package, mutated by each pass and synced back once.
+    pub(crate) package: PptxPackage,
+    source_snapshot: Option<DeckSnapshot>,
+}
+
+impl<'a> SourceImport<'a> {
+    pub(crate) fn new(package: PptxPackage, source: &'a PptxPackage) -> Self {
+        Self {
+            source,
+            package,
+            source_snapshot: None,
+        }
+    }
+
+    /// A seeded snapshot of `source`, built once and reused across passes.
+    pub(crate) fn source_snapshot(&mut self) -> EditResult<&DeckSnapshot> {
+        if self.source_snapshot.is_none() {
+            self.source_snapshot = Some(crate::save::baseline_snapshot(self.source)?);
+        }
+        Ok(self.source_snapshot.as_ref().unwrap())
+    }
+
+    /// Writes the accumulated package back iff an import changed it.
+    pub(crate) fn sync_package_json(self, doc: &Doc, baseline: &PptxPackage) -> EditResult<()> {
+        if &self.package == baseline {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&self.package)
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+        let meta = required_map(&txn, META)?;
+        meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -943,8 +986,12 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
-    let mut package = package_from_doc(doc)?;
+pub(crate) fn import_source_render_data(
+    doc: &Doc,
+    import: &mut SourceImport<'_>,
+) -> EditResult<()> {
+    let source = import.source;
+    let package = &mut import.package;
     let sources = source
         .slides
         .iter()
@@ -1030,12 +1077,9 @@ pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> Edit
     if !changed {
         return Ok(());
     }
-    let bytes = serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
-    backfill_blip_effects(&mut txn, &package)?;
-    backfill_tables(&mut txn, &package)?;
+    backfill_blip_effects(&mut txn, package)?;
+    backfill_tables(&mut txn, package)?;
     Ok(())
 }
 
