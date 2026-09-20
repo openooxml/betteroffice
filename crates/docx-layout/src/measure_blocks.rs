@@ -390,8 +390,11 @@ pub fn measure_blocks_with_shape_offsets(
         .iter()
         .enumerate()
         .map(|(index, block)| {
+            let opens_its_section =
+                index == 0 || matches!(blocks.get(index - 1), Some(LayoutBlock::SectionBreak(_)));
             matches!(block, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
                 && matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)))
+                && !opens_its_section
         })
         .collect::<Vec<_>>();
 
@@ -432,7 +435,8 @@ pub fn measure_blocks_with_shape_offsets(
         }
         let width = widths.get(index).copied().unwrap_or(default_width);
         // A bare paragraph mark carrying section properties is the section
-        // break itself; Word prints no line for it.
+        // break itself and prints no line, unless it is everything its section
+        // holds: Word lays such a section out one line tall.
         let extent = if section_break_marks[index] {
             BlockExtent::Paragraph(ParagraphExtent {
                 lines: Vec::new(),
@@ -1776,8 +1780,11 @@ mod tests {
         assert_eq!(offset(&measures[3]), 50.0);
     }
 
+    /// A section holding nothing but its own break mark is one line tall in
+    /// Word's PDF export; `oxi-en-correspondence-03` opens with such a section
+    /// and every line below it sits 25px lower than without one, at 150dpi.
     #[test]
-    fn a_bare_section_break_paragraph_mark_takes_no_line() {
+    fn a_section_break_mark_keeps_its_line_when_it_is_all_the_section_holds() {
         let font = crate::register_measure_font(include_bytes!(
             "../../ooxml-text/tests/fonts/LiberationSans-Regular.ttf"
         ))
@@ -1789,29 +1796,32 @@ mod tests {
         };
         let measure = |blocks: serde_json::Value| {
             let mut blocks: Vec<LayoutBlock> = serde_json::from_value(blocks).unwrap();
-            measure_blocks_with_floats(&mut blocks, &[200.0; 3], &config, None).unwrap()
+            measure_blocks_with_floats(&mut blocks, &[200.0; 6], &config, None).unwrap()
         };
         let empty = json!({"kind":"paragraph","id":"mark","runs":[]});
         let spaced = json!({"kind":"paragraph","id":"mark","runs":[{"kind":"text","text":" "}]});
         let section = json!({"kind":"sectionBreak","id":"sect:mark"});
+        let lead = json!({"kind":"paragraph","id":"lead","runs":[{"kind":"text","text":"words"}]});
         let tail = json!({"kind":"paragraph","id":"tail","runs":[{"kind":"text","text":"words"}]});
-
-        let marked = measure(json!([empty, section, tail]));
-        let BlockExtent::Paragraph(mark) = &marked[0] else {
-            panic!()
-        };
-        assert!(mark.lines.is_empty());
-        assert_eq!(mark.total_height, 0.0);
-
-        for kept in [
-            measure(json!([empty, tail])),
-            measure(json!([spaced, section, tail])),
-        ] {
-            let BlockExtent::Paragraph(mark) = &kept[0] else {
+        let mark_of = |measures: &[BlockExtent], index: usize| {
+            let BlockExtent::Paragraph(mark) = &measures[index] else {
                 panic!()
             };
-            assert_eq!(mark.lines.len(), 1);
-            assert!(mark.total_height > 0.0);
+            (mark.lines.len(), mark.total_height)
+        };
+
+        let marked = measure(json!([lead, empty, section, tail]));
+        assert_eq!(mark_of(&marked, 1), (0, 0.0));
+
+        for (measures, index) in [
+            (measure(json!([empty, section, tail])), 0),
+            (measure(json!([lead, section, empty, section, tail])), 2),
+            (measure(json!([empty, tail])), 0),
+            (measure(json!([lead, spaced, section, tail])), 1),
+        ] {
+            let (lines, height) = mark_of(&measures, index);
+            assert_eq!(lines, 1);
+            assert!(height > 0.0);
         }
     }
 
