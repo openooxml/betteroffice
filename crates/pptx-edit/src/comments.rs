@@ -177,6 +177,82 @@ fn live_parent<T: ReadTxn>(comments: &MapRef, entry: &MapRef, txn: &T) -> Option
     (depth % 2 == 1).then_some(parent_id)
 }
 
+/// The comments `snapshot_comments` returns for a doc `seed_comments` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_comments(
+    package: &PptxPackage,
+    slide_id_by_part: &dyn Fn(&str) -> Option<String>,
+) -> Vec<CommentSnapshot> {
+    let mut parents: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut comments = Vec::new();
+    for (index, comment) in package.comments.iter().enumerate() {
+        let Some(slide_id) = slide_id_by_part(&comment.slide_part_path) else {
+            continue;
+        };
+        let author = package
+            .comment_authors
+            .iter()
+            .find(|author| author.id == comment.author_id);
+        let id = seeded_comment_id(index, &comment.id);
+        let parent_id = comment.parent_id.as_ref().and_then(|parent| {
+            package
+                .comments
+                .iter()
+                .position(|candidate| &candidate.id == parent)
+                .map(|parent_index| seeded_comment_id(parent_index, parent))
+        });
+        parents.insert(id.clone(), parent_id.clone());
+        comments.push(CommentSnapshot {
+            id,
+            slide_id,
+            author: author.map(|author| author.name.clone()).unwrap_or_default(),
+            initials: author
+                .map(|author| author.initials.clone())
+                .unwrap_or_default(),
+            text: comment.text.clone(),
+            created: comment.created.clone(),
+            x_emu: comment.x_emu as f64 as i64,
+            y_emu: comment.y_emu as f64 as i64,
+            parent_id,
+            resolved: comment.status.as_deref() == Some("resolved"),
+        });
+    }
+    for comment in &mut comments {
+        if let Some(parent_id) = comment.parent_id.take() {
+            comment.parent_id = baseline_parent(&parents, parent_id);
+        }
+    }
+    comments.sort_by(|left, right| {
+        left.created
+            .cmp(&right.created)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    comments
+}
+
+/// `live_parent` over the seeded map: a reply keeps its parent only when the
+/// chain depth above it is odd.
+fn baseline_parent(
+    parents: &std::collections::HashMap<String, Option<String>>,
+    parent_id: String,
+) -> Option<String> {
+    let mut next = Some(parent_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    let mut depth = 0;
+    while let Some(id) = next {
+        if !seen.insert(id.clone()) || depth == 128 {
+            return None;
+        }
+        let Some(parent) = parents.get(&id) else {
+            break;
+        };
+        depth += 1;
+        next = parent.clone();
+    }
+    (depth % 2 == 1).then_some(parent_id)
+}
+
 pub(crate) fn snapshot_flavor<T: ReadTxn>(txn: &T) -> EditResult<CommentFlavor> {
     let meta = required_map(txn, META)?;
     Ok(match map_string(&meta, txn, "commentFlavor").as_deref() {
