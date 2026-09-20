@@ -1,14 +1,13 @@
 //! Aggregated read-state queries for host UI surfaces.
 
-use std::collections::HashSet;
+use yrs::{Any, Map, ReadTxn, Transact};
 
-use yrs::{Any, Map, Out, ReadTxn, Transact};
-
-use crate::op::{LocRange, OpError, OpResult, para_bounds};
+use crate::op::{OpError, OpResult, loc_range_in_bounds, para_bounds};
 use crate::ops::{Chunk, ChunkKind, capture_pilcrow, snapshot};
-use crate::queries::TextView;
+use crate::queries::{TextView, para_views, raw_changes};
 use crate::{
-    ChangeInfo, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string, story_ref,
+    ChangeInfo, ChangeKind, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string,
+    story_ref,
 };
 
 /// Preview cap for [`RevisionInfo::preview`], in Unicode scalar values.
@@ -118,49 +117,6 @@ pub struct RevisionInfo {
     /// The raw text under the change's range (deleted text included), capped
     /// at `PREVIEW_MAX_CHARS` characters. Empty for paragraph-mark revisions.
     pub preview: String,
-}
-
-/// Collects every story id referenced as a cell story by a `table` embed
-/// (payload `rows[*].cells[*].story`). Nested tables are covered because a
-/// nested table's embed lives in a cell story that is itself iterated.
-pub(crate) fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
-    let mut cells = HashSet::new();
-    let Some(stories) = txn.get_map(crate::STORIES) else {
-        return cells;
-    };
-    for (_, value) in stories.iter(txn) {
-        let Out::YText(story) = value else {
-            continue;
-        };
-        for chunk in snapshot(&story, txn) {
-            let ChunkKind::Embed(Some(map)) = &chunk.kind else {
-                continue;
-            };
-            if map_string(map, txn, KIND_KEY).as_deref() != Some("table") {
-                continue;
-            }
-            let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
-                continue;
-            };
-            for row in rows.iter() {
-                let Any::Map(row) = row else {
-                    continue;
-                };
-                let Some(Any::Array(row_cells)) = row.get("cells") else {
-                    continue;
-                };
-                for cell in row_cells.iter() {
-                    let Any::Map(cell) = cell else {
-                        continue;
-                    };
-                    if let Some(Any::String(story_id)) = cell.get("story") {
-                        cells.insert(story_id.to_string());
-                    }
-                }
-            }
-        }
-    }
-    cells
 }
 
 impl EditingDoc {
@@ -323,7 +279,7 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(&txn).contains(&range.story),
+            in_table: self.table_cells(&txn).contains(range.story.as_str()),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),
@@ -344,29 +300,42 @@ impl EditingDoc {
         };
         let mut result = Vec::new();
         for story_id in story_ids {
-            for change in self.list_changes(&story_id)? {
-                let range = LocRange {
-                    start: change.range.start.clone(),
-                    end: change.range.end.clone(),
-                };
+            let txn = self.yrs_doc().transact();
+            let story = story_ref(&txn, &story_id)?;
+            let bounds = para_bounds(&story, &txn);
+            // Paragraph views are materialized lazily: structural revisions
+            // carry an empty preview and never need text.
+            let mut views = None;
+            for change in raw_changes(&story, &txn) {
                 let preview = if matches!(
                     change.kind,
-                    crate::ChangeKind::ParagraphMarkInsertion
-                        | crate::ChangeKind::ParagraphMarkDeletion
-                        | crate::ChangeKind::ParagraphPropertiesChanged
-                        | crate::ChangeKind::TableRowInsertion
-                        | crate::ChangeKind::TableRowDeletion
-                        | crate::ChangeKind::TableInsertion
-                        | crate::ChangeKind::TableDeletion
+                    ChangeKind::ParagraphMarkInsertion
+                        | ChangeKind::ParagraphMarkDeletion
+                        | ChangeKind::ParagraphPropertiesChanged
+                        | ChangeKind::TableRowInsertion
+                        | ChangeKind::TableRowDeletion
+                        | ChangeKind::TableInsertion
+                        | ChangeKind::TableDeletion
                 ) {
                     String::new()
                 } else {
-                    let full = self.text_between(&range, TextView::Raw)?;
+                    let views =
+                        views.get_or_insert_with(|| para_views(&story, &txn, TextView::Raw));
+                    let mut full = String::new();
+                    for para in views.iter() {
+                        para.view_slice_of_raw(change.start, change.end, &mut full);
+                    }
                     full.chars().take(PREVIEW_MAX_CHARS).collect()
                 };
                 result.push(RevisionInfo {
                     story: story_id.clone(),
-                    change,
+                    change: ChangeInfo {
+                        revision_id: change.id,
+                        kind: change.kind,
+                        author: change.author,
+                        date: change.date,
+                        range: loc_range_in_bounds(&story_id, &bounds, change.start, change.end)?,
+                    },
                     preview,
                 });
             }

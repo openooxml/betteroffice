@@ -254,6 +254,41 @@ pub(crate) fn global_of_loc<T: ReadTxn>(
     Ok(bounds.start + loc.offset)
 }
 
+/// [`loc_of_global`] over paragraph bounds resolved once for a batch of mappings.
+pub(crate) fn loc_in_bounds(
+    story_id: &str,
+    bounds: &[ParaBounds],
+    index: u32,
+) -> Result<Loc, OpError> {
+    let Some(last) = bounds.last() else {
+        return Err(OpError::UnknownStory(story_id.to_owned()));
+    };
+    let para = bounds
+        .get(bounds.partition_point(|bounds| index > bounds.pilcrow))
+        .unwrap_or(last);
+    Ok(Loc {
+        story: story_id.to_owned(),
+        para: para.para_id.clone(),
+        offset: index
+            .min(para.pilcrow)
+            .saturating_sub(para.start)
+            .min(para.len()),
+    })
+}
+
+/// [`loc_range_in_txn`] over paragraph bounds resolved once for a batch of mappings.
+pub(crate) fn loc_range_in_bounds(
+    story_id: &str,
+    bounds: &[ParaBounds],
+    start: u32,
+    end: u32,
+) -> Result<LocRange, OpError> {
+    Ok(LocRange {
+        start: loc_in_bounds(story_id, bounds, start)?,
+        end: loc_in_bounds(story_id, bounds, end)?,
+    })
+}
+
 /// Maps a story-global index back to a [`Loc`]. Indices past the final pilcrow clamp to the final
 /// paragraph mark.
 pub(crate) fn loc_of_global<T: ReadTxn>(
@@ -262,23 +297,7 @@ pub(crate) fn loc_of_global<T: ReadTxn>(
     txn: &T,
     index: u32,
 ) -> Result<Loc, OpError> {
-    let all = para_bounds(story, txn);
-    let last = all
-        .last()
-        .cloned()
-        .ok_or_else(|| OpError::UnknownStory(story_id.to_owned()))?;
-    let bounds = all
-        .into_iter()
-        .find(|bounds| index <= bounds.pilcrow)
-        .unwrap_or(last);
-    Ok(Loc {
-        story: story_id.to_owned(),
-        para: bounds.para_id.clone(),
-        offset: index
-            .min(bounds.pilcrow)
-            .saturating_sub(bounds.start)
-            .min(bounds.len()),
-    })
+    loc_in_bounds(story_id, &para_bounds(story, txn), index)
 }
 
 /// Builds a [`LocRange`] for a story-global span inside an open transaction.
@@ -289,10 +308,7 @@ pub(crate) fn loc_range_in_txn<T: ReadTxn>(
     start: u32,
     end: u32,
 ) -> Result<LocRange, OpError> {
-    Ok(LocRange {
-        start: loc_of_global(story_id, story, txn, start)?,
-        end: loc_of_global(story_id, story, txn, end)?,
-    })
+    loc_range_in_bounds(story_id, &para_bounds(story, txn), start, end)
 }
 
 impl crate::EditingDoc {

@@ -4,14 +4,15 @@ use std::sync::{Arc, Mutex};
 
 use yrs::branch::{Branch, BranchPtr};
 use yrs::types::Delta;
+use yrs::types::text::YChange;
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ID, IndexedSequence, Map, Observable, Out, ReadTxn, StickyIndex, TextRef, Transact,
-    Update,
+    Any, Assoc, ID, IndexedSequence, Map, Observable, Out, ReadTxn, StickyIndex, Text, TextRef,
+    Transact, Update,
 };
 
-use crate::{EditingDoc, SegmentContent, story_ref};
+use crate::{EditingDoc, PARA_ID, is_pilcrow, map_string, out_len, story_ref};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct TypingInference {
@@ -146,23 +147,26 @@ struct InsertedContent {
 }
 
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<(String, u32), String> {
+    let txn = doc.yrs_doc().transact();
+    let story_ref = story_ref(&txn, story).map_err(|error| error.to_string())?;
     let mut cursor = 0_u32;
     let mut para_start = 0_u32;
-    for segment in doc
-        .story_segments(story)
-        .map_err(|error| error.to_string())?
-    {
-        match segment.content {
-            SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if index <= cursor {
-                    return Ok((properties.para_id, index.saturating_sub(para_start)));
-                }
-                cursor += 1;
-                para_start = cursor;
+    for diff in story_ref.diff(&txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if let Out::YMap(map) = &diff.insert
+            && is_pilcrow(map, &txn)
+        {
+            if index <= cursor {
+                return Ok((
+                    map_string(map, &txn, PARA_ID).unwrap_or_default(),
+                    index.saturating_sub(para_start),
+                ));
             }
-            SegmentContent::OtherEmbed { .. } => cursor += 1,
+            cursor += 1;
+            para_start = cursor;
+            continue;
         }
+        cursor += len;
     }
     Err(format!(
         "selection index {index} does not resolve in story {story:?}"

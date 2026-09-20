@@ -48,10 +48,10 @@
 //! Internal IDs are `{clientID}:{counter}`. Dense integer `w:id` values are an export concern and
 //! must be minted only while serializing OOXML.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -59,7 +59,8 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, Doc, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options, Out,
-    ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
+    ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim, TextRef, Transact,
+    Transaction, Update,
 };
 
 mod ctx;
@@ -285,6 +286,13 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
+    /// Bumped once per committed update (local ops, remote merges, undo/redo); caches
+    /// keyed on it are rebuilt on next lookup.
+    epoch: Arc<AtomicU64>,
+    /// The table-cell story set valid at `epoch`, shared by every table-aware
+    /// read query until the next commit.
+    cell_stories: Mutex<Option<(u64, Arc<HashSet<Arc<str>>>)>>,
+    _update_sub: Subscription,
 }
 
 impl EditingDoc {
@@ -297,11 +305,83 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        let epoch = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&epoch);
+        // after_transaction fires on every commit without materializing an update;
+        // observe_update_v1 would encode one and so costs (and can fail) per commit.
+        let update_sub = doc
+            .observe_after_transaction(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .expect("a fresh doc accepts an update observer");
         Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
+            epoch,
+            cell_stories: Mutex::new(None),
+            _update_sub: update_sub,
         }
+    }
+
+    /// Every story id referenced as a cell story by a `table` embed
+    /// (`rows[*].cells[*].story`), built once per committed epoch and reused
+    /// until the next commit. Nested tables are covered because a nested
+    /// table's embed lives in a cell story that is itself iterated.
+    ///
+    /// `txn` must be a read transaction opened for the current state; the
+    /// epoch is sampled before the build so a commit landing in between forces
+    /// one extra rebuild rather than serving a pre-commit view as current.
+    pub(crate) fn table_cells(&self, txn: &Transaction<'_>) -> Arc<HashSet<Arc<str>>> {
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        {
+            let cache = self.cell_stories.lock().unwrap();
+            if let Some((cached_epoch, cells)) = &*cache
+                && *cached_epoch == epoch
+            {
+                return Arc::clone(cells);
+            }
+        }
+        let mut cells = HashSet::new();
+        if let Some(stories) = txn.get_map(STORIES) {
+            for (_, value) in stories.iter(txn) {
+                let Out::YText(story) = value else {
+                    continue;
+                };
+                for diff in story.diff(txn, YChange::identity) {
+                    let Out::YMap(map) = diff.insert else {
+                        continue;
+                    };
+                    if map_string(&map, txn, KIND_KEY).as_deref() != Some("table") {
+                        continue;
+                    }
+                    let Some(Out::Any(Any::Array(rows))) = map.get(txn, "rows") else {
+                        continue;
+                    };
+                    for row in rows.iter() {
+                        let Any::Map(row) = row else {
+                            continue;
+                        };
+                        let Some(Any::Array(row_cells)) = row.get("cells") else {
+                            continue;
+                        };
+                        for cell in row_cells.iter() {
+                            let Any::Map(cell) = cell else {
+                                continue;
+                            };
+                            if let Some(Any::String(story_id)) = cell.get("story") {
+                                cells.insert(Arc::clone(story_id));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let cells = Arc::new(cells);
+        *self.cell_stories.lock().unwrap() = Some((epoch, Arc::clone(&cells)));
+        cells
     }
 
     pub fn client_id(&self) -> u64 {

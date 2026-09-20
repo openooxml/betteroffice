@@ -5,7 +5,7 @@ use regex::RegexBuilder;
 use serde::Serialize;
 use yrs::{Any, Map, ReadTxn, Transact};
 
-use crate::{EditingDoc, SegmentContent, read_state::table_cell_stories};
+use crate::{EditingDoc, SegmentContent};
 
 /// Paragraph-local UTF-16 offsets.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -83,10 +83,14 @@ impl EditingDoc {
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Ok(Vec::new());
         };
-        let cells = table_cell_stories(&txn);
+        let cells = self.table_cells(&txn);
         let mut ids: Vec<String> = stories.keys(&txn).map(str::to_owned).collect();
         ids.sort_by(|a, b| {
-            (a != "body", cells.contains(a), a).cmp(&(b != "body", cells.contains(b), b))
+            (a != "body", cells.contains(a.as_str()), a.as_str()).cmp(&(
+                b != "body",
+                cells.contains(b.as_str()),
+                b.as_str(),
+            ))
         });
         let mut tasks: Vec<_> = ids.into_iter().rev().map(SearchTask::Story).collect();
         let mut visited = HashSet::new();

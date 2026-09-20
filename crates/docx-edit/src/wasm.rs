@@ -45,16 +45,20 @@ use js_sys::{Function, Uint8Array};
 use serde::Serialize;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
-use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
+use yrs::types::text::YChange;
+use yrs::{
+    Any, Assoc, IndexedSequence, Map, Out, ReadTxn, StickyIndex, Subscription, Text, Transact,
+};
 
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
-    FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange, TabStop, TableLocator,
-    TableRange, TriState, UndoSession, story_ref,
+    FontFamilyPatch, FormatPolicy, InlineFormatDelta, KIND_KEY, MergeDirection, PARA_ID,
+    ParaAttrDelta, ParaSelector, Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange,
+    TabStop, TableLocator, TableRange, TriState, UndoSession, is_pilcrow, map_string, out_len,
+    story_ref,
 };
 
 #[wasm_bindgen]
@@ -133,26 +137,28 @@ fn is_block_embed(kind: &str) -> bool {
     matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
 }
 
-/// Resolves a paragraph to its story span by walking the public segment view.
+/// Resolves a paragraph to its story span by walking the story's diff stream
+/// once — no segment or attribute materialization.
 /// Story-scoped: a `para_id` that lives in another story is "not found".
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
+    let txn = doc.yrs_doc().transact();
+    let story_ref = story_ref(&txn, story).map_err(js_err)?;
     let mut offset: u32 = 0;
     let mut para_start: u32 = 0;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => offset += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
-                if properties.para_id == para_id {
-                    return Ok(ParaSpan {
-                        start: para_start,
-                        pilcrow: offset,
-                    });
-                }
-                offset += 1;
-                para_start = offset;
+    for diff in story_ref.diff(&txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if let Out::YMap(map) = diff.insert
+            && is_pilcrow(&map, &txn)
+        {
+            if map_string(&map, &txn, PARA_ID).as_deref() == Some(para_id) {
+                return Ok(ParaSpan {
+                    start: para_start,
+                    pilcrow: offset,
+                });
             }
-            SegmentContent::OtherEmbed { .. } => offset += 1,
+            para_start = offset + 1;
         }
+        offset += len;
     }
     Err(js_err(format!(
         "paragraph {para_id:?} was not found in story {story:?}"
@@ -175,16 +181,18 @@ fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Resul
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
 fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, JsValue> {
+    let txn = doc.yrs_doc().transact();
+    let story_ref = story_ref(&txn, story).map_err(js_err)?;
     let mut cursor = 0_u32;
     let mut para_start = 0_u32;
     let mut node_start = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => cursor += text.encode_utf16().count() as u32,
-            SegmentContent::Pilcrow(properties) => {
+    for diff in story_ref.diff(&txn, YChange::identity) {
+        match diff.insert {
+            Out::Any(Any::String(text)) => cursor += text.encode_utf16().count() as u32,
+            Out::YMap(map) if is_pilcrow(&map, &txn) => {
                 if index <= cursor {
                     return Ok(IndexedLoc {
-                        para_id: properties.para_id,
+                        para_id: map_string(&map, &txn, PARA_ID).unwrap_or_default(),
                         offset: index.saturating_sub(para_start),
                         node_offset: index.saturating_sub(node_start),
                     });
@@ -193,11 +201,18 @@ fn index_loc(doc: &EditingDoc, story: &str, index: u32) -> Result<IndexedLoc, Js
                 para_start = cursor;
                 node_start = cursor;
             }
-            SegmentContent::OtherEmbed { ref kind, .. } => {
-                if cursor == node_start && is_block_embed(kind) {
+            other => {
+                if cursor == node_start
+                    && let Out::YMap(map) = &other
+                    && is_block_embed(
+                        map_string(map, &txn, KIND_KEY)
+                            .as_deref()
+                            .unwrap_or_default(),
+                    )
+                {
                     node_start = cursor + 1;
                 }
-                cursor += 1;
+                cursor += out_len(&other);
             }
         }
     }
@@ -212,12 +227,13 @@ fn adjacent_story_unit(
     index: u32,
     direction: DeleteDirection,
 ) -> Result<Option<AdjacentStoryUnit>, JsValue> {
+    let txn = doc.yrs_doc().transact();
+    let story_ref = story_ref(&txn, story).map_err(js_err)?;
     let mut cursor = 0_u32;
-    for segment in doc.story_segments(story).map_err(js_err)? {
-        match segment.content {
-            SegmentContent::Text(text) => {
-                let units: Vec<u16> = text.encode_utf16().collect();
-                let end = cursor + units.len() as u32;
+    for diff in story_ref.diff(&txn, YChange::identity) {
+        match diff.insert {
+            Out::Any(Any::String(text)) => {
+                let end = cursor + text.encode_utf16().count() as u32;
                 let relative = match direction {
                     DeleteDirection::Backward if index > cursor && index <= end => {
                         Some((index - cursor) as usize)
@@ -228,6 +244,7 @@ fn adjacent_story_unit(
                     _ => None,
                 };
                 if let Some(relative) = relative {
+                    let units: Vec<u16> = text.encode_utf16().collect();
                     let width = match direction {
                         DeleteDirection::Backward
                             if relative > 1
@@ -249,7 +266,7 @@ fn adjacent_story_unit(
                 }
                 cursor = end;
             }
-            SegmentContent::Pilcrow(_) => {
+            Out::YMap(map) if is_pilcrow(&map, &txn) => {
                 let adjacent = match direction {
                     DeleteDirection::Backward => index == cursor + 1,
                     DeleteDirection::Forward => index == cursor,
@@ -259,7 +276,7 @@ fn adjacent_story_unit(
                 }
                 cursor += 1;
             }
-            SegmentContent::OtherEmbed { .. } => {
+            other => {
                 let adjacent = match direction {
                     DeleteDirection::Backward => index == cursor + 1,
                     DeleteDirection::Forward => index == cursor,
@@ -267,7 +284,7 @@ fn adjacent_story_unit(
                 if adjacent {
                     return Ok(Some(AdjacentStoryUnit::Content(1)));
                 }
-                cursor += 1;
+                cursor += out_len(&other);
             }
         }
     }
@@ -3365,23 +3382,25 @@ impl EditSession {
     /// exactly the `offset` domain of a Loc in it. One call replaces crossing
     /// the boundary once per paragraph. Errors on an unknown story.
     pub fn paragraph_spans(&self, story: &str) -> Result<String, JsValue> {
+        let doc = self.engine.doc();
+        let txn = doc.yrs_doc().transact();
+        let story_ref = story_ref(&txn, story).map_err(js_err)?;
         let mut items = Vec::new();
         let mut cursor = 0_u32;
         let mut paragraph_start = 0_u32;
-        for segment in self.engine.doc().story_segments(story).map_err(js_err)? {
-            match segment.content {
-                SegmentContent::Text(text) => {
-                    cursor += text.encode_utf16().count() as u32;
-                }
-                SegmentContent::Pilcrow(properties) => {
-                    items.push(json!({
-                        "paraId": properties.para_id,
-                        "length": cursor - paragraph_start,
-                    }));
-                    cursor += 1;
-                    paragraph_start = cursor;
-                }
-                SegmentContent::OtherEmbed { .. } => cursor += 1,
+        for diff in story_ref.diff(&txn, YChange::identity) {
+            let len = out_len(&diff.insert);
+            if let Out::YMap(map) = &diff.insert
+                && is_pilcrow(map, &txn)
+            {
+                items.push(json!({
+                    "paraId": map_string(map, &txn, PARA_ID).unwrap_or_default(),
+                    "length": cursor - paragraph_start,
+                }));
+                cursor += 1;
+                paragraph_start = cursor;
+            } else {
+                cursor += len;
             }
         }
         serde_json::to_string(&items).map_err(js_err)

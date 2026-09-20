@@ -5,12 +5,15 @@ use std::collections::{HashMap, HashSet};
 use unicode_segmentation::UnicodeSegmentation;
 use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
 
-use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
+use crate::op::{
+    Loc, LocRange, OpError, OpResult, ParaBounds, global_of_loc, loc_in_bounds, loc_of_global,
+    loc_range_in_bounds, para_bounds,
+};
 use crate::ops::table::{TableRowChangeKind, table_row_changes};
 use crate::ops::{ChunkKind, snapshot};
 use crate::{
-    BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
-    map_string, story_ref,
+    BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId,
+    ResolvedCommentAnchor, RevisionId, decode_anchor, map_string, story_ref,
 };
 
 /// Which projection of the story text a read query uses.
@@ -61,7 +64,7 @@ impl ParaView {
     }
 
     /// Appends the view text overlapping the raw interval `[from, to)` to `out`.
-    fn view_slice_of_raw(&self, from: u32, to: u32, out: &mut String) {
+    pub(crate) fn view_slice_of_raw(&self, from: u32, to: u32, out: &mut String) {
         for span in &self.spans {
             let overlap_start = span.raw_start.max(from);
             let overlap_end = (span.raw_start + span.len).min(to);
@@ -506,47 +509,53 @@ impl EditingDoc {
 
     /// Every comment in the side map, with best-effort resolved anchor ranges.
     pub fn list_comments(&self) -> OpResult<Vec<CommentInfo>> {
-        let ids: Vec<String> = {
-            let txn = self.yrs_doc().transact();
-            let Some(comments) = txn.get_map(COMMENTS) else {
-                return Ok(Vec::new());
-            };
-            use yrs::Map;
-            let mut ids: Vec<String> = comments.keys(&txn).map(|key| key.to_string()).collect();
-            ids.sort();
-            ids
+        let txn = self.yrs_doc().transact();
+        let Some(comments) = txn.get_map(COMMENTS) else {
+            return Ok(Vec::new());
         };
+        let mut ids: Vec<String> = comments.keys(&txn).map(|key| key.to_string()).collect();
+        ids.sort();
+        // Paragraph bounds are resolved once per anchor story and shared by
+        // every anchored range landing in it.
+        let mut bounds_by_story: HashMap<String, Vec<ParaBounds>> = HashMap::new();
         let mut result = Vec::new();
         for id in ids {
-            let ranges = self
-                .resolve_comment(&id)
-                .ok()
-                .map(|anchors| {
-                    let txn = self.yrs_doc().transact();
-                    anchors
-                        .into_iter()
-                        .filter_map(|anchor| {
-                            let story = story_ref(&txn, &anchor.story).ok()?;
-                            Some(LocRange {
-                                start: loc_of_global(&anchor.story, &story, &txn, anchor.start)
-                                    .ok()?,
-                                end: loc_of_global(&anchor.story, &story, &txn, anchor.end).ok()?,
-                            })
-                        })
-                        .collect()
-                })
-                .unwrap_or_default();
-            let txn = self.yrs_doc().transact();
-            let Some(comments) = txn.get_map(COMMENTS) else {
-                continue;
-            };
-            use yrs::Map;
             let Some(comment) = comments
                 .get(&txn, &id)
                 .and_then(|value| value.cast::<yrs::MapRef>().ok())
             else {
                 continue;
             };
+            // Anchor decode and offset resolution are all-or-nothing, matching
+            // resolve_comment: one dead anchor empties the comment's ranges.
+            let resolved = match comment.get(&txn, "anchors") {
+                Some(Out::Any(Any::Array(values))) => values
+                    .iter()
+                    .map(|value| {
+                        let anchor = decode_anchor(value).ok()?;
+                        Some(ResolvedCommentAnchor {
+                            story: anchor.story,
+                            start: anchor.start.get_offset(&txn)?.index,
+                            end: anchor.end.get_offset(&txn)?.index,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let ranges = resolved
+                .into_iter()
+                .filter_map(|anchor| {
+                    let story = story_ref(&txn, &anchor.story).ok()?;
+                    let bounds = bounds_by_story
+                        .entry(anchor.story.clone())
+                        .or_insert_with(|| para_bounds(&story, &txn));
+                    Some(LocRange {
+                        start: loc_in_bounds(&anchor.story, bounds, anchor.start).ok()?,
+                        end: loc_in_bounds(&anchor.story, bounds, anchor.end).ok()?,
+                    })
+                })
+                .collect();
             let string_of = |key: &str| match comment.get(&txn, key) {
                 Some(Out::Any(Any::String(value))) => Some(value.to_string()),
                 _ => None,
@@ -573,28 +582,63 @@ impl EditingDoc {
     pub fn list_changes(&self, story_id: &str) -> OpResult<Vec<ChangeInfo>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
-        let chunks = snapshot(&story, &txn);
-        struct RawChange {
-            id: String,
-            kind: ChangeKind,
-            author: String,
-            date: String,
-            start: u32,
-            end: u32,
-        }
-        let mut raw: Vec<RawChange> = Vec::new();
-        for chunk in &chunks {
-            if let ChunkKind::Pilcrow(map) = &chunk.kind {
-                for (key, kind) in [
-                    (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
-                    (crate::PPR_DEL, ChangeKind::ParagraphMarkDeletion),
-                ] {
-                    if let Some(Out::Any(value)) = map.get(&txn, key)
-                        && let Some((id, author, date)) = revision_parts(&value)
-                    {
+        let bounds = para_bounds(&story, &txn);
+        raw_changes(&story, &txn)
+            .into_iter()
+            .map(|change| {
+                Ok(ChangeInfo {
+                    revision_id: change.id,
+                    kind: change.kind,
+                    author: change.author,
+                    date: change.date,
+                    range: loc_range_in_bounds(story_id, &bounds, change.start, change.end)?,
+                })
+            })
+            .collect()
+    }
+}
+
+/// One tracked change at raw story-index granularity.
+pub(crate) struct RawChange {
+    pub id: String,
+    pub kind: ChangeKind,
+    pub author: String,
+    pub date: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// Every tracked change in `story` ordered by position, shared by
+/// [`EditingDoc::list_changes`] and `list_revisions` so enumeration walks the
+/// story once per epoch, not once per change.
+pub(crate) fn raw_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<RawChange> {
+    let chunks = snapshot(story, txn);
+    let mut raw: Vec<RawChange> = Vec::new();
+    for chunk in &chunks {
+        if let ChunkKind::Pilcrow(map) = &chunk.kind {
+            for (key, kind) in [
+                (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
+                (crate::PPR_DEL, ChangeKind::ParagraphMarkDeletion),
+            ] {
+                if let Some(Out::Any(value)) = map.get(txn, key)
+                    && let Some((id, author, date)) = revision_parts(&value)
+                {
+                    raw.push(RawChange {
+                        id,
+                        kind,
+                        author,
+                        date,
+                        start: chunk.start,
+                        end: chunk.start + 1,
+                    });
+                }
+            }
+            if let Some(Out::Any(Any::Array(changes))) = map.get(txn, crate::PPR_CHANGE) {
+                for change in changes.iter() {
+                    if let Some((id, author, date)) = revision_parts(change) {
                         raw.push(RawChange {
                             id,
-                            kind,
+                            kind: ChangeKind::ParagraphPropertiesChanged,
                             author,
                             date,
                             start: chunk.start,
@@ -602,85 +646,57 @@ impl EditingDoc {
                         });
                     }
                 }
-                if let Some(Out::Any(Any::Array(changes))) = map.get(&txn, crate::PPR_CHANGE) {
-                    for change in changes.iter() {
-                        if let Some((id, author, date)) = revision_parts(change) {
-                            raw.push(RawChange {
-                                id,
-                                kind: ChangeKind::ParagraphPropertiesChanged,
-                                author,
-                                date,
-                                start: chunk.start,
-                                end: chunk.start + 1,
-                            });
-                        }
-                    }
-                }
-                continue;
             }
-            for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
-                let Some(value) = chunk.attrs.get(key) else {
-                    continue;
-                };
-                let Some((id, author, date)) = revision_parts(value) else {
-                    continue;
-                };
-                if let Some(last) = raw
-                    .iter_mut()
-                    .rev()
-                    .find(|change| change.kind == kind)
-                    .filter(|change| change.id == id && change.end == chunk.start)
-                {
-                    last.end = chunk.end();
-                } else {
-                    raw.push(RawChange {
-                        id,
-                        kind,
-                        author,
-                        date,
-                        start: chunk.start,
-                        end: chunk.end(),
-                    });
-                }
+            continue;
+        }
+        for (key, kind) in [(INS, ChangeKind::Insertion), (DEL, ChangeKind::Deletion)] {
+            let Some(value) = chunk.attrs.get(key) else {
+                continue;
+            };
+            let Some((id, author, date)) = revision_parts(value) else {
+                continue;
+            };
+            if let Some(last) = raw
+                .iter_mut()
+                .rev()
+                .find(|change| change.kind == kind)
+                .filter(|change| change.id == id && change.end == chunk.start)
+            {
+                last.end = chunk.end();
+            } else {
+                raw.push(RawChange {
+                    id,
+                    kind,
+                    author,
+                    date,
+                    start: chunk.start,
+                    end: chunk.end(),
+                });
             }
         }
-        raw.extend(
-            table_row_changes(&story, &txn)
-                .into_iter()
-                .map(|change| RawChange {
-                    id: change.revision_id,
-                    kind: match change.kind {
-                        TableRowChangeKind::Insertion => ChangeKind::TableRowInsertion,
-                        TableRowChangeKind::Deletion => ChangeKind::TableRowDeletion,
-                        TableRowChangeKind::TableInsertion => ChangeKind::TableInsertion,
-                        TableRowChangeKind::TableDeletion => ChangeKind::TableDeletion,
-                    },
-                    author: change.author,
-                    date: change.date,
-                    start: change.start,
-                    end: change.start + 1,
-                }),
-        );
-        raw.sort_by_key(|change| change.start);
-        raw.into_iter()
-            .map(|change| {
-                Ok(ChangeInfo {
-                    revision_id: change.id,
-                    kind: change.kind,
-                    author: change.author,
-                    date: change.date,
-                    range: crate::op::loc_range_in_txn(
-                        story_id,
-                        &story,
-                        &txn,
-                        change.start,
-                        change.end,
-                    )?,
-                })
-            })
-            .collect()
     }
+    raw.extend(
+        table_row_changes(story, txn)
+            .into_iter()
+            .map(|change| RawChange {
+                id: change.revision_id,
+                kind: match change.kind {
+                    TableRowChangeKind::Insertion => ChangeKind::TableRowInsertion,
+                    TableRowChangeKind::Deletion => ChangeKind::TableRowDeletion,
+                    TableRowChangeKind::TableInsertion => ChangeKind::TableInsertion,
+                    TableRowChangeKind::TableDeletion => ChangeKind::TableDeletion,
+                },
+                author: change.author,
+                date: change.date,
+                start: change.start,
+                end: change.start + 1,
+            }),
+    );
+    raw.sort_by_key(|change| change.start);
+    raw
+}
 
+impl EditingDoc {
     /// The Loc range covering every unit stamped with the revision ID (any story).
     pub fn find_change_range(&self, revision_id: &str) -> OpResult<LocRange> {
         let txn = self.yrs_doc().transact();
