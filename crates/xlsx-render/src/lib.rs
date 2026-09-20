@@ -8,6 +8,8 @@ pub mod hit;
 pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
+use std::sync::Arc;
+
 use ooxml_drawingml::chart::ChartSpace;
 use std::ops::Range;
 
@@ -289,7 +291,7 @@ pub fn build_display_list_with_charts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
 {
     build_display_list_with_charts_and_ghosts(wb, sheet, viewport, &[], resolver)
 }
@@ -303,7 +305,7 @@ pub fn build_display_list_with_charts_and_ghosts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
 {
     build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
@@ -317,7 +319,7 @@ pub fn build_print_display_list_with_charts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
 {
     build_frame(
         wb,
@@ -338,7 +340,7 @@ fn build_frame<F>(
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
 {
     let mut commands = Vec::new();
 
