@@ -263,9 +263,7 @@ impl Workbook {
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
-    /// borrowed variant of `value`: providers holding the value lend it out
-    /// instead of cloning stored strings on every read. absent cells read as
-    /// `CellValue::Empty`.
+    /// Borrowing variant of `value`; absent cells read as `CellValue::Empty`.
     fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
         Cow::Owned(self.value(sheet, at))
     }

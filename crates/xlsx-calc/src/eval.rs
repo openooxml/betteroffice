@@ -722,9 +722,7 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-/// gate provider reads: non-finite numbers and over-long text become errors
-/// instead of leaking into results. `Cow::Borrowed` passes through untouched,
-/// so callers inspecting a stored value never clone it.
+/// Map invalid stored values to errors.
 fn normalize_cow(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
     match provider_error(&value) {
         Some(error) => Cow::Owned(err(error)),
@@ -732,8 +730,7 @@ fn normalize_cow(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
     }
 }
 
-/// a cell's text length needs no scan when its byte length already fits the
-/// cap: chars never outnumber bytes.
+/// `ErrorValue` a stored value must surface as, if any.
 fn provider_error(value: &CellValue) -> Option<ErrorValue> {
     match value {
         CellValue::Number { value } if !value.is_finite() => Some(ErrorValue::Num),
