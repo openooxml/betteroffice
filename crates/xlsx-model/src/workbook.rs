@@ -58,6 +58,15 @@ pub struct Cell {
 /// `None` when the cell is refused.
 type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 
+/// `sheetFormatPr` sizing defaults. `custom_height` is the author's claim that
+/// every unsized row is pinned at `default_row_height_pt`; without it an
+/// unsized row takes the height of its tallest content.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SheetFormat {
+    pub default_row_height_pt: Option<f64>,
+    pub custom_height: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
@@ -67,6 +76,8 @@ pub struct Sheet {
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
+    pub format: SheetFormat,
     pub charts: Vec<SheetChart>,
 }
 

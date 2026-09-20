@@ -8,7 +8,7 @@ use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
     FormatCode, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
-    VAlign, Workbook as WorkbookModel,
+    Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -237,6 +237,7 @@ impl Workbook {
             build_graph,
             client_id,
             &parsed.legacy_dimensions,
+            parsed.legacy_styles.as_ref(),
         )
     }
 
@@ -280,6 +281,7 @@ impl Workbook {
             build_graph,
             client_id,
             &[],
+            None,
         )
     }
 
@@ -290,6 +292,7 @@ impl Workbook {
         build_graph: bool,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self> {
         validate_model(&model)?;
         validate_chart_source(&model, source_package.is_some())?;
@@ -301,8 +304,9 @@ impl Workbook {
         if let Some(client_id) = client_id {
             validate_collaboration_client_id(client_id)?;
         }
-        let authority = WorkbookAuthority::from_source(&model, client_id, legacy_dimensions)
-            .map_err(authority_error)?;
+        let authority =
+            WorkbookAuthority::from_source(&model, client_id, legacy_dimensions, legacy_styles)
+                .map_err(authority_error)?;
         if client_id.is_some() {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
@@ -716,7 +720,7 @@ impl Workbook {
 
     pub fn sheet_info(&self) -> Result<SheetInfo> {
         let sheet = self.sheet(self.active_sheet)?;
-        let geometry = GridGeometry::new(sheet);
+        let geometry = GridGeometry::new(sheet, &self.model.styles);
         let sheet_ids = match &self.mode {
             WorkbookMode::Collaborative { structure } => structure.sheet_keys.clone(),
             WorkbookMode::Standalone => (0..self.model.sheets.len())
@@ -771,7 +775,7 @@ impl Workbook {
     pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
         validate_cell_ref(cell)?;
         let sheet = self.sheet(sheet)?;
-        let geometry = GridGeometry::new(sheet);
+        let geometry = GridGeometry::new(sheet, &self.model.styles);
         let (frozen_rows, frozen_cols) = sheet
             .freeze_pane
             .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -1545,7 +1549,7 @@ impl Workbook {
             });
         }
         let sheet_ref = self.sheet(sheet)?;
-        let geometry = GridGeometry::for_print(sheet_ref, metrics);
+        let geometry = GridGeometry::for_print(sheet_ref, &self.model.styles, metrics);
         let viewport = Viewport {
             x: geometry.col_x(range.start.col),
             y: geometry.row_y(range.start.row),
@@ -1585,7 +1589,7 @@ impl Workbook {
     /// proposal cell whose base drifted paints its committed text instead.
     pub fn display_list_for(&self, sheet: SheetId, viewport: &Viewport) -> Result<DisplayList> {
         let sheet_ref = self.sheet(sheet)?;
-        validate_display_region(sheet_ref, viewport)?;
+        validate_display_region(sheet_ref, &self.model.styles, viewport)?;
         let mut ghosts: BTreeMap<(u32, u32), GhostEdit> = BTreeMap::new();
         for proposal in self.proposals.list() {
             let drifted: BTreeSet<_> = proposal
@@ -1653,7 +1657,7 @@ impl Workbook {
         x: f32,
         y: f32,
     ) -> Result<Option<ChartRegion>> {
-        let regions = chart_regions(self.sheet(sheet)?, viewport)?;
+        let regions = chart_regions(self.sheet(sheet)?, &self.model.styles, viewport)?;
         Ok(chart_at_point(&regions, x, y).cloned())
     }
 
@@ -1680,7 +1684,7 @@ impl Workbook {
             .ok_or_else(|| chart_frame_not_found(frame))?;
         let to = moved_chart_anchor(
             chart.anchor,
-            &GridGeometry::new(sheet_ref),
+            &GridGeometry::new(sheet_ref, &self.model.styles),
             f64::from(dx),
             f64::from(dy),
         )
@@ -1741,9 +1745,9 @@ impl Workbook {
             validate_range(range)?;
         }
         let mut viewport = match options.range {
-            Some(range) => viewport_for_range(sheet_ref, range),
-            None => viewport_for_used_range_within(sheet_ref, |grown| {
-                renderable(sheet_ref, grown, options.scale)
+            Some(range) => viewport_for_range(sheet_ref, &self.model.styles, range),
+            None => viewport_for_used_range_within(sheet_ref, &self.model.styles, |grown| {
+                renderable(sheet_ref, &self.model.styles, grown, options.scale)
             }),
         };
         if let Some(width) = options.max_width {
@@ -1756,7 +1760,7 @@ impl Workbook {
         let width = ((viewport.width * options.scale).ceil() as u32).max(1);
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
         validate_render_size(width, height)?;
-        validate_display_region(sheet_ref, &viewport)?;
+        validate_display_region(sheet_ref, &self.model.styles, &viewport)?;
         let source_package = self.source_package.as_ref();
         let theme = &self.model.styles.theme;
         let model = &self.model;
@@ -2670,7 +2674,7 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
             // to as well: anything it accepts that they refuse would be
             // published and dropped, taking the rest of the session with it.
             validate_intrinsic_anchor(*to)?;
-            resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref), 0, 0)
+            resolve_chart_anchor(*to, &GridGeometry::new(sheet_ref, &model.styles), 0, 0)
                 .map_err(|error| Error::InvalidOperation(error.to_string()))?;
         }
         Op::MergeCells { sheet, range } | Op::UnmergeCells { sheet, range } => {
@@ -3354,9 +3358,9 @@ fn resolve_chart_space(
     })
 }
 
-fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {
+fn validate_display_region(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport) -> Result<()> {
     validate_viewport(viewport)?;
-    let geometry = GridGeometry::new(sheet);
+    let geometry = GridGeometry::new(sheet, styles);
     let right = viewport.x + viewport.width;
     let bottom = viewport.y + viewport.height;
     if right > geometry.col_x(MAX_COLS) || bottom > geometry.row_y(MAX_ROWS) {
@@ -3383,10 +3387,11 @@ fn validate_display_region(sheet: &Sheet, viewport: &Viewport) -> Result<()> {
 /// [`Workbook::render_sheet`] applies. The used range itself is the caller's
 /// to answer for; this decides only whether a chart may widen the frame.
 #[cfg(feature = "raster")]
-fn renderable(sheet: &Sheet, viewport: &Viewport, scale: f32) -> bool {
+fn renderable(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport, scale: f32) -> bool {
     let width = ((viewport.width * scale).ceil() as u32).max(1);
     let height = ((viewport.height * scale).ceil() as u32).max(1);
-    validate_render_size(width, height).is_ok() && validate_display_region(sheet, viewport).is_ok()
+    validate_render_size(width, height).is_ok()
+        && validate_display_region(sheet, styles, viewport).is_ok()
 }
 
 #[cfg(feature = "raster")]

@@ -366,8 +366,8 @@ where
     let theme = &styles.theme;
     let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
     let geom = print.map_or_else(
-        || GridGeometry::new(sheet_ref),
-        |(metrics, _)| GridGeometry::for_print(sheet_ref, metrics),
+        || GridGeometry::new(sheet_ref, styles),
+        |(metrics, _)| GridGeometry::for_print(sheet_ref, styles, metrics),
     );
     let (frozen_rows, frozen_cols) = if print.is_some() {
         (0, 0)

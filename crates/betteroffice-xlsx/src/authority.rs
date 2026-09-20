@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
     ChartAnchor, ChartRef, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, MAX_COLS,
-    MAX_ROWS, Sheet, SheetChart, SheetId, Stylesheet, Workbook as WorkbookModel,
+    MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -98,6 +98,7 @@ struct WorkbookBase {
     fingerprint: String,
     fingerprints: BTreeMap<i64, Vec<String>>,
     freeze_panes: Vec<Option<FreezePane>>,
+    formats: Vec<SheetFormat>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
@@ -112,7 +113,7 @@ impl WorkbookBase {
     /// refusing it would strand every snapshot an earlier release persisted.
     #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, String> {
-        Self::from_model_with_legacy_dimensions(model, &[])
+        Self::from_model_with_legacy_dimensions(model, &[], None)
     }
 
     /// `legacy_dimensions` are the row heights and column widths releases
@@ -122,6 +123,7 @@ impl WorkbookBase {
     fn from_model_with_legacy_dimensions(
         model: &WorkbookModel,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, String> {
         let (fingerprint, bootstrap_client_id) = fingerprint_model(model)?;
         let mut fingerprints = BTreeMap::new();
@@ -150,11 +152,28 @@ impl WorkbookBase {
                 }
             }
         }
+        if let Some(styles) = legacy_styles.filter(|styles| **styles != model.styles) {
+            let mut legacy_model = model.clone();
+            legacy_model.styles = styles.clone();
+            let legacy_base =
+                Self::from_model_with_legacy_dimensions(&legacy_model, legacy_dimensions, None)?;
+            for (version, legacy_fingerprints) in legacy_base.fingerprints {
+                let accepted = fingerprints.entry(version).or_default();
+                for fingerprint in legacy_fingerprints {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
+                }
+            }
+        }
         if !model.styles.indexed_colors.is_empty() {
             let mut legacy_model = model.clone();
             legacy_model.styles.indexed_colors.clear();
-            let legacy_base =
-                Self::from_model_with_legacy_dimensions(&legacy_model, legacy_dimensions)?;
+            let legacy_base = Self::from_model_with_legacy_dimensions(
+                &legacy_model,
+                legacy_dimensions,
+                legacy_styles,
+            )?;
             for (version, legacy_fingerprints) in legacy_base.fingerprints {
                 let accepted = fingerprints.entry(version).or_default();
                 for fingerprint in legacy_fingerprints {
@@ -171,6 +190,7 @@ impl WorkbookBase {
             fingerprint,
             fingerprints,
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
+            formats: model.sheets.iter().map(|sheet| sheet.format).collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -364,7 +384,7 @@ pub(crate) struct WorkbookAuthority {
 impl WorkbookAuthority {
     #[cfg(test)]
     fn from_model(model: &WorkbookModel) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, None, &[])
+        Self::from_model_internal(model, None, &[], None)
     }
 
     #[cfg(test)]
@@ -372,24 +392,30 @@ impl WorkbookAuthority {
         model: &WorkbookModel,
         client_id: u64,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, Some(client_id), &[])
+        Self::from_model_internal(model, Some(client_id), &[], None)
     }
 
     pub(crate) fn from_source(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, AuthorityError> {
-        Self::from_model_internal(model, client_id, legacy_dimensions)
+        Self::from_model_internal(model, client_id, legacy_dimensions, legacy_styles)
     }
 
     fn from_model_internal(
         model: &WorkbookModel,
         client_id: Option<u64>,
         legacy_dimensions: &[xlsx_parse::LegacySheetDimensions],
+        legacy_styles: Option<&Stylesheet>,
     ) -> Result<Self, AuthorityError> {
-        let base = WorkbookBase::from_model_with_legacy_dimensions(model, legacy_dimensions)
-            .map_err(AuthorityError::InvalidState)?;
+        let base = WorkbookBase::from_model_with_legacy_dimensions(
+            model,
+            legacy_dimensions,
+            legacy_styles,
+        )
+        .map_err(AuthorityError::InvalidState)?;
         if client_id == Some(base.bootstrap_client_id) {
             return Err(AuthorityError::ClientIdConflict(base.bootstrap_client_id));
         }
@@ -1014,6 +1040,10 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.freeze_panes.get(base))
                 .copied()
                 .flatten();
+            let format = base_sheet
+                .and_then(|base| self.base.formats.get(base))
+                .copied()
+                .unwrap_or_default();
             let hyperlinks = base_sheet
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
@@ -1032,6 +1062,7 @@ impl WorkbookAuthority {
                 version,
                 SheetFallbacks {
                     freeze_pane,
+                    format,
                     hyperlinks,
                     charts,
                     hidden_dimensions,
@@ -2621,6 +2652,7 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
 #[derive(Clone, Copy)]
 struct SheetFallbacks<'a> {
     freeze_pane: Option<FreezePane>,
+    format: SheetFormat,
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
@@ -2630,6 +2662,7 @@ impl Default for SheetFallbacks<'_> {
     fn default() -> Self {
         Self {
             freeze_pane: None,
+            format: SheetFormat::default(),
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
@@ -2692,6 +2725,7 @@ fn materialize_sheet<T: ReadTxn>(
             sheet.row_heights.entry(at).or_insert(size);
         }
     }
+    sheet.format = fallbacks.format;
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
