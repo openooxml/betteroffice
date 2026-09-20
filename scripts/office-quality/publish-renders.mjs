@@ -21,6 +21,7 @@ async function put(key, file, contentType) {
   await execute(
     'bunx',
     [
+      '--no-install',
       'wrangler',
       'r2',
       'object',

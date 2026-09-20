@@ -137,10 +137,17 @@ fn math_functions() {
         ("FLOOR(2.9, 1)", n(2.0)),
         ("CEILING(-2.5, -1)", n(-3.0)),
         ("ABS(-7)", n(7.0)),
+        ("TANH(0)", n(0.0)),
+        ("TANH(\"abc\")", e(ErrorValue::Value)),
+        ("TANH(1, 2)", e(ErrorValue::Value)),
     ]);
     approx("PI()", std::f64::consts::PI);
     approx("LN(EXP(1))", 1.0);
     approx("EXP(0)", 1.0);
+    approx("TANH(1)", 0.761_594_155_955_764_9);
+    approx("TANH(-2.5)", -0.986_614_298_151_430_3);
+    approx("TANH(20)", 1.0);
+    approx("TANH(TRUE)", 0.761_594_155_955_764_9);
 }
 
 #[test]
@@ -403,4 +410,66 @@ fn mmult_handles_scalar_and_erroring_arguments() {
     assert_eq!(eval_matrix("MMULT(1/0, M8:M9)"), e(ErrorValue::Div0));
     assert_eq!(eval_matrix("MMULT(M1:O1, NOSUCH())"), e(ErrorValue::Name));
     assert_eq!(eval_matrix("MMULT(NOSUCH(), M8:M9)"), e(ErrorValue::Name));
+}
+
+fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
+    let wb = fixture();
+    let expr = parse_formula(src).expect("parse");
+    let mut ctx = EvalContext::new(&wb, SheetId(0));
+    ctx.rand_seed = seed;
+    (0..count)
+        .map(|_| match evaluate(&expr, &ctx) {
+            CellValue::Number { value } => value,
+            other => panic!("formula {src:?}: expected number, got {other:?}"),
+        })
+        .collect()
+}
+
+/// the rounding and error rules here were measured against Excel for Mac over
+/// 400 draws per case: `bottom > top` errors before any rounding, the draw
+/// spans `ceil(bottom)..=floor(top)`, and an empty span yields `ceil(bottom)`.
+#[test]
+fn randbetween_matches_excels_rounding() {
+    check(&[
+        ("RANDBETWEEN(5, 5)", n(5.0)),
+        ("RANDBETWEEN(1.8, 2.2)", n(2.0)),
+        ("RANDBETWEEN(2.9, 3.1)", n(3.0)),
+        ("RANDBETWEEN(-0.5, 0.5)", n(0.0)),
+        ("RANDBETWEEN(1.5, 1.6)", n(2.0)),
+        ("RANDBETWEEN(2.2, 2.2)", n(3.0)),
+        ("RANDBETWEEN(-1.5, -1.4)", n(-1.0)),
+        ("RANDBETWEEN(0.1, 0.9)", n(1.0)),
+        ("RANDBETWEEN(-0.9, -0.1)", n(0.0)),
+        ("RANDBETWEEN(2.5, 2.1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(3, 1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(1)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(1, 2, 3)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(\"x\", 2)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(A1, A1)", n(10.0)),
+    ]);
+}
+
+#[test]
+fn randbetween_covers_its_range_and_never_leaves_it() {
+    for (src, want) in [
+        ("RANDBETWEEN(1.2, 3.8)", vec![2.0, 3.0]),
+        ("RANDBETWEEN(-3.5, -1.2)", vec![-3.0, -2.0]),
+        ("RANDBETWEEN(-1, 1)", vec![-1.0, 0.0, 1.0]),
+    ] {
+        let mut seen: Vec<f64> = draws(src, None, 2_000);
+        for value in &seen {
+            assert!(want.contains(value), "formula {src:?} drew {value}");
+        }
+        seen.sort_by(f64::total_cmp);
+        seen.dedup();
+        assert_eq!(seen, want, "formula {src:?} never covered its range");
+    }
+}
+
+#[test]
+fn randbetween_replays_a_pinned_seed() {
+    let src = "RANDBETWEEN(1, 1000000)";
+    assert_eq!(draws(src, Some(7), 16), draws(src, Some(7), 16));
+    assert_ne!(draws(src, Some(7), 16), draws(src, Some(8), 16));
+    assert_ne!(draws(src, None, 16), draws(src, None, 16));
 }
