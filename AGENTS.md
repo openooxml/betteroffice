@@ -41,24 +41,12 @@ Section rules:
 
 ## Review artifacts
 
-Upload review screenshots, before/after comparisons, recordings, and logs directly
-to the PR. Never commit files solely to display them in a PR. Keep temporary
-outputs outside the repository or in ignored paths.
-
-GitHub CLI v2.99.0 and later supports image and video uploads with `--attach`:
+Put review screenshots, recordings, and logs in the PR, never in git. Keep actual
+product assets and test fixtures/baselines. Use GitHub CLI **v2.101.0+** for image
+and video attachments:
 
 ```bash
-gh pr comment "$PR_NUMBER" --repo openooxml/betteroffice \
-  --body-file /tmp/review.md \
-  --attach /tmp/before.png --attach /tmp/after.png
+gh pr comment "$PR_NUMBER" --attach /tmp/before.png --attach /tmp/after.png
 ```
 
-`gh pr create` and `gh pr edit` also support `--attach`. Local image references
-in the body file are replaced with uploaded URLs. Use a newer CLI if the flag is
-missing; uploads require push access. See the [GitHub CLI attachment guide](https://docs.github.com/en/github-cli/github-cli/attaching-files-with-github-cli).
-For logs and other non-media files, use browser attachments or link CI artifacts.
-If uploading is unavailable, mention the limitation; never use git as a fallback.
-
-Keep actual product assets, maintained documentation illustrations, and fixtures
-or golden baselines consumed by automated tests. Linking a review screenshot from
-a fixture README does not make it a test fixture.
+If uploading fails, report it; do not commit the files as a workaround.
