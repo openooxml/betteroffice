@@ -2423,9 +2423,8 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
     validate_model_sheets(model)
 }
 
-/// A batch already applied to a scratch model, plus the inverse that undoes
-/// it. Committing adopts the result instead of replaying the ops against the
-/// live model under a second clone.
+/// A batch applied to a scratch model plus its inverse; committing adopts the
+/// scratch model instead of replaying.
 struct StagedApply {
     model: WorkbookModel,
     inverse: Vec<Op>,

@@ -69,8 +69,8 @@ impl fmt::Display for OpError {
 
 impl std::error::Error for OpError {}
 
-/// apply one op, mutating `wb` and returning its inverse. structural ops are
-/// staged on a clone first, so a refused op leaves `wb` untouched.
+/// apply one op, returning its inverse; refused structural ops leave `wb`
+/// untouched.
 pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
         Op::InsertRows { .. }
@@ -81,9 +81,8 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     }
 }
 
-/// apply one op directly, with no rollback clone. a refused structural op can
-/// leave `wb` partially mutated, so this is only for models the caller drops
-/// on error — batch and preview paths already stage a clone of their own.
+/// apply one op directly with no rollback clone; only for models the caller
+/// drops on error.
 pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
         Op::SetCell { sheet, at, cell } => {
