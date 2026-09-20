@@ -548,14 +548,10 @@ fn resolve_watermark_image(
         return ResolvedWatermarkImage::default();
     };
     for candidate in candidates {
-        if let Some(file) = media
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(&candidate))
-            .map(|(_, file)| file)
-        {
+        if let Some(file) = media.get_case_insensitive(&candidate) {
             return ResolvedWatermarkImage {
                 data_url: Some(if file.data_url.is_empty() {
-                    file.base64.clone()
+                    file.base64().to_owned()
                 } else {
                     file.data_url.clone()
                 }),

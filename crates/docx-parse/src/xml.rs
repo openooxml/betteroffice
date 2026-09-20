@@ -322,7 +322,7 @@ impl XmlElement {
     }
 
     pub fn matches_name(&self, namespace: &str, local: &str) -> bool {
-        self.name == format!("{namespace}:{local}") || self.local_name() == local
+        qualified_name_eq(&self.name, namespace, local) || self.local_name() == local
     }
 
     pub fn child(&self, namespace: &str, local: &str) -> Option<&XmlElement> {
@@ -365,9 +365,12 @@ impl XmlElement {
 
     pub fn attribute(&self, namespace: Option<&str>, name: &str) -> Option<&str> {
         namespace
-            .and_then(|namespace| self.attributes.get(&format!("{namespace}:{name}")))
-            .or_else(|| self.attributes.get(name))
-            .map(String::as_str)
+            .and_then(|namespace| {
+                self.attributes.iter().find_map(|(key, value)| {
+                    qualified_name_eq(key, namespace, name).then_some(value.as_str())
+                })
+            })
+            .or_else(|| self.attributes.get(name).map(String::as_str))
     }
 
     pub fn attribute_any<'a>(&'a self, names: &[&str]) -> Option<&'a str> {
@@ -961,6 +964,14 @@ fn is_entity_reference(input: &[u8]) -> bool {
         && body
             .iter()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':'))
+}
+
+/// `name == format!("{namespace}:{local}")` compared piecewise, without
+/// building the qualified name.
+fn qualified_name_eq(name: &str, namespace: &str, local: &str) -> bool {
+    name.strip_prefix(namespace)
+        .and_then(|rest| rest.strip_prefix(':'))
+        == Some(local)
 }
 
 pub fn local_name(name: &str) -> &str {

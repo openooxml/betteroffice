@@ -107,7 +107,10 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
         }
     }
     Ok(S4Projection {
-        media_entries: media.into_iter().collect(),
+        media_entries: media
+            .iter()
+            .map(|(key, file)| (key.clone(), file.clone()))
+            .collect(),
         chart_entries: charts.into_iter().collect(),
         xml_parts,
         smart_art_warnings: smart_art.warnings,

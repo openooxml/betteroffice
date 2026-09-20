@@ -699,7 +699,7 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-        let media = IndexMap::new();
+        let media = MediaMap::new();
         let charts = IndexMap::new();
         let mut smart_art = SmartArtContext::default();
         let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();
@@ -995,7 +995,7 @@ mod tests {
         ) -> Result<Vec<BlockContent>, ParseError> {
             let mut budget = ParseBudget::new(limits);
             let document = parse_xml(xml.as_bytes(), "word/document.xml", &mut budget).unwrap();
-            let media = IndexMap::new();
+            let media = MediaMap::new();
             let charts = IndexMap::new();
             let mut smart_art = SmartArtContext::default();
             let mut ids = HexIdAllocator::from_sha256(&"0".repeat(64)).unwrap();

@@ -1,24 +1,139 @@
 //! Embedded media table and image-resolution aliases.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
-use serde::{Deserialize, Serialize};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::relationships::RelationshipMap;
 
-pub type MediaMap = IndexMap<String, MediaFile>;
+/// Media files keyed by package path plus a bare `media/…` alias, with a
+/// lowercase index so case-insensitive lookups stay map hits, not scans.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaMap {
+    entries: IndexMap<String, Arc<MediaFile>>,
+    lower: HashMap<String, String>,
+}
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+impl MediaMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn get(&self, key: &str) -> Option<&MediaFile> {
+        self.entries.get(key).map(|file| &**file)
+    }
+
+    /// Exact `key` hit first, then a case-insensitive retry through the
+    /// lowercase index — relationship targets and package paths can disagree
+    /// on case.
+    pub fn get_case_insensitive(&self, key: &str) -> Option<&MediaFile> {
+        self.get(key).or_else(|| {
+            self.lower
+                .get(key.to_ascii_lowercase().as_str())
+                .and_then(|stored| self.entries.get(stored).map(|file| &**file))
+        })
+    }
+
+    /// Relationship targets may be bare (`media/x.png`) or `word/`-rooted; both
+    /// spellings resolve through the same index.
+    pub(crate) fn find_target(&self, target: &str) -> Option<&MediaFile> {
+        let trimmed = target.trim_start_matches('/');
+        self.get_case_insensitive(trimmed).or_else(|| {
+            (!trimmed.starts_with("word/"))
+                .then(|| format!("word/{trimmed}"))
+                .and_then(|candidate| self.get_case_insensitive(&candidate))
+        })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &MediaFile)> {
+        self.entries.iter().map(|(key, file)| (key, &**file))
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &String> {
+        self.entries.keys()
+    }
+
+    fn insert_key(&mut self, key: String, file: Arc<MediaFile>) {
+        self.lower.insert(key.to_ascii_lowercase(), key.clone());
+        self.entries.insert(key, file);
+    }
+}
+
+/// One media payload — `data_url` is canonical (`data:<mime>;base64,<payload>`)
+/// and [`MediaFile::base64`] slices the payload back out of it, so the bytes
+/// are stored once.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFile {
     pub path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub filename: Option<String>,
     pub mime_type: String,
-    pub base64: String,
     pub data_url: String,
+}
+
+impl MediaFile {
+    /// The base64 payload embedded in `data_url`, without copying.
+    pub fn base64(&self) -> &str {
+        self.data_url
+            .split_once(',')
+            .filter(|(head, _)| head.starts_with("data:") && head.ends_with(";base64"))
+            .map_or("", |(_, payload)| payload)
+    }
+}
+
+impl Serialize for MediaFile {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(4 + usize::from(self.filename.is_some())))?;
+        map.serialize_entry("path", &self.path)?;
+        if let Some(filename) = &self.filename {
+            map.serialize_entry("filename", filename)?;
+        }
+        map.serialize_entry("mimeType", &self.mime_type)?;
+        map.serialize_entry("base64", self.base64())?;
+        map.serialize_entry("dataUrl", &self.data_url)?;
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MediaFile {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct WireMediaFile {
+            path: String,
+            filename: Option<String>,
+            mime_type: String,
+            #[serde(default)]
+            base64: String,
+            data_url: String,
+        }
+        let wire = WireMediaFile::deserialize(deserializer)?;
+        // A payload serialized without a data URL rebuilds one so the bytes are
+        // still embedded in the single stored string.
+        let data_url = if wire.data_url.is_empty() && !wire.base64.is_empty() {
+            format!("data:{};base64,{}", wire.mime_type, wire.base64)
+        } else {
+            wire.data_url
+        };
+        Ok(Self {
+            path: wire.path,
+            filename: wire.filename,
+            mime_type: wire.mime_type,
+            data_url,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,16 +164,15 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         warnings.extend(warning);
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        let file = MediaFile {
+        let file = Arc::new(MediaFile {
             path: path.clone(),
             filename: Some(filename),
-            mime_type: mime_type.clone(),
             data_url: format!("data:{mime_type};base64,{base64}"),
-            base64,
-        };
-        media.insert(path.clone(), file.clone());
+            mime_type,
+        });
+        media.insert_key(path.clone(), Arc::clone(&file));
         if let Some(normalized) = path.strip_prefix("word/") {
-            media.insert(normalized.to_owned(), file);
+            media.insert_key(normalized.to_owned(), file);
         }
     }
     (media, warnings)
@@ -79,26 +193,17 @@ pub fn resolve_image_data(
         return ResolvedImageData::default();
     }
     let target = &relationship.target;
-    let normalized = normalize_media_path(target);
     let filename = target.rsplit('/').next().map(str::to_owned);
-    if let Some(media) = media {
-        for candidate in [
-            normalized,
-            target.trim_start_matches('/').to_owned(),
-            format!("word/{}", target.trim_start_matches('/')),
-        ] {
-            if let Some(file) = find_case_insensitive(media, &candidate) {
-                return ResolvedImageData {
-                    src: Some(if file.data_url.is_empty() {
-                        file.base64.clone()
-                    } else {
-                        file.data_url.clone()
-                    }),
-                    mime_type: Some(file.mime_type.clone()),
-                    filename,
-                };
-            }
-        }
+    if let Some(file) = media.and_then(|media| media.find_target(target)) {
+        return ResolvedImageData {
+            src: Some(if file.data_url.is_empty() {
+                file.base64().to_owned()
+            } else {
+                file.data_url.clone()
+            }),
+            mime_type: Some(file.mime_type.clone()),
+            filename,
+        };
     }
     ResolvedImageData {
         src: None,
@@ -165,24 +270,6 @@ pub fn media_mime_type(path: &str) -> &'static str {
         "wmf" => "image/x-wmf",
         _ => "application/octet-stream",
     }
-}
-
-fn normalize_media_path(path: &str) -> String {
-    let path = path.trim_start_matches('/');
-    if path.starts_with("media/") {
-        format!("word/{path}")
-    } else if path.starts_with("word/") {
-        path.to_owned()
-    } else {
-        format!("word/{path}")
-    }
-}
-
-fn find_case_insensitive<'a>(media: &'a MediaMap, path: &str) -> Option<&'a MediaFile> {
-    media
-        .iter()
-        .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
-        .map(|(_, file)| file)
 }
 
 #[cfg(test)]

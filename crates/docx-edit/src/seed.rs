@@ -4205,7 +4205,6 @@ mod tests {
                     path: "word/media/image.png".to_owned(),
                     filename: Some("image.png".to_owned()),
                     mime_type: "image/png".to_owned(),
-                    base64: "AQID".to_owned(),
                     data_url: src.to_owned(),
                 },
             )];
