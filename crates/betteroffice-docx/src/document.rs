@@ -16,8 +16,7 @@ use crate::types::DEFAULT_SERIALIZATION_TIME;
 use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveOptions};
 
 pub struct Document {
-    /// Inflated package parts retained from open; `save` consumes them without
-    /// re-inflating the archive.
+    /// Inflated package parts retained from open for `save` to reuse.
     original_parts: Vec<(String, Vec<u8>)>,
     seed: String,
     model: DocumentModel,

@@ -116,10 +116,7 @@ pub fn write_docx_s13(
     write_docx_s13_parts(request, &original_parts)
 }
 
-/// As [`write_docx_s13`], but seeds the package from already-inflated parts —
-/// for example the ones returned by
-/// [`crate::s9::parse_docx_s9_wire_parts_with_limits`] — instead of re-inflating
-/// the archive.
+/// [`write_docx_s13`] seeded from already-inflated parts.
 pub fn write_docx_s13_parts(
     mut request: S13SaveRequest,
     original_parts: &[(String, Vec<u8>)],
@@ -198,11 +195,10 @@ pub fn write_docx_s13_parts(
         }
     }
 
-    ooxml_opc::rezip_parts(&package.refs()).map_err(ParseError::Container)
+    ooxml_opc::rezip_parts_borrowed(&package.refs()).map_err(ParseError::Container)
 }
 
-/// Original entries are borrowed untouched; edits land in an overlay so save
-/// never re-inflates or copies unchanged parts.
+/// Edits overlay borrowed `original` entries so unchanged parts are never copied.
 #[derive(Debug)]
 struct Package<'a> {
     original: &'a [(String, Vec<u8>)],

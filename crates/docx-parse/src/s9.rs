@@ -189,10 +189,7 @@ pub fn parse_docx_s9_wire_with_limits(
     Ok(parse_docx_s9_wire_parts_with_limits(data, options, limits)?.0)
 }
 
-/// As [`parse_docx_s9_wire_with_limits`], but also returns the inflated package
-/// parts in archive order so callers can feed them to
-/// [`crate::serializer::write_docx_s13_parts`] instead of re-inflating the
-/// archive on save.
+/// [`parse_docx_s9_wire_with_limits`] plus the inflated parts in archive order.
 pub fn parse_docx_s9_wire_parts_with_limits(
     data: &[u8],
     options: S9ParseOptions,

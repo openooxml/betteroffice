@@ -119,8 +119,12 @@ pub fn unzip_parts_with_limits(
 }
 
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
-/// Entry bytes may be owned or borrowed.
-pub fn rezip_parts<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<Vec<u8>, String> {
+pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    rezip_parts_borrowed(entries)
+}
+
+/// `rezip_parts` over borrowed entry bytes.
+pub fn rezip_parts_borrowed<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<Vec<u8>, String> {
     if entries.len() > MAX_ENTRY_COUNT {
         return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
     }
