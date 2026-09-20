@@ -287,11 +287,13 @@ mod tests {
         );
     }
 
+    /// `WEBSERVICE` stands in for any function the engine does not implement,
+    /// and is one it never will.
     #[test]
     fn an_unimplemented_function_keeps_the_cached_value() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 7.0);
-        put_cached_formula(&mut wb, s, "B1", "MMULT(A1,A1)/10", num(4.9));
+        put_cached_formula(&mut wb, s, "B1", "WEBSERVICE(A1)/10", num(4.9));
         put_formula(&mut wb, s, "C1", "B1*2");
         let r = rebuild_and_recalc_all(&mut wb, None).1;
         assert_eq!(value(&wb, s, "B1"), num(4.9));
@@ -302,7 +304,7 @@ mod tests {
     #[test]
     fn an_unimplemented_function_without_a_cached_value_reports_name() {
         let (mut wb, s) = one_sheet();
-        put_formula(&mut wb, s, "A1", "MMULT(1,1)");
+        put_formula(&mut wb, s, "A1", "WEBSERVICE(1)");
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(
             value(&wb, s, "A1"),
