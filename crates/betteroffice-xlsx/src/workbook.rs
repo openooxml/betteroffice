@@ -195,16 +195,13 @@ pub struct Workbook {
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
-    /// Where each chart frame sat in the source package, by `frame_id`. Every
-    /// replica opens the same bytes, so this is the one anchor baseline they
-    /// all agree on however far their own editing has since diverged.
+    /// Anchor of each chart frame in the source package, by `frame_id`.
     opened_anchors: BTreeMap<String, ChartAnchor>,
-    /// bumped in `install_model`, the one funnel a model takes into the
-    /// workbook, so every cell edit or rename invalidates the chart cache.
+    /// Mutation counter; chart resolutions cache against it.
     model_epoch: u64,
-    /// resolved `ChartSpace` per chart part, valid for the stored epoch and
-    /// part-bytes hash; chart renders otherwise re-parse the part per frame.
-    chart_cache: Mutex<HashMap<String, CachedChartSpace>>,
+    /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
+    /// stored epoch and part-bytes hash.
+    chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
 }
 
 struct CachedChartSpace {
@@ -1083,7 +1080,6 @@ impl Workbook {
         edits: &[CellInput],
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.bump_model_epoch();
         if edits.is_empty() {
             return Ok(MutationResult::default());
         }
@@ -1219,7 +1215,6 @@ impl Workbook {
     }
 
     pub fn undo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
-        self.bump_model_epoch();
         if self.is_collaborative() {
             return self.collaborative_history_step(options, false);
         }
@@ -1259,7 +1254,6 @@ impl Workbook {
     }
 
     pub fn redo(&mut self, options: CalculationOptions) -> Result<MutationResult> {
-        self.bump_model_epoch();
         if self.is_collaborative() {
             return self.collaborative_history_step(options, true);
         }
@@ -1426,7 +1420,6 @@ impl Workbook {
         force: bool,
         options: CalculationOptions,
     ) -> Result<ProposalAcceptance> {
-        self.bump_model_epoch();
         let proposal = self
             .proposals
             .list()
@@ -1690,7 +1683,6 @@ impl Workbook {
         dy: f32,
         options: CalculationOptions,
     ) -> Result<MutationResult> {
-        self.bump_model_epoch();
         let sheet_ref = self.sheet(sheet)?;
         let chart = sheet_ref
             .charts
@@ -2425,9 +2417,8 @@ impl Workbook {
     /// The one way a model becomes this workbook's own. Everything arriving
     /// from the shared document is projected on the way out, so what is left to
     /// check here is what a local batch can still get wrong.
-    /// Chart resolutions cache against `model_epoch`; bump on every write
-    /// path, not only `install_model` — standalone commits and recalc write
-    /// the model in place.
+    /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
+    /// the bump invalidates chart resolutions.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
     }
@@ -3361,11 +3352,8 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
 }
 
 impl Workbook {
-    /// The `ChartSpace` both renderers draw. The part supplies the chart's
-    /// shape; the references inside it are resolved against the current
-    /// workbook, so an ordinary cell edit reaches the chart without a save.
-    /// Cached per part across frames; `install_model`'s epoch bump and a
-    /// part-bytes hash decide when a part must be re-resolved.
+    /// `ChartSpace` for a chart part, resolved against `owner`; cached per
+    /// epoch and part bytes.
     fn resolve_chart_space(
         &self,
         owner: &str,
@@ -3385,8 +3373,9 @@ impl Workbook {
                 })?;
         let bytes_hash = chart_bytes_hash(bytes);
         let epoch = self.model_epoch;
+        let key = (chart.part.clone(), owner.to_owned());
         let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(hit) = cache.get(&chart.part)
+        if let Some(hit) = cache.get(&key)
             && hit.epoch == epoch
             && hit.bytes_hash == bytes_hash
         {
@@ -3399,7 +3388,7 @@ impl Workbook {
                 })
                 .map(Arc::new)?;
         cache.insert(
-            chart.part.clone(),
+            key,
             CachedChartSpace {
                 bytes_hash,
                 epoch,

@@ -277,27 +277,28 @@ pub fn build_display_list_with_ghosts(
     ghosts: &[GhostEdit],
 ) -> Result<DisplayList, RenderError> {
     build_display_list_with_charts_and_ghosts(wb, sheet, viewport, ghosts, |chart| {
-        Err(RenderError::ChartSourceUnavailable {
+        Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
             part: chart.part.clone(),
         })
     })
 }
 
 /// Builds a display list using a lazy chart-part resolver.
-pub fn build_display_list_with_charts<F>(
+pub fn build_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_display_list_with_charts_and_ghosts(wb, sheet, viewport, &[], resolver)
 }
 
 /// Builds a display list with charts and pending edit ghosts.
-pub fn build_display_list_with_charts_and_ghosts<F>(
+pub fn build_display_list_with_charts_and_ghosts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -305,12 +306,13 @@ pub fn build_display_list_with_charts_and_ghosts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
 
-pub fn build_print_display_list_with_charts<F>(
+pub fn build_print_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -319,7 +321,8 @@ pub fn build_print_display_list_with_charts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_frame(
         wb,
@@ -331,7 +334,7 @@ where
     )
 }
 
-fn build_frame<F>(
+fn build_frame<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -340,7 +343,8 @@ fn build_frame<F>(
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     let mut commands = Vec::new();
 
