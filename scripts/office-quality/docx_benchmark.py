@@ -92,13 +92,14 @@ def edge_adjust(image, target):
 
 
 def libreoffice_fidelity(sample, root, soffice, version):
+    format = sample.get('format', 'docx')
     actual = root / 'libreoffice'
     actual.mkdir()
     result = dict(channel='libreoffice', version=version)
     stage = 'capture'
     try:
-        execute(lo_command(soffice, root / 'profile-fidelity', actual, root / 'source.docx',
-                           'pdf:writer_pdf_Export'), timeout=600, log=actual / 'convert.log')
+        execute(lo_command(soffice, root / 'profile-fidelity', actual, root / f'source.{format}',
+                           'pdf:impress_pdf_Export' if format == 'pptx' else 'pdf:writer_pdf_Export'), timeout=600, log=actual / 'convert.log')
         adjustments = []
         with fitz.open(actual / 'source.pdf') as pdf:
             if not len(pdf):
@@ -141,6 +142,7 @@ def validate_png(path, size, require_ink):
 
 
 def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
+    format = sample.get('format', 'docx')
     output = root / 'timing'
     output.mkdir()
     with Image.open(root / 'reference/page_0001.png') as reference:
@@ -149,10 +151,10 @@ def measure_sample(sample, root, binaries, manifest, soffice, trials, offset=0):
     options = {key: dict(type='long', value=value) for key, value in
                [('PixelWidth', size[0]), ('PixelHeight', size[1]), ('PageNumber', 1)]}
     options['Translucent'] = dict(type='boolean', value=False)
-    commands = {channel: [str(binary), str(root / 'source.docx'), str(output / f'{channel}.png'), str(manifest)]
+    commands = {channel: [str(binary), str(root / f'source.{format}'), str(output / f'{channel}.png'), str(manifest)]
                 for channel, binary in binaries.items()}
-    commands['libreoffice'] = lo_command(soffice, root / 'profile-timing', output, root / 'source.docx',
-                                       'png:writer_png_Export:' + json.dumps(options, separators=(',', ':')))
+    commands['libreoffice'] = lo_command(soffice, root / 'profile-timing', output, root / f'source.{format}',
+                                       f'png:{"impress" if format == "pptx" else "writer"}_png_Export:' + json.dumps(options, separators=(',', ':')))
     paths = {channel: output / (f'{channel}.png' if channel != 'libreoffice' else 'source.png') for channel in CHANNELS}
     results = {channel: dict(status='ok', elapsed_ms=[], command=commands[channel]) for channel in CHANNELS}
     for repeat in range(trials + 1):
