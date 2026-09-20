@@ -142,15 +142,7 @@ pub fn render_png(
     resources: &RenderResources<'_>,
 ) -> Result<Vec<u8>, String> {
     let mut glyphs = GlyphCache::default();
-    let mut images = ImageCache::default();
-    Ok(render_slide_cached(
-        dl,
-        resources,
-        &RenderOptions::default(),
-        &mut glyphs,
-        &mut images,
-    )?
-    .bytes)
+    Ok(render_slide_cached(dl, resources, &RenderOptions::default(), &mut glyphs)?.bytes)
 }
 
 /// Paint a slide display list at `options.scale`.
@@ -160,14 +152,22 @@ pub fn render_slide(
     options: &RenderOptions,
 ) -> Result<RenderedSlide, String> {
     let mut glyphs = GlyphCache::default();
-    let mut images = ImageCache::default();
-    render_slide_cached(dl, resources, options, &mut glyphs, &mut images)
+    render_slide_cached(dl, resources, options, &mut glyphs)
 }
 
-/// The same, reusing glyph outlines and decoded assets an earlier slide
-/// extracted. The glyph cache binds to the font store that fills it and refuses
-/// any other; the image cache keys by content, so it stays valid across decks.
+/// The same, reusing glyph outlines an earlier slide extracted. The cache binds
+/// to the font store that fills it and refuses any other.
 pub fn render_slide_cached(
+    dl: &SurfaceDisplayList,
+    resources: &RenderResources<'_>,
+    options: &RenderOptions,
+    glyphs: &mut GlyphCache,
+) -> Result<RenderedSlide, String> {
+    render_slide_shared(dl, resources, options, glyphs, &mut ImageCache::default())
+}
+
+/// The same, also sharing decoded assets across slides through `images`.
+pub fn render_slide_shared(
     dl: &SurfaceDisplayList,
     resources: &RenderResources<'_>,
     options: &RenderOptions,
@@ -916,16 +916,16 @@ impl Painter<'_, '_> {
         effects: &[pptx_render::ImageEffect],
     ) -> Option<Arc<Pixmap>> {
         let bytes = self.resources.images.get(asset_id)?;
-        let content = match self.asset_hashes.get(asset_id) {
-            Some(content) => *content,
+        let source = match self.asset_hashes.get(asset_id) {
+            Some(source) => *source,
             None => {
-                let content = content_hash(bytes);
-                self.asset_hashes.insert(asset_id.to_owned(), content);
-                content
+                let source = source_hash(asset_id, bytes);
+                self.asset_hashes.insert(asset_id.to_owned(), source);
+                source
             }
         };
         self.images.decode(
-            (content, effects_fingerprint(effects)),
+            (source, effects_fingerprint(effects)),
             bytes,
             effects,
             &mut self.image_budget,
@@ -1183,24 +1183,31 @@ fn stroke_paint(
     )))
 }
 
-/// Decoded assets keyed by `(content hash, effects fingerprint)`, shared across
-/// the slides of one render job so a picture paints once rather than once per
-/// reference. Keys are content, so the cache stays valid even when an asset id
-/// resolves to new bytes, and duplicate parts under different ids share one
-/// entry. Retained pixmaps are bounded by [`MAX_CACHED_IMAGE_BYTES`].
-#[derive(Default)]
+/// Decoded assets shared across the slides of one render job, keyed by asset
+/// identity and effects; each entry paints once rather than once per reference.
 pub struct ImageCache {
     decoded: HashMap<ImageKey, Arc<Pixmap>>,
     order: VecDeque<ImageKey>,
     retained: u64,
+    cap: u64,
 }
 
 type ImageKey = (u64, u64);
 
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self {
+            decoded: HashMap::new(),
+            order: VecDeque::new(),
+            retained: 0,
+            cap: MAX_CACHED_IMAGE_BYTES,
+        }
+    }
+}
+
 impl ImageCache {
     /// The pixmap for `key`, or `None` for content this backend will not draw.
-    /// A hit is free; a miss decodes through `budget` once. A failed decode is
-    /// not retained, so a later slide's fresh `budget` may still retry it.
+    /// A miss decodes through `budget` once; failures are not retained.
     fn decode(
         &mut self,
         key: ImageKey,
@@ -1216,11 +1223,10 @@ impl ImageCache {
         Some(pixmap)
     }
 
-    /// Keeps a decode while the cache has room, evicting the oldest insertions
-    /// first. A pixmap bigger than the cap on its own never enters.
+    /// Keeps a decode while the cache has room; oldest insertions evict first.
     fn remember(&mut self, key: ImageKey, pixmap: Arc<Pixmap>) {
         let cost = pixmap.data().len() as u64;
-        while self.retained + cost > MAX_CACHED_IMAGE_BYTES {
+        while self.retained + cost > self.cap {
             let Some(oldest) = self.order.pop_front() else {
                 return;
             };
@@ -1234,18 +1240,18 @@ impl ImageCache {
     }
 }
 
-/// The encoded bytes identify a decode: an asset id that starts resolving to
-/// new content gets a new entry, and identical media under different names
-/// shares one.
-fn content_hash(bytes: &[u8]) -> u64 {
+/// An asset id plus its encoded bytes identify a decode: an id that starts
+/// resolving to new content gets a new entry.
+fn source_hash(asset_id: &str, bytes: &[u8]) -> u64 {
     let mut hasher = DefaultHasher::new();
+    asset_id.hash(&mut hasher);
     bytes.hash(&mut hasher);
     hasher.finish()
 }
 
 #[cfg(test)]
-fn image_key(bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> ImageKey {
-    (content_hash(bytes), effects_fingerprint(effects))
+fn image_key(asset_id: &str, bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> ImageKey {
+    (source_hash(asset_id, bytes), effects_fingerprint(effects))
 }
 
 fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
@@ -1474,14 +1480,12 @@ mod tests {
                 .write_image_data(&[3, 167, 223, 128, 255, 255, 255, 0])
                 .unwrap();
         }
+        let effects = [pptx_render::ImageEffect::BiLevel { threshold: 0.25 }];
         let image = ImageCache::default()
             .decode(
-                image_key(
-                    &bytes,
-                    &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
-                ),
+                image_key("a.png", &bytes, &effects),
                 &bytes,
-                &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+                &effects,
                 &mut ImageBudget::default(),
             )
             .unwrap();
@@ -1492,7 +1496,7 @@ mod tests {
         assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
         let source = ImageCache::default()
             .decode(
-                image_key(&bytes, &[]),
+                image_key("a.png", &bytes, &[]),
                 &bytes,
                 &[],
                 &mut ImageBudget::default(),
@@ -1521,22 +1525,53 @@ mod tests {
         let mut budget = ImageBudget::default();
         let effects = [pptx_render::ImageEffect::Grayscale];
         let first = cache
-            .decode(image_key(&bytes, &[]), &bytes, &[], &mut budget)
+            .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
             .unwrap();
         let repeat = cache
-            .decode(image_key(&bytes, &[]), &bytes, &[], &mut budget)
+            .decode(image_key("a.png", &bytes, &[]), &bytes, &[], &mut budget)
             .unwrap();
         assert!(Arc::ptr_eq(&first, &repeat));
         assert_eq!(cache.decoded.len(), 1);
         let gray = cache
-            .decode(image_key(&bytes, &effects), &bytes, &effects, &mut budget)
+            .decode(
+                image_key("a.png", &bytes, &effects),
+                &bytes,
+                &effects,
+                &mut budget,
+            )
             .unwrap();
         assert!(!Arc::ptr_eq(&first, &gray));
-        assert_eq!(cache.decoded.len(), 2);
+        let other_asset = cache
+            .decode(image_key("b.png", &bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &other_asset));
+        assert_eq!(cache.decoded.len(), 3);
         assert!(
             budget.pixels > 0,
             "each miss still charges the slide budget"
         );
+    }
+
+    #[test]
+    fn the_image_cache_evicts_oldest_first_past_its_cap() {
+        let mut cache = ImageCache {
+            cap: 8,
+            ..ImageCache::default()
+        };
+        let pixmap = || Arc::new(Pixmap::new(1, 1).unwrap());
+        cache.remember((1, 0), pixmap());
+        cache.remember((2, 0), pixmap());
+        cache.remember((3, 0), pixmap());
+        assert_eq!(cache.decoded.len(), 2);
+        assert!(!cache.decoded.contains_key(&(1, 0)));
+        assert!(cache.decoded.contains_key(&(3, 0)));
+
+        let mut cache = ImageCache {
+            cap: 0,
+            ..ImageCache::default()
+        };
+        cache.remember((1, 0), pixmap());
+        assert!(cache.decoded.is_empty(), "an oversized entry never stores");
     }
 
     #[test]
@@ -2232,22 +2267,20 @@ mod tests {
         let images = AssetMap::default();
         let resources = resources(&fonts, &images);
         let mut glyphs = GlyphCache::default();
-        let mut image_cache = ImageCache::default();
         let list = shadow_probe(40.0, Some("#FF0000"), None, 0.0, 0.0);
         let options = RenderOptions {
             max_shadow_pixels: 42 * 42,
             ..Default::default()
         };
         for _ in 0..2 {
-            render_slide_cached(&list, &resources, &options, &mut glyphs, &mut image_cache)
-                .unwrap();
+            render_slide_cached(&list, &resources, &options, &mut glyphs).unwrap();
         }
         let options = RenderOptions {
             max_shadow_pixels: 42 * 42 - 1,
             ..options
         };
         assert!(
-            render_slide_cached(&list, &resources, &options, &mut glyphs, &mut image_cache)
+            render_slide_cached(&list, &resources, &options, &mut glyphs)
                 .unwrap_err()
                 .contains("shadows cover")
         );

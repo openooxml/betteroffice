@@ -25,8 +25,7 @@ impl Presentation {
     /// package, so nothing needs registering beyond the fonts
     /// [`Presentation::register_font`] took; a picture the backend cannot draw
     /// is skipped and counted rather than failing the render. Glyph outlines and
-    /// decoded images are cached on the deck, so later slides reuse what
-    /// earlier ones extracted.
+    /// decoded images are cached on the deck.
     pub fn render_png(&self, slide_index: usize, options: &RenderOptions) -> Result<RenderedPng> {
         let rendered = self.render_slide(slide_index)?;
         let mut images: AssetMap<'_> = self
@@ -59,7 +58,7 @@ impl Presentation {
             .images
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        pptx_raster::render_slide_cached(
+        pptx_raster::render_slide_shared(
             &rendered.display_list,
             &resources,
             options,
