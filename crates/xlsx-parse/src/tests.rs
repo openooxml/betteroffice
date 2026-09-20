@@ -5744,3 +5744,32 @@ fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
     assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
 }
+
+/// `<f t="array" ref>` records the rectangle the result occupies; a shared
+/// formula's `ref` and an oversized array `ref` are not array anchors.
+#[test]
+fn captures_array_formula_rectangles() {
+    let body = r#"<sheetData>
+      <row r="1">
+        <c r="A1"><f t="array" ref="A1:B2">SEQUENCE(2,2)</f></c>
+        <c r="D1"><f t="shared" ref="D1:D2" si="0">1+1</f></c>
+        <c r="F1"><f t="array" ref="F1:XFD1048576">SEQUENCE(1)</f></c>
+        <c r="H1"><f t="array" ref="ZZZ">1</f></c>
+      </row>
+      <row r="2"><c r="D2"><f t="shared" si="0"/></c></row>
+    </sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(
+        sheet.array_formula(CellRef::parse_a1("A1").unwrap()),
+        Some(xlsx_model::CellRange::parse_a1("A1:B2").unwrap())
+    );
+    for address in ["D1", "F1", "H1"] {
+        assert_eq!(
+            sheet.array_formula(CellRef::parse_a1(address).unwrap()),
+            None,
+            "{address} is not an array anchor"
+        );
+    }
+    assert_eq!(sheet.array_formulas().count(), 1);
+}

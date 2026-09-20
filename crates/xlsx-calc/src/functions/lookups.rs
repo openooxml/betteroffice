@@ -208,12 +208,12 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
     let rows = nth_int(args, ctx, 1)?;
     let cols = nth_int(args, ctx, 2)?;
     let height = match args.get(3) {
-        Some(_) => Some(nth_int(args, ctx, 3)?),
-        None => None,
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 3)?),
+        _ => None,
     };
     let width = match args.get(4) {
-        Some(_) => Some(nth_int(args, ctx, 4)?),
-        None => None,
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 4)?),
+        _ => None,
     };
     let bounds = CellRange::new(
         anchor.start,
@@ -229,6 +229,67 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
         rows: (rect.end.row - rect.start.row + 1) as usize,
         cols: (rect.end.col - rect.start.col + 1) as usize,
     })
+}
+
+/// LOOKUP(value, vector, [result]) and LOOKUP(value, array): approximate match
+/// over data assumed sorted ascending, returning the last entry not past the
+/// target. the array form searches the longer edge and returns the far one.
+pub(crate) fn lookup_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    let target = evaluate(&args[0], ctx);
+    if let CellValue::Error { value } = target {
+        return err(value);
+    }
+    let source = crate::array::evaluate_array(&args[1], ctx).into_array();
+    let (keys, results) = match args.get(2) {
+        Some(_) => (
+            flatten_vector(&source),
+            flatten_vector(&crate::array::evaluate_array(&args[2], ctx).into_array()),
+        ),
+        None if source.cols() > source.rows() => (
+            (0..source.cols()).map(|col| source.at(0, col)).collect(),
+            (0..source.cols())
+                .map(|col| source.at(source.rows() - 1, col))
+                .collect(),
+        ),
+        None => (
+            (0..source.rows()).map(|row| source.at(row, 0)).collect(),
+            (0..source.rows())
+                .map(|row| source.at(row, source.cols() - 1))
+                .collect(),
+        ),
+    };
+    let keys: Vec<CellValue> = keys;
+    let results: Vec<CellValue> = results;
+    let mut best = None;
+    for (index, key) in keys.iter().enumerate() {
+        if comparable(key, &target) && cmp_values(key, &target) != std::cmp::Ordering::Greater {
+            best = Some(index);
+        }
+    }
+    match best.and_then(|index| results.get(index)) {
+        Some(value) => value.clone(),
+        None => err(ErrorValue::NA),
+    }
+}
+
+fn flatten_vector(block: &crate::array::Array) -> Vec<CellValue> {
+    (0..block.rows())
+        .flat_map(|row| (0..block.cols()).map(move |col| (row, col)))
+        .map(|(row, col)| block.at(row, col))
+        .collect()
+}
+
+/// LOOKUP only compares entries of the target's own kind.
+fn comparable(value: &CellValue, target: &CellValue) -> bool {
+    matches!(
+        (value, target),
+        (CellValue::Number { .. }, CellValue::Number { .. })
+            | (CellValue::Text { .. }, CellValue::Text { .. })
+            | (CellValue::Bool { .. }, CellValue::Bool { .. })
+    )
 }
 
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match

@@ -46,6 +46,9 @@ pub struct DepGraph {
     by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
     /// formula cells that must re-evaluate every recalc regardless of edits.
     volatile: HashSet<NodeKey>,
+    /// array anchors whose result fills more than their own cell: a formula
+    /// reading anywhere in that rectangle depends on the anchor.
+    spills: HashMap<NodeKey, CellRange>,
 }
 
 impl DepGraph {
@@ -72,12 +75,19 @@ impl DepGraph {
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
+            spills: HashMap::new(),
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
             for (cell, c) in sheet.iter_cells() {
                 if let Some(src) = &c.formula {
                     g.install(NodeKey::new(sid, cell), src);
+                }
+            }
+            for (anchor, range) in sheet.array_formulas() {
+                let key = NodeKey::new(sid, anchor);
+                if range.start != range.end && g.deps.contains_key(&key) {
+                    g.spills.insert(key, range);
                 }
             }
         }
@@ -112,11 +122,16 @@ impl DepGraph {
         cell: CellRef,
     ) -> impl Iterator<Item = (SheetId, CellRef)> + '_ {
         let target = CellRef::new(cell.row, cell.col);
+        let anchor = NodeKey::new(sheet, cell);
+        let spill = self.spills.get(&anchor).copied();
         self.by_sheet
             .get(&sheet)
             .into_iter()
             .flatten()
-            .filter(move |(range, _)| range.contains(target))
+            .filter(move |(range, node)| {
+                range.contains(target)
+                    || (*node != anchor && spill.is_some_and(|spill| range.overlaps(&spill)))
+            })
             .map(|(_, node)| (node.sheet, node.cell()))
     }
 
@@ -160,6 +175,7 @@ impl DepGraph {
             }
         }
         self.volatile.remove(&key);
+        self.spills.remove(&key);
     }
 
     /// resolve refs to concrete sheet ids; unqualified refs bind to the owning
@@ -291,6 +307,8 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
     while let Some(expression) = expressions.pop() {
         match expression {
             Expr::Name { scope, name } => uses.push((owner, scope.clone(), name.clone())),
+            Expr::Literal(_) => {}
+            Expr::ArrayLiteral { values, .. } => expressions.extend(values),
             Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
             Expr::Binary { lhs, rhs, .. } => {
                 expressions.push(rhs);
@@ -330,6 +348,8 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
                 expressions.extend(args.iter().rev());
             }
             Expr::Name { scope, name } => uses.push((owner, scope.clone(), name.clone())),
+            Expr::Literal(_) => {}
+            Expr::ArrayLiteral { values, .. } => expressions.extend(values),
             Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
             Expr::Binary { lhs, rhs, .. } => {
                 expressions.push(rhs);

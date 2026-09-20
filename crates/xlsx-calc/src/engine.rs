@@ -4,8 +4,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use xlsx_model::{CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
+use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
 
+use crate::array::{Spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 use crate::parser::parse_formula;
@@ -103,10 +104,14 @@ fn run_recalc(
         if limited {
             limited_cells.push((u.0, cell_of(*u)));
         }
-        if let Some(value) = value
-            && write_if_changed(wb, *u, value)
-        {
-            changed.push((u.0, cell_of(*u)));
+        match value {
+            Some(NodeValue::Scalar(value)) => {
+                if write_if_changed(wb, *u, value) {
+                    changed.push((u.0, cell_of(*u)));
+                }
+            }
+            Some(NodeValue::Spill(spill)) => write_spill(wb, *u, spill, &mut changed),
+            None => {}
         }
     }
 
@@ -180,6 +185,13 @@ fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>
     (order, cycle)
 }
 
+/// what a formula node produced: one value, or a rectangle an array formula
+/// fills from its anchor.
+enum NodeValue {
+    Scalar(CellValue),
+    Spill(Spill),
+}
+
 /// evaluate one formula node; `None` keeps the cached value, because the cell
 /// has no formula, it no longer parses, or an engine gap reached the result.
 fn eval_node(
@@ -187,22 +199,75 @@ fn eval_node(
     u: Key,
     now_serial: Option<f64>,
     budget: Rc<EvaluationBudget>,
-) -> (Option<CellValue>, bool) {
+) -> (Option<NodeValue>, bool) {
     let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
         return (None, false);
     };
     let Ok(expr) = parse_formula(&src) else {
         return (None, false);
     };
+    let cell = cell_of(u);
+    let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
-    ctx.cell = Some(cell_of(u));
+    ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
-    let value = evaluate(&expr, &ctx);
+    let value = match authored {
+        Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
+        None => NodeValue::Scalar(evaluate(&expr, &ctx)),
+    };
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
-    if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
+    if incomplete && !matches!(wb.value(u.0, cell), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
     (Some(value), ctx.exhausted())
+}
+
+/// lay a spilled result out from its anchor: retire the cells the previous
+/// result reached and no longer fills, then write the new ones. a cell holding
+/// its own formula is never touched.
+fn write_spill(wb: &mut Workbook, u: Key, spill: Spill, changed: &mut Vec<(SheetId, CellRef)>) {
+    let anchor = cell_of(u);
+    let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
+    if let Some(previous) = previous {
+        for (row, col) in cells_of(previous) {
+            let at = CellRef::new(row, col);
+            if at.row == anchor.row && at.col == anchor.col || spill.range.contains(at) {
+                continue;
+            }
+            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed);
+        }
+    }
+    for ((row, col), value) in cells_of(spill.range).zip(spill.values) {
+        if row == anchor.row && col == anchor.col {
+            if write_if_changed(wb, (u.0, row, col), value) {
+                changed.push((u.0, anchor));
+            }
+            continue;
+        }
+        write_spilled_cell(wb, (u.0, row, col), value, changed);
+    }
+    if let Some(sheet) = wb.sheet_mut(u.0) {
+        sheet.set_array_formula(anchor, spill.range);
+    }
+}
+
+fn write_spilled_cell(
+    wb: &mut Workbook,
+    u: Key,
+    value: CellValue,
+    changed: &mut Vec<(SheetId, CellRef)>,
+) {
+    if wb.formula(u.0, cell_of(u)).is_some() {
+        return;
+    }
+    if write_if_changed(wb, u, value) {
+        changed.push((u.0, cell_of(u)));
+    }
+}
+
+fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
+    (range.start.row..=range.end.row)
+        .flat_map(move |row| (range.start.col..=range.end.col).map(move |col| (row, col)))
 }
 
 /// write `value` only if it differs from the stored value; returns whether

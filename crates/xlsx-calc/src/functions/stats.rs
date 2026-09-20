@@ -289,6 +289,44 @@ pub(crate) fn averageifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// MAXIFS/MINIFS(values, range1, criteria1, ...): the extreme of the values
+/// whose row satisfies every criterion; no match yields 0, as excel does.
+pub(crate) fn maxifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    extreme_ifs(args, ctx, true)
+}
+
+pub(crate) fn minifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    extreme_ifs(args, ctx, false)
+}
+
+fn extreme_ifs(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue {
+    if args.len() < 3 {
+        return err(ErrorValue::Value);
+    }
+    let value_area = match as_area(&args[0], ctx) {
+        Some(area) => area,
+        None => return err(ErrorValue::Value),
+    };
+    let pairs = match criteria::collect_pairs(&args[1..], ctx) {
+        Some(pairs) if pairs[0].0.rows == value_area.rows && pairs[0].0.cols == value_area.cols => {
+            pairs
+        }
+        _ => return err(ErrorValue::Value),
+    };
+    let nums = match matching_numbers(&pairs, &value_area, ctx) {
+        Ok(nums) => nums,
+        Err(error) => return err(error),
+    };
+    let picked = nums.into_iter().fold(None, |best: Option<f64>, value| {
+        Some(match best {
+            Some(best) if largest => best.max(value),
+            Some(best) => best.min(value),
+            None => value,
+        })
+    });
+    num(picked.unwrap_or(0.0))
+}
+
 fn average_of(pairs: &[(Area, Criterion)], value_area: &Area, ctx: &EvalContext<'_>) -> CellValue {
     let nums = match matching_numbers(pairs, value_area, ctx) {
         Ok(nums) => nums,

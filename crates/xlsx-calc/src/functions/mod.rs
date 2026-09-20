@@ -62,6 +62,8 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "COUNTIFS" => stats::countifs,
         "AVERAGEIF" => stats::averageif,
         "AVERAGEIFS" => stats::averageifs,
+        "MAXIFS" => stats::maxifs,
+        "MINIFS" => stats::minifs,
         "MIN" => stats::min,
         "MAX" => stats::max,
         "MEDIAN" => stats::median,
@@ -125,6 +127,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "OFFSET" => lookups::offset,
         "MATCH" => lookups::match_,
         "XLOOKUP" => lookups::xlookup,
+        "LOOKUP" => lookups::lookup_fn,
         "CHOOSE" => lookups::choose,
         "ROW" => lookups::row,
         "COLUMN" => lookups::column,
@@ -182,6 +185,12 @@ fn push_reference_number(nums: &mut Vec<f64>, v: CellValue) -> Result<(), ErrorV
         _ => {}
     }
     Ok(())
+}
+
+/// whether an argument was written as a gap, as in `OFFSET(a,,,n,)`. excel
+/// reads those as absent, not as zero.
+pub(crate) fn omitted(arg: &Expr) -> bool {
+    matches!(arg, Expr::Literal(CellValue::Empty))
 }
 
 /// evaluate one argument and coerce it to a number, propagating errors.

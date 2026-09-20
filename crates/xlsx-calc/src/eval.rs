@@ -279,10 +279,9 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Name { scope, name } => evaluate_defined_name(scope, name, ctx),
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
-        Expr::Percent(inner) => match to_number(&evaluate(inner, ctx)) {
-            Ok(n) => num(n / 100.0),
-            Err(e) => err(e),
-        },
+        Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
+        Expr::Literal(value) => normalize_provider_value(value.clone()),
+        Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { name, args } => match crate::functions::lookup(name) {
             Some(f) => f(args, ctx),
             None => {
@@ -410,12 +409,22 @@ pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Op
 }
 
 fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
-    let v = evaluate(expr, ctx);
-    match to_number(&v) {
+    apply_unary(op, &evaluate(expr, ctx))
+}
+
+pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
+    match to_number(v) {
         Ok(n) => match op {
             UnaryOp::Neg => num(-n),
             UnaryOp::Plus => num(n),
         },
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn apply_percent(v: &CellValue) -> CellValue {
+    match to_number(v) {
+        Ok(n) => num(n / 100.0),
         Err(e) => err(e),
     }
 }
@@ -429,30 +438,42 @@ fn eval_binary(op: BinaryOp, lhs: &Expr, rhs: &Expr, ctx: &EvalContext<'_>) -> C
     if let CellValue::Error { value } = rv {
         return err(value);
     }
+    apply_binary(op, &lv, &rv)
+}
+
+/// the operator itself, over values already evaluated; errors propagate
+/// leftmost-first.
+pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> CellValue {
+    if let CellValue::Error { value } = lv {
+        return err(*value);
+    }
+    if let CellValue::Error { value } = rv {
+        return err(*value);
+    }
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow => {
-            let a = match to_number(&lv) {
+            let a = match to_number(lv) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
-            let b = match to_number(&rv) {
+            let b = match to_number(rv) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
             arithmetic(op, a, b)
         }
         BinaryOp::Concat => {
-            let a = match to_text(&lv) {
+            let a = match to_text(lv) {
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
-            let b = match to_text(&rv) {
+            let b = match to_text(rv) {
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
             text(a + &b)
         }
-        _ => compare(op, &lv, &rv),
+        _ => compare(op, lv, rv),
     }
 }
 
@@ -674,7 +695,7 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-fn normalize_provider_value(value: CellValue) -> CellValue {
+pub(crate) fn normalize_provider_value(value: CellValue) -> CellValue {
     match value {
         CellValue::Number { value } if !value.is_finite() => err(ErrorValue::Num),
         CellValue::Text { value } if value.chars().count() > MAX_CELL_TEXT_CHARS => {

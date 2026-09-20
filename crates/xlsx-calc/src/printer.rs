@@ -76,6 +76,8 @@ impl Expr {
         match self {
             Expr::Number(n) => n.to_string(),
             Expr::Text(t) => format!("\"{}\"", t.replace('"', "\"\"")),
+            Expr::Literal(value) => literal(value),
+            Expr::ArrayLiteral { cols, values } => array_literal(*cols, values),
             Expr::Bool(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
             Expr::Error(e) => e.as_str().to_string(),
             Expr::Ref { sheet, cell } => format!("{}{}", sheet_prefix(sheet), cell.to_a1()),
@@ -107,6 +109,30 @@ impl Expr {
             }
         }
     }
+}
+
+/// print a spliced value the way the same literal would be written.
+fn literal(value: &xlsx_model::CellValue) -> String {
+    match value {
+        xlsx_model::CellValue::Empty => "\"\"".to_string(),
+        xlsx_model::CellValue::Number { value } => crate::eval::format_number(*value),
+        xlsx_model::CellValue::Text { value } => format!("\"{}\"", value.replace('"', "\"\"")),
+        xlsx_model::CellValue::Bool { value } => if *value { "TRUE" } else { "FALSE" }.to_string(),
+        xlsx_model::CellValue::Error { value } => value.as_str().to_string(),
+    }
+}
+
+fn array_literal(cols: usize, values: &[Expr]) -> String {
+    let rows: Vec<String> = values
+        .chunks(cols.max(1))
+        .map(|row| {
+            row.iter()
+                .map(|value| value.print(0))
+                .collect::<Vec<_>>()
+                .join(",")
+        })
+        .collect();
+    format!("{{{}}}", rows.join(";"))
 }
 
 #[cfg(test)]

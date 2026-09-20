@@ -6975,3 +6975,60 @@ fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
         assert_eq!(before, plotted(&workbook), "{reason} must keep its cache");
     }
 }
+
+/// a worksheet whose only formula is a dynamic array anchored at C1.
+fn spill_fixture() -> Vec<u8> {
+    let mut model = WorkbookModel::default();
+    model.sheets.push(Sheet::new("Sheet1"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    set_test_part(
+        &mut parts,
+        "xl/worksheets/sheet1.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>3</v></c><c r="C1"><f t="array" ref="C1:C3">_xlfn._xlws.SORT(A1:A3)</f></c></row><row r="2"><c r="A2"><v>1</v></c><c r="C2"/></row><row r="3"><c r="A3"><v>2</v></c><c r="C3"/></row></sheetData></worksheet>"#.to_vec(),
+    );
+    ooxml_opc::rezip_parts(&parts).unwrap()
+}
+
+/// spilled values are computed, never authored: opening and saving without a
+/// recalculation still reproduces the source bytes.
+#[test]
+fn an_unrecalculated_array_formula_round_trips_byte_identically() {
+    let original = spill_fixture();
+    let before = ooxml_opc::unzip_parts(&original).unwrap();
+    let saved = Workbook::open(&original).unwrap().save().unwrap();
+    assert_eq!(ooxml_opc::unzip_parts(&saved).unwrap(), before);
+}
+
+/// recalculating writes the whole rectangle, and the save projection carries
+/// exactly what the model holds.
+#[test]
+fn recalculation_spills_an_array_formula_into_the_saved_sheet() {
+    let workbook =
+        Workbook::open_recalculated(&spill_fixture(), CalculationOptions::default()).unwrap();
+    let sheet = workbook.model().sheet(SheetId(0)).unwrap();
+    let value = |address: &str| {
+        sheet
+            .cell(CellRef::parse_a1(address).unwrap())
+            .map(|cell| cell.value.clone())
+    };
+    assert_eq!(value("C1"), Some(CellValue::Number { value: 1.0 }));
+    assert_eq!(value("C2"), Some(CellValue::Number { value: 2.0 }));
+    assert_eq!(value("C3"), Some(CellValue::Number { value: 3.0 }));
+
+    let saved = workbook.save().unwrap();
+    let reopened = Workbook::open(&saved).unwrap();
+    let projected = reopened.model().sheet(SheetId(0)).unwrap();
+    for (address, expected) in [("C1", 1.0), ("C2", 2.0), ("C3", 3.0)] {
+        assert_eq!(
+            projected
+                .cell(CellRef::parse_a1(address).unwrap())
+                .map(|cell| cell.value.clone()),
+            Some(CellValue::Number { value: expected }),
+            "{address} survives the save projection"
+        );
+    }
+    assert_eq!(
+        projected.array_formula(CellRef::parse_a1("C1").unwrap()),
+        Some(xlsx_model::CellRange::parse_a1("C1:C3").unwrap())
+    );
+}

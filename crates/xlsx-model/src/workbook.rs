@@ -11,6 +11,10 @@ use crate::date::DateSystem;
 use crate::styles::Stylesheet;
 use crate::value::CellValue;
 
+/// upper bound on the cells one array formula may fill. a malformed or hostile
+/// `ref` must not be able to ask for a sheet's worth of cells.
+pub const MAX_SPILL_CELLS: usize = 262_144;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FreezePane {
     pub rows: RowId,
@@ -79,6 +83,9 @@ pub struct Sheet {
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
     pub charts: Vec<SheetChart>,
+    /// anchors of `t="array"` formulas mapped to the rectangle their result
+    /// occupies. authored from the file, then kept current by recalc.
+    array_formulas: BTreeMap<(RowId, ColId), CellRange>,
 }
 
 impl Sheet {
@@ -87,6 +94,26 @@ impl Sheet {
             name: name.into(),
             ..Self::default()
         }
+    }
+
+    /// the rectangle the array formula anchored at `at` currently fills.
+    pub fn array_formula(&self, at: CellRef) -> Option<CellRange> {
+        self.array_formulas.get(&(at.row, at.col)).copied()
+    }
+
+    pub fn set_array_formula(&mut self, at: CellRef, spill: CellRange) {
+        self.array_formulas.insert((at.row, at.col), spill);
+    }
+
+    pub fn clear_array_formula(&mut self, at: CellRef) {
+        self.array_formulas.remove(&(at.row, at.col));
+    }
+
+    /// every array-formula anchor with its rectangle, in address order.
+    pub fn array_formulas(&self) -> impl Iterator<Item = (CellRef, CellRange)> + '_ {
+        self.array_formulas
+            .iter()
+            .map(|(&(row, col), &spill)| (CellRef::new(row, col), spill))
     }
 
     pub fn cell(&self, at: CellRef) -> Option<&Cell> {
@@ -113,6 +140,7 @@ impl Sheet {
         &mut self,
         remap: impl Fn(CellRef) -> Option<CellRef>,
     ) -> Vec<(CellRef, Cell)> {
+        self.remap_array_formulas(&remap);
         let mut dropped = Vec::new();
         self.cells.retain(|_, cell| *cell != Cell::default());
         let mut plan: CellMoves = Vec::new();
@@ -161,6 +189,28 @@ impl Sheet {
             }
         }
         dropped
+    }
+
+    /// move each array anchor with its cell, translating its rectangle by the
+    /// same delta; anchors the remap refuses lose their array identity.
+    fn remap_array_formulas(&mut self, remap: &impl Fn(CellRef) -> Option<CellRef>) {
+        if self.array_formulas.is_empty() {
+            return;
+        }
+        let mut moved = BTreeMap::new();
+        for (&(row, col), &spill) in &self.array_formulas {
+            let Some(to) = remap(CellRef::new(row, col)) else {
+                continue;
+            };
+            let rows = spill.end.row.saturating_sub(spill.start.row);
+            let cols = spill.end.col.saturating_sub(spill.start.col);
+            let end = CellRef::new(
+                to.row.saturating_add(rows).min(crate::addr::MAX_ROWS - 1),
+                to.col.saturating_add(cols).min(crate::addr::MAX_COLS - 1),
+            );
+            moved.insert((to.row, to.col), CellRange::new(to, end));
+        }
+        self.array_formulas = moved;
     }
 
     /// ordered iteration over occupied cells (row-major).
@@ -267,6 +317,17 @@ pub trait CellProvider {
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
         None
     }
+
+    /// rows worth materializing for a whole-column reference; `0` means the
+    /// sheet is empty. bounds array evaluation to authored data.
+    fn used_rows(&self, _sheet: SheetId) -> RowId {
+        0
+    }
+
+    /// the rectangle the array formula anchored at `at` fills, if any.
+    fn spill_range(&self, _sheet: SheetId, _at: CellRef) -> Option<CellRange> {
+        None
+    }
 }
 
 impl CellProvider for Workbook {
@@ -287,6 +348,16 @@ impl CellProvider for Workbook {
 
     fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
         self.defined_name(sheet, name)
+    }
+
+    fn used_rows(&self, sheet: SheetId) -> RowId {
+        self.sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.row.saturating_add(1))
+    }
+
+    fn spill_range(&self, sheet: SheetId, at: CellRef) -> Option<CellRange> {
+        self.sheet(sheet)?.array_formula(at)
     }
 }
 

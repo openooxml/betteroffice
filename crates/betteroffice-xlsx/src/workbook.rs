@@ -311,7 +311,9 @@ impl Workbook {
             validate_collaboration_size(&authority.encode_state_as_update_v1())?;
             validate_collaboration_state_entries(authority.state_vector_entries())?;
         }
-        let model = authority.materialize().map_err(authority_error)?;
+        let mut projected = authority.materialize().map_err(authority_error)?;
+        retain_array_formulas(&model, &mut projected);
+        let model = projected;
         validate_model(&model)?;
         let opened_anchors = model
             .sheets
@@ -459,6 +461,7 @@ impl Workbook {
             return Err(Error::CollaborativeStructureChanged);
         }
         let mut model = candidate.materialize().map_err(authority_error)?;
+        retain_array_formulas(&self.model, &mut model);
         self.gate_incoming(&model)
             .map_err(|error| Error::CollaborativeState(error.to_string()))?;
         let migrated = candidate.encode_state_as_update_v1();
@@ -602,6 +605,7 @@ impl Workbook {
 
         let commit_update = staged.commit_update;
         let mut model = staged.model;
+        retain_array_formulas(&self.model, &mut model);
         let update = staged.update;
         let (graph, recalc) = rebuild_and_recalc_all(&mut model, options.now_serial);
         let mut calculation = calculation_result(&recalc);
@@ -1326,7 +1330,9 @@ impl Workbook {
         }
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
-        self.install_model(history.model)?;
+        let mut restored = history.model;
+        retain_array_formulas(&self.model, &mut restored);
+        self.install_model(restored)?;
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.preserved.forget_shared_strings();
@@ -1945,6 +1951,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
+            retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -1986,6 +1993,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
+            retain_array_formulas(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
                 update: staged.update,
@@ -2340,6 +2348,28 @@ fn calculation_result(result: &RecalcResult) -> CalculationResult {
             .iter()
             .map(|&(sheet, cell)| CellAddress { sheet, cell })
             .collect(),
+    }
+}
+
+/// array-formula anchors are local state: the collaboration document carries
+/// cells, not the rectangle a `t="array"` formula fills, so each projection of
+/// the model re-adopts the anchors whose formula it still holds unchanged.
+fn retain_array_formulas(current: &WorkbookModel, projected: &mut WorkbookModel) {
+    for (index, sheet) in projected.sheets.iter_mut().enumerate() {
+        let Some(source) = current.sheets.get(index) else {
+            continue;
+        };
+        let anchors: Vec<_> = source
+            .array_formulas()
+            .filter(|(at, _)| {
+                let formula = sheet.cell(*at).and_then(|cell| cell.formula.as_deref());
+                formula.is_some()
+                    && formula == source.cell(*at).and_then(|cell| cell.formula.as_deref())
+            })
+            .collect();
+        for (at, range) in anchors {
+            sheet.set_array_formula(at, range);
+        }
     }
 }
 

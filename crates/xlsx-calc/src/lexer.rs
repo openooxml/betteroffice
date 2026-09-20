@@ -95,6 +95,9 @@ pub enum TokKind {
     LParen,
     RParen,
     Comma,
+    LBrace,
+    RBrace,
+    Semicolon,
 }
 
 /// tokenize a formula source string.
@@ -128,6 +131,9 @@ impl Lexer<'_> {
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
+                '{' => self.punct(TokKind::LBrace),
+                '}' => self.punct(TokKind::RBrace),
+                ';' => self.punct(TokKind::Semicolon),
                 '+' => self.punct(TokKind::Plus),
                 '-' => self.punct(TokKind::Minus),
                 '*' => self.punct(TokKind::Star),

@@ -413,9 +413,13 @@ fn parse_worksheet(
                 }
                 b"f" => {
                     let text = collect_text(&mut reader, &mut buf, &mut depth)?;
+                    let array_ref = array_formula_range(&e)?;
                     if let Some(c) = cur.as_mut() {
                         if let Some(origin) = c.addr {
                             shared_formulas.record(&e, origin, &text)?;
+                            if let Some(range) = array_ref.filter(|range| range.contains(origin)) {
+                                sheet.set_array_formula(origin, range);
+                            }
                         }
                         c.formula = Some(text);
                     }
@@ -479,6 +483,25 @@ fn parse_worksheet(
     shared_formulas.resolve(&mut sheet)?;
     normalize_merges(&mut sheet.merges);
     Ok(sheet)
+}
+
+/// the rectangle an `<f t="array" ref="...">` fills. anything malformed or
+/// larger than the spill limit is read as an ordinary formula.
+fn array_formula_range(
+    element: &quick_xml::events::BytesStart,
+) -> Result<Option<CellRange>, ParseError> {
+    if attr(element, b"t")?.as_deref() != Some("array") {
+        return Ok(None);
+    }
+    let Some(reference) = attr(element, b"ref")? else {
+        return Ok(None);
+    };
+    let Ok(range) = CellRange::parse_a1(&reference) else {
+        return Ok(None);
+    };
+    let rows = u64::from(range.end.row - range.start.row) + 1;
+    let cols = u64::from(range.end.col - range.start.col) + 1;
+    Ok((rows * cols <= xlsx_model::MAX_SPILL_CELLS as u64).then_some(range))
 }
 
 fn parse_hyperlink(

@@ -2866,7 +2866,14 @@ where
     w.write_event(Event::Start(start))?;
     while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
         let retained = shared_string_index(cell, addr, wb, sst_index, retained, shared_string_plan);
-        write_cell(w, addr, cell, sst_index, retained)?;
+        write_cell(
+            w,
+            addr,
+            cell,
+            sst_index,
+            retained,
+            sheet.array_formula(addr),
+        )?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
     Ok(())
@@ -2902,6 +2909,7 @@ pub(crate) fn write_cell(
     cell: &Cell,
     sst_index: &HashMap<&str, usize>,
     retained: Option<usize>,
+    array_ref: Option<xlsx_model::CellRange>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
     let has_formula = cell.formula.is_some();
@@ -2945,8 +2953,14 @@ pub(crate) fn write_cell(
     }
     w.write_event(Event::Start(start))?;
     if let Some(f) = &cell.formula {
-        w.create_element("f")
-            .write_text_content(BytesText::new(f))?;
+        let reference = array_ref.map(|range| range.to_a1());
+        let mut element = w.create_element("f");
+        if let Some(reference) = &reference {
+            element = element
+                .with_attribute(("t", "array"))
+                .with_attribute(("ref", reference.as_str()));
+        }
+        element.write_text_content(BytesText::new(f))?;
     }
     if let Some(v) = &value {
         w.create_element("v")
