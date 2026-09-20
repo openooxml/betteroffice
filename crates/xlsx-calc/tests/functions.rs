@@ -310,3 +310,97 @@ fn case_insensitive_names() {
         ("stdev.p(2, 4, 4, 4, 5, 5, 7, 9)", n(2.0)),
     ]);
 }
+
+/// matrix fixture: a 2x3 at M1:O2, a 3x2 at M4:N6, a 2x1 at M8:M9, and
+/// one-row operands at M11:N11 (trailing text) and M13:N13 (trailing blank).
+fn matrix_fixture() -> Workbook {
+    let mut wb = Workbook::default();
+    let mut s = Sheet::new("Sheet1");
+    let put = |s: &mut Sheet, a1: &str, v: CellValue| {
+        s.set_cell(
+            CellRef::parse_a1(a1).unwrap(),
+            Cell {
+                value: v,
+                ..Cell::default()
+            },
+        );
+    };
+    for (a1, v) in [
+        ("M1", 1.0),
+        ("N1", 2.0),
+        ("O1", 3.0),
+        ("M2", 4.0),
+        ("N2", 5.0),
+        ("O2", 6.0),
+        ("M4", 7.0),
+        ("N4", 8.0),
+        ("M5", 9.0),
+        ("N5", 10.0),
+        ("M6", 11.0),
+        ("N6", 12.0),
+        ("M8", 1.0),
+        ("M9", 1.0),
+        ("M11", 1.0),
+        ("M13", 1.0),
+    ] {
+        put(&mut s, a1, n(v));
+    }
+    put(&mut s, "N11", t("x"));
+    put(&mut s, "N15", b(true));
+    put(&mut s, "M15", n(1.0));
+    wb.sheets.push(s);
+    wb
+}
+
+fn eval_matrix(src: &str) -> CellValue {
+    let wb = matrix_fixture();
+    let expr = parse_formula(src).expect("parse");
+    let ctx = EvalContext::new(&wb, SheetId(0));
+    evaluate(&expr, &ctx)
+}
+
+/// M1:O2 times M4:N6 is [[58, 64], [139, 154]]; each element is checked by
+/// multiplying the matching row and column, so every product is covered.
+#[test]
+fn mmult_multiplies_a_2x3_by_a_3x2() {
+    for (src, expected) in [
+        ("MMULT(M1:O1, M4:M6)", 58.0),
+        ("MMULT(M1:O1, N4:N6)", 64.0),
+        ("MMULT(M2:O2, M4:M6)", 139.0),
+        ("MMULT(M2:O2, N4:N6)", 154.0),
+    ] {
+        assert_eq!(eval_matrix(src), n(expected), "{src}");
+    }
+}
+
+/// the engine stores one value per cell, so a wider product yields its
+/// top-left element: what excel caches in the array formula's anchor cell.
+#[test]
+fn mmult_returns_the_top_left_element_of_a_wider_product() {
+    assert_eq!(eval_matrix("MMULT(M1:O2, M4:N6)"), n(58.0));
+}
+
+#[test]
+fn mmult_rejects_mismatched_and_non_numeric_operands() {
+    for src in [
+        "MMULT(M1:O2, M1:O2)",
+        "MMULT(M11:N11, M8:M9)",
+        "MMULT(M13:N13, M8:M9)",
+        "MMULT(M15:N15, M8:M9)",
+        "MMULT(M1:O1)",
+        "MMULT(M1:O1, M4:M6, M4:M6)",
+    ] {
+        assert_eq!(eval_matrix(src), e(ErrorValue::Value), "{src}");
+    }
+}
+
+/// an argument that is not a reference is a 1x1 matrix, and an argument that
+/// evaluates to an error propagates it -- so an unsupported inner function
+/// still surfaces `#NAME?` rather than being masked as `#VALUE!`.
+#[test]
+fn mmult_handles_scalar_and_erroring_arguments() {
+    assert_eq!(eval_matrix("MMULT(3, 4)"), n(12.0));
+    assert_eq!(eval_matrix("MMULT(1/0, M8:M9)"), e(ErrorValue::Div0));
+    assert_eq!(eval_matrix("MMULT(M1:O1, NOSUCH())"), e(ErrorValue::Name));
+    assert_eq!(eval_matrix("MMULT(NOSUCH(), M8:M9)"), e(ErrorValue::Name));
+}

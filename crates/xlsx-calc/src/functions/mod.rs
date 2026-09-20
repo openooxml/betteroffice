@@ -27,6 +27,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "SUMIF" => math::sumif,
         "SUMIFS" => math::sumifs,
         "SUMPRODUCT" => math::sumproduct,
+        "MMULT" => math::mmult,
         "PRODUCT" => math::product,
         "ABS" => math::abs,
         "SIGN" => math::sign,
