@@ -11,10 +11,49 @@ export function presentationImageBlob(bytes: Uint8Array): Blob {
     }
     return new Blob([decodeTiffImage(bytes).slice()], { type: 'image/png' });
   }
-  const bitmap = wmfBitmap(bytes);
+  const bitmap = wmfBitmap(bytes) ?? emfBitmap(bytes);
   return bitmap
     ? new Blob([bitmap], { type: 'image/bmp' })
     : new Blob([bytes.slice()]);
+}
+
+/** An EMF whose only ink is one unscaled `EMR_STRETCHDIBITS` filling its bounds. */
+function emfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {
+  const data = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (
+    data.byteLength < 108 ||
+    data.getUint32(0, true) !== 1 ||
+    data.getUint32(40, true) !== 0x464d4520
+  ) return;
+  const header = data.getUint32(4, true);
+  if (header < 88 || header % 4 || header > data.byteLength - 8) return;
+  const width = data.getInt32(16, true) - data.getInt32(8, true) + 1;
+  const height = data.getInt32(20, true) - data.getInt32(12, true) + 1;
+  const size = data.getUint32(header + 4, true);
+  if (
+    data.getUint32(header, true) !== 81 ||
+    size < 80 ||
+    size > data.byteLength - header - 8
+  ) return;
+  const at = (offset: number) => data.getInt32(header + offset, true);
+  const bmi = data.getUint32(header + 48, true);
+  const bits = data.getUint32(header + 56, true);
+  const bitsBytes = data.getUint32(header + 60, true);
+  if (
+    at(24) !== data.getInt32(8, true) || at(28) !== data.getInt32(12, true) ||
+    at(72) !== width || at(76) !== height ||
+    at(32) !== 0 || at(36) !== 0 || at(40) !== width || at(44) !== height ||
+    data.getUint32(header + 64, true) !== 0 ||
+    data.getUint32(header + 68, true) !== 0x00cc0020 ||
+    bmi < 80 || bmi + data.getUint32(header + 52, true) !== bits ||
+    bits + bitsBytes !== size
+  ) return;
+  const end = header + size;
+  if (
+    data.getUint32(end, true) !== 14 ||
+    data.getUint32(end + 4, true) !== data.byteLength - end
+  ) return;
+  return dibBitmap(bytes.subarray(header + bmi, end), width, height);
 }
 
 function wmfBitmap(bytes: Uint8Array): Uint8Array<ArrayBuffer> | undefined {

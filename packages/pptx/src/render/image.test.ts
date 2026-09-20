@@ -67,6 +67,58 @@ function bitmapMetafile(bitmap = bitmapRecord(), extras: Uint8Array[] = [], plac
   ], placeable);
 }
 
+function dib(width: number, height: number): Uint8Array<ArrayBuffer> {
+  const stride = Math.ceil((width * 24) / 32) * 4;
+  const bytes = new Uint8Array(40 + stride * height);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 40, true);
+  view.setInt32(4, width, true);
+  view.setInt32(8, height, true);
+  view.setUint16(12, 1, true);
+  view.setUint16(14, 24, true);
+  bytes.fill(0x7f, 40);
+  return bytes;
+}
+
+function stretchDibits(pixels: Uint8Array, width: number, height: number): Uint8Array<ArrayBuffer> {
+  const bytes = new Uint8Array(80 + pixels.length);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 81, true);
+  view.setUint32(4, bytes.length, true);
+  view.setInt32(40, width, true);
+  view.setInt32(44, height, true);
+  view.setUint32(48, 80, true);
+  view.setUint32(52, 40, true);
+  view.setUint32(56, 120, true);
+  view.setUint32(60, pixels.length - 40, true);
+  view.setUint32(68, 0x00cc0020, true);
+  view.setInt32(72, width, true);
+  view.setInt32(76, height, true);
+  bytes.set(pixels, 80);
+  return bytes;
+}
+
+function enhancedMetafile(records: Uint8Array[], width = 4, height = 3): Uint8Array<ArrayBuffer> {
+  const eof = new Uint8Array(20);
+  const end = new DataView(eof.buffer);
+  end.setUint32(0, 14, true);
+  end.setUint32(4, 20, true);
+  const body = [...records, eof];
+  const bytes = new Uint8Array(88 + body.reduce((sum, item) => sum + item.length, 0));
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, 1, true);
+  view.setUint32(4, 88, true);
+  view.setInt32(16, width - 1, true);
+  view.setInt32(20, height - 1, true);
+  view.setUint32(40, 0x464d4520, true);
+  let offset = 88;
+  for (const item of body) {
+    bytes.set(item, offset);
+    offset += item.length;
+  }
+  return bytes;
+}
+
 describe('presentation image blobs', () => {
   test('rejects oversized TIFF media before transferring it to Wasm', () => {
     const bytes = new Uint8Array(32 * 1024 * 1024 + 1);
@@ -148,6 +200,58 @@ describe('presentation image blobs', () => {
       else view.setInt16(offset, value, true);
       const bytes = bitmapMetafile(bitmap);
       expect(presentationImageBlob(bytes).type).toBe('');
+    }
+  });
+
+  test('unwraps a complete raster EMF', async () => {
+    const pixels = dib(4, 3);
+    const bytes = enhancedMetafile([stretchDibits(pixels, 4, 3)]);
+    const before = bytes.slice();
+    const blob = presentationImageBlob(bytes);
+    const bitmap = new Uint8Array(await blob.arrayBuffer());
+    const header = new DataView(bitmap.buffer);
+    expect(blob.type).toBe('image/bmp');
+    expect(header.getUint16(0, true)).toBe(0x4d42);
+    expect(header.getUint32(2, true)).toBe(14 + pixels.length);
+    expect(header.getUint32(10, true)).toBe(54);
+    expect(bitmap.subarray(14)).toEqual(pixels);
+    expect(bytes).toEqual(before);
+  });
+
+  test('unwraps a raster EMF read as a view into a larger buffer', async () => {
+    const bytes = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    const padded = new Uint8Array(bytes.length + 20);
+    padded.set(bytes, 10);
+    expect(presentationImageBlob(padded.subarray(10, 10 + bytes.length)).type).toBe('image/bmp');
+  });
+
+  test('preserves EMF metafiles that carry vector ink or a second blit', async () => {
+    const polyline = new Uint8Array(16);
+    new DataView(polyline.buffer).setUint32(0, 87, true);
+    new DataView(polyline.buffer).setUint32(4, 16, true);
+    for (const extra of [[polyline], [stretchDibits(dib(4, 3), 4, 3)]]) {
+      const bytes = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3), ...extra]);
+      expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
+    }
+  });
+
+  test('preserves EMF blits that scale, offset or composite their source', async () => {
+    for (const [offset, value] of [[32, 1], [40, 3], [68, 0x00ee0086], [64, 1], [72, 3], [24, 1]]) {
+      const blit = stretchDibits(dib(4, 3), 4, 3);
+      new DataView(blit.buffer).setInt32(offset, value, true);
+      expect(presentationImageBlob(enhancedMetafile([blit])).type).toBe('');
+    }
+  });
+
+  test('bounds malformed EMF records and rejects truncated metafiles', async () => {
+    const short = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    const truncated = short.subarray(0, short.length - 2);
+    const oversized = enhancedMetafile([stretchDibits(dib(4, 3), 4, 3)]);
+    new DataView(oversized.buffer).setUint32(92, 0, true);
+    const understated = stretchDibits(dib(4, 3), 4, 3);
+    new DataView(understated.buffer).setUint32(60, dib(4, 3).length - 44, true);
+    for (const bytes of [truncated, oversized, enhancedMetafile([understated])]) {
+      expect(new Uint8Array(await presentationImageBlob(bytes).arrayBuffer())).toEqual(bytes);
     }
   });
 
