@@ -167,6 +167,8 @@ fn attrs_in(attrs: &ParagraphAttrs) -> Option<AttrsIn> {
         default_tab_stop_twips: attrs.default_tab_stop_twips.and_then(finite),
         doc_grid_pitch_px: attrs.doc_grid_pitch_px.and_then(finite),
         snap_to_grid: attrs.snap_to_grid,
+        auto_space_de: attrs.auto_space_de,
+        auto_space_dn: attrs.auto_space_dn,
     })
 }
 

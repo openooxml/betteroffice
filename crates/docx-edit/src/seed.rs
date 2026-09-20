@@ -1905,6 +1905,8 @@ fn paragraph_attrs(
             "widowControl",
             "contextualSpacing",
             "snapToGrid",
+            "autoSpaceDE",
+            "autoSpaceDN",
             "outlineLevel",
             "bidi",
         ] {
@@ -1999,6 +2001,8 @@ fn paragraph_attrs(
             "keepLines",
             "widowControl",
             "snapToGrid",
+            "autoSpaceDE",
+            "autoSpaceDN",
             "outlineLevel",
             "bidi",
         ] {
