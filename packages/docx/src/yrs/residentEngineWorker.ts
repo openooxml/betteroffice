@@ -9,7 +9,9 @@ import {
   presentOffscreenPageBackBuffer,
   presentOffscreenPageBackBufferWithCaret,
   rasterizeDisplayPageToBackBuffer,
+  type ImageResolver,
 } from '../layout/render/canvasBackend';
+import { createWorkerImageResolver } from '../layout/render/canvasImageResolver';
 import {
   applyFrameDeltaOwned,
   decodeFrameDelta,
@@ -37,6 +39,7 @@ let fontsRevision = -1;
 let operations = Promise.resolve();
 let retainedFrame: RetainedFrame | null = null;
 let glyphCache: GlyphCache | null = null;
+let imageResolver: ImageResolver | null = null;
 const offscreenCanvases = new Map<string, OffscreenCanvas>();
 const offscreenBackBuffers = new Map<string, OffscreenCanvas>();
 const pendingOffscreenPageIds = new Set<string>();
@@ -271,6 +274,7 @@ function destroySession(): void {
   fontsRevision = -1;
   retainedFrame = null;
   glyphCache = null;
+  imageResolver = null;
   offscreenCanvases.clear();
   offscreenBackBuffers.clear();
   pendingOffscreenPageIds.clear();
@@ -377,6 +381,7 @@ async function replayOffscreen(
       provider: (fontId, glyphId) => session!.outlineGlyphJson(fontId, glyphId),
     });
   }
+  if (!imageResolver) imageResolver = createWorkerImageResolver();
   const caretTarget =
     caretPaintRect && activeOffscreenPageIds.has(caretPaintRect.pageId) ? caretPaintRect : null;
   const caretDevice = caretTarget
@@ -426,7 +431,7 @@ async function replayOffscreen(
       rasterizeDisplayPageToBackBuffer(
         resolvedBuffer,
         page,
-        { glyphCache: glyphCache ?? undefined },
+        { glyphCache: glyphCache ?? undefined, resolveImage: imageResolver ?? undefined },
         offscreenDpr,
         offscreenZoom
       ).then(() => ({ canvas, buffer: resolvedBuffer, pageId }))

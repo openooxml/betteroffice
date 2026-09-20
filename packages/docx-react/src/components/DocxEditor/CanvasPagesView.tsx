@@ -28,7 +28,6 @@ import { CanvasA11yLiveRegion, type CanvasA11yLiveRegionProps } from './CanvasA1
 import { CANVAS_PAGE_GAP_PX, CANVAS_PAGES_PADDING_PX } from '@betteroffice/docx/layout/render';
 import { SIDEBAR_DOCUMENT_SHIFT } from '../sidebar/constants';
 import { DefaultLoadingIndicator, ParseError } from '../DocxEditorHelpers';
-import { displayListNeedsHostImages } from './canvasPresentation';
 import { CanvasReplayState, presentCanvasReplay, type CanvasReplayPreparation } from './canvasReplay';
 import { resolveCaretPaintColor } from './paintedCaret';
 import { DEFAULT_CARET_WIDTH } from './overlays/SelectionOverlay';
@@ -218,10 +217,7 @@ export function CanvasPagesView({
     },
     [onWorkerPresentationChange]
   );
-  const offscreenEligible = useMemo(
-    () => Boolean(offscreenReplay && frame && !displayListNeedsHostImages(displayList)),
-    [displayList, frame, offscreenReplay]
-  );
+  const offscreenEligible = Boolean(offscreenReplay && frame);
   useEffect(() => {
     if (!offscreenEligible || offscreenFailed) publishWorkerPresentation(false);
   }, [offscreenEligible, offscreenFailed, publishWorkerPresentation]);

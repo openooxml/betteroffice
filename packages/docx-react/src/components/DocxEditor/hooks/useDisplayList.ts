@@ -17,6 +17,7 @@ import {
   type RustDisplayListEngine,
   type RetainedFrame,
   type ResidentDisplayListQueryEngine,
+  type DecodedFrameDelta,
 } from '@betteroffice/docx/layout/render';
 import { getLayoutKernelInputs } from '@betteroffice/docx/editor';
 import {
@@ -27,13 +28,13 @@ import {
   sameYrsSelection,
   type ResidentCaretPaintStyle,
   type ResidentEngineOffscreenPage,
+  type ResidentEngineWorkerApplyResult,
   type YrsResidentCaretSnapshot,
   type YrsSelection,
   type YrsSession,
 } from '@betteroffice/docx/yrs';
 import type { Layout } from '@betteroffice/docx/layout/pagination';
 import type { RustFontChainsProvider } from './useRustMeasurement';
-import { displayListNeedsHostImages } from '../canvasPresentation';
 import { CARET_PAINT_IDLE_MS, PaintedCaretMachine } from '../paintedCaret';
 import {
   DisplayListQueryEpochGate,
@@ -156,7 +157,14 @@ export function useRustDisplayList(
     client: ResidentEngineWorkerClient;
   } | null>(null);
   const workerFallbackEngineRef = useRef<YrsSession | null>(null);
-  const workerInputQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // Two half-queues replace one whole-op chain: dispatch serializes only the
+  // worker round-trip, publish serializes the main-thread merge — so a burst
+  // keystroke's engine work overlaps the previous reply's React commit.
+  const workerDispatchQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const workerPublishQueueRef = useRef<Promise<void>>(Promise.resolve());
+  // The epoch of the worker's latest produced frame; leads `snapshotRef` while
+  // a publish is in flight. Null until a frame pins the worker's sequence.
+  const dispatchedEpochRef = useRef<number | null>(null);
   const suppressWorkerInvalidationRef = useRef(0);
   const [workerSurfacesActive, setWorkerSurfacesActive] = useState(false);
   const workerPresentationActiveRef = useRef(false);
@@ -379,6 +387,7 @@ export function useRustDisplayList(
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
+          dispatchedEpochRef.current = null;
         }
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
@@ -428,61 +437,96 @@ export function useRustDisplayList(
         applyPaintedCaretReply(false, paintToken);
         return { frameEpoch: nextFrame.frameEpoch, caretSynchronized: false };
       };
-      const run = async (): Promise<ResidentFrameApplyResult | null> => {
+      interface AppliedDispatch {
+        kind: 'applied';
+        worker: { engine: YrsSession; client: ResidentEngineWorkerClient };
+        result: ResidentEngineWorkerApplyResult;
+        delta: DecodedFrameDelta;
+        paintToken: number;
+      }
+      interface FallbackDispatch {
+        kind: 'fallback';
+        hostEngine: YrsSession;
+        frameEpoch: number;
+        paintToken: number;
+      }
+      type DispatchOutcome = AppliedDispatch | FallbackDispatch | { kind: 'none' };
+
+      // The dispatch chain ends at the worker reply; the publish chain owns
+      // the main-thread merge. Decoupling them lets the next keystroke's
+      // worker apply start while the previous frame's publish still runs.
+      const dispatch = async (): Promise<DispatchOutcome> => {
         const worker = workerRef.current;
         const currentFrame = snapshotRef.current.frame;
-        if (!worker || !worker.client.isReady() || !currentFrame) return null;
+        if (!worker || !worker.client.isReady() || !currentFrame) return { kind: 'none' };
         const selection = worker.engine.selection();
-        if (!selection) return null;
+        if (!selection) return { kind: 'none' };
         paintedCaretMachine.noteInput(performance.now());
         const paintCaret = workerPresentationActiveRef.current;
         const paintToken = paintedCaretMachine.token();
         residentPaintInflightRef.current += 1;
         let result;
-        let workerDelta: ReturnType<typeof decodeFrameDelta> | undefined;
         try {
+          // The worker's own frame epoch leads the published one once the next
+          // dispatch overtakes an in-flight publish; `expected_frame_epoch`
+          // must name the epoch the WORKER holds, or every frame ships full.
+          const expectedEpoch = dispatchedEpochRef.current ?? currentFrame.frameEpoch;
           result =
             operation.kind === 'insert'
               ? await worker.client.applyInput(
                   operation.text,
                   selection,
-                  currentFrame.frameEpoch,
+                  expectedEpoch,
                   false,
                   paintCaret
                 )
               : await worker.client.applyDelete(
                   operation.direction,
                   selection,
-                  currentFrame.frameEpoch,
+                  expectedEpoch,
                   false,
                   paintCaret
                 );
-          if (result.applied) {
-            try {
-              workerDelta = decodeFrameDelta(result.frame);
-            } catch (error) {
-              throw new ResidentWorkerFailureError(
-                `Resident engine worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
-              );
-            }
+          if (!result.applied) return { kind: 'none' };
+          let delta: DecodedFrameDelta;
+          try {
+            delta = decodeFrameDelta(result.frame);
+          } catch (error) {
+            throw new ResidentWorkerFailureError(
+              `Resident engine worker returned an undecodable FrameDelta: ${error instanceof Error ? error.message : String(error)}`
+            );
           }
+          dispatchedEpochRef.current = delta.frameEpoch;
+          return { kind: 'applied', worker, result, delta, paintToken };
         } catch (error) {
           if (!(error instanceof ResidentWorkerFailureError)) throw error;
           console.error(
             '[CanvasRenderer] Resident engine worker unavailable; falling back to the main-thread engine',
             error
           );
-          return replayInputOnMainThread(
-            operation,
-            worker.engine,
-            currentFrame.frameEpoch,
-            paintToken
-          );
+          return {
+            kind: 'fallback',
+            hostEngine: worker.engine,
+            frameEpoch: currentFrame.frameEpoch,
+            paintToken,
+          };
         } finally {
           residentPaintInflightRef.current -= 1;
         }
-        if (!result.applied) return null;
-        const delta = workerDelta ?? decodeFrameDelta(result.frame);
+      };
+      const publish = async (
+        outcome: DispatchOutcome
+      ): Promise<ResidentFrameApplyResult | null> => {
+        if (outcome.kind === 'none') return null;
+        if (outcome.kind === 'fallback') {
+          return replayInputOnMainThread(
+            operation,
+            outcome.hostEngine,
+            outcome.frameEpoch,
+            outcome.paintToken
+          );
+        }
+        const { worker, result, delta, paintToken } = outcome;
         suppressWorkerInvalidationRef.current += 1;
         try {
           for (const update of result.updates) worker.engine.applyLocalUpdate(update);
@@ -520,18 +564,30 @@ export function useRustDisplayList(
         return {
           frameEpoch: nextFrame.frameEpoch,
           caretSynchronized: Boolean(
-            caret?.caretRect &&
-              workerPresentationActiveRef.current &&
-              !displayListNeedsHostImages(nextFrame.displayList)
+            caret?.caretRect && workerPresentationActiveRef.current
           ),
         };
       };
-      const pending = workerInputQueueRef.current.then(run, run);
-      workerInputQueueRef.current = pending.then(
+      const dispatched = workerDispatchQueueRef.current.then(dispatch, dispatch);
+      workerDispatchQueueRef.current = dispatched.then(
         () => undefined,
         () => undefined
       );
-      return pending.catch((error) => {
+      // Publish runs on its own chain so a queued dispatch never waits on the
+      // previous frame's main-thread merge; outcome payloads still arrive in
+      // dispatch order, keeping update application and frame merges serial.
+      const published = dispatched.then((outcome) => {
+        const run = workerPublishQueueRef.current.then(
+          () => publish(outcome),
+          () => publish(outcome)
+        );
+        workerPublishQueueRef.current = run.then(
+          () => undefined,
+          () => undefined
+        );
+        return run;
+      });
+      return published.catch((error) => {
         const nextError =
           error instanceof Error ? error : new Error(`Resident input failed: ${String(error)}`);
         // This Rust rejection happens before the edit transaction. Let the
@@ -692,6 +748,7 @@ export function useRustDisplayList(
         if (workerRef.current?.engine === hostEngine) {
           workerRef.current.client.destroy();
           workerRef.current = null;
+          dispatchedEpochRef.current = null;
         }
         setWorkerSurfacesActive(false);
         setWorkerPresentationActive(false);
@@ -704,6 +761,7 @@ export function useRustDisplayList(
             engine: hostEngine,
             client: new ResidentEngineWorkerClient(),
           };
+          dispatchedEpochRef.current = null;
         }
         const worker = workerRef.current.client;
         const extras = encodeDisplayListFrameExtras(buildInputs);
@@ -726,11 +784,15 @@ export function useRustDisplayList(
           !bootstrapping &&
           workerPresentationActiveRef.current &&
           paintedCaretMachine.shouldPaint(performance.now());
+        // `dispatchedEpochRef` leads `previousFrame` once input dispatches
+        // overtake their publishes; the worker expects its own latest epoch.
+        const expectedEpoch =
+          dispatchedEpochRef.current ?? previousFrame?.frameEpoch ?? 0;
         const workerFrame = bootstrapping
           ? worker.bootstrap(buildSnapshot(), extras)
           : worker.layoutRevision() !== probe.layoutRevision
-            ? worker.sync(buildSnapshot(), extras, previousFrame?.frameEpoch ?? 0, paintCaret)
-            : worker.buildFrame(extras, previousFrame?.frameEpoch ?? 0, paintCaret);
+            ? worker.sync(buildSnapshot(), extras, expectedEpoch, paintCaret)
+            : worker.buildFrame(extras, expectedEpoch, paintCaret);
         pending = workerFrame
           .then((result) => {
             const delta = decodeFrameDelta(result.frame);
@@ -771,6 +833,12 @@ export function useRustDisplayList(
           result.queryEngine,
           snapshotRef.current
         );
+        if (result.workerProduced && result.frame) {
+          dispatchedEpochRef.current = Math.max(
+            dispatchedEpochRef.current ?? 0,
+            result.frame.frameEpoch
+          );
+        }
         snapshotRef.current = nextSnapshot;
         publishQuerySnapshot(nextSnapshot, contentEpoch);
         setSnapshot(nextSnapshot);
@@ -1045,9 +1113,7 @@ export function useCanvasRenderer(
   }, [snapshotQueries]);
   const canvasHostRef = useRef<HTMLDivElement | null>(null);
   // Offscreen replay is the default when the browser supports transferable
-  // canvas surfaces. `offscreenReplay=0` is a diagnostic escape hatch; pages
-  // containing host-resolved media still select the DOM-canvas fallback in
-  // CanvasPagesView.
+  // canvas surfaces. `offscreenReplay=0` is a diagnostic escape hatch.
   const offscreenAllowed = (() => {
     if (typeof window === 'undefined') return false;
     return new URLSearchParams(window.location.search).get('offscreenReplay') !== '0';
@@ -1068,10 +1134,7 @@ export function useCanvasRenderer(
     [attachOffscreenCanvases, offscreenAllowed, workerSurfacesActive]
   );
   const authoritativeCaretActive = Boolean(
-    workerPresentationActive &&
-      displayList &&
-      caret?.caretRect &&
-      !displayListNeedsHostImages(displayList)
+    workerPresentationActive && displayList && caret?.caretRect
   );
   return {
     displayList,

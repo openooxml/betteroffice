@@ -14,10 +14,14 @@
 
 import type { ImageResolver } from './canvasBackend';
 
+function isEmbeddedMediaSource(relId: string): boolean {
+  return relId.startsWith('blob:') || relId.startsWith('data:');
+}
+
 export function createCanvasImageResolver(): ImageResolver {
   const cache = new Map<string, Promise<CanvasImageSource | null>>();
   return (relId: string) => {
-    if (!relId.startsWith('blob:') && !relId.startsWith('data:')) return null;
+    if (!isEmbeddedMediaSource(relId)) return null;
     let pending = cache.get(relId);
     if (!pending) {
       pending = new Promise<CanvasImageSource | null>((resolve) => {
@@ -26,6 +30,23 @@ export function createCanvasImageResolver(): ImageResolver {
         img.onerror = () => resolve(null);
         img.src = relId;
       });
+      cache.set(relId, pending);
+    }
+    return pending;
+  };
+}
+
+/** Worker-safe variant: `fetch` + `createImageBitmap` replace `new Image()`. */
+export function createWorkerImageResolver(): ImageResolver {
+  const cache = new Map<string, Promise<CanvasImageSource | null>>();
+  return (relId: string) => {
+    if (!isEmbeddedMediaSource(relId)) return null;
+    let pending = cache.get(relId);
+    if (!pending) {
+      pending = fetch(relId)
+        .then((response) => response.blob())
+        .then((blob) => createImageBitmap(blob) as Promise<CanvasImageSource>)
+        .catch(() => null);
       cache.set(relId, pending);
     }
     return pending;
