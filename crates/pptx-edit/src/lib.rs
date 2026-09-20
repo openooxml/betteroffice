@@ -68,6 +68,22 @@ pub struct DeckSession {
     package: Arc<PptxPackage>,
     undo: RefCell<DeckUndoManager>,
     proposals: RefCell<proposals::ProposalStore>,
+    /// Bumped on every committed transaction via `_epoch_observer`, so a value
+    /// uniquely identifies the doc's state for memoized computations.
+    epoch: Arc<AtomicU64>,
+    _epoch_observer: UpdateSubscription,
+    state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
+}
+
+fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
+    let epoch = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&epoch);
+    let observer = doc
+        .observe_update_v1(move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .map_err(|error| EditError::Observer(error.to_string()))?;
+    Ok((epoch, observer))
 }
 
 impl DeckSession {
@@ -114,6 +130,7 @@ impl DeckSession {
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
+        let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
             doc,
             client_id,
@@ -121,6 +138,9 @@ impl DeckSession {
             package: Arc::new(package),
             undo: RefCell::new(undo),
             proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: RefCell::new(None),
         })
     }
 
@@ -134,9 +154,9 @@ impl DeckSession {
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
-        deck::validate_doc(&doc)?;
-        let package = deck::package_from_doc(&doc)?;
+        let (package, _snapshot) = deck::validate_doc(&doc)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
+        let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
             doc,
             client_id,
@@ -144,6 +164,9 @@ impl DeckSession {
             package: Arc::new(package),
             undo: RefCell::new(undo),
             proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: RefCell::new(None),
         })
     }
 
@@ -169,22 +192,24 @@ impl DeckSession {
             pptx_parse::parse_pptx_without_connectors(source)
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
-        comments::import_source_comments(&session, &package)?;
-        deck::import_source_render_data(&session.doc, &package)?;
+        let mut import = deck::SourceImport::new(session.package().clone(), &package);
+        comments::import_source_comments(&session, &mut import)?;
+        deck::import_source_render_data(&session.doc, &mut import)?;
         source_run_properties::import_source(
             &session,
-            &package,
+            &mut import,
             source_run_properties::SourceProperty::Baseline,
         )?;
-        deck::import_source_ole_pictures(&session.doc, &package)?;
-        effects::import_source(&session.doc, &package)?;
+        deck::import_source_ole_pictures(&session.doc, import.source)?;
+        effects::import_source(&mut import);
         source_run_properties::import_source(
             &session,
-            &package,
+            &mut import,
             source_run_properties::SourceProperty::Spacing,
         )?;
-        story::import_source_numbering_restarts(&session.doc, &package)?;
-        outline_gradients::import_source(&session, &package)?;
+        story::import_source_numbering_restarts(&session.doc, import.source)?;
+        outline_gradients::import_source(&session, &mut import)?;
+        import.sync_package_json(&session.doc, session.package())?;
         Ok(Self {
             package: Arc::new(package),
             ..session
@@ -208,9 +233,27 @@ impl DeckSession {
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {
-        self.doc
-            .transact()
-            .encode_state_as_update_v1(&StateVector::default())
+        (*self.state_update_v1()).clone()
+    }
+
+    pub(crate) fn state_update_v1(&self) -> Arc<Vec<u8>> {
+        let epoch = self.epoch();
+        if let Some((cached_epoch, update)) = &*self.state_update.borrow()
+            && *cached_epoch == epoch
+        {
+            return Arc::clone(update);
+        }
+        let update = Arc::new(
+            self.doc
+                .transact()
+                .encode_state_as_update_v1(&StateVector::default()),
+        );
+        *self.state_update.borrow_mut() = Some((epoch, Arc::clone(&update)));
+        update
+    }
+
+    pub(crate) fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::Relaxed)
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {
@@ -232,14 +275,17 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        deck::validate_doc(&staged)?;
+        let (_, snapshot) = deck::validate_doc(&staged)?;
 
-        let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
+        let diff = staged
+            .transact()
+            .encode_state_as_update_v1(&self.doc.transact().state_vector());
+        let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
+            .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.snapshot()
+        Ok(snapshot)
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>

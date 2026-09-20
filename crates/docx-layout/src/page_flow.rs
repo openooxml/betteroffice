@@ -88,6 +88,10 @@ pub struct Paginator {
     /// Leading spacing already accounted for below the break the cursor just
     /// crossed; `f64::INFINITY` for a break that spends all of it.
     leading_spacing_spent: f64,
+    /// `leading_spacing_spent` as of the current page's first fragment. Field
+    /// resets to 0 once the fragment lands, so checkpoints taken after it are
+    /// recorded against this preserved value.
+    page_start_spacing_spent: f64,
     numbering_parity_offset: bool,
     pub pages: Vec<Page>,
     states: Vec<FlowState>,
@@ -125,6 +129,7 @@ impl Paginator {
         let column_region_top = margins.top;
         Ok(Paginator {
             leading_spacing_spent: 0.0,
+            page_start_spacing_spent: 0.0,
             numbering_parity_offset: false,
             pages: Vec::new(),
             states: Vec::new(),
@@ -225,7 +230,11 @@ impl Paginator {
     pub fn current_page_start(&self) -> Option<(usize, u32, PageFlowGeometry)> {
         let state = self.states.last()?;
         let page = self.pages.get(state.page_index)?;
-        Some((state.page_index, page.number, self.snapshot_geometry()))
+        let mut flow = self.snapshot_geometry();
+        if !page.fragments.is_empty() {
+            flow.leading_spacing_spent = self.page_start_spacing_spent;
+        }
+        Some((state.page_index, page.number, flow))
     }
 
     fn get_content_bottom(&self) -> f64 {
@@ -470,6 +479,9 @@ impl Paginator {
         fragment.set_xy(x, y);
         let page_index = self.states[idx].page_index;
         self.pages[page_index].fragments.push(fragment);
+        if self.pages[page_index].fragments.len() == 1 {
+            self.page_start_spacing_spent = self.leading_spacing_spent;
+        }
 
         let state = &mut self.states[idx];
         state.pen_y = y + height;

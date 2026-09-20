@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
@@ -6,6 +7,7 @@ use ooxml_drawingml::chart::{
     plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
+use xlsx_model::styles::Stylesheet;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{MAX_COLS, MAX_ROWS};
 
@@ -296,8 +298,12 @@ fn px_to_emu(px: f64) -> Option<i64> {
 /// Every chart the viewport shows, in paint order, carrying the geometry the
 /// display list publishes. The label is left empty: resolving anchors needs no
 /// chart part, and a hit test has no use for one.
-pub fn chart_regions(sheet: &Sheet, viewport: &Viewport) -> Result<Vec<ChartRegion>, RenderError> {
-    let geometry = GridGeometry::new(sheet);
+pub fn chart_regions(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    viewport: &Viewport,
+) -> Result<Vec<ChartRegion>, RenderError> {
+    let geometry = GridGeometry::new(sheet, styles);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -372,7 +378,7 @@ fn visible_charts<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_charts<F>(
+pub(crate) fn render_charts<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -383,7 +389,8 @@ pub(crate) fn render_charts<F>(
     resolver: &mut F,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     render_charts_with_budget(
         sheet,
@@ -399,7 +406,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_charts_with_budget<F>(
+fn render_charts_with_budget<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -411,7 +418,8 @@ fn render_charts_with_budget<F>(
     max_ops: usize,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     let mut remaining = max_ops;
     for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
@@ -458,7 +466,7 @@ enum ChartOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plot_one_chart<F>(
+fn plot_one_chart<F, R>(
     chart: &SheetChart,
     rect: PlotRect,
     clip: Rect,
@@ -468,14 +476,15 @@ fn plot_one_chart<F>(
     resolver: &mut F,
 ) -> ChartOutcome
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
-    let space = match resolver(chart) {
-        Ok(space) => space,
+    let space: Arc<ChartSpace> = match resolver(chart) {
+        Ok(space) => space.into(),
         Err(error) if error.refuses_frame() => return ChartOutcome::Fatal(error),
         Err(_) => return ChartOutcome::Degraded(degraded_label(None)),
     };
-    let plot = PlotChart::from(&space);
+    let plot = PlotChart::from(space.as_ref());
     let label = chart_aria_label(&plot);
     if let Some(error) = chart_refusal(chart, &space) {
         if error.refuses_frame() {
@@ -965,7 +974,7 @@ mod tests {
         let mut sheet = Sheet::new("Sheet1");
         sheet.col_widths.insert(1, 0.0);
         sheet.row_heights.insert(1, 0.0);
-        GridGeometry::new(&sheet)
+        GridGeometry::new(&sheet, &Stylesheet::default())
     }
 
     fn cell(col: u32, col_off: i64, row: u32, row_off: i64) -> AnchorCell {
@@ -1120,13 +1129,13 @@ mod tests {
                 refs: Vec::new(),
             });
         }
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let mut commands = Vec::new();
         let mut a11y = Vec::new();
         let resolved = std::cell::Cell::new(0);
         let mut resolver = |_: &SheetChart| {
             resolved.set(resolved.get() + 1);
-            Ok(ChartSpace {
+            Ok(Arc::new(ChartSpace {
                 chart_type: "line".into(),
                 title: None,
                 legend: Some(ChartLegend {
@@ -1139,7 +1148,7 @@ mod tests {
                 plot_groups: Vec::new(),
                 axis_list: None,
                 ..Default::default()
-            })
+            }))
         };
         let error = render_charts_with_budget(
             &sheet,
@@ -1229,7 +1238,7 @@ mod tests {
             },
             refs: Vec::new(),
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let viewport = Viewport {
             x: 0.0,
             y: 0.0,
@@ -1237,7 +1246,7 @@ mod tests {
             height: 200.0,
         };
         let mut resolver = |chart: &SheetChart| {
-            Err(RenderError::ChartParseFailed {
+            Err::<ChartSpace, _>(RenderError::ChartParseFailed {
                 part: chart.part.clone(),
             })
         };
@@ -1284,7 +1293,7 @@ mod tests {
             to: cell(4, 0, 6, 0),
             edit_as: AnchorEditAs::TwoCell,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let before = resolve_chart_anchor(sheet.charts[0].anchor, &geometry, 0, 0).unwrap();
         let moved = moved_chart_anchor(sheet.charts[0].anchor, &geometry, 17.0, -5.0).unwrap();
         let after = resolve_chart_anchor(moved, &geometry, 0, 0).unwrap();
@@ -1312,7 +1321,7 @@ mod tests {
             from: cell(1, 0, 1, 0),
             extent,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let moved =
             moved_chart_anchor(sheet.charts[0].anchor, &geometry, -10_000.0, -10_000.0).unwrap();
         assert_eq!(
@@ -1333,7 +1342,7 @@ mod tests {
                 cy: 476_250,
             },
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         assert!(moved_chart_anchor(sheet.charts[0].anchor, &geometry, 5.0, 5.0).is_none());
         assert!(
             moved_chart_anchor(
@@ -1364,7 +1373,7 @@ mod tests {
             width: 400.0,
             height: 300.0,
         };
-        let regions = chart_regions(&sheet, &viewport).unwrap();
+        let regions = chart_regions(&sheet, &Stylesheet::default(), &viewport).unwrap();
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].id, "xl/drawings/drawing1.xml#0");
         assert!(regions[0].label.is_empty());
@@ -1373,6 +1382,7 @@ mod tests {
 
         let scrolled = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 2_000.0,
                 y: 2_000.0,
@@ -1408,6 +1418,7 @@ mod tests {
         });
         let regions = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 0.0,
                 y: 0.0,

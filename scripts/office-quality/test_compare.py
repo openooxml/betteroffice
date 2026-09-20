@@ -48,6 +48,19 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual(report['penalized_ssim'], 1.0)
             self.assertEqual(report['pages'][0]['actual_size'], (40, 40))
 
+    def test_scores_without_gallery_are_identical_and_report_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            reference = self.pages(root, 'reference', 1)
+            actual = self.pages(root, 'actual', 2)
+            progress = []
+            normal = compare(reference, actual, root / 'normal')
+            compact = compare(reference, actual, root / 'compact', gallery=False,
+                              progress=lambda page, total: progress.append((page, total)))
+            self.assertEqual(normal, compact)
+            self.assertEqual(progress, [(1, 2), (2, 2)])
+            self.assertEqual([path.name for path in (root / 'compact').iterdir()], ['score.json'])
+
     def test_mismatched_sources_and_incomplete_renders_are_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

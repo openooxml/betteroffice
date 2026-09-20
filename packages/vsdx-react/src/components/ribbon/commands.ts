@@ -1,6 +1,6 @@
 import { createContext, createElement, useContext, useMemo } from 'react';
 import type { ReactNode } from 'react';
-import type { DiagramHandle, DiagramSnapshot, FormulaShapeDraft, PageDisplayList, PagePrimitive, PageSnapshot, Paint, ShapePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
+import type { CellWriteProbe, CellWriteQuery, DiagramHandle, DiagramSnapshot, FormulaShapeDraft, PageDisplayList, PagePrimitive, PageSnapshot, Paint, ShapePrimitive, ShapeSnapshot } from '@betteroffice/vsdx';
 import type { VsdxShapeSelection } from '../../VsdxEditor';
 import { standardShapeById } from '../shapes/shapeLibrary';
 import { DUPLICATE_OFFSET, PASTE_OFFSET, ancestorPinOffset, buildClipboardEntry, canCopyShape, draftForPaste, draftTreeForPaste, isTreeEntry } from './clipboard';
@@ -30,6 +30,7 @@ export interface RibbonCommandsProviderProps {
   onError: (error: unknown) => void;
   onDownload: (bytes: Uint8Array) => void;
   pageBreaks?: PageBreakToggle;
+  probes?: ReadonlyMap<string, ShapeWriteProbes>;
   children: ReactNode;
 }
 
@@ -94,9 +95,6 @@ function colorFormula(value = '#000000'): string {
   return `RGB(${[0, 2, 4].map((offset) => Number.parseInt(hex.slice(offset, offset + 2), 16)).join(',')})`;
 }
 
-/** Matches a GUARD function call without matching reference names containing guard. */
-export const GUARD_CALL = /(^|[^A-Z0-9_.])GUARD\s*\(/i;
-
 export function numberValue(value: string | undefined): number {
   const result = Number(value ?? '0');
   return Number.isFinite(result) ? result : 0;
@@ -149,60 +147,37 @@ export function lockCellEnabled(shape: ShapeSnapshot | null, name: string): bool
   return Number(cellValue(shape, name)) === 1;
 }
 
-/** True when the stored formula for a cell carries a GUARD interception. */
-export function cellIsGuarded(shape: ShapeSnapshot | null, name: string): boolean {
-  return GUARD_CALL.test(cellFormula(shape, name) ?? '');
+/** The engine's verdict per cell for one shape. */
+export type ShapeWriteProbes = ReadonlyMap<string, CellWriteProbe>;
+
+/** What the editor gates a control on, probed together per shape. */
+export const GATED_CELLS: readonly CellWriteQuery[] = [
+  { cellName: 'LockDelete', gesture: 'delete' },
+  { cellName: 'PinX', gesture: 'moveX' },
+  { cellName: 'PinY', gesture: 'moveY' },
+  { cellName: 'Width', gesture: 'resizeWidth' },
+  { cellName: 'Height', gesture: 'resizeHeight' },
+  { cellName: 'Angle', gesture: 'rotate' },
+  { cellName: 'FillForegnd' }, { cellName: 'LineColor' }, { cellName: 'LineWeight' },
+  { cellName: 'LinePattern' }, { cellName: 'FlipX' }, { cellName: 'FlipY' },
+];
+
+/** True when the engine says a write to this cell would be refused. */
+export function isCellWriteBlocked(probes: ShapeWriteProbes | null | undefined, cellName: string): boolean {
+  return probes?.get(cellName)?.allowed === false;
 }
 
-const SETATREF_REDIRECT = /^\s*=?\s*setatref\s*\(\s*([^()]*?)\s*\)\s*$/i;
-
-/** Matches any SETATREF call without matching reference names containing setatref. */
-const SETATREF_CALL = /(^|[^A-Z0-9_.])SETATREF[A-Z]*\s*\(/i;
-
-function singleSetatrefTarget(formula: string): string | undefined {
-  const target = SETATREF_REDIRECT.exec(formula)?.[1].trim();
-  if (!target || target.includes(',') || target.includes('!') || target.includes('.')) return undefined;
-  return target;
+/** True when the engine says the delete gesture would be refused. */
+export function isDeleteBlocked(probes: ShapeWriteProbes | null | undefined): boolean {
+  return isCellWriteBlocked(probes, 'LockDelete');
 }
 
-/** Blocked when a GUARD sits on the cell or on any SETATREF hop to it. */
-function guardChainBlocked(shape: ShapeSnapshot | null, name: string): boolean {
-  if (!shape) return false;
-  const seen = new Set<string>();
-  let current = name;
-  for (let hop = 0; hop <= 10; hop += 1) {
-    if (seen.has(current)) return true;
-    seen.add(current);
-    const formula = cellFormula(shape, current);
-    if (formula === undefined) return false;
-    if (cellIsGuarded(shape, current)) return true;
-    const target = singleSetatrefTarget(formula);
-    if (target === undefined) return SETATREF_CALL.test(formula);
-    if (!findCell(shape, target)) return true;
-    current = target;
-  }
-  return true;
-}
+/** Cells a handle resize writes; any one refused disables the handles. */
+export const HANDLE_RESIZE_CELLS = ['PinX', 'PinY', 'Width', 'Height'] as const;
 
-/** True when a delete would be refused by LockDelete or a GUARD on it. */
-export function isDeleteBlocked(shape: ShapeSnapshot | null): boolean {
-  if (!shape) return false;
-  return lockCellEnabled(shape, 'LockDelete') || guardChainBlocked(shape, 'LockDelete');
-}
-
-export const HANDLE_RESIZE_LOCKS = ['LockMoveX', 'LockMoveY', 'LockWidth', 'LockHeight', 'LockAspect'] as const;
-
-/** True when a handle resize would be refused by a lock or a GUARD on its pin or size. */
-export function isHandleResizeBlocked(shape: ShapeSnapshot | null): boolean {
-  if (!shape) return false;
-  if (HANDLE_RESIZE_LOCKS.some((lock) => lockCellEnabled(shape, lock))) return true;
-  return (['PinX', 'PinY', 'Width', 'Height'] as const).some((cell) => guardChainBlocked(shape, cell));
-}
-
-/** True when a single-cell write would be refused by the mutation policy. */
-export function isCellWriteBlocked(shape: ShapeSnapshot | null, cellName: string): boolean {
-  if (!shape) return false;
-  return guardChainBlocked(shape, cellName);
+/** True when the engine says any cell a handle resize writes would be refused. */
+export function isHandleResizeBlocked(probes: ShapeWriteProbes | null | undefined): boolean {
+  return HANDLE_RESIZE_CELLS.some((cell) => isCellWriteBlocked(probes, cell));
 }
 
 /** A shape's own geometry primitive; text boxes share its id, so kind is part of the match. */
@@ -301,10 +276,30 @@ export function addShapeWithText(handle: DiagramHandle, pageId: string, draft: F
   return receipt;
 }
 
-/** True when a rotation would be refused by LockRotate or a GUARD on Angle. */
-export function isRotateBlocked(shape: ShapeSnapshot | null): boolean {
-  if (!shape) return false;
-  return lockCellEnabled(shape, 'LockRotate') || guardChainBlocked(shape, 'Angle');
+/** Key for one shape's probes inside a selection-wide map. */
+export const probeKey = (pageId: string, shapeId: string): string => `${pageId}${shapeId}`;
+
+/** Asks the engine what it would refuse on one shape. */
+export function shapeWriteProbes(handle: DiagramHandle | null, pageId: string, shapeId: string, cells: readonly CellWriteQuery[] = GATED_CELLS): ShapeWriteProbes | null {
+  if (typeof handle?.probeCellWrites !== 'function') return null;
+  try {
+    return new Map(handle.probeCellWrites(pageId, shapeId, cells).map((probe) => [probe.cellName, probe]));
+  } catch { return null; }
+}
+
+/** The same, for every shape in a selection. */
+export function selectionWriteProbes(handle: DiagramHandle | null, selection: readonly VsdxShapeSelection[], cells: readonly CellWriteQuery[] = GATED_CELLS): Map<string, ShapeWriteProbes> {
+  const probes = new Map<string, ShapeWriteProbes>();
+  for (const item of selection) {
+    const shape = shapeWriteProbes(handle, item.pageId, item.shapeId, cells);
+    if (shape) probes.set(probeKey(item.pageId, item.shapeId), shape);
+  }
+  return probes;
+}
+
+/** True when the engine says a rotation would be refused. */
+export function isRotateBlocked(probes: ShapeWriteProbes | null | undefined): boolean {
+  return isCellWriteBlocked(probes, 'Angle');
 }
 
 export function createRibbonCommands(
@@ -319,6 +314,7 @@ export function createRibbonCommands(
   onClipboardChange: (next: VsdxClipboardEntry | null) => void = () => {},
   onSelectShape: (selection: VsdxShapeSelection) => void = () => {},
   pageBreaks?: PageBreakToggle,
+  probes: ReadonlyMap<string, ShapeWriteProbes> = selectionWriteProbes(handle, selection),
 ): RibbonCommands {
   const execute = (operation: (current: DiagramHandle, selected: readonly VsdxShapeSelection[]) => void, needsSelection = false) => () => {
     if (!handle || (needsSelection && selection.length === 0)) return;
@@ -330,6 +326,7 @@ export function createRibbonCommands(
   const single = placements.length === 1 ? placements[0] : null;
   const shape = first?.placement.shape ?? null;
   const selected = placements.length > 0;
+  const probesFor = (entry: { selection: VsdxShapeSelection }) => probes.get(probeKey(entry.selection.pageId, entry.selection.shapeId)) ?? null;
   const activePage = first ? pages.find((page) => page.id === first.selection.pageId) ?? null : null;
   const swatch = frameSwatch(frame, activePage, shape);
   const copyable = Boolean(single && canCopyShape(single.placement.shape) && activePage && ancestorPinOffset(activePage.shapes, single.selection.shapeId));
@@ -354,15 +351,15 @@ export function createRibbonCommands(
   const commands = {
     undo: { id: 'undo', enabled: Boolean(handle?.canUndo()), run: execute((currentHandle) => { currentHandle.undo(); }) },
     redo: { id: 'redo', enabled: Boolean(handle?.canRedo()), run: execute((currentHandle) => { currentHandle.redo(); }) },
-    delete: { id: 'delete', enabled: selected && placements.every((entry) => !isDeleteBlocked(entry.placement.shape)), run: execute((currentHandle) => {
+    delete: { id: 'delete', enabled: selected && placements.every((entry) => !isDeleteBlocked(probesFor(entry))), run: execute((currentHandle) => {
       const live = livePlacements(currentHandle);
       if (live.length === 0) return;
       currentHandle.deleteShapes(live.map(({ selection: item }) => ({ pageId: item.pageId, shapeId: item.shapeId })));
     }, true) },
-    fillColor: { id: 'fillColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FillForegnd')), value: swatch.fill ?? color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
-    lineColor: { id: 'lineColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LineColor')), value: swatch.line ?? color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
+    fillColor: { id: 'fillColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'FillForegnd')), value: swatch.fill ?? color(cellValue(shape, 'FillForegnd'), '#000000'), run: (value?: string) => formula('FillForegnd', colorFormula(value))() },
+    lineColor: { id: 'lineColor', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'LineColor')), value: swatch.line ?? color(cellValue(shape, 'LineColor'), '#000000'), run: (value?: string) => formula('LineColor', colorFormula(value))() },
     lineWeight: {
-      id: 'lineWeight', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LineWeight')), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => {
+      id: 'lineWeight', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'LineWeight')), value: cellFormula(shape, 'LineWeight'), run: (value?: string) => {
         if (value === undefined) return;
         const next = parseLineWeightInput(value);
         if (next === null || !isFormulaChange(cellFormula(shape, 'LineWeight'), value, parseLineWeightInput)) return;
@@ -370,7 +367,7 @@ export function createRibbonCommands(
       },
     },
     linePattern: {
-      id: 'linePattern', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'LinePattern')), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => {
+      id: 'linePattern', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'LinePattern')), value: cellFormula(shape, 'LinePattern'), run: (value?: string) => {
         if (value === undefined) return;
         const next = parseLinePatternInput(value);
         if (next === null || !isFormulaChange(cellFormula(shape, 'LinePattern'), value, parseLinePatternInput)) return;
@@ -381,10 +378,10 @@ export function createRibbonCommands(
     bringForward: { id: 'bringForward', enabled: single !== null && single.placement.index < topIndex, run: reorderTo((placement) => placement.index + 1, (placement) => placement.index < placement.siblings.length - 1) },
     sendBackward: { id: 'sendBackward', enabled: single !== null && single.placement.index > 0, run: reorderTo((placement) => placement.index - 1, (placement) => placement.index > 0) },
     sendToBack: { id: 'sendToBack', enabled: single !== null && single.placement.index > 0, run: reorderTo(() => 0, (placement) => placement.index > 0) },
-    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
-    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isRotateBlocked(entry.placement.shape)), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
-    flipHorizontal: { id: 'flipHorizontal', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipX')), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
-    flipVertical: { id: 'flipVertical', enabled: selected && placements.every((entry) => !isCellWriteBlocked(entry.placement.shape, 'FlipY')), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
+    rotateLeft: { id: 'rotateLeft', enabled: selected && placements.every((entry) => !isRotateBlocked(probesFor(entry))), run: setNumeric('Angle', (value) => String(value - Math.PI / 2)) },
+    rotateRight: { id: 'rotateRight', enabled: selected && placements.every((entry) => !isRotateBlocked(probesFor(entry))), run: setNumeric('Angle', (value) => String(value + Math.PI / 2)) },
+    flipHorizontal: { id: 'flipHorizontal', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'FlipX')), active: numberValue(cellValue(shape, 'FlipX')) !== 0, run: setNumeric('FlipX', (value) => value === 0 ? '1' : '0') },
+    flipVertical: { id: 'flipVertical', enabled: selected && placements.every((entry) => !isCellWriteBlocked(probesFor(entry), 'FlipY')), active: numberValue(cellValue(shape, 'FlipY')) !== 0, run: setNumeric('FlipY', (value) => value === 0 ? '1' : '0') },
     addShape: {
       id: 'addShape',
       enabled: Boolean(pageById(pages, pageId)),
@@ -450,8 +447,8 @@ export function createRibbonCommands(
   return commands;
 }
 
-export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, clipboard = null, onClipboardChange = () => {}, onSelectShape = () => {}, onMutation, onError, onDownload, pageBreaks, children }: RibbonCommandsProviderProps) {
-  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, clipboard, onClipboardChange, onSelectShape, pageBreaks), [handle, snapshot, pageId, selection, frame, clipboard, onClipboardChange, onSelectShape, onMutation, onError, onDownload, pageBreaks]);
+export function RibbonCommandsProvider({ handle, snapshot, pageId, selection, frame, clipboard = null, onClipboardChange = () => {}, onSelectShape = () => {}, onMutation, onError, onDownload, pageBreaks, probes, children }: RibbonCommandsProviderProps) {
+  const commands = useMemo(() => createRibbonCommands(handle, selection, pageId, onMutation, onError, onDownload, frame, clipboard, onClipboardChange, onSelectShape, pageBreaks, probes), [handle, snapshot, pageId, selection, frame, clipboard, onClipboardChange, onSelectShape, onMutation, onError, onDownload, pageBreaks, probes]);
   return createElement(RibbonCommandsContext.Provider, { value: commands }, children);
 }
 

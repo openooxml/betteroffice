@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn section_restart_parity_survives_incremental_page_resume() {
         let (mut input, _) = restart_parity_input(true, Some(1), 2, None, 2);
-        let previous = crate::place::layout_document_checkpointed(&mut input).unwrap();
+        let mut previous = crate::place::layout_document_checkpointed(&mut input).unwrap();
         assert_eq!(previous.layout.pages.len(), 4);
         let before = vec![0; input.measured.len()];
         let mut after = before.clone();
@@ -1165,7 +1165,7 @@ mod tests {
         paragraph.total_height = 30.0;
         let incremental = crate::place::layout_document_incremental(
             &mut input,
-            &previous.layout,
+            &mut previous.layout,
             &previous.checkpoints,
             &before,
             &after,

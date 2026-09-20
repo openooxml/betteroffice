@@ -23,7 +23,8 @@ pub use xlsx_model::addr::AddrError;
 pub use xlsx_model::{
     AnchorCell, AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellRange, CellRef, CellValue,
     ChartAnchor, ChartRef, ChartRefKind, ColId, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetId, Workbook as WorkbookModel,
+    Hyperlink, MAX_COLS, MAX_ROWS, RowId, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet,
+    Workbook as WorkbookModel,
 };
 pub use xlsx_ops::{
     BorderLineStyle, BorderPatch, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,

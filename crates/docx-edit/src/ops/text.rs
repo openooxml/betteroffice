@@ -19,7 +19,7 @@ use crate::{
 
 const FORBIDDEN_TEXT_CHARS: [char; 5] = ['\n', '\r', '\u{000B}', '\u{2028}', '\u{2029}'];
 
-fn validate_text(text: &str) -> OpResult<()> {
+pub(crate) fn validate_text(text: &str) -> OpResult<()> {
     if text.contains(FORBIDDEN_TEXT_CHARS) {
         return Err(OpError::TextContainsBreak);
     }

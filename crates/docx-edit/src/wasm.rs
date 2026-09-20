@@ -54,8 +54,8 @@ use crate::segments::SegKind;
 use crate::{
     CellLoc, ChangeKind, ChangeTarget, ColorPatch, EditCtx, EditingDoc, EngineSession,
     FontFamilyPatch, FormatPolicy, InlineFormatDelta, MergeDirection, ParaAttrDelta, ParaSelector,
-    Patch, Position, RawOp, SegmentContent, SimpleFormat, StoryRange, TabStop, TableLocator,
-    TableRange, TriState, UndoSession, story_ref,
+    Patch, Position, RawOp, SeedParagraph, SegmentContent, SimpleFormat, StoryRange, TabStop,
+    TableLocator, TableRange, TriState, UndoSession, story_ref,
 };
 
 #[wasm_bindgen]
@@ -1153,8 +1153,9 @@ impl EditSession {
     }
 
     /// Registers a measurement view of `base` carrying the vertical metrics
-    /// Word measures `requested_family` with — for a face this host had to
-    /// substitute. Returns `base` for a family whose metrics are unknown.
+    /// and advance pitch Word measures `requested_family` with — for a face
+    /// this host had to substitute. Returns `base` for a family whose metrics
+    /// are unknown.
     pub fn register_substitute_measure_font(
         &self,
         base: u32,
@@ -1690,59 +1691,24 @@ impl EditSession {
                 )));
             }
 
-            let (text, p_style, alignment) = seed_paragraph(&paragraphs[0]);
-            self.engine
-                .doc()
-                .create_story(story_id, &text, &p_style, &alignment)
-                .map_err(js_err)?;
-            let seed_ctx = EditCtx::local(String::new(), String::new());
-            for paragraph in &paragraphs[1..] {
-                let (text, p_style, alignment) = seed_paragraph(paragraph);
-                // Splitting at the final pilcrow appends: the first half keeps
-                // the original paraId, so the appended paragraph — whose
-                // properties this seeds — is the SECOND half.
-                let boundary = self.engine.doc().story_len(story_id).map_err(js_err)? - 1;
-                if !text.is_empty() {
-                    self.engine
-                        .doc()
-                        .insert_text(
-                            &seed_ctx,
-                            Position::new(story_id, boundary),
-                            &text,
-                            FormatPolicy::Inherit,
-                        )
-                        .map_err(js_err)?;
-                }
-                let split = self
-                    .engine
-                    .doc()
-                    .split_paragraph(&seed_ctx, Position::new(story_id, boundary), None)
-                    .map_err(js_err)?;
-                self.engine
-                    .doc()
-                    .set_paragraph_attr(
-                        &split.second_para_id,
-                        "pStyle",
-                        Any::from(p_style.as_str()),
-                    )
-                    .map_err(js_err)?;
-                self.engine
-                    .doc()
-                    .set_paragraph_attr(
-                        &split.second_para_id,
-                        "alignment",
-                        Any::from(alignment.as_str()),
-                    )
-                    .map_err(js_err)?;
-            }
-
+            let seed_paragraphs: Vec<SeedParagraph> = paragraphs
+                .iter()
+                .map(|paragraph| {
+                    let (text, p_style, alignment) = seed_paragraph(paragraph);
+                    SeedParagraph {
+                        text,
+                        p_style,
+                        alignment,
+                    }
+                })
+                .collect();
             let para_ids: Vec<Value> = self
                 .engine
                 .doc()
-                .paragraphs(story_id)
+                .seed_story(story_id, &seed_paragraphs)
                 .map_err(js_err)?
                 .into_iter()
-                .map(|paragraph| Value::String(paragraph.para_id))
+                .map(Value::String)
                 .collect();
             receipt.insert(story_id.to_owned(), Value::Array(para_ids));
         }
