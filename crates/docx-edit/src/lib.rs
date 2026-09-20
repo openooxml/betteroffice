@@ -353,8 +353,7 @@ impl EditingDoc {
         Ok(index)
     }
 
-    /// The story's whole `ops::snapshot` for read-only callers, shared across
-    /// queries issued against the same committed epoch.
+    /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
     pub(crate) fn chunk_snapshot<T: ReadTxn>(
         &self,
         story_id: &str,
@@ -371,10 +370,11 @@ impl EditingDoc {
             }
         }
         let chunks = Arc::new(ops::snapshot(story, txn));
-        self.chunk_snapshots
-            .lock()
-            .unwrap()
-            .insert(story_id.into(), (epoch, Arc::clone(&chunks)));
+        let mut cache = self.chunk_snapshots.lock().unwrap();
+        if let Some(stories) = txn.get_map(STORIES) {
+            cache.retain(|key, _| &**key == story_id || stories.get(txn, key).is_some());
+        }
+        cache.insert(story_id.into(), (epoch, Arc::clone(&chunks)));
         chunks
     }
 
@@ -464,6 +464,7 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         if stories.remove(&mut txn, story_id).is_some() {
+            self.chunk_snapshots.lock().unwrap().remove(story_id);
             Ok(())
         } else {
             Err(EditError::StoryNotFound(story_id.to_owned()))

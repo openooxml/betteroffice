@@ -100,8 +100,7 @@ pub(crate) struct DeleteOutcome {
     pub removed: u32,
 }
 
-/// Chunks covering the insertion/deletion boundary — the two units the
-/// revision-adjacency and formatting-inheritance lookups read.
+/// Chunks covering the insertion/deletion boundary.
 fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec<Chunk> {
     snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
 }

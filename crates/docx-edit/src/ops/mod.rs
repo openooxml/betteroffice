@@ -172,8 +172,7 @@ pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
         .collect()
 }
 
-/// `snapshot` restricted to the chunks overlapping `[lo, hi)`: skipped items cost
-/// one length measure — no string or attribute clones — and the walk stops at `hi`.
+/// `snapshot` over the chunks overlapping `[lo, hi)`.
 pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: u32) -> Vec<Chunk> {
     let mut offset = 0;
     let mut chunks = Vec::new();
@@ -195,8 +194,7 @@ pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: 
     chunks
 }
 
-/// The story's last pilcrow as `(index, map)` — a kind-only walk with no
-/// per-chunk materialization.
+/// The story's last pilcrow as `(index, map)`.
 pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32, MapRef)> {
     let mut offset = 0;
     let mut last = None;
