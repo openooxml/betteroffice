@@ -8,10 +8,7 @@ import * as React from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { cn } from '../../lib/utils';
 
-// Radix portals escape the editor's `.oox-root` subtree, so dark-mode
-// detection is a document-wide probe. Caching it behind a single
-// MutationObserver keeps every render of every Select at a boolean read —
-// the probe re-runs only when a class attribute changes anywhere.
+// Radix portals escape `.oox-root`, so dark-mode detection is a document-wide probe.
 const darkRootListeners = new Set<() => void>();
 let darkRootObserver: MutationObserver | null = null;
 let darkRootCached: boolean | null = null;
@@ -40,7 +37,6 @@ function subscribeDarkRoot(listener: () => void): () => void {
       attributeFilter: ['class'],
     });
   }
-  // Refresh on subscribe so a value cached before the editor mounted settles.
   darkRootCached = probeDarkRoot();
   return () => {
     darkRootListeners.delete(listener);
@@ -93,7 +89,6 @@ function SelectContent({
   onCloseAutoFocus,
   ...props
 }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>) {
-  // Re-assert the theme for tokens to resolve inside the portal in dark mode.
   const isDark = React.useSyncExternalStore(subscribeDarkRoot, getDarkRootSnapshot, () => false);
   return (
     <SelectPrimitive.Portal>

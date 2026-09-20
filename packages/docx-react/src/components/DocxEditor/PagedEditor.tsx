@@ -1500,11 +1500,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     // Under direct yrs input, the session's sticky comment coverage and revision
     // ranges are projected to the body/HF display-list regions without touching
     // an editor view.
-    // Anchor emission is heavy: one projection build walks every yrs story
-    // through wasm, and each anchor resolves a canvas element + live rect. It
-    // used to run twice per display-list frame (sync + on whenReady), so every
-    // keystroke paid a full sidebar reprojection. Emit on a trailing debounce
-    // instead — sidebar Ys tolerate a settle delay, keystroke latency does not.
     const anchorEmitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const lastAnchorEmitAtRef = useRef(0);
     const lastAnchorPositionsRef = useRef<Map<string, number> | null>(null);
@@ -1525,8 +1520,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
         const target = canvasOverlayTarget ?? host?.parentElement ?? null;
         if (!target) return;
         const targetRect = target.getBoundingClientRect();
-        // One DOM scan per emit; per-anchor rect lookup was an O(DOM)
-        // querySelector on every anchor before.
         const canvasByPage = new Map<number, HTMLCanvasElement>();
         for (const canvas of host.querySelectorAll<HTMLCanvasElement>(
           'canvas[data-page-index]'
@@ -1580,8 +1573,6 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       };
       const scheduleEmit = (): void => {
         if (anchorEmitTimerRef.current !== null) return;
-        // Leading edge past the throttle window keeps sidebar anchors fresh
-        // during a sustained burst instead of waiting for the first pause.
         if (performance.now() - lastAnchorEmitAtRef.current >= SIDEBAR_ANCHOR_STALE_MS) {
           lastAnchorEmitAtRef.current = performance.now();
           emit();
