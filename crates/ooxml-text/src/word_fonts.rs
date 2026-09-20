@@ -392,21 +392,17 @@ mod tests {
             "{}",
             bright.advance_scale
         );
-        for family in [
-            "Lucida Sans",
-            "Lucida Sans Unicode",
-            "Lucida Calligraphy",
-            "Georgia",
-            "Century Schoolbook",
-            "MS Mincho",
-            "Malgun Gothic",
-        ] {
-            let metrics = requested_line_metrics(family).expect(family);
-            assert!(
-                (metrics.advance_scale - 1.0).abs() < 1e-6,
-                "{family} has an unmeasured advance ratio and must keep its substitute's"
-            );
-        }
+        let scaled: Vec<&str> = EAST_ASIAN_FACES
+            .iter()
+            .chain(LATIN_FACES)
+            .filter(|(_, metrics)| (metrics.advance_scale - 1.0).abs() >= 1e-6)
+            .flat_map(|(names, _)| names.iter().copied())
+            .collect();
+        assert_eq!(
+            scaled,
+            ["lucida bright"],
+            "an unmeasured family must keep its substitute's advances"
+        );
     }
 
     /// Spans read off the font programs Word embeds in its own exports of the
