@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use docx_layout::display_list::DisplayList;
 use docx_layout::types::Layout;
 use docx_parse::chart::Chart;
@@ -29,7 +31,7 @@ pub struct DocumentModel {
     pub footnote_separators: Vec<Note>,
     pub endnote_separators: Vec<Note>,
     pub relationships: Vec<(String, Relationship)>,
-    pub media: Vec<(String, MediaFile)>,
+    pub media: Vec<(String, Arc<MediaFile>)>,
     pub charts: Vec<(String, Chart)>,
     pub template_variables: Vec<String>,
     pub warnings: Vec<String>,

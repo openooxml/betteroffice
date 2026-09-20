@@ -1,6 +1,7 @@
 //! Embedded media table and image-resolution aliases.
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::relationships::RelationshipMap;
 
-pub type MediaMap = IndexMap<String, MediaFile>;
+pub type MediaMap = IndexMap<String, Arc<MediaFile>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,14 +50,14 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         warnings.extend(warning);
         let mime_type = mime_type.to_owned();
         let base64 = base64::engine::general_purpose::STANDARD.encode(&data);
-        let file = MediaFile {
+        let file = Arc::new(MediaFile {
             path: path.clone(),
             filename: Some(filename),
             mime_type: mime_type.clone(),
             data_url: format!("data:{mime_type};base64,{base64}"),
             base64,
-        };
-        media.insert(path.clone(), file.clone());
+        });
+        media.insert(path.clone(), Arc::clone(&file));
         if let Some(normalized) = path.strip_prefix("word/") {
             media.insert(normalized.to_owned(), file);
         }
@@ -182,7 +183,7 @@ fn find_case_insensitive<'a>(media: &'a MediaMap, path: &str) -> Option<&'a Medi
     media
         .iter()
         .find(|(candidate, _)| candidate.eq_ignore_ascii_case(path))
-        .map(|(_, file)| file)
+        .map(|(_, file)| &**file)
 }
 
 #[cfg(test)]
