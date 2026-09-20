@@ -531,7 +531,7 @@ async function paintImage(
 ): Promise<void> {
   let source: CanvasImageSource | undefined;
   if (image.assetId && resolver) {
-    const resolved = await resolver(image.assetId);
+    const resolved = await resolveSource(resolver, image.assetId);
     if (resolved) source = image.effects?.length ? recolourImage(resolved, image.effects) : resolved;
   }
   if (image.shadow && (source || image.stroke || image.shadow.paths?.some((part) => part.stroke))) {
@@ -552,6 +552,18 @@ async function paintImage(
     );
   }
   drawImageContent(ctx, image, source);
+}
+
+/** Media the host cannot decode leaves the picture blank and the rest of the slide intact. */
+async function resolveSource(
+  resolver: CanvasImageResolver,
+  assetId: string
+): Promise<CanvasImageSource | null> {
+  try {
+    return await resolver(assetId);
+  } catch {
+    return null;
+  }
 }
 
 function drawImageContent(

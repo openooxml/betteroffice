@@ -779,6 +779,39 @@ describe('PPTX picture cropping', () => {
     expect(calls).not.toContain('clip');
   });
 
+  test('a picture the host cannot decode still leaves the rest of the slide painted', async () => {
+    const { calls, ctx } = harness();
+    const display = {
+      contractVersion: 1,
+      width: 320,
+      height: 180,
+      primitives: [
+        {
+          kind: 'image', objectId: 1, name: 'Metafile', x: 10, y: 20, w: 100, h: 50,
+          assetId: 'ppt/media/image1.emf', stroke: { color: '#ff00ff', width: 2 },
+        },
+        {
+          kind: 'image', objectId: 2, name: 'Screenshot', x: 10, y: 90, w: 200, h: 100,
+          assetId: 'ppt/media/image2.png',
+        },
+      ],
+    } as SlideDisplayList;
+    const attempted: string[] = [];
+    await paintSlide(ctx, display, 1, 1, {
+      resolveImage: async (assetId) => {
+        attempted.push(assetId);
+        if (assetId.endsWith('.emf'))
+          throw new Error('The source image could not be decoded.');
+        return source;
+      },
+    });
+    expect(attempted).toEqual(['ppt/media/image1.emf', 'ppt/media/image2.png']);
+    expect(calls).toContain('draw:0,0,400,300,10,90,200,100');
+    expect(calls.filter((call) => call.startsWith('draw:'))).toHaveLength(1);
+    expect(calls).toContain('rect:10,20,100,50');
+    expect(calls).toContain('stroke');
+  });
+
   test('a two-contour mask keeps both contours, so a counter can be punched out', async () => {
     const { calls, ctx } = harness();
     const ring: GeometryPathCommand[] = [
