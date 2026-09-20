@@ -26,7 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -59,7 +59,7 @@ test('artifact directories remain stable when a run selects only one format', ()
     (step: any) => step.uses?.startsWith('actions/download-artifact@')
   );
   expect(downloads.filter((step: any) => step.with.pattern).map((step: any) => step.with.pattern))
-    .toEqual(['docx-benchmark-report-*']);
+    .toEqual(['docx-benchmark-report-*', 'xlsx-benchmark-report-*']);
   for (const format of ['docx', 'pptx', 'xlsx']) {
     for (const kind of ['report', 'renders']) {
       const name = `visual-fidelity-${kind}-${format}`;
@@ -88,4 +88,23 @@ test('native builds and paired DOCX shards are isolated from browser measurement
   expect(publish.if).toContain("needs.docx-benchmark.result == 'success'");
   const merge = publish.steps.find((step: any) => step.run?.includes('merge.mjs'));
   expect(merge.env.QUALITY_REQUIRE_DOCX_BENCHMARK).toBe('true');
+});
+
+
+test('XLSX calculation and PPTX LibreOffice run independently and gate publication', () => {
+  const xlsx = workflow.jobs['xlsx-benchmark'];
+  const pptx = workflow.jobs['pptx-benchmark'];
+  expect(xlsx.needs).toEqual(['prepare', 'xlsx-native-build']);
+  expect(xlsx.strategy.matrix.shard).toBe('${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}');
+  expect(pptx.needs).toEqual(['prepare', 'pptx-native-build']);
+  expect(workflow.jobs['pptx-native-build'].steps[1].with.ref).toContain('needs.prepare.outputs.pptx-published-source');
+  expect(pptx.steps.find((step: any) => step.run?.includes('pptx_benchmark.py')).env.QUALITY_NATIVE).toBe('${{ runner.temp }}/native');
+  expect(publish.if).toContain("needs.xlsx-benchmark.result == 'success'");
+  expect(publish.if).toContain("needs.pptx-benchmark.result == 'success'");
+  const merge = publish.steps.find((step: any) => step.run?.includes('merge.mjs'));
+  expect(merge.env.QUALITY_REQUIRE_PPTX_BENCHMARK).toBe('true');
+  expect(merge.env.QUALITY_REQUIRE_XLSX_BENCHMARK).toBe('true');
+  const builds = workflow.jobs['xlsx-native-build'];
+  expect(builds.strategy.matrix.channel).toEqual(['published','commit']);
+  expect(builds.steps[1].with.ref).toContain('needs.prepare.outputs.xlsx-published-source');
 });

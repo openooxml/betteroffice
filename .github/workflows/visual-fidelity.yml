@@ -36,6 +36,9 @@ jobs:
       formats: ${{ steps.plan.outputs.formats }}
       docx-shards: ${{ steps.plan.outputs.docx-shards }}
       docx-published-source: ${{ steps.plan.outputs.docx-published-source }}
+      pptx-published-source: ${{ steps.plan.outputs.pptx-published-source }}
+      xlsx-shards: ${{ steps.plan.outputs.xlsx-shards }}
+      xlsx-published-source: ${{ steps.plan.outputs.xlsx-published-source }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -68,10 +71,14 @@ jobs:
           node --input-type=module - <<'JS'
           import { appendFile, readFile } from 'node:fs/promises';
           import { docxShards } from './scripts/office-quality/docx-benchmark.mjs';
+          import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
           await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-shards=${JSON.stringify(docxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-published-source=${plan.docx_published_source_sha ?? ''}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `xlsx-shards=${JSON.stringify(xlsxShards(plan).map((_, index) => index))}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `xlsx-published-source=${plan.xlsx_published_source_sha ?? ''}\n`);
+          await appendFile(process.env.GITHUB_OUTPUT, `pptx-published-source=${plan.pptx_published_source_sha ?? ''}\n`);
           JS
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -307,16 +314,7 @@ jobs:
 
       - name: Install LibreOffice and comparison tools
         run: |
-          lo_archive="${RUNNER_TEMP}/libreoffice.tar.gz"
-          curl --fail --location --retry 3 --max-time 300 --output "$lo_archive" \
-            https://downloadarchive.documentfoundation.org/libreoffice/old/26.2.3.2/deb/x86_64/LibreOffice_26.2.3.2_Linux_x86-64_deb.tar.gz
-          echo "18838cb9d028b664a9d0e966cd4c8ca47ca3ea363c393b41d1b5124740b121a5  $lo_archive" | sha256sum --check
-          mkdir "${RUNNER_TEMP}/libreoffice-install"
-          tar -xzf "$lo_archive" -C "${RUNNER_TEMP}/libreoffice-install"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            fontconfig libxinerama1 libx11-xcb1 libcairo2 libcups2t64 libdbus-glib-1-2 libsm6 libxrender1 libxext6 libnss3 \
-            "${RUNNER_TEMP}"/libreoffice-install/LibreOffice_*/DEBS/*.deb
+          bash scripts/office-quality/install-libreoffice.sh
           python -m pip install -r scripts/office-quality/requirements.txt
           chmod +x "${RUNNER_TEMP}/native/published/docx-native-bench" "${RUNNER_TEMP}/native/commit/docx-native-bench"
           "$SOFFICE" --version
@@ -364,12 +362,233 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  xlsx-native-build:
+    needs: prepare
+    if: needs.prepare.outputs.xlsx-shards != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [published, commit]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.xlsx-published-source || needs.prepare.outputs.source-sha }}
+          path: .source/native-source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xlsx-native-${{ matrix.channel }}
+          workspaces: . -> target/xlsx-benchmark
+      - name: Compile the native XLSX recalculation CLI
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/xlsx-benchmark
+        run: node scripts/office-quality/build-format.mjs xlsx .source/native-source "${RUNNER_TEMP}/native/${CHANNEL}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: xlsx-native-${{ matrix.channel }}
+          path: |
+            ${{ runner.temp }}/native/${{ matrix.channel }}/xlsx-native-bench
+            ${{ runner.temp }}/native/${{ matrix.channel }}/build.json
+          if-no-files-found: error
+          retention-days: 7
+
+  xlsx-benchmark:
+    needs: [prepare, xlsx-native-build]
+    if: needs.prepare.outputs.xlsx-shards != '[]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.xlsx-shards) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: xlsx-native-published
+          path: ${{ runner.temp }}/native/published
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: xlsx-native-commit
+          path: ${{ runner.temp }}/native/commit
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install LibreOffice and comparison tools
+        run: |
+          bash scripts/office-quality/install-libreoffice.sh
+          python -m pip install -r scripts/office-quality/requirements.txt
+          chmod +x "${RUNNER_TEMP}/native/published/xlsx-native-bench" "${RUNNER_TEMP}/native/commit/xlsx-native-bench"
+      - name: Download verified workbooks and Excel calculation references
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_SHARD: ${{ matrix.shard }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
+        run: node scripts/office-quality/xlsx-benchmark.mjs
+      - name: Measure calculation accuracy and native CLI times
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/xlsx-benchmark
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+        run: python scripts/office-quality/xlsx_benchmark.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: xlsx-benchmark-report-${{ matrix.shard }}
+          path: ${{ runner.temp }}/xlsx-benchmark/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload XLSX calculation diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: xlsx-benchmark-diagnostics-${{ matrix.shard }}
+          path: |
+            ${{ runner.temp }}/xlsx-benchmark/report.json
+            ${{ runner.temp }}/xlsx-benchmark/*/timing/**
+          retention-days: 7
+
+  pptx-native-build:
+    needs: prepare
+    if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [published, commit]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.channel == 'published' && needs.prepare.outputs.pptx-published-source || needs.prepare.outputs.source-sha }}
+          path: .source/native-source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: pptx-native-${{ matrix.channel }}
+          workspaces: . -> target/pptx-benchmark
+      - name: Compile the native PPTX rendering CLI
+        env:
+          CHANNEL: ${{ matrix.channel }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/pptx-benchmark
+        run: node scripts/office-quality/build-format.mjs pptx .source/native-source "${RUNNER_TEMP}/native/${CHANNEL}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pptx-native-${{ matrix.channel }}
+          path: |
+            ${{ runner.temp }}/native/${{ matrix.channel }}/pptx-native-bench
+            ${{ runner.temp }}/native/${{ matrix.channel }}/build.json
+          if-no-files-found: error
+          retention-days: 7
+
+  pptx-benchmark:
+    needs: [prepare, pptx-native-build]
+    if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      SOFFICE: /opt/libreoffice26.2/program/soffice
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pptx-native-published
+          path: ${{ runner.temp }}/native/published
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: pptx-native-commit
+          path: ${{ runner.temp }}/native/commit
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+      - name: Install LibreOffice and comparison tools
+        run: |
+          bash scripts/office-quality/install-libreoffice.sh
+          python -m pip install -r scripts/office-quality/requirements.txt
+          chmod +x "${RUNNER_TEMP}/native/published/pptx-native-bench" "${RUNNER_TEMP}/native/commit/pptx-native-bench"
+          bun scripts/office-quality/native-fonts.ts "${RUNNER_TEMP}/native-fonts"
+      - name: Download verified presentations and PowerPoint references
+        env:
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
+        run: node scripts/office-quality/pptx-benchmark.mjs
+      - name: Measure native slide render times and LibreOffice fidelity
+        env:
+          QUALITY_OUTPUT: ${{ runner.temp }}/pptx-benchmark
+          QUALITY_NATIVE: ${{ runner.temp }}/native
+          QUALITY_FONTS: ${{ runner.temp }}/native-fonts/manifest.json
+        run: python scripts/office-quality/pptx_benchmark.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pptx-benchmark-report
+          path: ${{ runner.temp }}/pptx-benchmark/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload PPTX LibreOffice diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pptx-benchmark-diagnostics
+          path: |
+            ${{ runner.temp }}/pptx-benchmark/report.json
+            ${{ runner.temp }}/pptx-benchmark/*/timing/*
+            ${{ runner.temp }}/pptx-benchmark/*/libreoffice/*
+            ${{ runner.temp }}/pptx-benchmark/*/lo-comparison/score.json
+          compression-level: 0
+          retention-days: 7
+
   publish:
-    needs: [prepare, measure, docx-benchmark]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
       needs.prepare.result == 'success' && needs.measure.result == 'success' &&
-      (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success')
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
+      (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
+      (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -434,6 +653,18 @@ jobs:
           pattern: docx-benchmark-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: needs.prepare.outputs.xlsx-shards != '[]'
+        with:
+          pattern: xlsx-benchmark-report-*
+          path: ${{ runner.temp }}/fidelity-parts
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        if: contains(fromJSON(needs.prepare.outputs.formats), 'pptx')
+        with:
+          name: pptx-benchmark-report
+          path: ${{ runner.temp }}/fidelity-parts/pptx-benchmark-report
+
       - name: Reconcile the format reports
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
@@ -441,6 +672,8 @@ jobs:
           QUALITY_OUTPUT: ${{ runner.temp }}/fidelity-report
           QUALITY_REQUIRE_RENDERS: ${{ inputs.publish_renders }}
           QUALITY_REQUIRE_DOCX_BENCHMARK: 'true'
+          QUALITY_REQUIRE_PPTX_BENCHMARK: 'true'
+          QUALITY_REQUIRE_XLSX_BENCHMARK: 'true'
         run: |
           node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
