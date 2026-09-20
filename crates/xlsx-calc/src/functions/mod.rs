@@ -130,10 +130,20 @@ pub enum Func {
 }
 
 /// resolve a function name (case-insensitive) to its interned id; aliases map
-/// to the same id.
+/// to the same id. every builtin name is at most 11 ascii bytes, so the
+/// uppercase fold fits in a stack buffer and never allocates.
 pub fn resolve(name: &str) -> Option<Func> {
-    let upper = name.to_ascii_uppercase();
-    Some(match upper.as_str() {
+    const MAX_BUILTIN_LEN: usize = 16;
+    let bytes = name.as_bytes();
+    if bytes.len() > MAX_BUILTIN_LEN {
+        return None;
+    }
+    let mut buf = [0u8; MAX_BUILTIN_LEN];
+    for (i, b) in bytes.iter().enumerate() {
+        buf[i] = b.to_ascii_uppercase();
+    }
+    let upper = std::str::from_utf8(&buf[..bytes.len()]).ok()?;
+    Some(match upper {
         "SUM" => Func::Sum,
         "SUMIF" => Func::SumIf,
         "SUMIFS" => Func::SumIfs,
