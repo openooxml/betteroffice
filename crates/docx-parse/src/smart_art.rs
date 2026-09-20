@@ -23,11 +23,11 @@ pub struct SmartArtContext {
     pub warnings: Vec<String>,
 }
 
-pub fn create_smart_art_context(all_xml: &IndexMap<String, Vec<u8>>) -> SmartArtContext {
+pub fn create_smart_art_context<S: AsRef<[u8]>>(all_xml: &IndexMap<String, S>) -> SmartArtContext {
     let mut parts = IndexMap::new();
     for (path, xml) in all_xml {
         if path.to_ascii_lowercase().starts_with("word/diagrams/") {
-            parts.insert(normalize_package_path(path), xml.clone());
+            parts.insert(normalize_package_path(path), xml.as_ref().to_vec());
         }
     }
     SmartArtContext {

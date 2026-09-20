@@ -66,7 +66,7 @@ fn walk(
             walk(lhs, out, seen);
             walk(rhs, out, seen);
         }
-        Expr::FuncCall { name, args } => {
+        Expr::FuncCall { name, args, .. } => {
             for (index, arg) in args.iter().enumerate() {
                 if positional_argument(name, index, arg) {
                     continue;

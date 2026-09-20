@@ -1,6 +1,7 @@
 //! lookup and reference functions: VLOOKUP/HLOOKUP/MATCH exact and approximate
 //! modes, INDEX area form, XLOOKUP exact-match subset, OFFSET.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
@@ -60,15 +61,15 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
     let mut found = None;
     for i in 0..lines {
         let key = if vertical {
-            area.get(ctx, i, 0)
+            area.get_ref(ctx, i, 0)
         } else {
-            area.get(ctx, 0, i)
+            area.get_ref(ctx, 0, i)
         };
         let key = match key {
             Ok(key) => key,
             Err(error) => return err(error),
         };
-        let ordering = cmp_values(&key, &target);
+        let ordering = cmp_values(key.as_ref(), &target);
         if approximate {
             if ordering != Ordering::Greater {
                 found = Some(i);
@@ -120,19 +121,19 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = match area.values(ctx) {
+    let values = match area.values_ref(ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let pos = match match_type {
         0 => values
             .iter()
-            .position(|v| cmp_values(v, &target) == Ordering::Equal),
+            .position(|v| cmp_values(v.as_ref(), &target) == Ordering::Equal),
         1 => approximate_row(values.len(), &target, |i| values[i].clone()),
         _ => {
             let mut found = None;
             for (i, v) in values.iter().enumerate() {
-                if cmp_values(v, &target) != Ordering::Less {
+                if cmp_values(v.as_ref(), &target) != Ordering::Less {
                     found = Some(i);
                 } else {
                     break;
@@ -361,11 +362,11 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
             Ok(col) => col,
             Err(_) => return err(ErrorValue::Num),
         };
-        let key = match lookup.get(ctx, row, col) {
+        let key = match lookup.get_ref(ctx, row, col) {
             Ok(key) => key,
             Err(error) => return err(error),
         };
-        if cmp_values(&key, &target) == Ordering::Equal {
+        if cmp_values(key.as_ref(), &target) == Ordering::Equal {
             return match result.get(ctx, row, col) {
                 Ok(value) => value,
                 Err(error) => err(error),
@@ -430,14 +431,14 @@ pub(crate) fn columns(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// last index whose value is <= target scanning in order (excel's ascending
 /// approximate match); target below the first value -> None.
-fn approximate_row(
+fn approximate_row<'v>(
     len: usize,
     target: &CellValue,
-    key: impl Fn(usize) -> CellValue,
+    key: impl Fn(usize) -> Cow<'v, CellValue>,
 ) -> Option<usize> {
     let mut found = None;
     for i in 0..len {
-        if cmp_values(&key(i), target) != Ordering::Greater {
+        if cmp_values(key(i).as_ref(), target) != Ordering::Greater {
             found = Some(i);
         } else {
             break;

@@ -59,6 +59,9 @@ pub struct PptxPackage {
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
+    /// Source bytes for verbatim member passthrough on save.
+    #[serde(skip)]
+    pub(crate) source_container: ooxml_opc::SourceContainer,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
 }
@@ -214,7 +217,43 @@ pub struct ChartPart {
 pub struct MediaPart {
     pub part_path: String,
     pub content_type: String,
+    #[serde(
+        serialize_with = "serialize_media_bytes",
+        deserialize_with = "deserialize_media_bytes"
+    )]
     pub bytes: Vec<u8>,
+}
+
+/// Writes base64: a JSON integer array inflates the payload about fourfold.
+fn serialize_media_bytes<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use base64::Engine as _;
+    serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Also accepts the integer arrays written before schema 2.2.
+fn deserialize_media_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use base64::Engine as _;
+    use serde::de::Error as _;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Bytes {
+        Base64(String),
+        Integers(Vec<u8>),
+    }
+
+    match Bytes::deserialize(deserializer)? {
+        Bytes::Base64(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(D::Error::custom),
+        Bytes::Integers(bytes) => Ok(bytes),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

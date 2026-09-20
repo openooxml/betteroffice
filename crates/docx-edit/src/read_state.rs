@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::op::{LocRange, OpError, OpResult, para_bounds};
-use crate::ops::{Chunk, ChunkKind, capture_pilcrow, snapshot};
+use crate::ops::{Chunk, ChunkKind, capture_pilcrow};
 use crate::queries::TextView;
 use crate::{
     ChangeInfo, EditingDoc, KIND_KEY, ParagraphId, StoryId, StoryRange, map_string, story_ref,
@@ -123,16 +123,16 @@ pub struct RevisionInfo {
 /// Collects every story id referenced as a cell story by a `table` embed
 /// (payload `rows[*].cells[*].story`). Nested tables are covered because a
 /// nested table's embed lives in a cell story that is itself iterated.
-pub(crate) fn table_cell_stories<T: ReadTxn>(txn: &T) -> HashSet<String> {
+pub(crate) fn table_cell_stories<T: ReadTxn>(doc: &EditingDoc, txn: &T) -> HashSet<String> {
     let mut cells = HashSet::new();
     let Some(stories) = txn.get_map(crate::STORIES) else {
         return cells;
     };
-    for (_, value) in stories.iter(txn) {
+    for (story_id, value) in stories.iter(txn) {
         let Out::YText(story) = value else {
             continue;
         };
-        for chunk in snapshot(&story, txn) {
+        for chunk in doc.chunk_snapshot(story_id, &story, txn).iter() {
             let ChunkKind::Embed(Some(map)) = &chunk.kind else {
                 continue;
             };
@@ -174,7 +174,7 @@ impl EditingDoc {
         }
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &range.story)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = self.chunk_snapshot(&range.story, &story, &txn);
         let story_len = chunks.last().map_or(0, Chunk::end);
         if range.end > story_len {
             return Err(OpError::OutOfBounds {
@@ -246,7 +246,7 @@ impl EditingDoc {
         let mut font_family = ValueAgg::Empty;
         let mut font_size = ValueAgg::Empty;
         let mut color = ValueAgg::Empty;
-        for chunk in &chunks {
+        for chunk in chunks.iter() {
             if chunk.start >= mark_to {
                 break;
             }
@@ -323,7 +323,7 @@ impl EditingDoc {
             paragraph_properties,
             has_selection: range.start != range.end,
             is_multi_paragraph,
-            in_table: table_cell_stories(&txn).contains(&range.story),
+            in_table: table_cell_stories(self, &txn).contains(&range.story),
             embed_kind,
             in_insertion: ins == Some(TriState::On),
             in_deletion: del == Some(TriState::On),

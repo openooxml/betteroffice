@@ -1,5 +1,5 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
 
 use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
@@ -88,6 +88,8 @@ pub struct SlideRenderer {
     /// Normalized fallback family.
     fallback_family: Option<String>,
     font_count: usize,
+    /// Laid-out text reused across display-list builds and slides.
+    text_layouts: Mutex<TextLayoutCache>,
 }
 
 impl Default for SlideRenderer {
@@ -104,6 +106,7 @@ impl SlideRenderer {
             fallback: None,
             fallback_family: None,
             font_count: 0,
+            text_layouts: Mutex::new(TextLayoutCache::default()),
         }
     }
 
@@ -142,6 +145,9 @@ impl SlideRenderer {
         self.fallback_family
             .get_or_insert_with(|| normalize_family(family));
         self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
         Ok(id.to_u32())
     }
 
@@ -1452,7 +1458,7 @@ impl<'a> LayoutBuilder<'a> {
             w: (width - emu_to_px(left + right)).max(1.0),
             h: 0.0,
         };
-        let text = layout_content(&self.renderer.fonts, &resolved, rect, 1.0, false)?;
+        let text = self.layout_text(&resolved, rect, 1.0, false)?;
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
@@ -1507,13 +1513,7 @@ impl<'a> LayoutBuilder<'a> {
         };
         let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
-        let mut laid_out = layout_content(
-            &self.renderer.fonts,
-            &resolved,
-            content_rect,
-            scale,
-            stacked,
-        )?;
+        let mut laid_out = self.layout_text(&resolved, content_rect, scale, stacked)?;
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1587,6 +1587,31 @@ impl<'a> LayoutBuilder<'a> {
             transform: text_transform,
             lines,
         })
+    }
+
+    /// `layout_content` behind the renderer cache.
+    fn layout_text(
+        &self,
+        content: &ResolvedContent,
+        rect: PxRect,
+        scale: f32,
+        stacked: bool,
+    ) -> Result<LayoutText, RenderError> {
+        let key = text_layout_key(content, rect, scale, stacked);
+        if let Some(text) = self
+            .renderer
+            .text_layouts
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key))
+        {
+            return Ok(text);
+        }
+        let laid_out = layout_content(&self.renderer.fonts, content, rect, scale, stacked)?;
+        if let Ok(mut cache) = self.renderer.text_layouts.lock() {
+            cache.insert(key, &laid_out);
+        }
+        Ok(laid_out)
     }
 }
 
@@ -2518,6 +2543,186 @@ fn chart_text_primitive(
 struct LayoutText {
     lines: Vec<PositionedTextLine>,
     total_height: f32,
+}
+
+/// Byte cap on retained text layouts; oldest entry evicts first.
+const MAX_TEXT_LAYOUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Laid-out text keyed by every `layout_content` input.
+#[derive(Default)]
+struct TextLayoutCache {
+    entries: HashMap<Vec<u8>, CachedTextLayout>,
+    order: VecDeque<Vec<u8>>,
+    bytes: usize,
+}
+
+struct CachedTextLayout {
+    lines: Vec<PositionedTextLine>,
+    total_height: f32,
+    bytes: usize,
+}
+
+impl TextLayoutCache {
+    fn get(&self, key: &[u8]) -> Option<LayoutText> {
+        self.entries.get(key).map(|entry| LayoutText {
+            lines: entry.lines.clone(),
+            total_height: entry.total_height,
+        })
+    }
+
+    fn insert(&mut self, key: Vec<u8>, text: &LayoutText) {
+        let bytes = key.len() * 2 + text_layout_bytes(&text.lines);
+        if bytes > MAX_TEXT_LAYOUT_BYTES || self.entries.contains_key(&key) {
+            return;
+        }
+        self.bytes += bytes;
+        self.order.push_back(key.clone());
+        self.entries.insert(
+            key,
+            CachedTextLayout {
+                lines: text.lines.clone(),
+                total_height: text.total_height,
+                bytes,
+            },
+        );
+        while self.bytes > MAX_TEXT_LAYOUT_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(entry) = self.entries.remove(&oldest) {
+                self.bytes -= entry.bytes;
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+        self.bytes = 0;
+    }
+}
+
+fn text_layout_bytes(lines: &[PositionedTextLine]) -> usize {
+    lines
+        .iter()
+        .map(|line| {
+            size_of::<PositionedTextLine>()
+                + line.caret_stops.capacity() * size_of::<CaretStop>()
+                + line
+                    .runs
+                    .iter()
+                    .map(|run| {
+                        size_of::<PositionedTextRun>()
+                            + run.text.capacity()
+                            + run.font_family.capacity()
+                            + run.color.capacity()
+                            + run.glyphs.capacity() * size_of::<PositionedGlyph>()
+                    })
+                    .sum::<usize>()
+        })
+        .sum()
+}
+
+/// Encodes every argument `layout_content` reads.
+fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked: bool) -> Vec<u8> {
+    let text_len: usize = content
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .map(|run| run.text.len())
+        .sum();
+    let mut key = Vec::with_capacity(64 + text_len);
+    key_f32(&mut key, rect.x);
+    key_f32(&mut key, rect.y);
+    key_f32(&mut key, rect.w);
+    key_f32(&mut key, scale);
+    key.push(u8::from(stacked));
+    key_u32(&mut key, content.paragraphs.len() as u32);
+    for paragraph in &content.paragraphs {
+        key.push(match paragraph.align {
+            TextAlign::Left => 0,
+            TextAlign::Center => 1,
+            TextAlign::Right => 2,
+            TextAlign::Justify => 3,
+        });
+        key.push(u8::from(paragraph.justify));
+        key_u32(&mut key, paragraph.level);
+        key_f32(&mut key, paragraph.margin_left_px);
+        key_f32(&mut key, paragraph.margin_right_px);
+        key_f32(&mut key, paragraph.indent_px);
+        key_f32(&mut key, paragraph.line_space_reduction);
+        key_spacing(&mut key, &paragraph.line_spacing);
+        key_spacing(&mut key, &paragraph.space_before);
+        key_spacing(&mut key, &paragraph.space_after);
+        key_opt_str(&mut key, &paragraph.marker);
+        match &paragraph.bullet_style {
+            Some(style) => {
+                key.push(1);
+                key_style(&mut key, style);
+            }
+            None => key.push(0),
+        }
+        key_u32(&mut key, paragraph.runs.len() as u32);
+        for run in &paragraph.runs {
+            key_u32(&mut key, run.start);
+            key_str(&mut key, &run.text);
+            key_style(&mut key, &run.style);
+        }
+    }
+    key
+}
+
+fn key_u32(key: &mut Vec<u8>, value: u32) {
+    key.extend_from_slice(&value.to_le_bytes());
+}
+
+fn key_f32(key: &mut Vec<u8>, value: f32) {
+    key_u32(key, value.to_bits());
+}
+
+fn key_f64(key: &mut Vec<u8>, value: f64) {
+    key.extend_from_slice(&value.to_bits().to_le_bytes());
+}
+
+fn key_str(key: &mut Vec<u8>, value: &str) {
+    key_u32(key, value.len() as u32);
+    key.extend_from_slice(value.as_bytes());
+}
+
+fn key_opt_str(key: &mut Vec<u8>, value: &Option<String>) {
+    match value {
+        Some(value) => {
+            key.push(1);
+            key_str(key, value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_spacing(key: &mut Vec<u8>, spacing: &Option<LineSpacing>) {
+    match spacing {
+        Some(LineSpacing::Percent { value }) => {
+            key.push(1);
+            key_f64(key, *value);
+        }
+        Some(LineSpacing::Points { value }) => {
+            key.push(2);
+            key_f64(key, *value);
+        }
+        None => key.push(0),
+    }
+}
+
+fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
+    key_u32(key, style.face.id.to_u32());
+    key_str(key, &style.family);
+    key_f32(key, style.font_size_pt);
+    key_f32(key, style.spacing_pt);
+    key_f32(key, style.baseline_shift_px);
+    key.push(u8::from(style.bold));
+    key.push(u8::from(style.italic));
+    key.push(u8::from(style.underline));
+    key_str(key, &style.color);
 }
 
 fn layout_content(

@@ -1,15 +1,16 @@
 //! recalc driver: given edited cells, re-evaluate exactly the formulas that
 //! could have changed, in dependency order, and report what moved.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use xlsx_model::{CellProvider, CellRange, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
+use xlsx_model::{
+    Cell, CellProvider, CellRange, CellRef, CellValue, ColId, ErrorValue, RowId, SheetId, Workbook,
+};
 
 use crate::array::{Spill, evaluate_spill};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
-use crate::parser::parse_formula;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// forced to `0` by cycle participation.
@@ -39,7 +40,9 @@ pub fn recalc_after(
     now_serial: Option<f64>,
 ) -> RecalcResult {
     let recompute = collect_recompute(graph, dirty_seeds);
-    run_recalc(wb, graph, recompute, now_serial)
+    let result = run_recalc(wb, graph, recompute, now_serial);
+    graph.refresh_spills(wb);
+    result
 }
 
 /// rebuild the graph from scratch and recalc every formula in dependency order.
@@ -47,9 +50,10 @@ pub fn rebuild_and_recalc_all(
     wb: &mut Workbook,
     now_serial: Option<f64>,
 ) -> (DepGraph, RecalcResult) {
-    let graph = DepGraph::build(wb);
+    let mut graph = DepGraph::build(wb);
     let recompute: HashSet<Key> = graph.formula_cells().map(|(s, c)| key(s, c)).collect();
     let result = run_recalc(wb, &graph, recompute, now_serial);
+    graph.refresh_spills(wb);
     (graph, result)
 }
 
@@ -86,6 +90,11 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
     recompute
 }
 
+/// a spilled rectangle that grows or shrinks uncovers cells whose readers were
+/// not in the recompute set, so each round seeds the next. bounded so no
+/// workbook can loop here.
+const MAX_SPILL_ROUNDS: usize = 4;
+
 /// topologically order `recompute` and evaluate it, writing changed values into
 /// `wb`. cells caught in a cycle are zeroed and reported separately.
 fn run_recalc(
@@ -94,36 +103,49 @@ fn run_recalc(
     recompute: HashSet<Key>,
     now_serial: Option<f64>,
 ) -> RecalcResult {
-    let (order, cycle) = topo_order(graph, &recompute);
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
-
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
     let mut limited_cells = Vec::new();
-    for u in &order {
-        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget));
-        if limited {
-            limited_cells.push((u.0, cell_of(*u)));
-        }
-        match value {
-            Some(NodeValue::Scalar(value)) => {
-                if write_if_changed(wb, *u, value) {
-                    changed.push((u.0, cell_of(*u)));
-                }
-            }
-            Some(NodeValue::Spill(spill)) => write_spill(wb, *u, spill, &mut changed),
-            None => {}
-        }
-    }
-
     let mut cycle_cells: Vec<(SheetId, CellRef)> = Vec::new();
-    for u in &cycle {
-        if write_if_changed(wb, *u, CellValue::Number { value: 0.0 }) {
-            changed.push((u.0, cell_of(*u)));
+    let mut pending = recompute;
+
+    for _ in 0..MAX_SPILL_ROUNDS {
+        let (order, cycle) = topo_order(graph, &pending);
+        let mut spilled: Vec<(SheetId, CellRef)> = Vec::new();
+        for u in &order {
+            let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget), graph);
+            if limited {
+                limited_cells.push((u.0, cell_of(*u)));
+            }
+            match value {
+                Some(NodeValue::Scalar(value)) => {
+                    if write_if_changed(wb, *u, value) {
+                        changed.push((u.0, cell_of(*u)));
+                    }
+                }
+                Some(NodeValue::Spill(spill)) => {
+                    spilled.extend(write_spill(wb, *u, spill, &mut changed));
+                }
+                None => {}
+            }
         }
-        cycle_cells.push((u.0, cell_of(*u)));
+        for u in &cycle {
+            if write_if_changed(wb, *u, CellValue::Number { value: 0.0 }) {
+                changed.push((u.0, cell_of(*u)));
+            }
+            cycle_cells.push((u.0, cell_of(*u)));
+        }
+        if spilled.is_empty() {
+            break;
+        }
+        pending = dependents_closure(graph, &spilled);
+        if pending.is_empty() {
+            break;
+        }
     }
 
     changed.sort_by(sort_key);
+    changed.dedup();
     RecalcResult {
         changed,
         cycle_cells,
@@ -131,17 +153,68 @@ fn run_recalc(
     }
 }
 
+/// formula cells that transitively read any of `seeds`.
+fn dependents_closure(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<Key> {
+    let mut found: HashSet<Key> = HashSet::new();
+    let mut expanded: HashSet<Key> = HashSet::new();
+    let mut worklist: Vec<Key> = seeds.iter().map(|&(s, c)| key(s, c)).collect();
+    while let Some(node) = worklist.pop() {
+        if !expanded.insert(node) {
+            continue;
+        }
+        for (sheet, cell) in graph.dependents_of(node.0, cell_of(node)) {
+            let dependent = key(sheet, cell);
+            if found.insert(dependent) {
+                worklist.push(dependent);
+            }
+        }
+    }
+    found
+}
+
 /// kahn's sort over the sub-graph induced by `recompute`: returns the evaluable
 /// order and, separately, the cells caught in (or only reachable through) a cycle.
 fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>) {
+    let mut points: HashMap<SheetId, BTreeMap<RowId, Vec<ColId>>> = HashMap::new();
+    for &(sheet, row, col) in recompute {
+        points
+            .entry(sheet)
+            .or_default()
+            .entry(row)
+            .or_default()
+            .push(col);
+    }
+
     let mut adj: HashMap<Key, Vec<Key>> = HashMap::new();
     let mut indegree: HashMap<Key, usize> = recompute.iter().map(|k| (*k, 0)).collect();
+    let mut seen: HashSet<(Key, Key)> = HashSet::new();
 
-    for &u in recompute {
-        let mut seen: HashSet<Key> = HashSet::new();
-        for (ds, dc) in graph.dependents_of(u.0, cell_of(u)) {
-            let v = key(ds, dc);
-            if recompute.contains(&v) && seen.insert(v) {
+    for (es, range, vs, vc) in graph.edges() {
+        let v = key(vs, vc);
+        if !recompute.contains(&v) {
+            continue;
+        }
+        let Some(rows) = points.get(&es) else {
+            continue;
+        };
+        for (&row, cols) in rows.range(range.start.row..=range.end.row) {
+            for &col in cols {
+                if col < range.start.col || col > range.end.col {
+                    continue;
+                }
+                let u = (es, row, col);
+                if seen.insert((u, v)) {
+                    adj.entry(u).or_default().push(v);
+                    *indegree.get_mut(&v).unwrap() += 1;
+                }
+            }
+        }
+        for (sheet, anchor) in graph.spill_sources(es, range) {
+            let u = key(sheet, anchor);
+            if u == v || !recompute.contains(&u) {
+                continue;
+            }
+            if seen.insert((u, v)) {
                 adj.entry(u).or_default().push(v);
                 *indegree.get_mut(&v).unwrap() += 1;
             }
@@ -199,11 +272,9 @@ fn eval_node(
     u: Key,
     now_serial: Option<f64>,
     budget: Rc<EvaluationBudget>,
+    graph: &DepGraph,
 ) -> (Option<NodeValue>, bool) {
-    let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
-        return (None, false);
-    };
-    let Ok(expr) = parse_formula(&src) else {
+    let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
     let cell = cell_of(u);
@@ -211,44 +282,88 @@ fn eval_node(
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
+    ctx.parse_cache = Some(graph.asts());
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(evaluate(&expr, &ctx)),
     };
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
-    if incomplete && !matches!(wb.value(u.0, cell), CellValue::Empty) {
+    if incomplete && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
     (Some(value), ctx.exhausted())
 }
 
 /// lay a spilled result out from its anchor: retire the cells the previous
-/// result reached and no longer fills, then write the new ones. a cell holding
-/// its own formula is never touched.
-fn write_spill(wb: &mut Workbook, u: Key, spill: Spill, changed: &mut Vec<(SheetId, CellRef)>) {
+/// result reached and no longer fills, then write the new ones. returns the
+/// spilled cells whose value moved, so their readers can be rescheduled.
+fn write_spill(
+    wb: &mut Workbook,
+    u: Key,
+    spill: Spill,
+    changed: &mut Vec<(SheetId, CellRef)>,
+) -> Vec<(SheetId, CellRef)> {
     let anchor = cell_of(u);
     let previous = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(anchor));
+    let (range, values) = if blocked(wb, u.0, anchor, spill.range, previous) {
+        (
+            CellRange::new(anchor, anchor),
+            vec![CellValue::Error {
+                value: ErrorValue::Spill,
+            }],
+        )
+    } else {
+        (spill.range, spill.values)
+    };
+    let mut moved = Vec::new();
     if let Some(previous) = previous {
         for (row, col) in cells_of(previous) {
             let at = CellRef::new(row, col);
-            if at.row == anchor.row && at.col == anchor.col || spill.range.contains(at) {
+            if at.row == anchor.row && at.col == anchor.col || range.contains(at) {
                 continue;
             }
-            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed);
+            write_spilled_cell(wb, (u.0, row, col), CellValue::Empty, changed, &mut moved);
         }
     }
-    for ((row, col), value) in cells_of(spill.range).zip(spill.values) {
+    for ((row, col), value) in cells_of(range).zip(values) {
         if row == anchor.row && col == anchor.col {
             if write_if_changed(wb, (u.0, row, col), value) {
                 changed.push((u.0, anchor));
             }
             continue;
         }
-        write_spilled_cell(wb, (u.0, row, col), value, changed);
+        write_spilled_cell(wb, (u.0, row, col), value, changed, &mut moved);
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
-        sheet.set_array_formula(anchor, spill.range);
+        sheet.set_array_formula(anchor, range);
     }
+    moved
+}
+
+/// whether anything the author put in the way stops a result spilling. only
+/// cells beyond the rectangle this anchor already records count: what is inside
+/// it is the previous result, and a file may record one over its own formulas.
+fn blocked(
+    wb: &Workbook,
+    sheet: SheetId,
+    anchor: CellRef,
+    range: CellRange,
+    previous: Option<CellRange>,
+) -> bool {
+    if range.start == range.end {
+        return false;
+    }
+    cells_of(range).any(|(row, col)| {
+        let at = CellRef::new(row, col);
+        if at.row == anchor.row && at.col == anchor.col {
+            return false;
+        }
+        if previous.is_some_and(|previous| previous.contains(at)) {
+            return false;
+        }
+        wb.formula(sheet, at).is_some()
+            || !matches!(wb.value_cow(sheet, at).as_ref(), CellValue::Empty)
+    })
 }
 
 fn write_spilled_cell(
@@ -256,12 +371,14 @@ fn write_spilled_cell(
     u: Key,
     value: CellValue,
     changed: &mut Vec<(SheetId, CellRef)>,
+    moved: &mut Vec<(SheetId, CellRef)>,
 ) {
     if wb.formula(u.0, cell_of(u)).is_some() {
         return;
     }
     if write_if_changed(wb, u, value) {
         changed.push((u.0, cell_of(u)));
+        moved.push((u.0, cell_of(u)));
     }
 }
 
@@ -273,13 +390,25 @@ fn cells_of(range: CellRange) -> impl Iterator<Item = (RowId, ColId)> {
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
 fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
-    if wb.value(u.0, cell_of(u)) == value {
+    if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
-        let mut cell = sheet.cell(cell_of(u)).cloned().unwrap_or_default();
-        cell.value = value;
-        sheet.set_cell(cell_of(u), cell);
+        let at = cell_of(u);
+        if let Some(cell) = sheet.cell_mut(at) {
+            cell.value = value;
+            if *cell == Cell::default() {
+                sheet.set_cell(at, Cell::default());
+            }
+        } else {
+            sheet.set_cell(
+                at,
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+            );
+        }
     }
     true
 }

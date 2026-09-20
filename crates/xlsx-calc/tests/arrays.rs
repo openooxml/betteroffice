@@ -1,7 +1,9 @@
 //! array evaluation: the dynamic-array builtins, elementwise lifting of scalar
 //! functions and operators, and how a `t="array"` formula lays its result out.
 
-use xlsx_calc::{EvalContext, Value, evaluate_array, parse_formula, rebuild_and_recalc_all};
+use xlsx_calc::{
+    EvalContext, Value, evaluate_array, parse_formula, rebuild_and_recalc_all, recalc_after,
+};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS, Sheet, SheetId, Workbook,
 };
@@ -127,6 +129,48 @@ fn unique_keeps_first_occurrences_and_can_demand_singletons() {
     );
 }
 
+/// the grouping the hashed dedup key has to reproduce.
+#[test]
+fn unique_groups_blanks_case_and_types_the_way_excel_does() {
+    let mut workbook = fixture();
+    let sheet = workbook.sheet_mut(SheetId(0)).unwrap();
+    for (address, value) in [
+        ("D1", n(0.0)),
+        ("D2", CellValue::Empty),
+        ("D3", t("Pear")),
+        ("D4", t("pear")),
+        ("D5", CellValue::Bool { value: false }),
+        (
+            "D6",
+            CellValue::Error {
+                value: ErrorValue::NA,
+            },
+        ),
+        (
+            "D7",
+            CellValue::Error {
+                value: ErrorValue::Div0,
+            },
+        ),
+    ] {
+        put(sheet, address, value);
+    }
+    assert_eq!(
+        values("_xlfn.UNIQUE(D1:D7)", &workbook),
+        vec![
+            n(0.0),
+            t("Pear"),
+            CellValue::Bool { value: false },
+            CellValue::Error {
+                value: ErrorValue::NA
+            },
+            CellValue::Error {
+                value: ErrorValue::Div0
+            },
+        ]
+    );
+}
+
 #[test]
 fn sequence_builds_a_rectangle_from_start_and_step() {
     let workbook = fixture();
@@ -238,8 +282,7 @@ fn iferror_replaces_only_the_failing_elements() {
     );
 }
 
-/// a bare range is still `#VALUE!` in the scalar evaluator; only array mode
-/// turns it into a block.
+/// a bare range is still `#VALUE!` in the scalar evaluator.
 #[test]
 fn scalar_evaluation_is_unchanged() {
     let workbook = fixture();
@@ -309,8 +352,7 @@ fn a_shrinking_result_clears_what_it_no_longer_fills() {
     }
 }
 
-/// a single value repeats across the rectangle the file recorded, which is what
-/// a legacy ctrl-shift-enter formula does.
+/// a single value repeats across the rectangle the file recorded.
 #[test]
 fn a_single_value_fills_the_recorded_rectangle() {
     let (mut workbook, sheet) = spilling_workbook("SUM(B1:B4)", "D1:E2");
@@ -321,27 +363,61 @@ fn a_single_value_fills_the_recorded_rectangle() {
     }
 }
 
-/// spilling never overwrites a cell that carries its own formula.
+/// a result growing past its recorded rectangle must not overwrite what the
+/// author put there: `#SPILL!` from the anchor, obstruction untouched.
 #[test]
-fn a_formula_inside_the_rectangle_is_left_alone() {
-    let (mut workbook, sheet) = spilling_workbook("_xlfn.SEQUENCE(3)", "D1:D3");
-    workbook.sheet_mut(sheet).unwrap().set_cell(
-        a1("D2"),
+fn an_obstructed_rectangle_reports_spill_and_keeps_the_obstruction() {
+    for obstruction in [
+        Cell {
+            value: n(99.0),
+            ..Cell::default()
+        },
         Cell {
             value: CellValue::Empty,
             formula: Some("1+1".into()),
             style: None,
         },
-    );
+    ] {
+        let (mut workbook, sheet) = spilling_workbook("_xlfn.SEQUENCE(3)", "D1");
+        let authored = obstruction.formula.clone();
+        workbook
+            .sheet_mut(sheet)
+            .unwrap()
+            .set_cell(a1("D2"), obstruction);
+        rebuild_and_recalc_all(&mut workbook, None);
+        let sheet = workbook.sheet(sheet).unwrap();
+        assert_eq!(
+            sheet.cell(a1("D1")).unwrap().value,
+            CellValue::Error {
+                value: ErrorValue::Spill
+            }
+        );
+        assert_eq!(sheet.cell(a1("D2")).unwrap().formula, authored);
+        if authored.is_none() {
+            assert_eq!(sheet.cell(a1("D2")).unwrap().value, n(99.0));
+        }
+        assert!(
+            sheet
+                .cell(a1("D3"))
+                .is_none_or(|cell| cell.value == CellValue::Empty)
+        );
+        assert_eq!(sheet.array_formula(a1("D1")), Some(range("D1")));
+    }
+}
+
+/// cells a previous result filled belong to the spill, not to the author, so a
+/// workbook opened with its cached spill still recalculates.
+#[test]
+fn cells_the_previous_result_filled_do_not_block_it() {
+    let (mut workbook, sheet) = spilling_workbook("_xlfn.SEQUENCE(3)", "D1:D3");
+    for address in ["D2", "D3"] {
+        put(workbook.sheet_mut(sheet).unwrap(), address, n(7.0));
+    }
     rebuild_and_recalc_all(&mut workbook, None);
     let sheet = workbook.sheet(sheet).unwrap();
-    assert_eq!(sheet.cell(a1("D1")).unwrap().value, n(1.0));
-    assert_eq!(sheet.cell(a1("D2")).unwrap().value, n(2.0));
-    assert_eq!(
-        sheet.cell(a1("D2")).unwrap().formula.as_deref(),
-        Some("1+1")
-    );
-    assert_eq!(sheet.cell(a1("D3")).unwrap().value, n(3.0));
+    for (address, expected) in [("D1", 1.0), ("D2", 2.0), ("D3", 3.0)] {
+        assert_eq!(sheet.cell(a1(address)).unwrap().value, n(expected));
+    }
 }
 
 /// a formula reading a spilled cell must be evaluated after the spill lands.
@@ -363,7 +439,53 @@ fn a_reader_of_a_spilled_cell_recalculates_after_it() {
     );
 }
 
-/// a `ref` far larger than the spill limit is read as an ordinary formula, and
+/// a growing rectangle reschedules readers of the cells it newly covers, on the
+/// incremental path that never saw them.
+#[test]
+fn a_growing_spill_reschedules_readers_of_the_cells_it_uncovers() {
+    let (mut workbook, sheet) = spilling_workbook("_xlfn._xlws.FILTER(B1:B4,B1:B4>3)", "D1");
+    workbook.sheet_mut(sheet).unwrap().set_cell(
+        a1("F1"),
+        Cell {
+            value: CellValue::Empty,
+            formula: Some("D2*10".into()),
+            style: None,
+        },
+    );
+    let (mut graph, _) = rebuild_and_recalc_all(&mut workbook, None);
+    assert_eq!(
+        workbook.sheet(sheet).unwrap().cell(a1("F1")).unwrap().value,
+        n(0.0)
+    );
+
+    put(workbook.sheet_mut(sheet).unwrap(), "B2", n(9.0));
+    recalc_after(&mut workbook, &mut graph, &[(sheet, a1("B2"))], None);
+    let sheet = workbook.sheet(sheet).unwrap();
+    assert_eq!(sheet.cell(a1("D1")).unwrap().value, n(9.0));
+    assert_eq!(sheet.cell(a1("D2")).unwrap().value, n(4.0));
+    assert_eq!(sheet.cell(a1("F1")).unwrap().value, n(40.0));
+}
+
+/// an output far larger than both inputs is refused before it is reserved.
+#[test]
+fn an_oversized_product_is_refused_before_allocation() {
+    let workbook = fixture();
+    for formula in [
+        "MMULT(_xlfn.SEQUENCE(550000,1),_xlfn.SEQUENCE(1,550000))",
+        "_xlfn.HSTACK(_xlfn.SEQUENCE(600000,1),_xlfn.SEQUENCE(600000,1))",
+        "_xlfn.VSTACK(_xlfn.SEQUENCE(1,600000),_xlfn.SEQUENCE(1,600000))",
+        "_xlfn.EXPAND(B1:B2,900000,900000)",
+    ] {
+        assert_eq!(
+            values(formula, &workbook),
+            vec![CellValue::Error {
+                value: ErrorValue::Num
+            }],
+            "{formula}"
+        );
+    }
+}
+
 /// a generated block past the limit reports `#NUM!` rather than allocating.
 #[test]
 fn oversized_results_are_refused() {

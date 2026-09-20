@@ -517,6 +517,84 @@ pub(crate) fn validate_story<T: ReadTxn>(
     Ok(())
 }
 
+/// The snapshot `snapshot_story` reads back from a story `seed_story` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_story(
+    story_id: &str,
+    body: &TextBody,
+    theme: Option<&Theme>,
+) -> EditResult<StorySnapshot> {
+    let mut paragraphs = Vec::with_capacity(body.paragraphs.len().max(1));
+    let mut length = 1_u32;
+    if body.paragraphs.is_empty() {
+        paragraphs.push(ParagraphSnapshot {
+            id: format!("para:{story_id}:0"),
+            alignment: None,
+            level: 0,
+            bullet_json: None,
+            runs: Vec::new(),
+        });
+    } else {
+        length = 0;
+        for (paragraph_index, paragraph) in body.paragraphs.iter().enumerate() {
+            let mut runs: Vec<TextRunSnapshot> = Vec::new();
+            let mut last_attrs: Option<TextStyle> = None;
+            for run in &paragraph.runs {
+                if run.text.is_empty() {
+                    continue;
+                }
+                let style = style_from_run_properties(&run.properties, theme);
+                // yrs' format-gap cleanup deletes every marker between two
+                // identically styled runs, so their text items squash into a
+                // single run in the snapshot.
+                if last_attrs.as_ref() == Some(&style) {
+                    if let Some(last) = runs.last_mut() {
+                        last.text.push_str(&run.text);
+                    }
+                } else {
+                    runs.push(TextRunSnapshot {
+                        text: run.text.clone(),
+                        style: baseline_style(style.clone()),
+                    });
+                }
+                last_attrs = Some(style);
+                length += run.text.encode_utf16().count() as u32;
+            }
+            length += 1;
+            let bullet_json = paragraph
+                .properties
+                .bullet
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|error| EditError::Json(error.to_string()))?;
+            paragraphs.push(ParagraphSnapshot {
+                id: format!("para:{story_id}:{paragraph_index}"),
+                alignment: paragraph.properties.alignment.clone(),
+                level: paragraph.properties.level,
+                bullet_json,
+                runs,
+            });
+        }
+    }
+    Ok(StorySnapshot {
+        id: story_id.to_owned(),
+        length,
+        paragraphs,
+    })
+}
+
+/// Attribute reads drop non-finite numbers, so the snapshot applies the same
+/// normalization the seeded `Any::Number` attributes go through.
+fn baseline_style(style: TextStyle) -> TextStyle {
+    TextStyle {
+        font_size_pt: style.font_size_pt.filter(|value| value.is_finite()),
+        spacing_pt: style.spacing_pt.filter(|value| value.is_finite()),
+        baseline_pct: style.baseline_pct.filter(|value| value.is_finite()),
+        ..style
+    }
+}
+
 pub(crate) fn snapshot_story<T: ReadTxn>(
     story: &TextRef,
     txn: &T,

@@ -145,8 +145,10 @@ impl DeckSession {
     /// `preview_edits` tail, with target validation left to the caller.
     fn preview_doc_with_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
         let doc = doc_with_client_id(self.client_id);
-        hydrate_doc(&doc, &self.encode_state_as_update_v1())?;
+        let update = self.state_update_v1();
+        hydrate_doc(&doc, &update)?;
         let undo = DeckUndoManager::new(&doc, self.client_id)?;
+        let (epoch, _epoch_observer) = crate::watch_epoch(&doc)?;
         let preview = DeckSession {
             doc,
             client_id: self.client_id,
@@ -154,11 +156,14 @@ impl DeckSession {
             package: self.package.clone(),
             undo: std::cell::RefCell::new(undo),
             proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: std::cell::RefCell::new(None),
         };
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validate_doc(&preview.doc)?;
+        crate::deck::validated_snapshot(&preview.doc, &self.package)?;
         Ok(preview)
     }
 

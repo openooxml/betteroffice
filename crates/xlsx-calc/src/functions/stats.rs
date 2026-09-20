@@ -134,14 +134,14 @@ pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         false
     };
-    let values = match area.values(ctx) {
+    let values = match area.values_ref(ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let nums: Vec<f64> = values
-        .into_iter()
-        .filter_map(|v| match v {
-            CellValue::Number { value } => Some(value),
+        .iter()
+        .filter_map(|v| match v.as_ref() {
+            CellValue::Number { value } => Some(*value),
             _ => None,
         })
         .collect();
@@ -161,13 +161,13 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let values = match area.values(ctx) {
+                let values = match area.values_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
                 count += values
                     .iter()
-                    .filter(|v| matches!(v, CellValue::Number { .. }))
+                    .filter(|v| matches!(v.as_ref(), CellValue::Number { .. }))
                     .count() as i64;
             }
             None => match evaluate(arg, ctx) {
@@ -186,13 +186,13 @@ pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let values = match area.values(ctx) {
+                let values = match area.values_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
                 count += values
                     .iter()
-                    .filter(|v| !matches!(v, CellValue::Empty))
+                    .filter(|v| !matches!(v.as_ref(), CellValue::Empty))
                     .count() as i64;
             }
             None => {
@@ -214,15 +214,15 @@ pub(crate) fn countblank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Some(a) => a,
         None => return err(ErrorValue::Value),
     };
-    let values = match area.values(ctx) {
+    let values = match area.values_ref(ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
     let n = values
         .iter()
         .filter(|v| {
-            matches!(v, CellValue::Empty)
-                || matches!(v, CellValue::Text { value } if value.is_empty())
+            matches!(v.as_ref(), CellValue::Empty)
+                || matches!(v.as_ref(), CellValue::Text { value } if value.is_empty())
         })
         .count();
     num(n as f64)
@@ -345,22 +345,14 @@ fn matching_numbers(
     ctx: &EvalContext<'_>,
 ) -> Result<Vec<f64>, ErrorValue> {
     let cols = pairs[0].0.cols;
-    criteria::matching_indices(pairs, ctx)?
-        .into_iter()
-        .map(|i| {
-            let (r, c) = (i / cols, i % cols);
-            value_area.get(ctx, r, c)
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(|values| {
-            values
-                .into_iter()
-                .filter_map(|value| match value {
-                    CellValue::Number { value } => Some(value),
-                    _ => None,
-                })
-                .collect()
-        })
+    let mut nums = Vec::new();
+    for i in criteria::matching_indices(pairs, ctx)? {
+        let (r, c) = (i / cols, i % cols);
+        if let CellValue::Number { value } = *value_area.get_ref(ctx, r, c)? {
+            nums.push(value);
+        }
+    }
+    Ok(nums)
 }
 
 /// sample (n-1) or population (n) variance; too few values -> #DIV/0!.
