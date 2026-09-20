@@ -29,10 +29,12 @@ pub(crate) fn iferror(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let checkpoint = ctx.budget_error_checkpoint();
+    let budget = ctx.budget_error_checkpoint();
+    let unsupported = ctx.unsupported_checkpoint();
     match evaluate(&args[0], ctx) {
         CellValue::Error { .. } => {
-            ctx.handle_budget_errors_since(checkpoint);
+            ctx.handle_budget_errors_since(budget);
+            ctx.handle_unsupported_since(unsupported);
             evaluate(&args[1], ctx)
         }
         v => v,

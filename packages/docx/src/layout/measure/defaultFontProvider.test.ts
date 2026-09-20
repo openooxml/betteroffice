@@ -404,6 +404,27 @@ describe('substituted-face metrics', () => {
     expect(substituted).toEqual([[3, 'MS Mincho']]);
   });
 
+  test('the substitute sink learns the requested style', async () => {
+    const substituted: Array<[number, string, boolean, boolean]> = [];
+    const registry = new TextMeasureFontRegistry(
+      {
+        registerFont: () => 3,
+        registerSubstituteFont: (id, family, bold, italic) => {
+          substituted.push([id, family, bold, italic]);
+          return id + 100;
+        },
+      },
+      {
+        bundled: {
+          resolve: () => async () => new ArrayBuffer(8),
+        },
+      }
+    );
+
+    expect(await registry.getFontIdChain('Lucida Bright', true, true)).toEqual([103]);
+    expect(substituted).toEqual([[3, 'Lucida Bright', true, true]]);
+  });
+
   test('keeps the plain registration when the sink has no substitute path', async () => {
     const registry = new TextMeasureFontRegistry(
       { registerFont: () => 3 },

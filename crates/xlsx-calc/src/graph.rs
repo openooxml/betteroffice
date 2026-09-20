@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
-use crate::deps::references;
+use crate::deps::{positional_argument, references};
 use crate::parser::{Expr, parse_formula};
 
 /// a formula cell, normalized so `$`-anchoring never splits a node.
@@ -295,7 +295,11 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
                 expressions.push(rhs);
                 expressions.push(lhs);
             }
-            Expr::FuncCall { args, .. } => expressions.extend(args.iter().rev()),
+            Expr::FuncCall { name, args } => expressions.extend(
+                args.iter()
+                    .rev()
+                    .filter(|arg| !positional_argument(name, arg)),
+            ),
             Expr::Number(_)
             | Expr::Text(_)
             | Expr::Bool(_)
