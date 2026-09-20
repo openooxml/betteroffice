@@ -14,6 +14,8 @@ pub struct MetafileOp {
     pub fill: Option<String>,
     pub stroke: Option<MetafileStroke>,
     pub even_odd: bool,
+    /// Clip rectangle in frame coordinates, as `[left, top, right, bottom]`.
+    pub clip: Option<[f64; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -118,6 +120,7 @@ struct Dc {
     xform: Xform,
     pen: Option<Pen>,
     brush: Option<Brush>,
+    clip: Option<[f64; 4]>,
 }
 
 impl Default for Dc {
@@ -143,6 +146,7 @@ impl Default for Dc {
                 color: 0x00ff_ffff,
                 visible: true,
             }),
+            clip: None,
         }
     }
 }
@@ -307,6 +311,7 @@ impl Player {
             fill,
             stroke,
             even_odd: self.dc.even_odd,
+            clip: self.dc.clip,
         });
     }
 
@@ -434,6 +439,37 @@ fn stock_object(index: u32) -> Option<GdiObject> {
         })),
         _ => None,
     }
+}
+
+/// The only clip combination mode this player represents: replace.
+const RGN_COPY: u32 = 5;
+
+/// Reads a path back as an axis-aligned rectangle, or `None` if it is not one.
+fn axis_aligned_rect(path: &[GeometryPathCommand]) -> Option<[f64; 4]> {
+    let mut corners: Vec<(f64, f64)> = Vec::with_capacity(5);
+    for command in path {
+        match command {
+            GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => {
+                if corners.last() != Some(&(*x, *y)) {
+                    corners.push((*x, *y));
+                }
+            }
+            GeometryPathCommand::Close => {}
+            _ => return None,
+        }
+    }
+    if corners.len() == 5 && corners[4] == corners[0] {
+        corners.pop();
+    }
+    let [a, b, c, d] = corners[..] else {
+        return None;
+    };
+    let across = a.1 == b.1 && b.0 == c.0 && c.1 == d.1 && d.0 == a.0;
+    let down = a.0 == b.0 && b.1 == c.1 && c.0 == d.0 && d.1 == a.1;
+    if !(across || down) {
+        return None;
+    }
+    Some([a.0.min(c.0), a.1.min(c.1), a.0.max(c.0), a.1.max(c.1)])
 }
 
 fn brush_from_style(style: u32, color: u32) -> Option<Brush> {
@@ -725,6 +761,20 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Opti
             let stroke = player.pen_stroke();
             player.emit(None, stroke);
         }
+        67 => {
+            if u32_at(bytes, body)? != RGN_COPY {
+                return None;
+            }
+            player.flush_pending();
+            let path = std::mem::take(&mut player.selected_path);
+            player.dc.clip = Some(axis_aligned_rect(&path)?);
+        }
+        75 => {
+            if u32_at(bytes, body)? != 0 || u32_at(bytes, body + 4)? != RGN_COPY {
+                return None;
+            }
+            player.dc.clip = None;
+        }
         68 => {
             player.path.clear();
             player.selected_path.clear();
@@ -879,7 +929,7 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Opti
         76 => bitblt(player, bytes, body)?,
         118 => gradient_fill(player, bytes, body)?,
         20 if u32_at(bytes, body)? == 13 => {}
-        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 69 | 70 | 98 => {}
+        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 58 | 69 | 70 | 98 => {}
         _ => return None,
     }
     Some(())
@@ -1543,6 +1593,92 @@ mod tests {
                 GeometryPathCommand::Close,
             ]
         );
+    }
+
+    /// `BEGINPATH; MOVETOEX; POLYLINETO16; ENDPATH; SELECTCLIPPATH` over the
+    /// left-top quarter of a 100x100 frame, which is how PowerPoint brackets
+    /// each part of an exported drawing.
+    fn quarter_clip_path() -> Vec<Vec<u8>> {
+        vec![
+            record(59, &[]),
+            record(27, &i32s(&[0, 0])),
+            record(89, &poly16(&[(0, 0), (0, 50), (50, 50), (50, 0)])),
+            record(60, &[]),
+            record(67, &i32s(&[RGN_COPY as i32])),
+        ]
+    }
+
+    fn filled_triangle() -> Vec<Vec<u8>> {
+        vec![
+            solid_brush(1, 0x0000_0000),
+            record(86, &poly16(&[(0, 0), (99, 0), (99, 99)])),
+        ]
+    }
+
+    #[test]
+    fn a_rectangular_clip_path_bounds_the_ops_that_follow() {
+        let mut records = quarter_clip_path();
+        records.extend(filled_triangle());
+        let bytes = emf(records, [0, 0, 99, 99], [100, 100]);
+
+        let drawing = decode(&bytes).expect("the clipped fill decodes");
+        assert_eq!(only_op(&drawing).clip, Some([0.0, 0.0, 0.5, 0.5]));
+    }
+
+    #[test]
+    fn an_empty_copy_region_puts_the_clip_back() {
+        let mut records = quarter_clip_path();
+        records.push(record(75, &i32s(&[0, RGN_COPY as i32])));
+        records.extend(filled_triangle());
+        let bytes = emf(records, [0, 0, 99, 99], [100, 100]);
+
+        let drawing = decode(&bytes).expect("the fill decodes");
+        assert!(only_op(&drawing).clip.is_none());
+    }
+
+    #[test]
+    fn a_saved_clip_comes_back_with_its_device_context() {
+        let mut records = vec![record(33, &[])];
+        records.extend(quarter_clip_path());
+        records.push(record(34, &i32s(&[-1])));
+        records.extend(filled_triangle());
+        let bytes = emf(records, [0, 0, 99, 99], [100, 100]);
+
+        let drawing = decode(&bytes).expect("the fill decodes");
+        assert!(only_op(&drawing).clip.is_none());
+    }
+
+    #[test]
+    fn a_clip_this_player_cannot_represent_yields_no_drawing() {
+        let triangle = vec![
+            record(59, &[]),
+            record(27, &i32s(&[0, 0])),
+            record(89, &poly16(&[(0, 50), (50, 50)])),
+            record(60, &[]),
+            record(67, &i32s(&[RGN_COPY as i32])),
+        ];
+        let region = i32s(&[
+            32,
+            RGN_COPY as i32,
+            32,
+            1,
+            1,
+            32,
+            0,
+            0,
+            50,
+            50,
+            0,
+            0,
+            50,
+            50,
+        ]);
+        for clip in [triangle, vec![record(75, &region)]] {
+            let mut records = clip;
+            records.extend(filled_triangle());
+            let bytes = emf(records, [0, 0, 99, 99], [100, 100]);
+            assert!(decode(&bytes).is_none());
+        }
     }
 
     #[test]

@@ -993,14 +993,22 @@ impl<'a> LayoutBuilder<'a> {
         let Some(crop) = source_rect(crop) else {
             return true;
         };
+        let masked = mask.path.is_some();
         let clip = mask
             .path
             .clone()
             .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
         for mut op in drawing.ops.iter().cloned() {
             place_in_source_rect(&mut op.path, crop);
+            let op_clip = match op.clip.filter(|_| !masked) {
+                Some(rect) => match metafile_clip_path(rect, crop) {
+                    Some(path) => path,
+                    None => continue,
+                },
+                None => clip.clone(),
+            };
             self.primitives.push(Primitive::Shape {
-                clip: Some(clip.clone()),
+                clip: Some(op_clip),
                 even_odd: op.even_odd,
                 object_id,
                 shape_id: None,
@@ -3500,6 +3508,32 @@ fn source_rect(crop: Option<&PictureCrop>) -> Option<(f64, f64, f64, f64)> {
         return None;
     }
     Some((-left / width, -top / height, 1.0 / width, 1.0 / height))
+}
+
+/// Maps a metafile clip rectangle into the picture box, or `None` when the clip
+/// leaves nothing of the box visible.
+fn metafile_clip_path(
+    clip: [f64; 4],
+    rect: (f64, f64, f64, f64),
+) -> Option<Vec<GeometryPathCommand>> {
+    let (x0, y0, w, h) = rect;
+    let left = (x0 + clip[0] * w).max(0.0);
+    let top = (y0 + clip[1] * h).max(0.0);
+    let right = (x0 + clip[2] * w).min(1.0);
+    let bottom = (y0 + clip[3] * h).min(1.0);
+    if !(left < right && top < bottom) {
+        return None;
+    }
+    Some(vec![
+        GeometryPathCommand::Move { x: left, y: top },
+        GeometryPathCommand::Line { x: right, y: top },
+        GeometryPathCommand::Line {
+            x: right,
+            y: bottom,
+        },
+        GeometryPathCommand::Line { x: left, y: bottom },
+        GeometryPathCommand::Close,
+    ])
 }
 
 /// Maps a path measured in the metafile's frame into the picture box.
@@ -7324,6 +7358,32 @@ mod tests {
         bytes
     }
 
+    /// `triangle_emf` with the left-top quarter of the frame selected as the
+    /// clip path before the fill.
+    fn clipped_triangle_emf() -> Vec<u8> {
+        let mut bytes = triangle_emf();
+        let record = |kind: u32, body: Vec<u8>| {
+            let mut out = kind.to_le_bytes().to_vec();
+            out.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+            out.extend(body);
+            out
+        };
+        let i32s =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let mut polyline = i32s(&[0, 0, 0, 0, 4]);
+        for (x, y) in [(0i16, 0i16), (0, 50), (50, 50), (50, 0)] {
+            polyline.extend_from_slice(&x.to_le_bytes());
+            polyline.extend_from_slice(&y.to_le_bytes());
+        }
+        let mut clip = record(59, Vec::new());
+        clip.extend(record(27, i32s(&[0, 0])));
+        clip.extend(record(89, polyline));
+        clip.extend(record(60, Vec::new()));
+        clip.extend(record(67, i32s(&[5])));
+        bytes.splice(88..88, clip);
+        bytes
+    }
+
     /// The demo deck with one extra master picture pointing at `media`.
     fn deck_with_master_picture(media: Vec<u8>) -> (PptxPackage, DeckSnapshot) {
         deck_with_cropped_master_picture(media, PictureCrop::default())
@@ -7537,6 +7597,34 @@ mod tests {
         assert_eq!(
             path[1],
             ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn a_metafile_clip_narrows_the_shape_clip_to_the_clipped_region() {
+        let (package, snapshot) = deck_with_master_picture(clipped_triangle_emf());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        let clip = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { name, clip, .. } if name == "Logo" => clip.clone(),
+                _ => None,
+            })
+            .expect("the clipped metafile paints");
+        assert_eq!(
+            clip,
+            vec![
+                ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.0, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Close,
+            ]
         );
     }
 
