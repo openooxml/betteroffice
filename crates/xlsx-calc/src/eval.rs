@@ -40,11 +40,14 @@ impl EvaluationBudget {
     }
 }
 
-/// evaluation environment: the cell source plus the sheet unqualified refs
-/// resolve against.
+/// evaluation environment: the cell source, the sheet unqualified refs resolve
+/// against, and the cell the formula belongs to.
 pub struct EvalContext<'a> {
     pub provider: &'a dyn CellProvider,
     pub sheet: SheetId,
+    /// the cell this formula belongs to; `None` -> referenceless ROW()/COLUMN()
+    /// return #VALUE!.
+    pub cell: Option<CellRef>,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
     remaining_cell_visits: Rc<Cell<u64>>,
@@ -60,6 +63,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -74,6 +78,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: Some(now_serial),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -92,6 +97,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -106,6 +112,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider: self.provider,
             sheet,
+            cell: self.cell,
             now_serial: self.now_serial,
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
             exhausted: Rc::clone(&self.exhausted),

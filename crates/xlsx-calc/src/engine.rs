@@ -195,6 +195,7 @@ fn eval_node(
         return (None, false);
     };
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
+    ctx.cell = Some(cell_of(u));
     ctx.now_serial = now_serial;
     let value = evaluate(&expr, &ctx);
     if !ctx.has_unhandled_budget_error() {
@@ -444,6 +445,30 @@ mod tests {
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(r.cycle_cells, vec![(s, a1("A1"))]);
         assert_eq!(value(&wb, s, "A1"), num(0.0));
+    }
+
+    #[test]
+    fn referenceless_row_and_column_resolve_against_the_calling_cell() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "C7", "ROW()");
+        put_formula(&mut wb, s, "D8", "COLUMN()");
+        put_formula(&mut wb, s, "E9", "ROW()*100+COLUMN()");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C7"), num(7.0));
+        assert_eq!(value(&wb, s, "D8"), num(4.0));
+        assert_eq!(value(&wb, s, "E9"), num(905.0));
+    }
+
+    #[test]
+    fn row_of_a_reference_is_positional_not_a_read() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "X1", "ROW($X$1)+COLUMN($X$1)+ROWS($X$1:$X$4)");
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "ROW()-ROW($A$1)");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "X1"), num(1.0 + 24.0 + 4.0));
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
     }
 
     #[test]

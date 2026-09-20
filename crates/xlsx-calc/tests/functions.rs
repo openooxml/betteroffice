@@ -282,6 +282,19 @@ fn lookup_functions() {
     ]);
 }
 
+/// without a calling cell the referenceless forms stay #VALUE!; `ROWS`/`COLUMNS`
+/// have no referenceless form at all.
+#[test]
+fn referenceless_position_needs_a_calling_cell() {
+    check(&[
+        ("ROW()", e(ErrorValue::Value)),
+        ("COLUMN()", e(ErrorValue::Value)),
+        ("ROWS()", e(ErrorValue::Value)),
+        ("COLUMNS()", e(ErrorValue::Value)),
+        ("ROW(A1,B1)", e(ErrorValue::Value)),
+    ]);
+}
+
 #[test]
 fn info_functions() {
     check(&[

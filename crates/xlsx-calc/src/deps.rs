@@ -15,6 +15,19 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     out
 }
 
+/// true when `arg` is a positional query rather than a value read: `ROW`,
+/// `COLUMN`, `ROWS` and `COLUMNS` answer where a reference sits, never what it
+/// holds, so such an argument carries no data dependency.
+pub fn positional_argument(name: &str, arg: &Expr) -> bool {
+    matches!(
+        name.to_ascii_uppercase().as_str(),
+        "ROW" | "COLUMN" | "ROWS" | "COLUMNS"
+    ) && matches!(
+        arg,
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::Name { .. }
+    )
+}
+
 fn walk(
     expr: &Expr,
     out: &mut Vec<(Option<String>, CellRange)>,
@@ -43,8 +56,11 @@ fn walk(
             walk(lhs, out, seen);
             walk(rhs, out, seen);
         }
-        Expr::FuncCall { args, .. } => {
+        Expr::FuncCall { name, args } => {
             for arg in args {
+                if positional_argument(name, arg) {
+                    continue;
+                }
                 walk(arg, out, seen);
             }
         }
@@ -101,6 +117,19 @@ mod tests {
     #[test]
     fn no_refs_for_literals() {
         assert!(refs("1 + 2 * 3").is_empty());
+    }
+
+    #[test]
+    fn positional_queries_read_nothing() {
+        assert!(refs("ROW($X$1)").is_empty());
+        assert!(refs("COLUMN(Sheet2!C3)").is_empty());
+        assert!(refs("ROWS(A1:A9)+COLUMNS(B:D)").is_empty());
+        assert!(refs("ROW()").is_empty());
+    }
+
+    #[test]
+    fn positional_queries_still_read_computed_arguments() {
+        assert_eq!(refs("ROW(OFFSET(A1,B1,0))"), vec!["A1", "B1"]);
     }
 
     #[test]

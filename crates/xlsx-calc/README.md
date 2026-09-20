@@ -129,8 +129,8 @@ is not yet wired — a follow-up.
 | `INDEX(area, row, [col])` | Single-row/column areas accept one index; out of range → `#REF!`. |
 | `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
-| `ROW` / `COLUMN([ref])` | **A reference is required** — the evaluator has no notion of the calling cell, so the no-arg form is `#VALUE!`. |
-| `ROWS` / `COLUMNS(area)` | Dimension counts. |
+| `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. A context built without a calling cell (`EvalContext::new`) still answers `#VALUE!` to the no-arg form. |
+| `ROWS` / `COLUMNS(area)` | Dimension counts; the area is required. |
 
 ### Information
 
@@ -164,5 +164,12 @@ with `~` escaping a literal `*`, `?`, or `~`.
   the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+- **`ROW` / `COLUMN`** with no reference answer the calling cell's own position.
+  Recalculation supplies it; a context built directly by `EvalContext::new`
+  leaves `cell` unset and those forms stay `#VALUE!`.
+- **`ROW` / `COLUMN` / `ROWS` / `COLUMNS` of a direct reference** are positional
+  queries, not value reads, so they contribute no dependency edge: `ROW($X$1)`
+  written in `$X$1` is not a cycle. A computed argument
+  (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
