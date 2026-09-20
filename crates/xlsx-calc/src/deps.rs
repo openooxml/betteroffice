@@ -15,9 +15,8 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     out
 }
 
-/// true when `arg` is a positional query rather than a value read: `ROW`,
-/// `COLUMN`, `ROWS` and `COLUMNS` answer where a reference sits, never what it
-/// holds, so such an argument carries no data dependency.
+/// true when `arg` is read for where it sits, not what it holds, so it
+/// carries no data dependency.
 pub fn positional_argument(name: &str, arg: &Expr) -> bool {
     matches!(
         name.to_ascii_uppercase().as_str(),
