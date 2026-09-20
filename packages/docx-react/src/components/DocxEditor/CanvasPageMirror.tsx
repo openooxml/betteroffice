@@ -12,27 +12,56 @@
 
 import { useEffect, useRef } from 'react';
 import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 
-export function CanvasPageMirror({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
+export function CanvasPageMirror({
+  page,
+  zoom = 1,
+  defer = false,
+}: {
+  page: DisplayPage;
+  zoom?: number;
+  /**
+   * Off-window pages build their mirror at idle time instead of during the
+   * mount commit's passive flush, so the first paint on a large document is
+   * not queued behind dozens of mirror DOM builds.
+   */
+  defer?: boolean;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const builtForRef = useRef<{ page: DisplayPage; t: TFunction } | null>(null);
   const { t } = useTranslation();
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const mirror = buildMirrorPage(page, {
-      labels: {
-        page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
-        header: t('a11y.headerLabel'),
-        footer: t('a11y.footerLabel'),
-      },
-    });
-    // Keep the previous mirror connected until this replacement is ready.
-    // Clearing in effect cleanup creates a detached-DOM window on every page
-    // update; unmounting already removes the host and its complete subtree.
-    host.replaceChildren(mirror);
-  }, [page, t]);
+    if (builtForRef.current?.page === page && builtForRef.current.t === t) return;
+    const build = (): void => {
+      const mirror = buildMirrorPage(page, {
+        labels: {
+          page: t('a11y.pageLabel', { number: page.pageIndex + 1 }),
+          header: t('a11y.headerLabel'),
+          footer: t('a11y.footerLabel'),
+        },
+      });
+      // Keep the previous mirror connected until this replacement is ready.
+      // Clearing in effect cleanup creates a detached-DOM window on every page
+      // update; unmounting already removes the host and its complete subtree.
+      host.replaceChildren(mirror);
+      builtForRef.current = { page, t };
+    };
+    if (!defer) {
+      build();
+      return;
+    }
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(build, { timeout: 1500 });
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(build, 150);
+    return () => clearTimeout(id);
+  }, [page, t, defer]);
 
   return (
     <div
