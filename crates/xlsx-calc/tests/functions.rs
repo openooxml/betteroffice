@@ -677,6 +677,7 @@ fn reference_counts_propagate_their_arguments_error() {
 
 /// excel stores post-2007 functions with an `_xlfn.` prefix (`_xlfn._xlws.`
 /// for worksheet-only ones), so the prefix must resolve to the same builtin.
+/// an array builtin called outside an array formula shows its top-left value;
 /// a prefixed name we do not implement stays `#NAME?`.
 #[test]
 fn xlfn_prefixed_names_resolve_to_the_same_builtin() {
@@ -690,7 +691,8 @@ fn xlfn_prefixed_names_resolve_to_the_same_builtin() {
         ("_xlfn.IFNA(1/0, 7)", e(ErrorValue::Div0)),
         ("_xlfn.IFNA(NA(), 7)", n(7.0)),
         ("_xlfn.XLOOKUP(2, E1:E4, F1:F4)", t("two")),
-        ("_xlfn._xlws.FILTER(A1:A5, C1:C5)", e(ErrorValue::Name)),
+        ("_xlfn._xlws.FILTER(A1:A5, C1:C5)", n(10.0)),
+        ("_xlfn.LET(_xlpm.x, 6, _xlpm.x * 7)", n(42.0)),
         ("_xlfn.NOSUCH()", e(ErrorValue::Name)),
         ("_xlws.CONCAT(\"a\", \"b\")", e(ErrorValue::Name)),
     ]);
