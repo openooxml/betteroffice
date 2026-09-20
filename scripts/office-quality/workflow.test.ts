@@ -26,7 +26,7 @@ test('one frozen plan feeds independent format jobs at the same source revision'
 });
 
 test('only the reconciler publishes reports and renders after every format succeeds', () => {
-  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity']);
+  expect(publish.needs).toEqual(['prepare', 'measure', 'docx-benchmark', 'xlsx-benchmark', 'pptx-benchmark', 'xlsx-fidelity', 'roundtrip']);
   expect(publish.if).not.toContain('always()');
   expect(
     measure.steps.some((step: any) => step.run?.includes('publish-renders.mjs'))
@@ -59,7 +59,7 @@ test('artifact directories remain stable when a run selects only one format', ()
     (step: any) => step.uses?.startsWith('actions/download-artifact@')
   );
   expect(downloads.filter((step: any) => step.with.pattern).map((step: any) => step.with.pattern))
-    .toEqual(['docx-benchmark-report-*', 'xlsx-benchmark-report-*', 'xlsx-fidelity-report-*']);
+    .toEqual(['docx-benchmark-report-*', 'xlsx-benchmark-report-*', 'xlsx-fidelity-report-*', 'roundtrip-report-*']);
   for (const format of ['docx', 'pptx', 'xlsx']) {
     for (const kind of ['report', 'renders']) {
       const name = `visual-fidelity-${kind}-${format}`;
@@ -117,4 +117,17 @@ test('XLSX fidelity covers every planned workbook independently of calculation w
   expect(fidelity.if).toBe("contains(fromJSON(needs.prepare.outputs.formats), 'xlsx')");
   expect(publish.if).toContain("needs.xlsx-fidelity.result == 'success'");
   expect(publish.steps.find((step: any) => step.run?.includes('merge.mjs')).env.QUALITY_REQUIRE_XLSX_FIDELITY).toBe('true');
+});
+
+
+test('native parse/edit/save probes run independently and gate the final report', () => {
+  const build = workflow.jobs['roundtrip-build'];
+  const probe = workflow.jobs.roundtrip;
+  expect(build.needs).toBe('prepare');
+  expect(build.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}');
+  expect(build.steps[1].with.ref).toBe('${{ matrix.source }}');
+  expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
+  expect(probe.strategy.matrix.format).toBe('${{ fromJSON(needs.prepare.outputs.formats) }}');
+  expect(publish.if).toContain("needs.roundtrip.result == 'success'");
+  expect(publish.steps.find((step: any) => step.run?.includes('merge.mjs')).env.QUALITY_REQUIRE_ROUNDTRIP).toBe('true');
 });

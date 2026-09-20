@@ -201,3 +201,24 @@ Each recorded range is exported separately through `calc_pdf_Export`. A temporar
 Each range must produce exactly one PDF page at the recorded physical dimensions. Overflow, a missing range, or a larger raster-size mismatch fails the workbook comparison and reduces scored/total. Raster rounding permits at most one pixel of right/bottom edge adjustment; no resizing or alignment correction is applied. SSIM averages successful workbook comparisons only, so compare coverage too.
 
 The final reconciler requires every XLSX render shard, including explicit failures, and matching plan, source, font and LibreOffice identities. It rejects a different LibreOffice build between fidelity and recalculation. `xlsx-fidelity-diagnostics-*` retains the prepared range workbooks, PDF exports, PNGs, logs and source/prepared hashes for seven days. No generated assets are committed.
+
+
+## Parse success and edit/save preservation
+
+The benchmark builds a separate native probe against the published and current Rust facades for DOCX, PPTX and XLSX. Every selected corpus original is attempted, independently of its render or calculation result. Parse success is the percentage for which the normal native `open` API returns successfully. It does not establish complete feature support or rendering fidelity. A later edit, save, reopen or preservation failure cannot erase that parse success.
+
+The `Lossless roundtrip` percentage uses the same full denominator. One deterministic probe is chosen from the original package and given unchanged to both builds: append a marker to an unambiguous single-run paragraph/text box for DOCX/PPTX, or change the first finite numeric literal to zero (one if already zero) for XLSX. The original stays unchanged. The native facade must perform the edit, save, reopen its output and verify the new value. Files without an eligible probe, errors and timeouts remain non-passes in the denominator, with their reasons recorded. A no-op save cannot pass.
+
+An independent ZIP/XML checker then compares the original with the saved package. Part names must match exactly; every part outside the edited XML part must retain identical uncompressed bytes, including unknown XML, relationships, custom parts and embedded files. The edited part must match the original XML tree with only the selected text/value replaced. Its other elements, attributes, namespace bindings, comments and text remain significant. Attribute ordering, XML declaration spelling, escaping and empty-element spelling in that one part do not affect the result. ZIP entry order, compression and timestamps are excluded.
+
+This is a strict preservation probe, not a verdict that every non-pass lost user content: even benign serialization changes outside the edit, updated metadata, or dependent formula-cache recalculation fail it. No part, formula cache, extension or subtree is broadly exempted. One passing edit also does not prove all edits are lossless. The per-file artifacts distinguish parse/edit/save/reopen failures from added, removed or changed parts and an edited-part mismatch.
+
+The README adds only the two percentages. Counts, exact edit footprints, source/output hashes and diagnostics stay in `roundtrip_benchmark` and per-sample `roundtrip`/`roundtrip_probe` report fields. LibreOffice is not measured for these two metrics and displays `—`; its existing SSIM and timing comparisons continue separately.
+
+Two native builds per selected format feed independent DOCX/PPTX/XLSX workers alongside rendering and calculation. Each file/channel gets a fresh process with a 180-second limit. These probes do not contribute to timing metrics. The reconciler requires all planned files, both channels, matching source/build/checker identities and explicit preservation evidence before publication. `roundtrip-diagnostics-*` retains saved documents, probe definitions and process logs for seven days. Runs remain manual; adding this harness does not refresh the current README numbers.
+
+Compile-check a host without executing measurements:
+
+```sh
+node scripts/office-quality/build-roundtrip.mjs docx /path/to/source .source/roundtrip-check --check
+```

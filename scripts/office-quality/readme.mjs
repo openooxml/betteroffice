@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateComparison } from './results.mjs';
 import { timingSummary } from './docx-benchmark.mjs';
+import { roundtripSummary } from './roundtrip.mjs';
 import { calculationSummary } from './xlsx-benchmark.mjs';
 
 export const BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
@@ -125,6 +126,18 @@ export function renderSection(report) {
     if (format === 'xlsx' && calculation) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
       rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+    }
+    const preservation = report.roundtrip_benchmark?.[format];
+    if (preservation) {
+      if (preservation.published_version !== report.versions[format] ||
+          preservation.builds?.commit?.source_sha !== report.source_sha)
+        throw new Error('Roundtrip results do not match the report revision');
+      const summary = roundtripSummary(report.samples, format);
+      for (const [label, field] of [['Parse success', 'parsed'], ['Lossless roundtrip', 'preserved']]) {
+        const values = ['published', 'commit'].map(channel => summary[channel].total
+          ? `${(100 * summary[channel][field] / summary[channel].total).toFixed(2)}%` : '—');
+        rows.push([label, ...values, ...(office ? ['—'] : [])]);
+      }
     }
     const value = (text) => `<td align="right">${text}</td>`;
     const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;

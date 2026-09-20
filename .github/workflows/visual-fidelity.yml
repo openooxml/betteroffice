@@ -34,6 +34,7 @@ jobs:
     outputs:
       source-sha: ${{ steps.source.outputs.sha }}
       formats: ${{ steps.plan.outputs.formats }}
+      roundtrip-builds: ${{ steps.plan.outputs.roundtrip-builds }}
       docx-shards: ${{ steps.plan.outputs.docx-shards }}
       docx-published-source: ${{ steps.plan.outputs.docx-published-source }}
       pptx-published-source: ${{ steps.plan.outputs.pptx-published-source }}
@@ -75,6 +76,9 @@ jobs:
           import { xlsxFidelityShards } from './scripts/office-quality/xlsx-fidelity.mjs';
           import { xlsxShards } from './scripts/office-quality/xlsx-benchmark.mjs';
           const plan = JSON.parse(await readFile(`${process.env.QUALITY_OUTPUT}/plan.json`, 'utf8'));
+          const builds = plan.formats.flatMap(format => ['published', 'commit'].map(channel =>
+            ({ format, channel, source: channel === 'commit' ? plan.source_sha : plan[`${format}_published_source_sha`] })));
+          await appendFile(process.env.GITHUB_OUTPUT, `roundtrip-builds=${JSON.stringify(builds)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `formats=${JSON.stringify(plan.formats)}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-shards=${JSON.stringify(docxShards(plan).map((_, index) => index))}\n`);
           await appendFile(process.env.GITHUB_OUTPUT, `docx-published-source=${plan.docx_published_source_sha ?? ''}\n`);
@@ -648,11 +652,116 @@ jobs:
           compression-level: 0
           retention-days: 7
 
+  roundtrip-build:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ matrix.source }}
+          path: .source/roundtrip-source
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: roundtrip-${{ matrix.format }}-${{ matrix.channel }}
+          workspaces: . -> target/roundtrip
+      - name: Compile the native edit/save probe
+        env:
+          FORMAT: ${{ matrix.format }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target/roundtrip
+        run: node scripts/office-quality/build-roundtrip.mjs "$FORMAT" .source/roundtrip-source "${RUNNER_TEMP}/roundtrip-native"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-native-${{ matrix.format }}-${{ matrix.channel }}
+          path: |
+            ${{ runner.temp }}/roundtrip-native/${{ matrix.format }}-roundtrip-bench
+            ${{ runner.temp }}/roundtrip-native/build.json
+          if-no-files-found: error
+          retention-days: 7
+
+  roundtrip:
+    needs: [prepare, roundtrip-build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        format: ${{ fromJSON(needs.prepare.outputs.formats) }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ needs.prepare.outputs.source-sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: visual-fidelity-plan
+          path: ${{ runner.temp }}/fidelity-plan
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: roundtrip-native-${{ matrix.format }}-published
+          path: ${{ runner.temp }}/roundtrip-native/published
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: roundtrip-native-${{ matrix.format }}-commit
+          path: ${{ runner.temp }}/roundtrip-native/commit
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.13"
+      - name: Download the frozen originals
+        env:
+          QUALITY_FORMAT: ${{ matrix.format }}
+          QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
+          QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
+          QUALITY_ASSET_CACHE: ${{ runner.temp }}/fidelity-assets
+        run: node scripts/office-quality/roundtrip.mjs
+      - name: Measure parsing and preservation after an edit
+        env:
+          FORMAT: ${{ matrix.format }}
+          QUALITY_OUTPUT: ${{ runner.temp }}/roundtrip
+          QUALITY_NATIVE: ${{ runner.temp }}/roundtrip-native
+        run: |
+          chmod +x "${QUALITY_NATIVE}/published/${FORMAT}-roundtrip-bench" "${QUALITY_NATIVE}/commit/${FORMAT}-roundtrip-bench"
+          python scripts/office-quality/roundtrip.py
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-report-${{ matrix.format }}
+          path: ${{ runner.temp }}/roundtrip/report.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload edit/save diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: roundtrip-diagnostics-${{ matrix.format }}
+          path: |
+            ${{ runner.temp }}/roundtrip/report.json
+            ${{ runner.temp }}/roundtrip/*/probe.json
+            ${{ runner.temp }}/roundtrip/*/published/*
+            ${{ runner.temp }}/roundtrip/*/commit/*
+          compression-level: 0
+          retention-days: 7
+
   publish:
-    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity]
+    needs: [prepare, measure, docx-benchmark, xlsx-benchmark, pptx-benchmark, xlsx-fidelity, roundtrip]
     if: >-
       !cancelled() && github.ref == 'refs/heads/main' &&
-      needs.prepare.result == 'success' && needs.measure.result == 'success' &&
+      needs.prepare.result == 'success' && needs.measure.result == 'success' && needs.roundtrip.result == 'success' &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'docx') || needs.docx-benchmark.result == 'success') &&
       (needs.prepare.outputs.xlsx-shards == '[]' || needs.xlsx-benchmark.result == 'success') &&
       (!contains(fromJSON(needs.prepare.outputs.formats), 'pptx') || needs.pptx-benchmark.result == 'success') &&
@@ -739,6 +848,11 @@ jobs:
           pattern: xlsx-fidelity-report-*
           path: ${{ runner.temp }}/fidelity-parts
 
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: roundtrip-report-*
+          path: ${{ runner.temp }}/fidelity-parts
+
       - name: Reconcile the format reports
         env:
           QUALITY_PLAN: ${{ runner.temp }}/fidelity-plan/plan.json
@@ -749,6 +863,7 @@ jobs:
           QUALITY_REQUIRE_PPTX_BENCHMARK: 'true'
           QUALITY_REQUIRE_XLSX_BENCHMARK: 'true'
           QUALITY_REQUIRE_XLSX_FIDELITY: 'true'
+          QUALITY_REQUIRE_ROUNDTRIP: 'true'
         run: |
           node scripts/office-quality/merge.mjs
           cat "${QUALITY_OUTPUT}/section.md" >> "$GITHUB_STEP_SUMMARY"
