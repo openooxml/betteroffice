@@ -86,10 +86,19 @@ impl PptxRenderer {
         slide_index: u32,
     ) -> Result<String, JsValue> {
         let session = document.session();
-        let preview = session.preview_proposal_diff(id).map_err(js_error)?;
+        let preview = session
+            .preview_proposal_diff_slide(id, slide_index as usize)
+            .map_err(|error| match error {
+                pptx_edit::ProposalError::Edit(pptx_edit::EditError::OutOfBounds { .. }) => {
+                    js_error(pptx_render::RenderError::SlideNotFound(
+                        slide_index as usize,
+                    ))
+                }
+                error => js_error(error),
+            })?;
         let rendered = self
             .renderer
-            .layout_slide(session.package(), &preview.snapshot, slide_index as usize)
+            .layout_scoped_slide(session.package(), &preview.scope)
             .map_err(js_error)?;
         serde_json::to_string(&serde_json::json!({
             "proposal": preview.proposal,

@@ -1554,14 +1554,7 @@ fn snapshot_slide<T: ReadTxn>(
             Some(&theme),
         )?);
     }
-    let notes = map_string(&slide, txn, "notes").unwrap_or_else(|| {
-        package
-            .slides
-            .iter()
-            .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-            .map(|source| source.notes.clone())
-            .unwrap_or_default()
-    });
+    let notes = slide_notes(&slide, txn, package);
     Ok(SlideSnapshot {
         id: slide_id.to_owned(),
         source_part_path,
@@ -1634,7 +1627,20 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
     })
 }
 
-fn snapshot_shape<T: ReadTxn>(
+pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPackage) -> String {
+    if let Some(notes) = map_string(slide, txn, "notes") {
+        return notes;
+    }
+    let source_part_path = map_string(slide, txn, "sourcePartPath");
+    package
+        .slides
+        .iter()
+        .find(|source| Some(&source.part_path) == source_part_path.as_ref())
+        .map(|source| source.notes.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn snapshot_shape<T: ReadTxn>(
     shapes: &MapRef,
     stories: &MapRef,
     txn: &T,
