@@ -17,20 +17,23 @@ use crate::image::Image;
 use crate::inline::{Hyperlink, InlineNode, Run, RunContent};
 use crate::notes::Note;
 use crate::numbering::NumberingDefinitions;
-use crate::paragraph::ParagraphContent;
+use crate::paragraph::{Paragraph, ParagraphContent};
 use crate::relationships::{
     Relationship, TargetMode, relationship_part_path, relationship_types, resolve_relative_path,
 };
+use crate::table::{Table, TableCell};
 use crate::vml::Watermark;
 use crate::xml::ParseError;
 
 use super::context::SerializerContext;
 use super::numbering::serialize_numbering_xml;
+use super::paragraph::serialize_paragraph;
 use super::parts::{
     serialize_comments_extended_part, serialize_comments_extensible_part,
     serialize_comments_ids_part, serialize_comments_with_info, serialize_document_part,
     serialize_endnotes_part, serialize_footnotes_part, serialize_header_footer_part,
 };
+use super::raw::{validate_math_subtree, validate_raw_subtree, validate_replayed_fragment};
 use super::s10::SerializerDeterminism;
 use super::xml_writer::escape_xml;
 
@@ -129,15 +132,25 @@ pub fn write_docx_s13(
     }
 
     let mut context = SerializerContext::new(&request.determinism)?;
-    let serialized_document = serialize_document_part(&request.document, &mut context)?;
     let document_xml = if let Some(selective) = request.selective.as_ref() {
         let original = package
             .text("word/document.xml")
             .ok_or_else(|| save_error("selective save has no word/document.xml"))?;
-        build_patched_document_xml(&original, &serialized_document, &selective.changed_para_ids)
-            .ok_or_else(|| save_error("selective document patch is unsafe"))?
+        match build_selective_document_xml(
+            &request.document,
+            &original,
+            &selective.changed_para_ids,
+            &mut context,
+        )? {
+            Some(patched) => patched,
+            None => {
+                let serialized = serialize_document_part(&request.document, &mut context)?;
+                build_patched_document_xml(&original, &serialized, &selective.changed_para_ids)
+                    .ok_or_else(|| save_error("selective document patch is unsafe"))?
+            }
+        }
     } else {
-        serialized_document
+        serialize_document_part(&request.document, &mut context)?
     };
     package.set_text("word/document.xml", document_xml);
 
@@ -1221,6 +1234,316 @@ pub fn build_patched_document_xml(
         patched.replace_range(span.start..span.end, replacement);
     }
     Some(patched)
+}
+
+/// Census of every `w:p` a full serialize would emit for this model. The walk
+/// mirrors the serializer's emission rules (table-cell fallbacks included) so
+/// a count mismatch proves the model no longer lines up with the source part;
+/// `allocates_ids` flags generated `wp:docPr/@id` draws that would move the
+/// seeded id allocator relative to a whole-document serialize.
+#[derive(Default)]
+struct SelectiveParagraphIndex<'a> {
+    count: usize,
+    by_id: HashMap<String, Vec<Paragraph>>,
+    changed: HashSet<&'a str>,
+    allocates_ids: bool,
+}
+
+impl<'a> SelectiveParagraphIndex<'a> {
+    fn new(changed_ids: &'a [String]) -> Self {
+        Self {
+            changed: changed_ids.iter().map(String::as_str).collect(),
+            ..Self::default()
+        }
+    }
+
+    fn story(&mut self, blocks: &[BlockContent]) -> Option<()> {
+        for block in blocks {
+            match block {
+                BlockContent::Paragraph(paragraph) => self.paragraph(paragraph)?,
+                BlockContent::Table(table) => self.table(table)?,
+                BlockContent::BlockSdt(sdt) => {
+                    self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
+                    self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
+                    self.story(&sdt.content)?;
+                }
+                BlockContent::RawXml(raw) => self.fragment(&raw.xml)?,
+            }
+        }
+        Some(())
+    }
+
+    fn table(&mut self, table: &Table) -> Option<()> {
+        for row in &table.rows {
+            for cell in &row.cells {
+                self.cell(cell)?;
+            }
+        }
+        Some(())
+    }
+
+    fn cell(&mut self, cell: &TableCell) -> Option<()> {
+        // Mirrors `serialize_table_cell`: block SDTs emit nothing and an
+        // otherwise empty cell still emits a `<w:p/>` fallback.
+        let mut emitted = false;
+        for block in &cell.content {
+            match block {
+                BlockContent::Paragraph(paragraph) => {
+                    self.paragraph(paragraph)?;
+                    emitted = true;
+                }
+                BlockContent::Table(table) => {
+                    self.table(table)?;
+                    emitted = true;
+                }
+                BlockContent::BlockSdt(_) => {}
+                BlockContent::RawXml(raw) => {
+                    self.fragment(&raw.xml)?;
+                    emitted = true;
+                }
+            }
+        }
+        if !emitted {
+            self.count += 1;
+        }
+        Some(())
+    }
+
+    fn paragraph(&mut self, paragraph: &Paragraph) -> Option<()> {
+        self.count += 1;
+        if let Some(id) = emitted_paragraph_id(paragraph)
+            && self.changed.contains(id)
+        {
+            self.by_id
+                .entry(id.to_owned())
+                .or_default()
+                .push(paragraph.clone());
+        }
+        for content in &paragraph.content {
+            match content {
+                ParagraphContent::Inline(node) => self.inline(node)?,
+                ParagraphContent::Tracked(change) => {
+                    if matches!(
+                        change.node_type.as_str(),
+                        "insertion" | "deletion" | "moveFrom" | "moveTo"
+                    ) {
+                        for item in &change.content {
+                            match item {
+                                InlineNode::Run(run) => self.run(run)?,
+                                InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink)?,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn inline(&mut self, node: &InlineNode) -> Option<()> {
+        match node {
+            InlineNode::Run(run) => self.run(run),
+            InlineNode::Hyperlink(hyperlink) => self.hyperlink(hyperlink),
+            InlineNode::BookmarkStart(_) | InlineNode::BookmarkEnd(_) => Some(()),
+            InlineNode::SimpleField(field) => {
+                for run in &field.content {
+                    self.run(run)?;
+                }
+                Some(())
+            }
+            InlineNode::ComplexField(field) => {
+                for run in &field.field_code {
+                    self.run(run)?;
+                }
+                match field
+                    .structured_result
+                    .as_ref()
+                    .filter(|result| result.blocks.is_none())
+                    .and_then(|result| result.inline.as_ref())
+                {
+                    Some(nodes) => {
+                        for node in nodes {
+                            self.inline(node)?;
+                        }
+                    }
+                    None => {
+                        for run in &field.field_result {
+                            self.run(run)?;
+                        }
+                    }
+                }
+                Some(())
+            }
+            InlineNode::InlineSdt(sdt) => {
+                self.raw_subtree(sdt.properties.raw_properties_xml.as_deref(), "sdtPr")?;
+                self.raw_subtree(sdt.properties.raw_end_properties_xml.as_deref(), "sdtEndPr")?;
+                for item in &sdt.content {
+                    self.inline(item)?;
+                }
+                Some(())
+            }
+            InlineNode::Math(math) => {
+                if !math.omml_xml.is_empty() {
+                    validate_math_subtree(&math.omml_xml).ok()?;
+                    self.count += count_paragraph_elements(&math.omml_xml)?;
+                }
+                Some(())
+            }
+            InlineNode::RawXml(raw) => self.fragment(&raw.xml),
+        }
+    }
+
+    /// Hyperlink serialization only emits Run/BookmarkStart/BookmarkEnd
+    /// children; only runs can carry nested paragraphs or generated ids.
+    fn hyperlink(&mut self, hyperlink: &Hyperlink) -> Option<()> {
+        for child in &hyperlink.children {
+            if let InlineNode::Run(run) = child {
+                self.run(run)?;
+            }
+        }
+        Some(())
+    }
+
+    fn run(&mut self, run: &Run) -> Option<()> {
+        for content in &run.content {
+            match content {
+                RunContent::Drawing { image } => {
+                    if image.id.as_deref().is_none_or(str::is_empty) {
+                        self.allocates_ids = true;
+                    }
+                }
+                RunContent::Shape { shape } => {
+                    if shape.id.as_deref().is_none_or(str::is_empty) {
+                        self.allocates_ids = true;
+                    }
+                    if let Some(text_body) = shape.text_body.as_ref() {
+                        for value in &text_body.content {
+                            let block: BlockContent = serde_json::from_value(value.clone()).ok()?;
+                            self.story(std::slice::from_ref(&block))?;
+                        }
+                    }
+                }
+                RunContent::HorizontalRule { rule } => self.fragment(&rule.xml)?,
+                RunContent::Chart { chart } => {
+                    self.raw_subtree_required(chart.drawing_xml.as_deref(), "drawing")?;
+                }
+                RunContent::OpaqueDrawing { xml, .. } => self.fragment(xml)?,
+                _ => {}
+            }
+        }
+        Some(())
+    }
+
+    fn fragment(&mut self, xml: &str) -> Option<()> {
+        validate_replayed_fragment(xml).ok()?;
+        self.count += count_paragraph_elements(xml)?;
+        Some(())
+    }
+
+    fn raw_subtree(&mut self, xml: Option<&str>, local_name: &'static str) -> Option<()> {
+        let Some(xml) = xml else { return Some(()) };
+        validate_raw_subtree(xml, "w", local_name).ok()?;
+        self.count += count_paragraph_elements(xml)?;
+        Some(())
+    }
+
+    fn raw_subtree_required(&mut self, xml: Option<&str>, local_name: &'static str) -> Option<()> {
+        validate_raw_subtree(xml?, "w", local_name).ok()?;
+        self.count += count_paragraph_elements(xml?)?;
+        Some(())
+    }
+}
+
+/// `w14:paraId` exactly as the paragraph serializer would emit it: the typed
+/// id first, then the first replayed attribute of that name.
+fn emitted_paragraph_id(paragraph: &Paragraph) -> Option<&str> {
+    if let Some(id) = paragraph.para_id.as_deref().filter(|id| !id.is_empty()) {
+        return Some(id);
+    }
+    paragraph
+        .extra_attributes
+        .iter()
+        .find(|attribute| attribute.name == "w14:paraId")
+        .map(|attribute| attribute.value.as_str())
+}
+
+/// Count `<w:p>` element starts in an already-validated fragment, skipping
+/// comments and CDATA like `index_paragraphs` does.
+fn count_paragraph_elements(xml: &str) -> Option<usize> {
+    let bytes = xml.as_bytes();
+    let mut count = 0usize;
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(relative) = bytes[cursor..].iter().position(|byte| *byte == b'<') else {
+            break;
+        };
+        let start = cursor + relative;
+        if bytes[start..].starts_with(b"<!--") {
+            cursor = find_bytes(bytes, start + 4, b"-->")? + 3;
+            continue;
+        }
+        if bytes[start..].starts_with(b"<![CDATA[") {
+            cursor = find_bytes(bytes, start + 9, b"]]>")? + 3;
+            continue;
+        }
+        let end = find_tag_end(bytes, start)?;
+        if is_open_paragraph_tag(&bytes[start..=end]) {
+            count += 1;
+        }
+        cursor = end + 1;
+    }
+    Some(count)
+}
+
+/// Selective-save fast path: splice only the changed `w14:paraId` paragraphs
+/// into the untouched source part instead of serializing the whole document.
+/// Returns `None` whenever the result cannot be proven identical to the
+/// serialize-then-patch path, so the caller can fall back to it and preserve
+/// its behaviour (including its errors) exactly.
+fn build_selective_document_xml(
+    document: &DocumentBody,
+    original_xml: &str,
+    changed_ids: &[String],
+    context: &mut SerializerContext,
+) -> Result<Option<String>, ParseError> {
+    if changed_ids.is_empty() {
+        return Ok(Some(original_xml.to_owned()));
+    }
+    let Some(original) = index_paragraphs(original_xml) else {
+        return Ok(None);
+    };
+    let mut index = SelectiveParagraphIndex::new(changed_ids);
+    if index.story(&document.content).is_none()
+        || index.count != original.count
+        || index.allocates_ids
+    {
+        return Ok(None);
+    }
+
+    let mut replacements = Vec::with_capacity(changed_ids.len());
+    for id in changed_ids {
+        let Some(&span) = original
+            .by_id
+            .get(id)
+            .filter(|spans| spans.len() == 1)
+            .and_then(|spans| spans.first())
+        else {
+            return Ok(None);
+        };
+        let Some([paragraph]) = index.by_id.get(id).map(Vec::as_slice) else {
+            return Ok(None);
+        };
+        replacements.push((span, serialize_paragraph(paragraph, context)?));
+    }
+    replacements.sort_unstable_by(|(left, _), (right, _)| right.start.cmp(&left.start));
+
+    let mut patched = original_xml.to_owned();
+    for (span, replacement) in replacements {
+        patched.replace_range(span.start..span.end, &replacement);
+    }
+    Ok(Some(patched))
 }
 
 /// Updates direct-child core-property text using a fixed clock.
