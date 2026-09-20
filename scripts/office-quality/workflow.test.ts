@@ -35,10 +35,17 @@ test('only the reconciler publishes reports and renders after every format succe
   const renders = publish.steps.findIndex((step: any) =>
     step.run?.includes('publish-renders.mjs')
   );
+  const install = publish.steps.findIndex((step: any) =>
+    step.run?.includes('bun install --frozen-lockfile')
+  );
   const readme = publish.steps.findIndex(
     (step: any) => step.name === 'Replace the generated README section'
   );
   expect(merge).toBeGreaterThan(-1);
+  expect(install).toBeGreaterThan(merge);
+  expect(install).toBeLessThan(renders);
+  expect(publish.steps[install].if).toBe(publish.steps[renders].if);
+  expect(publish.steps[install].run).toContain('bunx --no-install wrangler --version');
   expect(renders).toBeGreaterThan(merge);
   expect(readme).toBeGreaterThan(renders);
   expect(publish.steps[renders]['continue-on-error']).toBeUndefined();
