@@ -47,8 +47,23 @@ pub enum Expr {
     Percent(Box<Expr>),
     FuncCall {
         name: String,
+        /// resolved builtin, bound once at parse time; `None` = unknown name.
+        /// keep consistent with `name` — `Expr::func_call` does both.
+        func: Option<crate::functions::Func>,
         args: Vec<Expr>,
     },
+}
+
+impl Expr {
+    /// build a function call, interning the builtin binding from `name`.
+    pub fn func_call(name: impl Into<String>, args: Vec<Expr>) -> Expr {
+        let name = name.into();
+        Expr::FuncCall {
+            func: crate::functions::resolve(&name),
+            name,
+            args,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -240,12 +255,14 @@ impl Parser<'_> {
     }
 
     fn func_call(&mut self, name: String, depth: usize) -> Result<ParsedExpr, ParseError> {
+        let func = crate::functions::resolve(&name);
         self.expect(&TokKind::LParen, "'(' after function name")?;
         let mut args = Vec::new();
         if matches!(self.peek().map(|t| &t.kind), Some(TokKind::RParen)) {
             self.advance();
             return Ok(ParsedExpr::leaf(Expr::FuncCall {
                 name,
+                func,
                 args: Vec::new(),
             }));
         }
@@ -267,6 +284,7 @@ impl Parser<'_> {
         Ok(ParsedExpr {
             expr: Expr::FuncCall {
                 name,
+                func,
                 args: args.into_iter().map(|arg| arg.expr).collect(),
             },
             depth: ast_depth,

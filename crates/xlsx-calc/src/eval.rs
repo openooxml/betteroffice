@@ -7,7 +7,6 @@ use std::rc::Rc;
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::functions;
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
@@ -215,7 +214,7 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Ok(n) => num(n / 100.0),
             Err(e) => err(e),
         },
-        Expr::FuncCall { name, args, .. } => match functions::resolve(name) {
+        Expr::FuncCall { func, args, .. } => match func {
             Some(f) => f.call(args, ctx),
             None => err(ErrorValue::Name),
         },
