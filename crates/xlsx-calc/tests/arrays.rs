@@ -775,3 +775,27 @@ fn index_returns_a_whole_axis() {
         (1, 2, vec![t("apple"), n(1.0)])
     );
 }
+
+/// a callback body that reads a bound block pays for each read, so a large one
+/// cannot be copied for free once per output cell.
+#[test]
+fn reading_a_bound_block_charges_the_budget() {
+    let workbook = fixture();
+    let body = "_xlfn.MAKEARRAY(20,20,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,ROWS(_xlpm.x)))";
+    let large = values(
+        &format!("_xlfn.LET(_xlpm.x,_xlfn.SEQUENCE(60000),{body})"),
+        &workbook,
+    );
+    assert_eq!(large.len(), 400);
+    assert!(large.iter().any(|value| matches!(
+        value,
+        CellValue::Error {
+            value: ErrorValue::Num
+        }
+    )));
+    let small = values(
+        &format!("_xlfn.LET(_xlpm.x,_xlfn.SEQUENCE(4),{body})"),
+        &workbook,
+    );
+    assert!(small.iter().all(|value| *value == n(4.0)));
+}

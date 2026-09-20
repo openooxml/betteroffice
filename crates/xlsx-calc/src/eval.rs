@@ -20,7 +20,8 @@ const MAX_DEFINED_NAME_DEPTH: usize = 256;
 /// names one formula may have bound at once across nested `LET`/`LAMBDA`.
 const MAX_BINDINGS: usize = 1024;
 /// nested `LAMBDA` invocations, so a callback chain cannot exhaust the stack.
-const MAX_LAMBDA_DEPTH: usize = 128;
+/// the parser's depth cap already keeps real formulas well under this.
+const MAX_LAMBDA_DEPTH: usize = 64;
 
 #[cfg(test)]
 thread_local! {
