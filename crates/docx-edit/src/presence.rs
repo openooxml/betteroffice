@@ -6,7 +6,10 @@ use yrs::branch::{Branch, BranchPtr};
 use yrs::types::{DeepObservable, Delta, Event, PathSegment};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
-use yrs::{Any, Assoc, ID, IndexedSequence, Out, ReadTxn, StickyIndex, TextRef, Transact, Update};
+use yrs::{
+    Any, Assoc, GetString, ID, IndexedSequence, Out, ReadTxn, StickyIndex, TextRef, Transact,
+    Update,
+};
 
 use crate::{EditingDoc, SegmentContent, story_ref};
 
@@ -57,59 +60,82 @@ pub(crate) fn apply_update_with_typing_inference(
     // The inference only consumes story text insertions, and a block that does
     // not extend the local state vector can never integrate — empty,
     // already-known and delete-only updates skip watching entirely.
-    let subscription =
-        if client_id.is_some_and(|_| update.extends(&doc.yrs_doc().transact().state_vector())) {
-            let txn = doc.yrs_doc().transact();
-            let subscription = txn.get_map(super::STORIES).map(|stories| {
-                let changes = Arc::clone(&changes);
-                stories.observe_deep(move |txn, events| {
-                    for event in events.iter() {
-                        let Event::Text(event) = event else {
-                            continue;
-                        };
-                        let Some(story) = event.path().front().and_then(|segment| match segment {
-                            PathSegment::Key(key) => Some(key.to_string()),
-                            PathSegment::Index(_) => None,
-                        }) else {
-                            continue;
-                        };
-                        let mut index = 0_u32;
-                        for delta in event.delta(txn) {
-                            match delta {
-                                Delta::Retain(length, _) => index += length,
-                                Delta::Deleted(_) => {}
-                                Delta::Inserted(value, _) => {
-                                    let (length, is_text) = match value {
-                                        Out::Any(Any::String(text)) => {
-                                            (text.encode_utf16().count() as u32, true)
-                                        }
-                                        _ => (1, false),
-                                    };
-                                    let end_index = index + length;
-                                    if let Some(id) = event
-                                        .target()
-                                        .sticky_index(txn, end_index, Assoc::Before)
-                                        .and_then(|sticky| sticky.id().copied())
-                                    {
-                                        changes.lock().unwrap().push(InsertedContent {
-                                            id,
-                                            story: story.clone(),
-                                            end_index,
-                                            is_text,
-                                        });
+    let subscription = if client_id
+        .is_some_and(|_| update.extends(&doc.yrs_doc().transact().state_vector()))
+    {
+        let txn = doc.yrs_doc().transact();
+        let subscription = txn.get_map(super::STORIES).map(|stories| {
+            let changes = Arc::clone(&changes);
+            stories.observe_deep(move |txn, events| {
+                for event in events.iter() {
+                    // A story created by this update arrives as a map
+                    // insert carrying a prefilled text branch.
+                    if let Event::Map(event) = event {
+                        for (story, change) in event.keys(txn).iter() {
+                            let yrs::types::EntryChange::Inserted(Out::YText(text)) = change else {
+                                continue;
+                            };
+                            let end_index = text.get_string(txn).encode_utf16().count() as u32;
+                            if let Some(id) = text
+                                .sticky_index(txn, end_index, Assoc::Before)
+                                .and_then(|sticky| sticky.id().copied())
+                            {
+                                changes.lock().unwrap().push(InsertedContent {
+                                    id,
+                                    story: story.to_string(),
+                                    end_index,
+                                    is_text: true,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    let Event::Text(event) = event else {
+                        continue;
+                    };
+                    let Some(story) = event.path().front().and_then(|segment| match segment {
+                        PathSegment::Key(key) => Some(key.to_string()),
+                        PathSegment::Index(_) => None,
+                    }) else {
+                        continue;
+                    };
+                    let mut index = 0_u32;
+                    for delta in event.delta(txn) {
+                        match delta {
+                            Delta::Retain(length, _) => index += length,
+                            Delta::Deleted(_) => {}
+                            Delta::Inserted(value, _) => {
+                                let (length, is_text) = match value {
+                                    Out::Any(Any::String(text)) => {
+                                        (text.encode_utf16().count() as u32, true)
                                     }
-                                    index = end_index;
+                                    _ => (1, false),
+                                };
+                                let end_index = index + length;
+                                if let Some(id) = event
+                                    .target()
+                                    .sticky_index(txn, end_index, Assoc::Before)
+                                    .and_then(|sticky| sticky.id().copied())
+                                {
+                                    changes.lock().unwrap().push(InsertedContent {
+                                        id,
+                                        story: story.clone(),
+                                        end_index,
+                                        is_text,
+                                    });
                                 }
+                                index = end_index;
                             }
                         }
                     }
-                })
-            });
-            drop(txn);
-            subscription
-        } else {
-            None
-        };
+                }
+            })
+        });
+        drop(txn);
+        subscription
+    } else {
+        None
+    };
 
     doc.yrs_doc()
         .transact_mut()
@@ -261,6 +287,32 @@ mod tests {
                 story: "body".to_owned(),
                 para_id,
                 end_offset: 4,
+            })
+        );
+    }
+
+    #[test]
+    fn infers_typing_inside_a_story_created_by_the_same_update() {
+        let (baseline, _) = seeded(1);
+        let state = baseline.encode_state_as_update_v1();
+        let writer = EditingDoc::new(7);
+        writer.apply_update_v1(&state).unwrap();
+        let reader = EditingDoc::new(9);
+        reader.apply_update_v1(&state).unwrap();
+        let reader_state = reader.encode_state_vector_v1();
+
+        let para_id = writer
+            .create_story("notes", "typed", "Normal", "left")
+            .unwrap();
+        let update = writer.encode_diff_v1(&reader_state).unwrap();
+
+        assert_eq!(
+            apply_update_with_typing_inference(&reader, &update).unwrap(),
+            Some(TypingInference {
+                client_id: 7,
+                story: "notes".to_owned(),
+                para_id,
+                end_offset: 5,
             })
         );
     }
