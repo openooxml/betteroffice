@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::sync::Arc;
 
 use ooxml_drawingml::chart::{ChartLegend, ChartPlotGroup, ChartSeries, ChartSpace};
 use serde_json::{Value, json};
@@ -109,7 +110,7 @@ fn chart_display_list_matches_snapshot() {
             width: 300.0,
             height: 200.0,
         },
-        |_| Ok(chart_space()),
+        |_| Ok(Arc::new(chart_space())),
     )
     .unwrap();
     let commands = display_list
@@ -156,7 +157,7 @@ fn offscreen_charts_do_not_resolve_or_plot() {
         },
         |_| {
             resolved.set(true);
-            Ok(chart_space())
+            Ok(Arc::new(chart_space()))
         },
     )
     .unwrap();
@@ -205,7 +206,7 @@ fn charts_clip_to_the_body_and_precede_pane_dividers() {
             width: 400.0,
             height: 240.0,
         },
-        |_| Ok(chart_space()),
+        |_| Ok(Arc::new(chart_space())),
     )
     .unwrap();
 
@@ -288,7 +289,7 @@ fn placeholder_fills(display_list: &DisplayList) -> usize {
 /// about what survives when that chart cannot be drawn.
 fn frame_with_one_chart<F>(resolver: F) -> DisplayList
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<Arc<ChartSpace>, RenderError>,
 {
     let mut sheet = Sheet::new("Sheet1");
     sheet.set_cell(
@@ -362,11 +363,11 @@ fn a_missing_chart_part_degrades_to_a_placeholder() {
 #[test]
 fn an_unsupported_family_degrades_to_a_placeholder() {
     let display_list = frame_with_one_chart(|_| {
-        Ok(ChartSpace {
+        Ok(Arc::new(ChartSpace {
             chart_type: "treemap".into(),
             title: Some("Spend".into()),
             ..chart_space()
-        })
+        }))
     });
     assert_degrades_locally(&display_list, "Spend, treemap chart, not shown");
 }
@@ -374,7 +375,7 @@ fn an_unsupported_family_degrades_to_a_placeholder() {
 #[test]
 fn an_unsupported_feature_degrades_to_a_placeholder() {
     let display_list = frame_with_one_chart(|_| {
-        Ok(ChartSpace {
+        Ok(Arc::new(ChartSpace {
             title: Some("Spend".into()),
             series: Vec::new(),
             plot_groups: vec![ChartPlotGroup {
@@ -390,7 +391,7 @@ fn an_unsupported_feature_degrades_to_a_placeholder() {
                 ..Default::default()
             }],
             ..chart_space()
-        })
+        }))
     });
     assert_degrades_locally(
         &display_list,
@@ -425,7 +426,7 @@ fn a_chart_anchored_off_the_grid_is_skipped_entirely() {
             width: 300.0,
             height: 200.0,
         },
-        |_| Ok(chart_space()),
+        |_| Ok(Arc::new(chart_space())),
     )
     .unwrap();
 
@@ -470,7 +471,7 @@ fn the_resolverless_builder_places_holders_instead_of_failing() {
 
 #[test]
 fn a_drawable_chart_is_not_marked_as_a_placeholder() {
-    let display_list = frame_with_one_chart(|_| Ok(chart_space()));
+    let display_list = frame_with_one_chart(|_| Ok(Arc::new(chart_space())));
     assert_eq!(display_list.charts.len(), 1);
     assert!(!display_list.charts[0].placeholder);
     assert_eq!(placeholder_fills(&display_list), 0);

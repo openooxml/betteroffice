@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::{
@@ -377,7 +378,7 @@ fn visible_charts<'a>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn render_charts<F>(
+pub(crate) fn render_charts<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -388,7 +389,8 @@ pub(crate) fn render_charts<F>(
     resolver: &mut F,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     render_charts_with_budget(
         sheet,
@@ -404,7 +406,7 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_charts_with_budget<F>(
+fn render_charts_with_budget<F, R>(
     sheet: &Sheet,
     geometry: &GridGeometry,
     viewport: &Viewport,
@@ -416,7 +418,8 @@ fn render_charts_with_budget<F>(
     max_ops: usize,
 ) -> Result<(), RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     let mut remaining = max_ops;
     for visible in visible_charts(sheet, geometry, viewport, frozen_rows, frozen_cols)? {
@@ -463,7 +466,7 @@ enum ChartOutcome {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn plot_one_chart<F>(
+fn plot_one_chart<F, R>(
     chart: &SheetChart,
     rect: PlotRect,
     clip: Rect,
@@ -473,14 +476,15 @@ fn plot_one_chart<F>(
     resolver: &mut F,
 ) -> ChartOutcome
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
-    let space = match resolver(chart) {
-        Ok(space) => space,
+    let space: Arc<ChartSpace> = match resolver(chart) {
+        Ok(space) => space.into(),
         Err(error) if error.refuses_frame() => return ChartOutcome::Fatal(error),
         Err(_) => return ChartOutcome::Degraded(degraded_label(None)),
     };
-    let plot = PlotChart::from(&space);
+    let plot = PlotChart::from(space.as_ref());
     let label = chart_aria_label(&plot);
     if let Some(error) = chart_refusal(chart, &space) {
         if error.refuses_frame() {
@@ -1131,7 +1135,7 @@ mod tests {
         let resolved = std::cell::Cell::new(0);
         let mut resolver = |_: &SheetChart| {
             resolved.set(resolved.get() + 1);
-            Ok(ChartSpace {
+            Ok(Arc::new(ChartSpace {
                 chart_type: "line".into(),
                 title: None,
                 legend: Some(ChartLegend {
@@ -1144,7 +1148,7 @@ mod tests {
                 plot_groups: Vec::new(),
                 axis_list: None,
                 ..Default::default()
-            })
+            }))
         };
         let error = render_charts_with_budget(
             &sheet,
@@ -1242,7 +1246,7 @@ mod tests {
             height: 200.0,
         };
         let mut resolver = |chart: &SheetChart| {
-            Err(RenderError::ChartParseFailed {
+            Err::<ChartSpace, _>(RenderError::ChartParseFailed {
                 part: chart.part.clone(),
             })
         };

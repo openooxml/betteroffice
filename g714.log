@@ -1,0 +1,16 @@
+### fmt
+error: encountered diff marker
+   --> /private/tmp/bo-perf-land-20260920/crates/betteroffice-xlsx/src/workbook.rs:292:1
+    |
+292 | <<<<<<< HEAD
+    | ^^^^^^^ between this marker and `=======` is the code that you are merging into
+### clippy
+error: encountered diff marker
+error: could not compile `betteroffice-xlsx` (lib) due to 1 previous error
+error: could not compile `betteroffice-xlsx` (lib test) due to 1 previous error
+### test
+passed= failed=
+error: encountered diff marker
+error: could not compile `betteroffice-xlsx` (lib) due to 1 previous error
+error: could not compile `betteroffice-xlsx` (lib test) due to 1 previous error
+### GATE RED

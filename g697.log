@@ -1,0 +1,13 @@
+### fmt
+### clippy
+### test
+passed=623 failed=0
+### wasm+drift
+[INFO]: 📦   Your wasm pkg is ready to publish at /private/tmp/bo-perf-land-20260920/target/wasm-pack/pptx-wasm.
+(empty=no drift)
+### bun
+ 262 pass
+ 0 fail
+### tsc
+ok-packages=3
+### GATE GREEN
