@@ -17,7 +17,7 @@ names.
 
 ## Secrets
 
-Create an `native-macos` environment with required reviewers, then create
+Create a `native-macos` environment with required reviewers, then create
 these as environment secrets. All six are required for the signed path; if any
 is missing the workflow retains only the unsigned artifact.
 
