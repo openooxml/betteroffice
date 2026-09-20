@@ -41,11 +41,14 @@ impl EvaluationBudget {
     }
 }
 
-/// evaluation environment: the cell source plus the sheet unqualified refs
-/// resolve against.
+/// evaluation environment: the cell source, the sheet unqualified refs resolve
+/// against, and the cell the formula belongs to.
 pub struct EvalContext<'a> {
     pub provider: &'a dyn CellProvider,
     pub sheet: SheetId,
+    /// the cell this formula belongs to; `None` -> referenceless ROW()/COLUMN()
+    /// return #VALUE!.
+    pub cell: Option<CellRef>,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
     /// seed for the volatile random functions; `None` takes a fresh stream from
@@ -67,6 +70,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -84,6 +88,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: Some(now_serial),
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -105,6 +110,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -122,6 +128,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider: self.provider,
             sheet,
+            cell: self.cell,
             now_serial: self.now_serial,
             rand_seed: self.rand_seed,
             random_state: Rc::clone(&self.random_state),
@@ -633,9 +640,13 @@ impl Area {
 }
 
 /// interpret an argument as a rectangular reference (1x1 for single cells);
-/// `None` for non-references or unknown sheets.
+/// `None` for non-references, unknown sheets, and reference functions whose
+/// result is #REF!.
 pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     match arg {
+        Expr::FuncCall { name, args } if name.eq_ignore_ascii_case("OFFSET") => {
+            crate::functions::lookups::offset_area(args, ctx).ok()
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,

@@ -289,6 +289,98 @@ fn lookup_functions() {
     ]);
 }
 
+/// without a calling cell the referenceless forms stay #VALUE!; `ROWS`/`COLUMNS`
+/// have no referenceless form at all.
+#[test]
+fn referenceless_position_needs_a_calling_cell() {
+    check(&[
+        ("ROW()", e(ErrorValue::Value)),
+        ("COLUMN()", e(ErrorValue::Value)),
+        ("ROWS()", e(ErrorValue::Value)),
+        ("COLUMNS()", e(ErrorValue::Value)),
+        ("ROW(A1,B1)", e(ErrorValue::Value)),
+    ]);
+}
+
+#[test]
+fn offset_shifts_a_single_cell() {
+    check(&[
+        ("OFFSET(A1, 2, 0)", n(30.0)),
+        ("OFFSET(A1, 0, 2)", n(1.0)),
+        ("OFFSET(A1, 1, 1)", t("banana")),
+        ("OFFSET(C3, -2, -2)", n(10.0)),
+        ("OFFSET($A$1, 4, 0)", n(50.0)),
+        ("offset(A1, 2, 0)", n(30.0)),
+    ]);
+}
+
+#[test]
+fn offset_sizes_default_to_the_reference() {
+    check(&[
+        ("ROW(OFFSET(E1:F4, 1, 0))", n(2.0)),
+        ("COLUMN(OFFSET(E1:F4, 0, 2))", n(7.0)),
+        ("ROWS(OFFSET(E1:F4, 1, 0))", n(4.0)),
+        ("COLUMNS(OFFSET(E1:F4, 1, 0))", n(2.0)),
+        ("ROWS(OFFSET(A1, 1, 0))", n(1.0)),
+        ("COLUMNS(OFFSET(A:B, 0, 1))", n(2.0)),
+        ("COLUMN(OFFSET(A:B, 0, 1))", n(2.0)),
+    ]);
+}
+
+#[test]
+fn offset_resizes_and_extends_backwards() {
+    check(&[
+        ("SUM(OFFSET(A1, 1, 0, 3, 1))", n(90.0)),
+        ("SUM(OFFSET(A1, 1, 0, 3))", n(90.0)),
+        ("SUM(OFFSET(A3, 0, 0, -3, 1))", n(60.0)),
+        ("ROW(OFFSET(A5, 0, 0, -3, 1))", n(3.0)),
+        ("ROWS(OFFSET(A5, 0, 0, -3, 1))", n(3.0)),
+        ("COLUMN(OFFSET(C1, 0, 0, 1, -3))", n(1.0)),
+        ("COLUMNS(OFFSET(C1, 0, 0, 1, -3))", n(3.0)),
+        ("ROWS(OFFSET(A1, 0, 0, 2, 3))", n(2.0)),
+        ("COLUMNS(OFFSET(A1, 0, 0, 2, 3))", n(3.0)),
+    ]);
+}
+
+#[test]
+fn offset_rejects_empty_and_off_sheet_rectangles() {
+    check(&[
+        ("OFFSET(A1, 0, 0, 0, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, 1, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, Z9, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, -1, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, -1)", e(ErrorValue::Ref)),
+        ("OFFSET(A2, 0, 0, -3, 1)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 1048576, 0)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 16384)", e(ErrorValue::Ref)),
+        ("OFFSET(A1, 0, 0, 1048577, 1)", e(ErrorValue::Ref)),
+        ("SUM(OFFSET(A1, -1, 0))", e(ErrorValue::Ref)),
+    ]);
+}
+
+#[test]
+fn offset_argument_errors_and_scalar_context() {
+    check(&[
+        ("OFFSET(A1, 0, 0, 2, 1)", e(ErrorValue::Value)),
+        ("OFFSET(5, 1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1, 1, 1, 1, 1)", e(ErrorValue::Value)),
+        ("OFFSET(A1, 1/0, 0)", e(ErrorValue::Div0)),
+        ("OFFSET(A1, 0, 0, NA(), 1)", e(ErrorValue::NA)),
+    ]);
+}
+
+#[test]
+fn offset_feeds_the_other_reference_functions() {
+    check(&[
+        ("VLOOKUP(2, OFFSET(E1, 0, 0, 4, 2), 2, FALSE)", t("two")),
+        ("MATCH(30, OFFSET(A1, 0, 0, 5, 1), 0)", n(3.0)),
+        ("INDEX(OFFSET(A1, 0, 0, 5, 1), 4)", n(40.0)),
+        ("SUM(OFFSET(OFFSET(A1, 1, 0), 1, 0, 2, 1))", n(70.0)),
+        ("AVERAGE(OFFSET(A1, 0, 0, 5, 1))", n(30.0)),
+    ]);
+}
+
 #[test]
 fn info_functions() {
     check(&[
@@ -472,4 +564,15 @@ fn randbetween_replays_a_pinned_seed() {
     assert_eq!(draws(src, Some(7), 16), draws(src, Some(7), 16));
     assert_ne!(draws(src, Some(7), 16), draws(src, Some(8), 16));
     assert_ne!(draws(src, None, 16), draws(src, None, 16));
+}
+/// an argument that cannot become an area may still have said why: OFFSET
+/// past the sheet edge is #REF!, and the count must not flatten it to #VALUE!.
+#[test]
+fn reference_counts_propagate_their_arguments_error() {
+    check(&[
+        ("ROWS(OFFSET(A1,-1,0))", e(ErrorValue::Ref)),
+        ("COLUMNS(OFFSET(A1,0,-1))", e(ErrorValue::Ref)),
+        ("ROWS(1/0)", e(ErrorValue::Div0)),
+        ("ROWS(5)", e(ErrorValue::Value)),
+    ]);
 }

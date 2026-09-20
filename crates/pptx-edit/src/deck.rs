@@ -6,7 +6,7 @@ use ooxml_drawingml::{
     ColorValue, ShapeFill, ShapeOutline, Theme, preset_geometry_default_adjustments,
     preset_geometry_to_path, resolve_color_value_to_hex, resolve_color_value_to_hex_with_theme,
 };
-use pptx_parse::{ChartAxis, ChartSpace, PptxPackage, ShapeBase, ShapeNode, Slide};
+use pptx_parse::{ChartAxis, ChartSpace, PptxPackage, ShapeBase, ShapeNode};
 use serde::de::DeserializeOwned;
 use yrs::{
     Any, Array, ArrayPrelim, ArrayRef, Doc, Map, MapPrelim, MapRef, Out, ReadTxn, TextRef,
@@ -63,7 +63,7 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
     let mut slide_id_by_part: HashMap<String, String> = HashMap::new();
 
     for (slide_index, slide) in package.slides.iter().enumerate() {
-        let theme = slide_theme(package, slide);
+        let theme = pptx_parse::slide_theme(package, Some(&slide.part_path), None);
         let slide_id = seeded_slide_id(slide_index, package.presentation.slides[slide_index].id);
         order.push_back(&mut txn, slide_id.as_str());
         let slide_map = slides.insert(&mut txn, slide_id.as_str(), MapPrelim::default());
@@ -87,7 +87,7 @@ pub(crate) fn seed_doc(doc: &Doc, package: &PptxPackage, fingerprint: &str) -> E
                 &slide_id,
                 &shape_index.to_string(),
                 shape,
-                theme,
+                Some(&theme),
             )?;
             shape_order.push_back(&mut txn, shape_id.as_str());
         }
@@ -219,48 +219,6 @@ pub(crate) fn shape_base(shape: &ShapeNode) -> &ShapeBase {
         ShapeNode::GraphicFrame(shape) => &shape.base,
         ShapeNode::Group(shape) => &shape.base,
     }
-}
-
-fn slide_theme<'a>(package: &'a PptxPackage, slide: &Slide) -> Option<&'a Theme> {
-    theme_for_layout(package, slide.layout_part_path.as_deref())
-}
-
-fn theme_for_layout<'a>(
-    package: &'a PptxPackage,
-    layout_part_path: Option<&str>,
-) -> Option<&'a Theme> {
-    let layout = layout_part_path
-        .and_then(|path| {
-            package
-                .layouts
-                .iter()
-                .find(|layout| layout.part_path == path)
-        })
-        .or_else(|| package.layouts.first());
-    let master = layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first());
-    master
-        .and_then(|master| master.theme_part_path.as_deref())
-        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
-        .map(|part| &part.theme)
-        .or_else(|| package.themes.first().map(|part| &part.theme))
 }
 
 fn insert_json<T: serde::Serialize>(
@@ -1555,7 +1513,11 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
             .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
         let source_part_path = map_string(&slide, &txn, "sourcePartPath");
         let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
-        let theme = theme_for_layout(package, layout_part_path.as_deref());
+        let theme = pptx_parse::slide_theme(
+            package,
+            source_part_path.as_deref(),
+            layout_part_path.as_deref(),
+        );
         let shape_order = slide_shape_order(&slide, &txn)?;
         let mut shape_snapshots = Vec::new();
         for shape_id in live_shape_order(&shape_order, &txn)? {
@@ -1565,7 +1527,7 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
                 &txn,
                 &shape_id,
                 &mut HashSet::new(),
-                theme,
+                Some(&theme),
             )?);
         }
         let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {

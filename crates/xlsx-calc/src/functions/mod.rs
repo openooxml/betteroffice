@@ -117,6 +117,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "VLOOKUP" => lookups::vlookup,
         "HLOOKUP" => lookups::hlookup,
         "INDEX" => lookups::index,
+        "OFFSET" => lookups::offset,
         "MATCH" => lookups::match_,
         "XLOOKUP" => lookups::xlookup,
         "CHOOSE" => lookups::choose,
