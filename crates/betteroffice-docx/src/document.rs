@@ -6,7 +6,7 @@ use docx_parse::inline::{InlineNode, Run, RunContent, RunType};
 use docx_parse::paragraph::{Paragraph, ParagraphContent};
 use docx_parse::s9::{S9DocumentBodyWire, S9PackageWire, S9ParseOptions, S9SectionWire};
 use docx_parse::serializer::{
-    S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13,
+    S13SaveOptions, S13SaveRequest, SerializerDeterminism, write_docx_s13_parts,
 };
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
@@ -16,7 +16,9 @@ use crate::types::DEFAULT_SERIALIZATION_TIME;
 use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveOptions};
 
 pub struct Document {
-    original: Vec<u8>,
+    /// Inflated package parts retained from open; `save` consumes them without
+    /// re-inflating the archive.
+    original_parts: Vec<(String, Vec<u8>)>,
     seed: String,
     model: DocumentModel,
     #[cfg(feature = "raster")]
@@ -33,8 +35,11 @@ impl Document {
     /// [`Document::open`] under a caller-supplied parse budget. A document that
     /// exceeds any limit is rejected rather than truncated.
     pub fn open_with_limits(bytes: &[u8], limits: &ParseLimits) -> Result<Self> {
-        let parsed =
-            docx_parse::parse_docx_s9_wire_with_limits(bytes, S9ParseOptions::default(), limits)?;
+        let (parsed, original_parts) = docx_parse::parse_docx_s9_wire_parts_with_limits(
+            bytes,
+            S9ParseOptions::default(),
+            limits,
+        )?;
         let document = parsed.document;
         let model = model_from_package(
             document.package,
@@ -42,7 +47,7 @@ impl Document {
             document.warnings.unwrap_or_default(),
         );
         Ok(Self {
-            original: bytes.to_vec(),
+            original_parts,
             seed: format!("{:x}", Sha256::digest(bytes)),
             model,
             #[cfg(feature = "raster")]
@@ -197,7 +202,7 @@ impl Document {
             },
             selective: None,
         };
-        write_docx_s13(request, &self.original).map_err(Error::from)
+        write_docx_s13_parts(request, &self.original_parts).map_err(Error::from)
     }
 }
 

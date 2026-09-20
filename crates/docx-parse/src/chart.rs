@@ -136,8 +136,8 @@ pub fn parse_chart_xml(
 /// together cost no more reads than one part was allowed before. A part the
 /// remainder cannot cover is declined like a malformed one. Nothing else is
 /// shared, so per-part isolation still holds.
-pub fn parse_chart_parts(
-    all_xml: &IndexMap<String, Vec<u8>>,
+pub fn parse_chart_parts<S: AsRef<[u8]>>(
+    all_xml: &IndexMap<String, S>,
     limits: &ParseLimits,
 ) -> ChartPartsMap {
     let mut charts = ChartPartsMap::new();
@@ -151,7 +151,7 @@ pub fn parse_chart_parts(
             ..limits.clone()
         };
         let mut budget = ParseBudget::new(&part_limits);
-        let parsed = parse_chart_xml(xml, Some(&normalized), path, &mut budget);
+        let parsed = parse_chart_xml(xml.as_ref(), Some(&normalized), path, &mut budget);
         events -= budget.xml_events();
         let Ok(Some(chart)) = parsed else {
             continue;

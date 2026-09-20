@@ -119,13 +119,15 @@ pub fn unzip_parts_with_limits(
 }
 
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
-pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+/// Entry bytes may be owned or borrowed.
+pub fn rezip_parts<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<Vec<u8>, String> {
     if entries.len() > MAX_ENTRY_COUNT {
         return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
     }
     let mut seen_paths = HashSet::new();
     let mut total = 0_u64;
     for (name, bytes) in entries {
+        let bytes = bytes.as_ref();
         let Some(security_path) = normalized_security_path(name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
@@ -152,7 +154,7 @@ pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
                 .start_file(name, options)
                 .map_err(|e| format!("start_file {name}: {e}"))?;
             writer
-                .write_all(bytes)
+                .write_all(bytes.as_ref())
                 .map_err(|e| format!("write {name}: {e}"))?;
         }
         writer.finish().map_err(|e| format!("finish: {e}"))?;
