@@ -136,6 +136,11 @@ impl Presentation {
         Ok(self.session.snapshot()?)
     }
 
+    /// Slide ids in deck order, without serializing a full [`DeckSnapshot`].
+    pub fn slide_ids(&self) -> Result<Vec<String>> {
+        Ok(self.session.slide_ids()?)
+    }
+
     pub fn story(&self, story_id: &str) -> Result<StorySnapshot> {
         Ok(self.session.story(story_id)?)
     }

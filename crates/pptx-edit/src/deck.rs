@@ -282,6 +282,29 @@ impl DeckSession {
         snapshot_doc(&self.doc, &self.package)
     }
 
+    /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
+    pub fn slide_ids(&self) -> EditResult<Vec<String>> {
+        let txn = self.doc.transact();
+        let order = required_order(&txn)?;
+        let slides = required_map(&txn, SLIDES)?;
+        let mut seen_slides = HashSet::new();
+        let mut ids = Vec::new();
+        for slide_id in string_array_ref(&order, &txn) {
+            if !seen_slides.insert(slide_id.clone()) {
+                continue;
+            }
+            if slides
+                .get(&txn, &slide_id)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .is_none()
+            {
+                return Err(EditError::InvalidState(format!("missing slide {slide_id}")));
+            }
+            ids.push(slide_id);
+        }
+        Ok(ids)
+    }
+
     pub fn insert_slide(
         &self,
         context: &EditCtx,
