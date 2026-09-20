@@ -391,14 +391,7 @@ impl EditingDoc {
         Ok(para_id)
     }
 
-    /// Adds a story holding every listed paragraph in ONE transaction — the
-    /// `load_json` seeding path, at O(story) instead of O(paragraphs × story).
-    ///
-    /// Equivalent to `create_story` plus appending each further paragraph at
-    /// the trailing pilcrow: a seeded mark only ever holds `paraId`, `pStyle`
-    /// and `alignment`, exactly what the split path converges to. Texts beyond
-    /// the first paragraph must be break-free, matching `insert_text`.
-    /// Returns the paragraph IDs in document order.
+    /// Seeds a story and returns its paragraph IDs in document order.
     pub fn seed_story(
         &self,
         story_id: impl Into<StoryId>,
@@ -406,6 +399,9 @@ impl EditingDoc {
     ) -> OpResult<Vec<ParagraphId>> {
         if paragraphs.is_empty() {
             return Err(OpError::EmptyRange);
+        }
+        for paragraph in &paragraphs[1..] {
+            ops::text::validate_text(&paragraph.text)?;
         }
         let story_id = story_id.into();
         let mut txn = self.doc.transact_mut_with(self.client_id);
@@ -419,13 +415,7 @@ impl EditingDoc {
         let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
         let mut para_ids = Vec::with_capacity(paragraphs.len());
         let attrs = Box::new(insertion_attrs(None, None));
-        for (index, paragraph) in paragraphs.iter().enumerate() {
-            if index > 0
-                && let Err(error) = ops::text::validate_text(&paragraph.text)
-            {
-                story.apply_delta(&mut txn, std::mem::take(&mut deltas));
-                return Err(error);
-            }
+        for paragraph in paragraphs.iter() {
             if !paragraph.text.is_empty() {
                 deltas.push(Delta::Inserted(
                     In::Any(Any::String(Arc::from(paragraph.text.as_str()))),
@@ -926,6 +916,65 @@ mod tests {
             return None;
         };
         Some(author.to_string())
+    }
+
+    fn seed_paragraph(text: &str) -> SeedParagraph {
+        SeedParagraph {
+            text: text.to_owned(),
+            p_style: "Normal".to_owned(),
+            alignment: "left".to_owned(),
+        }
+    }
+
+    #[test]
+    fn seed_story_returns_ids_in_order_and_marks_paragraphs() {
+        let doc = EditingDoc::new(100);
+        let ids = doc
+            .seed_story(
+                "body",
+                &[
+                    seed_paragraph("one"),
+                    seed_paragraph("two"),
+                    seed_paragraph(""),
+                ],
+            )
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+        let segments = doc.story_segments("body").unwrap();
+        let joined: String = segments
+            .iter()
+            .filter_map(|segment| match &segment.content {
+                SegmentContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, "onetwo");
+        assert_eq!(doc.story_len("body").unwrap(), 3 + "onetwo".len() as u32);
+    }
+
+    #[test]
+    fn seed_story_rejects_breaks_without_committing() {
+        let doc = EditingDoc::new(100);
+        let result = doc.seed_story("body", &[seed_paragraph("ok"), seed_paragraph("bad\ntext")]);
+        assert!(matches!(result, Err(OpError::TextContainsBreak)));
+        assert!(matches!(
+            doc.story_len("body"),
+            Err(EditError::StoryNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn seed_story_rejects_empty_and_existing() {
+        let doc = EditingDoc::new(100);
+        assert!(matches!(
+            doc.seed_story("body", &[]),
+            Err(OpError::EmptyRange)
+        ));
+        doc.seed_story("body", &[seed_paragraph("a")]).unwrap();
+        assert!(matches!(
+            doc.seed_story("body", &[seed_paragraph("b")]),
+            Err(OpError::StoryExists(_))
+        ));
     }
 
     #[test]
