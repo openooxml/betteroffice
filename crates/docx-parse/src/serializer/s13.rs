@@ -5,6 +5,7 @@
 //! paragraph remains authored exactly as it appeared in the source package.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -690,7 +691,7 @@ fn visit_new_images(
     for block in blocks {
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     match content {
                         ParagraphContent::Inline(InlineNode::Run(run)) => {
                             visit_run_images(run, visit)?
@@ -707,7 +708,7 @@ fn visit_new_images(
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_new_images(&mut cell.content, visit)?;
                     }
@@ -1103,20 +1104,20 @@ fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyp
     for block in blocks {
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     if let ParagraphContent::Inline(InlineNode::Hyperlink(hyperlink)) = content {
                         visit(hyperlink);
                     }
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_hyperlinks(&mut cell.content, visit);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut sdt.content, visit),
+            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut Arc::make_mut(sdt).content, visit),
             BlockContent::RawXml(_) => {}
         }
     }

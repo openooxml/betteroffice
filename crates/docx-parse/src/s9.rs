@@ -1,6 +1,7 @@
 //! S9 full package orchestration and the versioned read-facade wire model.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -513,15 +514,19 @@ fn dedupe_blocks(
 ) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => dedupe_paragraph(paragraph, seen, ids),
+            BlockContent::Paragraph(paragraph) => {
+                dedupe_paragraph(Arc::make_mut(paragraph), seen, ids)
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         dedupe_blocks(&mut cell.content, seen, ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut sdt.content, seen, ids),
+            BlockContent::BlockSdt(sdt) => {
+                dedupe_blocks(&mut Arc::make_mut(sdt).content, seen, ids)
+            }
             BlockContent::RawXml(_) => {}
         }
     }

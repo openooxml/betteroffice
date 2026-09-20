@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use docx_edit::{EditCtx, EditingDoc, Receipt, StoryRange};
 use docx_layout::types::Input as LayoutInput;
 use docx_parse::block::BlockContent;
@@ -352,11 +354,11 @@ fn find_paragraph_mut<'a>(
     for block in blocks {
         match block {
             BlockContent::Paragraph(paragraph) if paragraph.para_id.as_deref() == Some(para_id) => {
-                return Some(paragraph);
+                return Some(Arc::make_mut(paragraph));
             }
             BlockContent::Paragraph(_) => {}
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         if let Some(paragraph) = find_paragraph_mut(&mut cell.content, para_id) {
                             return Some(paragraph);
@@ -365,7 +367,9 @@ fn find_paragraph_mut<'a>(
                 }
             }
             BlockContent::BlockSdt(sdt) => {
-                if let Some(paragraph) = find_paragraph_mut(&mut sdt.content, para_id) {
+                if let Some(paragraph) =
+                    find_paragraph_mut(&mut Arc::make_mut(sdt).content, para_id)
+                {
                     return Some(paragraph);
                 }
             }
