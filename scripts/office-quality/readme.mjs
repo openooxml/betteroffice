@@ -108,7 +108,6 @@ export function renderSection(report) {
     ];
     if (format === 'docx' && timing) {
       const channels = ['published', 'commit', 'libreoffice'].map((channel) => timing.channels[channel]);
-      rows.push(['Timed/total', ...channels.map((channel) => `${channel.successful}/${timing.total}`)]);
       rows.push(['Render time (avg)', ...channels.map((channel) => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
     }
     const value = (text) => `<td align="right">${text}</td>`;
@@ -134,9 +133,7 @@ export function renderSection(report) {
 Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
 
 ${docxTable}
-${timing ? `
-Native CLI timing: full DOCX → first-page PNG at 96 DPI, five fresh processes after warmup; arithmetic mean over the same ${timing.common}/${timing.total} successful documents. BetterOffice fidelity uses the browser renderer. [Method and artifacts](scripts/office-quality/README.md#native-docx-and-libreoffice).
-` : ''}
+
 
 ### PPTX
 
@@ -146,7 +143,7 @@ ${table('pptx')}
 
 ${table('xlsx')}
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
+For scoring, render timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
 
 ${END}`;
 }

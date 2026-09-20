@@ -97,11 +97,8 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><td>Absolute page error</td><td align="right">32</td><td align="right">0</td><td align="right">56</td></tr>
 <tr><td>SSIM</td><td align="right">0.7540</td><td align="right">0.8366</td><td align="right">0.7749</td></tr>
 <tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
-<tr><td>Timed/total</td><td align="right">47/63</td><td align="right">47/63</td><td align="right">63/63</td></tr>
 <tr><td>Render time (avg)</td><td align="right">483 ms</td><td align="right">478 ms</td><td align="right">705 ms</td></tr>
 </table>
-
-Native CLI timing: full DOCX → first-page PNG at 96 DPI, five fresh processes after warmup; arithmetic mean over the same 47/63 successful documents. BetterOffice fidelity uses the browser renderer. [Method and artifacts](scripts/office-quality/README.md#native-docx-and-libreoffice).
 
 
 ### PPTX
@@ -120,7 +117,7 @@ Native CLI timing: full DOCX → first-page PNG at 96 DPI, five fresh processes 
 <tr><td>Scored/total</td><td align="right">8/8</td><td align="right">8/8</td></tr>
 </table>
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
+For scoring, render timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
 
 <!-- END GENERATED VISUAL FIDELITY -->
 
