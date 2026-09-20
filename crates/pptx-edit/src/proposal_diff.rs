@@ -8,7 +8,7 @@ use yrs::{ArrayRef, Map, MapRef, ReadTxn, Transact};
 use crate::comments::{snapshot_comments, snapshot_flavor};
 use crate::deck::{
     live_shape_order, map_string, map_string_array, required_map, required_order, slide_notes,
-    slide_ref, slide_shape_order, snapshot_shape, string_array_ref, theme_for_layout,
+    slide_ref, slide_shape_order, snapshot_shape, string_array_ref,
 };
 use crate::proposals::{apply_edit, shape_text};
 use crate::{
@@ -249,8 +249,9 @@ fn scoped_capture<T: ReadTxn>(
             if !shape_in_tree(txn, &slide_shape_order(&slide, txn)?, shape_id)? {
                 return Err(EditError::ShapeNotFound(shape_id.to_owned()));
             }
-            let theme = theme_for_layout(
+            let theme = pptx_parse::slide_theme(
                 package,
+                map_string(&slide, txn, "sourcePartPath").as_deref(),
                 map_string(&slide, txn, "layoutPartPath").as_deref(),
             );
             let shape = snapshot_shape(
@@ -259,7 +260,7 @@ fn scoped_capture<T: ReadTxn>(
                 txn,
                 shape_id,
                 &mut HashSet::new(),
-                theme,
+                Some(&theme),
             )?;
             let text = shape_text(&shape);
             Ok((Some(shape), text))
