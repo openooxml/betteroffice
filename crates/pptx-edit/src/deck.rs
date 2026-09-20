@@ -1301,11 +1301,15 @@ fn merge_source_paragraph_properties(
         || target.line_spacing != source.line_spacing
         || target.margin_right != source.margin_right
         || target.space_before != source.space_before
-        || target.space_after != source.space_after;
+        || target.space_after != source.space_after
+        || target.default_tab_size != source.default_tab_size
+        || target.tab_stops != source.tab_stops;
     target.line_spacing = source.line_spacing;
     target.margin_right = source.margin_right;
     target.space_before = source.space_before;
     target.space_after = source.space_after;
+    target.default_tab_size = source.default_tab_size;
+    target.tab_stops.clone_from(&source.tab_stops);
     if let (
         Some(pptx_parse::Bullet::AutoNumber {
             restart: target, ..

@@ -761,6 +761,13 @@ pub struct ParagraphProperties {
     pub bullet_color: Option<BulletColor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bullet_size: Option<BulletSize>,
+    /// `a:pPr/@defTabSz` in EMU: the pitch of the implicit tab stops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_tab_size: Option<i64>,
+    /// `a:pPr/a:tabLst` positions in EMU. A declared empty list clears the
+    /// stops the list style would otherwise contribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_stops: Option<Vec<i64>>,
     pub default_run: Option<RunProperties>,
 }
 
