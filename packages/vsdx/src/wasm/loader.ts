@@ -1,6 +1,6 @@
 import initWasmModule, { VsdxDocument, VsdxRenderer, rendererVersion } from './generated/vsdx_wasm.js';
 import type { InitInput } from './generated/vsdx_wasm.js';
-import type { CellLocator, CellFormulaReceipt, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, DocumentMaster, RawValidationIssue, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeDataReceipt, ShapeDataWrite, ShapeReceipt, ShapeTreeGlue, TextReceipt, ValidationIssue, VsdxFontFace } from '../types';
+import type { CellLocator, CellFormulaReceipt, CellWriteProbe, CellWriteQuery, CollaborationUpdateOrigin, ConnectedShapeReceipt, ConnectorGlue, ConnectorRoutePoint, ConnectorRouteReceipt, DiagramSnapshot, DocumentMaster, RawValidationIssue, FormulaShapeDraft, FormulaShapeTreeDraft, HistoryResult, HitTestResult, PageDisplayList, PageLayer, ShapeDataReceipt, ShapeDataWrite, ShapeReceipt, ShapeTreeGlue, TextReceipt, ValidationIssue, VsdxFontFace } from '../types';
 
 export type WasmInitInput = InitInput | Promise<InitInput>;
 export interface OpenDiagramOptions { clientId?: number; fonts?: ReadonlyArray<VsdxFontFace>; initialUpdate?: Uint8Array; }
@@ -25,6 +25,7 @@ export interface DiagramHandle {
   hitTest(x: number, y: number): HitTestResult | null;
   mediaBytes(assetId: string): Uint8Array;
   setCellFormula(pageId: string, shapeId: string, locator: CellLocator, formula: string): CellFormulaReceipt;
+  probeCellWrites(pageId: string, shapeId: string, probes: readonly CellWriteQuery[]): CellWriteProbe[];
   setCellFormulas(writes: ReadonlyArray<CellFormulaWrite>): CellFormulaReceipt[];
   setShapeData(pageId: string, shapeId: string, writes: ReadonlyArray<ShapeDataWrite>): ShapeDataReceipt[];
   setControlHandle(pageId: string, shapeId: string, row: string, xFormula: string | null, yFormula: string | null): CellFormulaReceipt[];
@@ -174,6 +175,7 @@ export function openDiagram(bytes: Uint8Array, options: OpenDiagramOptions = {})
       return hit && shapeId ? { ...hit, shapeId } : null;
     }, mediaBytes: assetId => wasm(() => doc.mediaBytes(assetId).slice()),
     setCellFormula: (pageId, shapeId, locator, formula) => json(() => doc.setCellFormulaJson(JSON.stringify({ pageId, shapeId, locator, formula })), true),
+    probeCellWrites: (pageId, shapeId, probes) => json(() => doc.probeCellWritesJson(JSON.stringify({ pageId, shapeId, probes: [...probes] }))),
     setCellFormulas: (writes) => json(() => doc.setCellFormulasJson(JSON.stringify({ writes: [...writes] })), true),
     setShapeData: (pageId, shapeId, writes) => json(() => doc.setShapeDataJson(JSON.stringify({ pageId, shapeId, writes: [...writes] })), true),
     setControlHandle: (pageId, shapeId, row, xFormula, yFormula) => json(() => doc.setControlHandleJson(JSON.stringify({ pageId, shapeId, row, xFormula, yFormula })), true),

@@ -8,11 +8,12 @@ export interface TextEngineFontSink {
    */
   registerFont(bytes: Uint8Array): number;
   /**
-   * Register a measurement view of `id` carrying the vertical metrics Word
-   * measures `family` with, and return its id — the engine's answer to a face
-   * this host had to substitute. Returns `id` for a family whose metrics the
-   * engine does not know. Optional so partial sinks (tests, older hosts) keep
-   * working; without it a substitute measures with its own metrics.
+   * Register a measurement view of `id` carrying the vertical metrics and
+   * advance pitch Word measures `family` with, and return its id — the
+   * engine's answer to a face this host had to substitute. Returns `id` for a
+   * family whose metrics the engine does not know. Optional so partial sinks
+   * (tests, older hosts) keep working; without it a substitute measures with
+   * its own metrics.
    */
   registerSubstituteFont?(id: number, family: string): number;
 }

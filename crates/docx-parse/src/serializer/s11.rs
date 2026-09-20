@@ -170,11 +170,11 @@ fn find_inline(blocks: Vec<BlockContent>, node_type: &str) -> Option<InlineNode>
     let BlockContent::Paragraph(paragraph) = blocks.into_iter().next()? else {
         return None;
     };
-    paragraph.content.into_iter().find_map(|content| {
+    paragraph.content.iter().find_map(|content| {
         let ParagraphContent::Inline(node) = content else {
             return None;
         };
-        (node.node_type() == node_type).then_some(node)
+        (node.node_type() == node_type).then(|| node.clone())
     })
 }
 

@@ -3,6 +3,7 @@ use betteroffice_xlsx::{
     PrintMetrics, Sheet, SheetId, Viewport, Workbook, WorkbookModel,
 };
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, Color, Fill, Stylesheet, Xf};
+use xlsx_render::geometry::{autofit_row_height_pt, row_pt_to_px};
 
 fn metrics() -> PrintMetrics {
     PrintMetrics {
@@ -47,7 +48,7 @@ fn printing_uses_font_device_metrics_without_changing_screen_or_source() {
     workbook.set_active_sheet(SheetId(1)).unwrap();
     let model = workbook.model().clone();
     let saved = workbook.save().unwrap();
-    let screen_geometry = GridGeometry::new(&model.sheets[0]);
+    let screen_geometry = GridGeometry::new(&model.sheets[0], &model.styles);
     let viewport = Viewport {
         x: 0.0,
         y: 0.0,
@@ -64,7 +65,8 @@ fn printing_uses_font_device_metrics_without_changing_screen_or_source() {
         )
         .unwrap();
     assert!((printed.width - 604.0 / 3.0).abs() < 0.001);
-    assert!((printed.height - 52.0).abs() < 0.001);
+    let printed_rows = row_pt_to_px(24.0 + autofit_row_height_pt(11.0)) + 96.0 / metrics().dpi;
+    assert!((printed.height - printed_rows).abs() < 0.001);
     assert_eq!(printed.grid.start_row, 1);
     assert_eq!(printed.grid.col_offsets[1], 96.0);
     assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Text { text, font_family, .. } if text == "Row 1" && font_family.as_deref() == Some("Calibri"))));
@@ -83,7 +85,7 @@ fn printing_uses_font_device_metrics_without_changing_screen_or_source() {
         screen
     );
     assert_eq!(
-        GridGeometry::new(&model.sheets[0]).col_x(1),
+        GridGeometry::new(&model.sheets[0], &model.styles).col_x(1),
         screen_geometry.col_x(1)
     );
 }
@@ -345,4 +347,79 @@ fn display_only_hyperlinks_use_the_same_print_font_and_position_as_cells() {
     assert!((texts[1].0 - texts[0].0 - printed.grid.col_offsets[1]).abs() < 0.001);
     assert_eq!(texts[0].0, 4.0);
     assert!((texts[0].1 - 80.0 / 3.0).abs() < 0.001);
+}
+
+fn autofit_parts() -> Vec<(String, Vec<u8>)> {
+    let mut model = WorkbookModel::default();
+    model.styles.cell_xfs.push(Default::default());
+    model.sheets.push(Sheet::new("Data"));
+    let mut parts = xlsx_parse::serialize_workbook(&model).unwrap();
+    let styles = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><fonts count="2"><font><sz val="11"/><name val="Calibri"/></font><font><sz val="30"/><name val="Comic Sans MS"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/><xf numFmtId="0" fontId="1" fillId="0" borderId="0" applyAlignment="1"/></cellXfs></styleSheet>"#;
+    let worksheet = br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetFormatPr baseColWidth="8" defaultRowHeight="15"/><sheetData><row r="1"><c r="A1" s="1" t="inlineStr"><is><t>Tall</t></is></c></row><row r="2"><c r="A2" s="0" t="inlineStr"><is><t>Short</t></is></c></row></sheetData></worksheet>"#;
+    for (name, bytes) in parts.iter_mut() {
+        if name == "xl/styles.xml" {
+            *bytes = styles.to_vec();
+        }
+        if name == "xl/worksheets/sheet1.xml" {
+            *bytes = worksheet.to_vec();
+        }
+    }
+    parts
+}
+
+#[test]
+fn an_unsized_row_fits_its_tallest_font_without_writing_a_height() {
+    let parts = autofit_parts();
+    let source = ooxml_opc::rezip_parts(&parts).unwrap();
+    let workbook = Workbook::open(&source).unwrap();
+    let model = workbook.model();
+    let sheet = &model.sheets[0];
+    let geometry = GridGeometry::new(sheet, &model.styles);
+
+    let default_px = row_pt_to_px(15.0);
+    assert!(
+        geometry.row_y(1) > default_px * 1.5,
+        "30pt row stayed at {} px",
+        geometry.row_y(1)
+    );
+    assert!(
+        (geometry.row_y(2) - geometry.row_y(1) - row_pt_to_px(autofit_row_height_pt(11.0))).abs()
+            < 0.001
+    );
+    assert!(sheet.row_heights.is_empty());
+
+    let saved = ooxml_opc::unzip_parts(&workbook.save().unwrap()).unwrap();
+    for (name, bytes) in &parts {
+        assert_eq!(
+            saved
+                .iter()
+                .find(|(saved_name, _)| saved_name == name)
+                .map(|(_, saved_bytes)| saved_bytes),
+            Some(bytes),
+            "{name} changed on save"
+        );
+    }
+}
+
+#[test]
+fn a_sheet_that_pins_its_default_row_height_keeps_every_unsized_row_there() {
+    let mut parts = autofit_parts();
+    for (name, bytes) in parts.iter_mut() {
+        if name == "xl/worksheets/sheet1.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    r#"defaultRowHeight="15""#,
+                    r#"defaultRowHeight="15" customHeight="1""#,
+                )
+                .into_bytes();
+        }
+    }
+    let workbook = Workbook::open(&ooxml_opc::rezip_parts(&parts).unwrap()).unwrap();
+    let model = workbook.model();
+    let geometry = GridGeometry::new(&model.sheets[0], &model.styles);
+    assert_eq!(geometry.row_y(1), row_pt_to_px(15.0));
+    assert_eq!(geometry.row_y(2), row_pt_to_px(30.0));
 }

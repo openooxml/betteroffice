@@ -2,11 +2,13 @@
 //! cell changes, which formulas must re-evaluate?".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
-use crate::deps::references;
-use crate::parser::{Expr, parse_formula};
+use crate::deps::{offset_target, positional_argument, references};
+use crate::eval::{ParseCache, parse_cached};
+use crate::parser::Expr;
 
 /// a formula cell, normalized so `$`-anchoring never splits a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -31,7 +33,8 @@ impl NodeKey {
 }
 
 /// case-insensitive names of functions whose value can change with no input
-/// edit; cells calling them re-evaluate on every recalc.
+/// edit; cells calling them re-evaluate on every recalc. OFFSET joins them per
+/// call site, but only where its target is not statically resolvable.
 const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 
 pub struct DepGraph {
@@ -40,11 +43,20 @@ pub struct DepGraph {
     defined_names: Vec<DefinedName>,
     defined_name_indices: HashMap<(Option<SheetId>, String), usize>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
-    deps: HashMap<NodeKey, Vec<(SheetId, CellRange)>>,
+    deps: HashMap<NodeKey, NodeEntry>,
     /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
     by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
     /// formula cells that must re-evaluate every recalc regardless of edits.
     volatile: HashSet<NodeKey>,
+    /// parsed formula text -> ast, shared with recalc eval so each formula
+    /// parses once across graph construction and every subsequent recalc.
+    asts: ParseCache,
+}
+
+/// one formula node: its parsed ast and the cells/ranges it reads.
+struct NodeEntry {
+    ast: Arc<Expr>,
+    edges: Vec<(SheetId, CellRange)>,
 }
 
 impl DepGraph {
@@ -71,6 +83,7 @@ impl DepGraph {
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
+            asts: ParseCache::default(),
         };
         for (i, sheet) in wb.sheets.iter().enumerate() {
             let sid = SheetId(i as u32);
@@ -101,6 +114,17 @@ impl DepGraph {
     /// coarse invalidation for a sheet removal: ids shift, so rebuild wholesale.
     pub fn remove_sheet(&mut self, wb: &Workbook) {
         *self = Self::build(wb);
+    }
+
+    /// every stored edge as `(range's sheet, range, dependent cell)`.
+    pub(crate) fn edges(
+        &self,
+    ) -> impl Iterator<Item = (SheetId, CellRange, SheetId, CellRef)> + '_ {
+        self.by_sheet.iter().flat_map(|(&sheet, edges)| {
+            edges
+                .iter()
+                .map(move |(range, node)| (sheet, *range, node.sheet, node.cell()))
+        })
     }
 
     /// formula cells that directly read `cell` on `sheet`; may contain
@@ -134,9 +158,22 @@ impl DepGraph {
         self.volatile.iter().map(|k| (k.sheet, k.cell()))
     }
 
+    /// parsed asts shared with `engine::run_recalc` evaluation.
+    pub(crate) fn asts(&self) -> &ParseCache {
+        &self.asts
+    }
+
+    /// the node's parsed ast; `None` when the cell carries no (parseable)
+    /// formula.
+    pub(crate) fn ast(&self, sheet: SheetId, cell: CellRef) -> Option<Arc<Expr>> {
+        self.deps
+            .get(&NodeKey::new(sheet, cell))
+            .map(|n| Arc::clone(&n.ast))
+    }
+
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
-        let Ok(expr) = parse_formula(src) else {
+        let Some(expr) = parse_cached(&self.asts, src) else {
             return;
         };
         let edges = self.resolve_edges(key.sheet, &expr);
@@ -146,13 +183,13 @@ impl DepGraph {
         if self.is_volatile(key.sheet, &expr) {
             self.volatile.insert(key);
         }
-        self.deps.insert(key, edges);
+        self.deps.insert(key, NodeEntry { ast: expr, edges });
     }
 
     /// drop a node's edges from every index it appears in.
     fn uninstall(&mut self, key: NodeKey) {
-        if let Some(edges) = self.deps.remove(&key) {
-            for (sid, _) in &edges {
+        if let Some(entry) = self.deps.remove(&key) {
+            for (sid, _) in &entry.edges {
                 if let Some(list) = self.by_sheet.get_mut(sid) {
                     list.retain(|(_, node)| *node != key);
                 }
@@ -218,7 +255,8 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Ok(expression) = parse_formula(
+            let Some(expression) = parse_cached(
+                &self.asts,
                 defined
                     .formula
                     .strip_prefix('=')
@@ -265,7 +303,8 @@ impl DepGraph {
             if !expanded.insert(key) {
                 continue;
             }
-            let Ok(expression) = parse_formula(
+            let Some(expression) = parse_cached(
+                &self.asts,
                 defined
                     .formula
                     .strip_prefix('=')
@@ -295,7 +334,13 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
                 expressions.push(rhs);
                 expressions.push(lhs);
             }
-            Expr::FuncCall { args, .. } => expressions.extend(args.iter().rev()),
+            Expr::FuncCall { name, args, .. } => expressions.extend(
+                args.iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(index, arg)| !positional_argument(name, *index, arg))
+                    .map(|(_, arg)| arg),
+            ),
             Expr::Number(_)
             | Expr::Text(_)
             | Expr::Bool(_)
@@ -313,9 +358,11 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
     let mut uses = Vec::new();
     while let Some(expression) = expressions.pop() {
         match expression {
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 let upper = name.to_ascii_uppercase();
-                if VOLATILE_FNS.contains(&upper.as_str()) {
+                if VOLATILE_FNS.contains(&upper.as_str())
+                    || (upper == "OFFSET" && offset_target(args).is_none())
+                {
                     return true;
                 }
                 expressions.extend(args.iter().rev());
@@ -399,6 +446,7 @@ mod tests {
             g.deps
                 .get(&NodeKey::new(SheetId(0), a1("C1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -430,6 +478,7 @@ mod tests {
             g.deps
                 .get(&NodeKey::new(SheetId(1), a1("A1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -467,6 +516,30 @@ mod tests {
     }
 
     #[test]
+    fn static_offset_target_is_an_edge_and_not_volatile() {
+        let mut wb = wb2();
+        let s = wb.sheet_mut(SheetId(0)).unwrap();
+        s.set_cell(a1("C1"), formula_cell("OFFSET($A$1, 0, 1)"));
+        s.set_cell(a1("C2"), formula_cell("SUM(OFFSET(A1, 1, 0, 3, 1))"));
+        let g = DepGraph::build(&wb);
+        assert_eq!(deps_a1(&g, "Sheet1", "B1", &wb), vec!["Sheet1!C1"]);
+        assert_eq!(deps_a1(&g, "Sheet1", "A3", &wb), vec!["Sheet1!C2"]);
+        assert!(g.volatile_cells().next().is_none());
+    }
+
+    #[test]
+    fn only_a_computed_offset_is_volatile() {
+        let mut wb = wb2();
+        let s = wb.sheet_mut(SheetId(0)).unwrap();
+        s.set_cell(a1("C1"), formula_cell("OFFSET($A$1, B1, 0)"));
+        s.set_cell(a1("C2"), formula_cell("OFFSET($A$1, 0, 1)"));
+        s.set_cell(a1("C3"), formula_cell("OFFSET($A$1, -1, 0)"));
+        let g = DepGraph::build(&wb);
+        let vol: Vec<String> = g.volatile_cells().map(|(_, c)| c.to_a1()).collect();
+        assert_eq!(vol, vec!["C1"]);
+    }
+
+    #[test]
     fn anchored_refs_normalize_to_same_node() {
         let mut wb = wb2();
         wb.sheet_mut(SheetId(0))
@@ -488,6 +561,7 @@ mod tests {
                 .deps
                 .get(&NodeKey::new(SheetId(0), a1("C1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -573,7 +647,11 @@ mod tests {
 
         let graph = DepGraph::build(&wb);
 
-        assert!(graph.deps[&NodeKey::new(SheetId(0), a1("B1"))].is_empty());
+        assert!(
+            graph.deps[&NodeKey::new(SheetId(0), a1("B1"))]
+                .edges
+                .is_empty()
+        );
         assert!(graph.volatile_cells().next().is_none());
     }
 }

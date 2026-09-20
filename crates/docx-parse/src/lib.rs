@@ -149,7 +149,8 @@ pub use s8::{
 };
 pub use s9::{
     BinaryPartWire, S9DocumentBodyWire, S9DocumentWire, S9PackageWire, S9ParseOptions,
-    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_with_limits,
+    S9SectionWire, S9WireEnvelope, parse_docx_s9_wire, parse_docx_s9_wire_parts_with_limits,
+    parse_docx_s9_wire_with_limits,
 };
 pub use scalars::{
     ColorValue, RunScalarProperties, ShadingProperties, UnderlineValue, parse_color_value,
@@ -165,6 +166,7 @@ pub use serializer::{
     S11SerializeRequest, S11SerializeResponse, S12SerializeRequest, S12SerializeResponse,
     S13SaveOptions, S13SaveRequest, S13SelectiveSave, SerializerDeterminism, canonical_xml_events,
     serialize_s10_wire, serialize_s11_wire, serialize_s12_wire, write_docx_s13,
+    write_docx_s13_parts,
 };
 pub use settings::{
     CompatibilityFlags, DocumentSettings, RevisionView, ThemeFontLanguage, parse_settings,

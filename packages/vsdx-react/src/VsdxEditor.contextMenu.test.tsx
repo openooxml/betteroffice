@@ -30,7 +30,7 @@ function snapshot(cells: Array<ReturnType<typeof cell>>): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ids.map((id) => ({ id, sourceId: 1, name: id, children: [], cells })) }] };
 }
 
-function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
+function stubHandle(state: DiagramSnapshot, calls: Calls, refusals: ReadonlyMap<string, string> = new Map()): DiagramHandle {
   return {
     snapshot: () => state,
     canUndo: () => false,
@@ -42,6 +42,11 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
     },
+    probeCellWrites: (_pageId: string, _shapeId: string, queries: ReadonlyArray<{ cellName: string }>) =>
+      queries.map(({ cellName }) => {
+        const refusal = refusals.get(cellName);
+        return { cellName, allowed: refusal === undefined, targetCellName: refusal === undefined ? cellName : null, refusal: refusal === undefined ? null : 'guard', reason: refusal ?? null };
+      }),
     setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
       for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
       return [];
@@ -59,11 +64,11 @@ function Host({ diagram, selection, position, closed, focusTarget }: { diagram: 
   );
 }
 
-function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; position?: { top: number; left: number }; withFocusTarget?: boolean; shapeId?: string } = {}) {
+function renderMenu(options: { cells?: Array<ReturnType<typeof cell>>; refused?: readonly string[]; position?: { top: number; left: number }; withFocusTarget?: boolean; shapeId?: string } = {}) {
   cleanup();
   const calls: Calls = { deletes: [], reorders: [], formulas: [] };
   const state = snapshot(options.cells ?? [cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')]);
-  const diagram = stubHandle(state, calls);
+  const diagram = stubHandle(state, calls, new Map((options.refused ?? []).map((name) => [name, `${name} refuses this gesture`])));
   const closed: string[] = [];
   const shapeId = options.shapeId ?? 'three';
   const selection: Selection[] = [{ pageId: 'page', shapeId, hit: { kind: 'shape', shapeId } }];
@@ -304,7 +309,7 @@ test('the menu re-clamps when the viewport shrinks while it is open', () => {
 });
 
 test('a locked shape disables its refused operation and focuses the first allowed entry', () => {
-  const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  const { view } = renderMenu({ cells: [cell('LockDelete', '1'), cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')], refused: ['LockDelete', 'Angle'] });
   try {
     const menu = parentMenu() as HTMLElement;
     expect(menu).not.toBeNull();
@@ -352,7 +357,7 @@ test('a submenu with no enabled child stays closed to keyboard and pointer', () 
 });
 
 test('a fully guarded rotate submenu stays closed to keyboard and pointer', () => {
-  const { view } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', 'GUARD(0)'), cell('FlipY', 'GUARD(0)')] });
+  const { view } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', 'GUARD(0)'), cell('FlipY', 'GUARD(0)')], refused: ['Angle', 'FlipX', 'FlipY'] });
   try {
     const menu = parentMenu() as HTMLElement;
     expect((menu.querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(true);
@@ -370,7 +375,7 @@ test('a fully guarded rotate submenu stays closed to keyboard and pointer', () =
 });
 
 test('a guarded Angle leaves the rotate submenu open with only the flips enabled', () => {
-  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  const { view, calls } = renderMenu({ cells: [cell('Angle', 'GUARD(0)'), cell('FlipX', '0'), cell('FlipY', '0')], refused: ['Angle'] });
   try {
     expect((parentMenu().querySelector('[data-submenu-id="rotateRight"]') as HTMLButtonElement).disabled).toBe(false);
     const submenu = openSubmenu('rotateRight');

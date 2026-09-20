@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, StyleReference,
-    TableStyleList, Theme, ThemeFormatScheme,
+    ColorMap, ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline,
+    StyleReference, TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,9 @@ pub struct PptxPackage {
     pub relationships: BTreeMap<String, Vec<Relationship>>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
+    /// Source bytes for verbatim member passthrough on save.
+    #[serde(skip)]
+    pub(crate) source_container: ooxml_opc::SourceContainer,
     #[serde(default, skip_serializing_if = "ShapeElements::is_legacy")]
     pub(crate) shape_elements: ShapeElements,
 }
@@ -142,6 +145,9 @@ pub struct Slide {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
 }
@@ -160,6 +166,9 @@ pub struct SlideLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the master map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +185,9 @@ pub struct SlideMaster {
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     pub text_styles: TextStyleSet,
+    /// `p:clrMap`; absent from packages serialized before it was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -205,7 +217,43 @@ pub struct ChartPart {
 pub struct MediaPart {
     pub part_path: String,
     pub content_type: String,
+    #[serde(
+        serialize_with = "serialize_media_bytes",
+        deserialize_with = "deserialize_media_bytes"
+    )]
     pub bytes: Vec<u8>,
+}
+
+/// Writes base64: a JSON integer array inflates the payload about fourfold.
+fn serialize_media_bytes<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use base64::Engine as _;
+    serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+/// Also accepts the integer arrays written before schema 2.2.
+fn deserialize_media_bytes<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use base64::Engine as _;
+    use serde::de::Error as _;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Bytes {
+        Base64(String),
+        Integers(Vec<u8>),
+    }
+
+    match Bytes::deserialize(deserializer)? {
+        Bytes::Base64(encoded) => base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(D::Error::custom),
+        Bytes::Integers(bytes) => Ok(bytes),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -767,6 +815,35 @@ pub struct TextRun {
     pub line_break: bool,
 }
 
+/// `a:rPr/@cap`: how a run is cased when drawn. Display only — the stored text
+/// keeps the author's casing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextCaps {
+    None,
+    Small,
+    All,
+}
+
+impl TextCaps {
+    pub fn from_attribute(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "small" => Some(Self::Small),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_attribute(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Small => "small",
+            Self::All => "all",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
@@ -779,6 +856,8 @@ pub struct RunProperties {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,
     pub language: Option<String>,

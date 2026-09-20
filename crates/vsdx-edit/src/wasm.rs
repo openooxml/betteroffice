@@ -9,7 +9,7 @@ use crate::{
     CellSnapshot, DiagramSession, DiagramSnapshot, EditCtx, MAX_SAFE_CLIENT_ID, ShapeDraft,
     ShapeTreeDraft, ShapeTreeGlue, UpdateEvent, UpdateOrigin,
 };
-use vsdx_parse::{CellLocator, CellRow, CellSheet};
+use vsdx_parse::{CellLocator, CellRow, CellSheet, MutationGesture};
 
 #[wasm_bindgen]
 pub struct VsdxDocument {
@@ -165,6 +165,47 @@ impl TryFrom<ShapeDataWriteArgs> for crate::ShapeDataWrite {
             row,
             section_index: value.section_index,
             formula: value.formula,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProbeCellWritesArgs {
+    page_id: String,
+    shape_id: String,
+    probes: Vec<CellWriteQueryArgs>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CellWriteQueryArgs {
+    #[serde(flatten)]
+    locator: CellLocatorArgs,
+    gesture: Option<String>,
+}
+
+impl TryFrom<CellWriteQueryArgs> for crate::CellWriteQuery {
+    type Error = &'static str;
+
+    fn try_from(value: CellWriteQueryArgs) -> Result<Self, Self::Error> {
+        let gesture = match value.gesture.as_deref() {
+            None => None,
+            Some("cellEdit") => Some(MutationGesture::CellEdit),
+            Some("moveX") => Some(MutationGesture::MoveX),
+            Some("moveY") => Some(MutationGesture::MoveY),
+            Some("resizeWidth") => Some(MutationGesture::ResizeWidth),
+            Some("resizeHeight") => Some(MutationGesture::ResizeHeight),
+            Some("resizeAspect") => Some(MutationGesture::ResizeAspect),
+            Some("rotate") => Some(MutationGesture::Rotate),
+            Some("textEdit") => Some(MutationGesture::TextEdit),
+            Some("format") => Some(MutationGesture::Format),
+            Some("delete") => Some(MutationGesture::Delete),
+            Some(_) => return Err("unknown mutation gesture"),
+        };
+        Ok(Self {
+            locator: CellLocator::try_from(value.locator)?,
+            gesture,
         })
     }
 }
@@ -612,6 +653,11 @@ impl VsdxDocument {
         self.set_shape_data_json_inner(args).map_err(js_error)
     }
 
+    #[wasm_bindgen(js_name = probeCellWritesJson)]
+    pub fn probe_cell_writes_json(&self, args: &str) -> Result<String, JsValue> {
+        self.probe_cell_writes_json_inner(args).map_err(js_error)
+    }
+
     #[wasm_bindgen(js_name = setShapeBoundsJson)]
     pub fn set_shape_bounds_json(&self, args: &str) -> Result<String, JsValue> {
         self.set_shape_bounds_json_inner(args).map_err(js_error)
@@ -1051,6 +1097,20 @@ impl VsdxDocument {
                 })
                 .collect::<Vec<_>>(),
         )
+    }
+
+    fn probe_cell_writes_json_inner(&self, args: &str) -> Result<String, String> {
+        let args: ProbeCellWritesArgs = parse_args_inner(args)?;
+        let probes = args
+            .probes
+            .into_iter()
+            .map(crate::CellWriteQuery::try_from)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(str::to_owned)?;
+        self.session
+            .probe_cell_writes(&args.page_id, &args.shape_id, &probes)
+            .map_err(|error| error.to_string())
+            .and_then(json_inner)
     }
 
     fn set_cell_formulas_json_inner(&self, args: &str) -> Result<String, String> {

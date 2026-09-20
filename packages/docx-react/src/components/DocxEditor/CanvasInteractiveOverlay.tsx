@@ -16,28 +16,61 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { buildInteractiveOverlayPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import {
+  buildInteractiveOverlayPage,
+  displayPageRevision,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
+import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 
-export function CanvasInteractiveOverlay({ page, zoom = 1 }: { page: DisplayPage; zoom?: number }) {
+export function CanvasInteractiveOverlay({
+  page,
+  zoom = 1,
+  defer = false,
+}: {
+  page: DisplayPage;
+  zoom?: number;
+  /** See {@link CanvasPageMirror} — off-window pages build at idle time. */
+  defer?: boolean;
+}) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Position-shift deltas mutate primitives in place — identity alone is stale.
+  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const overlay = buildInteractiveOverlayPage(page, {
-      labels: {
-        control: t('a11y.contentControl'),
-        addRepeatingItem: t('a11y.addRepeatingItem'),
-        removeRepeatingItem: t('a11y.removeRepeatingItem'),
-      },
-    });
-    host.replaceChildren(overlay);
-    return () => {
-      host.replaceChildren();
+    const built = builtForRef.current;
+    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
+      return;
+    }
+    const build = (): void => {
+      const overlay = buildInteractiveOverlayPage(page, {
+        labels: {
+          control: t('a11y.contentControl'),
+          addRepeatingItem: t('a11y.addRepeatingItem'),
+          removeRepeatingItem: t('a11y.removeRepeatingItem'),
+        },
+      });
+      host.replaceChildren(overlay);
+      builtForRef.current = { page, revision: displayPageRevision(page), t };
     };
-  }, [page, t]);
+    if (!defer) {
+      build();
+      return () => {
+        host.replaceChildren();
+        builtForRef.current = null;
+      };
+    }
+    if (typeof requestIdleCallback === 'function') {
+      const id = requestIdleCallback(build, { timeout: 1500 });
+      return () => cancelIdleCallback(id);
+    }
+    const id = setTimeout(build, 150);
+    return () => clearTimeout(id);
+  }, [page, t, defer]);
 
   return (
     <div

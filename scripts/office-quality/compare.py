@@ -38,7 +38,7 @@ class Pages:
         return Image.alpha_composite(white, rgba).convert('RGB')
 
 
-def compare(reference, actual, output, resize=False):
+def compare(reference, actual, output, resize=False, gallery=True, progress=None):
     if not len(reference):
         raise ValueError('reference has no pages')
     left_hash = reference.metadata.get('sha256')
@@ -68,15 +68,20 @@ def compare(reference, actual, output, resize=False):
         expected = expected if expected is not None else Image.new('RGB', available.size, 'white')
         rendered = rendered if rendered is not None else Image.new('RGB', available.size, 'white')
         prefix = f'page_{index + 1:04d}'
-        expected.save(output / f'{prefix}.reference.png')
-        rendered.save(output / f'{prefix}.actual.png')
-        ImageEnhance.Brightness(ImageChops.difference(expected, rendered)).enhance(4).save(output / f'{prefix}.diff.png')
+        if gallery:
+            expected.save(output / f'{prefix}.reference.png')
+            rendered.save(output / f'{prefix}.actual.png')
+            ImageEnhance.Brightness(ImageChops.difference(expected, rendered)).enhance(4).save(output / f'{prefix}.diff.png')
         rows.append(dict(page=index + 1, ssim=score, reference_size=list(expected.size), actual_size=original_size))
+        if progress:
+            progress(index + 1, count)
     report = dict(reference_pages=len(reference), actual_pages=len(actual),
                   common_page_ssim=sum(scores) / len(scores) if scores else 0.0,
                   penalized_ssim=sum(scores) / count, source_verified=bool(left_hash and right_hash),
                   resized=resize, reference=reference.metadata, actual=actual.metadata, pages=rows)
     (output / 'score.json').write_text(json.dumps(report, indent=2) + '\n')
+    if not gallery:
+        return report
     cards = []
     for row in rows:
         prefix = f'page_{row["page"]:04d}'

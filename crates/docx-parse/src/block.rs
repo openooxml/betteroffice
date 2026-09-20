@@ -1,5 +1,7 @@
 //! Shared story dispatcher for body and recursively nested block content.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::chart::ChartPartsMap;
@@ -35,13 +37,16 @@ pub struct BlockSdt {
     pub content: Vec<BlockContent>,
 }
 
+/// Block payloads live behind `Arc` so derived views (section content,
+/// structured field caches) share the parsed allocation instead of
+/// deep-cloning it. Mutation goes through `Arc::make_mut` copy-on-write.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum BlockContent {
-    Paragraph(Paragraph),
-    Table(Table),
-    BlockSdt(BlockSdt),
-    RawXml(crate::inline::RawInlineXml),
+    Paragraph(Arc<Paragraph>),
+    Table(Arc<Table>),
+    BlockSdt(Arc<BlockSdt>),
+    RawXml(Arc<crate::inline::RawInlineXml>),
 }
 
 impl BlockContent {
@@ -118,7 +123,7 @@ impl StoryParser<'_, '_> {
                 if let Some(crate::inline::InlineNode::RawXml(raw)) =
                     crate::inline::raw_foreign_inline(child)
                 {
-                    content.push(BlockContent::RawXml(*raw));
+                    content.push(BlockContent::RawXml(Arc::new(*raw)));
                 }
                 continue;
             }
@@ -151,15 +156,21 @@ impl StoryParser<'_, '_> {
                         depth,
                     )?;
                     self.enrich_paragraph_text_boxes(&mut paragraph, child, depth)?;
-                    BlockContent::Paragraph(paragraph)
+                    BlockContent::Paragraph(Arc::new(paragraph))
                 }
-                "tbl" => BlockContent::Table(self.parse_table(child, depth, in_header_footer)?),
-                "sdt" => {
-                    BlockContent::BlockSdt(self.parse_block_sdt(child, depth, in_header_footer)?)
-                }
+                "tbl" => BlockContent::Table(Arc::new(self.parse_table(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
+                "sdt" => BlockContent::BlockSdt(Arc::new(self.parse_block_sdt(
+                    child,
+                    depth,
+                    in_header_footer,
+                )?)),
                 "oMath" | "oMathPara" => {
                     self.budget.charge_paragraph(self.part)?;
-                    BlockContent::Paragraph(math_paragraph(child))
+                    BlockContent::Paragraph(Arc::new(math_paragraph(child)))
                 }
                 _ => unreachable!(),
             };
@@ -298,7 +309,7 @@ impl StoryParser<'_, '_> {
         if content.is_empty() {
             self.budget.charge_block(self.part)?;
             self.budget.charge_paragraph(self.part)?;
-            content.push(BlockContent::Paragraph(empty_paragraph()));
+            content.push(BlockContent::Paragraph(Arc::new(empty_paragraph())));
         }
         Ok(TableCell {
             node_type: "tableCell".to_owned(),
@@ -565,7 +576,7 @@ fn complex_field_mut(
         return None;
     };
     let ParagraphContent::Inline(InlineNode::ComplexField(field)) =
-        paragraph.content.get_mut(content_index)?
+        Arc::make_mut(paragraph).content.get_mut(content_index)?
     else {
         return None;
     };
@@ -587,7 +598,7 @@ fn remove_external_field_end_runs(block: &mut BlockContent, count: usize) {
         return;
     };
     let mut remaining = count;
-    paragraph.content.retain(|content| {
+    Arc::make_mut(paragraph).content.retain(|content| {
         if remaining == 0 {
             return true;
         }

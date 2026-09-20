@@ -316,9 +316,10 @@ export function registerMeasureFont(bytes: Uint8Array): number {
 }
 
 /**
- * Register a measurement view of `base` carrying the vertical metrics Word
- * measures `family` with — for a face the host substituted. Returns `base`
- * unchanged for a family whose metrics the engine does not know.
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `family` with — for a face the host
+ * substituted. Returns `base` unchanged for a family whose metrics the engine
+ * does not know.
  */
 export function registerSubstituteMeasureFont(base: number, family: string): number {
   state.ensure();

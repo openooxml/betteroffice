@@ -4,10 +4,13 @@ import { resolve } from 'node:path';
 import type { DiagramHandle, DiagramSnapshot } from '@betteroffice/vsdx';
 import { initWasm, openDiagram } from '@betteroffice/vsdx';
 import { LINE_PATTERN_VALUES, createRibbonCommands, findShapePlacement, frameSwatch, isFormulaChange, isRotateBlocked, numericCellValue, parseLinePatternInput, parseLineWeightInput } from './commands';
+import { initEngineProbe, probeSnapshotShape } from './engineProbe';
 
 function snapshot(cells: Record<string, string> = {}): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: ['one', 'two', 'three'].map((id) => ({ id, sourceId: 1, name: id, children: [], cells: Object.entries(cells).map(([name, value]) => ({ locator: { sheet: { page: 1 }, shapeId: 1, section: null, row: null, cellName: name }, name, formula: value, value })) })) }] };
 }
+
+await initEngineProbe();
 
 function handle(state: DiagramSnapshot, history = { undo: true, redo: false }) {
   const applyWrite = (pageId: string, shapeId: string, cellName: string, formula: string) => {
@@ -29,6 +32,11 @@ function handle(state: DiagramSnapshot, history = { undo: true, redo: false }) {
   const value = {
     snapshot: () => state, canUndo: () => history.undo, canRedo: () => history.redo,
     undo: mock(() => ({})), redo: mock(() => ({})), deleteShape: mock(() => ({})), deleteShapes, setCellFormula, setCellFormulas, reorderShape: mock(() => ({})), addShape: mock(() => ({})), save: mock(() => new Uint8Array()),
+    probeCellWrites: (pageId: string, shapeId: string, queries: ReadonlyArray<{ cellName: string }>) => {
+      const shape = state.pages.find((page) => page.id === pageId)?.shapes.find((entry) => entry.id === shapeId);
+      const answers = shape ? probeSnapshotShape(shape) : null;
+      return queries.map(({ cellName }) => answers?.get(cellName) ?? { cellName, allowed: true, targetCellName: cellName, refusal: null, reason: null });
+    },
   };
   return value as unknown as DiagramHandle & typeof value;
 }
@@ -92,7 +100,7 @@ test('a GUARD on a colour cell disables its picker instead of refusing on pick',
 });
 
 test('a GUARD substring inside a reference name disables nothing', () => {
-  const state = snapshot({ LockDelete: 'User.GuardDelete', Angle: 'User.GuardAngle', FlipX: 'User.GuardFlip', FlipY: 'User.GuardFlip', FillForegnd: 'User.GuardFill', LineColor: 'User.GuardLine', LineWeight: 'User.GuardWeight', LinePattern: 'User.GuardPattern' });
+  const state = snapshot({ GuardDelete: '0', GuardAngle: '0', GuardFlip: '0', GuardFill: 'RGB(1,2,3)', GuardLine: 'RGB(4,5,6)', GuardWeight: '0.01', GuardPattern: '1', LockDelete: 'GuardDelete', Angle: 'GuardAngle', FlipX: 'GuardFlip', FlipY: 'GuardFlip', FillForegnd: 'GuardFill', LineColor: 'GuardLine', LineWeight: 'GuardWeight', LinePattern: 'GuardPattern' });
   const diagram = handle(state);
   const commands = createRibbonCommands(diagram, [selected], 'page', () => {}, () => {}, () => {});
   expect(commands.delete.enabled).toBe(true);
@@ -378,6 +386,6 @@ test('a rotation lock disables the rotate commands without touching the others',
   expect(commands.rotateRight.enabled).toBe(false);
   expect(commands.flipHorizontal.enabled).toBe(true);
   expect(commands.delete.enabled).toBe(true);
-  expect(isRotateBlocked(state.pages[0].shapes[1])).toBe(true);
-  expect(isRotateBlocked(snapshot({ Angle: '0' }).pages[0].shapes[1])).toBe(false);
+  expect(isRotateBlocked(probeSnapshotShape(state.pages[0].shapes[1]))).toBe(true);
+  expect(isRotateBlocked(probeSnapshotShape(snapshot({ Angle: '0' }).pages[0].shapes[1]))).toBe(false);
 });

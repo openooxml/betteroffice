@@ -19,7 +19,7 @@ pub use package::PreservedPackage;
 pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use reference::UnpatchableReference;
 pub use write::{
-    SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
+    SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
@@ -35,13 +35,24 @@ pub struct ParsedWorkbook {
     /// Per sheet, the dimensions releases before hidden rows and columns read
     /// as zero stored. Only a legacy collaboration fingerprint needs these.
     pub legacy_dimensions: Vec<LegacySheetDimensions>,
+    /// The style table releases that needed an explicit `applyX` flag read.
+    /// Only a legacy collaboration fingerprint needs it.
+    pub legacy_styles: Option<xlsx_model::Stylesheet>,
 }
 
 /// Parses the model and captures source package state.
 pub fn parse_workbook_with_package(
     parts: &[(String, Vec<u8>)],
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(parts)?;
+    parse_workbook_with_owned_package(parts.to_vec())
+}
+
+/// [`parse_workbook_with_package`] taking ownership of `parts` so the package
+/// retains the inflated archive once instead of cloning it.
+pub fn parse_workbook_with_owned_package(
+    parts: Vec<(String, Vec<u8>)>,
+) -> Result<ParsedWorkbook, ParseError> {
+    let parsed = read::parse_workbook_indexed(&parts)?;
     let package = PreservedPackage::capture(
         parts,
         &parsed.workbook,
@@ -54,6 +65,7 @@ pub fn parse_workbook_with_package(
         active_sheet: parsed.active_sheet,
         package,
         legacy_dimensions: parsed.legacy_dimensions,
+        legacy_styles: parsed.legacy_styles,
     })
 }
 

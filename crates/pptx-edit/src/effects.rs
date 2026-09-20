@@ -1,30 +1,31 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use pptx_parse::{PptxPackage, ShapeNode};
-use yrs::{Any, Doc, Map, ReadTxn, Transact};
+use pptx_parse::ShapeNode;
 
-use crate::{EditError, EditResult, META, MIGRATE_ORIGIN, deck};
+use crate::deck::{SourceImport, shape_base};
 
-pub(crate) fn import_source(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
-    let mut package = deck::package_from_doc(doc)?;
-    let sources: HashMap<_, _> = source
+pub(crate) fn import_source(import: &mut SourceImport<'_>) {
+    let sources: HashMap<_, _> = import
+        .source
         .slides
         .iter()
         .map(|part| (&part.part_path, &part.shapes))
         .chain(
-            source
+            import
+                .source
                 .layouts
                 .iter()
                 .map(|part| (&part.part_path, &part.shapes)),
         )
         .chain(
-            source
+            import
+                .source
                 .masters
                 .iter()
                 .map(|part| (&part.part_path, &part.shapes)),
         )
         .collect();
-    let mut changed = false;
+    let package = &mut import.package;
     for (path, shapes) in package
         .slides
         .iter_mut()
@@ -43,19 +44,9 @@ pub(crate) fn import_source(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
         )
     {
         if let Some(source) = sources.get(path) {
-            changed |= merge_shapes(shapes, source);
+            merge_shapes(shapes, source);
         }
     }
-    if changed {
-        let bytes =
-            serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
-        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-        let meta = txn
-            .get_map(META)
-            .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-        meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
-    }
-    Ok(())
 }
 
 fn merge_shapes(targets: &mut [ShapeNode], sources: &[ShapeNode]) -> bool {
@@ -63,7 +54,7 @@ fn merge_shapes(targets: &mut [ShapeNode], sources: &[ShapeNode]) -> bool {
     for source in sources {
         let Some(target) = targets
             .iter_mut()
-            .find(|target| deck::shape_base(target).id == deck::shape_base(source).id)
+            .find(|target| shape_base(target).id == shape_base(source).id)
         else {
             continue;
         };

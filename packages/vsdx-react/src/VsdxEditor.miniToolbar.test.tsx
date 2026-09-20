@@ -30,7 +30,7 @@ function snapshot(cells: Array<ReturnType<typeof cell>>): DiagramSnapshot {
   return { pages: [{ id: 'page', sourcePartPath: 'page', name: 'Page', shapes: [{ id: 'three', sourceId: 1, name: 'three', children: [], cells }] }] };
 }
 
-function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
+function stubHandle(state: DiagramSnapshot, calls: Calls, refused: readonly string[] = []): DiagramHandle {
   return {
     snapshot: () => state,
     canUndo: () => false,
@@ -42,6 +42,10 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
       calls.formulas.push({ pageId, shapeId, cell: locator.cellName, formula });
       return {};
     },
+    probeCellWrites: (_pageId: string, _shapeId: string, queries: ReadonlyArray<{ cellName: string }>) =>
+      queries.map(({ cellName }) => refused.includes(cellName)
+        ? { cellName, allowed: false, targetCellName: null, refusal: 'guard', reason: 'GUARD protects the requested cell' }
+        : { cellName, allowed: true, targetCellName: cellName, refusal: null, reason: null }),
     setCellFormulas: (writes: ReadonlyArray<{ pageId: string; shapeId: string; cellName: string; formula: string }>) => {
       for (const write of writes) calls.formulas.push({ pageId: write.pageId, shapeId: write.shapeId, cell: write.cellName, formula: write.formula });
       return [];
@@ -49,11 +53,11 @@ function stubHandle(state: DiagramSnapshot, calls: Calls): DiagramHandle {
   } as unknown as DiagramHandle;
 }
 
-function renderShapeMenu(options: { cells?: Array<ReturnType<typeof cell>>; position?: { top: number; left: number }; withFocusTarget?: boolean } = {}) {
+function renderShapeMenu(options: { cells?: Array<ReturnType<typeof cell>>; refused?: readonly string[]; position?: { top: number; left: number }; withFocusTarget?: boolean } = {}) {
   cleanup();
   const calls: Calls = { deletes: [], reorders: [], formulas: [] };
   const state = snapshot(options.cells ?? [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'RGB(0,0,255)'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')]);
-  const diagram = stubHandle(state, calls);
+  const diagram = stubHandle(state, calls, options.refused ?? []);
   const closed: string[] = [];
   const selection: Selection[] = [{ pageId: 'page', shapeId: 'three', hit: { kind: 'shape', shapeId: 'three' } }];
   let focusTarget: HTMLElement | undefined;
@@ -229,7 +233,7 @@ test('an outside press and a menu action close the toolbar with the menu', () =>
 });
 
 test('guarded colour cells hide the mini toolbar instead of refusing on pick', () => {
-  const { view } = renderShapeMenu({ cells: [cell('FillForegnd', 'GUARD(RGB(255,0,0))'), cell('LineColor', 'GUARD(RGB(0,0,255))'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')] });
+  const { view } = renderShapeMenu({ cells: [cell('FillForegnd', 'GUARD(RGB(255,0,0))'), cell('LineColor', 'GUARD(RGB(0,0,255))'), cell('Angle', '0'), cell('FlipX', '0'), cell('FlipY', '0')], refused: ['FillForegnd', 'LineColor'] });
   try {
     expect(shapeMenu()).not.toBeNull();
     expect(toolbar()).toBeNull();
@@ -239,7 +243,7 @@ test('guarded colour cells hide the mini toolbar instead of refusing on pick', (
 });
 
 test('a SETATREF redirect to a guarded cell hides only that swatch', () => {
-  const redirected = renderShapeMenu({ cells: [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'SETATREF(LineTarget)'), cell('LineTarget', 'GUARD(RGB(0,0,255))')] });
+  const redirected = renderShapeMenu({ cells: [cell('FillForegnd', 'RGB(255,0,0)'), cell('LineColor', 'SETATREF(LineTarget)'), cell('LineTarget', 'GUARD(RGB(0,0,255))')], refused: ['LineColor'] });
   try {
     const bar = toolbar();
     expect(bar).not.toBeNull();

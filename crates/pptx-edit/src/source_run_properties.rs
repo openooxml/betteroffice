@@ -1,10 +1,10 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
 
-use pptx_parse::PptxPackage;
 use serde_json::Value;
 use yrs::types::Attrs;
 use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
 
+use crate::deck::SourceImport;
 use crate::{
     DeckSession, EditError, EditResult, META, MIGRATE_ORIGIN, ShapeSnapshot, StorySnapshot,
 };
@@ -33,7 +33,7 @@ impl SourceProperty {
 
 pub(crate) fn import_source(
     session: &DeckSession,
-    source: &PptxPackage,
+    import: &mut SourceImport<'_>,
     property: SourceProperty,
 ) -> EditResult<()> {
     let (pending_key, json_key, attribute) = property.keys();
@@ -46,17 +46,18 @@ pub(crate) fn import_source(
         return Ok(());
     }
     let source_json =
-        serde_json::to_value(source).map_err(|error| EditError::Json(error.to_string()))?;
+        serde_json::to_value(import.source).map_err(|error| EditError::Json(error.to_string()))?;
     if !has_property(&source_json, json_key) {
         return Ok(());
     }
-    let fresh = DeckSession::from_package(source.clone(), 33100)?;
-    let original = fresh.snapshot()?;
-    let current = session.snapshot()?;
     let mut sources = HashMap::new();
-    for slide in &original.slides {
-        collect_stories(&slide.shapes, &mut sources);
+    {
+        let original = import.source_snapshot()?;
+        for slide in &original.slides {
+            collect_stories(&slide.shapes, &mut sources);
+        }
     }
+    let current = session.snapshot()?;
     let mut targets = HashMap::new();
     for slide in &current.slides {
         collect_stories(&slide.shapes, &mut targets);
@@ -90,12 +91,11 @@ pub(crate) fn import_source(
             }
         }
     }
-    let mut package = serde_json::to_value(crate::deck::package_from_doc(&session.doc)?)
+    let mut package = serde_json::to_value(&import.package)
         .map_err(|error| EditError::Json(error.to_string()))?;
     merge_property(&mut package, &source_json, json_key);
-    let package: PptxPackage =
+    import.package =
         serde_json::from_value(package).map_err(|error| EditError::Json(error.to_string()))?;
-    let bytes = serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
     let stories = txn
         .get_map(crate::STORIES)
@@ -115,7 +115,6 @@ pub(crate) fn import_source(
     let meta = txn
         .get_map(META)
         .ok_or_else(|| EditError::InvalidState("missing metadata".into()))?;
-    meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
     meta.remove(&mut txn, pending_key);
     Ok(())
 }

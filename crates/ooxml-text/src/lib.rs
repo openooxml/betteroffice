@@ -27,8 +27,13 @@
 //!   rounds the *content* box up to a whole number of grid rows via
 //!   [`snap_line_box`] when the caller supplies an activating grid pitch, so
 //!   the `auto` multiple then scales the quantized pitch.
+//! - [`caps`] — the casing `w:caps`/`w:smallCaps` and `a:rPr/@cap` share:
+//!   language-aware uppercasing ([`uppercase_for_language`]) and the
+//!   synthesized small-cap advance scales.
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
+//! - [`symbol_font`] — what a Wingdings or Webdings character actually
+//!   addresses, and the nearest covered Unicode character to draw for it.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -42,16 +47,21 @@
 #![allow(clippy::type_complexity)]
 
 pub mod bidi;
+pub mod caps;
 pub mod font_store;
 pub mod line_break;
 pub mod measure;
 pub mod outline;
 pub mod shape;
+pub mod symbol_font;
 pub mod word_fonts;
 pub mod word_metrics;
 
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
+};
+pub use caps::{
+    BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
 pub use font_store::{FontError, FontId, FontMetrics, FontStore, RequestedLineMetrics};
 pub use line_break::{BreakOpportunity, break_opportunities};
@@ -61,6 +71,7 @@ pub use measure::{
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
+pub use symbol_font::SymbolFont;
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
     line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,

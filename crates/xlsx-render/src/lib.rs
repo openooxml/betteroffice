@@ -8,15 +8,18 @@ pub mod hit;
 pub mod region;
 
 pub use ooxml_drawingml::GeometryPathCommand;
+use std::sync::Arc;
+
 use ooxml_drawingml::chart::ChartSpace;
-use std::ops::Range;
+use std::collections::BTreeMap;
+use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
 
 use xlsx_model::numfmt::{builtin_format_code, format_value};
 use xlsx_model::styles::{Border, BorderEdge, BorderStyle, FormatCode, Stylesheet};
 use xlsx_model::value::CellValue;
-use xlsx_model::workbook::Sheet;
+use xlsx_model::workbook::{Hyperlink, Sheet};
 use xlsx_model::{
     CellRange, CellRef, Fill, HAlign, MAX_COLS, MAX_ROWS, SheetChart, SheetId, VAlign, Workbook,
 };
@@ -29,7 +32,7 @@ pub use display_list::{
     Align, ChartA11yAttrs, ChartRegion, DisplayList, DrawCmd, GridMeta, HyperlinkRegion,
     PathStroke, Rect, scaled,
 };
-pub use geometry::{GridGeometry, PrintMetrics};
+pub use geometry::{GridGeometry, PrintMetrics, autofit_relevant};
 pub use hit::chart_at_point;
 pub use region::{viewport_for_range, viewport_for_used_range, viewport_for_used_range_within};
 
@@ -275,27 +278,28 @@ pub fn build_display_list_with_ghosts(
     ghosts: &[GhostEdit],
 ) -> Result<DisplayList, RenderError> {
     build_display_list_with_charts_and_ghosts(wb, sheet, viewport, ghosts, |chart| {
-        Err(RenderError::ChartSourceUnavailable {
+        Err::<ChartSpace, _>(RenderError::ChartSourceUnavailable {
             part: chart.part.clone(),
         })
     })
 }
 
 /// Builds a display list using a lazy chart-part resolver.
-pub fn build_display_list_with_charts<F>(
+pub fn build_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_display_list_with_charts_and_ghosts(wb, sheet, viewport, &[], resolver)
 }
 
 /// Builds a display list with charts and pending edit ghosts.
-pub fn build_display_list_with_charts_and_ghosts<F>(
+pub fn build_display_list_with_charts_and_ghosts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -303,12 +307,13 @@ pub fn build_display_list_with_charts_and_ghosts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_frame(wb, sheet, viewport, ghosts, resolver, None)
 }
 
-pub fn build_print_display_list_with_charts<F>(
+pub fn build_print_display_list_with_charts<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -317,7 +322,8 @@ pub fn build_print_display_list_with_charts<F>(
     resolver: F,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     build_frame(
         wb,
@@ -329,7 +335,7 @@ where
     )
 }
 
-fn build_frame<F>(
+fn build_frame<F, R>(
     wb: &Workbook,
     sheet: SheetId,
     viewport: &Viewport,
@@ -338,7 +344,8 @@ fn build_frame<F>(
     print: Option<(&PrintMetrics, bool)>,
 ) -> Result<DisplayList, RenderError>
 where
-    F: FnMut(&SheetChart) -> Result<ChartSpace, RenderError>,
+    F: FnMut(&SheetChart) -> Result<R, RenderError>,
+    R: Into<Arc<ChartSpace>>,
 {
     let mut commands = Vec::new();
 
@@ -366,8 +373,8 @@ where
     let theme = &styles.theme;
     let hyperlink_color = theme.slot(10).unwrap_or(HYPERLINK_COLOR);
     let geom = print.map_or_else(
-        || GridGeometry::new(sheet_ref),
-        |(metrics, _)| GridGeometry::for_print(sheet_ref, metrics),
+        || GridGeometry::new(sheet_ref, styles),
+        |(metrics, _)| GridGeometry::for_print(sheet_ref, styles, metrics),
     );
     let (frozen_rows, frozen_cols) = if print.is_some() {
         (0, 0)
@@ -422,7 +429,13 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
-    let mut anchors = visible_anchors(sheet_ref, &rows, &cols);
+    let link_index = HyperlinkIndex::new(&sheet_ref.hyperlinks);
+    let row_hint = match (rows.ranges.first(), rows.ranges.last()) {
+        (Some(first), Some(last)) => first.start..=last.end.saturating_sub(1),
+        _ => RangeInclusive::new(1, 0),
+    };
+    let merge_index = MergeIndex::new(&sheet_ref.merges, row_hint);
+    let mut anchors = visible_anchors(sheet_ref, &rows, &cols, &merge_index);
     if print.is_some() {
         for merge in &sheet_ref.merges {
             if rows.intersects(merge.start.row, merge.end.row)
@@ -493,7 +506,7 @@ where
             commands.extend(grid_commands.iter().cloned());
         }
         for merge in &sheet_ref.merges {
-            if let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, merge.start) {
+            if let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, merge.start) {
                 let inset = 96.0 / metrics.dpi / 2.0;
                 commands.push(DrawCmd::FillRect {
                     x: cell_box.x + inset,
@@ -515,7 +528,7 @@ where
         let Some(hex) = styles.resolve_color(color) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let clip = cell_box.clip;
@@ -575,6 +588,7 @@ where
             &rows,
             &cols,
             sheet_ref,
+            &merge_index,
             styles,
             at,
             border,
@@ -585,7 +599,7 @@ where
         if changed_ghost_cells.contains(&(at.row, at.col)) {
             continue;
         }
-        let hyperlink = sheet_ref.hyperlink_at(at);
+        let hyperlink = link_index.at(at);
         let Some((text, color)) = cell_display_text(styles, wb.date_system, cell).or_else(|| {
             hyperlink
                 .filter(|link| link.range.start == at)
@@ -601,7 +615,7 @@ where
             color
         };
 
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let font = cell.style.and_then(|s| styles.font_for(s));
@@ -623,6 +637,19 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let clip = spill_clip(
+            &geom,
+            &cols,
+            sheet_ref,
+            &link_index,
+            &merge_index,
+            styles,
+            wb.date_system,
+            at,
+            cell,
+            align,
+            cell_box,
+        );
 
         commands.push(DrawCmd::Text {
             x: tx,
@@ -630,7 +657,7 @@ where
             text,
             font_size: size,
             color,
-            clip: cell_box.clip,
+            clip,
             align,
             bold: font.is_some_and(|f| f.bold),
             italic: font.is_some_and(|f| f.italic),
@@ -656,7 +683,7 @@ where
         let Some(text) = link.display.as_ref().filter(|display| !display.is_empty()) else {
             continue;
         };
-        let Some(cell_box) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(cell_box) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let size = print.map_or(FONT_SIZE_PT, |(m, _)| m.font_size_pt);
@@ -697,7 +724,7 @@ where
             italic: font.is_some_and(|font| font.italic),
             underline: font.is_some_and(|font| font.underline),
         };
-        let Some(bx) = cell_box(&geom, &rows, &cols, sheet_ref, at) else {
+        let Some(bx) = cell_box(&geom, &rows, &cols, &merge_index, at) else {
             continue;
         };
         let align = resolve_align_with_value(styles, cell, &ghost.alignment_value);
@@ -909,6 +936,7 @@ fn visible_anchors<'a>(
     sheet: &'a Sheet,
     rows: &AxisLayout,
     cols: &AxisLayout,
+    merges: &MergeIndex,
 ) -> Vec<(CellRef, &'a xlsx_model::Cell)> {
     let mut cells = Vec::new();
     for row_range in &rows.ranges {
@@ -918,16 +946,306 @@ fn visible_anchors<'a>(
     }
     cells.sort_unstable_by_key(|(at, _)| (at.row, at.col));
     cells.dedup_by_key(|(at, _)| (at.row, at.col));
-    cells.retain(|(at, _)| match covering_merge(&sheet.merges, *at) {
+    cells.retain(|(at, _)| match merges.covering(*at) {
         Some(merge) => merge.start == *at,
         None => true,
     });
     cells
 }
 
-/// the merge (if any) that covers a cell.
-fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
-    merges.iter().copied().find(|m| m.contains(at))
+/// whether the painter draws a hyperlink's own label at `at`, which it does
+/// only at the link range's start and only when the cell has no text of its own.
+fn draws_hyperlink_label(links: &HyperlinkIndex, at: CellRef) -> bool {
+    links.at(at).is_some_and(|link| {
+        link.range.start == at && link.display.as_ref().is_some_and(|d| !d.is_empty())
+    })
+}
+
+/// per-pass merge coverage: merges shorter than `MERGE_ROW_CAP` are indexed
+/// per hinted row, taller or inverted merges are `contains`-scanned.
+struct MergeIndex<'a> {
+    merges: &'a [CellRange],
+    rows: BTreeMap<u32, MergeRow>,
+    entries: Vec<(u32, u32, u32, u32)>,
+    scanned: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct MergeRow {
+    /// span of this row's merges in `MergeIndex::entries`.
+    start: u32,
+    end: u32,
+    /// column-disjoint entries sort by start column and binary-search.
+    by_col: bool,
+}
+
+/// row-height cutoff between indexed and scanned merges.
+const MERGE_ROW_CAP: u32 = 64;
+
+impl<'a> MergeIndex<'a> {
+    /// indexes short merges over `hint` rows (plus every anchor row); other
+    /// merges — inverted, taller than `MERGE_ROW_CAP` — are scanned per query.
+    fn new(merges: &'a [CellRange], hint: RangeInclusive<u32>) -> Self {
+        let (hint_start, hint_end) = (*hint.start(), *hint.end());
+        let mut entries: Vec<(u32, u32, u32, u32)> = Vec::new();
+        let mut scanned = Vec::new();
+        for (index, merge) in merges.iter().enumerate() {
+            if merge.end.row < merge.start.row || merge.end.row - merge.start.row >= MERGE_ROW_CAP {
+                scanned.push(index as u32);
+                continue;
+            }
+            entries.push((
+                merge.start.row,
+                merge.start.col,
+                merge.end.col,
+                index as u32,
+            ));
+            for row in merge.start.row.max(hint_start)..=merge.end.row.min(hint_end) {
+                if row != merge.start.row {
+                    entries.push((row, merge.start.col, merge.end.col, index as u32));
+                }
+            }
+        }
+        entries.sort_by_key(|entry| (entry.0, entry.1));
+        let mut rows = BTreeMap::new();
+        let mut i = 0;
+        while i < entries.len() {
+            let mut j = i + 1;
+            while j < entries.len() && entries[j].0 == entries[i].0 {
+                j += 1;
+            }
+            let group = &mut entries[i..j];
+            let by_col = group.windows(2).all(|w| w[0].2 < w[1].1);
+            if !by_col {
+                group.sort_by_key(|entry| entry.3);
+            }
+            rows.insert(
+                entries[i].0,
+                MergeRow {
+                    start: i as u32,
+                    end: j as u32,
+                    by_col,
+                },
+            );
+            i = j;
+        }
+        Self {
+            merges,
+            rows,
+            entries,
+            scanned,
+        }
+    }
+
+    /// the merge (if any) that covers `at`.
+    fn covering(&self, at: CellRef) -> Option<CellRange> {
+        let in_row = self.rows.get(&at.row).and_then(|row| {
+            let entries = &self.entries[row.start as usize..row.end as usize];
+            if row.by_col {
+                let p = entries.partition_point(|entry| entry.1 <= at.col);
+                p.checked_sub(1)
+                    .and_then(|i| entries.get(i))
+                    .filter(|entry| entry.2 >= at.col)
+                    .map(|entry| entry.3)
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| entry.1 <= at.col && at.col <= entry.2)
+                    .map(|entry| entry.3)
+            }
+        });
+        let scanned = self
+            .scanned
+            .iter()
+            .copied()
+            .find(|&i| self.merges[i as usize].contains(at));
+        match (in_row, scanned) {
+            (Some(m), Some(s)) => Some(self.merges[m.min(s) as usize]),
+            (Some(m), None) => Some(self.merges[m as usize]),
+            (None, s) => s.map(|i| self.merges[i as usize]),
+        }
+    }
+}
+
+/// Excel lets text that outgrows its cell run into the blank cells beside it,
+/// towards whichever side its alignment points. The run stops at the first
+/// neighbour that draws something, at a merge, at a frozen-pane split, and at
+/// the edge of the columns this frame lays out.
+#[allow(clippy::too_many_arguments)]
+fn spill_clip(
+    geom: &GridGeometry,
+    cols: &AxisLayout,
+    sheet: &Sheet,
+    links: &HyperlinkIndex,
+    merges: &MergeIndex,
+    styles: &Stylesheet,
+    date_system: xlsx_model::DateSystem,
+    at: CellRef,
+    cell: &xlsx_model::Cell,
+    align: Align,
+    cell_box: CellBox,
+) -> Rect {
+    if !matches!(cell.value, CellValue::Text { .. })
+        || merges.covering(at).is_some()
+        || cell
+            .style
+            .and_then(|style| styles.alignment_for(style))
+            .is_some_and(|a| a.wrap_text || a.shrink_to_fit)
+    {
+        return cell_box.clip;
+    }
+    let Ok(anchor) = cols
+        .tracks
+        .binary_search_by_key(&at.col, |track| track.index)
+    else {
+        return cell_box.clip;
+    };
+    let blank = |col: u32| {
+        let neighbour = CellRef::new(at.row, col);
+        merges.covering(neighbour).is_none()
+            && sheet
+                .cell(neighbour)
+                .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
+            && !draws_hyperlink_label(links, neighbour)
+    };
+    let pane = cols.tracks[anchor].pinned;
+    let mut first = anchor;
+    if matches!(align, Align::Right | Align::Center) {
+        while first > 0
+            && cols.tracks[first - 1].pinned == pane
+            && cols.tracks[first - 1].index + 1 == cols.tracks[first].index
+            && blank(cols.tracks[first - 1].index)
+        {
+            first -= 1;
+        }
+    }
+    let mut last = anchor;
+    if matches!(align, Align::Left | Align::Center) {
+        while last + 1 < cols.tracks.len()
+            && cols.tracks[last + 1].pinned == pane
+            && cols.tracks[last].index + 1 == cols.tracks[last + 1].index
+            && blank(cols.tracks[last + 1].index)
+        {
+            last += 1;
+        }
+    }
+    if first == anchor && last == anchor {
+        return cell_box.clip;
+    }
+    cols.span(
+        cols.tracks[first].index,
+        cols.tracks[last].index,
+        |column| geom.col_x(column),
+    )
+    .map_or(cell_box.clip, |span| Rect {
+        x: span.start,
+        y: cell_box.clip.y,
+        w: span.end - span.start,
+        h: cell_box.clip.h,
+    })
+}
+
+/// hyperlink lookup for one render pass: per-row entries when ranges are
+/// column-disjoint, else scans `hyperlinks` order like a linear search.
+struct HyperlinkIndex<'a> {
+    links: &'a [Hyperlink],
+    rows: BTreeMap<u32, LinkRow>,
+    entries: Vec<(u32, u32, u32, u32)>,
+    scanned: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct LinkRow {
+    /// span of this row's links in `HyperlinkIndex::entries`.
+    start: u32,
+    end: u32,
+    /// true when the row's ranges are column-disjoint and binary-searchable.
+    by_col: bool,
+}
+
+/// a range spanning more rows than this is scanned instead of indexed per row.
+const LINK_ROW_CAP: u32 = 64;
+
+/// total expanded row entries an index build may hold before further ranges
+/// fall back to scanning.
+const LINK_ENTRY_CAP: usize = 1 << 20;
+
+impl<'a> HyperlinkIndex<'a> {
+    fn new(links: &'a [Hyperlink]) -> Self {
+        let mut entries: Vec<(u32, u32, u32, u32)> = Vec::new();
+        let mut scanned = Vec::new();
+        for (index, link) in links.iter().enumerate() {
+            let range = link.range;
+            if range.end.row - range.start.row >= LINK_ROW_CAP
+                || entries.len() + (range.end.row - range.start.row + 1) as usize > LINK_ENTRY_CAP
+            {
+                scanned.push(index as u32);
+                continue;
+            }
+            for row in range.start.row..=range.end.row {
+                entries.push((row, range.start.col, range.end.col, index as u32));
+            }
+        }
+        entries.sort_by_key(|entry| (entry.0, entry.1));
+        let mut rows = BTreeMap::new();
+        let mut i = 0;
+        while i < entries.len() {
+            let mut j = i + 1;
+            while j < entries.len() && entries[j].0 == entries[i].0 {
+                j += 1;
+            }
+            let group = &mut entries[i..j];
+            let by_col = group.windows(2).all(|w| w[0].2 < w[1].1);
+            if !by_col {
+                group.sort_by_key(|entry| entry.3);
+            }
+            rows.insert(
+                entries[i].0,
+                LinkRow {
+                    start: i as u32,
+                    end: j as u32,
+                    by_col,
+                },
+            );
+            i = j;
+        }
+        Self {
+            links,
+            rows,
+            entries,
+            scanned,
+        }
+    }
+
+    /// the first link in `hyperlinks` order (if any) that covers `at`.
+    fn at(&self, at: CellRef) -> Option<&'a Hyperlink> {
+        let in_row = self.rows.get(&at.row).and_then(|row| {
+            let entries = &self.entries[row.start as usize..row.end as usize];
+            if row.by_col {
+                let p = entries.partition_point(|entry| entry.1 <= at.col);
+                p.checked_sub(1)
+                    .and_then(|i| entries.get(i))
+                    .filter(|entry| entry.2 >= at.col)
+                    .map(|entry| entry.3)
+            } else {
+                entries
+                    .iter()
+                    .find(|entry| entry.1 <= at.col && at.col <= entry.2)
+                    .map(|entry| entry.3)
+            }
+        });
+        let scanned = self
+            .scanned
+            .iter()
+            .copied()
+            .find(|&i| self.links[i as usize].range.contains(at));
+        let index = match (in_row, scanned) {
+            (Some(m), Some(s)) => m.min(s),
+            (Some(m), None) => m,
+            (None, s) => s?,
+        };
+        Some(&self.links[index as usize])
+    }
 }
 
 /// viewport-local `(x, y, w, h)` of a cell's box, spanning its merged range
@@ -936,10 +1254,10 @@ fn cell_box(
     geom: &GridGeometry,
     rows: &AxisLayout,
     cols: &AxisLayout,
-    sheet: &Sheet,
+    merges: &MergeIndex,
     at: CellRef,
 ) -> Option<CellBox> {
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(merge) => (merge.end.col, merge.end.row),
         None => (at.col, at.row),
     };
@@ -1081,18 +1399,19 @@ fn emit_borders(
     rows: &AxisLayout,
     cols: &AxisLayout,
     sheet: &Sheet,
+    merges: &MergeIndex,
     styles: &Stylesheet,
     at: CellRef,
     border: &Border,
 ) {
-    let Some(cell_box) = cell_box(geom, rows, cols, sheet, at) else {
+    let Some(cell_box) = cell_box(geom, rows, cols, merges, at) else {
         return;
     };
     let (x, y) = (cell_box.x, cell_box.y);
     let (x2, y2) = (x + cell_box.w, y + cell_box.h);
     let clip = cell_box.clip;
     let (clip_x2, clip_y2) = (clip.x + clip.w, clip.y + clip.h);
-    let (end_col, end_row) = match covering_merge(&sheet.merges, at) {
+    let (end_col, end_row) = match merges.covering(at) {
         Some(m) => (m.end.col, m.end.row),
         None => (at.col, at.row),
     };
@@ -1185,6 +1504,7 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
 mod tests {
     use super::*;
     use xlsx_model::Hyperlink;
+    use xlsx_model::styles::{Alignment, HAlign, Xf};
     use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
@@ -1248,7 +1568,164 @@ mod tests {
             .unwrap();
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert_eq!(long_text.x, dc * 2.0);
-        assert_eq!(long_text.w, dc);
+        assert_eq!(long_text.w, dc * 5.0);
+    }
+
+    /// A neighbour the painter draws is not blank, whatever draws it: it also
+    /// paints a hyperlink's own label where the cell carries no text.
+    #[test]
+    fn spilling_text_stops_at_a_hyperlink_label() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let clip_of = |sheet: Sheet| {
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            build_display_list(&wb, SheetId(0), &vp)
+                .unwrap()
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text { text, clip, .. } if text == long => Some(clip.w),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 1), text_cell(long));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("D1:D1").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Open".into()),
+        });
+        assert_eq!(clip_of(sheet), dc * 2.0);
+    }
+
+    /// A frozen split is a pane boundary: Excel does not run text across it,
+    /// and `span` clamps a pinned start to the frozen extent, so a spill that
+    /// crossed the split would be clipped away from where its text sits.
+    #[test]
+    fn spilling_text_stops_at_a_frozen_split() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let mut styles = Stylesheet::default();
+        styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.freeze_pane = Some(FreezePane {
+            rows: 0,
+            cols: 1,
+            top_left: CellRef::new(0, 1),
+        });
+        let mut cell = text_cell(long);
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 1), cell);
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles = styles;
+        let clip = build_display_list(&wb, SheetId(0), &vp)
+            .unwrap()
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(clip.x, dc, "the run must not reach into the frozen column");
+    }
+
+    #[test]
+    fn text_spills_over_blank_neighbours_and_stops_at_the_next_value() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let clip_of = |sheet: Sheet, styles: Stylesheet| {
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            wb.styles = styles;
+            let clip = build_display_list(&wb, SheetId(0), &vp)
+                .unwrap()
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                    _ => None,
+                })
+                .unwrap();
+            (clip.x, clip.w)
+        };
+
+        let mut open = Sheet::new("Sheet1");
+        open.set_cell(CellRef::new(0, 1), text_cell(long));
+        assert_eq!(clip_of(open, Stylesheet::default()), (dc, dc * 6.0));
+
+        let mut blocked = Sheet::new("Sheet1");
+        blocked.set_cell(CellRef::new(0, 1), text_cell(long));
+        blocked.set_cell(CellRef::new(0, 3), num_cell(1.0));
+        assert_eq!(clip_of(blocked, Stylesheet::default()), (dc, dc * 2.0));
+
+        let mut merged = Sheet::new("Sheet1");
+        merged.set_cell(CellRef::new(0, 1), text_cell(long));
+        merged.merges.push(CellRange::parse_a1("D1:E1").unwrap());
+        assert_eq!(clip_of(merged, Stylesheet::default()), (dc, dc * 2.0));
+
+        let mut wrapped_styles = Stylesheet::default();
+        wrapped_styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                wrap_text: true,
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut wrapped = Sheet::new("Sheet1");
+        wrapped.set_cell(
+            CellRef::new(0, 1),
+            Cell {
+                style: Some(0),
+                ..text_cell(long)
+            },
+        );
+        assert_eq!(clip_of(wrapped, wrapped_styles), (dc, dc));
+
+        let mut numeric = Sheet::new("Sheet1");
+        numeric.set_cell(CellRef::new(0, 1), num_cell(123_456_789_012_345.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(numeric);
+        let clip = build_display_list(&wb, SheetId(0), &vp)
+            .unwrap()
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { clip, .. } => Some(*clip),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((clip.x, clip.w), (dc, dc));
     }
 
     #[test]
@@ -1391,7 +1868,7 @@ mod tests {
                 Rect {
                     x: dc,
                     y: dr,
-                    w: dc,
+                    w: dc * 3.0,
                     h: dr
                 }
             )
@@ -1778,5 +2255,103 @@ mod tests {
         assert_eq!(texts[0].0, "merged");
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert!((texts[0].1.w - dc * 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn hyperlink_index_matches_a_linear_scan() {
+        let link = |a1: &str, tag: &str| Hyperlink {
+            range: CellRange::parse_a1(a1).unwrap(),
+            external_target: Some(tag.to_string()),
+            location: None,
+            tooltip: None,
+            display: None,
+        };
+        let links = vec![
+            link("B2:D4", "wide"),
+            link("C3", "nested"),
+            link("A1:A200", "tall"),
+            link("D4:E4", "dup"),
+            link("B2:D4", "dup2"),
+        ];
+        let index = HyperlinkIndex::new(&links);
+        for row in 0..6u32 {
+            for col in 0..6u32 {
+                let at = CellRef::new(row, col);
+                let want = links
+                    .iter()
+                    .find(|l| l.range.contains(at))
+                    .and_then(|l| l.external_target.as_deref());
+                let got = index.at(at).and_then(|l| l.external_target.as_deref());
+                assert_eq!(got, want, "at {at:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn hyperlink_index_over_budget_falls_back_to_scan() {
+        let link = |a1: &str, tag: &str| Hyperlink {
+            range: CellRange::parse_a1(a1).unwrap(),
+            external_target: Some(tag.to_string()),
+            location: None,
+            tooltip: None,
+            display: None,
+        };
+        let mut links = Vec::new();
+        let rows = LINK_ROW_CAP - 1;
+        for i in 0..(LINK_ENTRY_CAP / rows as usize) as u32 {
+            let top = i * rows + 1;
+            links.push(link(&format!("A{top}:B{}", top + rows - 1), "in"));
+        }
+        links.push(link("C1:C5", "spill"));
+        let index = HyperlinkIndex::new(&links);
+        assert!(index.scanned.contains(&((links.len() - 1) as u32)));
+        assert_eq!(
+            index
+                .at(CellRef::new(0, 2))
+                .and_then(|l| l.external_target.as_deref()),
+            Some("spill")
+        );
+        assert_eq!(
+            index
+                .at(CellRef::new(0, 0))
+                .and_then(|l| l.external_target.as_deref()),
+            Some("in")
+        );
+    }
+
+    #[test]
+    fn merge_index_matches_linear_scan() {
+        let range = |r1: u32, c1: u32, r2: u32, c2: u32| CellRange {
+            start: CellRef::new(r1, c1),
+            end: CellRef::new(r2, c2),
+        };
+        let merges = [
+            range(2, 0, 65, 3),    // MERGE_ROW_CAP - 1 rows tall: indexed
+            range(10, 5, 74, 8),   // MERGE_ROW_CAP rows tall: scanned
+            range(30, 1, 40, 2),   // nested inside the indexed merge's rows
+            range(50, 6, 60, 7),   // nested inside the scanned merge
+            range(100, 0, 50, 5),  // inverted: never covers
+            range(200, 0, 210, 2), // below a narrow hint
+        ];
+        let linear = |at: CellRef| merges.iter().find(|m| m.contains(at)).copied();
+        for hint in [0u32..=120, 60..=70, 205..=205, RangeInclusive::new(1, 0)] {
+            let index = MergeIndex::new(&merges, hint.clone());
+            for row in hint.clone() {
+                for col in 0u32..10 {
+                    let at = CellRef::new(row, col);
+                    assert_eq!(index.covering(at), linear(at), "{at:?} hint {hint:?}");
+                }
+            }
+            for merge in &merges {
+                if hint.contains(&merge.start.row) {
+                    assert_eq!(
+                        index.covering(merge.start),
+                        linear(merge.start),
+                        "anchor {:?} hint {hint:?}",
+                        merge.start
+                    );
+                }
+            }
+        }
     }
 }
