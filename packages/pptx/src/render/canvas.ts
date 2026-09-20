@@ -45,8 +45,8 @@ export function sizeCanvasForSlide(
   dpr: number,
   scale = 1
 ): void {
-  canvas.width = Math.round(list.width * scale * dpr);
-  canvas.height = Math.round(list.height * scale * dpr);
+  canvas.width = Math.ceil(list.width * scale * dpr);
+  canvas.height = Math.ceil(list.height * scale * dpr);
   canvas.style.width = `${list.width * scale}px`;
   canvas.style.height = `${list.height * scale}px`;
 }

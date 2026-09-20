@@ -32,6 +32,8 @@ use crate::{
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const EMU_PER_POINT: f64 = 12_700.0;
+const CSS_PIXELS_PER_POINT: f64 = 96.0 / 72.0;
 const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
@@ -246,8 +248,8 @@ impl SlideRenderer {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = emu_to_px(deck.width_emu);
-        let height = emu_to_px(deck.height_emu);
+        let width = slide_extent_px(deck.width_emu);
+        let height = slide_extent_px(deck.height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -4117,6 +4119,12 @@ fn emu_to_px(value: i64) -> f32 {
     safe_geometry(value as f32 / EMU_PER_CSS_PIXEL)
 }
 
+/// A slide's page box is a whole number of points, the unit PowerPoint
+/// exports and prints it in, so the extent snaps there before the px scale.
+fn slide_extent_px(value: i64) -> f32 {
+    safe_geometry(((value as f64 / EMU_PER_POINT).round() * CSS_PIXELS_PER_POINT) as f32)
+}
+
 fn safe_geometry(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-1.0e12, 1.0e12)
@@ -4157,6 +4165,22 @@ mod tests {
         include_bytes!("../../../packages/fonts/assets/LiberationSans-Italic.ttf");
     const BOLD_ITALIC_FONT: &[u8] =
         include_bytes!("../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf");
+
+    #[test]
+    fn a_slide_extent_matches_the_page_powerpoint_exports() {
+        let page_px = |emu| (f64::from(slide_extent_px(emu)) * 150.0 / 96.0).ceil() as u32;
+        for (emu, px, dots) in [
+            (12_192_000, 1280.0, 2000),
+            (6_858_000, 720.0, 1125),
+            (10_691_813, 1122.6666, 1755),
+            (7_559_675, 793.3333, 1240),
+            (7_556_500, 793.3333, 1240),
+            (10_693_400, 1122.6666, 1755),
+        ] {
+            assert!((slide_extent_px(emu) - px).abs() < 0.001, "{emu}");
+            assert_eq!(page_px(emu), dots, "{emu}");
+        }
+    }
 
     #[test]
     fn a_source_crop_converts_to_fractions_and_refuses_what_cannot_be_drawn() {

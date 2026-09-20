@@ -8,7 +8,15 @@ import type {
   TablePrimitive,
   TextBoxPrimitive,
 } from '../types';
-import { applyImageEffects, paintSlide } from './canvas';
+import { applyImageEffects, paintSlide, sizeCanvasForSlide } from './canvas';
+
+test('sizes the backing store to cover a slide whose page is a fractional pixel', () => {
+  const canvas = { width: 0, height: 0, style: { width: '', height: '' } };
+  sizeCanvasForSlide(canvas, { width: 1122.6666, height: 793.3333 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([1755, 1240]);
+  sizeCanvasForSlide(canvas, { width: 1280, height: 720 }, 150 / 96);
+  expect([canvas.width, canvas.height]).toEqual([2000, 1125]);
+});
 
 describe('PPTX canvas replay', () => {
   test('paints shape geometry and positioned text in display-list order', async () => {
