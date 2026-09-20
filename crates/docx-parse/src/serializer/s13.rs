@@ -1497,28 +1497,26 @@ fn count_paragraph_elements(xml: &str) -> Option<usize> {
     Some(count)
 }
 
-/// Selective-save fast path: splice only the changed `w14:paraId` paragraphs
-/// into the untouched source part instead of serializing the whole document.
-/// Returns `None` whenever the result cannot be proven identical to the
-/// serialize-then-patch path, so the caller can fall back to it and preserve
-/// its behaviour (including its errors) exactly.
+/// Splice only the changed `w14:paraId` paragraphs into the untouched source
+/// part. `None` whenever the result cannot be proven identical to the
+/// serialize-then-patch path (whose behavior and errors the fallback preserves).
 fn build_selective_document_xml(
     document: &DocumentBody,
     original_xml: &str,
     changed_ids: &[String],
     context: &mut SerializerContext,
 ) -> Result<Option<String>, ParseError> {
+    let mut index = SelectiveParagraphIndex::new(changed_ids);
+    if index.story(&document.content).is_none() || index.allocates_ids {
+        return Ok(None);
+    }
     if changed_ids.is_empty() {
         return Ok(Some(original_xml.to_owned()));
     }
     let Some(original) = index_paragraphs(original_xml) else {
         return Ok(None);
     };
-    let mut index = SelectiveParagraphIndex::new(changed_ids);
-    if index.story(&document.content).is_none()
-        || index.count != original.count
-        || index.allocates_ids
-    {
+    if index.count != original.count {
         return Ok(None);
     }
 
