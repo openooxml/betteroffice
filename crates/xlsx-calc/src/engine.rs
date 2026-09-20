@@ -356,6 +356,21 @@ mod tests {
         assert_eq!(value(&wb, s, "B1"), num(4.0));
     }
 
+    /// OFFSET reads its anchor's coordinates, not its value, so a cell may
+    /// offset from itself: Greptile flagged `A1=SUM(OFFSET(A1,1,0,3,1))`
+    /// reporting A1 as cyclic and zeroing a valid result.
+    #[test]
+    fn a_cell_may_offset_from_its_own_position() {
+        let (mut wb, s) = one_sheet();
+        for (cell, v) in [("A2", 1.0), ("A3", 2.0), ("A4", 3.0)] {
+            put_num(&mut wb, s, cell, v);
+        }
+        put_formula(&mut wb, s, "A1", "SUM(OFFSET(A1,1,0,3,1))");
+        let report = rebuild_and_recalc_all(&mut wb, None).1;
+        assert!(report.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
     #[test]
     fn chain_propagates_transitively() {
         let (mut wb, s) = one_sheet();

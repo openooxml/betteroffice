@@ -16,16 +16,22 @@ pub fn references(expr: &Expr) -> Vec<(Option<String>, CellRange)> {
     out
 }
 
-/// true when `arg` is read for where it sits, not what it holds, so it
-/// carries no data dependency.
-pub fn positional_argument(name: &str, arg: &Expr) -> bool {
-    matches!(
-        name.to_ascii_uppercase().as_str(),
-        "ROW" | "COLUMN" | "ROWS" | "COLUMNS"
-    ) && matches!(
-        arg,
-        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::Name { .. }
-    )
+/// true when argument `index` is read for where it sits rather than what it
+/// holds, so it carries no data dependency: `ROW`, `COLUMN`, `ROWS` and
+/// `COLUMNS` answer a reference's position, and `OFFSET` takes its anchor's
+/// coordinates -- what `OFFSET` reads is the rectangle it resolves to, which
+/// [`offset_target`] supplies instead.
+pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
+    let positional = match name.to_ascii_uppercase().as_str() {
+        "ROW" | "COLUMN" | "ROWS" | "COLUMNS" => true,
+        "OFFSET" => index == 0,
+        _ => false,
+    };
+    positional
+        && matches!(
+            arg,
+            Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::Name { .. }
+        )
 }
 
 fn walk(
@@ -57,8 +63,8 @@ fn walk(
             walk(rhs, out, seen);
         }
         Expr::FuncCall { name, args } => {
-            for arg in args {
-                if positional_argument(name, arg) {
+            for (index, arg) in args.iter().enumerate() {
+                if positional_argument(name, index, arg) {
                     continue;
                 }
                 walk(arg, out, seen);
@@ -195,7 +201,7 @@ mod tests {
 
     #[test]
     fn positional_queries_still_read_computed_arguments() {
-        assert_eq!(refs("ROW(OFFSET(A1,B1,0))"), vec!["A1", "B1"]);
+        assert_eq!(refs("ROW(OFFSET(A1,B1,0))"), vec!["B1"]);
     }
 
     #[test]
@@ -203,25 +209,24 @@ mod tests {
         assert_eq!(refs("IF(A1>0, B1, -C1%)"), vec!["A1", "B1", "C1"]);
     }
 
+    /// the anchor gives coordinates, never a value, so the only cells an
+    /// OFFSET reads are the ones in the rectangle it resolves to.
     #[test]
-    fn static_offset_reads_its_target() {
-        assert_eq!(refs("OFFSET(A1, 1, 1)"), vec!["A1", "B2"]);
-        assert_eq!(refs("SUM(OFFSET($A$1, 1, 0, 3, 2))"), vec!["A1", "A2:B4"]);
-        assert_eq!(refs("OFFSET(C3, -2, -2)"), vec!["C3", "A1"]);
-        assert_eq!(refs("SUM(OFFSET(A5, 0, 0, -3, 1))"), vec!["A5", "A3:A5"]);
-        assert_eq!(refs("ROWS(OFFSET(E1:F4, 1, 0))"), vec!["E1:F4", "E2:F5"]);
-        assert_eq!(
-            refs("OFFSET(Sheet2!A1, 1, 0)"),
-            vec!["Sheet2!A1", "Sheet2!A2"]
-        );
+    fn static_offset_reads_its_target_and_not_its_anchor() {
+        assert_eq!(refs("OFFSET(A1, 1, 1)"), vec!["B2"]);
+        assert_eq!(refs("SUM(OFFSET($A$1, 1, 0, 3, 2))"), vec!["A2:B4"]);
+        assert_eq!(refs("OFFSET(C3, -2, -2)"), vec!["A1"]);
+        assert_eq!(refs("SUM(OFFSET(A5, 0, 0, -3, 1))"), vec!["A3:A5"]);
+        assert_eq!(refs("ROWS(OFFSET(E1:F4, 1, 0))"), vec!["E2:F5"]);
+        assert_eq!(refs("OFFSET(Sheet2!A1, 1, 0)"), vec!["Sheet2!A2"]);
     }
 
     #[test]
-    fn offset_without_a_target_reads_only_its_arguments() {
-        assert_eq!(refs("OFFSET(A1, B1, 0)"), vec!["A1", "B1"]);
-        assert_eq!(refs("OFFSET(A1, ROW(), 0)"), vec!["A1"]);
-        assert_eq!(refs("OFFSET(A1, -1, 0)"), vec!["A1"]);
-        assert_eq!(refs("OFFSET(A1, 0, 0, 0, 1)"), vec!["A1"]);
+    fn offset_without_a_target_reads_only_its_computed_arguments() {
+        assert_eq!(refs("OFFSET(A1, B1, 0)"), vec!["B1"]);
+        assert!(refs("OFFSET(A1, ROW(), 0)").is_empty());
+        assert!(refs("OFFSET(A1, -1, 0)").is_empty());
+        assert!(refs("OFFSET(A1, 0, 0, 0, 1)").is_empty());
     }
 
     #[test]

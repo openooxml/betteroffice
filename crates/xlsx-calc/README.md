@@ -183,6 +183,9 @@ with `~` escaping a literal `*`, `?`, or `~`.
   bound to a computed reference keeps no edge to what that reference reads.
 - **`OFFSET` in scalar context** follows the evaluator's no-implicit-intersection
   rule: a multi-cell result is `#VALUE!`, exactly as a bare `A1:A5` would be.
+- **`OFFSET`'s anchor** gives coordinates, never a value, so it is no more a
+  dependency than the reference under `ROW`. A cell may offset from its own
+  position without being a cycle.
 - **`OFFSET`'s dependencies** are exact — the resolved rectangle is a graph edge
   — whenever its offsets and sizes are literal numbers over a literal anchor.
   When any of them is computed, the target is unknowable before evaluation, so

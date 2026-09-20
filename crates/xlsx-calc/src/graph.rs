@@ -298,8 +298,10 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
             }
             Expr::FuncCall { name, args } => expressions.extend(
                 args.iter()
+                    .enumerate()
                     .rev()
-                    .filter(|arg| !positional_argument(name, arg)),
+                    .filter(|(index, arg)| !positional_argument(name, *index, arg))
+                    .map(|(_, arg)| arg),
             ),
             Expr::Number(_)
             | Expr::Text(_)
