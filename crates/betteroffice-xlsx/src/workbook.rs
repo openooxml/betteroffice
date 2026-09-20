@@ -229,7 +229,7 @@ impl Workbook {
                 return Err(Error::DuplicatePart(name.clone()));
             }
         }
-        let parsed = xlsx_parse::parse_workbook_with_package(parts)?;
+        let parsed = xlsx_parse::parse_workbook_with_owned_package(parts)?;
         Self::from_source(
             parsed.workbook,
             Some(parsed.package),

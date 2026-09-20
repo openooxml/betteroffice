@@ -37,9 +37,16 @@ pub struct ParsedWorkbook {
     pub legacy_dimensions: Vec<LegacySheetDimensions>,
 }
 
-/// Parses the model and captures source package state, taking ownership of
-/// `parts` as the package's single retained copy.
+/// Parses the model and captures source package state.
 pub fn parse_workbook_with_package(
+    parts: &[(String, Vec<u8>)],
+) -> Result<ParsedWorkbook, ParseError> {
+    parse_workbook_with_owned_package(parts.to_vec())
+}
+
+/// [`parse_workbook_with_package`] taking ownership of `parts` so the package
+/// retains the inflated archive once instead of cloning it.
+pub fn parse_workbook_with_owned_package(
     parts: Vec<(String, Vec<u8>)>,
 ) -> Result<ParsedWorkbook, ParseError> {
     let parsed = read::parse_workbook_indexed(&parts)?;
