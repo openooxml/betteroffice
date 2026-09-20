@@ -20,4 +20,6 @@ pub use styles::{
     NumFmtTableFull, NumberFormat, PoolMarks, Stylesheet, Theme, VAlign, Xf,
 };
 pub use value::{CellValue, ErrorValue};
-pub use workbook::{Cell, CellProvider, DefinedName, FreezePane, Hyperlink, Sheet, Workbook};
+pub use workbook::{
+    Cell, CellProvider, DefinedName, FreezePane, Hyperlink, Sheet, SheetFormat, Workbook,
+};

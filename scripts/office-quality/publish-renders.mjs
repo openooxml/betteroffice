@@ -1,11 +1,10 @@
-import { execFile } from 'node:child_process';
+import { S3Client, file as localFile } from 'bun';
 import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { promisify } from 'node:util';
+import { r2Options } from './r2.mjs';
 import { RENDER_PREFIX, latestManifest, planRenders, reportKey } from './renders.mjs';
 
-const execute = promisify(execFile);
 const output = resolve(process.env.QUALITY_OUTPUT ?? '.source/office-quality/run');
 const bucket = process.env.QUALITY_RENDER_BUCKET ?? '';
 const concurrency = Number(process.env.QUALITY_RENDER_CONCURRENCY || 8);
@@ -18,24 +17,7 @@ if (!Number.isInteger(concurrency) || concurrency < 1)
 async function put(key, file, contentType) {
   if (!key.startsWith(`${RENDER_PREFIX}/`))
     throw new Error(`Refusing to write outside the prefix: ${key}`);
-  await execute(
-    'bunx',
-    [
-      '--no-install',
-      'wrangler',
-      'r2',
-      'object',
-      'put',
-      `${bucket}/${key}`,
-      '--file',
-      file,
-      '--content-type',
-      contentType,
-      '--force',
-      '--remote',
-    ],
-    { timeout: 300_000, maxBuffer: 16 * 1024 * 1024, env: process.env }
-  );
+  await client.file(key).write(localFile(file), { type: contentType });
 }
 
 async function pooled(items, worker) {
@@ -54,6 +36,7 @@ const sources = plan.uploads.map((upload) => ({
 }));
 for (const source of sources) await stat(source.file);
 
+const client = new S3Client(await r2Options(process.env));
 const scratch = await mkdtemp(join(tmpdir(), 'fidelity-renders-'));
 try {
   let done = 0;

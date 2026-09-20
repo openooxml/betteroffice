@@ -20,6 +20,8 @@ export interface TextStyleSnapshot {
   underline: string | null;
   spacingPt?: number | null;
   baselinePct?: number | null;
+  /** `a:rPr@cap`: how the run is cased when drawn, never in the stored text. */
+  caps?: 'none' | 'small' | 'all' | null;
 }
 
 export interface TextRunSnapshot {

@@ -1,10 +1,11 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 
 use quick_xml::events::{BytesCData, BytesStart, BytesText, Event};
 use quick_xml::name::ResolveResult;
 use quick_xml::{NsReader, Reader, Writer, XmlVersion};
 
-use crate::{rezip_parts, unzip_parts};
+use crate::{rezip_parts_preserving, unzip_parts};
 
 const CONTENT_TYPES_NAMESPACE: &[u8] =
     b"http://schemas.openxmlformats.org/package/2006/content-types";
@@ -36,9 +37,10 @@ pub fn sanitize_package_for_format(data: &[u8], expected_format: &str) -> Result
 fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<Vec<u8>, String> {
     let mut parts = unzip_parts(data)?;
     let mut xml_budget = XmlBudget::default();
-    let detected = if expected_format.is_some() {
-        detect_package_kind_with_budget(&parts, &mut xml_budget)
-            .map_err(|error| error.to_string())?
+    let (detected, content_types) = if expected_format.is_some() {
+        let (kind, content_types) = detect_package_kind_with_budget(&parts, &mut xml_budget)
+            .map_err(|error| error.to_string())?;
+        (kind, Some(content_types))
     } else {
         detect_format_with_budget(&parts, &mut xml_budget)?
     };
@@ -51,28 +53,18 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
         ));
     }
 
-    let content_types = match parse_content_types(&parts, &mut xml_budget) {
-        Ok(content_types) => Some(content_types),
-        Err(DocumentKindError::MissingContentTypes) => None,
-        Err(error) => return Err(error.to_string()),
-    };
-
     let mut removed: HashSet<String> = parts
         .iter()
         .filter(|(path, _)| dangerous_path(path))
-        .map(|(path, _)| normalize_part_name(path))
+        .map(|(path, _)| normalize_part_name(path).into_owned())
         .collect();
-    if let Some((_, content_types)) = parts
-        .iter()
-        .find(|(path, _)| path.eq_ignore_ascii_case("[Content_Types].xml"))
-    {
-        removed.extend(dangerous_content_type_parts(
-            content_types,
-            &mut xml_budget,
-        )?);
+    if let Some(content_types) = &content_types {
+        removed.extend(content_types.dangerous.iter().cloned());
     }
 
-    parts.retain(|(path, _)| !removed.contains(&normalize_part_name(path)));
+    if !removed.is_empty() {
+        parts.retain(|(path, _)| !removed.contains(normalize_part_name(path).as_ref()));
+    }
     for (path, bytes) in &mut parts {
         let lower = path.to_ascii_lowercase();
         let content_type = content_types
@@ -88,7 +80,7 @@ fn sanitize_package_inner(data: &[u8], expected_format: Option<&str>) -> Result<
             *bytes = neutralize_fields(bytes, path, &mut xml_budget)?;
         }
     }
-    rezip_parts(&parts)
+    rezip_parts_preserving(&parts, data)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -183,16 +175,16 @@ impl std::error::Error for DocumentKindError {}
 
 pub fn detect_package_kind(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, DocumentKindError> {
     let mut xml_budget = XmlBudget::default();
-    detect_package_kind_with_budget(parts, &mut xml_budget)
+    detect_package_kind_with_budget(parts, &mut xml_budget).map(|(kind, _)| kind)
 }
 
 fn detect_package_kind_with_budget(
     parts: &[(String, Vec<u8>)],
     xml_budget: &mut XmlBudget,
-) -> Result<DocumentKind, DocumentKindError> {
+) -> Result<(DocumentKind, ContentTypes), DocumentKindError> {
     let part_names: HashSet<String> = parts
         .iter()
-        .map(|(path, _)| normalize_part_name(path))
+        .map(|(path, _)| normalize_part_name(path).into_owned())
         .collect();
     let main_document = main_document_part(parts, &part_names, xml_budget)?;
     let content_types = parse_content_types(parts, xml_budget)?;
@@ -202,7 +194,7 @@ fn detect_package_kind_with_budget(
     let kind =
         declared_main_kind(content_type).ok_or(DocumentKindError::MissingMainDocumentKind)?;
     if main_document.relationship_kind.accepts(kind) {
-        Ok(kind)
+        Ok((kind, content_types))
     } else {
         Err(invalid_relationships(
             "main relationship type does not match document content type",
@@ -213,12 +205,15 @@ fn detect_package_kind_with_budget(
 struct ContentTypes {
     overrides: BTreeMap<String, String>,
     defaults: BTreeMap<String, String>,
+    /// Parts named by any `Override` (any depth, any namespace prefix) whose
+    /// declared content type is macro/embedding-dangerous.
+    dangerous: HashSet<String>,
 }
 
 impl ContentTypes {
     fn content_type_for(&self, part_name: &str) -> Option<&str> {
         let part_name = normalize_part_name(part_name);
-        if let Some(content_type) = self.overrides.get(&part_name) {
+        if let Some(content_type) = self.overrides.get(part_name.as_ref()) {
             return Some(content_type);
         }
         let (_, extension) = part_name.rsplit_once('.')?;
@@ -241,6 +236,7 @@ fn parse_content_types(
     let mut reader = NsReader::from_reader(bytes.as_slice());
     let mut overrides = BTreeMap::new();
     let mut defaults = BTreeMap::new();
+    let mut dangerous = HashSet::new();
     let mut declaration_count = 0_usize;
     let mut depth = 0_usize;
     let mut root_seen = false;
@@ -271,6 +267,9 @@ fn parse_content_types(
                         &mut declaration_count,
                     )?;
                 }
+                if local.as_ref() == b"Override" {
+                    record_dangerous_override(&reader, &start, &mut dangerous)?;
+                }
                 depth += 1;
             }
             (namespace, Event::Empty(start)) => {
@@ -294,6 +293,9 @@ fn parse_content_types(
                         &mut defaults,
                         &mut declaration_count,
                     )?;
+                }
+                if local.as_ref() == b"Override" {
+                    record_dangerous_override(&reader, &start, &mut dangerous)?;
                 }
             }
             (_, Event::End(_)) => {
@@ -326,7 +328,24 @@ fn parse_content_types(
     Ok(ContentTypes {
         overrides,
         defaults,
+        dangerous,
     })
+}
+
+fn record_dangerous_override(
+    reader: &Reader<&[u8]>,
+    start: &BytesStart<'_>,
+    dangerous: &mut HashSet<String>,
+) -> Result<(), DocumentKindError> {
+    let values = content_type_attributes(reader, start)?;
+    if let (Some(part_name), Some(content_type)) = (
+        attribute_value(&values, "PartName"),
+        attribute_value(&values, "ContentType"),
+    ) && dangerous_content_type(content_type)
+    {
+        dangerous.insert(normalize_part_name(part_name).into_owned());
+    }
+    Ok(())
 }
 
 fn is_content_types_namespace(namespace: &ResolveResult<'_>) -> bool {
@@ -356,7 +375,7 @@ fn record_content_type(
                 .ok_or_else(|| invalid_content_types("Override missing PartName"))?;
             let content_type = attribute_value(&values, "ContentType")
                 .ok_or_else(|| invalid_content_types("Override missing ContentType"))?;
-            let part_name = normalize_part_name(part_name);
+            let part_name = normalize_part_name(part_name).into_owned();
             if overrides
                 .insert(part_name.clone(), content_type.to_owned())
                 .is_some()
@@ -620,15 +639,15 @@ fn declared_main_kind(content_type: &str) -> Option<DocumentKind> {
 #[cfg(test)]
 fn detect_format(parts: &[(String, Vec<u8>)]) -> Result<DocumentKind, String> {
     let mut xml_budget = XmlBudget::default();
-    detect_format_with_budget(parts, &mut xml_budget)
+    detect_format_with_budget(parts, &mut xml_budget).map(|(kind, _)| kind)
 }
 
 fn detect_format_with_budget(
     parts: &[(String, Vec<u8>)],
     xml_budget: &mut XmlBudget,
-) -> Result<DocumentKind, String> {
+) -> Result<(DocumentKind, Option<ContentTypes>), String> {
     match detect_package_kind_with_budget(parts, xml_budget) {
-        Ok(kind) => return Ok(kind),
+        Ok((kind, content_types)) => return Ok((kind, Some(content_types))),
         Err(error @ DocumentKindError::InvalidContentTypes(_))
         | Err(error @ DocumentKindError::InvalidPackageRelationships(_))
         | Err(error @ DocumentKindError::ConflictingMainDocumentRelationships(_)) => {
@@ -636,15 +655,21 @@ fn detect_format_with_budget(
         }
         Err(_) => {}
     }
-    if has_part(parts, "word/document.xml") {
-        Ok(DocumentKind::Docx)
+    let kind = if has_part(parts, "word/document.xml") {
+        DocumentKind::Docx
     } else if has_part(parts, "xl/workbook.xml") {
-        Ok(DocumentKind::Xlsx)
+        DocumentKind::Xlsx
     } else if has_part(parts, "ppt/presentation.xml") {
-        Ok(DocumentKind::Pptx)
+        DocumentKind::Pptx
     } else {
-        Err("could not detect DOCX, XLSX, PPTX, or VSDX package".to_owned())
-    }
+        return Err("could not detect DOCX, XLSX, PPTX, or VSDX package".to_owned());
+    };
+    let content_types = match parse_content_types(parts, xml_budget) {
+        Ok(content_types) => Some(content_types),
+        Err(DocumentKindError::MissingContentTypes) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok((kind, content_types))
 }
 
 fn has_part(parts: &[(String, Vec<u8>)], expected: &str) -> bool {
@@ -653,51 +678,24 @@ fn has_part(parts: &[(String, Vec<u8>)], expected: &str) -> bool {
         .any(|(path, _)| path.eq_ignore_ascii_case(expected))
 }
 
-fn dangerous_content_type_parts(
-    xml: &[u8],
-    xml_budget: &mut XmlBudget,
-) -> Result<HashSet<String>, String> {
-    validate_xml_limits(xml, "[Content_Types].xml", xml_budget)?;
-    let mut reader = Reader::from_reader(xml);
-    let mut paths = HashSet::new();
-    loop {
-        match reader
-            .read_event()
-            .map_err(|error| format!("invalid [Content_Types].xml: {error}"))?
-        {
-            Event::Start(start) | Event::Empty(start)
-                if start.name().local_name().as_ref() == b"Override" =>
-            {
-                let attributes = attributes(&reader, &start, "[Content_Types].xml")?;
-                let part_name = attribute_value(&attributes, "PartName");
-                let content_type = attribute_value(&attributes, "ContentType");
-                if let (Some(part_name), Some(content_type)) = (part_name, content_type)
-                    && dangerous_content_type(content_type)
-                {
-                    paths.insert(normalize_part_name(part_name));
-                }
-            }
-            Event::DocType(_) => return Err("DTD is forbidden in [Content_Types].xml".to_owned()),
-            Event::Eof => return Ok(paths),
-            _ => {}
-        }
-    }
-}
-
 fn sanitize_content_types(
     xml: &[u8],
     removed: &HashSet<String>,
     path: &str,
     xml_budget: &mut XmlBudget,
 ) -> Result<Vec<u8>, String> {
-    validate_xml_limits(xml, path, xml_budget)?;
+    let needs_validation = xml_budget.needs_validation(path);
     let mut reader = Reader::from_reader(xml);
     let mut writer = Writer::new(Vec::with_capacity(xml.len()));
     let mut skip_depth = 0_usize;
+    let mut depth = 0_usize;
     loop {
         let event = reader
             .read_event()
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        if needs_validation {
+            validate_xml_event(&event, path, xml_budget, &mut depth)?;
+        }
         if skip_depth > 0 {
             match event {
                 Event::Start(_) => skip_depth += 1,
@@ -750,7 +748,7 @@ fn remove_content_type_entry(
     }
     element == b"Override"
         && attribute_value(attributes, "PartName")
-            .is_some_and(|path| removed.contains(&normalize_part_name(path)))
+            .is_some_and(|path| removed.contains(normalize_part_name(path).as_ref()))
 }
 
 fn rewrite_content_type(
@@ -791,14 +789,18 @@ fn sanitize_relationships(
     path: &str,
     xml_budget: &mut XmlBudget,
 ) -> Result<Vec<u8>, String> {
-    validate_xml_limits(xml, path, xml_budget)?;
+    let needs_validation = xml_budget.needs_validation(path);
     let mut reader = Reader::from_reader(xml);
     let mut writer = Writer::new(Vec::with_capacity(xml.len()));
     let mut skip_depth = 0_usize;
+    let mut depth = 0_usize;
     loop {
         let event = reader
             .read_event()
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        if needs_validation {
+            validate_xml_event(&event, path, xml_budget, &mut depth)?;
+        }
         if skip_depth > 0 {
             match event {
                 Event::Start(_) => skip_depth += 1,
@@ -854,16 +856,20 @@ fn neutralize_fields(
     path: &str,
     xml_budget: &mut XmlBudget,
 ) -> Result<Vec<u8>, String> {
-    validate_xml_limits(xml, path, xml_budget)?;
+    let needs_validation = xml_budget.needs_validation(path);
     let mut reader = Reader::from_reader(xml);
     reader.config_mut().trim_text(false);
     let mut writer = Writer::new(Vec::with_capacity(xml.len()));
     let mut stack = Vec::new();
     let mut skip_depth = 0_usize;
+    let mut depth = 0_usize;
     loop {
         let event = reader
             .read_event()
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
+        if needs_validation {
+            validate_xml_event(&event, path, xml_budget, &mut depth)?;
+        }
         if skip_depth > 0 {
             match event {
                 Event::Start(_) => skip_depth += 1,
@@ -986,7 +992,12 @@ fn attribute_local(name: &str) -> &str {
 }
 
 fn dangerous_path(path: &str) -> bool {
-    let path = path.replace('\\', "/").to_ascii_lowercase();
+    let path: Cow<'_, str> =
+        if path.contains('\\') || path.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            Cow::Owned(path.replace('\\', "/").to_ascii_lowercase())
+        } else {
+            Cow::Borrowed(path)
+        };
     path.ends_with("vbaproject.bin")
         || path.ends_with("vbadata.xml")
         || path.contains("/macrosheets/")
@@ -1040,9 +1051,16 @@ struct XmlBudget {
     validated_parts: HashSet<String>,
 }
 
+impl XmlBudget {
+    fn needs_validation(&self, path: &str) -> bool {
+        !self
+            .validated_parts
+            .contains(normalize_part_name(path).as_ref())
+    }
+}
+
 fn validate_xml_limits(xml: &[u8], path: &str, budget: &mut XmlBudget) -> Result<(), String> {
-    let part_name = normalize_part_name(path);
-    if budget.validated_parts.contains(&part_name) {
+    if !budget.needs_validation(path) {
         return Ok(());
     }
     let mut reader = Reader::from_reader(xml);
@@ -1051,44 +1069,59 @@ fn validate_xml_limits(xml: &[u8], path: &str, budget: &mut XmlBudget) -> Result
         let event = reader
             .read_event()
             .map_err(|error| format!("invalid XML in {path}: {error}"))?;
-        budget.events = budget
-            .events
-            .checked_add(1)
-            .ok_or_else(|| format!("package XML event limit exceeded in {path}"))?;
-        if budget.events > MAX_PACKAGE_XML_EVENTS {
-            return Err(format!("package XML event limit exceeded in {path}"));
-        }
-        match event {
-            Event::Start(start) => {
-                validate_xml_attributes(&start, path, budget)?;
-                depth += 1;
-                if depth > MAX_XML_DEPTH {
-                    return Err(format!("XML depth limit exceeded in {path}"));
-                }
-            }
-            Event::Empty(start) => {
-                validate_xml_attributes(&start, path, budget)?;
-                if depth >= MAX_XML_DEPTH {
-                    return Err(format!("XML depth limit exceeded in {path}"));
-                }
-            }
-            Event::End(_) => {
-                if depth == 0 {
-                    return Err(format!("unexpected closing element in {path}"));
-                }
-                depth -= 1;
-            }
-            Event::DocType(_) => return Err(format!("DTD is forbidden in {path}")),
-            Event::Eof => {
-                if depth != 0 {
-                    return Err(format!("unexpected EOF in {path}"));
-                }
-                budget.validated_parts.insert(part_name);
-                return Ok(());
-            }
-            _ => {}
+        let done = matches!(event, Event::Eof);
+        validate_xml_event(&event, path, budget, &mut depth)?;
+        if done {
+            return Ok(());
         }
     }
+}
+
+fn validate_xml_event(
+    event: &Event<'_>,
+    path: &str,
+    budget: &mut XmlBudget,
+    depth: &mut usize,
+) -> Result<(), String> {
+    budget.events = budget
+        .events
+        .checked_add(1)
+        .ok_or_else(|| format!("package XML event limit exceeded in {path}"))?;
+    if budget.events > MAX_PACKAGE_XML_EVENTS {
+        return Err(format!("package XML event limit exceeded in {path}"));
+    }
+    match event {
+        Event::Start(start) => {
+            validate_xml_attributes(start, path, budget)?;
+            *depth += 1;
+            if *depth > MAX_XML_DEPTH {
+                return Err(format!("XML depth limit exceeded in {path}"));
+            }
+        }
+        Event::Empty(start) => {
+            validate_xml_attributes(start, path, budget)?;
+            if *depth >= MAX_XML_DEPTH {
+                return Err(format!("XML depth limit exceeded in {path}"));
+            }
+        }
+        Event::End(_) => {
+            if *depth == 0 {
+                return Err(format!("unexpected closing element in {path}"));
+            }
+            *depth -= 1;
+        }
+        Event::DocType(_) => return Err(format!("DTD is forbidden in {path}")),
+        Event::Eof => {
+            if *depth != 0 {
+                return Err(format!("unexpected EOF in {path}"));
+            }
+            budget
+                .validated_parts
+                .insert(normalize_part_name(path).into_owned());
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn validate_xml_attributes(
@@ -1154,10 +1187,18 @@ fn resolve_relationship_target(relationship_path: &str, target: &str) -> Option<
     Some(segments.join("/").to_ascii_lowercase())
 }
 
-fn normalize_part_name(path: &str) -> String {
-    path.replace('\\', "/")
-        .trim_start_matches('/')
-        .to_ascii_lowercase()
+fn normalize_part_name(path: &str) -> Cow<'_, str> {
+    if !path.starts_with('/')
+        && !path.contains('\\')
+        && !path.bytes().any(|byte| byte.is_ascii_uppercase())
+    {
+        return Cow::Borrowed(path);
+    }
+    Cow::Owned(
+        path.replace('\\', "/")
+            .trim_start_matches('/')
+            .to_ascii_lowercase(),
+    )
 }
 
 fn is_xml_part(path: &str) -> bool {
@@ -1202,6 +1243,7 @@ fn write(writer: &mut Writer<Vec<u8>>, event: Event<'_>, path: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rezip_parts;
 
     fn content_types(part_name: &str, content_type: &str) -> (String, Vec<u8>) {
         (

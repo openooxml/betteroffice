@@ -14,6 +14,9 @@ import { pathToFileURL } from 'node:url';
 import { FORMATS, renderSection } from './readme.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
+import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
+import { mergePptxBenchmark } from './pptx-benchmark.mjs';
+import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -210,8 +213,12 @@ export async function mergeFromPaths({
   parts,
   output,
   requireRenders = false,
+  requireDocxBenchmark = false,
+  requirePptxBenchmark = false,
+  requireXlsxBenchmark = false,
 }) {
-  const plan = normalizePlan(JSON.parse(await readFile(planPath, 'utf8')));
+  const planBytes = await readFile(planPath);
+  const plan = normalizePlan(JSON.parse(planBytes));
   await directory(resolve(parts), 'QUALITY_PARTS');
   const reports = await Promise.all(
     plan.formats.map(async (format) => {
@@ -223,7 +230,21 @@ export async function mergeFromPaths({
       }
     })
   );
-  const report = mergeReports(plan, reports);
+  let report = mergeReports(plan, reports);
+  if (requireDocxBenchmark && plan.formats.includes('docx')) {
+    const benchmarks = await Promise.all(docxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `docx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergeDocxBenchmarks(plan, report, benchmarks, digest(planBytes));
+  }
+  if (requirePptxBenchmark && plan.formats.includes('pptx')) {
+    const benchmark = JSON.parse(await readFile(resolve(parts, 'pptx-benchmark-report', 'report.json'), 'utf8'));
+    report = mergePptxBenchmark(plan, report, benchmark, digest(planBytes));
+  }
+  if (requireXlsxBenchmark && xlsxShards(plan).length) {
+    const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `xlsx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergeXlsxBenchmarks(plan, report, benchmarks, digest(planBytes));
+  }
   const section = renderSection(report);
   await emptyOutput(output);
   await mkdir(dirname(output), { recursive: true });
@@ -250,5 +271,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     parts: resolve(QUALITY_PARTS),
     output: resolve(QUALITY_OUTPUT),
     requireRenders: QUALITY_REQUIRE_RENDERS === 'true',
+    requireDocxBenchmark: process.env.QUALITY_REQUIRE_DOCX_BENCHMARK === 'true',
+    requirePptxBenchmark: process.env.QUALITY_REQUIRE_PPTX_BENCHMARK === 'true',
+    requireXlsxBenchmark: process.env.QUALITY_REQUIRE_XLSX_BENCHMARK === 'true',
   });
 }

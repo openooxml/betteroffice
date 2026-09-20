@@ -1402,6 +1402,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),
+        caps: element.attribute("cap").and_then(TextCaps::from_attribute),
         font_family: element
             .child("latin")
             .and_then(|value| value.attribute("typeface"))
@@ -2111,6 +2112,34 @@ mod tests {
                 .baseline_pct,
             Some(0.0)
         );
+    }
+
+    #[test]
+    fn a_run_reads_its_caps_token_and_refuses_junk() {
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let mut caps = Vec::new();
+        for token in ["all", "small", "none", "ALL", "bogus"] {
+            let element = parse_xml(
+                format!(r#"<a:rPr cap="{token}"/>"#).as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut budget,
+            )
+            .unwrap();
+            caps.push(parse_run_properties(Some(&element)).caps);
+        }
+        assert_eq!(
+            caps,
+            [
+                Some(TextCaps::All),
+                Some(TextCaps::Small),
+                Some(TextCaps::None),
+                None,
+                None
+            ]
+        );
+        let element = parse_xml(br#"<a:rPr/>"#, "ppt/slides/slide1.xml", &mut budget).unwrap();
+        assert_eq!(parse_run_properties(Some(&element)).caps, None);
     }
 
     #[test]

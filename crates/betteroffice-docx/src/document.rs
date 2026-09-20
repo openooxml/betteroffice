@@ -13,6 +13,7 @@ use docx_parse::serializer::{
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 
 use crate::types::DEFAULT_SERIALIZATION_TIME;
 use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveOptions};
@@ -278,7 +279,15 @@ fn model_from_package(
         footnote_separators: footnote_separators.unwrap_or_default(),
         endnote_separators: endnote_separators.unwrap_or_default(),
         relationships: relationship_entries,
-        media: media_entries,
+        media: media_entries
+            .into_iter()
+            .map(|(key, file)| {
+                (
+                    key,
+                    Arc::try_unwrap(file).unwrap_or_else(|file| (*file).clone()),
+                )
+            })
+            .collect(),
         charts: chart_entries,
         template_variables,
         warnings,

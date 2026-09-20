@@ -7,12 +7,34 @@ use xlsx_model::{
     Workbook,
 };
 
-use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
+use crate::write::{
+    serialize_workbook_with_package, serialize_workbook_with_package_and_origins,
+    serialize_workbook_with_package_and_origins_after_edits,
+};
 use crate::{
-    ParseError, SaveEdits, SharedStringCells, SheetAxes, parse_workbook,
-    parse_workbook_with_package, serialize_workbook,
+    ParseError, SaveEdits, SharedStringCells, SheetAxes, serialize_workbook,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
+
+/// Materializes entries a borrowed-entry save returns, so a fixture stays
+/// usable after the parse; production callers hand ownership to
+/// `crate::parse_workbook_with_package` instead.
+fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> {
+    parts
+        .iter()
+        .map(|(path, bytes)| (path.clone(), bytes.as_ref().to_vec()))
+        .collect()
+}
+
+fn parse_workbook_with_package(
+    parts: &[(String, impl AsRef<[u8]>)],
+) -> Result<crate::ParsedWorkbook, ParseError> {
+    crate::parse_workbook_with_owned_package(owned_parts(parts))
+}
+
+fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, ParseError> {
+    crate::parse_workbook(&owned_parts(parts))
+}
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
@@ -147,6 +169,81 @@ fn expands_shared_formulas_and_preserves_source_until_edited() {
             cell_at(&edited, address).formula
         );
     }
+}
+
+#[test]
+fn package_save_borrows_unchanged_parts() {
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts: Vec<(String, Vec<u8>)> = vec![
+        ("xl/workbook.xml".into(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".into(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet2.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+    ];
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let origins = vec![Some(0), Some(1)];
+    let shared = vec![
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &parsed.workbook,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits::default(),
+    )
+    .unwrap();
+    assert!(
+        saved
+            .iter()
+            .all(|(_, bytes)| matches!(bytes, std::borrow::Cow::Borrowed(_)))
+    );
+
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &edited,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    let mut borrowed = 0;
+    for (path, bytes) in &saved {
+        if path == "xl/worksheets/sheet1.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Owned(_)), "{path}");
+        }
+        if path == "xl/worksheets/sheet2.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)), "{path}");
+        }
+        if matches!(bytes, std::borrow::Cow::Borrowed(_)) {
+            borrowed += 1;
+        }
+    }
+    assert!(borrowed > 0, "unchanged parts must stay borrowed");
 }
 
 #[test]
@@ -865,9 +962,43 @@ fn parses_full_styled_workbook() {
     assert_eq!(align.v, Some(VAlign::Center));
     assert!(align.wrap_text);
 
-    assert!(ss.font_for(0).is_none());
-    assert!(ss.fill_for(0).is_none());
+    assert_eq!(ss.font_for(0).unwrap().name.as_deref(), Some("Calibri"));
+    assert_eq!(ss.fill_for(0), Some(&Fill::None));
     assert_eq!(ss.format_code_for(0), FormatCode::Builtin(0));
+}
+
+#[test]
+fn an_xf_without_apply_flags_still_carries_its_indexed_facets() {
+    let styles = r#"
+        <fonts count="2">
+            <font><sz val="11"/><name val="Calibri"/></font>
+            <font><sz val="30"/><name val="Comic Sans MS"/></font>
+        </fonts>
+        <fills count="2">
+            <fill><patternFill patternType="none"/></fill>
+            <fill><patternFill patternType="solid"><fgColor rgb="FFFF0000"/></patternFill></fill>
+        </fills>
+        <cellXfs count="3">
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyAlignment="1"/>
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="0" applyFill="0"/>
+            <xf numFmtId="0" fontId="1" fillId="1" borderId="0" applyFont="false"/>
+        </cellXfs>
+    "#;
+    let wb = parse_workbook(&package_styled("<sheetData/>", Some(styles), None)).unwrap();
+    let ss = &wb.styles;
+
+    assert_eq!(ss.font_for(0).unwrap().size_pt, Some(30.0));
+    assert_eq!(
+        ss.fill_for(0),
+        Some(&Fill::Solid(Color::Rgb("#ff0000".into())))
+    );
+    assert!(ss.font_for(1).is_none());
+    assert!(ss.fill_for(1).is_none());
+    assert!(ss.font_for(2).is_none());
+    assert_eq!(
+        ss.fill_for(2),
+        Some(&Fill::Solid(Color::Rgb("#ff0000".into())))
+    );
 }
 
 #[test]
@@ -1229,13 +1360,14 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
-fn part_bytes(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()
         .find(|(name, _)| name == path)
         .unwrap_or_else(|| panic!("missing {path}"))
         .1
-        .clone()
+        .as_ref()
+        .to_vec()
 }
 
 /// The parser models a subset of row, column and cell markup. An edit to one
@@ -1353,7 +1485,7 @@ fn set_number(workbook: &mut Workbook, sheet: usize, address: &str, value: f64) 
     );
 }
 
-fn sheet_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+fn sheet_text<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> String {
     String::from_utf8(part_bytes(parts, path)).unwrap()
 }
 
@@ -1901,14 +2033,15 @@ fn writes_a_strict_theme_for_a_strict_package() {
     );
 }
 
-fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
+fn content_types_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "[Content_Types].xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -2093,14 +2226,15 @@ fn resolves_shared_strings_through_the_workbook_relationship() {
     );
 }
 
-fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
+fn shared_strings_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "xl/sharedStrings.xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -4249,6 +4383,7 @@ fn save_shared(
             moved_references: false,
         },
     )
+    .map(|parts| parts.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect())
 }
 
 /// One chart part cannot hold two sheets' references at once. A save where the

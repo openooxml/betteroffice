@@ -72,7 +72,7 @@ pub struct S9PackageWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_separators: Option<Vec<Note>>,
     pub relationship_entries: Vec<(String, Relationship)>,
-    pub media_entries: Vec<(String, MediaFile)>,
+    pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
 }
 
@@ -675,7 +675,7 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
-fn canonical_media(entries: &[(String, MediaFile)]) -> Result<CanonicalValue, ParseError> {
+fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
     entries
         .iter()
         .map(|(key, file)| {

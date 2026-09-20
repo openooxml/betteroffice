@@ -1,6 +1,5 @@
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
-import type { Affine, ModelPoint, PageDisplayList, PagePrimitive, ShapeSnapshot, TextBoxPrimitive } from '@betteroffice/vsdx';
-import { GUARD_CALL } from './components/ribbon/commands';
+import type { Affine, CellLocator, CellWriteProbe, ModelPoint, PageDisplayList, PagePrimitive, ShapeSnapshot, TextBoxPrimitive } from '@betteroffice/vsdx';
 export type ResizeHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 export const RESIZE_HANDLES: readonly ResizeHandle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
 export type RotateHandle = 'rotate';
@@ -445,11 +444,14 @@ const sectionNumber = (shape: ShapeSnapshot, section: string, row: string, cell:
   const parsed = Number(raw);
   return Number.isFinite(parsed) ? parsed : undefined;
 };
-/** True when a Control X/Y write would be refused outright; a plain SETATREF redirect is not. */
-export const controlCellWriteBlocked = (shape: ShapeSnapshot, row: string, cell: 'X' | 'Y'): boolean => {
-  const formula = sectionCell(shape, 'Control', row, cell)?.formula ?? '';
-  return GUARD_CALL.test(formula) || /\bSETATREF(EXPR|EVAL)\s*\(/i.test(formula);
-};
+/** True when the engine says a Control X/Y write would be refused. */
+export const controlCellWriteBlocked = (probes: ReadonlyMap<string, CellWriteProbe> | null | undefined, row: string, cell: 'X' | 'Y'): boolean =>
+  probes?.get(controlProbeKey(row, cell))?.allowed === false;
+/** Key a Control row probe is filed under, since one shape probes several rows. */
+export const controlProbeKey = (row: string, cell: 'X' | 'Y'): string => `Control.${row}.${cell}`;
+/** Locators for every Control X/Y a shape exposes, to probe in one call. */
+export const controlProbeLocators = (shape: ShapeSnapshot): CellLocator[] =>
+  controlHandlesForShape(shape).flatMap((handle) => (['X', 'Y'] as const).map((cell) => ({ section: 'Control', rowName: handle.row, cellName: cell })));
 /** Resolves the draggable control handles of a shape from its snapshot cells. */
 export const controlHandlesForShape = (shape: ShapeSnapshot): ControlHandle[] => {
   const rows: string[] = [];

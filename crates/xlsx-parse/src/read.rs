@@ -7,7 +7,7 @@ use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, Sheet, SheetId, Workbook,
+    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Workbook,
 };
 
 use crate::formula::SharedFormulas;
@@ -16,6 +16,9 @@ use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
 };
 use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, ParseError};
+
+/// excel's row-height ceiling in points.
+const MAX_ROW_HEIGHT_PT: f64 = 409.5;
 
 /// parse a full workbook from opc parts, resolving sheets through the
 /// workbook relationships.
@@ -32,6 +35,10 @@ pub(crate) struct IndexedWorkbook {
     pub(crate) active_sheet: SheetId,
     pub(crate) shared_string_cells: Vec<SharedStringCells>,
     pub(crate) legacy_dimensions: Vec<LegacySheetDimensions>,
+    /// The style table releases that needed an explicit `applyX` flag read,
+    /// present only when it differs. A legacy collaboration fingerprint is the
+    /// only thing that asks for it.
+    pub(crate) legacy_styles: Option<Stylesheet>,
     /// The drawing and chart parts no sheet's charts were built from, which
     /// no save rewrites.
     pub(crate) declined_parts: Vec<String>,
@@ -65,7 +72,7 @@ pub(crate) fn parse_workbook_indexed(
     };
     let styles_bytes = typed_part(parts, wb_rels, "styles", "xl/styles.xml")?;
     let theme_bytes = typed_part(parts, wb_rels, "theme", "xl/theme/theme1.xml")?;
-    let styles = parse_stylesheet(styles_bytes, theme_bytes)?;
+    let (styles, legacy_styles) = parse_stylesheet(styles_bytes, theme_bytes)?;
 
     let mut sheets = Vec::with_capacity(meta.sheets.len());
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
@@ -119,6 +126,7 @@ pub(crate) fn parse_workbook_indexed(
         active_sheet: meta.active_sheet,
         shared_string_cells,
         legacy_dimensions,
+        legacy_styles,
         declined_parts,
     })
 }
@@ -440,6 +448,15 @@ fn parse_worksheet(
                     }
                 }
                 b"col" => parse_col(&e, &mut sheet, legacy)?,
+                b"sheetFormatPr" => {
+                    sheet.format = SheetFormat {
+                        default_row_height_pt: attr(&e, b"defaultRowHeight")?
+                            .and_then(|v| v.parse::<f64>().ok())
+                            .filter(|h| h.is_finite() && (0.0..=MAX_ROW_HEIGHT_PT).contains(h)),
+                        custom_height: attr(&e, b"customHeight")?
+                            .is_some_and(|value| is_truthy(&value)),
+                    };
+                }
                 _ => {}
             },
             Event::End(e) => {

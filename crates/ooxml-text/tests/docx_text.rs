@@ -1146,6 +1146,79 @@ fn a_latin_view_pins_the_win_box_to_the_requested_span() {
     );
 }
 
+/// Measurement and painting read one advance scale, so a widened substitute
+/// cannot break a line at one pitch and paint it at another. Lucida Bright's
+/// 1.113x is the only measured entry; a document in it paginated a page short
+/// of Word with the substitute's own advances.
+#[test]
+fn a_widened_substitute_measures_and_paints_at_one_pitch() {
+    let (mut store, base) = store_with_font();
+    let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    let scale = requested.advance_scale;
+    assert!(scale > 1.0, "the fixture family is a widened one");
+    let view = store.register_substitute(base, requested).unwrap();
+    assert_eq!(store.advance_scale(view).unwrap(), scale);
+    assert_eq!(store.advance_scale(base).unwrap(), 1.0);
+
+    let text = "the quick brown fox jumps";
+    let width = |id| -> f32 {
+        shape(&store, id, text, 64.0, &[])
+            .unwrap()
+            .iter()
+            .map(|glyph| glyph.x_advance)
+            .sum()
+    };
+    let measured = width(view) / width(base);
+    assert!((measured - scale).abs() < 1e-4, "measured {measured}");
+
+    let per_char = store.advance_width(view, 'm').unwrap().unwrap()
+        / store.advance_width(base, 'm').unwrap().unwrap();
+    assert!((per_char - scale).abs() < 1e-4, "advance_width {per_char}");
+
+    let glyph = store.glyph_id(base, 'm').unwrap().unwrap();
+    let extent = |id| -> f32 {
+        store
+            .outline_glyph(id, glyph)
+            .unwrap()
+            .cmds
+            .iter()
+            .map(|cmd| match *cmd {
+                ooxml_text::PathCmd::MoveTo { x, .. } | ooxml_text::PathCmd::LineTo { x, .. } => x,
+                ooxml_text::PathCmd::QuadTo { x, .. } => x,
+                ooxml_text::PathCmd::CubicTo { x, .. } => x,
+                ooxml_text::PathCmd::Close => f32::MIN,
+            })
+            .fold(f32::MIN, f32::max)
+    };
+    let painted = extent(view) / extent(base);
+    assert!((painted - scale).abs() < 1e-4, "painted {painted}");
+}
+
+/// An advance scale that is not a positive finite number is a host bug, not a
+/// reason to hand back a view that measures at zero or backwards.
+#[test]
+fn a_nonsensical_advance_scale_falls_back_to_the_substitutes_own() {
+    let (mut store, base) = store_with_font();
+    let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    for scale in [0.0, -1.5, f32::NAN, f32::INFINITY] {
+        let view = store
+            .register_substitute(
+                base,
+                ooxml_text::RequestedLineMetrics {
+                    advance_scale: scale,
+                    ..requested
+                },
+            )
+            .unwrap();
+        assert_eq!(store.advance_scale(view).unwrap(), 1.0, "{scale}");
+        assert_eq!(
+            store.advance_width(view, 'm').unwrap(),
+            store.advance_width(base, 'm').unwrap(),
+            "{scale}"
+        );
+    }
+}
+
 #[test]
 fn a_family_with_no_known_metrics_leaves_its_substitute_alone() {
     for family in ["Arial", "Times New Roman", "Helvetica", "폴라리스바탕"] {
