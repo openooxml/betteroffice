@@ -112,6 +112,7 @@ test('keeps each format tied to its own published version and comparison', () =>
   expect(pptx).toMatch(/^\| Scored\/total \| 1\/1 \| 1\/1 \|$/m);
   const xlsx = section.slice(section.indexOf('#### XLSX'));
   expect(xlsx).toMatch(/^\| SSIM \| 0\.8700 \| 0\.8700 \|$/m);
+  expect(xlsx).toMatch(/^\| Scored\/total \| 1\/1 \| 1\/1 \|$/m);
   expect(section).toMatch(/^\| SSIM \| 0\.8000 \| 0\.8000 \|$/m);
 });
 
