@@ -200,6 +200,43 @@ pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// OFFSET's reference result, for callers that take an area rather than a
 /// value; `as_area` routes nested OFFSET calls back through here.
+/// INDIRECT(text, [a1]): the reference `text` spells. only a reference-shaped
+/// expression is accepted, so the text cannot smuggle in another call.
+pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ErrorValue::Value);
+    }
+    if let Some(style) = args.get(1)
+        && !crate::eval::to_bool(&evaluate(style, ctx)).unwrap_or(true)
+    {
+        return Err(ErrorValue::Ref);
+    }
+    let text = match evaluate(&args[0], ctx) {
+        CellValue::Text { value } => value,
+        CellValue::Error { value } => return Err(value),
+        _ => return Err(ErrorValue::Ref),
+    };
+    let expr = crate::parse_formula(&text).map_err(|_| ErrorValue::Ref)?;
+    if !matches!(
+        expr,
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. }
+    ) {
+        return Err(ErrorValue::Ref);
+    }
+    as_area(&expr, ctx).ok_or(ErrorValue::Ref)
+}
+
+/// INDIRECT used as a value: the top-left cell of the reference it spells.
+pub(crate) fn indirect(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match indirect_area(args, ctx) {
+        Ok(area) => match area.get(ctx, 0, 0) {
+            Ok(value) => value,
+            Err(e) => err(e),
+        },
+        Err(e) => err(e),
+    }
+}
+
 pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
     if args.len() < 3 || args.len() > 5 {
         return Err(ErrorValue::Value);

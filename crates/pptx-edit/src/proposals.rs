@@ -83,7 +83,7 @@ pub struct ProposalChange {
 }
 
 impl ProposalChange {
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         self.shape_id
             .clone()
             .unwrap_or_else(|| self.slide_id.clone())
@@ -235,7 +235,7 @@ impl DeckSession {
         before != store.pending.len()
     }
 
-    fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
+    pub(crate) fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
         self.proposals
             .borrow()
             .pending
@@ -270,7 +270,7 @@ impl DeckSession {
     }
 }
 
-fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
+pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
         ProposalEdit::ReplaceText {
@@ -387,7 +387,7 @@ fn find_story_shape<'a>(shapes: &'a [ShapeSnapshot], id: &str) -> Option<&'a Sha
     })
 }
 
-fn shape_text(shape: &ShapeSnapshot) -> String {
+pub(crate) fn shape_text(shape: &ShapeSnapshot) -> String {
     shape
         .text_stories
         .iter()

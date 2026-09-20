@@ -14,13 +14,15 @@ use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
     break_opportunities, shape, single_line_box, uppercase_for_language,
 };
-use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
+use pptx_edit::{
+    DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
+};
 use pptx_parse::{
-    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
-    GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
-    Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps, TextOverflow,
-    effective_color_map,
+    BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartPart, ChartSpace,
+    CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
+    PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
+    Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
+    TextOverflow, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -164,6 +166,39 @@ impl SlideRenderer {
             .slides
             .get(slide_index)
             .ok_or(RenderError::SlideNotFound(slide_index))?;
+        self.layout_resolved(
+            package,
+            deck_slide,
+            deck.width_emu,
+            deck.height_emu,
+            slide_index,
+        )
+    }
+
+    /// Render one slide from a [`pptx_edit::DeckSession::slide_scope`] snapshot,
+    /// which materializes only that slide instead of the whole deck.
+    pub fn layout_scoped_slide(
+        &self,
+        package: &PptxPackage,
+        scope: &SlideScope,
+    ) -> Result<RenderedSlide, RenderError> {
+        self.layout_resolved(
+            package,
+            &scope.slide,
+            scope.width_emu,
+            scope.height_emu,
+            scope.index,
+        )
+    }
+
+    fn layout_resolved(
+        &self,
+        package: &PptxPackage,
+        deck_slide: &SlideSnapshot,
+        width_emu: i64,
+        height_emu: i64,
+        slide_index: usize,
+    ) -> Result<RenderedSlide, RenderError> {
         let parsed_slide = deck_slide
             .source_part_path
             .as_deref()
@@ -261,8 +296,8 @@ impl SlideRenderer {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = slide_extent_px(deck.width_emu);
-        let height = slide_extent_px(deck.height_emu);
+        let width = slide_extent_px(width_emu);
+        let height = slide_extent_px(height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -280,6 +315,8 @@ impl SlideRenderer {
             metafile_budget: MAX_METAFILE_PRIMITIVES,
             metafile_bytes: 32 * 1024 * 1024,
             metafiles: HashMap::new(),
+            media_parts: None,
+            chart_parts: None,
             slide_number: i64::from(package.presentation.first_slide_num) + slide_index as i64,
         };
         let root_space = Space::root();
@@ -489,6 +526,11 @@ struct LayoutBuilder<'a> {
     metafile_budget: usize,
     metafile_bytes: usize,
     metafiles: HashMap<&'a str, Option<Arc<MetafileDrawing>>>,
+    /// Package media keyed by part path, built on first picture lookup so
+    /// per-shape work stays independent of the deck's part count.
+    media_parts: Option<HashMap<&'a str, &'a MediaPart>>,
+    /// Package charts keyed by (part path, theme part path); same rationale.
+    chart_parts: Option<HashMap<(&'a str, Option<&'a str>), &'a ChartPart>>,
     /// The number a `slidenum` field resolves to on this slide.
     slide_number: i64,
 }
@@ -1030,25 +1072,33 @@ impl<'a> LayoutBuilder<'a> {
         true
     }
 
+    fn media_part(&mut self, part_path: &str) -> Option<&'a MediaPart> {
+        self.media_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.media {
+                    index.entry(part.part_path.as_str()).or_insert(part);
+                }
+                index
+            })
+            .get(part_path)
+            .copied()
+    }
+
     fn metafile(&mut self, media_part_path: Option<&str>) -> Option<Arc<MetafileDrawing>> {
         let part_path = media_part_path?;
-        let part = self
-            .package
-            .media
-            .iter()
-            .find(|part| part.part_path == part_path)?;
-        if !is_metafile(&part.bytes) {
-            return None;
-        }
         if let Some(drawing) = self.metafiles.get(part_path) {
             return drawing.clone();
         }
-        if part.bytes.len() > self.metafile_bytes {
+        let part = self.media_part(part_path)?;
+        if !is_metafile(&part.bytes) || part.bytes.len() > self.metafile_bytes {
+            self.metafiles.insert(part.part_path.as_str(), None);
             return None;
         }
         self.metafile_bytes -= part.bytes.len();
         let drawing = decode_metafile(&part.bytes).map(Arc::new);
-        self.metafiles.insert(&part.part_path, drawing.clone());
+        self.metafiles
+            .insert(part.part_path.as_str(), drawing.clone());
         drawing
     }
 
@@ -1406,7 +1456,7 @@ impl<'a> LayoutBuilder<'a> {
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
-    fn chart_space(&self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
+    fn chart_space(&mut self, graphic: Option<&GraphicFrameData>) -> Option<&'a ChartSpace> {
         let GraphicFrameData::Chart {
             part_path: Some(part_path),
             ..
@@ -1414,13 +1464,18 @@ impl<'a> LayoutBuilder<'a> {
         else {
             return None;
         };
-        self.package
-            .charts
-            .iter()
-            .find(|part| {
-                &part.part_path == part_path
-                    && part.theme_part_path.as_deref() == self.theme_part_path
+        let theme_part_path = self.theme_part_path;
+        self.chart_parts
+            .get_or_insert_with(|| {
+                let mut index = HashMap::new();
+                for part in &self.package.charts {
+                    index
+                        .entry((part.part_path.as_str(), part.theme_part_path.as_deref()))
+                        .or_insert(part);
+                }
+                index
             })
+            .get(&(part_path.as_str(), theme_part_path))
             .map(|part| &part.chart)
     }
 

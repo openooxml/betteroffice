@@ -19,7 +19,8 @@ use crate::{
     DeckSession, DeckSnapshot, EditCtx, EditError, EditResult, META, MIGRATE_ORIGIN, PendingMedia,
     PictureDraft, PresetShapeDraft, SHAPES, SLIDE_ORDER, SLIDES, STORIES, ShapeAdjustReceipt,
     ShapeDraft, ShapeFillReceipt, ShapeKind, ShapeReceipt, ShapeRect, ShapeSnapshot, ShapeStroke,
-    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
+    ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideScope, SlideSnapshot,
+    TransformReceipt,
 };
 
 const SCHEMA_VERSION: f64 = 2.1;
@@ -238,6 +239,34 @@ fn insert_json<T: serde::Serialize>(
 impl DeckSession {
     pub fn snapshot(&self) -> EditResult<DeckSnapshot> {
         snapshot_doc(&self.doc, &self.package)
+    }
+
+    /// Slide ids in deck order, matching `snapshot().slides` without walking shapes.
+    pub fn slide_ids(&self) -> EditResult<Vec<String>> {
+        let txn = self.doc.transact();
+        let order = required_order(&txn)?;
+        let slides = required_map(&txn, SLIDES)?;
+        let mut seen_slides = HashSet::new();
+        let mut ids = Vec::new();
+        for slide_id in string_array_ref(&order, &txn) {
+            if !seen_slides.insert(slide_id.clone()) {
+                continue;
+            }
+            if slides
+                .get(&txn, &slide_id)
+                .and_then(|value| value.cast::<MapRef>().ok())
+                .is_none()
+            {
+                return Err(EditError::InvalidState(format!("missing slide {slide_id}")));
+            }
+            ids.push(slide_id);
+        }
+        Ok(ids)
+    }
+
+    /// Snapshot one slide without materializing the rest of the deck.
+    pub fn slide_scope(&self, slide_index: usize) -> EditResult<SlideScope> {
+        slide_scope(&self.doc, &self.package, slide_index)
     }
 
     pub fn insert_slide(
@@ -867,7 +896,7 @@ impl DeckSession {
     }
 }
 
-pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
+pub(crate) fn validate_doc(doc: &Doc) -> EditResult<(PptxPackage, DeckSnapshot)> {
     let package = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
@@ -891,9 +920,52 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
             .map_err(|_| EditError::InvalidState(format!("story {story_id} is not text")))?;
         validate_story(&story, &txn, story_id)?;
     }
-    Ok(())
+    Ok((package, snapshot))
 }
 
+/// Shared state for the pending-source import passes run by
+/// [`DeckSession::open_from_update_with_source`]: one deserialization of the
+/// doc's package plus the seeded source snapshot built at most once.
+pub(crate) struct SourceImport<'a> {
+    /// The source package the update was seeded from.
+    pub(crate) source: &'a PptxPackage,
+    /// The doc's package, mutated by each pass and synced back once.
+    pub(crate) package: PptxPackage,
+    source_snapshot: Option<DeckSnapshot>,
+}
+
+impl<'a> SourceImport<'a> {
+    pub(crate) fn new(package: PptxPackage, source: &'a PptxPackage) -> Self {
+        Self {
+            source,
+            package,
+            source_snapshot: None,
+        }
+    }
+
+    /// A seeded snapshot of `source`, built once and reused across passes.
+    pub(crate) fn source_snapshot(&mut self) -> EditResult<&DeckSnapshot> {
+        if self.source_snapshot.is_none() {
+            self.source_snapshot = Some(crate::save::baseline_snapshot(self.source)?);
+        }
+        Ok(self.source_snapshot.as_ref().unwrap())
+    }
+
+    /// Writes the accumulated package back iff an import changed it.
+    pub(crate) fn sync_package_json(self, doc: &Doc, baseline: &PptxPackage) -> EditResult<()> {
+        if &self.package == baseline {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&self.package)
+            .map_err(|error| EditError::Json(error.to_string()))?;
+        let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+        let meta = required_map(&txn, META)?;
+        meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -901,8 +973,12 @@ pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
     package_from_meta(&meta, &txn)
 }
 
-pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> EditResult<()> {
-    let mut package = package_from_doc(doc)?;
+pub(crate) fn import_source_render_data(
+    doc: &Doc,
+    import: &mut SourceImport<'_>,
+) -> EditResult<()> {
+    let source = import.source;
+    let package = &mut import.package;
     let sources = source
         .slides
         .iter()
@@ -988,12 +1064,9 @@ pub(crate) fn import_source_render_data(doc: &Doc, source: &PptxPackage) -> Edit
     if !changed {
         return Ok(());
     }
-    let bytes = serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
     let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
-    let meta = required_map(&txn, META)?;
-    meta.insert(&mut txn, "packageJson", Any::Buffer(Arc::from(bytes)));
-    backfill_blip_effects(&mut txn, &package)?;
-    backfill_tables(&mut txn, &package)?;
+    backfill_blip_effects(&mut txn, package)?;
+    backfill_tables(&mut txn, package)?;
     Ok(())
 }
 
@@ -1494,6 +1567,84 @@ pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditRes
         .collect())
 }
 
+fn snapshot_slide<T: ReadTxn>(
+    slides: &MapRef,
+    shapes: &MapRef,
+    stories: &MapRef,
+    package: &PptxPackage,
+    txn: &T,
+    slide_id: &str,
+) -> EditResult<SlideSnapshot> {
+    let slide = slides
+        .get(txn, slide_id)
+        .and_then(|value| value.cast::<MapRef>().ok())
+        .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
+    let source_part_path = map_string(&slide, txn, "sourcePartPath");
+    let layout_part_path = map_string(&slide, txn, "layoutPartPath");
+    let theme = pptx_parse::slide_theme(
+        package,
+        source_part_path.as_deref(),
+        layout_part_path.as_deref(),
+    );
+    let shape_order = slide_shape_order(&slide, txn)?;
+    let mut shape_snapshots = Vec::new();
+    for shape_id in live_shape_order(&shape_order, txn)? {
+        shape_snapshots.push(snapshot_shape(
+            shapes,
+            stories,
+            txn,
+            &shape_id,
+            &mut HashSet::new(),
+            Some(&theme),
+        )?);
+    }
+    let notes = slide_notes(&slide, txn, package);
+    Ok(SlideSnapshot {
+        id: slide_id.to_owned(),
+        source_part_path,
+        layout_part_path,
+        name: map_string(&slide, txn, "name"),
+        notes,
+        shapes: shape_snapshots,
+    })
+}
+
+pub(crate) fn slide_scope(
+    doc: &Doc,
+    package: &PptxPackage,
+    slide_index: usize,
+) -> EditResult<SlideScope> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    let order = required_order(&txn)?;
+    let slides = required_map(&txn, SLIDES)?;
+    let shapes = required_map(&txn, SHAPES)?;
+    let stories = required_map(&txn, STORIES)?;
+    let mut seen_slides = HashSet::new();
+    let mut position = 0usize;
+    let mut slide_id = None;
+    for id in string_array_ref(&order, &txn) {
+        if !seen_slides.insert(id.clone()) {
+            continue;
+        }
+        if position == slide_index {
+            slide_id = Some(id);
+            break;
+        }
+        position += 1;
+    }
+    let slide_id = slide_id.ok_or(EditError::OutOfBounds {
+        index: slide_index.min(u32::MAX as usize) as u32,
+        length: seen_slides.len() as u32,
+    })?;
+    Ok(SlideScope {
+        index: slide_index,
+        slide: snapshot_slide(&slides, &shapes, &stories, package, &txn, &slide_id)?,
+        width_emu: required_i64(&meta, &txn, "widthEmu")?,
+        height_emu: required_i64(&meta, &txn, "heightEmu")?,
+    })
+}
+
 pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let txn = doc.transact();
     let meta = required_map(&txn, META)?;
@@ -1507,45 +1658,9 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
         if !seen_slides.insert(slide_id.clone()) {
             continue;
         }
-        let slide = slides
-            .get(&txn, &slide_id)
-            .and_then(|value| value.cast::<MapRef>().ok())
-            .ok_or_else(|| EditError::InvalidState(format!("missing slide {slide_id}")))?;
-        let source_part_path = map_string(&slide, &txn, "sourcePartPath");
-        let layout_part_path = map_string(&slide, &txn, "layoutPartPath");
-        let theme = pptx_parse::slide_theme(
-            package,
-            source_part_path.as_deref(),
-            layout_part_path.as_deref(),
-        );
-        let shape_order = slide_shape_order(&slide, &txn)?;
-        let mut shape_snapshots = Vec::new();
-        for shape_id in live_shape_order(&shape_order, &txn)? {
-            shape_snapshots.push(snapshot_shape(
-                &shapes,
-                &stories,
-                &txn,
-                &shape_id,
-                &mut HashSet::new(),
-                Some(&theme),
-            )?);
-        }
-        let notes = map_string(&slide, &txn, "notes").unwrap_or_else(|| {
-            package
-                .slides
-                .iter()
-                .find(|source| Some(&source.part_path) == source_part_path.as_ref())
-                .map(|source| source.notes.clone())
-                .unwrap_or_default()
-        });
-        slide_snapshots.push(SlideSnapshot {
-            id: slide_id,
-            source_part_path,
-            layout_part_path,
-            name: map_string(&slide, &txn, "name"),
-            notes,
-            shapes: shape_snapshots,
-        });
+        slide_snapshots.push(snapshot_slide(
+            &slides, &shapes, &stories, package, &txn, &slide_id,
+        )?);
     }
     Ok(DeckSnapshot {
         width_emu: required_i64(&meta, &txn, "widthEmu")?,
@@ -1556,7 +1671,20 @@ pub(crate) fn snapshot_doc(doc: &Doc, package: &PptxPackage) -> EditResult<DeckS
     })
 }
 
-fn snapshot_shape<T: ReadTxn>(
+pub(crate) fn slide_notes<T: ReadTxn>(slide: &MapRef, txn: &T, package: &PptxPackage) -> String {
+    if let Some(notes) = map_string(slide, txn, "notes") {
+        return notes;
+    }
+    let source_part_path = map_string(slide, txn, "sourcePartPath");
+    package
+        .slides
+        .iter()
+        .find(|source| Some(&source.part_path) == source_part_path.as_ref())
+        .map(|source| source.notes.clone())
+        .unwrap_or_default()
+}
+
+pub(crate) fn snapshot_shape<T: ReadTxn>(
     shapes: &MapRef,
     stories: &MapRef,
     txn: &T,

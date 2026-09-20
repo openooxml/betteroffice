@@ -95,7 +95,7 @@ impl DeckSession {
     }
 }
 
-fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
+pub(crate) fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
     let doc = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
     seed_doc(&doc, package, "")?;
     snapshot_doc(&doc, package)

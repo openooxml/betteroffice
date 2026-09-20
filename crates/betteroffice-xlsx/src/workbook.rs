@@ -824,7 +824,7 @@ impl Workbook {
             for (cell_ref, cell) in sheet.iter_cells() {
                 let text = display_text(&self.model.styles, self.model.date_system, cell);
                 let found = match &folded_query {
-                    Some(needle) => text.to_lowercase().contains(needle),
+                    Some(needle) => contains_lowercased(&text, needle),
                     None => text.contains(query),
                 };
                 if !found {
@@ -3229,6 +3229,47 @@ fn display_text_at(workbook: &WorkbookModel, sheet: SheetId, cell: CellRef) -> R
     })
 }
 
+/// `text.to_lowercase().contains(needle)` without allocating.
+/// `needle` must already be lowercase.
+fn contains_lowercased(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if text.is_ascii() {
+        return needle.is_ascii()
+            && text
+                .as_bytes()
+                .windows(needle.len())
+                .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()));
+    }
+    // 'Σ' is the only char whose lowercase is context-sensitive (final sigma);
+    // that rule needs std internals, so keep the allocating path for it.
+    if text.contains('Σ') {
+        return text.to_lowercase().contains(needle);
+    }
+    lowered_contains(text, needle)
+}
+
+/// Whether `needle` occurs in `text.chars().flat_map(char::to_lowercase)`.
+/// Matches `text.to_lowercase().contains(needle)` when `text` has no 'Σ'.
+fn lowered_contains(text: &str, needle: &str) -> bool {
+    let mut needle_chars = needle.chars();
+    let Some(first) = needle_chars.next() else {
+        return true;
+    };
+    let mut stream = text.chars().flat_map(char::to_lowercase);
+    while let Some(c) = stream.next() {
+        if c != first {
+            continue;
+        }
+        let mut rest = stream.clone();
+        if needle_chars.clone().all(|want| rest.next() == Some(want)) {
+            return true;
+        }
+    }
+    false
+}
+
 fn apply_proposed_number_format(
     workbook: &mut WorkbookModel,
     sheet: SheetId,
@@ -3488,4 +3529,96 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::RenameSheet { .. }
             | Op::RestoreSheet { .. }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contains_lowercased_matches_std_lowercase_semantics() {
+        let texts = [
+            "Hello World",
+            "ALPHA",
+            "alpha",
+            "aaa",
+            "25.00%",
+            "",
+            "İSTANBUL",
+            "İ",
+            "i̇",
+            "STRİNG THEORY",
+            "ΟΣ",
+            "ΑΣΑ",
+            "ΣΟΦΟΣ",
+            "ὈΣΟΣ",
+            "AΣ'Σ",
+            "Σ",
+            "ΣA",
+            "A Σ. Σ",
+            "Κ",
+            "10Κ run",
+            "ǅungla",
+            "ẞtraße",
+            "ﬃle",
+            "mixed ΣΩΕΛτα İcl",
+            "ΕΛΛΗΝΙΚΆ",
+            "ΟΔΟΣ ΚΑΙ ΣΤΑΘΜΟΣ",
+        ];
+        let queries = [
+            "hello",
+            "ALPHA",
+            "world",
+            "aa",
+            "aaa",
+            "5.00%",
+            "i",
+            "i̇",
+            "̇",
+            "İ",
+            "İstanbul",
+            "string",
+            "ος",
+            "οσ",
+            "ασα",
+            "σοφοσ",
+            "ς",
+            "σ",
+            "ς.",
+            "σ ς",
+            "κ",
+            "10κ",
+            "ungla",
+            "ǆungla",
+            "strasse",
+            "straße",
+            "ﬃ",
+            "file",
+            "ελληνικά",
+            "Σ",
+            "σταθμοσ",
+            "a",
+            "z",
+            "",
+        ];
+        for text in texts {
+            for query in queries {
+                let needle = query.to_lowercase();
+                let expected = text.to_lowercase().contains(&needle);
+                let actual = contains_lowercased(text, &needle);
+                assert_eq!(actual, expected, "text={text:?} query={query:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn contains_lowercased_handles_edge_cases() {
+        // ASCII haystack vs non-ASCII needle can never match.
+        assert!(!contains_lowercased("Hello World", "wörld"));
+        // Kelvin sign 'K' (U+212A) lowercases to ASCII 'k'.
+        assert!(contains_lowercased("10\u{212a} run", "10k"));
+        // Word-final 'Σ' lowercases to 'ς' (U+03C2), not 'σ' (U+03C3).
+        assert!(contains_lowercased("ΟΔΟΣ", "ο\u{3c2}"));
+        assert!(!contains_lowercased("ΟΔΟΣ", "ο\u{3c3}"));
+    }
 }

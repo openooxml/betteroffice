@@ -6,6 +6,27 @@ use xlsx_model::{CellValue, ErrorValue};
 use crate::eval::{EvalContext, boolean, err, evaluate, num};
 use crate::parser::Expr;
 
+/// ISEVEN(number): truncates toward zero, then tests parity.
+pub(crate) fn iseven(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    parity(args, ctx, 0)
+}
+
+/// ISODD(number): truncates toward zero, then tests parity.
+pub(crate) fn isodd(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    parity(args, ctx, 1)
+}
+
+fn parity(args: &[Expr], ctx: &EvalContext<'_>, want: i64) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    match crate::eval::to_number(&evaluate(&args[0], ctx)) {
+        Ok(n) if !n.is_finite() => err(ErrorValue::Num),
+        Ok(n) => boolean((n.trunc() as i64).rem_euclid(2) == want),
+        Err(e) => err(e),
+    }
+}
+
 pub(crate) fn isblank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     test(args, ctx, |v| matches!(v, CellValue::Empty))
 }

@@ -1,8 +1,8 @@
 use pptx_parse::{CommentFlavor, PptxPackage};
 use sha2::{Digest, Sha256};
-use yrs::{Any, Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
+use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
 
-use crate::deck::{map_bool, map_number, map_string, required_map};
+use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map};
 use crate::{
     BOOTSTRAP_CLIENT_ID, COMMENTS, CommentReceipt, CommentSnapshot, DeckSession, EditCtx,
     EditError, EditResult, META, MIGRATE_ORIGIN, SLIDES, doc_with_client_id, hydrate_doc,
@@ -70,7 +70,7 @@ pub(crate) fn seed_comments(
 
 pub(crate) fn import_source_comments(
     session: &DeckSession,
-    source: &PptxPackage,
+    import: &mut SourceImport<'_>,
 ) -> EditResult<()> {
     {
         let txn = session.doc.transact();
@@ -81,7 +81,8 @@ pub(crate) fn import_source_comments(
     }
     let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
     hydrate_doc(&bootstrap, &session.encode_state_as_update_v1())?;
-    let slide_ids: std::collections::HashMap<_, _> = source
+    let slide_ids: std::collections::HashMap<_, _> = import
+        .source
         .presentation
         .slides
         .iter()
@@ -95,30 +96,25 @@ pub(crate) fn import_source_comments(
         .collect();
     seed_comments(
         &mut bootstrap.transact_mut_with(MIGRATE_ORIGIN),
-        source,
+        import.source,
         &|part| slide_ids.get(part).cloned(),
     )?;
     let update = bootstrap
         .transact()
         .encode_diff_v1(&session.doc.transact().state_vector());
     hydrate_doc(&session.doc, &update)?;
-    let mut package = session.package().clone();
-    package.comments = source.comments.clone();
-    package.comment_authors = source.comment_authors.clone();
-    package.comment_flavor = source.comment_flavor;
+    import.package.comments.clone_from(&import.source.comments);
+    import
+        .package
+        .comment_authors
+        .clone_from(&import.source.comment_authors);
+    import.package.comment_flavor = import.source.comment_flavor;
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(
         &mut txn,
-        "packageJson",
-        Any::Buffer(std::sync::Arc::from(
-            serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?,
-        )),
-    );
-    meta.insert(
-        &mut txn,
         "commentFlavor",
-        flavor_key(source.comment_flavor.unwrap_or_default()),
+        flavor_key(import.source.comment_flavor.unwrap_or_default()),
     );
     meta.insert(&mut txn, "commentsPendingSource", false);
     Ok(())
