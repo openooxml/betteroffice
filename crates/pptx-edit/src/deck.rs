@@ -1808,14 +1808,18 @@ fn baseline_slide(
     slide: &Slide,
     slide_id: String,
 ) -> EditResult<SlideSnapshot> {
-    let theme = slide_theme(package, slide);
+    let theme = pptx_parse::slide_theme(
+        package,
+        Some(&slide.part_path),
+        slide.layout_part_path.as_deref(),
+    );
     let mut shapes = Vec::with_capacity(slide.shapes.len());
     for (shape_index, shape) in slide.shapes.iter().enumerate() {
         shapes.push(baseline_shape(
             &slide_id,
             &shape_index.to_string(),
             shape,
-            theme,
+            Some(&theme),
         )?);
     }
     Ok(SlideSnapshot {
