@@ -1213,8 +1213,9 @@ impl EditSession {
     }
 
     /// Registers a measurement view of `base` carrying the vertical metrics
-    /// Word measures `requested_family` with — for a face this host had to
-    /// substitute. Returns `base` for a family whose metrics are unknown.
+    /// and advance pitch Word measures `requested_family` with — for a face
+    /// this host had to substitute. Returns `base` for a family whose metrics
+    /// are unknown.
     pub fn register_substitute_measure_font(
         &self,
         base: u32,

@@ -158,10 +158,10 @@ impl std::fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
-/// `head.unitsPerEm` and the `hhea` line metrics of a face a document asked
-/// for but the host could not supply, carried by the substitute that stands in
-/// for it. See [`FontStore::register_substitute`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `head.unitsPerEm`, the `hhea` line metrics and the advance pitch of a face
+/// a document asked for but the host could not supply, carried by the
+/// substitute that stands in for it. See [`FontStore::register_substitute`].
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RequestedLineMetrics {
     pub units_per_em: u16,
     pub hhea_ascender: i16,
@@ -171,6 +171,10 @@ pub struct RequestedLineMetrics {
     /// ([`crate::word_metrics::EAST_ASIAN_CODE_PAGES`]) rather than the Latin
     /// win-box rule. Decides which fields the view has to move.
     pub east_asian: bool,
+    /// How much wider the requested face's advances run than the substitute's.
+    /// `1.0` leaves the substitute's own pitch alone, which is what every
+    /// family whose ratio is unmeasured carries — see [`crate::word_fonts`].
+    pub advance_scale: f32,
 }
 
 /// Design-space metrics extracted at registration time, in font units.
@@ -232,6 +236,9 @@ struct FontEntry {
     face: Option<rustybuzz::Face<'static>>,
     data: Box<[u8]>,
     metrics: FontMetrics,
+    /// Horizontal multiplier every advance, offset and outline this entry
+    /// reports is scaled by. See [`FontStore::advance_scale`].
+    advance_scale: f32,
     char_cache: RefCell<HashMap<char, CharEntry>>,
 }
 
@@ -310,16 +317,20 @@ impl FontStore {
             face,
             data,
             metrics,
+            advance_scale: 1.0,
             char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
     }
 
-    /// A measurement view of `base` carrying `requested`'s line metrics. Shares
-    /// `base`'s bytes, so glyphs and advances are unchanged; hosts put the
-    /// returned id at the head of the fallback chain. A Latin entry mirrors the
-    /// span into the win box and clears the East Asian code pages, so the view
-    /// measures the same under either line rule whatever the substitute claims.
+    /// A measurement view of `base` carrying `requested`'s line metrics and
+    /// advance pitch. Shares `base`'s bytes, so the glyph repertoire is
+    /// unchanged; hosts put the returned id at the head of the fallback chain.
+    /// A Latin entry mirrors the span into the win box and clears the East
+    /// Asian code pages, so the view measures the same under either line rule
+    /// whatever the substitute claims. A `requested.advance_scale` other than
+    /// `1.0` widens every advance, offset and outline the view reports, so the
+    /// same id measures and paints at the requested face's pitch.
     pub fn register_substitute(
         &mut self,
         base: FontId,
@@ -331,6 +342,12 @@ impl FontStore {
         if requested.units_per_em == 0 || metrics.units_per_em == 0 {
             return Ok(base);
         }
+        let advance_scale = if requested.advance_scale.is_finite() && requested.advance_scale > 0.0
+        {
+            requested.advance_scale
+        } else {
+            1.0
+        };
         let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
         let rescale = |design: i16| {
             (f32::from(design) * scale)
@@ -354,9 +371,20 @@ impl FontStore {
             face: None,
             data: Box::default(),
             metrics,
+            advance_scale,
             char_cache: RefCell::new(HashMap::new()),
         });
         Ok(id)
+    }
+
+    /// Horizontal multiplier this id reports advances, offsets and outlines
+    /// with — `1.0` for anything but a substitute view whose requested face
+    /// has a measured advance ratio.
+    ///
+    /// Measurement and painting both read it here, so the two projections
+    /// cannot disagree about how wide a substituted run is.
+    pub fn advance_scale(&self, id: FontId) -> Result<f32, FontError> {
+        self.entry(id).map(|entry| entry.advance_scale)
     }
 
     /// Per-font design-space metrics captured at registration.
@@ -454,14 +482,16 @@ impl FontStore {
         Ok(self.char_entry(id, ch)?.mapped.filter(|&g| g != 0))
     }
 
-    /// Horizontal advance width for a character, in font units.
-    /// `None` if the character is not covered by this font's cmap.
+    /// Horizontal advance width for a character, in font units, at this id's
+    /// [`FontStore::advance_scale`]. `None` if the character is not covered by
+    /// this font's cmap.
     pub fn advance_width(&self, id: FontId, ch: char) -> Result<Option<f32>, FontError> {
         let entry = self.char_entry(id, ch)?;
         if entry.mapped.is_none() {
             return Ok(None);
         }
-        Ok(entry.advance)
+        let scale = self.advance_scale(id)?;
+        Ok(entry.advance.map(|advance| advance * scale))
     }
 
     /// Whether the font's cmap covers `ch`.

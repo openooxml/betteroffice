@@ -1,15 +1,18 @@
-//! Vertical metrics of the faces Word ships but this package does not bundle,
-//! keyed by the requested family. Read off `head` and `hhea` of Word's own
-//! copies and cross-checked against the font programs it embeds in its exports.
-//! A family with no entry keeps its substitute's own metrics.
+//! Metrics of the faces Word ships but this package does not bundle, keyed by
+//! the requested family. Read off `head` and `hhea` of Word's own copies and
+//! cross-checked against the font programs it embeds in its exports. A family
+//! with no entry keeps its substitute's own metrics.
 //!
-//! A family is listed only when its span is the same under either reading of
-//! Word's line rule, and when the substitute's advances are already close: the
-//! view moves vertical metrics only, so correcting the pitch of a much
-//! narrower or wider face moves a document past Word rather than onto it.
-//! Gigi is the measured counter-example — its span is 1.382 em against the
-//! last-resort face's 1.150, and correcting it alone lands one corpus document
-//! on an extra page.
+//! A family is listed with vertical metrics only when its span is the same
+//! under either reading of Word's line rule. Gigi is the measured
+//! counter-example — its span is 1.382 em against the last-resort face's
+//! 1.150, and correcting it alone lands one corpus document on an extra page.
+//!
+//! `advance_scale` is the horizontal twin, and stays `1.0` unless the ratio
+//! has been measured against the substitute the host actually supplies: a face
+//! much wider or narrower than its substitute paginates past Word rather than
+//! onto it, and a scale that is right on average is still wrong per glyph, so
+//! it buys line and page counts, not line breaks.
 //!
 //! A family Word has no face for carries its substitute's metrics, taken from
 //! the document's `w:altName` or identified against Word's reference render.
@@ -23,6 +26,7 @@ const fn ea(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> Reque
         hhea_descender,
         hhea_line_gap: 0,
         east_asian: true,
+        advance_scale: 1.0,
     }
 }
 
@@ -38,6 +42,26 @@ const fn latin(
         hhea_descender,
         hhea_line_gap,
         east_asian: false,
+        advance_scale: 1.0,
+    }
+}
+
+/// [`latin`] for a family whose advance ratio against its substitute has been
+/// measured off the font program Word embeds in its own export.
+const fn latin_scaled(
+    units_per_em: u16,
+    hhea_ascender: i16,
+    hhea_descender: i16,
+    hhea_line_gap: i16,
+    advance_scale: f32,
+) -> RequestedLineMetrics {
+    RequestedLineMetrics {
+        units_per_em,
+        hhea_ascender,
+        hhea_descender,
+        hhea_line_gap,
+        east_asian: false,
+        advance_scale,
     }
 }
 
@@ -234,10 +258,15 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["cambria math"], latin(2048, 1595, -455, 353)),
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
-    (
-        &["lucida bright", "lucida sans"],
-        latin(2048, 1900, -432, 0),
-    ),
+    // Lucida Bright runs 1.113x the last-resort Liberation Sans it falls back
+    // to: its advances over a-z, weighted by English letter frequency and one
+    // space per 5.1 letters, against Liberation Sans's. Measured off the
+    // subset Word embeds in its own export of `oxi-en-creative-01`. The ratio
+    // is the regular face's; Demi measures 1.068 and Italic 1.093, and running
+    // text is overwhelmingly regular. Lucida Sans keeps the same span but is a
+    // different design, so it stays unscaled until it is measured too.
+    (&["lucida bright"], latin_scaled(2048, 1900, -432, 0, 1.113)),
+    (&["lucida sans"], latin(2048, 1900, -432, 0)),
     (&["lucida calligraphy"], latin(2048, 1900, -666, 0)),
     (&["wingdings 3"], latin(2048, 1900, -432, 0)),
 ];
@@ -347,6 +376,36 @@ mod tests {
             "폴라리스바탕",
         ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
+        }
+    }
+
+    /// Lucida Bright is the one family whose advances are corrected, and the
+    /// correction is measured against the Liberation Sans the last-resort
+    /// chain supplies: per-glyph the two faces run 0.813x (`S`) to 1.558x
+    /// (`j`) apart, and 1.113x is where that lands over a-z weighted by
+    /// English letter frequency plus one space per 5.1 letters.
+    #[test]
+    fn lucida_bright_carries_the_advance_ratio_word_embeds() {
+        let bright = requested_line_metrics("Lucida Bright").expect("Lucida Bright");
+        assert!(
+            (bright.advance_scale - 1.113).abs() < 1e-6,
+            "{}",
+            bright.advance_scale
+        );
+        for family in [
+            "Lucida Sans",
+            "Lucida Sans Unicode",
+            "Lucida Calligraphy",
+            "Georgia",
+            "Century Schoolbook",
+            "MS Mincho",
+            "Malgun Gothic",
+        ] {
+            let metrics = requested_line_metrics(family).expect(family);
+            assert!(
+                (metrics.advance_scale - 1.0).abs() < 1e-6,
+                "{family} has an unmeasured advance ratio and must keep its substitute's"
+            );
         }
     }
 
