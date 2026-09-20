@@ -217,6 +217,16 @@ mod tests {
     }
 
     #[test]
+    fn alias_keys_share_one_allocation() {
+        let parts = vec![("word/media/a.png".to_owned(), vec![1, 2, 3])];
+        let media = build_media_map(&parts);
+        assert!(Arc::ptr_eq(
+            &media["word/media/a.png"],
+            &media["media/a.png"]
+        ));
+    }
+
+    #[test]
     fn missing_media_returns_only_extension_metadata() {
         let relationships = RelationshipMap::from([(
             "rId2".into(),
