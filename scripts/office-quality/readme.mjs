@@ -7,11 +7,9 @@ export const BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
 export const END = '<!-- END GENERATED VISUAL FIDELITY -->';
 export const FORMATS = ['docx', 'pptx', 'xlsx'];
 
-// Pinned so DOCX's longer labels cannot widen its table past PPTX's and XLSX's.
 const LABEL_PX = 180;
 const VALUE_PX = 230;
 
-// Anchors rather than markdown links: markdown is inert inside an HTML block.
 const link = (text, href) => `<a href="${href}">${text}</a>`;
 
 function score(samples, channel, revision) {
