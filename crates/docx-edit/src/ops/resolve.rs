@@ -202,12 +202,19 @@ fn resolve_story(
     resolved: &mut Vec<String>,
 ) -> u32 {
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
-    let chunks = if span.is_some() {
-        snapshot_range(story, txn, span_start, span_end)
+    let (chunks, final_pilcrow) = if span.is_some() {
+        (
+            snapshot_range(story, txn, span_start, span_end),
+            last_pilcrow(story, txn).map(|(index, _)| index),
+        )
     } else {
-        snapshot(story, txn)
+        let chunks = snapshot(story, txn);
+        let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
+            ChunkKind::Pilcrow(_) => Some(chunk.start),
+            _ => None,
+        });
+        (chunks, final_pilcrow)
     };
-    let final_pilcrow = last_pilcrow(story, txn).map(|(index, _)| index);
     let mut removed = 0;
     // Reverse walk so physical removals never shift the indices still to be visited.
     for chunk in chunks.iter().rev() {
