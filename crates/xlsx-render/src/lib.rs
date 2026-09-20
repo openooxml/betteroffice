@@ -1029,13 +1029,8 @@ fn spill_clip(
     })
 }
 
-/// hyperlink lookup for one render pass. `entries` holds `(row, start_col,
-/// end_col, link index)` grouped by row — sorted by start column when a row's
-/// ranges do not overlap, so lookups binary-search; otherwise kept in
-/// `hyperlinks` order and scanned. ranges taller than `LINK_ROW_CAP` rows stay
-/// out of `entries` and are scanned in `hyperlinks` order, so one huge range
-/// cannot dominate the index build. either way `at` returns the same
-/// first-in-`hyperlinks`-order match a linear scan would.
+/// hyperlink lookup for one render pass: per-row entries when ranges are
+/// column-disjoint, else scans `hyperlinks` order like a linear search.
 struct HyperlinkIndex<'a> {
     links: &'a [Hyperlink],
     rows: BTreeMap<u32, LinkRow>,
@@ -1048,13 +1043,16 @@ struct LinkRow {
     /// span of this row's links in `HyperlinkIndex::entries`.
     start: u32,
     end: u32,
-    /// true when the row's ranges are column-disjoint, so its entries are
-    /// sorted by start column and at most one can cover a queried cell.
+    /// true when the row's ranges are column-disjoint and binary-searchable.
     by_col: bool,
 }
 
 /// a range spanning more rows than this is scanned instead of indexed per row.
 const LINK_ROW_CAP: u32 = 64;
+
+/// total expanded row entries an index build may hold before further ranges
+/// fall back to scanning.
+const LINK_ENTRY_CAP: usize = 1 << 20;
 
 impl<'a> HyperlinkIndex<'a> {
     fn new(links: &'a [Hyperlink]) -> Self {
@@ -1062,7 +1060,9 @@ impl<'a> HyperlinkIndex<'a> {
         let mut scanned = Vec::new();
         for (index, link) in links.iter().enumerate() {
             let range = link.range;
-            if range.end.row - range.start.row >= LINK_ROW_CAP {
+            if range.end.row - range.start.row >= LINK_ROW_CAP
+                || entries.len() + (range.end.row - range.start.row + 1) as usize > LINK_ENTRY_CAP
+            {
                 scanned.push(index as u32);
                 continue;
             }
@@ -2168,5 +2168,37 @@ mod tests {
                 assert_eq!(got, want, "at {at:?}");
             }
         }
+    }
+
+    #[test]
+    fn hyperlink_index_over_budget_falls_back_to_scan() {
+        let link = |a1: &str, tag: &str| Hyperlink {
+            range: CellRange::parse_a1(a1).unwrap(),
+            external_target: Some(tag.to_string()),
+            location: None,
+            tooltip: None,
+            display: None,
+        };
+        let mut links = Vec::new();
+        let rows = LINK_ROW_CAP - 1;
+        for i in 0..(LINK_ENTRY_CAP / rows as usize) as u32 {
+            let top = i * rows + 1;
+            links.push(link(&format!("A{top}:B{}", top + rows - 1), "in"));
+        }
+        links.push(link("C1:C5", "spill"));
+        let index = HyperlinkIndex::new(&links);
+        assert!(index.scanned.contains(&((links.len() - 1) as u32)));
+        assert_eq!(
+            index
+                .at(CellRef::new(0, 2))
+                .and_then(|l| l.external_target.as_deref()),
+            Some("spill")
+        );
+        assert_eq!(
+            index
+                .at(CellRef::new(0, 0))
+                .and_then(|l| l.external_target.as_deref()),
+            Some("in")
+        );
     }
 }
