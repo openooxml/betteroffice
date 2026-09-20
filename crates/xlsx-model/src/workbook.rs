@@ -1,5 +1,6 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -58,6 +59,15 @@ pub struct Cell {
 /// `None` when the cell is refused.
 type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 
+/// `sheetFormatPr` sizing defaults. `custom_height` is the author's claim that
+/// every unsized row is pinned at `default_row_height_pt`; without it an
+/// unsized row takes the height of its tallest content.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SheetFormat {
+    pub default_row_height_pt: Option<f64>,
+    pub custom_height: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Sheet {
     pub name: String,
@@ -67,6 +77,8 @@ pub struct Sheet {
     pub merges: Vec<CellRange>,
     pub col_widths: BTreeMap<ColId, f64>,
     pub row_heights: BTreeMap<RowId, f64>,
+    /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
+    pub format: SheetFormat,
     pub charts: Vec<SheetChart>,
 }
 
@@ -251,6 +263,10 @@ impl Workbook {
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
+    /// Borrowing variant of `value`; absent cells read as `CellValue::Empty`.
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        Cow::Owned(self.value(sheet, at))
+    }
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
@@ -260,10 +276,14 @@ pub trait CellProvider {
 
 impl CellProvider for Workbook {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
-        self.sheet(sheet)
-            .and_then(|s| s.cell(at))
-            .map(|c| c.value.clone())
-            .unwrap_or_default()
+        self.value_cow(sheet, at).into_owned()
+    }
+
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        match self.sheet(sheet).and_then(|s| s.cell(at)) {
+            Some(cell) => Cow::Borrowed(&cell.value),
+            None => Cow::Owned(CellValue::Empty),
+        }
     }
 
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str> {

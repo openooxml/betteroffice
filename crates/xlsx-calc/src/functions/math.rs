@@ -81,9 +81,12 @@ fn sum_matching(
     };
     for i in indices {
         let (r, c) = (i / cols, i % cols);
-        match value_area.get(ctx, r, c) {
-            Ok(CellValue::Number { value }) => total += value,
-            Ok(_) => {}
+        match value_area.get_ref(ctx, r, c) {
+            Ok(v) => {
+                if let CellValue::Number { value } = *v {
+                    total += value;
+                }
+            }
             Err(error) => return err(error),
         }
     }
@@ -100,15 +103,15 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let values = match area.values(ctx) {
+                let values = match area.values_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
                 let mut col = Vec::with_capacity(values.len());
                 for v in values {
-                    match v {
-                        CellValue::Number { value } => col.push(value),
-                        CellValue::Error { value } => return err(value),
+                    match v.as_ref() {
+                        CellValue::Number { value } => col.push(*value),
+                        CellValue::Error { value } => return err(*value),
                         _ => col.push(0.0),
                     }
                 }
@@ -133,6 +136,68 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         total += prod;
     }
     num(total)
+}
+
+/// MMULT(array1, array2): the matrix product; `cols(array1)` must equal
+/// `rows(array2)` and any non-numeric operand cell is `#VALUE!`. a cell holds
+/// one value, so this is the top-left element excel caches in the anchor.
+pub(crate) fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let left = match matrix(&args[0], ctx) {
+        Ok(m) => m,
+        Err(e) => return err(e),
+    };
+    let right = match matrix(&args[1], ctx) {
+        Ok(m) => m,
+        Err(e) => return err(e),
+    };
+    if left.cols != right.rows {
+        return err(ErrorValue::Value);
+    }
+    let mut total = 0.0;
+    for k in 0..left.cols {
+        total += left.values[k] * right.values[k * right.cols];
+    }
+    finite(total)
+}
+
+/// a rectangle of numbers in row-major order.
+struct Matrix {
+    rows: usize,
+    cols: usize,
+    values: Vec<f64>,
+}
+
+/// read an argument as a numeric rectangle; a non-reference is 1x1 and any
+/// non-numeric cell is `#VALUE!`.
+fn matrix(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Matrix, ErrorValue> {
+    let Some(area) = as_area(arg, ctx) else {
+        return match evaluate(arg, ctx) {
+            CellValue::Number { value } => Ok(Matrix {
+                rows: 1,
+                cols: 1,
+                values: vec![value],
+            }),
+            CellValue::Error { value } => Err(value),
+            _ => Err(ErrorValue::Value),
+        };
+    };
+    let cells = area.values_ref(ctx)?;
+    let mut values = Vec::with_capacity(cells.len());
+    for cell in cells {
+        match *cell {
+            CellValue::Number { value } => values.push(value),
+            CellValue::Error { value } => return Err(value),
+            _ => return Err(ErrorValue::Value),
+        }
+    }
+    Ok(Matrix {
+        rows: area.rows,
+        cols: area.cols,
+        values,
+    })
 }
 
 pub(crate) fn abs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -346,4 +411,30 @@ fn directional(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) -> Ce
     };
     let factor = 10f64.powi(digits);
     finite(rule(x * factor) / factor)
+}
+
+pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::tanh)
+}
+
+/// RANDBETWEEN(bottom, top): a volatile integer draw. measured against excel:
+/// a raw `bottom > top` is `#NUM!`, the draw spans `ceil(bottom)..=floor(top)`,
+/// and a span that rounds away to nothing collapses to `ceil(bottom)`.
+pub(crate) fn randbetween(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let (bottom, top) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(bottom), Ok(top)) => (bottom, top),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    if bottom > top {
+        return err(ErrorValue::Num);
+    }
+    let (lo, hi) = (bottom.ceil(), top.floor());
+    if hi < lo {
+        return num(lo);
+    }
+    let span = hi - lo + 1.0;
+    finite(lo + (ctx.next_random_unit() * span).floor().min(hi - lo))
 }

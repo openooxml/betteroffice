@@ -1,0 +1,7 @@
+### fmt
+### clippy
+### test
+passed=621 failed=0
+### bindings (separate workspace, --locked)
+bindings-exit=0
+### GATE GREEN

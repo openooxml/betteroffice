@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use ooxml_drawingml::{ShapeFill, ShapeOutline};
 use pptx_parse::{BlipEffect, GraphicFrameData, Placeholder};
 
-pub use pptx_parse::CommentFlavor;
+pub use pptx_parse::{CommentFlavor, TextCaps};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -46,6 +46,8 @@ pub struct TextStyle {
     pub spacing_pt: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -170,6 +172,17 @@ pub struct SlideSnapshot {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
     pub shapes: Vec<ShapeSnapshot>,
+}
+
+/// One slide's snapshot plus deck geometry — the slide-scoped render input.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideScope {
+    /// The slide's position in deck order.
+    pub index: usize,
+    pub slide: SlideSnapshot,
+    pub width_emu: i64,
+    pub height_emu: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

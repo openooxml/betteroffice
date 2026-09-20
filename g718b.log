@@ -1,0 +1,13 @@
+### fmt
+### clippy
+### test
+passed=619 failed=0
+### wasm+drift
+[wasm] pptx-wasm: up to date
+(empty=no drift)
+### bun
+ 262 pass
+ 0 fail
+### tsc
+ok-packages=3
+### GATE GREEN

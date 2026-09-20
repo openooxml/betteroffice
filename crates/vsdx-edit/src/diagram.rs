@@ -16,10 +16,11 @@ use yrs::{
 };
 
 use crate::{
-    CONNECTS, CellFormulaReceipt, CellFormulaWrite, CellSnapshot, ConnectorRouteReceipt,
-    DiagramSession, DiagramSnapshot, EditCtx, EditError, EditResult, META, PAGE_ORDER, PAGES,
-    PageSnapshot, SHEETS, STORIES, ShapeDataReceipt, ShapeDataWrite, ShapeDelete, ShapeDraft,
-    ShapeMove, ShapeReceipt, ShapeSnapshot, ShapeTreeDraft, ShapeTreeGlue, TextReceipt,
+    CONNECTS, CellFormulaReceipt, CellFormulaWrite, CellSnapshot, CellWriteProbe, CellWriteQuery,
+    ConnectorRouteReceipt, DiagramSession, DiagramSnapshot, EditCtx, EditError, EditResult, META,
+    PAGE_ORDER, PAGES, PageSnapshot, SHEETS, STORIES, ShapeDataReceipt, ShapeDataWrite,
+    ShapeDelete, ShapeDraft, ShapeMove, ShapeReceipt, ShapeSnapshot, ShapeTreeDraft, ShapeTreeGlue,
+    TextReceipt,
 };
 
 mod connect;
@@ -1668,6 +1669,57 @@ impl DiagramSession {
             }
         }
         Ok(receipts)
+    }
+
+    /// What the mutation policy would do with a write to each locator, writing nothing.
+    pub fn probe_cell_writes(
+        &self,
+        page_id: &str,
+        shape_id: &str,
+        probes: &[CellWriteQuery],
+    ) -> EditResult<Vec<CellWriteProbe>> {
+        if probes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let txn = self.doc.transact();
+        let policy = CrdtMutationContext::new(&txn, page_id, shape_id)?;
+        Ok(probes
+            .iter()
+            .map(|query| {
+                let cell_name = query.locator.cell_name.clone();
+                match decide_mutation(
+                    &policy,
+                    policy.locator(query.locator.clone()),
+                    query
+                        .gesture
+                        .unwrap_or_else(|| gesture_for_cell(&cell_name)),
+                    PROBE_FORMULA.to_owned(),
+                    &ParseLimits::default(),
+                ) {
+                    MutationOutcome::Allowed { target, .. } => CellWriteProbe {
+                        cell_name,
+                        allowed: true,
+                        target_cell_name: Some(target.cell_name),
+                        refusal: None,
+                        reason: None,
+                    },
+                    MutationOutcome::Refused { reason } => CellWriteProbe {
+                        cell_name,
+                        allowed: false,
+                        target_cell_name: None,
+                        refusal: Some(refusal_kind(&reason).to_owned()),
+                        reason: Some(reason),
+                    },
+                    MutationOutcome::Unsupported { reason } => CellWriteProbe {
+                        cell_name,
+                        allowed: false,
+                        target_cell_name: None,
+                        refusal: Some("unsupported".to_owned()),
+                        reason: Some(reason),
+                    },
+                }
+            })
+            .collect())
     }
 
     pub fn resize_loc_pin(
@@ -5023,6 +5075,19 @@ impl MutationContext for CrdtMutationContext {
         }
     }
 }
+
+/// Splits a policy refusal into the two the UI words differently. The policy returns prose,
+/// so this lives beside it rather than in a client that would have to match the same strings.
+fn refusal_kind(reason: &str) -> &'static str {
+    if reason.starts_with("GUARD") {
+        "guard"
+    } else {
+        "lock"
+    }
+}
+
+/// Stand-in value for a probe; the policy's refusal never reads the incoming formula.
+const PROBE_FORMULA: &str = "0";
 
 fn gesture_for_cell(cell_name: &str) -> MutationGesture {
     match cell_name {

@@ -6,7 +6,7 @@ use betteroffice_xlsx::{
     DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
     MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS,
     NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet,
-    SheetChart, SheetId, StylePatch, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    SheetChart, SheetId, StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1151,7 +1151,7 @@ fn frozen_panes_survive_the_facade_and_drive_the_initial_view() {
             ..Cell::default()
         },
     );
-    let geometry = GridGeometry::new(&sheet);
+    let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
     let expected_x = geometry.col_x(3) - geometry.col_x(1);
     let expected_y = geometry.row_y(4) - geometry.row_y(1);
     let mut model = WorkbookModel::default();
@@ -6909,7 +6909,7 @@ fn chart_part(saved: &[u8]) -> Vec<u8> {
 /// comparison pass with the projection switched off entirely.
 fn chart_only_viewport(workbook: &Workbook) -> Viewport {
     let sheet = workbook.model().sheet(SheetId(0)).unwrap();
-    let geometry = GridGeometry::new(sheet);
+    let geometry = GridGeometry::new(sheet, &workbook.model().styles);
     Viewport {
         x: geometry.col_x(3),
         y: 0.0,

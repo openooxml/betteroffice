@@ -211,7 +211,7 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
  * alias points at the vendored sans face of the same region — coverage
  * first.
  */
-const WORD_FAMILY_ALIASES: Record<string, string> = {
+export const WORD_FAMILY_ALIASES: Record<string, string> = {
   helvetica: 'arial',
   times: 'times new roman',
   courier: 'courier new',
