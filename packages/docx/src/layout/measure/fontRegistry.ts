@@ -15,7 +15,7 @@ export interface TextEngineFontSink {
    * (tests, older hosts) keep working; without it a substitute measures with
    * its own metrics.
    */
-  registerSubstituteFont?(id: number, family: string, bold: boolean, italic: boolean): number;
+  registerSubstituteFont?(id: number, family: string): number;
 }
 
 /**
@@ -362,7 +362,7 @@ export class TextMeasureFontRegistry {
       );
     }
     if (loader) {
-      const id = await this.registerBundled(key, loader, family, bold, italic);
+      const id = await this.registerBundled(key, loader, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
     }
@@ -384,7 +384,7 @@ export class TextMeasureFontRegistry {
       );
     }
     if (lastResort) {
-      const id = await this.registerLastResort(key, lastResort, family, bold, italic);
+      const id = await this.registerLastResort(key, lastResort, family);
       if (id !== null && !ids.includes(id)) ids.push(id);
       if (id === null) retryable = true;
     }
@@ -450,11 +450,11 @@ export class TextMeasureFontRegistry {
    * the head. Falls back to `base` when the sink or the engine has no metrics
    * for the family, which is how every face measured before this existed.
    */
-  private measuredAs(base: number, family: string, bold: boolean, italic: boolean): number {
+  private measuredAs(base: number, family: string): number {
     const substitute = this.sink.registerSubstituteFont;
     if (!substitute) return base;
     try {
-      return substitute.call(this.sink, base, family, bold, italic);
+      return substitute.call(this.sink, base, family);
     } catch (error) {
       console.warn(
         `[fontRegistry] measurement view of the substitute for "${family}" failed; ` +
@@ -505,9 +505,7 @@ export class TextMeasureFontRegistry {
   private registerBundled(
     key: string,
     loader: () => Promise<ArrayBuffer>,
-    family: string,
-    bold: boolean,
-    italic: boolean
+    family: string
   ): Promise<number | null> {
     let pending = this.bundledIds.get(key);
     if (!pending) {
@@ -515,7 +513,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family, bold, italic);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch (error) {
           console.warn(
             `[fontRegistry] bundled face for "${family}" failed to load or register; ` +
@@ -537,9 +535,7 @@ export class TextMeasureFontRegistry {
   private registerLastResort(
     key: string,
     loader: () => Promise<ArrayBuffer>,
-    family: string,
-    bold: boolean,
-    italic: boolean
+    family: string
   ): Promise<number | null> {
     let pending = this.lastResortIds.get(key);
     if (!pending) {
@@ -547,7 +543,7 @@ export class TextMeasureFontRegistry {
       pending = (async () => {
         try {
           const bytes = await loader();
-          return this.measuredAs(await this.registerBuffer(bytes), family, bold, italic);
+          return this.measuredAs(await this.registerBuffer(bytes), family);
         } catch {
           console.warn(
             `[fontRegistry] last-resort base face for "${family}" failed to load or register; ` +

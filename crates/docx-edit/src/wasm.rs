@@ -1215,15 +1215,13 @@ impl EditSession {
     /// Registers a measurement view of `base` carrying the vertical metrics
     /// and advance pitch Word measures `requested_family` with — for a face
     /// this host had to substitute. Returns `base` for a family whose metrics
-    /// are unknown. `bold`/`italic` pick that face's measured advance ratio.
+    /// are unknown.
     pub fn register_substitute_measure_font(
         &self,
         base: u32,
         requested_family: &str,
-        bold: bool,
-        italic: bool,
     ) -> Result<u32, JsValue> {
-        docx_layout::register_substitute_measure_font(base, requested_family, bold, italic)
+        docx_layout::register_substitute_measure_font(base, requested_family)
     }
 
     /// Drops every registered measurement font (ids restart at zero) and

@@ -27,9 +27,6 @@ const fn ea(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> Reque
         hhea_line_gap: 0,
         east_asian: true,
         advance_scale: 1.0,
-        advance_scale_bold: None,
-        advance_scale_italic: None,
-        advance_scale_bold_italic: None,
     }
 }
 
@@ -46,23 +43,17 @@ const fn latin(
         hhea_line_gap,
         east_asian: false,
         advance_scale: 1.0,
-        advance_scale_bold: None,
-        advance_scale_italic: None,
-        advance_scale_bold_italic: None,
     }
 }
 
 /// [`latin`] for a family whose advance ratio against its substitute has been
-/// measured off the font program Word embeds in its own export; `bold` and
-/// `italic` carry that face's ratio where one was measured.
+/// measured off the font program Word embeds in its own export.
 const fn latin_scaled(
     units_per_em: u16,
     hhea_ascender: i16,
     hhea_descender: i16,
     hhea_line_gap: i16,
     advance_scale: f32,
-    bold: Option<f32>,
-    italic: Option<f32>,
 ) -> RequestedLineMetrics {
     RequestedLineMetrics {
         units_per_em,
@@ -71,9 +62,6 @@ const fn latin_scaled(
         hhea_line_gap,
         east_asian: false,
         advance_scale,
-        advance_scale_bold: bold,
-        advance_scale_italic: italic,
-        advance_scale_bold_italic: None,
     }
 }
 
@@ -271,14 +259,13 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
     // Lucida Bright runs 1.113x the last-resort Liberation Sans it falls back
-    // to: advances over a-z, weighted by English letter frequency and one space
-    // per 5.1 letters, measured off the subset Word embeds in `oxi-en-creative-01`.
-    // Demi and Italic measured 1.068 and 1.093; Demi Italic is unmeasured and
-    // takes Demi's. Lucida Sans is a different design, so it stays unscaled.
-    (
-        &["lucida bright"],
-        latin_scaled(2048, 1900, -432, 0, 1.113, Some(1.068), Some(1.093)),
-    ),
+    // to: its advances over a-z, weighted by English letter frequency and one
+    // space per 5.1 letters, against Liberation Sans's. Measured off the
+    // subset Word embeds in its own export of `oxi-en-creative-01`. The ratio
+    // is the regular face's; Demi measures 1.068 and Italic 1.093, and running
+    // text is overwhelmingly regular. Lucida Sans keeps the same span but is a
+    // different design, so it stays unscaled until it is measured too.
+    (&["lucida bright"], latin_scaled(2048, 1900, -432, 0, 1.113)),
     (&["lucida sans"], latin(2048, 1900, -432, 0)),
     (&["lucida calligraphy"], latin(2048, 1900, -666, 0)),
     (&["wingdings 3"], latin(2048, 1900, -432, 0)),
@@ -392,7 +379,11 @@ mod tests {
         }
     }
 
-    /// Lucida Bright is the one family whose advances are corrected.
+    /// Lucida Bright is the one family whose advances are corrected, and the
+    /// correction is measured against the Liberation Sans the last-resort
+    /// chain supplies: per-glyph the two faces run 0.813x (`S`) to 1.558x
+    /// (`j`) apart, and 1.113x is where that lands over a-z weighted by
+    /// English letter frequency plus one space per 5.1 letters.
     #[test]
     fn lucida_bright_carries_the_advance_ratio_word_embeds() {
         let bright = requested_line_metrics("Lucida Bright").expect("Lucida Bright");

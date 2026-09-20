@@ -467,7 +467,7 @@ export interface YrsEngineApplyProfile {
  */
 export type YrsResidentFontRegistration =
   | Uint8Array
-  | { substituteOf: number; family: string; bold: boolean; italic: boolean };
+  | { substituteOf: number; family: string };
 
 export interface YrsResidentWorkerSnapshot {
   clientId: number;
@@ -669,7 +669,7 @@ export interface YrsSession extends CollaborationReplica {
    * measures `family` with, for a face the host substituted; `base` when the
    * engine knows no metrics for the family.
    */
-  registerSubstituteFont(base: number, family: string, bold: boolean, italic: boolean): number;
+  registerSubstituteFont(base: number, family: string): number;
   /** Clear the session's registered measurement/display fonts. */
   clearFonts(): void;
   /** Measure one paragraph through the session's resident text engine. */
@@ -1146,10 +1146,10 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       residentFontsRevision += 1;
       return id;
     },
-    registerSubstituteFont: (base, family, bold, italic) => {
-      const id = session.register_substitute_measure_font(base, family, bold, italic);
+    registerSubstituteFont: (base, family) => {
+      const id = session.register_substitute_measure_font(base, family);
       if (id === base) return id;
-      residentFonts.push({ substituteOf: base, family, bold, italic });
+      residentFonts.push({ substituteOf: base, family });
       residentFontsRevision += 1;
       return id;
     },
