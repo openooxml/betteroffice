@@ -11,7 +11,11 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { buildMirrorPage, type DisplayPage } from '@betteroffice/docx/layout/render';
+import {
+  buildMirrorPage,
+  displayPageRevision,
+  type DisplayPage,
+} from '@betteroffice/docx/layout/render';
 import type { TFunction } from '@betteroffice/docx-i18n';
 import { useTranslation } from '../../i18n';
 
@@ -22,21 +26,21 @@ export function CanvasPageMirror({
 }: {
   page: DisplayPage;
   zoom?: number;
-  /**
-   * Off-window pages build their mirror at idle time instead of during the
-   * mount commit's passive flush, so the first paint on a large document is
-   * not queued behind dozens of mirror DOM builds.
-   */
+  /** Off-window pages build at idle time instead of inside the mount flush. */
   defer?: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const builtForRef = useRef<{ page: DisplayPage; t: TFunction } | null>(null);
+  // Position-shift deltas mutate primitives in place — identity alone is stale.
+  const builtForRef = useRef<{ page: DisplayPage; revision: number; t: TFunction } | null>(null);
   const { t } = useTranslation();
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    if (builtForRef.current?.page === page && builtForRef.current.t === t) return;
+    const built = builtForRef.current;
+    if (built?.page === page && built.revision === displayPageRevision(page) && built.t === t) {
+      return;
+    }
     const build = (): void => {
       const mirror = buildMirrorPage(page, {
         labels: {
@@ -49,7 +53,7 @@ export function CanvasPageMirror({
       // Clearing in effect cleanup creates a detached-DOM window on every page
       // update; unmounting already removes the host and its complete subtree.
       host.replaceChildren(mirror);
-      builtForRef.current = { page, t };
+      builtForRef.current = { page, revision: displayPageRevision(page), t };
     };
     if (!defer) {
       build();
