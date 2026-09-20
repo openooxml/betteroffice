@@ -134,8 +134,7 @@ impl DeckSession {
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
-        deck::validate_doc(&doc)?;
-        let package = deck::package_from_doc(&doc)?;
+        let (package, _snapshot) = deck::validate_doc(&doc)?;
         let undo = DeckUndoManager::new(&doc, client_id)?;
         Ok(Self {
             doc,
@@ -169,22 +168,24 @@ impl DeckSession {
             pptx_parse::parse_pptx_without_connectors(source)
         }
         .map_err(|error| EditError::Parse(error.to_string()))?;
-        comments::import_source_comments(&session, &package)?;
-        deck::import_source_render_data(&session.doc, &package)?;
+        let mut import = deck::SourceImport::new(session.package().clone(), &package);
+        comments::import_source_comments(&session, &mut import)?;
+        deck::import_source_render_data(&session.doc, &mut import)?;
         source_run_properties::import_source(
             &session,
-            &package,
+            &mut import,
             source_run_properties::SourceProperty::Baseline,
         )?;
-        deck::import_source_ole_pictures(&session.doc, &package)?;
-        effects::import_source(&session.doc, &package)?;
+        deck::import_source_ole_pictures(&session.doc, import.source)?;
+        effects::import_source(&mut import);
         source_run_properties::import_source(
             &session,
-            &package,
+            &mut import,
             source_run_properties::SourceProperty::Spacing,
         )?;
-        story::import_source_numbering_restarts(&session.doc, &package)?;
-        outline_gradients::import_source(&session, &package)?;
+        story::import_source_numbering_restarts(&session.doc, import.source)?;
+        outline_gradients::import_source(&session, &mut import)?;
+        import.sync_package_json(&session.doc, session.package())?;
         Ok(Self {
             package: Arc::new(package),
             ..session
@@ -232,14 +233,17 @@ impl DeckSession {
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        deck::validate_doc(&staged)?;
+        let (_, snapshot) = deck::validate_doc(&staged)?;
 
-        let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
+        let diff = staged
+            .transact()
+            .encode_state_as_update_v1(&self.doc.transact().state_vector());
+        let diff = decode_update_v1(&diff).map_err(EditError::InvalidUpdate)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
+            .apply_update(diff)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.snapshot()
+        Ok(snapshot)
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>
