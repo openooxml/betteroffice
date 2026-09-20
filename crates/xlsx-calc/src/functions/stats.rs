@@ -9,7 +9,7 @@ use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
-use super::{collect_numbers, nth_int, nth_number};
+use super::{collect_numbers, finite, nth_int, nth_number};
 
 pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
@@ -31,6 +31,143 @@ pub(crate) fn max(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => num(0.0),
         Ok(nums) => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        Err(e) => err(e),
+    }
+}
+
+/// paired numeric samples from two areas, dropping positions where either side
+/// is not a number. excel requires matching counts.
+fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), ErrorValue> {
+    if args.len() != 2 {
+        return Err(ErrorValue::Value);
+    }
+    let ys = collect_numbers(&args[..1], ctx)?;
+    let xs = collect_numbers(&args[1..2], ctx)?;
+    if xs.len() != ys.len() || xs.is_empty() {
+        return Err(ErrorValue::NA);
+    }
+    Ok((ys, xs))
+}
+
+/// sums a linear fit needs: n, mean x, mean y, Sxx, Syy, Sxy.
+fn moments(ys: &[f64], xs: &[f64]) -> (f64, f64, f64, f64, f64, f64) {
+    let n = xs.len() as f64;
+    let mx = xs.iter().sum::<f64>() / n;
+    let my = ys.iter().sum::<f64>() / n;
+    let (mut sxx, mut syy, mut sxy) = (0.0, 0.0, 0.0);
+    for (x, y) in xs.iter().zip(ys) {
+        sxx += (x - mx) * (x - mx);
+        syy += (y - my) * (y - my);
+        sxy += (x - mx) * (y - my);
+    }
+    (n, mx, my, sxx, syy, sxy)
+}
+
+/// CORREL(y, x): Pearson's r. zero variance on either side is `#DIV/0!`.
+pub(crate) fn correl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let (ys, xs) = match pairs(args, ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (_, _, _, sxx, syy, sxy) = moments(&ys, &xs);
+    if sxx == 0.0 || syy == 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    finite(sxy / (sxx * syy).sqrt())
+}
+
+/// SLOPE(y, x) of the least-squares line.
+pub(crate) fn slope(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let (ys, xs) = match pairs(args, ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (_, _, _, sxx, _, sxy) = moments(&ys, &xs);
+    if sxx == 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    finite(sxy / sxx)
+}
+
+/// INTERCEPT(y, x) of the least-squares line.
+pub(crate) fn intercept(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let (ys, xs) = match pairs(args, ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (_, mx, my, sxx, _, sxy) = moments(&ys, &xs);
+    if sxx == 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    finite(my - (sxy / sxx) * mx)
+}
+
+/// COVARIANCE.P / COVARIANCE.S over paired samples.
+pub(crate) fn covariance_p(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    covariance(args, ctx, 0.0)
+}
+
+pub(crate) fn covariance_s(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    covariance(args, ctx, 1.0)
+}
+
+fn covariance(args: &[Expr], ctx: &EvalContext<'_>, lost: f64) -> CellValue {
+    let (ys, xs) = match pairs(args, ctx) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let (n, _, _, _, _, sxy) = moments(&ys, &xs);
+    if n - lost <= 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    finite(sxy / (n - lost))
+}
+
+/// PERCENTILE.INC(array, k): linear interpolation between order statistics,
+/// which is what QUARTILE.INC divides into quarters.
+fn percentile_inc(sorted: &[f64], k: f64) -> Result<f64, ErrorValue> {
+    if sorted.is_empty() || !(0.0..=1.0).contains(&k) {
+        return Err(ErrorValue::Num);
+    }
+    let position = k * (sorted.len() - 1) as f64;
+    let lower = position.floor() as usize;
+    let upper = position.ceil() as usize;
+    Ok(sorted[lower] + (position - lower as f64) * (sorted[upper] - sorted[lower]))
+}
+
+pub(crate) fn percentile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let mut nums = match collect_numbers(&args[..1], ctx) {
+        Ok(n) => n,
+        Err(e) => return err(e),
+    };
+    nums.sort_by(f64::total_cmp);
+    match nth_number(args, ctx, 1).and_then(|k| percentile_inc(&nums, k)) {
+        Ok(v) => finite(v),
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn quartile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let mut nums = match collect_numbers(&args[..1], ctx) {
+        Ok(n) => n,
+        Err(e) => return err(e),
+    };
+    nums.sort_by(f64::total_cmp);
+    let quart = match nth_number(args, ctx, 1) {
+        Ok(q) => q.trunc(),
+        Err(e) => return err(e),
+    };
+    if !(0.0..=4.0).contains(&quart) {
+        return err(ErrorValue::Num);
+    }
+    match percentile_inc(&nums, quart / 4.0) {
+        Ok(v) => finite(v),
         Err(e) => err(e),
     }
 }

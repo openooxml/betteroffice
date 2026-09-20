@@ -33,6 +33,85 @@ pub(crate) fn lower(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// TRIM: collapse runs of spaces to one and strip the ends (excel trims only
 /// the ascii space, u+0020).
+/// TEXTBEFORE(text, delimiter, [instance], [match_mode], [if_not_found]).
+/// a negative instance counts from the end. missing delimiter is `#N/A`
+/// unless `if_not_found` is given.
+pub(crate) fn textbefore(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, true)
+}
+
+/// TEXTAFTER, the same rules taking the remainder instead.
+pub(crate) fn textafter(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, false)
+}
+
+fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> CellValue {
+    if args.len() < 2 || args.len() > 5 {
+        return err(ErrorValue::Value);
+    }
+    let source = match nth_text(args, ctx, 0) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let delimiter = match nth_text(args, ctx, 1) {
+        Ok(d) => d,
+        Err(e) => return err(e),
+    };
+    let instance = match args.get(2) {
+        Some(_) => match nth_int(args, ctx, 2) {
+            Ok(0) => return err(ErrorValue::Value),
+            Ok(i) => i,
+            Err(e) => return err(e),
+        },
+        None => 1,
+    };
+    let insensitive = match args.get(3) {
+        Some(_) => match nth_int(args, ctx, 3) {
+            Ok(m) => m != 0,
+            Err(e) => return err(e),
+        },
+        None => false,
+    };
+    if delimiter.is_empty() {
+        return text(if before { String::new() } else { source });
+    }
+    let (haystack, needle) = if insensitive {
+        (source.to_lowercase(), delimiter.to_lowercase())
+    } else {
+        (source.clone(), delimiter.clone())
+    };
+    let mut starts: Vec<usize> = Vec::new();
+    let mut from = 0;
+    while let Some(at) = haystack[from..].find(&needle) {
+        starts.push(from + at);
+        from += at + needle.len();
+    }
+    let index = if instance > 0 {
+        instance as usize - 1
+    } else {
+        match starts.len().checked_sub(instance.unsigned_abs() as usize) {
+            Some(i) => i,
+            None => return not_found(args, ctx),
+        }
+    };
+    let Some(&start) = starts.get(index) else {
+        return not_found(args, ctx);
+    };
+    let out = if before {
+        source[..start].to_owned()
+    } else {
+        source[start + delimiter.len()..].to_owned()
+    };
+    text(out)
+}
+
+fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match args.get(4) {
+        Some(fallback) => evaluate(fallback, ctx),
+        None => err(ErrorValue::NA),
+    }
+}
+
 pub(crate) fn trim(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     map_text(args, ctx, |s| {
         s.split(' ')

@@ -454,6 +454,66 @@ pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::tanh)
 }
 
+pub(crate) fn sin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::sin)
+}
+
+pub(crate) fn cos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::cos)
+}
+
+pub(crate) fn tan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::tan)
+}
+
+pub(crate) fn sinh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::sinh)
+}
+
+pub(crate) fn cosh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::cosh)
+}
+
+/// ASIN/ACOS are `#NUM!` outside [-1, 1]; `finite` turns the NaN into it.
+pub(crate) fn asin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => finite(x.asin()),
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn acos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => finite(x.acos()),
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn atan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::atan)
+}
+
+/// ATAN2(x, y) — excel takes the x coordinate first, the reverse of `f64::atan2`.
+/// both zero is `#DIV/0!`.
+pub(crate) fn atan2(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(0.0), Ok(0.0)) => err(ErrorValue::Div0),
+        (Ok(x), Ok(y)) => finite(y.atan2(x)),
+        (Err(e), _) | (_, Err(e)) => err(e),
+    }
+}
+
+pub(crate) fn degrees(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::to_degrees)
+}
+
+pub(crate) fn radians(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::to_radians)
+}
+
 /// RANDBETWEEN(bottom, top): a volatile integer draw. measured against excel:
 /// a raw `bottom > top` is `#NUM!`, the draw spans `ceil(bottom)..=floor(top)`,
 /// and a span that rounds away to nothing collapses to `ceil(bottom)`.
