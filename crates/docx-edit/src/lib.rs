@@ -50,8 +50,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
@@ -59,7 +59,8 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, Doc, In, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options,
-    Out, ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
+    Out, ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim, TextRef, Transact,
+    Update,
 };
 
 mod ctx;
@@ -73,6 +74,7 @@ mod raw;
 mod read_state;
 mod search;
 mod seed;
+mod segments;
 mod undo;
 
 pub mod canonical;
@@ -102,6 +104,7 @@ pub use raw::RawOp;
 pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::seed_from_docx;
+use segments::SegmentIndex;
 pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
 
 #[cfg(feature = "wasm")]
@@ -293,6 +296,11 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
+    /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
+    /// indexes older than the current value are rebuilt on next lookup.
+    epoch: Arc<AtomicU64>,
+    segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
+    _update_sub: Subscription,
 }
 
 impl EditingDoc {
@@ -305,11 +313,49 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        let epoch = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&epoch);
+        // after_transaction: bumps on any store-changing commit without encoding an update.
+        let update_sub = doc
+            .observe_after_transaction(move |txn| {
+                if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                    observed.fetch_add(1, Ordering::Relaxed);
+                }
+            })
+            .expect("a fresh doc accepts an update observer");
         Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
+            epoch,
+            segment_indexes: Mutex::new(HashMap::new()),
+            _update_sub: update_sub,
         }
+    }
+
+    /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
+    pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
+        // Sampling before the read txn lets a racing commit tag the fresh index
+        // stale rather than serve a pre-commit snapshot as current.
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        {
+            let cache = self.segment_indexes.lock().unwrap();
+            if let Some((cached_epoch, index)) = cache.get(story_id) {
+                if *cached_epoch == epoch {
+                    return Ok(Arc::clone(index));
+                }
+            }
+        }
+        let txn = self.doc.transact();
+        let story = story_ref(&txn, story_id)?;
+        let index = Arc::new(SegmentIndex::build(&story, &txn));
+        let mut cache = self.segment_indexes.lock().unwrap();
+        if let Some(stories) = txn.get_map(STORIES) {
+            cache.retain(|key, _| &**key == story_id || stories.get(&txn, key).is_some());
+        }
+        drop(txn);
+        cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
+        Ok(index)
     }
 
     pub fn client_id(&self) -> u64 {
