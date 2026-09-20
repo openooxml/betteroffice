@@ -28,7 +28,8 @@ use yrs::types::Attrs;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::format::{PROTECTED_ATTRS, Patch};
-use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
+use crate::index::ParaIndex;
+use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt};
 use crate::ops::{
     adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, capture_pilcrow,
     revision_id_in_range, snapshot,
@@ -194,35 +195,28 @@ struct TargetPara {
     map: MapRef,
 }
 
-fn all_targets<T: ReadTxn>(txn: &T) -> Vec<TargetPara> {
-    let Some(stories) = txn.get_map(crate::STORIES) else {
-        return Vec::new();
-    };
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
-    story_ids.sort();
+fn all_targets(index: &ParaIndex) -> Vec<TargetPara> {
     let mut result = Vec::new();
-    for story_id in story_ids {
-        let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
-            continue;
-        };
-        let pilcrow_maps: HashMap<u32, MapRef> = crate::pilcrows(&story, txn).into_iter().collect();
-        for bounds in para_bounds(&story, txn) {
-            if let Some(map) = pilcrow_maps.get(&bounds.pilcrow) {
-                result.push(TargetPara {
-                    story_id: story_id.clone(),
-                    story: story.clone(),
-                    bounds,
-                    map: map.clone(),
-                });
-            }
+    for story in &index.stories {
+        for para in &story.paras {
+            result.push(TargetPara {
+                story_id: story.story_id.clone(),
+                story: story.story.clone(),
+                bounds: ParaBounds {
+                    para_id: para.para_id.clone(),
+                    start: para.start,
+                    pilcrow: para.pilcrow,
+                },
+                map: para.map.clone(),
+            });
         }
     }
     result
 }
 
 /// Resolves a selector to pilcrow targets, validating BEFORE any mutation.
-fn resolve_selector<T: ReadTxn>(txn: &T, selector: &ParaSelector) -> OpResult<Vec<TargetPara>> {
-    let all = all_targets(txn);
+fn resolve_selector(index: &ParaIndex, selector: &ParaSelector) -> OpResult<Vec<TargetPara>> {
+    let all = all_targets(index);
     match selector {
         ParaSelector::One(id) => {
             let target = all
@@ -474,7 +468,8 @@ impl EditingDoc {
         direction: MergeDirection,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = all_targets(&txn);
+        let para_index = self.para_index_in(&txn);
+        let targets = all_targets(&para_index);
         let index = targets
             .iter()
             .position(|target| target.bounds.para_id == para)
@@ -564,7 +559,8 @@ impl EditingDoc {
             }
         }
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         let revision_id = ctx.is_suggesting().then(|| {
             targets
                 .iter()
@@ -613,7 +609,8 @@ impl EditingDoc {
         stop: &TabStop,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             let mut stops = read_tab_stops(&target.map, &txn);
             stops.retain(|existing| existing_pos(existing) != Some(stop.pos));
@@ -639,7 +636,8 @@ impl EditingDoc {
         pos: f64,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             let mut stops = read_tab_stops(&target.map, &txn);
             stops.retain(|existing| existing_pos(existing) != Some(pos));
@@ -664,7 +662,8 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         let step = step.unwrap_or(INDENT_STEP_TWIPS);
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             target
@@ -685,7 +684,8 @@ impl EditingDoc {
     ) -> OpResult<Receipt> {
         let step = step.unwrap_or(INDENT_STEP_TWIPS);
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             let current = number_prop(&target.map, &txn, INDENT_LEFT).unwrap_or(0.0);
             let next = (current - step).max(0.0);
@@ -706,7 +706,8 @@ impl EditingDoc {
         formatting: Option<&BTreeMap<String, Any>>,
     ) -> OpResult<Receipt> {
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             match formatting {
                 Some(map) if !map.is_empty() => {
@@ -749,7 +750,8 @@ impl EditingDoc {
             }
         }
         let mut txn = self.transact_for(ctx);
-        let targets = resolve_selector(&txn, selector)?;
+        let para_index = self.para_index_in(&txn);
+        let targets = resolve_selector(&para_index, selector)?;
         for target in &targets {
             target
                 .map
@@ -780,7 +782,8 @@ impl EditingDoc {
         let ctx = EditCtx::system(now_iso);
         let mut renames = Vec::new();
         let mut txn = self.transact_for(&ctx);
-        let targets = all_targets(&txn);
+        let para_index = self.para_index_in(&txn);
+        let targets = all_targets(&para_index);
         let mut seen: HashSet<String> = HashSet::new();
         for target in targets {
             let id = target.bounds.para_id.clone();

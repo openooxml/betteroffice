@@ -50,8 +50,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -59,12 +59,13 @@ use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
     Any, Assoc, ClientID, Doc, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options, Out,
-    ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
+    ReadTxn, StateVector, StickyIndex, Subscription, Text, TextPrelim, TextRef, Transact, Update,
 };
 
 mod ctx;
 mod deterministic;
 mod format;
+mod index;
 mod op;
 mod ops;
 mod presence;
@@ -285,6 +286,10 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
+    /// Committed-transaction counter; the para index rebuilds when it advances.
+    doc_epoch: Arc<AtomicU64>,
+    para_index: Mutex<Option<Arc<index::ParaIndex>>>,
+    _index_observer: Subscription,
 }
 
 impl EditingDoc {
@@ -297,11 +302,48 @@ impl EditingDoc {
         // explicit transactions below.
         doc.get_or_insert_map(STORIES);
         doc.get_or_insert_map(COMMENTS);
+        let doc_epoch = Arc::new(AtomicU64::new(0));
+        let observer_epoch = Arc::clone(&doc_epoch);
+        let index_observer = doc
+            .observe_after_transaction(move |_txn| {
+                observer_epoch.fetch_add(1, Ordering::Relaxed);
+            })
+            .expect("EditingDoc transaction observer registers");
         Self {
             doc,
             client_id,
             id_counter: AtomicU64::new(0),
+            doc_epoch,
+            para_index: Mutex::new(None),
+            _index_observer: index_observer,
         }
+    }
+
+    /// Paragraph and embed geometry cached against the last committed epoch.
+    /// Rebuilds lazily once the transaction observer's epoch advances. A
+    /// mutating transaction's uncommitted writes are invisible here, so ops
+    /// may only consult the index at validation time — before their first
+    /// write — or from a read transaction.
+    pub(crate) fn para_index_in<T: ReadTxn>(&self, txn: &T) -> Arc<index::ParaIndex> {
+        let epoch = self.doc_epoch.load(Ordering::Relaxed);
+        let mut guard = self
+            .para_index
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(index) = guard.as_ref()
+            && index.epoch == epoch
+        {
+            return Arc::clone(index);
+        }
+        let index = Arc::new(index::ParaIndex::build(txn, epoch));
+        *guard = Some(Arc::clone(&index));
+        index
+    }
+
+    /// [`Self::para_index_in`] over a fresh read transaction.
+    pub(crate) fn para_index(&self) -> Arc<index::ParaIndex> {
+        let txn = self.doc.transact();
+        self.para_index_in(&txn)
     }
 
     pub fn client_id(&self) -> u64 {
@@ -411,21 +453,12 @@ impl EditingDoc {
             return Err(EditError::ReservedParagraphKey(key));
         }
         let mut txn = self.doc.transact_mut_with(self.client_id);
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        for (_, value_ref) in stories.iter(&txn) {
-            let Out::YText(story) = value_ref else {
-                continue;
-            };
-            for (_, pilcrow) in pilcrows(&story, &txn) {
-                if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
-                    pilcrow.insert(&mut txn, key, value);
-                    return Ok(());
-                }
-            }
-        }
-        Err(EditError::ParagraphNotFound(para_id.to_owned()))
+        let index = self.para_index_in(&txn);
+        let Some((_, para)) = index.para_anywhere(para_id) else {
+            return Err(EditError::ParagraphNotFound(para_id.to_owned()));
+        };
+        para.map.insert(&mut txn, key, value);
+        Ok(())
     }
 
     /// Creates a side-map comment whose anchors are sticky positions, in one transaction.
@@ -556,21 +589,11 @@ impl EditingDoc {
     }
 
     pub fn paragraph_mark_position(&self, para_id: &str) -> EditResult<Position> {
-        let txn = self.doc.transact();
-        let stories = txn
-            .get_map(STORIES)
-            .expect("stories root is declared by EditingDoc::new");
-        for (story_id, value) in stories.iter(&txn) {
-            let Out::YText(story) = value else {
-                continue;
-            };
-            for (index, pilcrow) in pilcrows(&story, &txn) {
-                if map_string(&pilcrow, &txn, PARA_ID).as_deref() == Some(para_id) {
-                    return Ok(Position::new(story_id.to_string(), index));
-                }
-            }
-        }
-        Err(EditError::ParagraphNotFound(para_id.to_owned()))
+        let index = self.para_index();
+        index
+            .para_anywhere(para_id)
+            .map(|(story, para)| Position::new(story.story_id.clone(), para.pilcrow))
+            .ok_or_else(|| EditError::ParagraphNotFound(para_id.to_owned()))
     }
 
     pub fn encode_state_as_update_v1(&self) -> Vec<u8> {

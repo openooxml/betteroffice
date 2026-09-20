@@ -32,45 +32,37 @@ fn embed_map_at<T: ReadTxn>(story: &TextRef, txn: &T, index: u32) -> OpResult<Ma
     })
 }
 
-fn id_value_matches(value: Option<Out>, embed_id: &str) -> bool {
+fn id_value_matches(value: &Any, embed_id: &str) -> bool {
     match value {
-        Some(Out::Any(Any::String(value))) => value.as_ref() == embed_id,
-        Some(Out::Any(Any::Number(value))) => embed_id
+        Any::String(value) => value.as_ref() == embed_id,
+        Any::Number(value) => embed_id
             .parse::<f64>()
-            .is_ok_and(|candidate| candidate == value),
-        Some(Out::Any(Any::BigInt(value))) => embed_id
+            .is_ok_and(|candidate| candidate == *value),
+        Any::BigInt(value) => embed_id
             .parse::<i64>()
-            .is_ok_and(|candidate| candidate == value),
+            .is_ok_and(|candidate| candidate == *value),
         _ => false,
     }
-}
-
-fn embed_has_id<T: ReadTxn>(map: &MapRef, txn: &T, embed_id: &str) -> bool {
-    ["embedId", "id", "rId"]
-        .into_iter()
-        .any(|key| id_value_matches(map.get(txn, key), embed_id))
 }
 
 /// Finds one map-backed embed, and the story holding it, by its stable authored
 /// payload identity. New yrs inserts use `embedId`; `id` (SDTs) and `rId`
 /// (images) keep mirrored embeds addressable without rewriting their payload
 /// vocabulary.
-fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)> {
-    let stories = txn
-        .get_map(crate::STORIES)
-        .ok_or_else(|| OpError::UnknownEmbed(embed_id.to_owned()))?;
-    let mut story_ids: Vec<String> = stories.keys(txn).map(|key| key.to_string()).collect();
-    story_ids.sort();
-    for story_id in story_ids {
-        let Some(Out::YText(story)) = stories.get(txn, &story_id) else {
-            continue;
-        };
-        for diff in story.diff(txn, YChange::identity) {
-            if let Out::YMap(map) = diff.insert
-                && !is_pilcrow(&map, txn)
-                && embed_has_id(&map, txn, embed_id)
+fn embed_by_id<T: ReadTxn>(
+    doc: &EditingDoc,
+    txn: &T,
+    embed_id: &str,
+) -> OpResult<(String, MapRef)> {
+    let index = doc.para_index_in(txn);
+    for story in &index.stories {
+        for embed in &story.embeds {
+            if embed
+                .ids
+                .iter()
+                .any(|value| id_value_matches(value, embed_id))
             {
-                return Ok((story_id, map));
+                return Ok((story.story_id.clone(), embed.map.clone()));
             }
         }
     }
@@ -80,7 +72,7 @@ fn embed_by_id<T: ReadTxn>(txn: &T, embed_id: &str) -> OpResult<(String, MapRef)
 impl EditingDoc {
     /// The story holding the embed carrying `embed_id`.
     pub fn embed_story(&self, embed_id: &str) -> OpResult<String> {
-        embed_by_id(&self.yrs_doc().transact(), embed_id).map(|(story, _)| story)
+        embed_by_id(self, &self.yrs_doc().transact(), embed_id).map(|(story, _)| story)
     }
 
     /// Sets (or, with [`Any::Null`], removes) payload entries on the map-backed
@@ -130,7 +122,7 @@ impl EditingDoc {
             }
         }
         let mut txn = self.transact_for(ctx);
-        let (_, map) = embed_by_id(&txn, embed_id)?;
+        let (_, map) = embed_by_id(self, &txn, embed_id)?;
         for (key, value) in entries {
             if value == Any::Null {
                 map.remove(&mut txn, &key);

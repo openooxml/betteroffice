@@ -4,6 +4,7 @@ use std::fmt;
 
 use yrs::{ReadTxn, TextRef, Transact};
 
+use crate::index::ParaIndex;
 use crate::{
     CommentId, EditError, ParagraphId, Position, RevisionId, StoryId, StoryRange, pilcrows,
 };
@@ -235,25 +236,6 @@ pub(crate) fn para_bounds<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<ParaBound
         .collect()
 }
 
-/// Resolves a [`Loc`] to a story-global index. Transaction-scoped by construction.
-pub(crate) fn global_of_loc<T: ReadTxn>(
-    story: &TextRef,
-    txn: &T,
-    loc: &Loc,
-) -> Result<u32, OpError> {
-    let bounds = para_bounds(story, txn)
-        .into_iter()
-        .find(|bounds| bounds.para_id == loc.para)
-        .ok_or_else(|| OpError::UnknownPara(loc.para.clone()))?;
-    if loc.offset > bounds.len() {
-        return Err(OpError::OutOfBounds {
-            index: loc.offset,
-            len: bounds.len(),
-        });
-    }
-    Ok(bounds.start + loc.offset)
-}
-
 /// Maps a story-global index back to a [`Loc`]. Indices past the final pilcrow clamp to the final
 /// paragraph mark.
 pub(crate) fn loc_of_global<T: ReadTxn>(
@@ -295,28 +277,83 @@ pub(crate) fn loc_range_in_txn<T: ReadTxn>(
     })
 }
 
+/// [`global_of_loc`] against the committed para index.
+pub(crate) fn global_of_index(
+    index: &ParaIndex,
+    story_id: &str,
+    loc: &Loc,
+) -> Result<u32, OpError> {
+    let bounds = index
+        .para_in(story_id, &loc.para)
+        .ok_or_else(|| OpError::UnknownPara(loc.para.clone()))?;
+    if loc.offset > bounds.len() {
+        return Err(OpError::OutOfBounds {
+            index: loc.offset,
+            len: bounds.len(),
+        });
+    }
+    Ok(bounds.start + loc.offset)
+}
+
+/// [`loc_of_global`] against the committed para index.
+pub(crate) fn loc_of_index(index: &ParaIndex, story_id: &str, at: u32) -> Result<Loc, OpError> {
+    let Some(story) = index.story(story_id) else {
+        return Err(OpError::UnknownStory(story_id.to_owned()));
+    };
+    let Some(last) = story.paras.last() else {
+        return Err(OpError::UnknownStory(story_id.to_owned()));
+    };
+    let para = story.para_at(at).unwrap_or(last);
+    Ok(Loc {
+        story: story_id.to_owned(),
+        para: para.para_id.clone(),
+        offset: at
+            .min(para.pilcrow)
+            .saturating_sub(para.start)
+            .min(para.len()),
+    })
+}
+
+/// [`loc_range_in_txn`] against the committed para index — read-side callers
+/// only; mutating ops keep resolving post-write state via `loc_range_in_txn`.
+pub(crate) fn loc_range_in_index(
+    index: &ParaIndex,
+    story_id: &str,
+    start: u32,
+    end: u32,
+) -> Result<LocRange, OpError> {
+    Ok(LocRange {
+        start: loc_of_index(index, story_id, start)?,
+        end: loc_of_index(index, story_id, end)?,
+    })
+}
+
 impl crate::EditingDoc {
     /// Resolves a public [`Loc`] to a transient story-global [`Position`].
     pub fn locate(&self, loc: &Loc) -> OpResult<Position> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &loc.story)?;
-        let index = global_of_loc(&story, &txn, loc)?;
-        Ok(Position::new(loc.story.clone(), index))
+        crate::story_ref(&txn, &loc.story)?;
+        let index = self.para_index_in(&txn);
+        Ok(Position::new(
+            loc.story.clone(),
+            global_of_index(&index, &loc.story, loc)?,
+        ))
     }
 
     /// Maps a transient story-global [`Position`] to the public [`Loc`] vocabulary.
     pub fn loc_at(&self, position: &Position) -> OpResult<Loc> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &position.story)?;
-        loc_of_global(&position.story, &story, &txn, position.index)
+        crate::story_ref(&txn, &position.story)?;
+        loc_of_index(&self.para_index_in(&txn), &position.story, position.index)
     }
 
     /// Resolves a public [`LocRange`] to a transient [`StoryRange`].
     pub fn locate_range(&self, range: &LocRange) -> OpResult<StoryRange> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &range.start.story)?;
-        let start = global_of_loc(&story, &txn, &range.start)?;
-        let end = global_of_loc(&story, &txn, &range.end)?;
+        crate::story_ref(&txn, &range.start.story)?;
+        let index = self.para_index_in(&txn);
+        let start = global_of_index(&index, &range.start.story, &range.start)?;
+        let end = global_of_index(&index, &range.start.story, &range.end)?;
         if end < start {
             return Err(OpError::InvalidRange { start, end });
         }
@@ -326,10 +363,11 @@ impl crate::EditingDoc {
     /// Maps a transient [`StoryRange`] to the public [`LocRange`] vocabulary.
     pub fn loc_range_of(&self, range: &StoryRange) -> OpResult<LocRange> {
         let txn = self.yrs_doc().transact();
-        let story = crate::story_ref(&txn, &range.story)?;
+        crate::story_ref(&txn, &range.story)?;
+        let index = self.para_index_in(&txn);
         Ok(LocRange {
-            start: loc_of_global(&range.story, &story, &txn, range.start)?,
-            end: loc_of_global(&range.story, &story, &txn, range.end)?,
+            start: loc_of_index(&index, &range.story, range.start)?,
+            end: loc_of_index(&index, &range.story, range.end)?,
         })
     }
 }

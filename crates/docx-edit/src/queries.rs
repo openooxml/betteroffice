@@ -3,14 +3,17 @@
 use std::collections::{HashMap, HashSet};
 
 use unicode_segmentation::UnicodeSegmentation;
-use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
+use yrs::types::text::YChange;
+use yrs::{Any, Map, Out, ReadTxn, Text, TextRef, Transact};
 
-use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
+use crate::op::{
+    Loc, LocRange, OpError, OpResult, global_of_index, loc_of_index, loc_range_in_index,
+};
 use crate::ops::table::{TableRowChangeKind, table_row_changes};
 use crate::ops::{ChunkKind, snapshot};
 use crate::{
     BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
-    map_string, story_ref,
+    map_string, out_len, story_ref,
 };
 
 /// Which projection of the story text a read query uses.
@@ -160,6 +163,60 @@ pub(crate) fn para_views<T: ReadTxn>(story: &TextRef, txn: &T, view: TextView) -
         }
     }
     views
+}
+
+/// The [`TextView`] text of one paragraph, bounded to its `[start, pilcrow)`
+/// span — the text half of [`para_views`] for a single indexed paragraph.
+fn para_view_text<T: ReadTxn>(
+    story: &TextRef,
+    txn: &T,
+    start: u32,
+    pilcrow: u32,
+    view: TextView,
+) -> String {
+    let mut text = String::new();
+    let mut offset = 0u32;
+    for diff in story.diff(txn, YChange::identity) {
+        if offset >= pilcrow {
+            break;
+        }
+        let len = out_len(&diff.insert);
+        if offset + len <= start {
+            offset += len;
+            continue;
+        }
+        match &diff.insert {
+            Out::Any(Any::String(value)) => {
+                let ins_active = diff
+                    .attributes
+                    .as_deref()
+                    .and_then(|attrs| attrs.get(INS))
+                    .is_some_and(|value| *value != Any::Null);
+                if view == TextView::Vanilla && ins_active {
+                    offset += len;
+                    continue;
+                }
+                for ch in value.chars() {
+                    if !(view == TextView::Vanilla && ch == '\t') {
+                        text.push(ch);
+                    }
+                }
+            }
+            Out::YMap(map) => {
+                if view == TextView::Raw {
+                    let is_break = map_string(map, txn, KIND_KEY).as_deref() == Some(BREAK_KIND);
+                    text.push(if is_break { '\n' } else { '\u{FFFC}' });
+                }
+            }
+            _ => {
+                if view == TextView::Raw {
+                    text.push('\u{FFFC}');
+                }
+            }
+        }
+        offset += len;
+    }
+    text
 }
 
 /// One document-search match.
@@ -328,20 +385,27 @@ impl EditingDoc {
 
     /// The text of one paragraph in the requested view.
     pub fn para_text(&self, para_id: &str, view: TextView) -> OpResult<String> {
-        for (_, views) in self.views_everywhere(view) {
-            if let Some(para) = views.into_iter().find(|para| para.para_id == para_id) {
-                return Ok(para.text);
-            }
-        }
-        Err(OpError::UnknownPara(para_id.to_owned()))
+        let txn = self.yrs_doc().transact();
+        let index = self.para_index_in(&txn);
+        let Some((story, para)) = index.para_anywhere(para_id) else {
+            return Err(OpError::UnknownPara(para_id.to_owned()));
+        };
+        Ok(para_view_text(
+            &story.story,
+            &txn,
+            para.start,
+            para.pilcrow,
+            view,
+        ))
     }
 
     /// Returns view text without paragraph-boundary text.
     pub fn text_between(&self, range: &LocRange, view: TextView) -> OpResult<String> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &range.start.story)?;
-        let from = global_of_loc(&story, &txn, &range.start)?;
-        let to = global_of_loc(&story, &txn, &range.end)?;
+        let index = self.para_index_in(&txn);
+        let from = global_of_index(&index, &range.start.story, &range.start)?;
+        let to = global_of_index(&index, &range.start.story, &range.end)?;
         if to < from {
             return Err(OpError::InvalidRange {
                 start: from,
@@ -463,8 +527,9 @@ impl EditingDoc {
     pub fn selection_info(&self, anchor: &Loc, head: &Loc) -> OpResult<SelectionInfo> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &anchor.story)?;
-        let a = global_of_loc(&story, &txn, anchor)?;
-        let h = global_of_loc(&story, &txn, head)?;
+        let index = self.para_index_in(&txn);
+        let a = global_of_index(&index, &anchor.story, anchor)?;
+        let h = global_of_index(&index, &anchor.story, head)?;
         let (from, to) = (a.min(h), a.max(h));
         let views = para_views(&story, &txn, TextView::Vanilla);
         let para = views
@@ -497,10 +562,11 @@ impl EditingDoc {
             .first()
             .ok_or_else(|| OpError::UnknownComment(comment_id.to_owned()))?;
         let txn = self.yrs_doc().transact();
-        let story = story_ref(&txn, &anchor.story)?;
+        story_ref(&txn, &anchor.story)?;
+        let index = self.para_index_in(&txn);
         Ok(LocRange {
-            start: loc_of_global(&anchor.story, &story, &txn, anchor.start)?,
-            end: loc_of_global(&anchor.story, &story, &txn, anchor.end)?,
+            start: loc_of_index(&index, &anchor.story, anchor.start)?,
+            end: loc_of_index(&index, &anchor.story, anchor.end)?,
         })
     }
 
@@ -523,14 +589,13 @@ impl EditingDoc {
                 .ok()
                 .map(|anchors| {
                     let txn = self.yrs_doc().transact();
+                    let index = self.para_index_in(&txn);
                     anchors
                         .into_iter()
                         .filter_map(|anchor| {
-                            let story = story_ref(&txn, &anchor.story).ok()?;
                             Some(LocRange {
-                                start: loc_of_global(&anchor.story, &story, &txn, anchor.start)
-                                    .ok()?,
-                                end: loc_of_global(&anchor.story, &story, &txn, anchor.end).ok()?,
+                                start: loc_of_index(&index, &anchor.story, anchor.start).ok()?,
+                                end: loc_of_index(&index, &anchor.story, anchor.end).ok()?,
                             })
                         })
                         .collect()
@@ -662,6 +727,7 @@ impl EditingDoc {
                 }),
         );
         raw.sort_by_key(|change| change.start);
+        let index = self.para_index_in(&txn);
         raw.into_iter()
             .map(|change| {
                 Ok(ChangeInfo {
@@ -669,13 +735,7 @@ impl EditingDoc {
                     kind: change.kind,
                     author: change.author,
                     date: change.date,
-                    range: crate::op::loc_range_in_txn(
-                        story_id,
-                        &story,
-                        &txn,
-                        change.start,
-                        change.end,
-                    )?,
+                    range: loc_range_in_index(&index, story_id, change.start, change.end)?,
                 })
             })
             .collect()
@@ -692,6 +752,7 @@ impl EditingDoc {
             stories.keys(&txn).map(|key| key.to_string()).collect()
         };
         story_ids.sort();
+        let index = self.para_index_in(&txn);
         for story_id in story_ids {
             use yrs::Map;
             let Some(Out::YText(story)) = stories.get(&txn, &story_id) else {
@@ -739,7 +800,7 @@ impl EditingDoc {
                 }
             }
             if let (Some(start), Some(end)) = (min, max) {
-                return crate::op::loc_range_in_txn(&story_id, &story, &txn, start, end);
+                return loc_range_in_index(&index, &story_id, start, end);
             }
         }
         Err(OpError::UnknownChange(revision_id.to_owned()))
