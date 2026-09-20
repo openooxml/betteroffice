@@ -52,6 +52,8 @@ test('selects a worker format from frozen metadata before asset work', () => {
 test('rejects bad revisions, metadata, duplicate samples, and format lists', () => {
   for (const plan of [
     { ...input(), source_sha: 'bad' },
+    { ...input(), pptx_published_source_sha: 'bad' },
+    { ...input(), xlsx_published_source_sha: 'bad' },
     {
       ...input(),
       samples: [{ id: 'pptarena-001-original', format: 'docx', metadata: metadata() }],
@@ -127,6 +129,7 @@ test('freezes canonical metadata and every package version in one plan', async (
   expect(plan.versions).toEqual({ docx: '1.2.3', pptx: '1.2.3', xlsx: '1.2.3' });
   expect(plan.react_version).toBe('4.5.6');
   expect(plan.docx_published_source_sha).toBe('d'.repeat(40));
+  expect(plan.pptx_published_source_sha).toBe('d'.repeat(40));
   expect(plan.samples.map((sample) => sample.id)).toEqual([
     'docx-example',
     'pptarena-001-original',

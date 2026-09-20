@@ -42,8 +42,8 @@ function validateTiming(timing) {
     fail('invalid timing trials');
 }
 
-export function timingSummary(samples) {
-  const rows = samples.filter((sample) => sample.format === 'docx');
+export function timingSummary(samples, format = 'docx') {
+  const rows = samples.filter((sample) => sample.format === format);
   for (const row of rows) {
     if (!row.native_timings || Object.keys(row.native_timings).length !== CHANNELS.length)
       fail('missing timing channels');

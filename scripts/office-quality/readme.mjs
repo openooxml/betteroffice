@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { validateComparison } from './results.mjs';
 import { timingSummary } from './docx-benchmark.mjs';
+import { calculationSummary } from './xlsx-benchmark.mjs';
 
 export const BEGIN = '<!-- BEGIN GENERATED VISUAL FIDELITY -->';
 export const END = '<!-- END GENERATED VISUAL FIDELITY -->';
@@ -86,30 +87,41 @@ export function renderSection(report) {
   };
   const pages = (side) => (side.paged ? `${side.exact}/${side.paged}` : '—');
   const pageError = (side) => (side.paged ? String(side.pageError) : '—');
-  const benchmark = report.docx_benchmark;
-  if (benchmark && !/^\d+(?:\.\d+){2,3}$/.test(benchmark.libreoffice_version ?? ''))
-    throw new Error('Invalid LibreOffice version');
-  if (benchmark && (benchmark.published_version !== report.versions.docx ||
-      benchmark.builds?.commit?.source_sha !== report.source_sha))
-    throw new Error('Native timings do not match the report revision');
-  const timing = benchmark ? timingSummary(report.samples) : null;
+  for (const format of FORMATS) {
+    const config = report[`${format}_benchmark`];
+    if (config && !/^\d+(?:\.\d+){2,3}$/.test(config.libreoffice_version ?? ''))
+      throw new Error('Invalid LibreOffice version');
+    if (config && (config.published_version !== report.versions[format] ||
+        config.builds?.commit?.source_sha !== report.source_sha))
+      throw new Error('Benchmark results do not match the report revision');
+  }
+  const timings = Object.fromEntries(['docx', 'pptx'].map(format =>
+    [format, report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
+  const calculation = report.xlsx_benchmark ? calculationSummary(report.samples) : null;
   const table = (format, extraRows = []) => {
     const { versionLink, published, current } = measure(format);
     const sides = [published, current];
     const headings = [`BetterOffice (${versionLink})`, `BetterOffice (${commitLink})`];
-    if (format === 'docx' && benchmark) {
-      sides.push(score(report.samples.filter((sample) => sample.format === 'docx'), 'libreoffice', benchmark.libreoffice_version));
-      headings.push(`LibreOffice (${benchmark.libreoffice_version})`);
+    const office = report[`${format}_benchmark`];
+    if (office) {
+      sides.push(format === 'xlsx' ? { value: '—', not_measured: true } :
+        score(report.samples.filter(sample => sample.format === format), 'libreoffice', office.libreoffice_version));
+      headings.push(`LibreOffice (${office.libreoffice_version})`);
     }
     const rows = [
       ...extraRows.map(([label, cell]) => [label, ...sides.map(cell)]),
       ['SSIM', ...sides.map((side) => side.value)],
-      ['Scored/total', ...sides.map((side) => `${side.count}/${side.total}`)],
+      ['Scored/total', ...sides.map((side) => side.not_measured ? '—' : `${side.count}/${side.total}`)],
     ];
-    if (format === 'docx' && timing) {
-      const channels = ['published', 'commit', 'libreoffice'].map((channel) => timing.channels[channel]);
-      rows.push(['Timed/total', ...channels.map((channel) => `${channel.successful}/${timing.total}`)]);
+    if (timings[format]) {
+      const channels = ['published', 'commit', 'libreoffice'].map((channel) => timings[format].channels[channel]);
       rows.push(['Render time (avg)', ...channels.map((channel) => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
+    }
+    if (format === 'xlsx' && calculation) {
+      const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
+      rows.push(['Calc accuracy', ...channels.map(channel => channel.total ?
+        `${(100 * channel.correct / channel.total).toFixed(2)}% (${channel.correct.toLocaleString('en-US')}/${channel.total.toLocaleString('en-US')})` : '—')]);
+      rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
     }
     const value = (text) => `<td align="right">${text}</td>`;
     const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
@@ -134,9 +146,7 @@ export function renderSection(report) {
 Page agreement is reported on its own because a document either paginates as Word does or it does not; SSIM cannot express that.
 
 ${docxTable}
-${timing ? `
-Native CLI timing: full DOCX → first-page PNG at 96 DPI, five fresh processes after warmup; arithmetic mean over the same ${timing.common}/${timing.total} successful documents. BetterOffice fidelity uses the browser renderer. [Method and artifacts](scripts/office-quality/README.md#native-docx-and-libreoffice).
-` : ''}
+
 
 ### PPTX
 
@@ -146,7 +156,7 @@ ${table('pptx')}
 
 ${table('xlsx')}
 
-SSIM is the mean page-penalized grayscale score at 150 DPI, without resampling or alignment correction. DOCX uses recorded page bounds with at most a one-pixel edge adjustment. Missing or extra pages are penalized. Exact page counts are the documents whose rendered page count equals the reference; absolute page error sums the per-document difference. BetterOffice browser renders use pinned CDN fonts; native DOCX and LibreOffice share bundled fonts in CI. XLSX uses recorded print ranges and scale; its score measures range rendering, not automatic print pagination. Means cover successful comparisons only; failed or missing comparisons have no score. Compare coverage alongside SSIM because the channels may score different subsets.
+For scoring, calculation accuracy, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
 
 ${END}`;
 }
@@ -162,8 +172,11 @@ export function updateReadme(readme, section) {
     begin >= 0
       ? readme.slice(0, begin) + readme.slice(end + END.length)
       : readme.replace(/^## Visual fidelity\n[\s\S]*?(?=^## |$(?![\s\S]))/m, '');
-  const position = stripped.indexOf('## Contributing\n');
-  if (position < 0) throw new Error('README has no Contributing section');
+  const packages = /^## Packages\r?\n/m.exec(stripped);
+  if (!packages) throw new Error('README has no Packages section');
+  const afterPackages = packages.index + packages[0].length;
+  const nextSection = /^## /m.exec(stripped.slice(afterPackages));
+  const position = nextSection ? afterPackages + nextSection.index : stripped.length;
   return `${stripped.slice(0, position).trimEnd()}\n\n${section}\n\n${stripped.slice(
     position
   )}`;

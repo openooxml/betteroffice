@@ -55,7 +55,9 @@ test('reconciles all shards and renders three versioned columns with native mean
   expect(text).not.toContain('Latest published');
   expect(text).not.toContain('### Fidelity');
   expect(text).toContain('<tr><td>Render time (avg)</td><td align="right">100 ms</td><td align="right">200 ms</td><td align="right">300 ms</td></tr>\n</table>');
-  expect(text).toContain('same 6/6 successful documents');
+  expect(text).not.toContain('Timed/total');
+  expect(text).not.toContain('Native CLI timing:');
+  expect(text).toContain('[benchmark methodology](scripts/office-quality/README.md)');
   expect(() => renderSection({ ...merged, versions: { ...plan.versions, docx: '9.0.0' } })).toThrow('revision');
 });
 

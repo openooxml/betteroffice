@@ -134,3 +134,41 @@ fn zero_spacing_overrides_inherited_spacing() {
         assert_eq!(lines[1].baseline, lines[0].baseline);
     }
 }
+
+#[test]
+fn autofit_line_space_reduction_shortens_percentage_spacing_only() {
+    let session = DeckSession::open(DECK, 3144).unwrap();
+    let renderer = renderer();
+    let snapshot = session.snapshot().unwrap();
+    let base = renderer
+        .layout_slide(session.package(), &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let mut package = session.package().clone();
+    for shape in &mut package.slides[0].shapes {
+        let ShapeNode::Shape(shape) = shape else {
+            continue;
+        };
+        let Some(text) = shape.text.as_mut() else {
+            continue;
+        };
+        text.autofit = Some(pptx_parse::TextAutofit::Normal {
+            font_scale: None,
+            line_space_reduction: Some(0.2),
+        });
+    }
+    let reduced = renderer
+        .layout_slide(&package, &snapshot, 0)
+        .unwrap()
+        .display_list;
+    for (id, factor) in [(6, (1.5 - 0.2) / 1.5), (7, 0.8), (4, 1.0)] {
+        let before = lines(&base, id);
+        let after = lines(&reduced, id);
+        let pitch = before[1].y - before[0].y;
+        assert!(
+            (after[1].y - after[0].y - pitch * factor).abs() < 0.001,
+            "shape {id}: {pitch} -> {}",
+            after[1].y - after[0].y
+        );
+    }
+}
