@@ -29,6 +29,8 @@
 //!   the `auto` multiple then scales the quantized pitch.
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
+//! - [`symbol_font`] — what a Wingdings or Webdings character actually
+//!   addresses, and the nearest covered Unicode character to draw for it.
 //! - [`outline`] — glyph outline extraction ([`FontStore::outline_glyph`]):
 //!   font-unit path commands ([`PathCmd`]) from the same skrifa bytes the
 //!   metrics came from, for the canvas renderer's `Path2D` glyph pipeline.
@@ -47,6 +49,7 @@ pub mod line_break;
 pub mod measure;
 pub mod outline;
 pub mod shape;
+pub mod symbol_font;
 pub mod word_fonts;
 pub mod word_metrics;
 
@@ -61,6 +64,7 @@ pub use measure::{
 };
 pub use outline::{GlyphOutline, PathCmd};
 pub use shape::{ShapeDirection, ShapeFeature, ShapedGlyph, shape, shape_with_direction};
+pub use symbol_font::SymbolFont;
 pub use word_metrics::{
     CompatFlags, LineBox, LineSpacingRule, apply_spacing_rule, kern_enabled, kern_features,
     line_is_justified, single_line_box, snap_line_box, snap_line_height, stretch_spaces,
