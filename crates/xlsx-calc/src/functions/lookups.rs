@@ -375,6 +375,9 @@ fn reference_dim(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(&Area) -> usize)
     }
     match as_area(&args[0], ctx) {
         Some(area) => num(pick(&area) as f64),
-        None => err(ErrorValue::Value),
+        None => match evaluate(&args[0], ctx) {
+            value @ CellValue::Error { .. } => value,
+            _ => err(ErrorValue::Value),
+        },
     }
 }

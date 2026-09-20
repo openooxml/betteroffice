@@ -471,3 +471,14 @@ fn randbetween_replays_a_pinned_seed() {
     assert_ne!(draws(src, Some(7), 16), draws(src, Some(8), 16));
     assert_ne!(draws(src, None, 16), draws(src, None, 16));
 }
+/// an argument that cannot become an area may still have said why: OFFSET
+/// past the sheet edge is #REF!, and the count must not flatten it to #VALUE!.
+#[test]
+fn reference_counts_propagate_their_arguments_error() {
+    check(&[
+        ("ROWS(OFFSET(A1,-1,0))", e(ErrorValue::Ref)),
+        ("COLUMNS(OFFSET(A1,0,-1))", e(ErrorValue::Ref)),
+        ("ROWS(1/0)", e(ErrorValue::Div0)),
+        ("ROWS(5)", e(ErrorValue::Value)),
+    ]);
+}
