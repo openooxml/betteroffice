@@ -1,6 +1,8 @@
 //! logical functions. all take lazy arguments so only the taken branch is
 //! evaluated: IF/IFS/SWITCH/IFERROR/IFNA never touch the paths they skip.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{EvalContext, as_area, boolean, cmp_values, err, evaluate, to_bool};
@@ -138,10 +140,10 @@ fn fold_bools(
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            match v {
+            match *v {
                 CellValue::Bool { value } => {
                     acc = combine(acc, value);
                     seen = true;

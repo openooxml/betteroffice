@@ -82,8 +82,11 @@ fn sum_matching(
     for i in indices {
         let (r, c) = (i / cols, i % cols);
         match value_area.get(ctx, r, c) {
-            Ok(CellValue::Number { value }) => total += value,
-            Ok(_) => {}
+            Ok(v) => {
+                if let CellValue::Number { value } = *v {
+                    total += value;
+                }
+            }
             Err(error) => return err(error),
         }
     }
@@ -106,7 +109,7 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 };
                 let mut col = Vec::with_capacity(values.len());
                 for v in values {
-                    match v {
+                    match *v {
                         CellValue::Number { value } => col.push(value),
                         CellValue::Error { value } => return err(value),
                         _ => col.push(0.0),
@@ -184,7 +187,7 @@ fn matrix(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Matrix, ErrorValue> {
     let cells = area.values(ctx)?;
     let mut values = Vec::with_capacity(cells.len());
     for cell in cells {
-        match cell {
+        match cell.into_owned() {
             CellValue::Number { value } => values.push(value),
             CellValue::Error { value } => return Err(value),
             _ => return Err(ErrorValue::Value),

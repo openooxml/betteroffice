@@ -150,7 +150,7 @@ pub(crate) fn collect_numbers(
         match as_area(arg, ctx) {
             Some(area) => {
                 for value in area.values(ctx)? {
-                    push_reference_number(&mut nums, value)?;
+                    push_reference_number(&mut nums, &value)?;
                 }
             }
             None => match evaluate(arg, ctx) {
@@ -170,10 +170,10 @@ pub(crate) fn collect_numbers(
 
 /// a referenced cell contributes to aggregation only when numeric; errors
 /// propagate, text/bool/blank are silently skipped.
-fn push_reference_number(nums: &mut Vec<f64>, v: CellValue) -> Result<(), ErrorValue> {
+fn push_reference_number(nums: &mut Vec<f64>, v: &CellValue) -> Result<(), ErrorValue> {
     match v {
-        CellValue::Number { value } => nums.push(value),
-        CellValue::Error { value } => return Err(value),
+        CellValue::Number { value } => nums.push(*value),
+        CellValue::Error { value } => return Err(*value),
         _ => {}
     }
     Ok(())

@@ -140,7 +140,7 @@ pub(crate) fn rank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     };
     let nums: Vec<f64> = values
         .into_iter()
-        .filter_map(|v| match v {
+        .filter_map(|v| match *v {
             CellValue::Number { value } => Some(value),
             _ => None,
         })
@@ -167,7 +167,7 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 };
                 count += values
                     .iter()
-                    .filter(|v| matches!(v, CellValue::Number { .. }))
+                    .filter(|v| matches!(***v, CellValue::Number { .. }))
                     .count() as i64;
             }
             None => match evaluate(arg, ctx) {
@@ -192,7 +192,7 @@ pub(crate) fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 };
                 count += values
                     .iter()
-                    .filter(|v| !matches!(v, CellValue::Empty))
+                    .filter(|v| !matches!(***v, CellValue::Empty))
                     .count() as i64;
             }
             None => {
@@ -221,8 +221,8 @@ pub(crate) fn countblank(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let n = values
         .iter()
         .filter(|v| {
-            matches!(v, CellValue::Empty)
-                || matches!(v, CellValue::Text { value } if value.is_empty())
+            matches!(&***v, CellValue::Empty)
+                || matches!(&***v, CellValue::Text { value } if value.is_empty())
         })
         .count();
     num(n as f64)
@@ -317,7 +317,7 @@ fn matching_numbers(
         .map(|values| {
             values
                 .into_iter()
-                .filter_map(|value| match value {
+                .filter_map(|value| match *value {
                     CellValue::Number { value } => Some(value),
                     _ => None,
                 })

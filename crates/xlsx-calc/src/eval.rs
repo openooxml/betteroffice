@@ -1,6 +1,7 @@
 //! tree-walking evaluator; reads cells only through `xlsx_model::CellProvider`.
 //! coercion follows excel; errors propagate leftmost-first.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -61,8 +62,7 @@ pub struct EvalContext<'a> {
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
     unsupported_functions: Rc<Cell<u64>>,
-    defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
-    defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
+    defined_names: Rc<DefinedNameState>,
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
@@ -81,8 +81,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_names: Rc::new(DefinedNameState::default()),
             shared_budget: None,
             parse_cache: None,
         }
@@ -100,17 +99,20 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_names: Rc::new(DefinedNameState::default()),
             shared_budget: None,
             parse_cache: None,
         }
     }
 
+    /// `names` is shared across every context of one recalc pass so a name is
+    /// bound and evaluated at most once per pass instead of once per
+    /// referencing cell.
     pub(crate) fn with_budget(
         provider: &'a dyn CellProvider,
         sheet: SheetId,
         budget: Rc<EvaluationBudget>,
+        names: Rc<DefinedNameState>,
     ) -> Self {
         Self {
             provider,
@@ -123,8 +125,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
             unsupported_functions: Rc::new(Cell::new(0)),
-            defined_name_stack: Rc::new(RefCell::new(Vec::new())),
-            defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            defined_names: names,
             shared_budget: Some(budget),
             parse_cache: None,
         }
@@ -142,8 +143,7 @@ impl<'a> EvalContext<'a> {
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
             unsupported_functions: Rc::clone(&self.unsupported_functions),
-            defined_name_stack: Rc::clone(&self.defined_name_stack),
-            defined_name_values: Rc::clone(&self.defined_name_values),
+            defined_names: Rc::clone(&self.defined_names),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
         }
@@ -231,11 +231,12 @@ impl<'a> EvalContext<'a> {
         binding: &DefinedNameBinding,
         evaluate_definition: impl FnOnce(&Expr, &EvalContext<'_>) -> T,
     ) -> T {
-        self.defined_name_stack
+        self.defined_names
+            .stack
             .borrow_mut()
             .push(binding.key.clone());
         let value = evaluate_definition(&binding.expression, &self.for_sheet(binding.sheet));
-        self.defined_name_stack.borrow_mut().pop();
+        self.defined_names.stack.borrow_mut().pop();
         value
     }
 }
@@ -329,16 +330,30 @@ struct DefinedNameBinding {
     sheet: SheetId,
 }
 
-/// a name's value is stable for the life of a context, so each one is expanded
-/// at most once: without the memo a chain of `A=B+B` definitions costs 2^n. a
-/// hit replays the engine gap the expansion recorded, which a handler may have
-/// cleared since.
+/// per-pass defined-name state: the re-entry stack plus memoized parsed
+/// bindings and evaluated values, shared by every context a recalc pass
+/// creates. `None` bindings record lookup/parse failures so they error once.
+/// each memoized value carries the unsupported-function gap its expansion
+/// recorded, which a hit replays.
+#[derive(Default)]
+pub(crate) struct DefinedNameState {
+    stack: RefCell<Vec<DefinedNameKey>>,
+    values: RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>,
+    bindings: RefCell<HashMap<DefinedNameKey, Option<Rc<DefinedNameBinding>>>>,
+}
+
+/// a name's value is stable for the life of a recalc pass: its dependencies
+/// are evaluated before every referencing cell (the dep graph expands name
+/// references into edges, so topo order covers them). the memo is shared
+/// across the pass's contexts, so each name expands at most once — without it
+/// a chain of `A=B+B` definitions costs 2^n, and a `Name=SUM(range)` used by
+/// n cells costs n full evaluations.
 fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> CellValue {
     let key = match defined_name_key(scope, name, ctx) {
         Ok(key) => key,
         Err(error) => return err(error),
     };
-    if let Some((cached, gap)) = ctx.defined_name_values.borrow().get(&key) {
+    if let Some((cached, gap)) = ctx.defined_names.values.borrow().get(&key) {
         if *gap {
             ctx.record_unsupported_function();
         }
@@ -351,9 +366,14 @@ fn evaluate_defined_name(scope: &Option<String>, name: &str, ctx: &EvalContext<'
     let checkpoint = ctx.unsupported_checkpoint();
     let value = ctx.inside_defined_name(&binding, evaluate);
     let gap = ctx.unsupported_checkpoint() > checkpoint;
-    ctx.defined_name_values
-        .borrow_mut()
-        .insert(binding.key, (value.clone(), gap));
+    // a budget-exhausted result is per-context (each node has its own visit
+    // cap), so it must not poison the shared memo.
+    if !ctx.exhausted() {
+        ctx.defined_names
+            .values
+            .borrow_mut()
+            .insert(binding.key.clone(), (value.clone(), gap));
+    }
     value
 }
 
@@ -370,13 +390,15 @@ fn defined_name_key(
 }
 
 /// Parses a name's definition, refusing re-entry, and charges the work budget.
+/// Parsed bindings are cached per pass so a name's formula is parsed once
+/// rather than once per referencing cell (or per `as_area` call).
 fn bind_defined_name(
     key: DefinedNameKey,
     name: &str,
     ctx: &EvalContext<'_>,
-) -> Result<DefinedNameBinding, ErrorValue> {
+) -> Result<Rc<DefinedNameBinding>, ErrorValue> {
     {
-        let stack = ctx.defined_name_stack.borrow();
+        let stack = ctx.defined_names.stack.borrow();
         if stack.contains(&key) {
             return Err(ErrorValue::Name);
         }
@@ -387,27 +409,31 @@ fn bind_defined_name(
     if !ctx.consume_cells(1) {
         return Err(ErrorValue::Num);
     }
-    let defined = ctx
-        .provider
-        .defined_name(key.0, name)
-        .ok_or(ErrorValue::Name)?;
-    let formula = defined
-        .formula
-        .strip_prefix('=')
-        .unwrap_or(&defined.formula);
-    let expression = match ctx.parse_cache {
-        Some(cache) => parse_cached(cache, formula),
-        None => parse_formula(formula).ok().map(Arc::new),
+    if let Some(cached) = ctx.defined_names.bindings.borrow().get(&key) {
+        return cached.clone().ok_or(ErrorValue::Name);
     }
-    .ok_or(ErrorValue::Name)?;
-    let sheet = defined.local_sheet.unwrap_or(key.0);
-    #[cfg(test)]
-    DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
-    Ok(DefinedNameBinding {
-        key,
-        expression,
-        sheet,
-    })
+    let binding = ctx.provider.defined_name(key.0, name).and_then(|defined| {
+        let formula = defined
+            .formula
+            .strip_prefix('=')
+            .unwrap_or(&defined.formula);
+        let expression = match ctx.parse_cache {
+            Some(cache) => parse_cached(cache, formula),
+            None => parse_formula(formula).ok().map(Arc::new),
+        }?;
+        #[cfg(test)]
+        DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
+        Some(Rc::new(DefinedNameBinding {
+            key: key.clone(),
+            expression,
+            sheet: defined.local_sheet.unwrap_or(key.0),
+        }))
+    });
+    ctx.defined_names
+        .bindings
+        .borrow_mut()
+        .insert(key, binding.clone());
+    binding.ok_or(ErrorValue::Name)
 }
 
 /// resolve a possibly sheet-qualified cell reference to its stored value.
@@ -426,7 +452,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_provider_value(ctx.provider.value(sid, cell))
+    normalize_provider_value(ctx.provider.value(sid, cell)).into_owned()
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -628,25 +654,33 @@ pub(crate) struct Area {
 
 impl Area {
     /// value at 0-based `(row, col)` within the area.
-    pub(crate) fn get(
+    pub(crate) fn get<'a>(
         &self,
-        ctx: &EvalContext<'_>,
+        ctx: &EvalContext<'a>,
         row: usize,
         col: usize,
-    ) -> Result<CellValue, ErrorValue> {
+    ) -> Result<Cow<'a, CellValue>, ErrorValue> {
         if !ctx.consume_cells(1) {
             return Err(ErrorValue::Num);
         }
         Ok(self.get_unmetered(ctx, row, col))
     }
 
-    pub(crate) fn get_unmetered(&self, ctx: &EvalContext<'_>, row: usize, col: usize) -> CellValue {
+    pub(crate) fn get_unmetered<'a>(
+        &self,
+        ctx: &EvalContext<'a>,
+        row: usize,
+        col: usize,
+    ) -> Cow<'a, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
         normalize_provider_value(ctx.provider.value(self.sheet, cell))
     }
 
     /// all values in row-major order.
-    pub(crate) fn values(&self, ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
+    pub(crate) fn values<'a>(
+        &self,
+        ctx: &EvalContext<'a>,
+    ) -> Result<Vec<Cow<'a, CellValue>>, ErrorValue> {
         let count = self.cell_count().ok_or(ErrorValue::Num)?;
         if !ctx.consume_cells(count) {
             return Err(ErrorValue::Num);
@@ -703,13 +737,21 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-fn normalize_provider_value(value: CellValue) -> CellValue {
-    match value {
-        CellValue::Number { value } if !value.is_finite() => err(ErrorValue::Num),
-        CellValue::Text { value } if value.chars().count() > MAX_CELL_TEXT_CHARS => {
-            err(ErrorValue::Value)
+fn normalize_provider_value(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
+    let error = match &*value {
+        CellValue::Number { value } if !value.is_finite() => Some(ErrorValue::Num),
+        // a char count is only possible past the byte cap, so short texts skip
+        // the scan entirely
+        CellValue::Text { value }
+            if value.len() > MAX_CELL_TEXT_CHARS && value.chars().count() > MAX_CELL_TEXT_CHARS =>
+        {
+            Some(ErrorValue::Value)
         }
-        value => value,
+        _ => None,
+    };
+    match error {
+        Some(kind) => Cow::Owned(err(kind)),
+        None => value,
     }
 }
 
@@ -911,8 +953,12 @@ mod tests {
         }
         workbook.defined_names.push(defined_name("Step_4", "1"));
 
-        let context =
-            EvalContext::with_budget(&workbook, SheetId(0), Rc::new(EvaluationBudget::new(2)));
+        let context = EvalContext::with_budget(
+            &workbook,
+            SheetId(0),
+            Rc::new(EvaluationBudget::new(2)),
+            Rc::new(DefinedNameState::default()),
+        );
         assert_eq!(
             evaluate(&parse_formula("Step_0").unwrap(), &context),
             CellValue::Error {
@@ -970,8 +1016,10 @@ mod tests {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
         let budget = Rc::new(EvaluationBudget::new(1));
-        let first = EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget));
-        let second = EvalContext::with_budget(&workbook, SheetId(0), budget);
+        let names = Rc::new(DefinedNameState::default());
+        let first =
+            EvalContext::with_budget(&workbook, SheetId(0), Rc::clone(&budget), Rc::clone(&names));
+        let second = EvalContext::with_budget(&workbook, SheetId(0), budget, names);
         let expression = parse_formula("A1").unwrap();
         assert_eq!(evaluate(&expression, &first), CellValue::Empty);
         assert_eq!(

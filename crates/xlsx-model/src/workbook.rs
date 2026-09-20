@@ -1,5 +1,6 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -261,7 +262,7 @@ impl Workbook {
 
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
-    fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
+    fn value<'a>(&'a self, sheet: SheetId, at: CellRef) -> Cow<'a, CellValue>;
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
@@ -270,11 +271,11 @@ pub trait CellProvider {
 }
 
 impl CellProvider for Workbook {
-    fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
+    fn value(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
         self.sheet(sheet)
             .and_then(|s| s.cell(at))
-            .map(|c| c.value.clone())
-            .unwrap_or_default()
+            .map(|c| Cow::Borrowed(&c.value))
+            .unwrap_or(Cow::Owned(CellValue::Empty))
     }
 
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str> {
@@ -345,10 +346,10 @@ mod tests {
 
         let id = wb.sheet_id("Data").unwrap();
         assert_eq!(wb.sheet_id("data"), Some(id));
-        assert_eq!(wb.value(id, a1), CellValue::Number { value: 42.0 });
+        assert_eq!(*wb.value(id, a1), CellValue::Number { value: 42.0 });
         assert_eq!(wb.formula(id, a1), Some("40+2"));
         assert_eq!(
-            wb.value(id, CellRef::parse_a1("Z9").unwrap()),
+            *wb.value(id, CellRef::parse_a1("Z9").unwrap()),
             CellValue::Empty
         );
         assert!(wb.sheet_id("Nope").is_none());

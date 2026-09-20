@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cell::Cell as Counter;
 
 use xlsx_calc::{ColumnRange, EvalContext, Expr, evaluate, parse_formula, references};
@@ -58,9 +59,9 @@ struct CountedData {
 }
 
 impl CellProvider for CountedData {
-    fn value(&self, _sheet: SheetId, at: CellRef) -> CellValue {
+    fn value(&self, _sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
         self.visits.set(self.visits.get() + 1);
-        match (at.row, at.col) {
+        Cow::Owned(match (at.row, at.col) {
             (1, 18) => CellValue::Number { value: 2.0 },
             (1, 21) => CellValue::Text {
                 value: "two".into(),
@@ -71,7 +72,7 @@ impl CellProvider for CountedData {
             },
             (row, 21) if row == MAX_ROWS - 1 => CellValue::Number { value: 42.0 },
             _ => CellValue::Empty,
-        }
+        })
     }
 
     fn formula(&self, _sheet: SheetId, _at: CellRef) -> Option<&str> {

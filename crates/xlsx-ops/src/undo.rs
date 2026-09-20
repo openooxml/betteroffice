@@ -111,27 +111,27 @@ mod tests {
         let mut stack = UndoStack::new();
         stack.commit(&mut wb, &tx).unwrap();
         assert_eq!(
-            wb.value(SheetId(0), r("A1")),
+            *wb.value(SheetId(0), r("A1")),
             CellValue::Number { value: 1.0 }
         );
         assert_eq!(
-            wb.value(SheetId(0), r("B1")),
+            *wb.value(SheetId(0), r("B1")),
             CellValue::Number { value: 2.0 }
         );
 
         assert!(stack.can_undo());
         stack.undo(&mut wb).unwrap();
-        assert_eq!(wb.value(SheetId(0), r("A1")), CellValue::Empty);
-        assert_eq!(wb.value(SheetId(0), r("B1")), CellValue::Empty);
+        assert_eq!(*wb.value(SheetId(0), r("A1")), CellValue::Empty);
+        assert_eq!(*wb.value(SheetId(0), r("B1")), CellValue::Empty);
 
         assert!(stack.can_redo());
         stack.redo(&mut wb).unwrap();
         assert_eq!(
-            wb.value(SheetId(0), r("A1")),
+            *wb.value(SheetId(0), r("A1")),
             CellValue::Number { value: 1.0 }
         );
         assert_eq!(
-            wb.value(SheetId(0), r("B1")),
+            *wb.value(SheetId(0), r("B1")),
             CellValue::Number { value: 2.0 }
         );
     }
@@ -156,12 +156,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            wb.value(SheetId(0), r("A1")),
+            *wb.value(SheetId(0), r("A1")),
             CellValue::Number { value: 99.0 }
         );
         stack.undo(&mut wb).unwrap();
         assert_eq!(
-            wb.value(SheetId(0), r("A1")),
+            *wb.value(SheetId(0), r("A1")),
             CellValue::Number { value: 5.0 }
         );
     }

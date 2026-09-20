@@ -1,6 +1,8 @@
 //! text functions. positions are 1-based, counted in unicode scalar values
 //! (excel counts utf-16 units). FIND is case-sensitive, SEARCH case-insensitive.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
@@ -382,11 +384,11 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            let empty = matches!(v, CellValue::Empty)
-                || matches!(&v, CellValue::Text { value } if value.is_empty());
+            let empty = matches!(*v, CellValue::Empty)
+                || matches!(&*v, CellValue::Text { value } if value.is_empty());
             if ignore_empty && empty {
                 continue;
             }
@@ -417,7 +419,7 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
             match to_text(&v) {

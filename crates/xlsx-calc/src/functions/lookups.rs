@@ -1,6 +1,7 @@
 //! lookup and reference functions: VLOOKUP/HLOOKUP/MATCH exact and approximate
 //! modes, INDEX area form, XLOOKUP exact-match subset, OFFSET.
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
@@ -89,7 +90,7 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
                 area.get(ctx, off, i)
             };
             match value {
-                Ok(value) => value,
+                Ok(value) => value.into_owned(),
                 Err(error) => err(error),
             }
         }
@@ -179,7 +180,7 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Ref);
     }
     match area.get(ctx, row as usize - 1, col as usize - 1) {
-        Ok(value) => value,
+        Ok(value) => value.into_owned(),
         Err(error) => err(error),
     }
 }
@@ -190,7 +191,7 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match offset_area(args, ctx) {
         Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
-            Ok(value) => value,
+            Ok(value) => value.into_owned(),
             Err(error) => err(error),
         },
         Ok(_) => err(ErrorValue::Value),
@@ -269,7 +270,7 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         };
         if cmp_values(&key, &target) == Ordering::Equal {
             return match result.get(ctx, row, col) {
-                Ok(value) => value,
+                Ok(value) => value.into_owned(),
                 Err(error) => err(error),
             };
         }
@@ -332,10 +333,10 @@ pub(crate) fn columns(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// last index whose value is <= target scanning in order (excel's ascending
 /// approximate match); target below the first value -> None.
-fn approximate_row(
+fn approximate_row<'a>(
     len: usize,
     target: &CellValue,
-    key: impl Fn(usize) -> CellValue,
+    key: impl Fn(usize) -> Cow<'a, CellValue>,
 ) -> Option<usize> {
     let mut found = None;
     for i in 0..len {
@@ -388,7 +389,7 @@ pub(crate) fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     let value = match as_area(&args[0], ctx) {
         Some(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
-            Ok(value) => value,
+            Ok(value) => value.into_owned(),
             Err(error) => return err(error),
         },
         Some(_) => {
