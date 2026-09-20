@@ -426,10 +426,7 @@ pub fn parse_docx_s9_wire_with_limits(
             footnote_separators,
             endnote_separators,
             relationship_entries: relationships.into_iter().collect(),
-            media_entries: media
-                .iter()
-                .map(|(key, file)| (key.clone(), file.clone()))
-                .collect(),
+            media_entries: media.into_iter().collect(),
             chart_entries: charts.into_iter().collect(),
         },
         template_variables,
@@ -678,7 +675,7 @@ fn canonical_media(entries: &[(String, MediaFile)]) -> Result<CanonicalValue, Pa
         .iter()
         .map(|(key, file)| {
             let data = base64::engine::general_purpose::STANDARD
-                .decode(file.base64())
+                .decode(&file.base64)
                 .map_err(|error| ParseError::Canonical(error.to_string()))?;
             let mut values = vec![
                 ("path".to_owned(), CanonicalValue::String(file.path.clone())),
@@ -689,7 +686,7 @@ fn canonical_media(entries: &[(String, MediaFile)]) -> Result<CanonicalValue, Pa
                 ("data".to_owned(), CanonicalValue::Binary(data)),
                 (
                     "dataUrl".to_owned(),
-                    CanonicalValue::String(file.data_url.clone()),
+                    CanonicalValue::String(file.data_url()),
                 ),
             ];
             if let Some(filename) = &file.filename {

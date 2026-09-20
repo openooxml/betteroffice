@@ -11,8 +11,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::relationships::RelationshipMap;
 
-/// Media files keyed by package path plus a bare `media/…` alias, with a
-/// lowercase index so case-insensitive lookups stay map hits, not scans.
+/// Media files keyed by package path, with a lowercase index so
+/// case-insensitive lookups stay map hits.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MediaMap {
     entries: IndexMap<String, Arc<MediaFile>>,
@@ -36,9 +36,7 @@ impl MediaMap {
         self.entries.get(key).map(|file| &**file)
     }
 
-    /// Exact `key` hit first, then a case-insensitive retry through the
-    /// lowercase index — relationship targets and package paths can disagree
-    /// on case.
+    /// Exact hit first, then a case-insensitive retry through the index.
     pub fn get_case_insensitive(&self, key: &str) -> Option<&MediaFile> {
         self.get(key).or_else(|| {
             self.lower
@@ -47,8 +45,7 @@ impl MediaMap {
         })
     }
 
-    /// Relationship targets may be bare (`media/x.png`) or `word/`-rooted; both
-    /// spellings resolve through the same index.
+    /// Bare (`media/x.png`) and `word/`-rooted targets resolve the same.
     pub(crate) fn find_target(&self, target: &str) -> Option<&MediaFile> {
         let trimmed = target.trim_start_matches('/');
         self.get_case_insensitive(trimmed).or_else(|| {
@@ -66,30 +63,121 @@ impl MediaMap {
         self.entries.keys()
     }
 
+    /// IndexMap-compatible insert; returns any replaced entry.
+    pub fn insert(&mut self, key: String, file: MediaFile) -> Option<MediaFile> {
+        self.lower
+            .entry(key.to_ascii_lowercase())
+            .or_insert_with(|| key.clone());
+        self.entries
+            .insert(key, Arc::new(file))
+            .map(|old| (*old).clone())
+    }
+
     fn insert_key(&mut self, key: String, file: Arc<MediaFile>) {
-        self.lower.insert(key.to_ascii_lowercase(), key.clone());
+        self.lower
+            .entry(key.to_ascii_lowercase())
+            .or_insert_with(|| key.clone());
         self.entries.insert(key, file);
     }
 }
 
-/// One media payload — `data_url` is canonical (`data:<mime>;base64,<payload>`)
-/// and [`MediaFile::base64`] slices the payload back out of it, so the bytes
-/// are stored once.
+impl std::ops::Deref for MediaMap {
+    type Target = IndexMap<String, Arc<MediaFile>>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
+
+impl std::ops::Index<&str> for MediaMap {
+    type Output = MediaFile;
+
+    fn index(&self, key: &str) -> &MediaFile {
+        self.entries[key].as_ref()
+    }
+}
+
+fn as_ref_entry<'a>((key, file): (&'a String, &'a Arc<MediaFile>)) -> (&'a String, &'a MediaFile) {
+    (key, file.as_ref())
+}
+
+fn unwrap_entry((key, file): (String, Arc<MediaFile>)) -> (String, MediaFile) {
+    (
+        key,
+        Arc::try_unwrap(file).unwrap_or_else(|file| (*file).clone()),
+    )
+}
+
+impl<'a> IntoIterator for &'a MediaMap {
+    type Item = (&'a String, &'a MediaFile);
+    type IntoIter = std::iter::Map<
+        indexmap::map::Iter<'a, String, Arc<MediaFile>>,
+        fn((&'a String, &'a Arc<MediaFile>)) -> (&'a String, &'a MediaFile),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter().map(as_ref_entry)
+    }
+}
+
+impl IntoIterator for MediaMap {
+    type Item = (String, MediaFile);
+    type IntoIter = std::iter::Map<
+        indexmap::map::IntoIter<String, Arc<MediaFile>>,
+        fn((String, Arc<MediaFile>)) -> (String, MediaFile),
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter().map(unwrap_entry)
+    }
+}
+
+impl FromIterator<(String, MediaFile)> for MediaMap {
+    fn from_iter<I: IntoIterator<Item = (String, MediaFile)>>(iter: I) -> Self {
+        let mut map = Self::new();
+        map.extend(iter);
+        map
+    }
+}
+
+impl Extend<(String, MediaFile)> for MediaMap {
+    fn extend<I: IntoIterator<Item = (String, MediaFile)>>(&mut self, iter: I) {
+        for (key, file) in iter {
+            self.insert(key, file);
+        }
+    }
+}
+
+impl Serialize for MediaMap {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut map = serializer.serialize_map(Some(self.entries.len()))?;
+        for (key, file) in &self.entries {
+            map.serialize_entry(key, &**file)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MediaMap {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        IndexMap::<String, MediaFile>::deserialize(deserializer).map(Self::from_iter)
+    }
+}
+
+/// One media payload; `base64` is canonical and [`Self::data_url`] derives
+/// the display form, so the bytes are stored once.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MediaFile {
     pub path: String,
     pub filename: Option<String>,
     pub mime_type: String,
-    pub data_url: String,
+    pub base64: String,
 }
 
 impl MediaFile {
-    /// The base64 payload embedded in `data_url`, without copying.
-    pub fn base64(&self) -> &str {
-        self.data_url
-            .split_once(',')
-            .filter(|(head, _)| head.starts_with("data:") && head.ends_with(";base64"))
-            .map_or("", |(_, payload)| payload)
+    /// `data:<mime>;base64,<payload>` derived from `base64`.
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.base64)
     }
 }
 
@@ -101,8 +189,8 @@ impl Serialize for MediaFile {
             map.serialize_entry("filename", filename)?;
         }
         map.serialize_entry("mimeType", &self.mime_type)?;
-        map.serialize_entry("base64", self.base64())?;
-        map.serialize_entry("dataUrl", &self.data_url)?;
+        map.serialize_entry("base64", &self.base64)?;
+        map.serialize_entry("dataUrl", &self.data_url())?;
         map.end()
     }
 }
@@ -120,18 +208,20 @@ impl<'de> Deserialize<'de> for MediaFile {
             data_url: String,
         }
         let wire = WireMediaFile::deserialize(deserializer)?;
-        // A payload serialized without a data URL rebuilds one so the bytes are
-        // still embedded in the single stored string.
-        let data_url = if wire.data_url.is_empty() && !wire.base64.is_empty() {
-            format!("data:{};base64,{}", wire.mime_type, wire.base64)
-        } else {
+        // A payload serialized only as a data URL keeps its base64 half.
+        let base64 = if wire.base64.is_empty() {
             wire.data_url
+                .split_once(',')
+                .filter(|(head, _)| head.starts_with("data:") && head.ends_with(";base64"))
+                .map_or_else(String::new, |(_, payload)| payload.to_owned())
+        } else {
+            wire.base64
         };
         Ok(Self {
             path: wire.path,
             filename: wire.filename,
             mime_type: wire.mime_type,
-            data_url,
+            base64,
         })
     }
 }
@@ -167,7 +257,7 @@ pub fn build_media_map_with_warnings(parts: &[(String, Vec<u8>)]) -> (MediaMap, 
         let file = Arc::new(MediaFile {
             path: path.clone(),
             filename: Some(filename),
-            data_url: format!("data:{mime_type};base64,{base64}"),
+            base64,
             mime_type,
         });
         media.insert_key(path.clone(), Arc::clone(&file));
@@ -196,10 +286,10 @@ pub fn resolve_image_data(
     let filename = target.rsplit('/').next().map(str::to_owned);
     if let Some(file) = media.and_then(|media| media.find_target(target)) {
         return ResolvedImageData {
-            src: Some(if file.data_url.is_empty() {
-                file.base64().to_owned()
+            src: Some(if file.base64.is_empty() {
+                file.base64.clone()
             } else {
-                file.data_url.clone()
+                file.data_url()
             }),
             mime_type: Some(file.mime_type.clone()),
             filename,

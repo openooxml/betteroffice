@@ -550,10 +550,10 @@ fn resolve_watermark_image(
     for candidate in candidates {
         if let Some(file) = media.get_case_insensitive(&candidate) {
             return ResolvedWatermarkImage {
-                data_url: Some(if file.data_url.is_empty() {
-                    file.base64().to_owned()
+                data_url: Some(if file.base64.is_empty() {
+                    file.base64.clone()
                 } else {
-                    file.data_url.clone()
+                    file.data_url()
                 }),
                 media_path: Some(file.path.clone()),
                 content_type: Some(file.mime_type.clone()),
