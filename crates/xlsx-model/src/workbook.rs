@@ -1,5 +1,6 @@
 //! sparse workbook containers and the calc-facing cell-access trait.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -262,6 +263,12 @@ impl Workbook {
 /// read access the calc engine evaluates through.
 pub trait CellProvider {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue;
+    /// borrowed variant of `value`: providers holding the value lend it out
+    /// instead of cloning stored strings on every read. absent cells read as
+    /// `CellValue::Empty`.
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        Cow::Owned(self.value(sheet, at))
+    }
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
@@ -271,10 +278,14 @@ pub trait CellProvider {
 
 impl CellProvider for Workbook {
     fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
-        self.sheet(sheet)
-            .and_then(|s| s.cell(at))
-            .map(|c| c.value.clone())
-            .unwrap_or_default()
+        self.value_cow(sheet, at).into_owned()
+    }
+
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        match self.sheet(sheet).and_then(|s| s.cell(at)) {
+            Some(cell) => Cow::Borrowed(&cell.value),
+            None => Cow::Owned(CellValue::Empty),
+        }
     }
 
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str> {

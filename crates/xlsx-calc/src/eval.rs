@@ -1,6 +1,7 @@
 //! tree-walking evaluator; reads cells only through `xlsx_model::CellProvider`.
 //! coercion follows excel; errors propagate leftmost-first.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -426,7 +427,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_provider_value(ctx.provider.value(sid, cell))
+    normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned()
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -634,19 +635,37 @@ impl Area {
         row: usize,
         col: usize,
     ) -> Result<CellValue, ErrorValue> {
+        self.get_ref(ctx, row, col).map(Cow::into_owned)
+    }
+
+    /// borrowed variant of `get` for callers that only inspect the value.
+    pub(crate) fn get_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+        row: usize,
+        col: usize,
+    ) -> Result<Cow<'p, CellValue>, ErrorValue> {
         if !ctx.consume_cells(1) {
             return Err(ErrorValue::Num);
         }
-        Ok(self.get_unmetered(ctx, row, col))
+        Ok(self.get_unmetered_ref(ctx, row, col))
     }
 
-    pub(crate) fn get_unmetered(&self, ctx: &EvalContext<'_>, row: usize, col: usize) -> CellValue {
+    pub(crate) fn get_unmetered_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+        row: usize,
+        col: usize,
+    ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
-        normalize_provider_value(ctx.provider.value(self.sheet, cell))
+        normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 
-    /// all values in row-major order.
-    pub(crate) fn values(&self, ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
+    /// all values in row-major order, borrowed where the provider can lend them.
+    pub(crate) fn values_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+    ) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
         let count = self.cell_count().ok_or(ErrorValue::Num)?;
         if !ctx.consume_cells(count) {
             return Err(ErrorValue::Num);
@@ -655,7 +674,7 @@ impl Area {
         let mut out = Vec::with_capacity(capacity);
         for row in 0..self.rows {
             for col in 0..self.cols {
-                out.push(self.get_unmetered(ctx, row, col));
+                out.push(self.get_unmetered_ref(ctx, row, col));
             }
         }
         Ok(out)
@@ -703,13 +722,27 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-fn normalize_provider_value(value: CellValue) -> CellValue {
+/// gate provider reads: non-finite numbers and over-long text become errors
+/// instead of leaking into results. `Cow::Borrowed` passes through untouched,
+/// so callers inspecting a stored value never clone it.
+fn normalize_cow(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
+    match provider_error(&value) {
+        Some(error) => Cow::Owned(err(error)),
+        None => value,
+    }
+}
+
+/// a cell's text length needs no scan when its byte length already fits the
+/// cap: chars never outnumber bytes.
+fn provider_error(value: &CellValue) -> Option<ErrorValue> {
     match value {
-        CellValue::Number { value } if !value.is_finite() => err(ErrorValue::Num),
-        CellValue::Text { value } if value.chars().count() > MAX_CELL_TEXT_CHARS => {
-            err(ErrorValue::Value)
+        CellValue::Number { value } if !value.is_finite() => Some(ErrorValue::Num),
+        CellValue::Text { value }
+            if value.len() > MAX_CELL_TEXT_CHARS && value.chars().count() > MAX_CELL_TEXT_CHARS =>
+        {
+            Some(ErrorValue::Value)
         }
-        value => value,
+        _ => None,
     }
 }
 

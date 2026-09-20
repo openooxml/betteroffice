@@ -116,6 +116,17 @@ impl DepGraph {
         *self = Self::build(wb);
     }
 
+    /// every stored edge as `(range's sheet, range, dependent cell)`.
+    pub(crate) fn edges(
+        &self,
+    ) -> impl Iterator<Item = (SheetId, CellRange, SheetId, CellRef)> + '_ {
+        self.by_sheet.iter().flat_map(|(&sheet, edges)| {
+            edges
+                .iter()
+                .map(move |(range, node)| (sheet, *range, node.sheet, node.cell()))
+        })
+    }
+
     /// formula cells that directly read `cell` on `sheet`; may contain
     /// duplicates, callers dedup.
     pub fn dependents_of(
