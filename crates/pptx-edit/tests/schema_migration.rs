@@ -859,3 +859,44 @@ fn a_2_0_snapshot_recovers_line_spacing() {
         |value| without_keys(value, &["lineSpacing", "compatLineSpacing"]),
     );
 }
+
+#[test]
+fn a_2_1_deck_with_integer_media_arrays_migrates_to_base64() {
+    let fresh = DeckSession::open(FIXTURE, 4171).unwrap();
+    let update = fresh.encode_state_as_update_v1();
+    let json = package_json(&update);
+    assert!(
+        json.contains("\"bytes\":\""),
+        "2.2 must write base64 strings"
+    );
+
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let media = value["media"]
+        .as_array_mut()
+        .expect("fixture carries media");
+    assert!(!media.is_empty());
+    for part in media.iter_mut() {
+        part["bytes"] = serde_json::json!([7, 6, 5]);
+    }
+    let doc = hydrated(&update);
+    let meta = meta(&doc);
+    {
+        let mut txn = doc.transact_mut();
+        meta.insert(
+            &mut txn,
+            "packageJson",
+            Any::Buffer(serde_json::to_vec(&value).unwrap().into()),
+        );
+        meta.insert(&mut txn, "schemaVersion", 2.1);
+    }
+    let legacy = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+
+    let migrated = DeckSession::open_from_update(&legacy, 4172).unwrap();
+    let migrated_json = package_json(&migrated.encode_state_as_update_v1());
+    assert_eq!(stamped_version(&legacy), Some(2.1));
+    assert!(migrated_json.contains("\"bytes\":\"BwYF\""));
+    assert!(!migrated_json.contains("[7,6,5]"));
+    assert!(migrated_json.contains("betteroffice-mark.png"));
+}
