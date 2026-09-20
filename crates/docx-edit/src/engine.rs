@@ -86,6 +86,9 @@ struct ResidentRegionState {
 struct RegionFastPathState {
     regions: Rc<DocumentRegions>,
     measurement: Rc<docx_layout::measure_blocks::MeasurementConfig>,
+    /// `measurement` hashed once so a later full pass can verify the retained
+    /// arena was measured under the same config without re-serializing.
+    measurement_fingerprint: u64,
     /// True when the last full pass had no normal footnote/endnote contents
     /// and no note references — the fast path skips note stabilization
     /// entirely, so it requires a note-free document.
@@ -163,8 +166,8 @@ fn column_measurement_width(
     ((content_width - (columns.count - 1.0) * columns.gap) / columns.count).floor()
 }
 
-fn region_measurement_widths(
-    blocks: &[LayoutBlock],
+fn region_measurement_widths<'a>(
+    blocks: impl IntoIterator<Item = &'a LayoutBlock>,
     input: &LayoutInput,
     regions: &DocumentRegions,
 ) -> Vec<f64> {
@@ -180,7 +183,7 @@ fn region_measurement_widths(
         docx_layout::section_breaks::resolve_page_margins(input.options.margins.as_ref());
     let mut section_index = 0;
     blocks
-        .iter()
+        .into_iter()
         .map(|block| {
             let section = regions
                 .sections
@@ -234,7 +237,7 @@ fn stabilize_shape_wrapping(
     input: &mut LayoutInput,
     regions: &DocumentRegions,
     measurement: &docx_layout::measure_blocks::MeasurementConfig,
-) -> Result<(), docx_layout::LayoutError> {
+) -> Result<bool, docx_layout::LayoutError> {
     let shapes = input
         .measured
         .iter()
@@ -256,16 +259,17 @@ fn stabilize_shape_wrapping(
         })
         .collect::<Vec<_>>();
     if shapes.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let mut blocks = input
         .measured
         .iter()
         .map(|measured| measured.block.clone())
         .collect::<Vec<_>>();
-    let widths = region_measurement_widths(&blocks, input, regions);
+    let widths = region_measurement_widths(blocks.iter(), input, regions);
     let geometry = initial_float_page_geometry(input, regions);
     let mut previous_offsets = BTreeMap::new();
+    let mut touched = false;
     for _ in 0..shapes.len() + 2 {
         let layout = docx_layout::place::layout_document(input)?;
         let offsets = shapes
@@ -287,7 +291,7 @@ fn stabilize_shape_wrapping(
             })
             .collect::<BTreeMap<_, _>>();
         if offsets == previous_offsets {
-            return Ok(());
+            return Ok(touched);
         }
         let measures = docx_layout::measure_blocks::measure_blocks_with_shape_offsets(
             &mut blocks,
@@ -303,6 +307,7 @@ fn stabilize_shape_wrapping(
             measured.block = block.clone();
             measured.measure = measure;
         }
+        touched = true;
         previous_offsets = offsets;
     }
     Err(docx_layout::LayoutError::Invalid(
@@ -387,6 +392,10 @@ fn extend_input_for_header_footer(
 #[derive(Debug, Default)]
 struct PaginationState {
     input: Option<LayoutInput>,
+    /// Fingerprint of the measurement config that produced the retained
+    /// `input` arena; the region path only reuses extents measured under an
+    /// identical config.
+    measured_with: Option<u64>,
     layout: Option<Layout>,
     checkpoints: Vec<LayoutCheckpoint>,
     block_fingerprints: Vec<u64>,
@@ -606,21 +615,206 @@ fn resident_block_slots_match(previous: &LayoutBlock, next: &LayoutBlock) -> boo
     }
 }
 
+fn fragment_identity(block: &LayoutBlock) -> Option<&BlockId> {
+    match block {
+        LayoutBlock::Paragraph(block) => Some(&block.id),
+        LayoutBlock::Table(block) => Some(&block.id),
+        LayoutBlock::Image(block) => Some(&block.id),
+        LayoutBlock::TextBox(block) => Some(&block.id),
+        LayoutBlock::Shape(block) => Some(&block.id),
+        LayoutBlock::Chart(block) => Some(&block.id),
+        _ => None,
+    }
+}
+
+fn resident_fragment_keys_match(previous: &LayoutBlock, next: &LayoutBlock) -> bool {
+    match (fragment_identity(previous), fragment_identity(next)) {
+        (Some(previous_id), Some(next_id)) => block_key(previous_id) == block_key(next_id),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+fn effective_paragraph_style(paragraph: &docx_layout::types::ParagraphBlock) -> &str {
+    let Some(attrs) = paragraph.attrs.as_ref() else {
+        return "";
+    };
+    attrs
+        .effective_style_id
+        .as_deref()
+        .filter(|style| !style.is_empty())
+        .or_else(|| attrs.style_id.as_deref().filter(|style| !style.is_empty()))
+        .unwrap_or("")
+}
+
+fn empty_paragraph_runs(paragraph: &docx_layout::types::ParagraphBlock) -> bool {
+    paragraph.runs.is_empty()
+        || matches!(paragraph.runs.as_slice(), [Run::Text(run)] if run.text.is_empty())
+}
+
+fn contextual_spacing_enabled(paragraph: &docx_layout::types::ParagraphBlock) -> bool {
+    paragraph
+        .attrs
+        .as_ref()
+        .is_some_and(|attrs| attrs.contextual_spacing.unwrap_or(false))
+}
+
+/// First paragraph of a table's leading cell, used by the empty-paragraph +
+/// table arm of the contextual-spacing rule.
+fn first_cell_paragraph(
+    table: &docx_layout::types::TableBlock,
+) -> Option<&docx_layout::types::ParagraphBlock> {
+    table
+        .rows
+        .first()
+        .and_then(|row| row.cells.first())
+        .and_then(|cell| cell.blocks.first())
+        .and_then(|block| match block {
+            LayoutBlock::Paragraph(paragraph) => Some(paragraph),
+            _ => None,
+        })
+}
+
+/// Mirror `contextual_spacing_pair` for the `owned` side of a pair boundary:
+/// retained blocks were suppressed in place during their layout pass, so a
+/// freshly lowered block must see the same rule before equality means
+/// anything. The earlier sibling's `after` / the later sibling's `before`
+/// zero out when both sides share an effective style and carry
+/// contextualSpacing; an empty paragraph ahead of a non-floating table routes
+/// the `before` suppression to the table's first cell instead.
+fn suppress_contextual_spacing(blocks: &[LayoutBlock], index: usize, owned: &mut LayoutBlock) {
+    if let Some(LayoutBlock::Paragraph(previous)) = index.checked_sub(1).and_then(|i| blocks.get(i))
+    {
+        let suppress_before = match &*owned {
+            LayoutBlock::Paragraph(paragraph) => {
+                effective_paragraph_style(paragraph) == effective_paragraph_style(previous)
+                    && contextual_spacing_enabled(paragraph)
+            }
+            LayoutBlock::Table(table)
+                if table.floating.is_none() && empty_paragraph_runs(previous) =>
+            {
+                first_cell_paragraph(table).is_some_and(|inner| {
+                    effective_paragraph_style(inner) == effective_paragraph_style(previous)
+                        && contextual_spacing_enabled(inner)
+                })
+            }
+            _ => false,
+        };
+        if suppress_before {
+            let target: Option<&mut docx_layout::types::ParagraphBlock> = match owned {
+                LayoutBlock::Paragraph(paragraph) => Some(paragraph),
+                LayoutBlock::Table(table) => table
+                    .rows
+                    .first_mut()
+                    .and_then(|row| row.cells.first_mut())
+                    .and_then(|cell| cell.blocks.first_mut())
+                    .and_then(|block| match block {
+                        LayoutBlock::Paragraph(paragraph) => Some(paragraph),
+                        _ => None,
+                    }),
+                _ => None,
+            };
+            if let Some(spacing) = target
+                .and_then(|paragraph| paragraph.attrs.as_mut())
+                .and_then(|attrs| attrs.spacing.as_mut())
+            {
+                spacing.before = Some(0.0);
+            }
+        }
+    }
+    let LayoutBlock::Paragraph(current) = owned else {
+        return;
+    };
+    let suppress_after = match blocks.get(index + 1) {
+        Some(LayoutBlock::Paragraph(next)) => {
+            effective_paragraph_style(next) == effective_paragraph_style(current)
+                && contextual_spacing_enabled(current)
+        }
+        Some(LayoutBlock::Table(table))
+            if table.floating.is_none() && empty_paragraph_runs(current) =>
+        {
+            first_cell_paragraph(table).is_some_and(|inner| {
+                effective_paragraph_style(inner) == effective_paragraph_style(current)
+                    && contextual_spacing_enabled(current)
+            })
+        }
+        _ => false,
+    };
+    if suppress_after
+        && let Some(spacing) = current
+            .attrs
+            .as_mut()
+            .and_then(|attrs| attrs.spacing.as_mut())
+    {
+        spacing.after = Some(0.0);
+    }
+}
+
+fn nested_block_keys(block: &LayoutBlock, out: &mut Vec<String>) {
+    match block {
+        LayoutBlock::Table(table) => {
+            for row in &table.rows {
+                for cell in &row.cells {
+                    for nested in &cell.blocks {
+                        if let Some(id) = nested.block_id() {
+                            out.push(block_key(id).into_owned());
+                        }
+                        nested_block_keys(nested, out);
+                    }
+                }
+            }
+        }
+        LayoutBlock::TextBox(textbox) => {
+            for paragraph in &textbox.content {
+                out.push(block_key(&paragraph.id).into_owned());
+            }
+        }
+        LayoutBlock::Shape(shape) => {
+            if let Some(inner_text) = &shape.inner_text {
+                for paragraph in inner_text {
+                    out.push(block_key(&paragraph.id).into_owned());
+                }
+            }
+            for child in &shape.children {
+                if let Some(inner_text) = &child.inner_text {
+                    for paragraph in inner_text {
+                        out.push(block_key(&paragraph.id).into_owned());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn position_deltas(previous: &LayoutInput, next: &LayoutInput) -> HashMap<String, i64> {
     previous
         .measured
         .iter()
         .zip(&next.measured)
         .filter_map(|(previous, next)| {
-            let (previous_id, previous_start) = paragraph_identity(&previous.block)?;
-            let (next_id, next_start) = paragraph_identity(&next.block)?;
+            let previous_id = previous.block.block_id()?;
+            let next_id = next.block.block_id()?;
             let key = block_key(previous_id);
             if key != block_key(next_id) {
                 return None;
             }
+            let previous_start = previous.block.pm_start();
+            let next_start = next.block.pm_start();
             let delta = next_start? as i64 - previous_start? as i64;
-            (delta != 0).then_some((key.into_owned(), delta))
+            if delta == 0 {
+                return None;
+            }
+            let mut entries = vec![(key.into_owned(), delta)];
+            // Nested paragraphs (table cells, text boxes, shape text) carry
+            // their own ids on display primitives but shift with the
+            // enclosing block.
+            let mut nested = Vec::new();
+            nested_block_keys(&next.block, &mut nested);
+            entries.extend(nested.into_iter().map(|key| (key, delta)));
+            Some(entries)
         })
+        .flatten()
         .collect()
 }
 
@@ -650,13 +844,7 @@ fn incremental_eligible(
             .measured
             .iter()
             .zip(&next.measured)
-            .all(|(previous, next)| {
-                paragraph_identity(&previous.block)
-                    .zip(paragraph_identity(&next.block))
-                    .is_some_and(|((previous_id, _), (next_id, _))| {
-                        block_key(previous_id) == block_key(next_id)
-                    })
-            })
+            .all(|(previous, next)| resident_fragment_keys_match(&previous.block, &next.block))
 }
 
 impl EngineSession {
@@ -1044,36 +1232,86 @@ impl EngineSession {
             env.paragraph_spacing_line_px = (line_px != 16.0).then_some(line_px);
             env.doc_grid_pitch_px = regions.doc_grid_snap_pitch_px(0);
         }
+        let measurement_fingerprint = serde_json::to_vec(&measurement)
+            .map(|bytes| hash_bytes(&bytes))
+            .map_err(|error| format!("fingerprint measurement config: {error}"))?;
         let resident_body = body_story.is_some();
+        let mut block_fingerprints: Option<Vec<u64>> = None;
         if let Some(story) = body_story.as_deref() {
             let render_env = parsed_render_env
                 .as_ref()
                 .ok_or_else(|| "resident body layout requires a render environment".to_owned())?;
-            let mut blocks = self
-                .with_lowered_story(story, render_env, <[LayoutBlock]>::to_vec)
-                .map_err(|error| error.to_string())?;
-            let mut section_index = 0;
-            for block in &mut blocks {
-                resolve_line_unit_spacing(block, regions.paragraph_spacing_line_px(section_index));
-                resolve_doc_grid_pitch(block, regions.doc_grid_snap_pitch_px(section_index));
-                if matches!(block, LayoutBlock::SectionBreak(_)) {
-                    section_index += 1;
+            enum Arena {
+                Reused(Vec<MeasuredBlock>, Vec<u64>),
+                Full(Vec<LayoutBlock>),
+            }
+            let arena = self
+                .with_lowered_story(story, render_env, |blocks| -> Result<Arena, String> {
+                    // Section geometry lands on options before any measurement
+                    // so the width fallback reads it identically either way.
+                    apply_section_geometry(&mut input, &regions);
+                    let widths = region_measurement_widths(blocks.iter(), &input, &regions);
+                    let geometry = initial_float_page_geometry(&input, &regions);
+                    let default_width = widths.first().copied().unwrap_or(0.0);
+                    // Floating anchors couple a block's extent to flow position,
+                    // which the retained arena cannot revalidate per block.
+                    if docx_layout::measure_blocks::has_floating_zones(
+                        blocks,
+                        default_width,
+                        &measurement,
+                        Some(&geometry),
+                    )? {
+                        return Ok(Arena::Full(blocks.to_vec()));
+                    }
+                    match self.resident_region_measured(
+                        blocks,
+                        &widths,
+                        &regions,
+                        &measurement,
+                        measurement_fingerprint,
+                    )? {
+                        Some((measured, fingerprints)) => Ok(Arena::Reused(measured, fingerprints)),
+                        None => Ok(Arena::Full(blocks.to_vec())),
+                    }
+                })
+                .map_err(|error| error.to_string())??;
+            match arena {
+                Arena::Reused(measured, fingerprints) => {
+                    input.measured = measured;
+                    block_fingerprints = Some(fingerprints);
+                    apply_section_geometry(&mut input, &regions);
+                }
+                Arena::Full(mut blocks) => {
+                    let mut section_index = 0;
+                    for block in &mut blocks {
+                        resolve_line_unit_spacing(
+                            block,
+                            regions.paragraph_spacing_line_px(section_index),
+                        );
+                        resolve_doc_grid_pitch(
+                            block,
+                            regions.doc_grid_snap_pitch_px(section_index),
+                        );
+                        if matches!(block, LayoutBlock::SectionBreak(_)) {
+                            section_index += 1;
+                        }
+                    }
+                    apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
+                    let widths = region_measurement_widths(blocks.iter(), &input, &regions);
+                    let geometry = initial_float_page_geometry(&input, &regions);
+                    let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
+                        &mut blocks,
+                        &widths,
+                        &measurement,
+                        Some(&geometry),
+                    )?;
+                    input.measured = blocks
+                        .into_iter()
+                        .zip(measures)
+                        .map(|(block, measure)| MeasuredBlock { block, measure })
+                        .collect();
                 }
             }
-            apply_section_geometry_to_blocks(&mut blocks, &mut input.options, &regions);
-            let widths = region_measurement_widths(&blocks, &input, &regions);
-            let geometry = initial_float_page_geometry(&input, &regions);
-            let measures = docx_layout::measure_blocks::measure_blocks_with_floats(
-                &mut blocks,
-                &widths,
-                &measurement,
-                Some(&geometry),
-            )?;
-            input.measured = blocks
-                .into_iter()
-                .zip(measures)
-                .map(|(block, measure)| MeasuredBlock { block, measure })
-                .collect();
         } else {
             apply_section_geometry(&mut input, &regions);
         }
@@ -1082,19 +1320,28 @@ impl EngineSession {
         } else {
             None
         };
-        if resident_body {
-            stabilize_shape_wrapping(&mut input, &regions, &measurement)
-                .map_err(layout_error_message)?;
+        if resident_body
+            && stabilize_shape_wrapping(&mut input, &regions, &measurement)
+                .map_err(layout_error_message)?
+        {
+            block_fingerprints = None;
         }
-        self.layout_document_value(input.clone())?;
+        let block_fingerprints = match block_fingerprints {
+            Some(fingerprints) => fingerprints,
+            None => measured_fingerprints(&input)?,
+        };
+        // The note fixpoint replays `base_input`; `input` itself moves into
+        // pagination and is never cloned again.
+        let base_input = input.clone();
+        self.layout_document_value_with_fingerprints(input, block_fingerprints)?;
         let mut initial_layout = self
             .pagination
-            .borrow()
+            .borrow_mut()
             .layout
-            .clone()
+            .take()
             .expect("layout retained after successful pagination");
         apply_document_regions(&mut initial_layout, &regions);
-        let refs = input
+        let refs = base_input
             .measured
             .iter()
             .flat_map(|measured| collect_note_refs(std::slice::from_ref(&measured.block)))
@@ -1113,7 +1360,6 @@ impl EngineSession {
                     .expect("resident body required render environment"),
             )?;
         }
-        let base_input = input.clone();
         let stabilized = stabilize_note_layout(
             |reserved| {
                 let mut pass = base_input.clone();
@@ -1133,13 +1379,16 @@ impl EngineSession {
         .map_err(layout_error_message)?;
         let notes_converged = stabilized.converged;
         if !stabilized.reserved_heights.is_empty() {
-            input.options.footnote_reserved_heights =
+            let mut final_input = base_input;
+            final_input.options.footnote_reserved_heights =
                 reservation_options(&stabilized.reserved_heights);
             if resident_body {
-                stabilize_shape_wrapping(&mut input, &regions, &measurement)
+                stabilize_shape_wrapping(&mut final_input, &regions, &measurement)
                     .map_err(layout_error_message)?;
             }
-            self.layout_document_value(input)?;
+            self.layout_document_value(final_input)?;
+        } else {
+            self.pagination.borrow_mut().layout = Some(stabilized.layout);
         }
         let mut pagination = self.pagination.borrow_mut();
         let layout = pagination
@@ -1173,9 +1422,13 @@ impl EngineSession {
             fast_path: (resident_body && single_section).then(|| RegionFastPathState {
                 regions: Rc::new(regions),
                 measurement: Rc::new(measurement),
+                measurement_fingerprint,
                 notes_clear,
             }),
         }));
+        // Only the region-measured arena may seed the next pass's reuse walk.
+        self.pagination.borrow_mut().measured_with =
+            resident_body.then_some(measurement_fingerprint);
         Ok(notes_converged)
     }
 
@@ -1392,7 +1645,7 @@ impl EngineSession {
         let mut incremental = false;
         let mut deltas = HashMap::new();
         let run = {
-            let previous = self.pagination.borrow();
+            let mut previous = self.pagination.borrow_mut();
             let first_dirty = previous
                 .block_fingerprints
                 .iter()
@@ -1401,13 +1654,16 @@ impl EngineSession {
             if let Some(dirty_index) = first_dirty
                 && incremental_eligible(&previous, &input, input_options_fingerprint)
             {
-                let previous_input = previous.input.as_ref().expect("eligibility checked input");
-                deltas = position_deltas(previous_input, &input);
+                let previous = &mut *previous;
+                deltas = position_deltas(
+                    previous.input.as_ref().expect("eligibility checked input"),
+                    &input,
+                );
                 let attempted = docx_layout::place::layout_document_incremental(
                     &mut input,
                     previous
                         .layout
-                        .as_ref()
+                        .as_mut()
                         .expect("eligibility checked layout"),
                     &previous.checkpoints,
                     &previous.block_fingerprints,
@@ -1442,6 +1698,7 @@ impl EngineSession {
         };
         let mut pagination = self.pagination.borrow_mut();
         pagination.input = Some(input);
+        pagination.measured_with = None;
         pagination.layout = Some(run.layout);
         pagination.checkpoints = run.checkpoints;
         pagination.block_fingerprints = block_fingerprints;
@@ -1670,6 +1927,149 @@ impl EngineSession {
         })
     }
 
+    /// Rebuild the region measured arena by moving extents out of the retained
+    /// arena for every block whose measure cannot have changed: equal lowered
+    /// block (`PartialEq` masks positions), equal measurement width, identical
+    /// measurement config, and an unchanged section-break mark next to it.
+    /// Freshly lowered blocks are normalized through the same passes the
+    /// retained arena already went through — line-unit/doc-grid resolvers,
+    /// section-geometry stamps, and contextual-spacing suppression — before
+    /// comparing. `Ok(None)` means the caller must measure the whole story.
+    fn resident_region_measured(
+        &self,
+        blocks: &[LayoutBlock],
+        widths: &[f64],
+        regions: &DocumentRegions,
+        measurement: &docx_layout::measure_blocks::MeasurementConfig,
+        measurement_fingerprint: u64,
+    ) -> Result<Option<(Vec<MeasuredBlock>, Vec<u64>)>, String> {
+        let pagination = &mut *self.pagination.borrow_mut();
+        let Some(previous) = pagination.input.as_mut() else {
+            return Ok(None);
+        };
+        if pagination.measured_with != Some(measurement_fingerprint)
+            || previous.measured.len() != blocks.len()
+            || previous.measured.len() != pagination.block_fingerprints.len()
+        {
+            return Ok(None);
+        }
+        let previous_widths = region_measurement_widths(
+            previous.measured.iter().map(|measured| &measured.block),
+            previous,
+            regions,
+        );
+        let previous_fingerprints = &pagination.block_fingerprints;
+
+        let mut measured: Vec<MeasuredBlock> = Vec::with_capacity(blocks.len());
+        let mut block_fingerprints = Vec::with_capacity(blocks.len());
+        let mut measure_calls = 0_u64;
+        let mut reused_blocks = 0_u64;
+        let mut section_index = 0_usize;
+        for (index, next_block) in blocks.iter().enumerate() {
+            // An empty paragraph ahead of a section break measures to a bare
+            // mark extent; only its own emptiness plus the next block's kind
+            // matter, so a dirty next block has to force a re-measure.
+            let next_is_break = matches!(blocks.get(index + 1), Some(LayoutBlock::SectionBreak(_)));
+            let retained_next_is_break = matches!(
+                previous
+                    .measured
+                    .get(index + 1)
+                    .map(|measured| &measured.block),
+                Some(LayoutBlock::SectionBreak(_))
+            );
+            let previous_entry = &mut previous.measured[index];
+            if !resident_block_slots_match(&previous_entry.block, next_block) {
+                for (consumed, entry) in measured.into_iter().enumerate() {
+                    previous.measured[consumed].measure = entry.measure;
+                }
+                return Ok(None);
+            }
+            let width_clean = next_is_break == retained_next_is_break
+                && widths.get(index) == previous_widths.get(index)
+                && matches!(previous_entry.measure, BlockExtent::Unsupported)
+                    == matches!(next_block, LayoutBlock::Unsupported);
+            if width_clean && *next_block == previous_entry.block {
+                measured.push(MeasuredBlock {
+                    block: next_block.clone(),
+                    measure: std::mem::replace(
+                        &mut previous_entry.measure,
+                        BlockExtent::Unsupported,
+                    ),
+                });
+                block_fingerprints.push(previous_fingerprints[index]);
+                reused_blocks = reused_blocks.wrapping_add(1);
+            } else {
+                let mut owned = next_block.clone();
+                resolve_line_unit_spacing(
+                    &mut owned,
+                    regions.paragraph_spacing_line_px(section_index),
+                );
+                resolve_doc_grid_pitch(&mut owned, regions.doc_grid_snap_pitch_px(section_index));
+                if let LayoutBlock::SectionBreak(section_break) = &mut owned
+                    && let Some(section) = regions.sections.get(section_index)
+                {
+                    if section.page_size.is_some() {
+                        section_break.page_size.clone_from(&section.page_size);
+                    }
+                    if section.margins.is_some() {
+                        section_break.margins.clone_from(&section.margins);
+                    }
+                    if section.columns.is_some() {
+                        section_break.columns.clone_from(&section.columns);
+                    }
+                }
+                suppress_contextual_spacing(blocks, index, &mut owned);
+                docx_layout::paragraph_spacing::apply_contextual_spacing_blocks(
+                    std::slice::from_mut(&mut owned),
+                );
+                if width_clean && owned == previous_entry.block {
+                    measured.push(MeasuredBlock {
+                        block: owned,
+                        measure: std::mem::replace(
+                            &mut previous_entry.measure,
+                            BlockExtent::Unsupported,
+                        ),
+                    });
+                    block_fingerprints.push(previous_fingerprints[index]);
+                    reused_blocks = reused_blocks.wrapping_add(1);
+                } else {
+                    let measure = if next_is_break
+                        && matches!(&owned, LayoutBlock::Paragraph(paragraph) if paragraph.runs.is_empty())
+                    {
+                        BlockExtent::Paragraph(ParagraphExtent {
+                            lines: Vec::new(),
+                            total_height: 0.0,
+                        })
+                    } else {
+                        docx_layout::measure_blocks::measure_block(
+                            &mut owned,
+                            widths.get(index).copied().unwrap_or(0.0),
+                            measurement,
+                        )?
+                    };
+                    let entry = MeasuredBlock {
+                        block: owned,
+                        measure,
+                    };
+                    block_fingerprints.push(measured_fingerprint(&entry)?);
+                    measured.push(entry);
+                    measure_calls = measure_calls.wrapping_add(1);
+                }
+            }
+            if matches!(next_block, LayoutBlock::SectionBreak(_)) {
+                section_index += 1;
+            }
+        }
+        let mut measurement_state = self.measurement.borrow_mut();
+        measurement_state.resident_measure_calls = measurement_state
+            .resident_measure_calls
+            .wrapping_add(measure_calls);
+        measurement_state.resident_reused_blocks = measurement_state
+            .resident_reused_blocks
+            .wrapping_add(reused_blocks);
+        Ok(Some((measured, block_fingerprints)))
+    }
+
     /// Complete the post-edit dependency cone and return its binary frame.
     /// No measured/layout/display values cross the wasm boundary.
     pub fn apply_and_layout(
@@ -1726,11 +2126,16 @@ impl EngineSession {
             let state = self.regions.borrow();
             state.as_ref().and_then(|state| {
                 let fast = state.fast_path.as_ref()?;
-                fast.notes_clear
-                    .then(|| (Rc::clone(&fast.regions), Rc::clone(&fast.measurement)))
+                fast.notes_clear.then(|| {
+                    (
+                        Rc::clone(&fast.regions),
+                        Rc::clone(&fast.measurement),
+                        fast.measurement_fingerprint,
+                    )
+                })
             })
         };
-        let Some((regions, measurement)) = fast_config else {
+        let Some((regions, measurement, measurement_fingerprint)) = fast_config else {
             return Ok(false);
         };
         let env = {
@@ -1754,7 +2159,7 @@ impl EngineSession {
                             return Ok(None);
                         };
                         (
-                            region_measurement_widths(blocks, input, &regions),
+                            region_measurement_widths(blocks.iter(), input, &regions),
                             initial_float_page_geometry(input, &regions),
                             layout.pages.len(),
                         )
@@ -1797,6 +2202,9 @@ impl EngineSession {
         phase(RegionResidentPhase::Measured);
         self.layout_document_value_with_fingerprints(resident.input, resident.block_fingerprints)?;
         let mut pagination = self.pagination.borrow_mut();
+        // The fast path measures through the region config too, so its
+        // retained arena is also eligible for the next pass's reuse walk.
+        pagination.measured_with = Some(measurement_fingerprint);
         let layout = pagination
             .layout
             .as_mut()

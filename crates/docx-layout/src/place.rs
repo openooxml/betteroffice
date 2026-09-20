@@ -301,7 +301,7 @@ pub fn layout_document_checkpointed(input: &mut Input) -> Result<CheckpointedLay
 /// dependency shapes (floats, notes, structural edits) before entering here.
 pub fn layout_document_incremental(
     input: &mut Input,
-    previous_layout: &Layout,
+    previous_layout: &mut Layout,
     previous_checkpoints: &[LayoutCheckpoint],
     previous_fingerprints: &[u64],
     next_fingerprints: &[u64],
@@ -348,7 +348,6 @@ pub fn layout_document_incremental(
         .rev()
         .find(|checkpoint| checkpoint.block_index <= dirty_index)
         .ok_or_else(|| LayoutError::Unsupported("no clean pagination checkpoint".into()))?;
-    let prefix_pages = previous_layout.pages[..resume.page_index].to_vec();
     let prefix_checkpoints: Vec<_> = previous_checkpoints
         .iter()
         .filter(|checkpoint| checkpoint.page_index < resume.page_index)
@@ -360,13 +359,16 @@ pub fn layout_document_incremental(
         options.footnote_reserved_heights.clone(),
     )?;
     paginator.set_section_index(resume.section_index);
+    // Retained pages move rather than clone; restore them if placement fails
+    // so the caller's retained layout is left untouched.
+    let mut previous_pages = std::mem::take(&mut previous_layout.pages);
     let convergence = ConvergenceInput {
         previous_checkpoints,
         previous_fingerprints,
         next_fingerprints,
         dirty_index,
     };
-    let placement = place(
+    let placement = match place(
         &input.measured,
         &plan,
         &mut paginator,
@@ -375,7 +377,13 @@ pub fn layout_document_incremental(
         resume.section_index,
         resume.page_index,
         Some(&convergence),
-    )?;
+    ) {
+        Ok(placement) => placement,
+        Err(error) => {
+            previous_layout.pages = previous_pages;
+            return Err(error);
+        }
+    };
 
     let rebuilt_page_end = placement
         .converged
@@ -383,7 +391,7 @@ pub fn layout_document_incremental(
         .map_or(resume.page_index + paginator.pages.len(), |(next, _)| {
             next.page_index
         });
-    let mut pages = prefix_pages;
+    let mut pages: Vec<_> = previous_pages.drain(..resume.page_index).collect();
     pages.append(&mut paginator.pages);
     let mut checkpoints = prefix_checkpoints;
     checkpoints.extend(placement.checkpoints);
@@ -391,8 +399,8 @@ pub fn layout_document_incremental(
     if let Some((next_checkpoint, previous_checkpoint)) = placement.converged {
         debug_assert_eq!(pages.len(), next_checkpoint.page_index);
         let reused_page_start = pages.len();
-        pages.extend_from_slice(&previous_layout.pages[previous_checkpoint.page_index..]);
-        refresh_reused_paragraph_pages(&mut pages[reused_page_start..], &input.measured);
+        pages.extend(previous_pages.drain(previous_checkpoint.page_index - resume.page_index..));
+        refresh_reused_pages(&mut pages[reused_page_start..], &input.measured);
         let page_shift =
             next_checkpoint.page_index as isize - previous_checkpoint.page_index as isize;
         checkpoints.extend(
@@ -714,38 +722,76 @@ fn block_id_key(id: &crate::types::BlockId) -> String {
 }
 
 /// Retained suffix pages keep their geometry but absolute document positions move
-/// after an earlier edit. Refresh paragraph fragment ranges and resolved run
-/// slices from the new measured arena before the display list consumes them.
-fn refresh_reused_paragraph_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
-    let paragraphs: std::collections::HashMap<_, _> = measured
+/// after an earlier edit. Refresh fragment ranges and resolved run slices from
+/// the new measured arena before the display list consumes them.
+fn refresh_reused_pages(pages: &mut [crate::types::Page], measured: &[MeasuredBlock]) {
+    let blocks: std::collections::HashMap<_, _> = measured
         .iter()
-        .filter_map(|measured| match (&measured.block, &measured.measure) {
-            (LayoutBlock::Paragraph(block), BlockExtent::Paragraph(extent)) => {
-                Some((block_id_key(&block.id), (block, extent)))
-            }
-            _ => None,
+        .filter_map(|measured| {
+            measured
+                .block
+                .block_id()
+                .map(|id| (block_id_key(id), measured))
         })
         .collect();
     for page in pages {
         for fragment in &mut page.fragments {
-            let Fragment::Paragraph(fragment) = fragment else {
+            let key = match fragment {
+                Fragment::Paragraph(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Table(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Image(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Shape(fragment) => block_id_key(&fragment.block_id),
+                Fragment::Chart(fragment) => block_id_key(&fragment.block_id),
+                Fragment::TextBox(fragment) => block_id_key(&fragment.block_id),
+            };
+            let Some(measured) = blocks.get(&key) else {
                 continue;
             };
-            let Some((block, extent)) = paragraphs.get(&block_id_key(&fragment.block_id)) else {
-                continue;
-            };
-            (fragment.pm_start, fragment.pm_end) = get_paragraph_fragment_pm_range(
-                block,
-                extent,
-                fragment.from_line,
-                fragment.to_line,
-            );
-            fragment.resolved_lines = Some(build_resolved_lines(
-                block,
-                extent,
-                fragment.from_line,
-                fragment.to_line,
-            ));
+            match (fragment, &measured.block, &measured.measure) {
+                (
+                    Fragment::Paragraph(fragment),
+                    LayoutBlock::Paragraph(block),
+                    BlockExtent::Paragraph(extent),
+                ) => {
+                    (fragment.pm_start, fragment.pm_end) = get_paragraph_fragment_pm_range(
+                        block,
+                        extent,
+                        fragment.from_line,
+                        fragment.to_line,
+                    );
+                    fragment.resolved_lines = Some(build_resolved_lines(
+                        block,
+                        extent,
+                        fragment.from_line,
+                        fragment.to_line,
+                    ));
+                }
+                (Fragment::Table(fragment), LayoutBlock::Table(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                (Fragment::Image(fragment), LayoutBlock::Image(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                (Fragment::Shape(fragment), LayoutBlock::Shape(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                    fragment.doc_start = block.doc_start;
+                    fragment.doc_end = block.doc_end;
+                }
+                (Fragment::Chart(fragment), LayoutBlock::Chart(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                    fragment.doc_start = block.doc_start;
+                    fragment.doc_end = block.doc_end;
+                }
+                (Fragment::TextBox(fragment), LayoutBlock::TextBox(block), _) => {
+                    fragment.pm_start = block.pm_start;
+                    fragment.pm_end = block.pm_end;
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -1466,9 +1512,10 @@ mod pagination_rule_tests {
         let previous_fingerprints = vec![1_u64; measured.len()];
         let mut next_fingerprints = previous_fingerprints.clone();
         next_fingerprints[0] = 2;
+        let mut previous_layout = previous.layout;
         let incremental = layout_document_incremental(
             &mut incremental_input,
-            &previous.layout,
+            &mut previous_layout,
             &previous.checkpoints,
             &previous_fingerprints,
             &next_fingerprints,
