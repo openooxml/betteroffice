@@ -57,12 +57,13 @@ test('rejects missing shards, stale references, mixed harnesses and malformed tr
 
 import { renderSection } from './readme.mjs';
 
-test('renders calculation accuracy and timing without inventing LibreOffice XLSX fidelity', () => {
+test('keeps accuracy in artifacts and renders timings without inventing LibreOffice XLSX fidelity', () => {
   const input = { ...plan(), samples: samples.map(sample => ({ ...sample, comparisons: [] })) };
   const merged = mergeXlsxBenchmarks(plan(),input,parts(),hash);
   const text = renderSection(merged).split('### XLSX')[1];
   expect(text).toContain('LibreOffice (26.2.3.2)');
-  expect(text).toContain('100.00% (50/50)');
+  expect(text).not.toContain('Calc accuracy');
+  expect(merged.xlsx_benchmark.summary.channels.commit.correct).toBe(50);
   expect(text).toContain('<td>Recalc time (avg)</td><td align="right">10 ms</td><td align="right">10 ms</td><td align="right">20 ms</td>');
   expect(text).toContain('<td>Scored/total</td><td align="right">0/2</td><td align="right">0/2</td><td align="right">—</td>');
   expect(() => renderSection({...merged,source_sha:'e'.repeat(40)})).toThrow('revision');

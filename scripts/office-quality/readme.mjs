@@ -95,6 +95,11 @@ export function renderSection(report) {
         config.builds?.commit?.source_sha !== report.source_sha))
       throw new Error('Benchmark results do not match the report revision');
   }
+  const xlsxFidelity = report.xlsx_fidelity_benchmark;
+  if (xlsxFidelity && (!/^\d+(?:\.\d+){2,3}$/.test(xlsxFidelity.libreoffice_version ?? '') ||
+      xlsxFidelity.source_sha !== report.source_sha ||
+      (report.xlsx_benchmark && report.xlsx_benchmark.libreoffice_version !== xlsxFidelity.libreoffice_version)))
+    throw new Error('XLSX fidelity does not match the report revision or LibreOffice version');
   const timings = Object.fromEntries(['docx', 'pptx'].map(format =>
     [format, report[`${format}_benchmark`] ? timingSummary(report.samples, format) : null]));
   const calculation = report.xlsx_benchmark ? calculationSummary(report.samples) : null;
@@ -102,9 +107,9 @@ export function renderSection(report) {
     const { versionLink, published, current } = measure(format);
     const sides = [published, current];
     const headings = [`BetterOffice (${versionLink})`, `BetterOffice (${commitLink})`];
-    const office = report[`${format}_benchmark`];
+    const office = (format === 'xlsx' && xlsxFidelity) || report[`${format}_benchmark`];
     if (office) {
-      sides.push(format === 'xlsx' ? { value: '—', not_measured: true } :
+      sides.push(format === 'xlsx' && !xlsxFidelity ? { value: '—', not_measured: true } :
         score(report.samples.filter(sample => sample.format === format), 'libreoffice', office.libreoffice_version));
       headings.push(`LibreOffice (${office.libreoffice_version})`);
     }
@@ -119,8 +124,6 @@ export function renderSection(report) {
     }
     if (format === 'xlsx' && calculation) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
-      rows.push(['Calc accuracy', ...channels.map(channel => channel.total ?
-        `${(100 * channel.correct / channel.total).toFixed(2)}% (${channel.correct.toLocaleString('en-US')}/${channel.total.toLocaleString('en-US')})` : '—')]);
       rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
     }
     const value = (text) => `<td align="right">${text}</td>`;
@@ -156,7 +159,7 @@ ${table('pptx')}
 
 ${table('xlsx')}
 
-For scoring, calculation accuracy, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
+For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).
 
 ${END}`;
 }
