@@ -1033,7 +1033,7 @@ fn a_substitute_measures_as_the_face_it_stands_in_for() {
     let mincho = ooxml_text::word_fonts::requested_line_metrics("ＭＳ 明朝")
         .expect("MS Mincho is a known East Asian face");
     let view = store
-        .register_substitute(base, mincho)
+        .register_substitute(base, mincho, false, false)
         .expect("a measurement view registers");
     assert_ne!(view, base, "the view is its own font id");
 
@@ -1087,7 +1087,9 @@ fn a_substitute_measures_as_the_face_it_stands_in_for() {
 fn a_substitute_view_rescales_the_requested_span_into_its_own_units() {
     let (mut store, base) = store_with_font();
     let malgun = ooxml_text::word_fonts::requested_line_metrics("Malgun Gothic").unwrap();
-    let view = store.register_substitute(base, malgun).unwrap();
+    let view = store
+        .register_substitute(base, malgun, false, false)
+        .unwrap();
     let metrics = store.metrics(view).unwrap();
     let span = f32::from(metrics.hhea_ascender) - f32::from(metrics.hhea_descender);
     let requested_span = f32::from(malgun.hhea_ascender) - f32::from(malgun.hhea_descender);
@@ -1106,7 +1108,9 @@ fn a_latin_substitute_measures_at_the_requested_span() {
     let (mut store, base) = store_with_font();
     for (family, span_em) in [("Open Sans", 2789.0 / 2048.0), ("Lato", 2400.0 / 2000.0)] {
         let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
-        let view = store.register_substitute(base, requested).expect(family);
+        let view = store
+            .register_substitute(base, requested, false, false)
+            .expect(family);
         let metrics = store.metrics(view).unwrap();
         assert!(
             !metrics.east_asian_line_metrics(),
@@ -1134,7 +1138,9 @@ fn a_latin_substitute_measures_at_the_requested_span() {
 fn a_latin_view_pins_the_win_box_to_the_requested_span() {
     let (mut store, base) = store_with_font();
     let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Sans Unicode").unwrap();
-    let view = store.register_substitute(base, requested).unwrap();
+    let view = store
+        .register_substitute(base, requested, false, false)
+        .unwrap();
     let metrics = store.metrics(view).unwrap();
     assert_eq!(
         i32::from(metrics.hhea_ascender),
@@ -1144,6 +1150,99 @@ fn a_latin_view_pins_the_win_box_to_the_requested_span() {
         i32::from(metrics.hhea_descender),
         -i32::from(metrics.os2_win_descent)
     );
+}
+
+/// A widened substitute measures and paints at one pitch.
+#[test]
+fn a_widened_substitute_measures_and_paints_at_one_pitch() {
+    let (mut store, base) = store_with_font();
+    let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    let scale = requested.advance_scale;
+    assert!(scale > 1.0, "the fixture family is a widened one");
+    let view = store
+        .register_substitute(base, requested, false, false)
+        .unwrap();
+    assert_eq!(store.advance_scale(view).unwrap(), scale);
+    assert_eq!(store.advance_scale(base).unwrap(), 1.0);
+
+    let text = "the quick brown fox jumps";
+    let width = |id| -> f32 {
+        shape(&store, id, text, 64.0, &[])
+            .unwrap()
+            .iter()
+            .map(|glyph| glyph.x_advance)
+            .sum()
+    };
+    let measured = width(view) / width(base);
+    assert!((measured - scale).abs() < 1e-4, "measured {measured}");
+
+    let per_char = store.advance_width(view, 'm').unwrap().unwrap()
+        / store.advance_width(base, 'm').unwrap().unwrap();
+    assert!((per_char - scale).abs() < 1e-4, "advance_width {per_char}");
+
+    let glyph = store.glyph_id(base, 'm').unwrap().unwrap();
+    let extent = |id| -> f32 {
+        store
+            .outline_glyph(id, glyph)
+            .unwrap()
+            .cmds
+            .iter()
+            .map(|cmd| match *cmd {
+                ooxml_text::PathCmd::MoveTo { x, .. } | ooxml_text::PathCmd::LineTo { x, .. } => x,
+                ooxml_text::PathCmd::QuadTo { x, .. } => x,
+                ooxml_text::PathCmd::CubicTo { x, .. } => x,
+                ooxml_text::PathCmd::Close => f32::MIN,
+            })
+            .fold(f32::MIN, f32::max)
+    };
+    let painted = extent(view) / extent(base);
+    assert!((painted - scale).abs() < 1e-4, "painted {painted}");
+}
+
+/// A styled face measures at its own ratio; an unmeasured style falls back to
+/// the regular face's.
+#[test]
+fn a_substitute_view_scales_at_the_requested_style() {
+    let (mut store, base) = store_with_font();
+    let bright = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    for (bold, italic, scale) in [
+        (false, false, 1.113),
+        (true, false, 1.068),
+        (false, true, 1.093),
+        (true, true, 1.068),
+    ] {
+        let view = store
+            .register_substitute(base, bright, bold, italic)
+            .unwrap();
+        assert_eq!(store.advance_scale(view).unwrap(), scale, "{bold}/{italic}");
+    }
+}
+
+/// An advance scale that is not a positive finite number is a host bug, not a
+/// reason to hand back a view that measures at zero or backwards.
+#[test]
+fn a_nonsensical_advance_scale_falls_back_to_the_substitutes_own() {
+    let (mut store, base) = store_with_font();
+    let requested = ooxml_text::word_fonts::requested_line_metrics("Lucida Bright").unwrap();
+    for scale in [0.0, -1.5, f32::NAN, f32::INFINITY] {
+        let view = store
+            .register_substitute(
+                base,
+                ooxml_text::RequestedLineMetrics {
+                    advance_scale: scale,
+                    ..requested
+                },
+                false,
+                false,
+            )
+            .unwrap();
+        assert_eq!(store.advance_scale(view).unwrap(), 1.0, "{scale}");
+        assert_eq!(
+            store.advance_width(view, 'm').unwrap(),
+            store.advance_width(base, 'm').unwrap(),
+            "{scale}"
+        );
+    }
 }
 
 #[test]
@@ -1171,7 +1270,9 @@ fn a_substituted_corpus_face_measures_at_the_span_word_embeds() {
         ("Cambria Math", 2403.0 / 2048.0),
     ] {
         let requested = ooxml_text::word_fonts::requested_line_metrics(family).expect(family);
-        let view = store.register_substitute(base, requested).expect(family);
+        let view = store
+            .register_substitute(base, requested, false, false)
+            .expect(family);
         let line = single_line_box(
             store.metrics(view).unwrap(),
             size_px,
