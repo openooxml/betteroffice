@@ -289,8 +289,7 @@ pub(crate) fn loc_range_in_bounds(
     })
 }
 
-/// Maps a story-global index back to a [`Loc`]. Indices past the final pilcrow clamp to the final
-/// paragraph mark.
+/// Maps a story-global index back to a [`Loc`], clamping at the final pilcrow.
 pub(crate) fn loc_of_global<T: ReadTxn>(
     story_id: &str,
     story: &TextRef,

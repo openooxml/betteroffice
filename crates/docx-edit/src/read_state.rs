@@ -303,8 +303,7 @@ impl EditingDoc {
             let txn = self.yrs_doc().transact();
             let story = story_ref(&txn, &story_id)?;
             let bounds = para_bounds(&story, &txn);
-            // Paragraph views are materialized lazily: structural revisions
-            // carry an empty preview and never need text.
+            // Structural revisions carry an empty preview; materialize lazily.
             let mut views = None;
             for change in raw_changes(&story, &txn) {
                 let preview = if matches!(

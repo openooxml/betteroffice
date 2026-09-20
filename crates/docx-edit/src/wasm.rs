@@ -137,9 +137,7 @@ fn is_block_embed(kind: &str) -> bool {
     matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
 }
 
-/// Resolves a paragraph to its story span by walking the story's diff stream
-/// once — no segment or attribute materialization.
-/// Story-scoped: a `para_id` that lives in another story is "not found".
+/// Story span of `para_id`; not found when it lives in another story.
 fn find_para_span(doc: &EditingDoc, story: &str, para_id: &str) -> Result<ParaSpan, JsValue> {
     let txn = doc.yrs_doc().transact();
     let story_ref = story_ref(&txn, story).map_err(js_err)?;

@@ -515,8 +515,6 @@ impl EditingDoc {
         };
         let mut ids: Vec<String> = comments.keys(&txn).map(|key| key.to_string()).collect();
         ids.sort();
-        // Paragraph bounds are resolved once per anchor story and shared by
-        // every anchored range landing in it.
         let mut bounds_by_story: HashMap<String, Vec<ParaBounds>> = HashMap::new();
         let mut result = Vec::new();
         for id in ids {
@@ -526,8 +524,6 @@ impl EditingDoc {
             else {
                 continue;
             };
-            // Anchor decode and offset resolution are all-or-nothing, matching
-            // resolve_comment: one dead anchor empties the comment's ranges.
             let resolved = match comment.get(&txn, "anchors") {
                 Some(Out::Any(Any::Array(values))) => values
                     .iter()
@@ -608,9 +604,7 @@ pub(crate) struct RawChange {
     pub end: u32,
 }
 
-/// Every tracked change in `story` ordered by position, shared by
-/// [`EditingDoc::list_changes`] and `list_revisions` so enumeration walks the
-/// story once per epoch, not once per change.
+/// Tracked changes in `story` ordered by position.
 pub(crate) fn raw_changes<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<RawChange> {
     let chunks = snapshot(story, txn);
     let mut raw: Vec<RawChange> = Vec::new();

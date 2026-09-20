@@ -286,11 +286,9 @@ pub struct EditingDoc {
     doc: Doc,
     client_id: u64,
     id_counter: AtomicU64,
-    /// Bumped once per committed update (local ops, remote merges, undo/redo); caches
-    /// keyed on it are rebuilt on next lookup.
+    /// Epoch of the last committed update; epoch-keyed caches rebuild lazily.
     epoch: Arc<AtomicU64>,
-    /// The table-cell story set valid at `epoch`, shared by every table-aware
-    /// read query until the next commit.
+    /// Table-cell story ids valid at `epoch`.
     cell_stories: Mutex<Option<(u64, Arc<HashSet<Arc<str>>>)>>,
     _update_sub: Subscription,
 }
@@ -307,8 +305,7 @@ impl EditingDoc {
         doc.get_or_insert_map(COMMENTS);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
-        // after_transaction fires on every commit without materializing an update;
-        // observe_update_v1 would encode one and so costs (and can fail) per commit.
+        // observe_after_transaction avoids encoding an update per commit.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
@@ -326,14 +323,7 @@ impl EditingDoc {
         }
     }
 
-    /// Every story id referenced as a cell story by a `table` embed
-    /// (`rows[*].cells[*].story`), built once per committed epoch and reused
-    /// until the next commit. Nested tables are covered because a nested
-    /// table's embed lives in a cell story that is itself iterated.
-    ///
-    /// `txn` must be a read transaction opened for the current state; the
-    /// epoch is sampled before the build so a commit landing in between forces
-    /// one extra rebuild rather than serving a pre-commit view as current.
+    /// Story ids of table cells, cached per committed epoch.
     pub(crate) fn table_cells(&self, txn: &Transaction<'_>) -> Arc<HashSet<Arc<str>>> {
         let epoch = self.epoch.load(Ordering::Relaxed);
         {
