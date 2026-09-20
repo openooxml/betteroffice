@@ -120,26 +120,32 @@ pub fn unzip_parts_with_limits(
 
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
 pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    rezip_parts_borrowed(entries)
+}
+
+/// `rezip_parts` over borrowed entry bytes.
+pub fn rezip_parts_borrowed<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<Vec<u8>, String> {
     validate_parts(entries)?;
 
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);
         for (name, bytes) in entries {
-            write_deflated(&mut writer, name, bytes)?;
+            write_deflated(&mut writer, name, bytes.as_ref())?;
         }
         writer.finish().map_err(|e| format!("finish: {e}"))?;
     }
     Ok(cursor.into_inner())
 }
 
-fn validate_parts(entries: &[(String, Vec<u8>)]) -> Result<(), String> {
+fn validate_parts<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<(), String> {
     if entries.len() > MAX_ENTRY_COUNT {
         return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
     }
     let mut seen_paths = HashSet::new();
     let mut total = 0_u64;
     for (name, bytes) in entries {
+        let bytes = bytes.as_ref();
         let Some(security_path) = normalized_security_path(name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
@@ -207,23 +213,24 @@ impl Eq for SourceContainer {}
 
 /// As [`rezip_parts`], but unchanged members copy the source's compressed
 /// payload verbatim; unreadable `source` falls back to full rezip.
-pub fn rezip_parts_preserving(
-    entries: &[(String, Vec<u8>)],
+pub fn rezip_parts_preserving<S: AsRef<[u8]>>(
+    entries: &[(String, S)],
     source: &[u8],
 ) -> Result<Vec<u8>, String> {
     validate_parts(entries)?;
 
     let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(source)) else {
-        return rezip_parts(entries);
+        return rezip_parts_borrowed(entries);
     };
     if archive.len() > MAX_ENTRY_COUNT {
-        return rezip_parts(entries);
+        return rezip_parts_borrowed(entries);
     }
 
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);
         for (name, bytes) in entries {
+            let bytes = bytes.as_ref();
             if !copy_unchanged_member(&mut archive, &mut writer, name, bytes)? {
                 write_deflated(&mut writer, name, bytes)?;
             }

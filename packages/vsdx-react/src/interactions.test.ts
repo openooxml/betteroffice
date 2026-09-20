@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { canvasPointToModel, modelPointToCanvas } from '@betteroffice/vsdx';
 import type { Affine, ModelPoint, PageDisplayList, TextBoxPrimitive } from '@betteroffice/vsdx';
 import { MIN_ZOOM } from './components/statusbar';
-import { canvasKeyboardIntent, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, MARQUEE_STROKE, marqueeEnclosesQuad, normalizeMarquee, pageToShapeLocal, paintControlHandles, paintDragPreview, paintMarquee, paintSelectionFrame, passedDragThreshold, previewOutline, RESIZE_HANDLES, resizeCursor, resizedBounds, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, SELECTION_STROKE, selectionHandlePositions, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
+import { canvasKeyboardIntent, controlCellWriteBlocked, controlProbeKey, controlHandleCanvasPositions, controlHandleHidden, controlHandleLockedX, controlHandleLockedY, controlHandlesForShape, hitTestControlHandles, hitTestSelection, isEditableKeyboardTarget, isPrintableEntryKey, keyboardNudgeStep, MARQUEE_STROKE, marqueeEnclosesQuad, normalizeMarquee, pageToShapeLocal, paintControlHandles, paintDragPreview, paintMarquee, paintSelectionFrame, passedDragThreshold, previewOutline, RESIZE_HANDLES, resizeCursor, resizedBounds, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, rotationGripPosition, SELECTION_STROKE, selectionHandlePositions, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
 const pagePaintTransform = { a: 96, b: 0, c: 0, d: -96, e: 0, f: 1056 };
 const identity = { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
 test('passedDragThreshold needs four css pixels by default', () => {
@@ -508,20 +508,15 @@ test('control handles resolve named rows and honour hidden and locked variants',
   expect(controlHandleLockedX(first)).toBe(true);
   expect(controlHandleLockedY(first)).toBe(false);
 });
-test('control handles report only cells the policy refuses outright as write-blocked', () => {
-  const shape = controlShape([
-    { section: 'Control', row: 'Row_1', cell: 'X', value: 'GUARD(Width*0.25)' },
-    { section: 'Control', row: 'Row_1', cell: 'Y', value: 'Height*0.5' },
-    { section: 'Control', row: 'Row_2', cell: 'X', value: 'SETATREF(Controls.Row_1.X)' },
-    { section: 'Control', row: 'Row_2', cell: 'Y', value: 'SETATREFEVAL(Controls.Row_1.Y)' },
-    { section: 'Control', row: 'Row_3', cell: 'X', value: 'User.GuardBand*0.5' },
+test('controlCellWriteBlocked reads the engine answer for that row and cell', () => {
+  const probes = new Map([
+    [controlProbeKey('Row_1', 'X'), { cellName: 'X', allowed: false, targetCellName: null, refusal: 'guard' as const, reason: 'GUARD protects the requested cell' }],
+    [controlProbeKey('Row_1', 'Y'), { cellName: 'Y', allowed: true, targetCellName: 'Y', refusal: null, reason: null }],
   ]);
-  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'X')).toBe(true);
-  expect(controlCellWriteBlocked(shape as never, 'Row_1', 'Y')).toBe(false);
-  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'X')).toBe(false);
-  expect(controlCellWriteBlocked(shape as never, 'Row_2', 'Y')).toBe(true);
-  expect(controlCellWriteBlocked(shape as never, 'Row_3', 'X')).toBe(false);
-  expect(controlCellWriteBlocked(shape as never, 'Row_9', 'X')).toBe(false);
+  expect(controlCellWriteBlocked(probes, 'Row_1', 'X')).toBe(true);
+  expect(controlCellWriteBlocked(probes, 'Row_1', 'Y')).toBe(false);
+  expect(controlCellWriteBlocked(probes, 'Row_9', 'X')).toBe(false);
+  expect(controlCellWriteBlocked(null, 'Row_1', 'X')).toBe(false);
 });
 test('control handles map between shape-local and page coordinates', () => {
   const base = { pin: { x: 3, y: 3 }, locPin: { x: 1, y: 0.5 }, size: { width: 2, height: 1 } };

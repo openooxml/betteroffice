@@ -2382,9 +2382,34 @@ fn coalesce_runs(runs: Vec<RawRun>) -> Vec<RawRun> {
     result
 }
 
+/// Compares formatting while preserving serialized non-finite equality.
 fn formatting_equal(left: &RunFormatting, right: &RunFormatting) -> bool {
-    serde_json::to_value(left).expect("RunFormatting serializes")
-        == serde_json::to_value(right).expect("RunFormatting serializes")
+    left == right
+        || (has_nonfinite(left)
+            && has_nonfinite(right)
+            && serde_json::to_value(left).expect("RunFormatting serializes")
+                == serde_json::to_value(right).expect("RunFormatting serializes"))
+}
+
+fn has_nonfinite(formatting: &RunFormatting) -> bool {
+    formatting
+        .comment_ids
+        .as_ref()
+        .is_some_and(|ids| ids.iter().any(|id| !id.is_finite()))
+        || [
+            formatting.font_size,
+            formatting.font_size_cs,
+            formatting.letter_spacing,
+            formatting.position_px,
+            formatting.horizontal_scale,
+            formatting.kerning_min_pt,
+            formatting.footnote_ref_id,
+            formatting.endnote_ref_id,
+            formatting.change_revision_id,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite())
 }
 
 fn raw_run_to_layout(raw: RawRun, paragraph_pm_start: u64) -> Run {
@@ -5305,5 +5330,65 @@ mod tests {
         doc.set_paragraph_attr(&para, "widowControl", Any::Bool(false))
             .unwrap();
         assert_eq!(attrs(&doc)["widowControl"], json!(false));
+    }
+
+    #[test]
+    fn formatting_equal_matches_serialized_equality_on_nonfinite_values() {
+        let finite = RunFormatting {
+            font_size: Some(12.0),
+            ..RunFormatting::default()
+        };
+        let nan_size = RunFormatting {
+            font_size: Some(f64::NAN),
+            ..RunFormatting::default()
+        };
+        let nan_size2 = RunFormatting {
+            font_size: Some(f64::NAN),
+            ..RunFormatting::default()
+        };
+        let pos_inf = RunFormatting {
+            font_size: Some(f64::INFINITY),
+            ..RunFormatting::default()
+        };
+        let neg_inf = RunFormatting {
+            font_size: Some(f64::NEG_INFINITY),
+            ..RunFormatting::default()
+        };
+        let nan_comments = RunFormatting {
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+        let nan_comments2 = RunFormatting {
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+        let nan_in_field = RunFormatting {
+            font_size: Some(12.0),
+            comment_ids: Some(vec![f64::NAN]),
+            ..RunFormatting::default()
+        };
+
+        for (a, b) in [
+            (&finite, &nan_size),
+            (&finite, &pos_inf),
+            (&nan_size, &nan_size2),
+            (&pos_inf, &neg_inf),
+            (&pos_inf, &nan_size),
+            (&nan_comments, &nan_comments2),
+            (&nan_comments, &nan_in_field),
+            (&nan_size, &nan_in_field),
+        ] {
+            assert_eq!(
+                formatting_equal(a, b),
+                serde_json::to_value(a).unwrap() == serde_json::to_value(b).unwrap(),
+                "{a:?} vs {b:?}"
+            );
+        }
+        assert!(formatting_equal(&nan_size, &nan_size2));
+        assert!(formatting_equal(&pos_inf, &neg_inf));
+        assert!(!formatting_equal(&finite, &nan_size));
+        assert!(!formatting_equal(&finite, &pos_inf));
+        assert!(formatting_equal(&nan_comments, &nan_comments2));
+        assert!(!formatting_equal(&nan_comments, &nan_in_field));
     }
 }

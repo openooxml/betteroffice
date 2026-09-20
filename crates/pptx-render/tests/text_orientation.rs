@@ -155,7 +155,7 @@ fn vertical_autofit_and_anchoring_use_the_inset_text_area() {
     let snapshot = session.snapshot().unwrap();
     for autofit in [
         pptx_parse::TextAutofit::Normal {
-            font_scale: Some(0.85),
+            font_scale: Some(0.55),
             line_space_reduction: None,
         },
         pptx_parse::TextAutofit::Shape,

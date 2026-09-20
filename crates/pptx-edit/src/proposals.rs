@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
@@ -83,7 +83,7 @@ pub struct ProposalChange {
 }
 
 impl ProposalChange {
-    fn key(&self) -> String {
+    pub(crate) fn key(&self) -> String {
         self.shape_id
             .clone()
             .unwrap_or_else(|| self.slide_id.clone())
@@ -134,6 +134,9 @@ pub type ProposalResult<T> = Result<T, ProposalError>;
 pub(crate) struct ProposalStore {
     next_id: u64,
     pending: Vec<Proposal>,
+    /// Memoized previews keyed on proposal id and the doc's epoch; a preview
+    /// is a pure function of the proposal's edits and the doc state.
+    pub(crate) previews: HashMap<String, (u64, ProposalPreview)>,
 }
 
 impl DeckSession {
@@ -152,8 +155,8 @@ impl DeckSession {
             ));
         }
         let before = self.snapshot()?;
-        let preview = self.preview_edits(&request.edits)?;
-        let changes = changes_for(&before, &preview.snapshot()?, &request.edits)?;
+        let (_, snapshot) = self.preview_edits(&before, &request.edits)?;
+        let changes = changes_for(&before, &snapshot, &request.edits)?;
         let mut store = self.proposals.borrow_mut();
         store.next_id += 1;
         let proposal = Proposal {
@@ -165,6 +168,17 @@ impl DeckSession {
             stale_targets: Vec::new(),
         };
         store.pending.push(proposal.clone());
+        let epoch = self.epoch();
+        store.previews.insert(
+            proposal.id.clone(),
+            (
+                epoch,
+                ProposalPreview {
+                    proposal: proposal.clone(),
+                    snapshot,
+                },
+            ),
+        );
         Ok(proposal)
     }
 
@@ -184,16 +198,29 @@ impl DeckSession {
     }
 
     pub fn preview_proposal(&self, id: &str) -> ProposalResult<ProposalPreview> {
+        let epoch = self.epoch();
+        if let Some((cached_epoch, preview)) = self.proposals.borrow().previews.get(id)
+            && *cached_epoch == epoch
+        {
+            return Ok(preview.clone());
+        }
         let mut proposal = self.pending_proposal(id)?;
         let before = self.snapshot()?;
-        let snapshot = self.preview_edits(&proposal.edits)?.snapshot()?;
+        let (_, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         proposal.stale_targets = stale_targets(&before, &proposal);
         proposal.changes = changes_for(&before, &snapshot, &proposal.edits)?;
-        Ok(ProposalPreview { proposal, snapshot })
+        let preview = ProposalPreview { proposal, snapshot };
+        self.proposals
+            .borrow_mut()
+            .previews
+            .insert(id.to_owned(), (epoch, preview.clone()));
+        Ok(preview)
     }
 
     pub fn proposal_preview_session(&self, id: &str) -> ProposalResult<DeckSession> {
-        self.preview_edits(&self.pending_proposal(id)?.edits)
+        let proposal = self.pending_proposal(id)?;
+        let before = self.snapshot()?;
+        Ok(self.preview_edits(&before, &proposal.edits)?.0)
     }
 
     pub fn accept_proposal(&self, id: &str, force: bool) -> ProposalResult<ProposalAcceptance> {
@@ -203,8 +230,7 @@ impl DeckSession {
         if !force && !stale.is_empty() {
             return Err(ProposalError::Stale(stale));
         }
-        let preview = self.preview_edits(&proposal.edits)?;
-        let snapshot = preview.snapshot()?;
+        let (preview, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         let applied = before != snapshot;
         if applied {
             let update = preview.encode_diff_v1(&self.encode_state_vector_v1())?;
@@ -235,7 +261,7 @@ impl DeckSession {
         before != store.pending.len()
     }
 
-    fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
+    pub(crate) fn pending_proposal(&self, id: &str) -> ProposalResult<Proposal> {
         self.proposals
             .borrow()
             .pending
@@ -245,15 +271,24 @@ impl DeckSession {
             .ok_or_else(|| ProposalError::NotFound(id.to_owned()))
     }
 
-    fn preview_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
-        let snapshot = self.snapshot()?;
+    /// Applies `edits` to a hydrated clone of the live doc — never the live
+    /// doc itself, so a preview produces no observable update events and
+    /// leaves `encode_state_as_update_v1` byte-identical — validates it, and
+    /// returns the scratch session together with the validated snapshot.
+    fn preview_edits(
+        &self,
+        before: &DeckSnapshot,
+        edits: &[ProposalEdit],
+    ) -> ProposalResult<(DeckSession, DeckSnapshot)> {
         for edit in edits {
-            let (slide_id, shape_id) = target(&snapshot, edit)?;
-            capture(&snapshot, &slide_id, shape_id.as_deref())?;
+            let (slide_id, shape_id) = target(before, edit)?;
+            check_target(before, &slide_id, shape_id.as_deref())?;
         }
         let doc = doc_with_client_id(self.client_id);
-        hydrate_doc(&doc, &self.encode_state_as_update_v1())?;
+        let update = self.state_update_v1();
+        hydrate_doc(&doc, &update)?;
         let undo = DeckUndoManager::new(&doc, self.client_id)?;
+        let (epoch, _epoch_observer) = crate::watch_epoch(&doc)?;
         let preview = DeckSession {
             doc,
             client_id: self.client_id,
@@ -261,16 +296,19 @@ impl DeckSession {
             package: self.package.clone(),
             undo: std::cell::RefCell::new(undo),
             proposals: Default::default(),
+            epoch,
+            _epoch_observer,
+            state_update: std::cell::RefCell::new(None),
         };
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validate_doc(&preview.doc)?;
-        Ok(preview)
+        let snapshot = crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        Ok((preview, snapshot))
     }
 }
 
-fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
+pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(), EditError> {
     let context = EditCtx::local("proposal");
     match edit {
         ProposalEdit::ReplaceText {
@@ -387,7 +425,7 @@ fn find_story_shape<'a>(shapes: &'a [ShapeSnapshot], id: &str) -> Option<&'a Sha
     })
 }
 
-fn shape_text(shape: &ShapeSnapshot) -> String {
+pub(crate) fn shape_text(shape: &ShapeSnapshot) -> String {
     shape
         .text_stories
         .iter()
@@ -425,6 +463,22 @@ fn target(
         } => Ok((slide_id.clone(), Some(shape_id.clone()))),
         ProposalEdit::SetSlideNotes { slide_id, .. } => Ok((slide_id.clone(), None)),
     }
+}
+
+fn check_target(
+    snapshot: &DeckSnapshot,
+    slide_id: &str,
+    shape_id: Option<&str>,
+) -> Result<(), EditError> {
+    let slide = snapshot
+        .slides
+        .iter()
+        .find(|slide| slide.id == slide_id)
+        .ok_or_else(|| EditError::SlideNotFound(slide_id.to_owned()))?;
+    if let Some(id) = shape_id {
+        find_shape(&slide.shapes, id).ok_or_else(|| EditError::ShapeNotFound(id.to_owned()))?;
+    }
+    Ok(())
 }
 
 fn capture(

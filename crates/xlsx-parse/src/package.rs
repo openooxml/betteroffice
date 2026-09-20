@@ -34,14 +34,16 @@ pub struct PreservedPackage {
 }
 
 impl PreservedPackage {
+    /// `parts` moves into the package: the inflated archive is retained once,
+    /// and the save path borrows from it rather than holding a second copy.
     pub(crate) fn capture(
-        parts: &[(String, Vec<u8>)],
+        parts: Vec<(String, Vec<u8>)>,
         workbook: &Workbook,
         active_sheet: SheetId,
         shared_string_cells: &[SharedStringCells],
         declined_parts: &[String],
     ) -> Result<Self, ParseError> {
-        let workbook_xml = find_part(parts, "xl/workbook.xml")
+        let workbook_xml = find_part(&parts, "xl/workbook.xml")
             .ok_or_else(|| ParseError::MissingPart("xl/workbook.xml".into()))?;
         let workbook_template = XmlTemplate::capture(workbook_xml)?;
         let workbook_pr_attributes = workbook_template
@@ -58,7 +60,7 @@ impl PreservedPackage {
             .map(|child| attributes_from_fragment(&child.bytes))
             .transpose()?;
 
-        let workbook_relationships = find_part(parts, "xl/_rels/workbook.xml.rels")
+        let workbook_relationships = find_part(&parts, "xl/_rels/workbook.xml.rels")
             .map(parse_relationships)
             .transpose()?
             .unwrap_or_default();
@@ -79,7 +81,7 @@ impl PreservedPackage {
                 .map(|target| resolve_part_path("xl", target))
                 .unwrap_or_else(|| format!("xl/worksheets/sheet{}.xml", index + 1));
             let bytes =
-                find_part(parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
+                find_part(&parts, &path).ok_or_else(|| ParseError::MissingPart(path.clone()))?;
             let relationship_type = relationship
                 .and_then(|relationship| relationship.attribute("Type"))
                 .map(str::to_owned);
@@ -95,21 +97,21 @@ impl PreservedPackage {
         }
 
         let shared_strings = part_reference(
-            parts,
+            &parts,
             &workbook_relationships,
             "sharedStrings",
             "xl/sharedStrings.xml",
         );
-        let styles = part_reference(parts, &workbook_relationships, "styles", "xl/styles.xml");
+        let styles = part_reference(&parts, &workbook_relationships, "styles", "xl/styles.xml");
         let theme = part_reference(
-            parts,
+            &parts,
             &workbook_relationships,
             "theme",
             "xl/theme/theme1.xml",
         );
         let shared_strings_template = shared_strings
             .as_ref()
-            .and_then(|part| find_part(parts, &part.path))
+            .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
         let mut calc_chains = workbook_relationships
@@ -122,7 +124,7 @@ impl PreservedPackage {
                 })
             })
             .collect::<Vec<_>>();
-        if calc_chains.is_empty() && find_part(parts, "xl/calcChain.xml").is_some() {
+        if calc_chains.is_empty() && find_part(&parts, "xl/calcChain.xml").is_some() {
             calc_chains.push(PartReference {
                 path: "xl/calcChain.xml".to_owned(),
                 relationship_id: None,
@@ -130,17 +132,17 @@ impl PreservedPackage {
         }
         let stylesheet_template = styles
             .as_ref()
-            .and_then(|part| find_part(parts, &part.path))
+            .and_then(|part| find_part(&parts, &part.path))
             .map(XmlTemplate::capture)
             .transpose()?;
 
-        let content_types = find_part(parts, "[Content_Types].xml")
+        let content_types = find_part(&parts, "[Content_Types].xml")
             .map(parse_content_types)
             .transpose()?
             .unwrap_or_default();
         let unpatchable_references = crate::reference::unpatchable_references(
-            parts,
-            &part_content_types(&content_types, parts),
+            &parts,
+            &part_content_types(&content_types, &parts),
             workbook,
             &sheets
                 .iter()
@@ -149,13 +151,15 @@ impl PreservedPackage {
             declined_parts,
         )?;
 
+        let root_relationships = find_part(&parts, "_rels/.rels")
+            .map(parse_relationships)
+            .transpose()?
+            .unwrap_or_default();
+
         Ok(Self {
-            parts: parts.to_vec(),
+            parts,
             content_types,
-            root_relationships: find_part(parts, "_rels/.rels")
-                .map(parse_relationships)
-                .transpose()?
-                .unwrap_or_default(),
+            root_relationships,
             workbook_relationships,
             workbook_template,
             workbook_pr_attributes,

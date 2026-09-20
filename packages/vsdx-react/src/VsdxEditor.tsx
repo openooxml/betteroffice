@@ -1,7 +1,7 @@
 import { createT, deepMerge, diagnosticMessage, en } from '@betteroffice/vsdx-i18n';
 import type { TFunction, Translations } from '@betteroffice/vsdx-i18n';
 import { canvasPointToModel, modelPointToCanvas, initWasm, openDiagram, paintPage, sizeCanvasForPage } from '@betteroffice/vsdx';
-import type { Affine, CellLocator, DocumentMaster, PageLayer, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeMove, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
+import type { Affine, CellLocator, CellWriteProbe, DocumentMaster, PageLayer, PagePrimitive, CollaborationReplica, DiagramHandle, DiagramSnapshot, HitTestResult, ModelPoint, PageDisplayList, PageSnapshot, ShapeDataRow, ShapeMove, ShapeSnapshot, TextDiagnostic, VsdxFontFace, VsdxPresence } from '@betteroffice/vsdx';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { CSSProperties, DragEvent, FocusEvent, KeyboardEvent, MouseEvent, PointerEvent, ReactNode } from 'react';
 import { AUTO_CONNECT_FADE_MS, HOVER_FREE_DRAG_INCHES, HOVER_PROXIMITY_PX, QUICK_SHAPE_IDS, autoConnectArrowAt, autoConnectArrowCss, autoConnectArrowsForShape, autoConnectHaloHit, connectionPointsForShape, connectorDraft, connectorEndpointGlue, connectorGlue, connectorRouteFromFrame, dropTargetForPoint, hoverPointAt, isConnectorShape, nearestConnectionPointAnywhere, paintAutoConnectOverlay, paintConnectorOverlay, quickShapePlacement, reroutePreviewForMove, routeConnector } from './connector';
@@ -10,7 +10,8 @@ import { Ribbon } from './components/ribbon/Ribbon';
 import type { ViewToggleKey } from './components/ribbon/Ribbon';
 import { CanvasContextMenu } from './components/ribbon/CanvasContextMenu';
 import { ShapeContextMenu } from './components/ribbon/ShapeContextMenu';
-import { RibbonCommandsProvider, copySelection, duplicateEntry, findShapePlacement, isCellWriteBlocked, isHandleResizeBlocked, isRotateBlocked, numericCellValue, pasteEntry, useRibbonCommands } from './components/ribbon/commands';
+import { GATED_CELLS, RibbonCommandsProvider, copySelection, duplicateEntry, findShapePlacement, isHandleResizeBlocked, isRotateBlocked, numericCellValue, pasteEntry, probeKey, selectionWriteProbes, shapeWriteProbes, useRibbonCommands } from './components/ribbon/commands';
+import type { ShapeWriteProbes } from './components/ribbon/commands';
 import type { RibbonCommands } from './components/ribbon/commands';
 import { dragSegmentRoute, hitSegmentDot, paintConnectorChrome, previewChrome, selectedConnectorChrome } from './connectorChrome';
 import type { ChromePoint } from './connectorChrome';
@@ -25,7 +26,7 @@ import { shapeStencils, stencilShapeById } from './components/shapes/shapeLibrar
 import type { ShapeStencil, StandardShape } from './components/shapes/shapeLibrary';
 import { documentStencilEntries } from './components/shapes/documentStencil';
 import { StatusBar, clampZoom } from './components/statusbar';
-import { paintDragPreview, paintMarquee, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, isOwnedBrowserShortcut, hitTestControlHandles, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandlesForShape, isPrintableEntryKey, marqueeEnclosesQuad, normalizeMarquee, paintControlHandles, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
+import { paintDragPreview, paintMarquee, paintSelectionFrame, passedDragThreshold, previewOutline, hitTestSelection, isOwnedBrowserShortcut, hitTestControlHandles, controlCellWriteBlocked, controlHandleCanvasPositions, controlHandlesForShape, controlProbeKey, controlProbeLocators, isPrintableEntryKey, marqueeEnclosesQuad, normalizeMarquee, paintControlHandles, resolveControlDrag, resolveDragGeometry, resolveNudgeGeometry, resolveRotationAngle, resizeCursor, canvasKeyboardIntent, shapeLocalToPage, textEditOverlay, withoutTextBox } from './interactions';
 import type { CanvasKeyboardIntent, ControlDrag, DragStart, MarqueeRect, ResizeHandle } from './interactions';
 import { collectSnapTargets, paintGrid, paintSmartGuides, snapRelease, GRID_SPACING_IN } from './snap';
 import type { SnapTargets } from './snap';
@@ -345,6 +346,13 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
     return () => { disposed = true; };
   }, [stableFonts, hasDocument, refresh, reportError]);
 
+  const writeProbes = useMemo(
+    () => selectionWriteProbes(handleRef.current, selection, GATED_CELLS),
+    [model.snapshot, selection],
+  );
+  const writeProbesRef = useRef(writeProbes);
+  writeProbesRef.current = writeProbes;
+
   const editedTextId = editing && model.snapshot ? textPrimitiveId(model.snapshot, model.pageIndex, editing.pageId, editing.shapeId) : null;
   const paintFrame = useMemo(
     () => (model.frame && editedTextId ? { ...model.frame, primitives: withoutTextBox(model.frame.primitives, editedTextId) } : model.frame),
@@ -388,8 +396,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         try {
           const corners = selectionCorners(page, frame, item);
           const placement = findShapePlacement(page.shapes, item.shapeId);
-          const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-          const rotationBlocked = placement ? isRotateBlocked(placement.shape) : false;
+          const itemProbes = writeProbesRef.current.get(probeKey(item.pageId, item.shapeId)) ?? null;
+          const blocked = isHandleResizeBlocked(itemProbes);
+          const rotationBlocked = isRotateBlocked(itemProbes);
           if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotationBlocked);
           if (placement && selection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), dpr, zoom);
         } catch { void 0; }
@@ -574,8 +583,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
         try {
           const corners = selectionCorners(page, frame, item);
           const placement = findShapePlacement(page.shapes, item.shapeId);
-          const blocked = placement ? isHandleResizeBlocked(placement.shape) : false;
-          const rotationBlocked = placement ? isRotateBlocked(placement.shape) : false;
+          const itemProbes = writeProbesRef.current.get(probeKey(item.pageId, item.shapeId)) ?? null;
+          const blocked = isHandleResizeBlocked(itemProbes);
+          const rotationBlocked = isRotateBlocked(itemProbes);
           if (corners) paintSelectionFrame(context, corners, dpr, zoom, blocked ? [] : undefined, !rotationBlocked);
           if (placement && currentSelection.length === 1) paintControlHandles(context, controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform), dpr, zoom);
         } catch { void 0; }
@@ -887,7 +897,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
             const controls = controlHandleCanvasPositions(placement.shape, base, frame.paintTransform);
             const row = hitTestControlHandles(point.canvas, controls, zoomRef.current);
             const hit = row ? controls.find((entry) => entry.row === row) : undefined;
-            const drag = hit && row ? controlDragStart(placement.shape, row, hit) : null;
+            const drag = hit && row ? controlDragStart(placement.shape, row, hit, controlWriteProbes(handleRef.current, active.pageId, active.shapeId, placement.shape)) : null;
             if (hit && drag && !(drag.lockedX && drag.lockedY)) {
               pointerRef.current = {
                 ...point,
@@ -911,11 +921,12 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (!target) continue;
           const handlePlacement = findShapePlacement(page.shapes, active.shapeId);
           if (!handlePlacement) continue;
-          if (target === 'rotate' && isRotateBlocked(handlePlacement.shape)) {
-            reportError(new Error(rotateBlockedMessage(t, handlePlacement.shape)));
+          const handleProbes = writeProbesRef.current.get(probeKey(active.pageId, active.shapeId)) ?? null;
+          if (target === 'rotate' && isRotateBlocked(handleProbes)) {
+            reportError(new Error(rotateBlockedMessage(t, handleProbes)));
             return;
           }
-          if (target !== 'rotate' && isHandleResizeBlocked(handlePlacement.shape)) {
+          if (target !== 'rotate' && isHandleResizeBlocked(handleProbes)) {
             reportError(new Error(t('errors.resizeLocked')));
             return;
           }
@@ -1071,7 +1082,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
               const controls = controlHandleCanvasPositions(placement.shape, shapeDragStart(page, placement.shape, frame), frame.paintTransform);
               const row = hitTestControlHandles(point.canvas, controls, zoomRef.current);
               const hit = row ? controls.find((entry) => entry.row === row) : undefined;
-              const drag = hit && row ? controlDragStart(placement.shape, row, hit) : null;
+              const drag = hit && row ? controlDragStart(placement.shape, row, hit, controlWriteProbes(handleRef.current, active.pageId, active.shapeId, placement.shape)) : null;
               if (drag && !(drag.lockedX && drag.lockedY)) { event.currentTarget.style.cursor = 'move'; return; }
             } catch { void 0; }
           }
@@ -1079,7 +1090,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
           if (!corners) continue;
           const target = hitTestSelection(point.canvas, corners, zoomRef.current);
           const shape = findShapePlacement(page.shapes, active.shapeId)?.shape;
-          if (target && shape && (target === 'rotate' ? isRotateBlocked(shape) : isHandleResizeBlocked(shape))) continue;
+          const hoverProbes = writeProbesRef.current.get(probeKey(active.pageId, active.shapeId)) ?? null;
+          if (target && shape && (target === 'rotate' ? isRotateBlocked(hoverProbes) : isHandleResizeBlocked(hoverProbes))) continue;
           if (target) { event.currentTarget.style.cursor = target === 'rotate' ? 'grab' : resizeCursor(target); return; }
           if (selected.length === 1) {
             const chrome = selectedConnectorChrome(frame, page, active);
@@ -1239,8 +1251,9 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (pointer.control) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const liveShape = livePage ? findShapePlacement(livePage.shapes, selected.shapeId)?.shape : undefined;
-        const lockedX = pointer.control.lockedX || (liveShape ? controlCellWriteBlocked(liveShape, pointer.control.row, 'X') : false);
-        const lockedY = pointer.control.lockedY || (liveShape ? controlCellWriteBlocked(liveShape, pointer.control.row, 'Y') : false);
+        const controlProbes = liveShape ? controlWriteProbes(handle, selected.pageId, selected.shapeId, liveShape) : null;
+        const lockedX = pointer.control.lockedX || controlCellWriteBlocked(controlProbes, pointer.control.row, 'X');
+        const lockedY = pointer.control.lockedY || controlCellWriteBlocked(controlProbes, pointer.control.row, 'Y');
         if (lockedX && lockedY) return;
         const next = resolveControlDrag(pointer, pointer.control.startLocal, point.model, lockedX, lockedY);
         handle.setControlHandle(selected.pageId, selected.shapeId, pointer.control.row, lockedX ? null : inchFormula(next.x), lockedY ? null : inchFormula(next.y));
@@ -1250,7 +1263,8 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (pointer.rotate) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
-        if (livePlacement && isRotateBlocked(livePlacement.shape)) throw new Error(rotateBlockedMessage(t, livePlacement.shape));
+        const liveRotateProbes = shapeWriteProbes(handle, selected.pageId, selected.shapeId);
+        if (livePlacement && isRotateBlocked(liveRotateProbes)) throw new Error(rotateBlockedMessage(t, liveRotateProbes));
         handle.setCellFormula(selected.pageId, selected.shapeId, { cellName: 'Angle' }, String(resolveRotationAngle(pointer, point.model, event.shiftKey)));
         refresh(undefined, true);
         return;
@@ -1260,7 +1274,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
       if (pointer.handle) {
         const livePage = handle.snapshot().pages.find((page) => page.id === selected.pageId);
         const livePlacement = livePage ? findShapePlacement(livePage.shapes, selected.shapeId) : null;
-        if (livePlacement && isHandleResizeBlocked(livePlacement.shape)) throw new Error(t('errors.resizeLocked'));
+        if (livePlacement && isHandleResizeBlocked(shapeWriteProbes(handle, selected.pageId, selected.shapeId))) throw new Error(t('errors.resizeLocked'));
         handle.setShapeBounds(selected.pageId, selected.shapeId, inchFormula(geometry.x), inchFormula(geometry.y), inchFormula(geometry.width), inchFormula(geometry.height));
       }
       else if (pointer.resize) handle.resizeShape(selected.pageId, selected.shapeId, inchFormula(geometry.width), inchFormula(geometry.height));
@@ -1616,7 +1630,7 @@ export function VsdxEditor({ file, fonts, clientId, collaboration, i18n, classNa
   const fidelity = diagnostics.filter((diagnostic) => diagnostic.category === 'fidelity');
   return <div ref={editorRootRef} className={className} style={styles.root} aria-label={t('editor.appLabel')} onKeyDown={onEditorKeyDown}>
     <header style={styles.titleBar}><strong>{t('ribbon.documentName')}</strong><span style={{ color: dirty ? '#a16207' : '#526273' }}>{dirty ? t('ribbon.dirty') : t('ribbon.saved')}</span></header>
-    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} frame={model.frame} clipboard={clipboard} onClipboardChange={setClipboard} onSelectShape={(next) => setSelection([next])} pageBreaks={pageBreakToggle} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
+    <RibbonCommandsProvider handle={handleRef.current} snapshot={model.snapshot} pageId={model.snapshot?.pages[model.pageIndex]?.id} selection={selection} frame={model.frame} clipboard={clipboard} onClipboardChange={setClipboard} onSelectShape={(next) => setSelection([next])} pageBreaks={pageBreakToggle} probes={writeProbes} onMutation={() => refresh(undefined, true)} onError={reportError} onDownload={download}>
     <RibbonCommandsBridge target={commandsRef} />
     <Ribbon t={t} hasSelection={selection.length > 0} connector={{ active: connectorMode, disabled: !model.frame, onToggle: toggleConnector }} view={{ grid: showGrid, snap: snapEnabled, rulers: showRulers }} onToggleView={toggleView} />
     <div style={styles.contentRow}>
@@ -1905,8 +1919,27 @@ export function stillSelectable(snapshot: DiagramSnapshot, pageIndex: number, se
   return !layers || !selectionHiddenByLayers(page, layers, selection);
 }
 
-const rotateBlockedMessage = (t: TFunction, shape: ShapeSnapshot): string =>
-  isCellWriteBlocked(shape, 'Angle') ? t('errors.rotationGuarded') : t('errors.rotateLocked');
+/** The engine's answers, or null when the shape it names is already gone. */
+function probeOrNull(handle: DiagramHandle, pageId: string, shapeId: string, locators: readonly CellLocator[]): CellWriteProbe[] | null {
+  try {
+    return handle.probeCellWrites(pageId, shapeId, locators);
+  } catch (value) {
+    if (value instanceof ReferenceError || value instanceof TypeError) throw value;
+    return null;
+  }
+}
+
+/** Probes every Control X/Y a shape exposes, keyed the way `controlCellWriteBlocked` reads them. */
+function controlWriteProbes(handle: DiagramHandle | null, pageId: string, shapeId: string, shape: ShapeSnapshot): ReadonlyMap<string, CellWriteProbe> | null {
+  const locators = controlProbeLocators(shape);
+  if (!handle || locators.length === 0) return null;
+  const probed = probeOrNull(handle, pageId, shapeId, locators);
+  if (!probed) return null;
+  return new Map(locators.map((locator, index) => [controlProbeKey(locator.rowName ?? '', locator.cellName as 'X' | 'Y'), probed[index]]));
+}
+
+const rotateBlockedMessage = (t: TFunction, probes: ShapeWriteProbes | null): string =>
+  probes?.get('Angle')?.refusal === 'guard' ? t('errors.rotationGuarded') : t('errors.rotateLocked');
 
 export function canvasLabel(t: TFunction, pageIndex: number, total: number, selection: readonly VsdxShapeSelection[]): string {
   if (selection.length > 1) return t('pages.canvasLabelWithMultiSelection', { current: pageIndex + 1, total, count: selection.length });
@@ -1979,10 +2012,10 @@ export function selectionCorners(page: PageSnapshot, frame: PageDisplayList, sel
   return previewOutline(start, { x: 0, y: 0 }, frame.paintTransform);
 }
 
-export function controlDragStart(shape: ShapeSnapshot, row: string, hit: { lockedX: boolean; lockedY: boolean }): ControlDrag | null {
+export function controlDragStart(shape: ShapeSnapshot, row: string, hit: { lockedX: boolean; lockedY: boolean }, probes: ReadonlyMap<string, CellWriteProbe> | null): ControlDrag | null {
   const handle = controlHandlesForShape(shape).find((entry) => entry.row === row);
   if (!handle) return null;
-  return { row, startLocal: { x: handle.x, y: handle.y }, lockedX: hit.lockedX || controlCellWriteBlocked(shape, row, 'X'), lockedY: hit.lockedY || controlCellWriteBlocked(shape, row, 'Y') };
+  return { row, startLocal: { x: handle.x, y: handle.y }, lockedX: hit.lockedX || controlCellWriteBlocked(probes, row, 'X'), lockedY: hit.lockedY || controlCellWriteBlocked(probes, row, 'Y') };
 }
 
 export function collectDiagnostics(frame: PageDisplayList): TextDiagnostic[] { const result: TextDiagnostic[] = []; const work = frame.primitives.map((primitive) => ({ primitive, depth: 0 })); while (work.length) { const current = work.pop(); if (!current || current.depth >= 256) continue; if (current.primitive.kind === 'shape') result.push(...(current.primitive.diagnostics ?? [])); if (current.primitive.kind === 'textBox') for (const paragraph of current.primitive.paragraphs) for (const run of paragraph.runs) result.push(...(run.diagnostics ?? [])); if (current.primitive.kind === 'group') for (const primitive of current.primitive.primitives) work.push({ primitive, depth: current.depth + 1 }); } return result; }
