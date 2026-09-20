@@ -10,7 +10,7 @@ pub mod region;
 pub use ooxml_drawingml::GeometryPathCommand;
 use ooxml_drawingml::chart::ChartSpace;
 use std::collections::BTreeMap;
-use std::ops::Range;
+use std::ops::{Range, RangeInclusive};
 
 use serde::{Deserialize, Serialize};
 
@@ -423,7 +423,11 @@ where
             tooltip: link.tooltip.clone(),
         })
         .collect();
-    let merge_index = MergeIndex::new(&sheet_ref.merges);
+    let row_hint = match (rows.ranges.first(), rows.ranges.last()) {
+        (Some(first), Some(last)) => first.start..=last.end.saturating_sub(1),
+        _ => RangeInclusive::new(1, 0),
+    };
+    let merge_index = MergeIndex::new(&sheet_ref.merges, row_hint);
     let mut anchors = visible_anchors(sheet_ref, &rows, &cols, &merge_index);
     if print.is_some() {
         for merge in &sheet_ref.merges {
@@ -949,13 +953,8 @@ fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
     })
 }
 
-/// merge coverage for one render pass. `entries` holds `(row, start_col,
-/// end_col, merge index)` grouped by row — sorted by start column when a row's merges
-/// do not overlap, so lookups binary-search; otherwise kept in `merges` order
-/// and scanned. merges taller than `MERGE_ROW_CAP` rows stay out of `entries`
-/// and are scanned in `merges` order, so one huge merge cannot dominate the
-/// index build. either way `covering` returns the same first-in-`merges`-order
-/// match a linear scan would.
+/// per-pass merge coverage: merges shorter than `MERGE_ROW_CAP` are indexed
+/// per hinted row, taller or inverted merges are `contains`-scanned.
 struct MergeIndex<'a> {
     merges: &'a [CellRange],
     rows: BTreeMap<u32, MergeRow>,
@@ -968,25 +967,35 @@ struct MergeRow {
     /// span of this row's merges in `MergeIndex::entries`.
     start: u32,
     end: u32,
-    /// true when the row's merges are column-disjoint, so its entries are
-    /// sorted by start column and at most one can cover a queried cell.
+    /// column-disjoint entries sort by start column and binary-search.
     by_col: bool,
 }
 
-/// a merge spanning more rows than this is scanned instead of indexed per row.
+/// row-height cutoff between indexed and scanned merges.
 const MERGE_ROW_CAP: u32 = 64;
 
 impl<'a> MergeIndex<'a> {
-    fn new(merges: &'a [CellRange]) -> Self {
+    /// indexes short merges over `hint` rows (plus every anchor row); other
+    /// merges — inverted, taller than `MERGE_ROW_CAP` — are scanned per query.
+    fn new(merges: &'a [CellRange], hint: RangeInclusive<u32>) -> Self {
+        let (hint_start, hint_end) = (*hint.start(), *hint.end());
         let mut entries: Vec<(u32, u32, u32, u32)> = Vec::new();
         let mut scanned = Vec::new();
         for (index, merge) in merges.iter().enumerate() {
-            if merge.end.row - merge.start.row >= MERGE_ROW_CAP {
+            if merge.end.row < merge.start.row || merge.end.row - merge.start.row >= MERGE_ROW_CAP {
                 scanned.push(index as u32);
                 continue;
             }
-            for row in merge.start.row..=merge.end.row {
-                entries.push((row, merge.start.col, merge.end.col, index as u32));
+            entries.push((
+                merge.start.row,
+                merge.start.col,
+                merge.end.col,
+                index as u32,
+            ));
+            for row in merge.start.row.max(hint_start)..=merge.end.row.min(hint_end) {
+                if row != merge.start.row {
+                    entries.push((row, merge.start.col, merge.end.col, index as u32));
+                }
             }
         }
         entries.sort_by_key(|entry| (entry.0, entry.1));
@@ -2134,5 +2143,41 @@ mod tests {
         assert_eq!(texts[0].0, "merged");
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert!((texts[0].1.w - dc * 2.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn merge_index_matches_linear_scan() {
+        let range = |r1: u32, c1: u32, r2: u32, c2: u32| CellRange {
+            start: CellRef::new(r1, c1),
+            end: CellRef::new(r2, c2),
+        };
+        let merges = [
+            range(2, 0, 65, 3),    // MERGE_ROW_CAP - 1 rows tall: indexed
+            range(10, 5, 74, 8),   // MERGE_ROW_CAP rows tall: scanned
+            range(30, 1, 40, 2),   // nested inside the indexed merge's rows
+            range(50, 6, 60, 7),   // nested inside the scanned merge
+            range(100, 0, 50, 5),  // inverted: never covers
+            range(200, 0, 210, 2), // below a narrow hint
+        ];
+        let linear = |at: CellRef| merges.iter().find(|m| m.contains(at)).copied();
+        for hint in [0u32..=120, 60..=70, 205..=205, RangeInclusive::new(1, 0)] {
+            let index = MergeIndex::new(&merges, hint.clone());
+            for row in hint.clone() {
+                for col in 0u32..10 {
+                    let at = CellRef::new(row, col);
+                    assert_eq!(index.covering(at), linear(at), "{at:?} hint {hint:?}");
+                }
+            }
+            for merge in &merges {
+                if hint.contains(&merge.start.row) {
+                    assert_eq!(
+                        index.covering(merge.start),
+                        linear(merge.start),
+                        "anchor {:?} hint {hint:?}",
+                        merge.start
+                    );
+                }
+            }
+        }
     }
 }
