@@ -2506,7 +2506,7 @@ fn layout_content(
     })
 }
 
-/// Height of a `spcBef` or `spcAft`, whose percentages measure the text size.
+/// Height of a `spcBef` or `spcAft`, whose percentages measure a single line.
 fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale: f32) -> f32 {
     let height = match spacing {
         Some(LineSpacing::Percent { value }) => {
@@ -2515,7 +2515,7 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .iter()
                 .map(|run| run.style.font_size_pt)
                 .fold(0.0_f32, f32::max);
-            value as f32 * points_to_px(size_pt * scale)
+            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
         }
         Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
         None => 0.0,
