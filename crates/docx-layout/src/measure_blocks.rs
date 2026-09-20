@@ -13,7 +13,8 @@ use crate::table_grid::{
 use crate::types::{
     BlockExtent, ChartExtent, FloatingTablePosition, ImageExtent, ImageRunPosition, LayoutBlock,
     ParagraphBlock, ParagraphExtent, ParagraphSpacing, Run, ShapeBlock, ShapeExtent, TableBlock,
-    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetRow,
+    TableCellExtent, TableExtent, TableRowExtent, TextBoxBlock, TextBoxExtent, TypesetBidiSlice,
+    TypesetClusterAdvance, TypesetRow, TypesetRowSegment, TypesetRunAdvance,
 };
 use ooxml_text::{LineBox, LineSpacingRule, apply_spacing_rule};
 
@@ -571,46 +572,77 @@ fn measure_paragraph_with_context(
     };
     measure_horizontal_rules(paragraph, &mut extent);
     if let ExtentLookup::Miss(Some(key)) = lookup {
-        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone()));
+        let weight = extent_weight(&extent);
+        EXTENT_CACHE.with(|cache| cache.borrow_mut().insert_hot(key, extent.clone(), weight));
     }
     Ok(extent)
 }
 
 const MAX_EXTENT_CACHE_ENTRIES: usize = 4_096;
 const MAX_EXTENT_CACHE_KEY_BYTES: usize = 8 * 1024 * 1024;
+/// Estimated retained bytes of cached extents per generation.
+const MAX_EXTENT_CACHE_VALUE_BYTES: usize = 32 * 1024 * 1024;
+
+fn extent_weight(extent: &ParagraphExtent) -> usize {
+    use std::mem::size_of;
+    size_of::<ParagraphExtent>()
+        + extent.lines.capacity() * size_of::<TypesetRow>()
+        + extent
+            .lines
+            .iter()
+            .map(|row| {
+                row.segments
+                    .as_ref()
+                    .map_or(0, |v| v.capacity() * size_of::<TypesetRowSegment>())
+                    + row
+                        .run_advances
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetRunAdvance>())
+                    + row
+                        .cluster_advances
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetClusterAdvance>())
+                    + row
+                        .bidi_slices
+                        .as_ref()
+                        .map_or(0, |v| v.capacity() * size_of::<TypesetBidiSlice>())
+            })
+            .sum::<usize>()
+}
 /// Serialized paragraph inputs past this size are measured uncached.
 const MAX_EXTENT_KEY_BYTES: usize = 256 * 1024;
 
 #[derive(Default)]
 struct ExtentCacheGeneration {
-    entries: HashMap<Vec<u8>, ParagraphExtent>,
+    entries: HashMap<Vec<u8>, (ParagraphExtent, usize)>,
     key_bytes: usize,
+    value_bytes: usize,
 }
 
 impl ExtentCacheGeneration {
-    fn would_overflow(&self, key: &[u8]) -> bool {
+    fn would_overflow(&self, key: &[u8], weight: usize) -> bool {
         self.entries.len() >= MAX_EXTENT_CACHE_ENTRIES
             || self.key_bytes.saturating_add(key.len()) > MAX_EXTENT_CACHE_KEY_BYTES
+            || self.value_bytes.saturating_add(weight) > MAX_EXTENT_CACHE_VALUE_BYTES
     }
 
-    fn insert(&mut self, key: Vec<u8>, extent: ParagraphExtent) {
+    fn insert(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
         self.entries.remove(&key);
         self.key_bytes += key.len();
-        self.entries.insert(key, extent);
+        self.value_bytes += weight;
+        self.entries.insert(key, (extent, weight));
     }
 
-    fn remove(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
-        let extent = self.entries.remove(key)?;
+    fn remove(&mut self, key: &[u8]) -> Option<(ParagraphExtent, usize)> {
+        let (extent, weight) = self.entries.remove(key)?;
         self.key_bytes = self.key_bytes.saturating_sub(key.len());
-        Some(extent)
+        self.value_bytes = self.value_bytes.saturating_sub(weight);
+        Some((extent, weight))
     }
 }
 
-/// Measured paragraph extents reused across pagination passes. The key is the
-/// full serialized input tuple, so identical table cells, repeated notes and
-/// unchanged paragraphs all share one measure. Same two-generation policy as
-/// `ooxml_text`'s shape cache: hits promote into `hot`, untouched entries age
-/// out with `cold`.
+/// Measured paragraph extents reused across pagination passes; same
+/// two-generation aging as `ooxml_text`'s shape cache.
 #[derive(Default)]
 struct ExtentCache {
     hot: ExtentCacheGeneration,
@@ -619,25 +651,23 @@ struct ExtentCache {
 
 impl ExtentCache {
     fn get(&mut self, key: &[u8]) -> Option<ParagraphExtent> {
-        if let Some(extent) = self.hot.entries.get(key) {
+        if let Some((extent, _)) = self.hot.entries.get(key) {
             return Some(extent.clone());
         }
-        let extent = self.cold.remove(key)?;
-        self.insert_hot(key.to_vec(), extent.clone());
+        let (extent, weight) = self.cold.remove(key)?;
+        self.insert_hot(key.to_vec(), extent.clone(), weight);
         Some(extent)
     }
 
-    fn insert_hot(&mut self, key: Vec<u8>, extent: ParagraphExtent) {
-        if self.hot.would_overflow(&key) {
+    fn insert_hot(&mut self, key: Vec<u8>, extent: ParagraphExtent, weight: usize) {
+        if self.hot.would_overflow(&key, weight) {
             self.cold = std::mem::take(&mut self.hot);
         }
-        self.hot.insert(key, extent);
+        self.hot.insert(key, extent, weight);
     }
 }
 
 thread_local! {
-    /// Lives next to `MEASURE_FONTS`: the font store inside the key's id makes
-    /// entries unreachable after `clear_measure_fonts`, which also resets it.
     static EXTENT_CACHE: RefCell<ExtentCache> = RefCell::new(ExtentCache::default());
     /// Key scratch reused per lookup so a hit allocates nothing.
     static EXTENT_KEY_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
@@ -649,15 +679,11 @@ pub(crate) fn clear_extent_cache() {
 
 enum ExtentLookup {
     Hit(ParagraphExtent),
-    /// `Some(key)` is the built key to insert under; `None` means the input
-    /// could not be keyed and the measure runs uncached.
+    /// The built key to insert under, or `None` for uncached inputs.
     Miss(Option<Vec<u8>>),
 }
 
-/// Key over every input a measure reads: the paragraph (runs, attrs,
-/// tracked-change marks), width, floating zones, y-offset, config contents and
-/// the font store generation. Serialization failures or oversized inputs are
-/// measured uncached rather than risking a collision.
+/// Key over every input a measure reads; oversized inputs run uncached.
 fn extent_cache_lookup(
     paragraph: &ParagraphBlock,
     content_width: f64,
