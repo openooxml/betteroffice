@@ -199,7 +199,7 @@ fn eval_node(
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
     ctx.now_serial = now_serial;
     let value = evaluate(&expr, &ctx);
-    let incomplete = ctx.has_unhandled_budget_error() || ctx.used_unsupported_function();
+    let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
     if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
@@ -312,6 +312,25 @@ mod tests {
                 value: xlsx_model::ErrorValue::Name
             }
         );
+    }
+
+    /// IFERROR answers for the call it wraps, so the gap never reaches the
+    /// result and the computed value must replace the cache.
+    #[test]
+    fn a_handler_that_answers_an_unimplemented_call_writes_its_result() {
+        let (mut wb, s) = one_sheet();
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(WEBSERVICE(1),0)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+    }
+
+    #[test]
+    fn a_handler_beside_an_unimplemented_call_still_keeps_the_cache() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_cached_formula(&mut wb, s, "B1", "IFERROR(A1,0)+WEBSERVICE(1)", num(99.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(99.0));
     }
 
     #[test]

@@ -50,7 +50,7 @@ pub struct EvalContext<'a> {
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
-    unsupported_functions: Rc<Cell<bool>>,
+    unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, CellValue>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
@@ -65,7 +65,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -80,7 +80,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
@@ -99,7 +99,7 @@ impl<'a> EvalContext<'a> {
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
-            unsupported_functions: Rc::new(Cell::new(false)),
+            unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
@@ -156,13 +156,24 @@ impl<'a> EvalContext<'a> {
         self.unhandled_budget_errors.get() != 0
     }
 
-    /// whether this evaluation named a function the engine does not implement.
-    pub(crate) fn used_unsupported_function(&self) -> bool {
+    pub(crate) fn unsupported_checkpoint(&self) -> u64 {
         self.unsupported_functions.get()
     }
 
+    pub(crate) fn handle_unsupported_since(&self, checkpoint: u64) {
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().min(checkpoint));
+    }
+
+    /// whether a function the engine does not implement reached this
+    /// evaluation's result, rather than being answered by a handler.
+    pub(crate) fn has_unhandled_unsupported_function(&self) -> bool {
+        self.unsupported_functions.get() != 0
+    }
+
     fn record_unsupported_function(&self) {
-        self.unsupported_functions.set(true);
+        self.unsupported_functions
+            .set(self.unsupported_functions.get().saturating_add(1));
     }
 
     fn record_budget_error(&self) {
