@@ -246,11 +246,7 @@ pub fn write_docx_s13_with_warnings(
     Ok((bytes, warnings))
 }
 
-/// Authored chart placements in one story part, keyed by chart relationship
-/// id. The lookup is lexical: a drawing never nests, so each span from an
-/// opening tag to its first closing tag is one placement, and the chart
-/// reference inside names the chart it places. Both tags follow the prefixes
-/// the part declares for their namespaces, so reprefixed packages resolve.
+/// Authored chart placements in one story part, keyed by relationship id.
 fn chart_drawings_in_part(xml: &str) -> HashMap<String, String> {
     let drawing_prefix = declared_prefix(xml, &WORDPROCESSINGML_URIS, "w");
     let chart_prefix = declared_prefix(xml, &CHART_URIS, "c");
@@ -755,19 +751,31 @@ fn append_before(xml: &str, closing: &str, value: &str) -> Option<String> {
 }
 
 fn opaque_relationship_references(xml: &str) -> Vec<&str> {
+    const RELATIONSHIP_URIS: &[&str] =
+        &["http://schemas.openxmlformats.org/officeDocument/2006/relationships"];
+    let prefix = declared_prefix(xml, RELATIONSHIP_URIS, "r");
     let mut references = Vec::new();
-    for marker in ["r:embed=\"", "r:id=\""] {
-        let mut cursor = 0usize;
-        while cursor < xml.len() {
-            let Some(relative) = xml[cursor..].find(marker) else {
-                break;
-            };
-            let start = cursor + relative + marker.len();
-            let end = start + xml[start..].find('"').unwrap_or(xml.len() - start);
-            if end > start {
-                references.push(&xml[start..end]);
+    for name in ["embed", "id"] {
+        for quote in ['"', '\''] {
+            let marker = format!("{prefix}:{name}={quote}");
+            let mut cursor = 0usize;
+            while cursor < xml.len() {
+                let Some(relative) = xml[cursor..].find(&marker) else {
+                    break;
+                };
+                let at = cursor + relative;
+                let preceded = at > 0
+                    && matches!(
+                        xml.as_bytes()[at - 1],
+                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'.' | b'-' | b':'
+                    );
+                let start = at + marker.len();
+                let end = start + xml[start..].find(quote).unwrap_or(xml.len() - start);
+                if end > start && !preceded {
+                    references.push(&xml[start..end]);
+                }
+                cursor = end + 1;
             }
-            cursor = end + 1;
         }
     }
     references
@@ -832,7 +840,10 @@ fn warn_about_dangling_opaque_refs(
     let mut reported = HashSet::new();
     visit_opaque_drawings(blocks, &mut |xml| {
         for id in opaque_relationship_references(xml) {
-            if rels_xml.contains(&format!("Id=\"{id}\"")) || !reported.insert(id.to_owned()) {
+            if rels_xml.contains(&format!("Id=\"{id}\""))
+                || rels_xml.contains(&format!("Id='{id}'"))
+                || !reported.insert(id.to_owned())
+            {
                 continue;
             }
             context.warn(format!(

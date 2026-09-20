@@ -230,11 +230,7 @@ fn utf16_len(value: &str) -> u32 {
     value.encode_utf16().count() as u32
 }
 
-/// Aggregate cap, in xml bytes, for opaque drawing payloads copied into yrs
-/// state while seeding. Opaque markup replays verbatim through JSON raw ops
-/// and yrs map values, so uncapped documents multiply memory once per layer.
-/// Both seeders enforce this constant and refuse over-budget documents
-/// instead of silently dropping content.
+/// Aggregate xml-byte cap for opaque drawing payloads seeded into yrs state.
 pub const OPAQUE_SEED_BUDGET_BYTES: u64 = 8 * 1024 * 1024;
 
 pub fn opaque_seed_budget_exceeded(total: u64) -> String {

@@ -968,42 +968,50 @@ function ordinaryContentForItem(item: InlineItem, recovery: ChartRecovery): Para
   }
 }
 
+function trackedRunForItem(item: InlineItem, recovery: ChartRecovery): Run | null {
+  if (item.kind === 'embed' && item.embedKind === 'image') return imageRunFromPayload(item.payload);
+  if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
+    return horizontalRuleRun(item.payload, item.attributes);
+  if (item.kind === 'embed' && item.embedKind === 'shape') return shapeRunFromPayload(item.payload);
+  if (item.kind === 'embed' && item.embedKind === 'chart')
+    return chartRunFromPayload(item.payload, recovery);
+  if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
+    return opaqueDrawingRunFromPayload(item.payload) ?? { type: 'run', content: [] };
+  if (item.kind === 'text') {
+    const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
+    return {
+      type: 'run',
+      content: [{ type: 'text', text: item.text }],
+      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+    };
+  }
+  return { type: 'run', content: [] };
+}
+
+function trackedWrap(
+  item: InlineItem,
+  info: TrackedChangeInfo,
+  inner: Run | Hyperlink
+): ParagraphContent {
+  const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
+  const isMovePair = raw?.isMovePair === true;
+  if (item.attributes.ins) {
+    return isMovePair
+      ? { type: 'moveTo', info, content: [inner] }
+      : { type: 'insertion', info, content: [inner] };
+  }
+  return isMovePair
+    ? { type: 'moveFrom', info, content: [inner] }
+    : { type: 'deletion', info, content: [inner] };
+}
+
 function trackedContentForItem(
   item: InlineItem,
   info: TrackedChangeInfo,
   recovery: ChartRecovery
 ): ParagraphContent | null {
-  let run: Run;
-  if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
-    run = horizontalRuleRun(item.payload, item.attributes);
-  else if (item.kind === 'embed' && item.embedKind === 'shape')
-    run = shapeRunFromPayload(item.payload);
-  else if (item.kind === 'embed' && item.embedKind === 'chart') {
-    const chart = chartRunFromPayload(item.payload, recovery);
-    if (!chart) return null;
-    run = chart;
-  } else if (item.kind === 'embed' && item.embedKind === 'opaqueDrawing')
-    run = opaqueDrawingRunFromPayload(item.payload) ?? { type: 'run', content: [] };
-  else if (item.kind === 'text') {
-    const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
-    run = {
-      type: 'run',
-      content: [{ type: 'text', text: item.text }],
-      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
-    };
-  } else run = { type: 'run', content: [] };
-
-  const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
-  const isMovePair = raw?.isMovePair === true;
-  if (item.attributes.ins) {
-    return isMovePair
-      ? { type: 'moveTo', info, content: [run] }
-      : { type: 'insertion', info, content: [run] };
-  }
-  return isMovePair
-    ? { type: 'moveFrom', info, content: [run] }
-    : { type: 'deletion', info, content: [run] };
+  const run = trackedRunForItem(item, recovery);
+  return run ? trackedWrap(item, info, run) : null;
 }
 
 function addToHyperlink(hyperlink: Hyperlink, item: InlineItem, recovery: ChartRecovery): void {
@@ -1146,8 +1154,22 @@ function buildParagraphContent(items: InlineItem[], recovery: ChartRecovery): Pa
     if (revision) {
       flushRun();
       flushHyperlink();
-      const tracked = trackedContentForItem(item, revision, recovery);
-      if (tracked) content.push(tracked);
+      const inner = createHyperlink(item.attributes);
+      if (inner) {
+        if (item.kind === 'embed' && item.embedKind === 'math') {
+          inner.structuredChildren = [mathFromPayload(item.payload)];
+          content.push(trackedWrap(item, revision, inner));
+        } else {
+          const run = trackedRunForItem(item, recovery);
+          if (run) {
+            inner.children.push(run);
+            content.push(trackedWrap(item, revision, inner));
+          }
+        }
+      } else {
+        const tracked = trackedContentForItem(item, revision, recovery);
+        if (tracked) content.push(tracked);
+      }
       continue;
     }
 
@@ -1886,12 +1908,7 @@ function commentRanges(
   return byStory;
 }
 
-/**
- * Source for chart placements a persisted session no longer carries. The base
- * document still names each chart's `w:drawing`; sessions seeded before
- * drawings were replayed recover it from there instead of failing the save.
- * Relationship ids are local to their part, so drawings stay keyed by story.
- */
+/** Chart placements recoverable from the base document, keyed per story. */
 interface ChartRecovery {
   drawingFor(rId: string | undefined, path: string | undefined): string | undefined;
   unrecoverable(rId: string | undefined, path: string | undefined): void;

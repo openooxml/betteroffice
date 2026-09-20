@@ -31,7 +31,7 @@
 
 DOCX layout omits hidden content by default. Set `showHiddenText: true` in `YrsRenderEnv` to reveal it without changing the document's hidden formatting.
 
-Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving. Elliptical pictures render with crops and borders. Other picture presets retain rectangular rendering; soft-edge effects are unsupported.
+Standard legacy VML horizontal rules render in DOCX and retain their source XML through editing and saving. Elliptical pictures render with crops and borders. Unrecognized drawing markup inside runs round-trips verbatim. Other picture presets retain rectangular rendering; soft-edge effects are unsupported.
 
 ### Spreadsheets — `.xlsx`
 

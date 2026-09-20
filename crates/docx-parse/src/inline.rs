@@ -2221,9 +2221,10 @@ fn inline_content_length(node: &InlineNode) -> usize {
     match node {
         InlineNode::Run(run) => run.content.iter().map(run_content_length).sum(),
         InlineNode::Hyperlink(hyperlink) => hyperlink
-            .children
+            .structured_children
+            .as_deref()
+            .unwrap_or(&hyperlink.children)
             .iter()
-            .filter(|child| matches!(child, InlineNode::Run(_)))
             .map(inline_content_length)
             .sum(),
         InlineNode::SimpleField(field) => field
@@ -2508,6 +2509,29 @@ mod tests {
         assert_eq!(nested[0].display_mode.as_deref(), Some("result"));
         // Parsing records INCLUDETEXT; it never resolves or fetches it.
         assert!(field.instruction.starts_with("IF"));
+    }
+
+    #[test]
+    fn a_bookmark_after_hyperlink_math_counts_the_math_unit() {
+        let paragraph = root(
+            r#"<w:p><w:hyperlink w:anchor="a"><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t>ab</w:t></w:r></w:hyperlink><w:bookmarkStart w:id="1" w:name="b"/></w:p>"#,
+        );
+        let limits = ParseLimits::default();
+        let content = parse_inline_container(
+            &paragraph,
+            None,
+            None,
+            None,
+            None,
+            "word/document.xml",
+            &ParseBudget::new(&limits),
+            0,
+        )
+        .unwrap();
+        let InlineNode::BookmarkStart(bookmark) = &content[1] else {
+            panic!("expected bookmark")
+        };
+        assert_eq!(bookmark.position.as_ref().unwrap().offset, Some(3.0));
     }
 
     #[test]
