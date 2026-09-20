@@ -1534,8 +1534,7 @@ impl<'a> LayoutBuilder<'a> {
         })
     }
 
-    /// `layout_content` behind the renderer cache: a hit replays the exact
-    /// lines an uncached pass emitted for the same inputs.
+    /// `layout_content` behind the renderer cache.
     fn layout_text(
         &self,
         content: &ResolvedContent,
@@ -2491,14 +2490,10 @@ struct LayoutText {
     total_height: f32,
 }
 
-/// Most memoized text output one renderer retains; the oldest insertion evicts
-/// first once the cap is exceeded.
+/// Byte cap on retained text layouts; oldest entry evicts first.
 const MAX_TEXT_LAYOUT_BYTES: usize = 16 * 1024 * 1024;
 
-/// Laid-out text keyed by every input `layout_content` reads, so entries stay
-/// valid across display-list builds, slides, and decks sharing boilerplate.
-/// Stored lines carry the positions the miss computed, keeping a hit's output
-/// byte-identical to an uncached pass.
+/// Laid-out text keyed by every `layout_content` input.
 #[derive(Default)]
 struct TextLayoutCache {
     entries: HashMap<Vec<u8>, CachedTextLayout>,
@@ -2521,7 +2516,7 @@ impl TextLayoutCache {
     }
 
     fn insert(&mut self, key: Vec<u8>, text: &LayoutText) {
-        let bytes = key.len() + text_layout_bytes(&text.lines);
+        let bytes = key.len() * 2 + text_layout_bytes(&text.lines);
         if bytes > MAX_TEXT_LAYOUT_BYTES || self.entries.contains_key(&key) {
             return;
         }
@@ -2557,25 +2552,23 @@ fn text_layout_bytes(lines: &[PositionedTextLine]) -> usize {
         .iter()
         .map(|line| {
             size_of::<PositionedTextLine>()
-                + line.caret_stops.len() * size_of::<CaretStop>()
+                + line.caret_stops.capacity() * size_of::<CaretStop>()
                 + line
                     .runs
                     .iter()
                     .map(|run| {
                         size_of::<PositionedTextRun>()
-                            + run.text.len()
-                            + run.font_family.len()
-                            + run.color.len()
-                            + run.glyphs.len() * size_of::<PositionedGlyph>()
+                            + run.text.capacity()
+                            + run.font_family.capacity()
+                            + run.color.capacity()
+                            + run.glyphs.capacity() * size_of::<PositionedGlyph>()
                     })
                     .sum::<usize>()
         })
         .sum()
 }
 
-/// Exact encoding of the arguments `layout_content` reads: the resolved
-/// paragraphs and runs, the layout frame's origin and wrap width, the autofit
-/// scale, and stacked writing. Height never enters the layout pass.
+/// Encodes every argument `layout_content` reads.
 fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked: bool) -> Vec<u8> {
     let text_len: usize = content
         .paragraphs
