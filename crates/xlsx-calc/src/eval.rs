@@ -5,10 +5,11 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::parser::{BinaryOp, Expr, UnaryOp};
+use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
@@ -41,11 +42,14 @@ impl EvaluationBudget {
     }
 }
 
-/// evaluation environment: the cell source plus the sheet unqualified refs
-/// resolve against.
+/// evaluation environment: the cell source, the sheet unqualified refs resolve
+/// against, and the cell the formula belongs to.
 pub struct EvalContext<'a> {
     pub provider: &'a dyn CellProvider,
     pub sheet: SheetId,
+    /// the cell this formula belongs to; `None` -> referenceless ROW()/COLUMN()
+    /// return #VALUE!.
+    pub cell: Option<CellRef>,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
     /// seed for the volatile random functions; `None` takes a fresh stream from
@@ -60,6 +64,8 @@ pub struct EvalContext<'a> {
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
+    /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
+    pub(crate) parse_cache: Option<&'a ParseCache>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -67,6 +73,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -77,6 +84,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
+            parse_cache: None,
         }
     }
 
@@ -84,6 +92,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: Some(now_serial),
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -94,6 +103,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
+            parse_cache: None,
         }
     }
 
@@ -105,6 +115,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider,
             sheet,
+            cell: None,
             now_serial: None,
             rand_seed: None,
             random_state: Rc::new(Cell::new(None)),
@@ -115,6 +126,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
+            parse_cache: None,
         }
     }
 
@@ -122,6 +134,7 @@ impl<'a> EvalContext<'a> {
         Self {
             provider: self.provider,
             sheet,
+            cell: self.cell,
             now_serial: self.now_serial,
             rand_seed: self.rand_seed,
             random_state: Rc::clone(&self.random_state),
@@ -132,6 +145,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             shared_budget: self.shared_budget.clone(),
+            parse_cache: self.parse_cache,
         }
     }
 
@@ -234,6 +248,24 @@ fn next_random_stream() -> u64 {
     NEXT_STREAM.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed)
 }
 
+/// parsed-formula memo shared by graph build and every recalc. `parse_formula`
+/// is pure over the source text, so entries never invalidate — a changed
+/// formula is simply a different key.
+pub(crate) type ParseCache = Mutex<HashMap<String, Arc<Expr>>>;
+
+/// parse `src` once per unique text instead of once per cell that stores it.
+pub(crate) fn parse_cached(cache: &ParseCache, src: &str) -> Option<Arc<Expr>> {
+    if let Some(expr) = cache.lock().expect("parse cache poisoned").get(src) {
+        return Some(Arc::clone(expr));
+    }
+    let expr = Arc::new(parse_formula(src).ok()?);
+    cache
+        .lock()
+        .expect("parse cache poisoned")
+        .insert(src.to_string(), Arc::clone(&expr));
+    Some(expr)
+}
+
 pub(crate) fn err(value: ErrorValue) -> CellValue {
     CellValue::Error { value }
 }
@@ -293,7 +325,7 @@ type DefinedNameKey = (SheetId, String);
 /// definition's unqualified refs bind to.
 struct DefinedNameBinding {
     key: DefinedNameKey,
-    expression: Expr,
+    expression: Arc<Expr>,
     sheet: SheetId,
 }
 
@@ -363,7 +395,11 @@ fn bind_defined_name(
         .formula
         .strip_prefix('=')
         .unwrap_or(&defined.formula);
-    let expression = crate::parse_formula(formula).map_err(|_| ErrorValue::Name)?;
+    let expression = match ctx.parse_cache {
+        Some(cache) => parse_cached(cache, formula),
+        None => parse_formula(formula).ok().map(Arc::new),
+    }
+    .ok_or(ErrorValue::Name)?;
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -633,9 +669,13 @@ impl Area {
 }
 
 /// interpret an argument as a rectangular reference (1x1 for single cells);
-/// `None` for non-references or unknown sheets.
+/// `None` for non-references, unknown sheets, and reference functions whose
+/// result is #REF!.
 pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     match arg {
+        Expr::FuncCall { name, args } if name.eq_ignore_ascii_case("OFFSET") => {
+            crate::functions::lookups::offset_area(args, ctx).ok()
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,

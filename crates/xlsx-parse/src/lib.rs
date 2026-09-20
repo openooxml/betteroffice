@@ -35,6 +35,9 @@ pub struct ParsedWorkbook {
     /// Per sheet, the dimensions releases before hidden rows and columns read
     /// as zero stored. Only a legacy collaboration fingerprint needs these.
     pub legacy_dimensions: Vec<LegacySheetDimensions>,
+    /// The style table releases that needed an explicit `applyX` flag read.
+    /// Only a legacy collaboration fingerprint needs it.
+    pub legacy_styles: Option<xlsx_model::Stylesheet>,
 }
 
 /// Parses the model and captures source package state.
@@ -54,6 +57,7 @@ pub fn parse_workbook_with_package(
         active_sheet: parsed.active_sheet,
         package,
         legacy_dimensions: parsed.legacy_dimensions,
+        legacy_styles: parsed.legacy_styles,
     })
 }
 

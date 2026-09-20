@@ -2,6 +2,7 @@
 //! the content-pixel rectangle the display list is built for.
 
 use ooxml_drawingml::chart::PlotRect;
+use xlsx_model::styles::Stylesheet;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{CellRange, CellRef};
 
@@ -11,8 +12,8 @@ use crate::geometry::GridGeometry;
 
 /// content-pixel rectangle spanning an inclusive cell range, with the viewport
 /// origin at the range's top-left.
-pub fn viewport_for_range(sheet: &Sheet, range: CellRange) -> Viewport {
-    let geom = GridGeometry::new(sheet);
+pub fn viewport_for_range(sheet: &Sheet, styles: &Stylesheet, range: CellRange) -> Viewport {
+    let geom = GridGeometry::new(sheet, styles);
     let x = geom.col_x(range.start.col);
     let y = geom.row_y(range.start.row);
     let right = geom.col_x(range.end.col + 1);
@@ -27,8 +28,8 @@ pub fn viewport_for_range(sheet: &Sheet, range: CellRange) -> Viewport {
 
 /// content-pixel rectangle spanning the sheet's whole used range; an empty
 /// sheet falls back to a1:z50, matching `xlsx-wasm`'s `sheet_info` default extent.
-pub fn viewport_for_used_range(sheet: &Sheet) -> Viewport {
-    viewport_for_used_range_within(sheet, |_| true)
+pub fn viewport_for_used_range(sheet: &Sheet, styles: &Stylesheet) -> Viewport {
+    viewport_for_used_range_within(sheet, styles, |_| true)
 }
 
 /// [`viewport_for_used_range`], but a chart only widens the frame while `fits`
@@ -41,13 +42,14 @@ pub fn viewport_for_used_range(sheet: &Sheet) -> Viewport {
 /// the earlier one wins. A used range `fits` already rejects grows no further.
 pub fn viewport_for_used_range_within(
     sheet: &Sheet,
+    styles: &Stylesheet,
     mut fits: impl FnMut(&Viewport) -> bool,
 ) -> Viewport {
     let range = sheet
         .used_range()
         .unwrap_or_else(|| CellRange::new(CellRef::new(0, 0), CellRef::new(49, 25)));
-    let mut viewport = viewport_for_range(sheet, range);
-    let geometry = GridGeometry::new(sheet);
+    let mut viewport = viewport_for_range(sheet, styles, range);
+    let geometry = GridGeometry::new(sheet, styles);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -133,7 +135,11 @@ mod tests {
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
 
-        let vp = viewport_for_range(&sheet, CellRange::parse_a1("B2:C4").unwrap());
+        let vp = viewport_for_range(
+            &sheet,
+            &Stylesheet::default(),
+            CellRange::parse_a1("B2:C4").unwrap(),
+        );
         assert_eq!(vp.x, dc);
         assert_eq!(vp.y, dr);
         assert!((vp.width - dc * 2.0).abs() < 0.01);
@@ -145,7 +151,11 @@ mod tests {
         let sheet = Sheet::new("S");
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
-        let vp = viewport_for_range(&sheet, CellRange::parse_a1("A1").unwrap());
+        let vp = viewport_for_range(
+            &sheet,
+            &Stylesheet::default(),
+            CellRange::parse_a1("A1").unwrap(),
+        );
         assert_eq!((vp.x, vp.y), (0.0, 0.0));
         assert!((vp.width - dc).abs() < 0.01);
         assert!((vp.height - dr).abs() < 0.01);
@@ -159,7 +169,7 @@ mod tests {
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
 
-        let vp = viewport_for_used_range(&sheet);
+        let vp = viewport_for_used_range(&sheet, &Stylesheet::default());
         assert_eq!(vp.x, dc);
         assert_eq!(vp.y, dr);
         assert!((vp.width - dc * 3.0).abs() < 0.01);
@@ -171,7 +181,7 @@ mod tests {
         let sheet = Sheet::new("S");
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
-        let vp = viewport_for_used_range(&sheet);
+        let vp = viewport_for_used_range(&sheet, &Stylesheet::default());
         assert_eq!((vp.x, vp.y), (0.0, 0.0));
         assert!((vp.width - dc * 26.0).abs() < 0.01);
         assert!((vp.height - dr * 50.0).abs() < 0.01);
@@ -182,7 +192,7 @@ mod tests {
         let sheet = sheet_with_chart(1);
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
-        let vp = viewport_for_used_range(&sheet);
+        let vp = viewport_for_used_range(&sheet, &Stylesheet::default());
         assert_eq!((vp.x, vp.y), (0.0, 0.0));
         assert!((vp.width - dc * 14.0).abs() < 0.01);
         assert!((vp.height - dr * 16.0).abs() < 0.01);
@@ -193,7 +203,9 @@ mod tests {
         let sheet = sheet_with_chart(1);
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
-        let vp = viewport_for_used_range_within(&sheet, |grown| grown.height <= 16_384.0);
+        let vp = viewport_for_used_range_within(&sheet, &Stylesheet::default(), |grown| {
+            grown.height <= 16_384.0
+        });
         assert!((vp.width - dc * 14.0).abs() < 0.01);
         assert!((vp.height - dr * 16.0).abs() < 0.01);
     }
@@ -201,16 +213,29 @@ mod tests {
     #[test]
     fn a_chart_past_the_budget_is_left_out_of_frame() {
         let sheet = sheet_with_chart(2_000);
-        let used = viewport_for_range(&sheet, CellRange::parse_a1("A1:F11").unwrap());
-        let vp = viewport_for_used_range_within(&sheet, |grown| grown.height <= 16_384.0);
+        let used = viewport_for_range(
+            &sheet,
+            &Stylesheet::default(),
+            CellRange::parse_a1("A1:F11").unwrap(),
+        );
+        let vp = viewport_for_used_range_within(&sheet, &Stylesheet::default(), |grown| {
+            grown.height <= 16_384.0
+        });
         assert_eq!(vp, used);
     }
 
     #[test]
     fn a_used_range_the_budget_already_refuses_grows_no_further() {
         let sheet = sheet_with_chart(1);
-        let used = viewport_for_range(&sheet, CellRange::parse_a1("A1:F11").unwrap());
-        assert_eq!(viewport_for_used_range_within(&sheet, |_| false), used);
+        let used = viewport_for_range(
+            &sheet,
+            &Stylesheet::default(),
+            CellRange::parse_a1("A1:F11").unwrap(),
+        );
+        assert_eq!(
+            viewport_for_used_range_within(&sheet, &Stylesheet::default(), |_| false),
+            used
+        );
     }
 
     #[test]
@@ -219,7 +244,9 @@ mod tests {
         sheet.charts.push(chart_at_row(1));
         let dc = col_chars_to_px(DEFAULT_COL_WIDTH_CHARS);
         let dr = row_pt_to_px(DEFAULT_ROW_HEIGHT_PT);
-        let vp = viewport_for_used_range_within(&sheet, |grown| grown.height <= 16_384.0);
+        let vp = viewport_for_used_range_within(&sheet, &Stylesheet::default(), |grown| {
+            grown.height <= 16_384.0
+        });
         assert!((vp.width - dc * 14.0).abs() < 0.01);
         assert!((vp.height - dr * 16.0).abs() < 0.01);
     }

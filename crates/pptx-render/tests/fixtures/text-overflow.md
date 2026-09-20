@@ -5,7 +5,7 @@
 | 1 | Top overflow, object 2, blue `#2040B0` | 48 pt text paints below its 32 px box. |
 | 1 | `spAutoFit`, object 3, green `#147D40` | 48 pt / 64 px, instead of main's 24 pt / 32 px. |
 | 1 | Center and bottom anchors, objects 4–5 | A 73.59375 px line starts at y=269.203125 and y=248.40625 respectively, around boxes starting at y=290. |
-| 1 | `normAutofit` and fitting controls, objects 6–7 | Normal autofit still shrinks; fitting text remains 48 pt. |
+| 1 | `normAutofit` and fitting controls, objects 6–7 | Normal autofit keeps PowerPoint's stored scale, so the outgrown line overflows at 48 pt; fitting text remains 48 pt. |
 | 2 | Rotation, vertical flip, inherited `spAutoFit` | Full-size text remains clickable outside its box, using the stored shape's transform pivot. |
 | 3 | Vertical clip, horizontal clip, ellipsis, inherited clip | Preserve the existing clipped rendering and exclude hidden text from hit testing. |
 | 3 | Explicit overflow overriding inherited clip | Text paints outside the box and remains clickable. |

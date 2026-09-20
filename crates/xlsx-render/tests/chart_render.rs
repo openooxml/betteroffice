@@ -4,7 +4,7 @@ use ooxml_drawingml::chart::{ChartLegend, ChartPlotGroup, ChartSeries, ChartSpac
 use serde_json::{Value, json};
 use xlsx_model::chart::{AnchorCell, AnchorExtent, AnchorPos, ChartAnchor, SheetChart};
 use xlsx_model::workbook::{Cell as SheetCell, FreezePane, Sheet};
-use xlsx_model::{CellRef, CellValue, SheetId, Workbook};
+use xlsx_model::{CellRef, CellValue, SheetId, Stylesheet, Workbook};
 use xlsx_render::{
     DisplayList, DrawCmd, GridGeometry, RenderError, Viewport, build_display_list,
     build_display_list_with_charts,
@@ -191,7 +191,7 @@ fn charts_clip_to_the_body_and_precede_pane_dividers() {
             cy: 1_143_000,
         },
     }));
-    let geometry = GridGeometry::new(&sheet);
+    let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
     let frozen_x = geometry.col_x(1);
     let frozen_y = geometry.row_y(1);
     let mut workbook = Workbook::default();

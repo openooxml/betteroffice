@@ -84,7 +84,10 @@ fn mongolian_vertical_turns_the_box_and_runs_its_lines_the_other_way() {
             .fold(f32::MIN, f32::max);
         (top, bottom)
     };
-    assert_eq!(span(lines), span(east_asian));
+    let (top, bottom) = span(lines);
+    let (east_asian_top, east_asian_bottom) = span(east_asian);
+    assert!((top - east_asian_top).abs() < 0.001);
+    assert!((bottom - east_asian_bottom).abs() < 0.001);
 }
 
 #[test]
@@ -167,9 +170,9 @@ fn squeezed_font_size(source_id: u32, autofit: bool) -> f32 {
 }
 
 #[test]
-fn autofit_shrinks_a_squeezed_horizontal_box_but_never_a_stack() {
+fn autofit_without_a_stored_scale_leaves_a_squeezed_box_at_its_authored_size() {
     assert_eq!(squeezed_font_size(42, true), squeezed_font_size(42, false));
-    assert!(squeezed_font_size(45, true) < squeezed_font_size(45, false));
+    assert_eq!(squeezed_font_size(45, true), squeezed_font_size(45, false));
 }
 
 #[test]

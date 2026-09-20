@@ -8,7 +8,6 @@ use xlsx_model::{CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbo
 
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
-use crate::parser::parse_formula;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// forced to `0` by cycle participation.
@@ -99,7 +98,7 @@ fn run_recalc(
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
     let mut limited_cells = Vec::new();
     for u in &order {
-        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget));
+        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget), graph);
         if limited {
             limited_cells.push((u.0, cell_of(*u)));
         }
@@ -187,15 +186,15 @@ fn eval_node(
     u: Key,
     now_serial: Option<f64>,
     budget: Rc<EvaluationBudget>,
+    graph: &DepGraph,
 ) -> (Option<CellValue>, bool) {
-    let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
-        return (None, false);
-    };
-    let Ok(expr) = parse_formula(&src) else {
+    let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
     let mut ctx = EvalContext::with_budget(wb, u.0, budget);
+    ctx.cell = Some(cell_of(u));
     ctx.now_serial = now_serial;
+    ctx.parse_cache = Some(graph.asts());
     let value = evaluate(&expr, &ctx);
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
     if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
@@ -311,6 +310,20 @@ mod tests {
         );
     }
 
+    /// the array form of a supported function is still a gap in the engine, so
+    /// it must leave the cached value alone exactly as an unknown name does.
+    /// `nanogpt-excel` reaches this through
+    /// `SUMPRODUCT(OFFSET(...), TRANSPOSE(OFFSET(...)))`.
+    #[test]
+    fn an_array_result_the_engine_cannot_represent_keeps_the_cached_value() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_num(&mut wb, s, "A2", 3.0);
+        put_cached_formula(&mut wb, s, "B1", "SUMPRODUCT(TRANSPOSE(A1:A2))", num(5.0));
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+    }
+
     /// IFERROR answers for the call it wraps, so the gap never reaches the
     /// result and the computed value must replace the cache.
     #[test]
@@ -353,6 +366,21 @@ mod tests {
         put_cached_formula(&mut wb, s, "B1", "SUM(A1,A1)", num(99.0));
         rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(value(&wb, s, "B1"), num(4.0));
+    }
+
+    /// OFFSET reads its anchor's coordinates, not its value, so a cell may
+    /// offset from itself: Greptile flagged `A1=SUM(OFFSET(A1,1,0,3,1))`
+    /// reporting A1 as cyclic and zeroing a valid result.
+    #[test]
+    fn a_cell_may_offset_from_its_own_position() {
+        let (mut wb, s) = one_sheet();
+        for (cell, v) in [("A2", 1.0), ("A3", 2.0), ("A4", 3.0)] {
+            put_num(&mut wb, s, cell, v);
+        }
+        put_formula(&mut wb, s, "A1", "SUM(OFFSET(A1,1,0,3,1))");
+        let report = rebuild_and_recalc_all(&mut wb, None).1;
+        assert!(report.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "A1"), num(6.0));
     }
 
     #[test]
@@ -402,6 +430,42 @@ mod tests {
         let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A5"))], None);
         assert_eq!(value(&wb, s, "B1"), num(110.0));
         assert_eq!(changed_a1(&r), vec!["B1"]);
+    }
+
+    #[test]
+    fn static_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3", "A4"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_formula(&mut wb, s, "B1", "SUM(OFFSET(A1, 1, 0, 3, 1))");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(9.0));
+
+        put_num(&mut wb, s, "A3", 100.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(106.0));
+        assert_eq!(changed_a1(&r), vec!["B1"]);
+    }
+
+    #[test]
+    fn unresolvable_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_num(&mut wb, s, "D1", 2.0);
+        put_formula(&mut wb, s, "B1", "OFFSET(A1, D1, 0)");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(3.0));
+
+        put_num(&mut wb, s, "A3", 30.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(30.0));
+
+        put_num(&mut wb, s, "D1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
     }
 
     #[test]
@@ -524,6 +588,30 @@ mod tests {
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(r.cycle_cells, vec![(s, a1("A1"))]);
         assert_eq!(value(&wb, s, "A1"), num(0.0));
+    }
+
+    #[test]
+    fn referenceless_row_and_column_resolve_against_the_calling_cell() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "C7", "ROW()");
+        put_formula(&mut wb, s, "D8", "COLUMN()");
+        put_formula(&mut wb, s, "E9", "ROW()*100+COLUMN()");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C7"), num(7.0));
+        assert_eq!(value(&wb, s, "D8"), num(4.0));
+        assert_eq!(value(&wb, s, "E9"), num(905.0));
+    }
+
+    #[test]
+    fn row_of_a_reference_is_positional_not_a_read() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "X1", "ROW($X$1)+COLUMN($X$1)+ROWS($X$1:$X$4)");
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "ROW()-ROW($A$1)");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "X1"), num(1.0 + 24.0 + 4.0));
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
     }
 
     #[test]

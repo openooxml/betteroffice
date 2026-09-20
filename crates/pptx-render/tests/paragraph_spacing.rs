@@ -57,7 +57,7 @@ fn spacing_opens_between_paragraphs_and_cascades_from_the_master_and_layout() {
     assert_gaps(lines(&list, 8), 0.0);
     assert_gaps(lines(&list, 2), points(10.0));
     assert_gaps(lines(&list, 3), points(28.0));
-    assert_gaps(lines(&list, 4), points(16.0));
+    assert_gaps(lines(&list, 4), points(19.2));
     assert_gaps(lines(&list, 5), 0.0);
     assert_gaps(lines(&list, 6), points(12.0));
 

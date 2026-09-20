@@ -6,6 +6,7 @@ use ooxml_drawingml::chart::{
     plot_chart_into,
 };
 use xlsx_model::chart::{AnchorCell, ChartAnchor, SheetChart};
+use xlsx_model::styles::Stylesheet;
 use xlsx_model::workbook::Sheet;
 use xlsx_model::{MAX_COLS, MAX_ROWS};
 
@@ -296,8 +297,12 @@ fn px_to_emu(px: f64) -> Option<i64> {
 /// Every chart the viewport shows, in paint order, carrying the geometry the
 /// display list publishes. The label is left empty: resolving anchors needs no
 /// chart part, and a hit test has no use for one.
-pub fn chart_regions(sheet: &Sheet, viewport: &Viewport) -> Result<Vec<ChartRegion>, RenderError> {
-    let geometry = GridGeometry::new(sheet);
+pub fn chart_regions(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    viewport: &Viewport,
+) -> Result<Vec<ChartRegion>, RenderError> {
+    let geometry = GridGeometry::new(sheet, styles);
     let (frozen_rows, frozen_cols) = sheet
         .freeze_pane
         .map_or((0, 0), |pane| (pane.rows, pane.cols));
@@ -965,7 +970,7 @@ mod tests {
         let mut sheet = Sheet::new("Sheet1");
         sheet.col_widths.insert(1, 0.0);
         sheet.row_heights.insert(1, 0.0);
-        GridGeometry::new(&sheet)
+        GridGeometry::new(&sheet, &Stylesheet::default())
     }
 
     fn cell(col: u32, col_off: i64, row: u32, row_off: i64) -> AnchorCell {
@@ -1120,7 +1125,7 @@ mod tests {
                 refs: Vec::new(),
             });
         }
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let mut commands = Vec::new();
         let mut a11y = Vec::new();
         let resolved = std::cell::Cell::new(0);
@@ -1229,7 +1234,7 @@ mod tests {
             },
             refs: Vec::new(),
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let viewport = Viewport {
             x: 0.0,
             y: 0.0,
@@ -1284,7 +1289,7 @@ mod tests {
             to: cell(4, 0, 6, 0),
             edit_as: AnchorEditAs::TwoCell,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let before = resolve_chart_anchor(sheet.charts[0].anchor, &geometry, 0, 0).unwrap();
         let moved = moved_chart_anchor(sheet.charts[0].anchor, &geometry, 17.0, -5.0).unwrap();
         let after = resolve_chart_anchor(moved, &geometry, 0, 0).unwrap();
@@ -1312,7 +1317,7 @@ mod tests {
             from: cell(1, 0, 1, 0),
             extent,
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         let moved =
             moved_chart_anchor(sheet.charts[0].anchor, &geometry, -10_000.0, -10_000.0).unwrap();
         assert_eq!(
@@ -1333,7 +1338,7 @@ mod tests {
                 cy: 476_250,
             },
         });
-        let geometry = GridGeometry::new(&sheet);
+        let geometry = GridGeometry::new(&sheet, &Stylesheet::default());
         assert!(moved_chart_anchor(sheet.charts[0].anchor, &geometry, 5.0, 5.0).is_none());
         assert!(
             moved_chart_anchor(
@@ -1364,7 +1369,7 @@ mod tests {
             width: 400.0,
             height: 300.0,
         };
-        let regions = chart_regions(&sheet, &viewport).unwrap();
+        let regions = chart_regions(&sheet, &Stylesheet::default(), &viewport).unwrap();
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].id, "xl/drawings/drawing1.xml#0");
         assert!(regions[0].label.is_empty());
@@ -1373,6 +1378,7 @@ mod tests {
 
         let scrolled = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 2_000.0,
                 y: 2_000.0,
@@ -1408,6 +1414,7 @@ mod tests {
         });
         let regions = chart_regions(
             &sheet,
+            &Stylesheet::default(),
             &Viewport {
                 x: 0.0,
                 y: 0.0,
