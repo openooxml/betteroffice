@@ -46,7 +46,7 @@ class XlsxFidelityTests(unittest.TestCase):
     def test_each_range_replaces_print_area_and_hides_other_sheets(self):
         parts = package(fixture())
         parts['xl/workbook.xml'] = parts['xl/workbook.xml'].replace(b'</sheets>', b'<sheet name="O\'Brien" sheetId="2" r:id="rId2" state="hidden"/></sheets><definedNames><definedName name="_xlnm.Print_Titles" localSheetId="0">Sheet1!$1:$2</definedName><definedName name="KeepMe">42</definedName></definedNames>')
-        parts['xl/_rels/workbook.xml.rels'] = parts['xl/_rels/workbook.xml.rels'].replace(b'</Relationships>', b'<Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>')
+        parts['xl/_rels/workbook.xml.rels'] = parts['xl/_rels/workbook.xml.rels'].replace(b'</Relationships>', b'<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>')
         parts['xl/worksheets/sheet2.xml'] = parts['xl/worksheets/sheet1.xml']
         prepared = package(range_workbook(repack(parts), PROFILE, dict(PAGE, sheet=1, range='C4:D7')))
         book = minidom.parseString(prepared['xl/workbook.xml']).documentElement
@@ -56,6 +56,20 @@ class XlsxFidelityTests(unittest.TestCase):
         self.assertEqual([node.firstChild.data for node in names], ['42', "'O''Brien'!$C$4:$D$7"])
         self.assertEqual(names[-1].getAttribute('localSheetId'), '1')
         self.assertEqual(prepared['xl/worksheets/sheet1.xml'], parts['xl/worksheets/sheet1.xml'])
+
+    def test_worksheet_index_skips_chart_tabs_but_print_area_uses_workbook_index(self):
+        parts = package(fixture())
+        parts['xl/workbook.xml'] = parts['xl/workbook.xml'].replace(b'<sheets>', b'<sheets><sheet name="Chart" sheetId="2" r:id="chart"/>')
+        parts['xl/_rels/workbook.xml.rels'] = parts['xl/_rels/workbook.xml.rels'].replace(b'</Relationships>', b'<Relationship Id="chart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>')
+        parts['xl/chartsheets/sheet1.xml'] = b'<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>'
+        prepared = package(range_workbook(repack(parts), PROFILE, PAGE))
+        self.assertEqual(prepared['xl/chartsheets/sheet1.xml'], parts['xl/chartsheets/sheet1.xml'])
+        book = minidom.parseString(prepared['xl/workbook.xml']).documentElement
+        tabs = children(children(book, 'sheets')[0], 'sheet')
+        self.assertEqual([tab.getAttribute('state') for tab in tabs], ['hidden', 'visible'])
+        area = children(children(book, 'definedNames')[0], 'definedName')[0]
+        self.assertEqual(area.getAttribute('localSheetId'), '1')
+        self.assertEqual(area.firstChild.data, "'Sheet1'!$A$1:$G$1")
 
     def test_rejects_unknown_paper_and_invalid_ranges_instead_of_fitting(self):
         for page in [dict(PAGE, width_pt=100), dict(PAGE, range='B2:A1'), dict(PAGE, range='XFE1:XFE2'), dict(PAGE, sheet=3)]:

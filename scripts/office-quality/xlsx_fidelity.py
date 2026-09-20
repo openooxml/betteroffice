@@ -64,7 +64,7 @@ def range_workbook(data, profile, page):
     if paper is None:
         raise ValueError('Unsupported recorded paper dimensions')
     parts = package(data)
-    worksheets = sheets(parts)
+    worksheets = sheets(parts, worksheets_only=True)
     if page['sheet'] >= len(worksheets):
         raise ValueError('Recorded worksheet is missing')
     name, path, _ = worksheets[page['sheet']]

@@ -24,12 +24,17 @@ def package(data):
         return {entry.filename: archive.read(entry) for entry in entries}
 
 
-def sheets(parts):
+def sheets(parts, worksheets_only=False):
     workbook = ET.fromstring(parts['xl/workbook.xml'])
     relationships = ET.fromstring(parts['xl/_rels/workbook.xml.rels'])
     targets = {r.get('Id'): r.get('Target') for r in relationships if r.get('TargetMode') != 'External'}
+    worksheet_ids = {r.get('Id') for r in relationships
+                     if r.get('Type') == 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet'
+                     and r.get('TargetMode') != 'External'}
     result = []
     for sheet in workbook.findall('s:sheets/s:sheet', NS):
+        if worksheets_only and sheet.get(REL) not in worksheet_ids:
+            continue
         target = targets[sheet.get(REL)]
         path = posixpath.normpath(target.lstrip('/') if target.startswith('/') else 'xl/' + target)
         if not path.startswith('xl/') or path not in parts:
