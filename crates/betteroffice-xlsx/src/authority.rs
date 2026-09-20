@@ -582,9 +582,7 @@ impl WorkbookAuthority {
         })
     }
 
-    /// `baseline` may carry this replica's already-encoded current state;
-    /// callers retrying a queue of pending updates pass it back in while the
-    /// document has not changed between retries.
+    /// `baseline` may carry this replica's already-encoded current state.
     pub(crate) fn stage_updates_v1(
         &self,
         updates: &[&[u8]],
@@ -1145,10 +1143,7 @@ impl WorkbookAuthority {
         Ok((model, structure))
     }
 
-    /// `authored_styles` holds the pre-batch style of every `SetCell` target,
-    /// collected from the materialization the caller already made to apply the
-    /// batch — the document has not changed since, so re-materializing here
-    /// would read the same state twice.
+    /// `authored_styles` holds the pre-batch style of every `SetCell` target.
     fn sync_model(
         &mut self,
         model: &WorkbookModel,
@@ -1162,7 +1157,11 @@ impl WorkbookAuthority {
         self.validate_sync_state(&current_keys, &keys)?;
 
         let topology_changed = current_keys != keys;
-        let full_sync = ops.iter().any(requires_full_semantic_sync);
+        // a SetCell after AddSheet targets the post-insert index, so its
+        // pre-batch baseline lookup would read the wrong sheet.
+        let full_sync = ops.iter().any(requires_full_semantic_sync)
+            || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+                && ops.iter().any(|op| matches!(op, Op::SetCell { .. })));
         let structure_delta = i64::try_from(ops.iter().filter(|op| is_structural_op(op)).count())
             .map_err(|_| "too many structural operations".to_string())?;
         let mut authored_cells = HashSet::new();
