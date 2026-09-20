@@ -201,11 +201,11 @@ pub fn write_pptx_with_edits(
                     .ok_or_else(|| PptxError::MissingPart(part_path.clone()))?;
                 let mut root = parse_xml(bytes, part_path, &mut budget)?;
                 let original_root = root.clone();
-                let theme = slide_theme(package, part_path);
+                let theme = crate::slide_theme(package, Some(part_path), None);
                 patch_slide(
                     &mut root,
                     shapes,
-                    theme,
+                    Some(&theme),
                     part_path,
                     package.shape_elements,
                     &mut sink,
@@ -1303,47 +1303,6 @@ fn patch_slide(
         sink,
         budget,
     )
-}
-
-/// The theme a slide's colours resolve against, via its layout's master.
-fn slide_theme<'a>(package: &'a PptxPackage, part_path: &str) -> Option<&'a Theme> {
-    let slide = package
-        .slides
-        .iter()
-        .find(|slide| slide.part_path == part_path);
-    let layout = slide
-        .and_then(|slide| slide.layout_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .layouts
-                .iter()
-                .find(|layout| layout.part_path == path)
-        })
-        .or_else(|| package.layouts.first());
-    let master = layout
-        .and_then(|layout| layout.master_part_path.as_deref())
-        .and_then(|path| {
-            package
-                .masters
-                .iter()
-                .find(|master| master.part_path == path)
-        })
-        .or_else(|| {
-            layout.and_then(|layout| {
-                package.masters.iter().find(|master| {
-                    master
-                        .layout_part_paths
-                        .iter()
-                        .any(|path| path == &layout.part_path)
-                })
-            })
-        })
-        .or_else(|| package.masters.first());
-    master
-        .and_then(|master| master.theme_part_path.as_deref())
-        .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
-        .map(|part| &part.theme)
-        .or_else(|| package.themes.first().map(|part| &part.theme))
 }
 
 fn max_shape_id(root: &XmlElement) -> u32 {

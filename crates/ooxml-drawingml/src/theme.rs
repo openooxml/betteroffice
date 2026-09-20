@@ -129,12 +129,64 @@ impl Default for ThemeFontScheme {
     }
 }
 
+/// `p:clrMap`, which decides the `a:clrScheme` slot every `tx1`/`bg1`-style
+/// scheme colour resolves against. Only entries that differ from the identity
+/// mapping are stored, so an empty map resolves each slot to itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ColorMap(IndexMap<String, String>);
+
+impl ColorMap {
+    pub fn set(&mut self, name: &str, slot: &str) {
+        let name = normalize_color_slot(name);
+        if identity_color_slot(name) == slot || ThemeColorScheme::default().get(slot).is_none() {
+            return;
+        }
+        self.0.insert(name.to_owned(), slot.to_owned());
+    }
+
+    pub fn is_identity(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn resolve<'a>(&'a self, slot: &'a str) -> &'a str {
+        self.0
+            .get(normalize_color_slot(slot))
+            .map_or(slot, String::as_str)
+    }
+}
+
+/// Scheme colour names as parsers normalize them, which is also how
+/// [`ColorMap`] keys them.
+fn normalize_color_slot(slot: &str) -> &str {
+    match slot {
+        "tx1" => "text1",
+        "tx2" => "text2",
+        "bg1" => "background1",
+        "bg2" => "background2",
+        slot => slot,
+    }
+}
+
+fn identity_color_slot(name: &str) -> &str {
+    match name {
+        "text1" => "dk1",
+        "text2" => "dk2",
+        "background1" => "lt1",
+        "background2" => "lt2",
+        name => name,
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Theme {
     pub name: String,
     pub color_scheme: ThemeColorScheme,
     pub font_scheme: ThemeFontScheme,
+    /// Absent from packages serialized before `p:clrMap` was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 impl Default for Theme {
@@ -143,12 +195,15 @@ impl Default for Theme {
             name: "Office Theme".to_owned(),
             color_scheme: ThemeColorScheme::default(),
             font_scheme: ThemeFontScheme::default(),
+            color_map: ColorMap::default(),
         }
     }
 }
 
 pub fn get_theme_color(theme: Option<&Theme>, slot: &str) -> String {
-    if let Some(value) = theme.and_then(|theme| theme.color_scheme.get(slot)) {
+    if let Some(value) =
+        theme.and_then(|theme| theme.color_scheme.get(theme.color_map.resolve(slot)))
+    {
         return value.to_owned();
     }
     let defaults = ThemeColorScheme::default();

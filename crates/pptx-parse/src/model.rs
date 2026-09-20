@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, StyleReference,
-    TableStyleList, Theme, ThemeFormatScheme,
+    ColorMap, ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline,
+    StyleReference, TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +142,9 @@ pub struct Slide {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
 }
@@ -160,6 +163,9 @@ pub struct SlideLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the master map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +182,9 @@ pub struct SlideMaster {
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     pub text_styles: TextStyleSet,
+    /// `p:clrMap`; absent from packages serialized before it was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

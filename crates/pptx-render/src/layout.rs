@@ -18,7 +18,7 @@ use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
     GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
     Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow,
+    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -201,7 +201,14 @@ impl SlideRenderer {
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
-        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        // `p:clrMap` lives on the master and `p:clrMapOvr` on the parts below it,
+        // so the slot mapping is per slide rather than per theme part.
+        let mapped_theme = Theme {
+            color_map: effective_color_map(parsed_slide, layout, master),
+            ..base_theme.clone()
+        };
+        let theme = &mapped_theme;
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
