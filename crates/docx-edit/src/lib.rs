@@ -53,13 +53,13 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use yrs::types::Attrs;
 use yrs::types::text::YChange;
+use yrs::types::{Attrs, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ClientID, Doc, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options, Out,
-    ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
+    Any, Assoc, ClientID, Doc, In, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options,
+    Out, ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
 };
 
 mod ctx;
@@ -219,6 +219,14 @@ pub struct ParagraphSnapshot {
     pub para_id: ParagraphId,
     pub text: String,
     pub properties: BTreeMap<String, Any>,
+}
+
+/// One paragraph of a [`EditingDoc::seed_story`] batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeedParagraph {
+    pub text: String,
+    pub p_style: String,
+    pub alignment: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,6 +389,66 @@ impl EditingDoc {
         );
         write_pilcrow_properties(&pilcrow, &mut txn, &para_id, p_style, alignment);
         Ok(para_id)
+    }
+
+    /// Adds a story holding every listed paragraph in ONE transaction — the
+    /// `load_json` seeding path, at O(story) instead of O(paragraphs × story).
+    ///
+    /// Equivalent to `create_story` plus appending each further paragraph at
+    /// the trailing pilcrow: a seeded mark only ever holds `paraId`, `pStyle`
+    /// and `alignment`, exactly what the split path converges to. Texts beyond
+    /// the first paragraph must be break-free, matching `insert_text`.
+    /// Returns the paragraph IDs in document order.
+    pub fn seed_story(
+        &self,
+        story_id: impl Into<StoryId>,
+        paragraphs: &[SeedParagraph],
+    ) -> OpResult<Vec<ParagraphId>> {
+        if paragraphs.is_empty() {
+            return Err(OpError::EmptyRange);
+        }
+        let story_id = story_id.into();
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let stories = txn
+            .get_map(STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        if stories.contains_key(&txn, &story_id) {
+            return Err(OpError::StoryExists(story_id));
+        }
+        let story = stories.insert(&mut txn, story_id, TextPrelim::new(""));
+        let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
+        let mut para_ids = Vec::with_capacity(paragraphs.len());
+        let attrs = Box::new(insertion_attrs(None, None));
+        for (index, paragraph) in paragraphs.iter().enumerate() {
+            if index > 0
+                && let Err(error) = ops::text::validate_text(&paragraph.text)
+            {
+                story.apply_delta(&mut txn, std::mem::take(&mut deltas));
+                return Err(error);
+            }
+            if !paragraph.text.is_empty() {
+                deltas.push(Delta::Inserted(
+                    In::Any(Any::String(Arc::from(paragraph.text.as_str()))),
+                    Some(attrs.clone()),
+                ));
+            }
+            let para_id = self.next_id();
+            deltas.push(Delta::Inserted(
+                In::Map(MapPrelim::from_iter([
+                    (KIND_KEY.to_owned(), Any::from(PILCROW_KIND)),
+                    (PARA_ID.to_owned(), Any::from(para_id.as_str())),
+                    ("pStyle".to_owned(), Any::from(paragraph.p_style.as_str())),
+                    (
+                        "alignment".to_owned(),
+                        Any::from(paragraph.alignment.as_str()),
+                    ),
+                ])),
+                Some(attrs.clone()),
+            ));
+            para_ids.push(para_id);
+        }
+        story.apply_delta(&mut txn, deltas);
+        Ok(para_ids)
     }
 
     /// Removes one complete story from the document map.
