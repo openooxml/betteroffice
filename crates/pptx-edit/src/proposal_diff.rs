@@ -41,8 +41,7 @@ pub struct ProposalDiffPreview {
     pub text_changes: Vec<ProposalTextChange>,
 }
 
-/// Slide-scoped diff preview: `scope` is the annotated render input and
-/// `snapshot` carries only that slide — the payload callers serialize.
+/// Slide-scoped diff preview: `scope` is the render input, `snapshot` carries that slide.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalSlideDiff {
@@ -53,9 +52,7 @@ pub struct ProposalSlideDiff {
 }
 
 impl DeckSession {
-    /// Slide-scoped `preview_proposal_diff`: resolves targets, staleness and
-    /// changes against the proposal's touched shapes only, and materializes
-    /// just the rendered slide instead of the whole deck.
+    /// Slide-scoped `preview_proposal_diff`.
     pub fn preview_proposal_diff_slide(
         &self,
         id: &str,
