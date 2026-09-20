@@ -2091,7 +2091,7 @@ impl Workbook {
 
     /// Rebuild the authority after a failed sync may have half-written it.
     fn restore_authority(&mut self) {
-        if let Ok(authority) = WorkbookAuthority::from_source(&self.model, None, &[]) {
+        if let Ok(authority) = WorkbookAuthority::from_source(&self.model, None, &[], None) {
             self.authority = authority;
         }
     }
