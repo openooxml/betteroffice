@@ -256,6 +256,8 @@ impl DeckSession {
         let undo = DeckUndoManager::new(&doc, self.client_id)?;
         let preview = DeckSession {
             doc,
+            staged: std::cell::RefCell::new(None),
+            package_json: std::cell::RefCell::new(self.package_json.borrow().clone()),
             client_id: self.client_id,
             id_counter: self.id_counter.load(Ordering::Relaxed).into(),
             package: self.package.clone(),

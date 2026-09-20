@@ -5,9 +5,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
+
 use pptx_parse::PptxPackage;
 use sha2::{Digest, Sha256};
-use yrs::updates::decoder::{Decode, Decoder, DecoderV1};
 use yrs::updates::encoder::Encode;
 use yrs::{
     ClientID, Doc, OffsetKind, Options, ReadTxn, StateVector, StickyIndex, Subscription, Transact,
@@ -63,6 +64,13 @@ pub struct CaretAnchor {
 
 pub struct DeckSession {
     pub(crate) doc: Doc,
+    /// Persistent clone of `doc` that remote updates stage against before
+    /// adoption, so a rejected update leaves `doc` untouched without paying a
+    /// full clone per apply. Built lazily and re-synced by diff.
+    staged: RefCell<Option<Doc>>,
+    /// The `packageJson` bytes `doc` currently stores — proven to parse — so
+    /// updates that leave them untouched skip the deserialize.
+    package_json: RefCell<Arc<[u8]>>,
     client_id: u64,
     id_counter: AtomicU64,
     package: Arc<PptxPackage>,
@@ -113,15 +121,7 @@ impl DeckSession {
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
-        let undo = DeckUndoManager::new(&doc, client_id)?;
-        Ok(Self {
-            doc,
-            client_id,
-            id_counter: AtomicU64::new(0),
-            package: Arc::new(package),
-            undo: RefCell::new(undo),
-            proposals: Default::default(),
-        })
+        Self::assemble(doc, client_id, package)
     }
 
     pub fn open_from_update(update: &[u8], client_id: u64) -> EditResult<Self> {
@@ -136,9 +136,16 @@ impl DeckSession {
         deck::migrate_doc(&doc)?;
         deck::validate_doc(&doc)?;
         let package = deck::package_from_doc(&doc)?;
+        Self::assemble(doc, client_id, package)
+    }
+
+    fn assemble(doc: Doc, client_id: u64, package: PptxPackage) -> EditResult<Self> {
         let undo = DeckUndoManager::new(&doc, client_id)?;
+        let package_json = deck::package_json_bytes(&doc)?;
         Ok(Self {
             doc,
+            staged: RefCell::new(None),
+            package_json: RefCell::new(package_json),
             client_id,
             id_counter: AtomicU64::new(0),
             package: Arc::new(package),
@@ -185,10 +192,14 @@ impl DeckSession {
         )?;
         story::import_source_numbering_restarts(&session.doc, &package)?;
         outline_gradients::import_source(&session, &package)?;
-        Ok(Self {
+        let session = Self {
             package: Arc::new(package),
             ..session
-        })
+        };
+        // The import passes may have rewritten `packageJson` — re-record the
+        // bytes the session has proven to parse.
+        *session.package_json.borrow_mut() = deck::package_json_bytes(&session.doc)?;
+        Ok(session)
     }
 
     pub fn client_id(&self) -> u64 {
@@ -226,20 +237,82 @@ impl DeckSession {
             )));
         }
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
-        let staged = doc_with_client_id(self.client_id);
-        hydrate_doc(&staged, &self.encode_state_as_update_v1())?;
-        staged
-            .transact_mut_with(REMOTE_ORIGIN)
-            .apply_update(incoming)
-            .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        deck::validate_doc(&staged)?;
+        self.sync_staged()?;
+        let validated = {
+            let staged = self.staged.borrow();
+            let staged = staged.as_ref().expect("staged doc synced");
+            // The mut transaction must drop — committing the update — before
+            // validation opens a read transaction on the same store.
+            let applied = staged
+                .transact_mut_with(REMOTE_ORIGIN)
+                .apply_update(incoming)
+                .map_err(|error| EditError::InvalidUpdate(error.to_string()));
+            applied.and_then(|()| {
+                deck::validate_remote_doc(staged, &self.package, &self.package_json.borrow())
+            })
+        };
+        let (snapshot, package_json) = match validated {
+            Ok(ok) => ok,
+            Err(error) => {
+                self.rebuild_staged()?;
+                return Err(error);
+            }
+        };
 
         let incoming = decode_update_v1(bytes).map_err(EditError::InvalidUpdate)?;
         self.doc
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
             .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-        self.snapshot()
+        *self.package_json.borrow_mut() = package_json;
+        Ok(snapshot)
+    }
+
+    /// Brings `staged` to `doc`'s state — a diff replay after local edits, a
+    /// full re-hydrate when the clone has drifted sideways or is missing.
+    fn sync_staged(&self) -> EditResult<()> {
+        let doc_sv = self.doc.transact().state_vector();
+        let staged_sv = self
+            .staged
+            .borrow()
+            .as_ref()
+            .map(|staged| staged.transact().state_vector());
+        match staged_sv {
+            None => self.rebuild_staged(),
+            Some(staged_sv) if staged_sv == doc_sv => Ok(()),
+            Some(staged_sv) if state_vector_exceeds(&staged_sv, &doc_sv) => self.rebuild_staged(),
+            Some(staged_sv) => {
+                let diff = self.doc.transact().encode_diff_v1(&staged_sv);
+                let caught_up = decode_update_v1(&diff).and_then(|update| {
+                    self.staged
+                        .borrow()
+                        .as_ref()
+                        .expect("staged doc synced")
+                        .transact_mut()
+                        .apply_update(update)
+                        .map_err(|error| error.to_string())
+                });
+                let synced = caught_up.is_ok()
+                    && self
+                        .staged
+                        .borrow()
+                        .as_ref()
+                        .map(|staged| staged.transact().state_vector() == doc_sv)
+                        .unwrap_or(false);
+                if synced {
+                    Ok(())
+                } else {
+                    self.rebuild_staged()
+                }
+            }
+        }
+    }
+
+    fn rebuild_staged(&self) -> EditResult<()> {
+        let staged = doc_with_client_id(self.client_id);
+        hydrate_doc(&staged, &self.encode_state_as_update_v1())?;
+        *self.staged.borrow_mut() = Some(staged);
+        Ok(())
     }
 
     pub fn observe_update_v1<F>(&self, callback: F) -> EditResult<Subscription>
@@ -311,6 +384,10 @@ fn validate_client_id(client_id: u64) -> EditResult<()> {
         return Err(EditError::InvalidClientId(client_id));
     }
     Ok(())
+}
+
+fn state_vector_exceeds(a: &StateVector, b: &StateVector) -> bool {
+    a.iter().any(|(client, clock)| *clock > b.get(client))
 }
 
 fn hydrate_doc(doc: &Doc, bytes: &[u8]) -> EditResult<()> {

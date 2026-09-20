@@ -913,13 +913,49 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
     let package = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
-        validate_schema_version(&meta, &txn)?;
-        if map_string(&meta, &txn, "fingerprint").is_none() {
-            return Err(EditError::InvalidState("missing fingerprint".to_owned()));
-        }
-        package_from_meta(&meta, &txn)?
+        serde_json::from_slice(&checked_package_json(&meta, &txn)?)
+            .map_err(|error| EditError::InvalidState(error.to_string()))?
     };
-    let snapshot = snapshot_doc(doc, &package)?;
+    validate_structure(doc, &package).map(|_| ())
+}
+
+/// Validates a staged clone after a remote update, skipping the `packageJson`
+/// deserialize when its bytes still equal `proven` — bytes the session already
+/// parsed. Returns the post-apply snapshot and the packageJson bytes the
+/// caller should adopt as the new proven buffer.
+pub(crate) fn validate_remote_doc(
+    doc: &Doc,
+    package: &PptxPackage,
+    proven: &Arc<[u8]>,
+) -> EditResult<(DeckSnapshot, Arc<[u8]>)> {
+    let package_json = {
+        let txn = doc.transact();
+        let meta = required_map(&txn, META)?;
+        checked_package_json(&meta, &txn)?
+    };
+    if package_json != *proven {
+        serde_json::from_slice::<PptxPackage>(&package_json)
+            .map_err(|error| EditError::InvalidState(error.to_string()))?;
+    }
+    Ok((validate_structure(doc, package)?, package_json))
+}
+
+fn checked_package_json<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<Arc<[u8]>> {
+    validate_schema_version(meta, txn)?;
+    if map_string(meta, txn, "fingerprint").is_none() {
+        return Err(EditError::InvalidState("missing fingerprint".to_owned()));
+    }
+    package_json_from_meta(meta, txn)
+}
+
+pub(crate) fn package_json_bytes(doc: &Doc) -> EditResult<Arc<[u8]>> {
+    let txn = doc.transact();
+    let meta = required_map(&txn, META)?;
+    package_json_from_meta(&meta, &txn)
+}
+
+fn validate_structure(doc: &Doc, package: &PptxPackage) -> EditResult<DeckSnapshot> {
+    let snapshot = snapshot_doc(doc, package)?;
     if snapshot.width_emu <= 0 || snapshot.height_emu <= 0 {
         return Err(EditError::InvalidState(
             "slide dimensions must be positive".to_owned(),
@@ -933,7 +969,7 @@ pub(crate) fn validate_doc(doc: &Doc) -> EditResult<()> {
             .map_err(|_| EditError::InvalidState(format!("story {story_id} is not text")))?;
         validate_story(&story, &txn, story_id)?;
     }
-    Ok(())
+    Ok(snapshot)
 }
 
 pub(crate) fn package_from_doc(doc: &Doc) -> EditResult<PptxPackage> {
@@ -1521,10 +1557,15 @@ fn validate_schema_version<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<()>
 }
 
 fn package_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<PptxPackage> {
+    serde_json::from_slice(&package_json_from_meta(meta, txn)?)
+        .map_err(|error| EditError::InvalidState(error.to_string()))
+}
+
+fn package_json_from_meta<T: ReadTxn>(meta: &MapRef, txn: &T) -> EditResult<Arc<[u8]>> {
     let Some(Out::Any(Any::Buffer(bytes))) = meta.get(txn, "packageJson") else {
         return Err(EditError::InvalidState("missing package data".to_owned()));
     };
-    serde_json::from_slice(&bytes).map_err(|error| EditError::InvalidState(error.to_string()))
+    Ok(bytes)
 }
 
 pub(crate) fn live_shape_order<T: ReadTxn>(order: &ArrayRef, txn: &T) -> EditResult<Vec<String>> {
