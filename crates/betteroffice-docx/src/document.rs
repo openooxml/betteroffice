@@ -13,7 +13,6 @@ use docx_parse::serializer::{
 use docx_parse::table::Table;
 use docx_parse::xml::ParseLimits;
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 
 use crate::types::DEFAULT_SERIALIZATION_TIME;
 use crate::{DocumentModel, DocumentStructure, Error, LayoutResult, Result, SaveOptions};
