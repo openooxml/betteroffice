@@ -67,8 +67,7 @@ pub struct SheetFormat {
     pub custom_height: bool,
 }
 
-/// a `<col>` run that names a style: the `cellXfs` index every cell from
-/// `first` through `last` inherits when it declares none of its own.
+/// a `<col>` run's style: the `cellXfs` index its columns give a cell that names none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColStyle {
     pub first: ColId,
@@ -87,8 +86,7 @@ pub struct Sheet {
     pub row_heights: BTreeMap<RowId, f64>,
     /// parsed from `sheetFormatPr`; read by the renderer, never by the writer.
     pub format: SheetFormat,
-    /// `<col>` runs naming a style, in source order; read by the renderer,
-    /// never the writer.
+    /// `<col>` style runs in source order; read by the renderer, never the writer.
     pub col_styles: Vec<ColStyle>,
     pub charts: Vec<SheetChart>,
 }
@@ -105,10 +103,8 @@ impl Sheet {
         self.cells.get(&(at.row, at.col))
     }
 
-    /// the style a column's `<col>` run gives every cell that declares none;
-    /// later runs win, matching how excel resolves overlapping runs. only the
-    /// fill and the row fit read it today, so callers that want a cell's font,
-    /// number format, alignment or border still read `Cell::style` directly.
+    /// the style a `<col>` run gives a cell that names none; later runs win.
+    /// only the fill and the row fit consult it; other facets read `Cell::style`.
     pub fn col_style(&self, col: ColId) -> Option<u32> {
         self.col_styles
             .iter()
