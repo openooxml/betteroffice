@@ -53,13 +53,13 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use yrs::types::Attrs;
 use yrs::types::text::YChange;
+use yrs::types::{Attrs, Delta};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::Encode;
 use yrs::{
-    Any, Assoc, ClientID, Doc, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options, Out,
-    ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
+    Any, Assoc, ClientID, Doc, In, IndexedSequence, Map, MapPrelim, MapRef, OffsetKind, Options,
+    Out, ReadTxn, StateVector, StickyIndex, Text, TextPrelim, TextRef, Transact, Update,
 };
 
 mod ctx;
@@ -219,6 +219,14 @@ pub struct ParagraphSnapshot {
     pub para_id: ParagraphId,
     pub text: String,
     pub properties: BTreeMap<String, Any>,
+}
+
+/// One paragraph of a [`EditingDoc::seed_story`] batch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SeedParagraph {
+    pub text: String,
+    pub p_style: String,
+    pub alignment: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -381,6 +389,56 @@ impl EditingDoc {
         );
         write_pilcrow_properties(&pilcrow, &mut txn, &para_id, p_style, alignment);
         Ok(para_id)
+    }
+
+    /// Seeds a story and returns its paragraph IDs in document order.
+    pub fn seed_story(
+        &self,
+        story_id: impl Into<StoryId>,
+        paragraphs: &[SeedParagraph],
+    ) -> OpResult<Vec<ParagraphId>> {
+        if paragraphs.is_empty() {
+            return Err(OpError::EmptyRange);
+        }
+        for paragraph in &paragraphs[1..] {
+            ops::text::validate_text(&paragraph.text)?;
+        }
+        let story_id = story_id.into();
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let stories = txn
+            .get_map(STORIES)
+            .expect("stories root is declared by EditingDoc::new");
+        if stories.contains_key(&txn, &story_id) {
+            return Err(OpError::StoryExists(story_id));
+        }
+        let story = stories.insert(&mut txn, story_id, TextPrelim::new(""));
+        let mut deltas = Vec::with_capacity(paragraphs.len() * 2);
+        let mut para_ids = Vec::with_capacity(paragraphs.len());
+        let attrs = Box::new(insertion_attrs(None, None));
+        for paragraph in paragraphs.iter() {
+            if !paragraph.text.is_empty() {
+                deltas.push(Delta::Inserted(
+                    In::Any(Any::String(Arc::from(paragraph.text.as_str()))),
+                    Some(attrs.clone()),
+                ));
+            }
+            let para_id = self.next_id();
+            deltas.push(Delta::Inserted(
+                In::Map(MapPrelim::from_iter([
+                    (KIND_KEY.to_owned(), Any::from(PILCROW_KIND)),
+                    (PARA_ID.to_owned(), Any::from(para_id.as_str())),
+                    ("pStyle".to_owned(), Any::from(paragraph.p_style.as_str())),
+                    (
+                        "alignment".to_owned(),
+                        Any::from(paragraph.alignment.as_str()),
+                    ),
+                ])),
+                Some(attrs.clone()),
+            ));
+            para_ids.push(para_id);
+        }
+        story.apply_delta(&mut txn, deltas);
+        Ok(para_ids)
     }
 
     /// Removes one complete story from the document map.
@@ -858,6 +916,65 @@ mod tests {
             return None;
         };
         Some(author.to_string())
+    }
+
+    fn seed_paragraph(text: &str) -> SeedParagraph {
+        SeedParagraph {
+            text: text.to_owned(),
+            p_style: "Normal".to_owned(),
+            alignment: "left".to_owned(),
+        }
+    }
+
+    #[test]
+    fn seed_story_returns_ids_in_order_and_marks_paragraphs() {
+        let doc = EditingDoc::new(100);
+        let ids = doc
+            .seed_story(
+                "body",
+                &[
+                    seed_paragraph("one"),
+                    seed_paragraph("two"),
+                    seed_paragraph(""),
+                ],
+            )
+            .unwrap();
+        assert_eq!(ids.len(), 3);
+        let segments = doc.story_segments("body").unwrap();
+        let joined: String = segments
+            .iter()
+            .filter_map(|segment| match &segment.content {
+                SegmentContent::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(joined, "onetwo");
+        assert_eq!(doc.story_len("body").unwrap(), 3 + "onetwo".len() as u32);
+    }
+
+    #[test]
+    fn seed_story_rejects_breaks_without_committing() {
+        let doc = EditingDoc::new(100);
+        let result = doc.seed_story("body", &[seed_paragraph("ok"), seed_paragraph("bad\ntext")]);
+        assert!(matches!(result, Err(OpError::TextContainsBreak)));
+        assert!(matches!(
+            doc.story_len("body"),
+            Err(EditError::StoryNotFound(_))
+        ));
+    }
+
+    #[test]
+    fn seed_story_rejects_empty_and_existing() {
+        let doc = EditingDoc::new(100);
+        assert!(matches!(
+            doc.seed_story("body", &[]),
+            Err(OpError::EmptyRange)
+        ));
+        doc.seed_story("body", &[seed_paragraph("a")]).unwrap();
+        assert!(matches!(
+            doc.seed_story("body", &[seed_paragraph("b")]),
+            Err(OpError::StoryExists(_))
+        ));
     }
 
     #[test]

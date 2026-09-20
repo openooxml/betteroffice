@@ -4,8 +4,9 @@ use std::io::{Cursor, Write};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, GlyphCache, ImageMap, ImageScope, MAX_IMAGE_PIXELS, MAX_PAGE_IMAGE_PIXELS,
-    RenderResources, render_page, render_page_cached, render_png, scoped_image_key,
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, MAX_IMAGE_PIXELS,
+    MAX_PAGE_IMAGE_PIXELS, RenderResources, render_page, render_page_cached, render_png,
+    scoped_image_key,
 };
 use ooxml_text::{FontStore, shape};
 use serde_json::{Value, json};
@@ -158,13 +159,26 @@ fn a_glyph_cache_is_bound_to_the_store_that_filled_it() {
     {
         let (fonts, chains, images) = carlito_resources();
         let resources = RenderResources::new(&fonts, &chains, &images);
-        render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache)
-            .expect("render into an unbound cache");
+        render_page_cached(
+            &single_glyph_scene(),
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default(),
+        )
+        .expect("render into an unbound cache");
     }
     let (fonts, chains, images) = carlito_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
     assert_eq!(
-        render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
+        render_page_cached(
+            &single_glyph_scene(),
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .unwrap_err(),
         "glyph cache is bound to another font store"
     );
 }
@@ -191,15 +205,27 @@ fn a_shared_cache_keeps_one_glyph_id_apart_per_face() {
 
     let mut cache = GlyphCache::default();
     assert_eq!(
-        render_page_cached(&first, 0, &resources, &mut cache)
-            .expect("shared first")
-            .bytes,
+        render_page_cached(
+            &first,
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .expect("shared first")
+        .bytes,
         fresh_first
     );
     assert_eq!(
-        render_page_cached(&second, 0, &resources, &mut cache)
-            .expect("shared second")
-            .bytes,
+        render_page_cached(
+            &second,
+            0,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default()
+        )
+        .expect("shared second")
+        .bytes,
         fresh_second
     );
 }
@@ -213,14 +239,27 @@ fn a_failed_page_leaves_a_glyph_cache_free_to_bind_elsewhere() {
         let (fonts, chains, images) = carlito_resources();
         let resources = RenderResources::new(&fonts, &chains, &images);
         assert_eq!(
-            render_page_cached(&missing_glyph_scene(), 0, &resources, &mut cache).unwrap_err(),
+            render_page_cached(
+                &missing_glyph_scene(),
+                0,
+                &resources,
+                &mut cache,
+                &mut ImageCache::default()
+            )
+            .unwrap_err(),
             "glyph id 65536 exceeds the font outline range"
         );
     }
     let (fonts, chains, images) = carlito_resources();
     let resources = RenderResources::new(&fonts, &chains, &images);
-    render_page_cached(&single_glyph_scene(), 0, &resources, &mut cache)
-        .expect("render into a cache no failed page bound");
+    render_page_cached(
+        &single_glyph_scene(),
+        0,
+        &resources,
+        &mut cache,
+        &mut ImageCache::default(),
+    )
+    .expect("render into a cache no failed page bound");
 }
 
 #[test]
@@ -570,9 +609,108 @@ fn a_shared_glyph_cache_renders_every_page_identically() {
     .expect("display list");
     let mut cache = GlyphCache::default();
     for page in 0..2 {
-        let shared = render_page_cached(&list, page, &resources, &mut cache).expect("shared");
+        let shared = render_page_cached(
+            &list,
+            page,
+            &resources,
+            &mut cache,
+            &mut ImageCache::default(),
+        )
+        .expect("shared");
         let fresh = render_page(&list, page, &resources).expect("fresh");
         assert_eq!(shared.bytes, fresh.bytes);
+    }
+}
+
+/// An image cache shared across pages has to paint exactly what fresh caches
+/// paint: the second page resolves the decode the first one cached.
+#[test]
+fn a_shared_image_cache_renders_every_page_identically() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([(
+        scoped_image_key(ImageScope::Body, "rIdLogo"),
+        solid_png(32, 32),
+    )]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let logo = |y: f64| json!({"kind":"image","relId":"rIdLogo","x":8,"y":y,"w":32,"h":32});
+    let list: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 120.0, "height": 60.0, "primitives": [logo(4.0)]},
+            {"pageIndex": 1, "width": 120.0, "height": 60.0, "primitives": [logo(20.0), logo(24.0)]}
+        ]
+    }))
+    .expect("display list");
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    for page in 0..2 {
+        let shared =
+            render_page_cached(&list, page, &resources, &mut glyphs, &mut cache).expect("shared");
+        let fresh = render_page(&list, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes);
+        assert_eq!(shared.skipped_images, fresh.skipped_images);
+    }
+}
+
+/// The same bytes under two relationship ids are one decode in one cache: the
+/// key is the content, not the reference.
+#[test]
+fn two_relationship_ids_sharing_bytes_share_the_decode() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([
+        (
+            scoped_image_key(ImageScope::Body, "rIdLeft"),
+            solid_png(16, 16),
+        ),
+        (
+            scoped_image_key(ImageScope::Body, "rIdRight"),
+            solid_png(16, 16),
+        ),
+    ]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let scene = list(
+        40.0,
+        24.0,
+        vec![
+            json!({"kind":"image","relId":"rIdLeft","x":0,"y":4,"w":16,"h":16}),
+            json!({"kind":"image","relId":"rIdRight","x":20,"y":4,"w":16,"h":16}),
+        ],
+    );
+    let rendered = render_page(&scene, 0, &resources).expect("render");
+    assert_eq!(rendered.skipped_images, 0);
+    assert_eq!(pixel(&rendered.bytes, 8, 12), [0x11, 0x66, 0xcc, 255]);
+    assert_eq!(pixel(&rendered.bytes, 28, 12), [0x11, 0x66, 0xcc, 255]);
+}
+
+/// A refusal written to a shared cache must not spend the next page's decode
+/// budget: page two gets its own [`MAX_PAGE_IMAGE_PIXELS`] to spend, no matter
+/// what page one refused.
+#[test]
+fn a_shared_cache_does_not_spend_the_next_pages_budget_on_refusals() {
+    let (fonts, chains) = (FontStore::new(), FontChains::new());
+    let images = ImageMap::from([("\u{1f}rIdSmall".to_string(), solid_png(8, 8))]);
+    let resources = RenderResources::new(&fonts, &chains, &images);
+    let pages: DisplayList = serde_json::from_value(json!({
+        "pages": [
+            {"pageIndex": 0, "width": 20.0, "height": 20.0,
+             "primitives": [{"kind":"image","relId":BOMB_40000_SQUARE,"x":0,"y":0,"w":5,"h":5}]},
+            {"pageIndex": 1, "width": 20.0, "height": 20.0,
+             "primitives": [
+                {"kind":"image","relId":BOMB_40000_SQUARE,"x":0,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":CAP_8192_BY_4096,"x":0,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":CAP_4096_BY_8192,"x":5,"y":0,"w":5,"h":5},
+                {"kind":"image","relId":"rIdSmall","x":0,"y":0,"w":20,"h":20}
+             ]}
+        ]
+    }))
+    .expect("display list");
+    let mut glyphs = GlyphCache::default();
+    let mut cache = ImageCache::default();
+    for page in 0..2 {
+        let shared =
+            render_page_cached(&pages, page, &resources, &mut glyphs, &mut cache).expect("shared");
+        let fresh = render_page(&pages, page, &resources).expect("fresh");
+        assert_eq!(shared.bytes, fresh.bytes, "page {page}");
+        assert_eq!(shared.skipped_images, fresh.skipped_images, "page {page}");
     }
 }
 

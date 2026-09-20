@@ -1,14 +1,16 @@
 //! tree-walking evaluator; reads cells only through `xlsx_model::CellProvider`.
 //! coercion follows excel; errors propagate leftmost-first.
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
-use crate::parser::{BinaryOp, Expr, UnaryOp};
+use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
@@ -63,6 +65,8 @@ pub struct EvalContext<'a> {
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
+    /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
+    pub(crate) parse_cache: Option<&'a ParseCache>,
 }
 
 impl<'a> EvalContext<'a> {
@@ -81,6 +85,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
+            parse_cache: None,
         }
     }
 
@@ -99,6 +104,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: None,
+            parse_cache: None,
         }
     }
 
@@ -121,6 +127,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
             shared_budget: Some(budget),
+            parse_cache: None,
         }
     }
 
@@ -139,6 +146,7 @@ impl<'a> EvalContext<'a> {
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
             shared_budget: self.shared_budget.clone(),
+            parse_cache: self.parse_cache,
         }
     }
 
@@ -241,6 +249,24 @@ fn next_random_stream() -> u64 {
     NEXT_STREAM.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed)
 }
 
+/// parsed-formula memo shared by graph build and every recalc. `parse_formula`
+/// is pure over the source text, so entries never invalidate — a changed
+/// formula is simply a different key.
+pub(crate) type ParseCache = Mutex<HashMap<String, Arc<Expr>>>;
+
+/// parse `src` once per unique text instead of once per cell that stores it.
+pub(crate) fn parse_cached(cache: &ParseCache, src: &str) -> Option<Arc<Expr>> {
+    if let Some(expr) = cache.lock().expect("parse cache poisoned").get(src) {
+        return Some(Arc::clone(expr));
+    }
+    let expr = Arc::new(parse_formula(src).ok()?);
+    cache
+        .lock()
+        .expect("parse cache poisoned")
+        .insert(src.to_string(), Arc::clone(&expr));
+    Some(expr)
+}
+
 pub(crate) fn err(value: ErrorValue) -> CellValue {
     CellValue::Error { value }
 }
@@ -283,8 +309,8 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
             Ok(n) => num(n / 100.0),
             Err(e) => err(e),
         },
-        Expr::FuncCall { name, args } => match crate::functions::lookup(name) {
-            Some(f) => f(args, ctx),
+        Expr::FuncCall { func, args, .. } => match func {
+            Some(f) => f.call(args, ctx),
             None => {
                 ctx.record_unsupported_function();
                 err(ErrorValue::Name)
@@ -300,7 +326,7 @@ type DefinedNameKey = (SheetId, String);
 /// definition's unqualified refs bind to.
 struct DefinedNameBinding {
     key: DefinedNameKey,
-    expression: Expr,
+    expression: Arc<Expr>,
     sheet: SheetId,
 }
 
@@ -370,7 +396,11 @@ fn bind_defined_name(
         .formula
         .strip_prefix('=')
         .unwrap_or(&defined.formula);
-    let expression = crate::parse_formula(formula).map_err(|_| ErrorValue::Name)?;
+    let expression = match ctx.parse_cache {
+        Some(cache) => parse_cached(cache, formula),
+        None => parse_formula(formula).ok().map(Arc::new),
+    }
+    .ok_or(ErrorValue::Name)?;
     let sheet = defined.local_sheet.unwrap_or(key.0);
     #[cfg(test)]
     DEFINED_NAME_EXPANSIONS.with(|count| count.set(count.get() + 1));
@@ -397,7 +427,7 @@ pub(crate) fn resolve_ref(
     if !ctx.consume_cells(1) {
         return err(ErrorValue::Num);
     }
-    normalize_provider_value(ctx.provider.value(sid, cell))
+    normalize_cow(ctx.provider.value_cow(sid, cell)).into_owned()
 }
 
 /// resolve a possibly sheet-qualified name to its sheet id (`None` -> the
@@ -605,19 +635,37 @@ impl Area {
         row: usize,
         col: usize,
     ) -> Result<CellValue, ErrorValue> {
+        self.get_ref(ctx, row, col).map(Cow::into_owned)
+    }
+
+    /// borrowed variant of `get` for callers that only inspect the value.
+    pub(crate) fn get_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+        row: usize,
+        col: usize,
+    ) -> Result<Cow<'p, CellValue>, ErrorValue> {
         if !ctx.consume_cells(1) {
             return Err(ErrorValue::Num);
         }
-        Ok(self.get_unmetered(ctx, row, col))
+        Ok(self.get_unmetered_ref(ctx, row, col))
     }
 
-    pub(crate) fn get_unmetered(&self, ctx: &EvalContext<'_>, row: usize, col: usize) -> CellValue {
+    pub(crate) fn get_unmetered_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+        row: usize,
+        col: usize,
+    ) -> Cow<'p, CellValue> {
         let cell = CellRef::new(self.start.row + row as u32, self.start.col + col as u32);
-        normalize_provider_value(ctx.provider.value(self.sheet, cell))
+        normalize_cow(ctx.provider.value_cow(self.sheet, cell))
     }
 
-    /// all values in row-major order.
-    pub(crate) fn values(&self, ctx: &EvalContext<'_>) -> Result<Vec<CellValue>, ErrorValue> {
+    /// all values in row-major order, borrowed where the provider can lend them.
+    pub(crate) fn values_ref<'p>(
+        &self,
+        ctx: &EvalContext<'p>,
+    ) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
         let count = self.cell_count().ok_or(ErrorValue::Num)?;
         if !ctx.consume_cells(count) {
             return Err(ErrorValue::Num);
@@ -626,7 +674,7 @@ impl Area {
         let mut out = Vec::with_capacity(capacity);
         for row in 0..self.rows {
             for col in 0..self.cols {
-                out.push(self.get_unmetered(ctx, row, col));
+                out.push(self.get_unmetered_ref(ctx, row, col));
             }
         }
         Ok(out)
@@ -644,10 +692,10 @@ impl Area {
 /// result is #REF!.
 pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     match arg {
-        Expr::FuncCall { name, args } if name.eq_ignore_ascii_case("OFFSET") => {
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("OFFSET") => {
             crate::functions::lookups::offset_area(args, ctx).ok()
         }
-        Expr::FuncCall { name, args } if name.eq_ignore_ascii_case("INDIRECT") => {
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDIRECT") => {
             crate::functions::lookups::indirect_area(args, ctx).ok()
         }
         Expr::Ref { sheet, cell } => Some(Area {
@@ -677,13 +725,24 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-fn normalize_provider_value(value: CellValue) -> CellValue {
+/// Map invalid stored values to errors.
+fn normalize_cow(value: Cow<'_, CellValue>) -> Cow<'_, CellValue> {
+    match provider_error(&value) {
+        Some(error) => Cow::Owned(err(error)),
+        None => value,
+    }
+}
+
+/// `ErrorValue` a stored value must surface as, if any.
+fn provider_error(value: &CellValue) -> Option<ErrorValue> {
     match value {
-        CellValue::Number { value } if !value.is_finite() => err(ErrorValue::Num),
-        CellValue::Text { value } if value.chars().count() > MAX_CELL_TEXT_CHARS => {
-            err(ErrorValue::Value)
+        CellValue::Number { value } if !value.is_finite() => Some(ErrorValue::Num),
+        CellValue::Text { value }
+            if value.len() > MAX_CELL_TEXT_CHARS && value.chars().count() > MAX_CELL_TEXT_CHARS =>
+        {
+            Some(ErrorValue::Value)
         }
-        value => value,
+        _ => None,
     }
 }
 
