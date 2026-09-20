@@ -202,13 +202,18 @@ impl SlideRenderer {
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
         let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
-        // `p:clrMap` lives on the master and `p:clrMapOvr` on the parts below it,
-        // so the slot mapping is per slide rather than per theme part.
-        let mapped_theme = Theme {
-            color_map: effective_color_map(parsed_slide, layout, master),
-            ..base_theme.clone()
+        // The slot mapping is per slide, not per theme part.
+        let color_map = effective_color_map(parsed_slide, layout, master);
+        let mapped_theme;
+        let theme = if color_map.is_identity() {
+            base_theme
+        } else {
+            mapped_theme = Theme {
+                color_map,
+                ..base_theme.clone()
+            };
+            &mapped_theme
         };
-        let theme = &mapped_theme;
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
