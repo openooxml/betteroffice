@@ -459,12 +459,6 @@ jobs:
         with:
           bun-version: "1.3.14"
 
-      - name: Install the publisher dependencies
-        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
-        run: |
-          bun install --frozen-lockfile
-          bunx --no-install wrangler --version
-
       - name: Publish the reconciled commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         env:
@@ -472,7 +466,7 @@ jobs:
           QUALITY_RENDER_BUCKET: betteroffice-fidelity
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-        run: node scripts/office-quality/publish-renders.mjs
+        run: bun scripts/office-quality/publish-renders.mjs
 
       - name: Replace the generated README section
         run: |

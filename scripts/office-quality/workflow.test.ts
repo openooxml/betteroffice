@@ -35,17 +35,19 @@ test('only the reconciler publishes reports and renders after every format succe
   const renders = publish.steps.findIndex((step: any) =>
     step.run?.includes('publish-renders.mjs')
   );
-  const install = publish.steps.findIndex((step: any) =>
-    step.run?.includes('bun install --frozen-lockfile')
+  const runtime = publish.steps.findIndex((step: any) =>
+    step.uses?.startsWith('oven-sh/setup-bun@')
   );
   const readme = publish.steps.findIndex(
     (step: any) => step.name === 'Replace the generated README section'
   );
   expect(merge).toBeGreaterThan(-1);
-  expect(install).toBeGreaterThan(merge);
-  expect(install).toBeLessThan(renders);
-  expect(publish.steps[install].if).toBe(publish.steps[renders].if);
-  expect(publish.steps[install].run).toContain('bunx --no-install wrangler --version');
+  expect(runtime).toBeGreaterThan(merge);
+  expect(runtime).toBeLessThan(renders);
+  expect(publish.steps[runtime].if).toBe(publish.steps[renders].if);
+  expect(publish.steps[renders].run).toBe('bun scripts/office-quality/publish-renders.mjs');
+  expect(publish.steps[renders].env.CLOUDFLARE_API_TOKEN).toBe('${{ secrets.CLOUDFLARE_API_TOKEN }}');
+  expect(publish.steps.some((step: any) => step.run?.includes('wrangler'))).toBe(false);
   expect(renders).toBeGreaterThan(merge);
   expect(readme).toBeGreaterThan(renders);
   expect(publish.steps[renders]['continue-on-error']).toBeUndefined();

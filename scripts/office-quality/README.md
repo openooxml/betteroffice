@@ -89,6 +89,11 @@ renders/<sha>/report.json
 renders/latest.json
 ```
 
+Uploads use Bun’s S3 client with the existing `CLOUDFLARE_ACCOUNT_ID` and
+`CLOUDFLARE_API_TOKEN` secrets. The publisher verifies the account or user token,
+then derives its S3 credentials as [documented by Cloudflare](https://developers.cloudflare.com/r2/api/tokens/#get-s3-api-credentials-from-an-api-token).
+Bucket-scoped Object Read & Write access to `betteroffice-fidelity` is sufficient.
+
 `latest.json` names the current SHA, its report key, and the published page count per sample. It is
 written last, so it never points at an incomplete upload. Every published SHA is kept.
 
