@@ -8,7 +8,7 @@ use xlsx_model::{
     Cell, CellProvider, CellRange, CellRef, CellValue, ColId, ErrorValue, RowId, SheetId, Workbook,
 };
 
-use crate::array::{Spill, evaluate_spill};
+use crate::array::{Spill, evaluate_spill, spill_at};
 use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
 use crate::graph::DepGraph;
 
@@ -287,10 +287,24 @@ fn eval_node(
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
         None => NodeValue::Scalar(evaluate(&expr, &ctx)),
     };
-    let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
+    let unsupported = ctx.has_unhandled_unsupported_function();
+    let incomplete = ctx.has_unhandled_budget_error() || unsupported;
     if incomplete && !matches!(wb.value_cow(u.0, cell).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
+    // a rectangle an engine gap reshaped would retire cells the real result
+    // still covers, so report the gap over the recorded rectangle instead.
+    let value = match value {
+        NodeValue::Spill(spill)
+            if unsupported && authored.is_some_and(|range| range != spill.range) =>
+        {
+            let name = CellValue::Error {
+                value: ErrorValue::Name,
+            };
+            NodeValue::Spill(spill_at(cell, authored, name.into()))
+        }
+        value => value,
+    };
     (Some(value), ctx.exhausted())
 }
 

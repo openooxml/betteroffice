@@ -10,12 +10,17 @@ use std::sync::{Arc, Mutex};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
+use crate::array::{Binding, evaluate_array};
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
 const MAX_DEFINED_NAME_DEPTH: usize = 256;
+/// names one formula may have bound at once across nested `LET`/`LAMBDA`.
+const MAX_BINDINGS: usize = 1024;
+/// nested `LAMBDA` invocations, so a callback chain cannot exhaust the stack.
+const MAX_LAMBDA_DEPTH: usize = 128;
 
 #[cfg(test)]
 thread_local! {
@@ -64,6 +69,8 @@ pub struct EvalContext<'a> {
     unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
+    bindings: Rc<RefCell<Vec<Binding>>>,
+    lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
@@ -84,6 +91,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
         }
@@ -103,6 +112,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
         }
@@ -126,6 +137,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
             parse_cache: None,
         }
@@ -145,6 +158,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::clone(&self.unsupported_functions),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
+            bindings: Rc::clone(&self.bindings),
+            lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
         }
@@ -226,6 +241,50 @@ impl<'a> EvalContext<'a> {
             .set(self.unhandled_budget_errors.get().saturating_add(1));
     }
 
+    pub(crate) fn binding_depth(&self) -> usize {
+        self.bindings.borrow().len()
+    }
+
+    /// bind a `LET` name or `LAMBDA` parameter; `false` once the formula holds
+    /// as many as it may.
+    pub(crate) fn push_binding(&self, binding: Binding) -> bool {
+        let mut bindings = self.bindings.borrow_mut();
+        if bindings.len() >= MAX_BINDINGS {
+            return false;
+        }
+        bindings.push(binding);
+        true
+    }
+
+    pub(crate) fn truncate_bindings(&self, depth: usize) {
+        self.bindings.borrow_mut().truncate(depth);
+    }
+
+    /// innermost binding for `name`, so a `LAMBDA` parameter shadows an outer
+    /// `LET` name and both shadow a defined name.
+    pub(crate) fn binding(&self, name: &str) -> Option<Binding> {
+        self.bindings
+            .borrow()
+            .iter()
+            .rev()
+            .find(|binding| binding.matches(name))
+            .cloned()
+    }
+
+    pub(crate) fn enter_lambda(&self) -> bool {
+        let depth = self.lambda_depth.get();
+        if depth >= MAX_LAMBDA_DEPTH {
+            return false;
+        }
+        self.lambda_depth.set(depth + 1);
+        true
+    }
+
+    pub(crate) fn leave_lambda(&self) {
+        self.lambda_depth
+            .set(self.lambda_depth.get().saturating_sub(1));
+    }
+
     /// evaluate a bound definition with the name held on the re-entry stack.
     fn inside_defined_name<T>(
         &self,
@@ -302,14 +361,18 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
-        Expr::Name { scope, name } => evaluate_defined_name(scope, name, ctx),
+        Expr::Name { scope, name } => match bound(scope, name, ctx) {
+            Some(binding) => binding.value().into_scalar(),
+            None => evaluate_defined_name(scope, name, ctx),
+        },
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
         Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
         Expr::Literal(value) => normalize_provider_value(value.clone()),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
-        Expr::FuncCall { func, args, .. } => match func {
+        Expr::FuncCall { func, name, args } => match func {
             Some(f) => f.call(args, ctx),
+            None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
             None => {
                 ctx.record_unsupported_function();
                 err(ErrorValue::Name)
@@ -408,6 +471,15 @@ fn bind_defined_name(
         expression,
         sheet,
     })
+}
+
+/// the `LET`/`LAMBDA` binding a bare name stands for, if any. a sheet
+/// qualifier always means a defined name.
+pub(crate) fn bound(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> Option<Binding> {
+    match scope {
+        Some(_) => None,
+        None => ctx.binding(name),
+    }
 }
 
 /// resolve a possibly sheet-qualified cell reference to its stored value.
@@ -738,9 +810,12 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             cols: (range.end - range.start + 1) as usize,
         }),
         Expr::Name { scope, name } => {
+            if let Some(binding) = bound(scope, name, ctx) {
+                return binding.reference().and_then(|expr| as_area(expr, ctx));
+            }
             let key = defined_name_key(scope, name, ctx).ok()?;
-            let binding = bind_defined_name(key, name, ctx).ok()?;
-            ctx.inside_defined_name(&binding, as_area)
+            let definition = bind_defined_name(key, name, ctx).ok()?;
+            ctx.inside_defined_name(&definition, as_area)
         }
         _ => None,
     }

@@ -55,7 +55,6 @@ fn arrayed(formula: &str, workbook: &Workbook) -> (usize, usize, Vec<CellValue>)
     let expression = parse_formula(formula).unwrap();
     let context = EvalContext::new(workbook, SheetId(0));
     match evaluate_array(&expression, &context) {
-        Value::Scalar(value) => (1, 1, vec![value]),
         Value::Array(array) => {
             let mut values = Vec::new();
             for row in 0..array.rows() {
@@ -65,6 +64,7 @@ fn arrayed(formula: &str, workbook: &Workbook) -> (usize, usize, Vec<CellValue>)
             }
             (array.rows(), array.cols(), values)
         }
+        other => (1, 1, vec![other.into_scalar()]),
     }
 }
 
@@ -505,4 +505,273 @@ fn whole_column_blocks_stop_at_the_used_range() {
     let workbook = fixture();
     assert_eq!(arrayed("A:A", &workbook).0, 4);
     assert_eq!(values("_xlfn.TOCOL(B:B,1)", &workbook).len(), 4);
+}
+
+/// `LET` binds each name for every later value and for the calculation, and a
+/// later binding of the same name shadows the earlier one.
+#[test]
+fn let_binds_names_in_order() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn.LET(_xlpm.x,2,_xlpm.y,_xlpm.x*3,_xlpm.x+_xlpm.y)",
+            &workbook
+        ),
+        vec![n(8.0)]
+    );
+    assert_eq!(
+        values("_xlfn.LET(_xlpm.x,2,_xlpm.x,5,_xlpm.x)", &workbook),
+        vec![n(5.0)]
+    );
+    assert_eq!(
+        arrayed("_xlfn.LET(_xlpm.b,B1:B4,_xlpm.b*2)", &workbook).2,
+        vec![n(6.0), n(2.0), n(8.0), n(4.0)]
+    );
+}
+
+/// a name is unbound again once its `LET` returns, and an even argument count
+/// leaves the calculation missing.
+#[test]
+fn let_refuses_malformed_and_unbound_uses() {
+    let workbook = fixture();
+    for formula in [
+        "_xlfn.LET(_xlpm.x,1)",
+        "_xlfn.LET(_xlpm.x,1,2,_xlpm.x)",
+        "_xlfn.LET(1,1,1)",
+    ] {
+        assert!(
+            matches!(values(formula, &workbook)[..], [CellValue::Error { .. }]),
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        values("_xlfn.LET(_xlpm.x,1,_xlpm.x)+_xlpm.x", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Name
+        }]
+    );
+}
+
+/// a name bound to a plain reference still reaches a callee that wants an
+/// area, so `ROWS` counts rows rather than measuring a block.
+#[test]
+fn a_name_bound_to_a_range_stays_a_reference() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn.LET(_xlpm.r,A1:A4,ROWS(_xlpm.r)+COLUMNS(_xlpm.r))",
+            &workbook
+        ),
+        vec![n(5.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.LET(_xlpm.r,B1:B4,SUM(OFFSET(_xlpm.r,1,0,2,1)))",
+            &workbook
+        ),
+        vec![n(5.0)]
+    );
+}
+
+/// the callback builtins each call a `LAMBDA` and keep their own output shape.
+#[test]
+fn callbacks_invoke_lambdas() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed(
+            "_xlfn.BYROW(A1:B4,_xlfn.LAMBDA(_xlpm.r,COUNTA(_xlpm.r)))",
+            &workbook
+        ),
+        (4, 1, vec![n(2.0), n(2.0), n(2.0), n(2.0)])
+    );
+    assert_eq!(
+        arrayed(
+            "_xlfn.BYCOL(B1:B4,_xlfn.LAMBDA(_xlpm.c,SUM(_xlpm.c)))",
+            &workbook
+        ),
+        (1, 1, vec![n(10.0)])
+    );
+    assert_eq!(
+        values(
+            "_xlfn.MAP(B1:B4,_xlfn.LAMBDA(_xlpm.v,_xlpm.v*10))",
+            &workbook
+        ),
+        vec![n(30.0), n(10.0), n(40.0), n(20.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.REDUCE(0,B1:B4,_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a+_xlpm.v))",
+            &workbook
+        ),
+        vec![n(10.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.SCAN(0,B1:B4,_xlfn.LAMBDA(_xlpm.a,_xlpm.v,_xlpm.a+_xlpm.v))",
+            &workbook
+        ),
+        vec![n(3.0), n(4.0), n(8.0), n(10.0)]
+    );
+    assert_eq!(
+        arrayed(
+            "_xlfn.MAKEARRAY(2,3,_xlfn.LAMBDA(_xlpm.r,_xlpm.c,_xlpm.r*10+_xlpm.c))",
+            &workbook
+        ),
+        (
+            2,
+            3,
+            vec![n(11.0), n(12.0), n(13.0), n(21.0), n(22.0), n(23.0)]
+        )
+    );
+}
+
+/// a lambda parameter shadows an outer `LET` name for the call only, and a
+/// free name still resolves through the caller's bindings.
+#[test]
+fn lambda_parameters_shadow_and_close_over() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn.LET(_xlpm.k,100,_xlfn.MAP(B1:B2,_xlfn.LAMBDA(_xlpm.v,_xlpm.v+_xlpm.k)))",
+            &workbook
+        ),
+        vec![n(103.0), n(101.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.LET(_xlpm.v,7,_xlfn.MAP(B1:B1,_xlfn.LAMBDA(_xlpm.v,_xlpm.v)))",
+            &workbook
+        ),
+        vec![n(3.0)]
+    );
+}
+
+/// `BYROW` hands the lambda the row it is called with as a reference, so a
+/// callee that needs one still works.
+#[test]
+fn byrow_passes_each_row_as_a_reference() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn.BYROW(B2:B3,_xlfn.LAMBDA(_xlpm.r,SUM(OFFSET(_xlpm.r,0,-1,1,2))))",
+            &workbook
+        ),
+        vec![n(1.0), n(4.0)]
+    );
+}
+
+/// a callback argument that is not a lambda, and a lambda given the wrong
+/// number of arguments, both report `#VALUE!`.
+#[test]
+fn callbacks_refuse_a_non_lambda() {
+    let workbook = fixture();
+    for formula in ["_xlfn.MAP(B1:B4,1)", "_xlfn.LAMBDA(_xlpm.x,_xlpm.x)"] {
+        assert_eq!(
+            values(formula, &workbook),
+            vec![CellValue::Error {
+                value: ErrorValue::Value
+            }],
+            "{formula}"
+        );
+    }
+    assert_eq!(
+        values(
+            "_xlfn.BYROW(B1:B4,_xlfn.LAMBDA(_xlpm.a,_xlpm.b,1))",
+            &workbook
+        ),
+        vec![
+            CellValue::Error {
+                value: ErrorValue::Value
+            };
+            4
+        ]
+    );
+}
+
+/// `TEXTSPLIT` splits rows first, then columns, padding short rows.
+#[test]
+fn textsplit_builds_a_grid() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("_xlfn.TEXTSPLIT(\"a,b;c\",\",\",\";\")", &workbook),
+        (
+            2,
+            2,
+            vec![
+                t("a"),
+                t("b"),
+                t("c"),
+                CellValue::Error {
+                    value: ErrorValue::NA
+                }
+            ]
+        )
+    );
+    assert_eq!(
+        arrayed(
+            "_xlfn.TEXTSPLIT(\"a,b;c\",\",\",\";\",FALSE,0,\"-\")",
+            &workbook
+        ),
+        (2, 2, vec![t("a"), t("b"), t("c"), t("-")])
+    );
+    assert_eq!(
+        values("_xlfn.TEXTSPLIT(\"a,,b\",\",\",,TRUE)", &workbook),
+        vec![t("a"), t("b")]
+    );
+    assert_eq!(
+        values("_xlfn.TEXTSPLIT(\"aXbxc\",\"x\",,,1)", &workbook),
+        vec![t("a"), t("b"), t("c")]
+    );
+    assert_eq!(
+        values("_xlfn.TEXTSPLIT(\"a+-b\",{\"+\",\"+-\"})", &workbook),
+        vec![t("a"), t("b")]
+    );
+    assert_eq!(
+        values("_xlfn.TEXTSPLIT(\"abc\",\"\")", &workbook),
+        vec![t("abc")]
+    );
+}
+
+/// `TEXTJOIN`/`CONCAT` read every cell of a computed block, not just its
+/// top-left value.
+#[test]
+fn joins_read_whole_blocks() {
+    let workbook = fixture();
+    assert_eq!(
+        values("_xlfn.TEXTJOIN(\",\",TRUE,B1:B4*2)", &workbook),
+        vec![t("6,2,8,4")]
+    );
+    assert_eq!(
+        values("_xlfn.CONCAT(_xlfn.SEQUENCE(3))", &workbook),
+        vec![t("123")]
+    );
+}
+
+/// a criterion or lookup key given as a block answers once per element while
+/// the range arguments still arrive as references.
+#[test]
+fn criteria_and_lookup_keys_lift_elementwise() {
+    let workbook = fixture();
+    assert_eq!(
+        values("COUNTIF(A1:A4,_xlfn.UNIQUE(A1:A4))", &workbook),
+        vec![n(1.0), n(2.0), n(1.0)]
+    );
+    assert_eq!(
+        values("SUMIF(A1:A4,_xlfn.UNIQUE(A1:A4),B1:B4)", &workbook),
+        vec![n(3.0), n(3.0), n(4.0)]
+    );
+}
+
+/// `INDEX` with a zero or omitted index answers with the whole row or column.
+#[test]
+fn index_returns_a_whole_axis() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("INDEX(A1:B4,,2)", &workbook),
+        (4, 1, vec![n(3.0), n(1.0), n(4.0), n(2.0)])
+    );
+    assert_eq!(
+        arrayed("INDEX(A1:B4,2,0)", &workbook),
+        (1, 2, vec![t("apple"), n(1.0)])
+    );
 }

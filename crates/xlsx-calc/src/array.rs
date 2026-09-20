@@ -4,12 +4,13 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::rc::Rc;
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue, MAX_SPILL_CELLS};
 
 use crate::eval::{
     Area, EvalContext, apply_binary, apply_percent, apply_unary, as_area, cmp_values, err,
-    evaluate, normalize_provider_value, num, to_bool, to_number,
+    evaluate, normalize_provider_value, num, text, to_bool, to_number, to_text,
 };
 use crate::functions::Func;
 use crate::parser::Expr;
@@ -67,11 +68,53 @@ impl Array {
     }
 }
 
+/// a `LAMBDA`: the names its call binds, and the body those names are bound
+/// for. free names resolve through the caller's binding stack, which is the
+/// scope the literal was written in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lambda {
+    params: Vec<String>,
+    body: Expr,
+}
+
+/// a `LET` name or `LAMBDA` parameter bound for the body being evaluated.
+#[derive(Debug, Clone)]
+pub(crate) struct Binding {
+    name: String,
+    value: Rc<Value>,
+    /// the reference the name was bound to, kept so a callee that wants an
+    /// area still sees one rather than the block the name evaluates to.
+    reference: Option<Rc<Expr>>,
+}
+
+impl Binding {
+    pub(crate) fn new(name: &str, value: Value, reference: Option<Expr>) -> Self {
+        Self {
+            name: name.to_string(),
+            value: Rc::new(value),
+            reference: reference.map(Rc::new),
+        }
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        self.name.eq_ignore_ascii_case(name)
+    }
+
+    pub(crate) fn value(&self) -> Value {
+        (*self.value).clone()
+    }
+
+    pub(crate) fn reference(&self) -> Option<&Expr> {
+        self.reference.as_deref()
+    }
+}
+
 /// what an expression evaluates to in array mode.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Scalar(CellValue),
     Array(Array),
+    Lambda(Rc<Lambda>),
 }
 
 impl Value {
@@ -81,8 +124,8 @@ impl Value {
 
     fn dims(&self) -> (usize, usize) {
         match self {
-            Value::Scalar(_) => (1, 1),
             Value::Array(array) => (array.rows, array.cols),
+            _ => (1, 1),
         }
     }
 
@@ -90,26 +133,29 @@ impl Value {
         match self {
             Value::Scalar(value) => value.clone(),
             Value::Array(array) => array.broadcast(row, col),
+            Value::Lambda(_) => err(ErrorValue::Value),
         }
     }
 
-    /// the value a single cell shows: the top-left element.
+    /// the value a single cell shows: the top-left element. an uncalled
+    /// `LAMBDA` is not a value a cell can hold.
     pub fn into_scalar(self) -> CellValue {
         match self {
             Value::Scalar(value) => value,
             Value::Array(array) => array.at(0, 0),
+            Value::Lambda(_) => err(ErrorValue::Value),
         }
     }
 
     /// this value as a block; a single value becomes a 1x1 block.
     pub fn into_array(self) -> Array {
         match self {
-            Value::Scalar(value) => Array {
+            Value::Array(array) => array,
+            other => Array {
                 rows: 1,
                 cols: 1,
-                values: vec![value],
+                values: vec![other.into_scalar()],
             },
-            Value::Array(array) => array,
         }
     }
 
@@ -158,9 +204,12 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
             Some(area) => area_values(&area, ctx),
             None => Value::error(ErrorValue::Ref),
         },
-        Expr::Name { .. } => match as_array_area(expr, ctx) {
-            Some(area) => area_values(&area, ctx),
-            None => Value::Scalar(evaluate(expr, ctx)),
+        Expr::Name { scope, name } => match crate::eval::bound(scope, name, ctx) {
+            Some(binding) => binding.value(),
+            None => match as_array_area(expr, ctx) {
+                Some(area) => area_values(&area, ctx),
+                None => Value::Scalar(evaluate(expr, ctx)),
+            },
         },
         Expr::ArrayLiteral { cols, values } => array_literal(*cols, values, ctx),
         Expr::Unary { op, expr } => map1(evaluate_array(expr, ctx), ctx, |v| apply_unary(*op, v)),
@@ -196,11 +245,11 @@ fn array_literal(cols: usize, values: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// elementwise over one value.
 fn map1(value: Value, ctx: &EvalContext<'_>, f: impl Fn(&CellValue) -> CellValue) -> Value {
     match value {
-        Value::Scalar(value) => Value::Scalar(f(&value)),
         Value::Array(array) => {
             let cells: Vec<CellValue> = array.values.iter().map(&f).collect();
             block(ctx, array.rows, array.cols, cells)
         }
+        other => Value::Scalar(f(&other.into_scalar())),
     }
 }
 
@@ -270,6 +319,7 @@ fn argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Array,
         Value::Scalar(CellValue::Error { value }) => Err(value),
         Value::Scalar(value) => Array::new(1, 1, vec![value]),
         Value::Array(array) => Ok(array),
+        Value::Lambda(_) => Err(ErrorValue::Value),
     }
 }
 
@@ -412,7 +462,10 @@ fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) ->
         return f(args, ctx);
     }
     match func {
-        Some(f) if lifts(&upper) => lift(f, args, ctx),
+        Some(f) if lifts(&upper) => lift(f, args, ctx, None),
+        Some(f) if lifted_positions(&upper).is_some() => {
+            lift(f, args, ctx, lifted_positions(&upper))
+        }
         Some(f) => Value::Scalar(f.call(args, ctx)),
         None => {
             ctx.record_unsupported_function();
@@ -421,14 +474,24 @@ fn call(name: &str, func: Option<Func>, args: &[Expr], ctx: &EvalContext<'_>) ->
     }
 }
 
-/// call a scalar builtin once per output position, splicing each element in as
-/// a literal argument. with no array argument the call is left untouched, so
-/// laziness and reference arguments behave exactly as in scalar mode.
-fn lift(f: Func, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+/// call a scalar builtin once per output position, splicing the lifted
+/// arguments in as literals. `positions` limits lifting to those arguments, so
+/// a builtin whose other arguments are ranges still receives them as written;
+/// `None` lifts every argument. with no array argument the call is left
+/// untouched, so laziness and reference arguments behave as in scalar mode.
+fn lift(f: Func, args: &[Expr], ctx: &EvalContext<'_>, positions: Option<&[usize]>) -> Value {
+    let values: Vec<Option<Value>> = args
+        .iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            positions
+                .is_none_or(|positions| positions.contains(&index))
+                .then(|| evaluate_array(arg, ctx))
+        })
+        .collect();
     let mut rows = 1usize;
     let mut cols = 1usize;
-    for value in &values {
+    for value in values.iter().flatten() {
         let (r, c) = value.dims();
         rows = rows.max(r);
         cols = cols.max(c);
@@ -442,17 +505,31 @@ fn lift(f: Func, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if count > MAX_ARRAY_CELLS {
         return Value::error(ErrorValue::Num);
     }
-    let mut spliced: Vec<Expr> = args.iter().map(|_| Expr::Number(0.0)).collect();
+    let mut spliced: Vec<Expr> = args.to_vec();
     let mut cells = Vec::with_capacity(count);
     for row in 0..rows {
         for col in 0..cols {
             for (slot, value) in spliced.iter_mut().zip(&values) {
-                *slot = Expr::Literal(value.broadcast(row, col));
+                if let Some(value) = value {
+                    *slot = Expr::Literal(value.broadcast(row, col));
+                }
             }
             cells.push(f.call(&spliced, ctx));
         }
     }
     block(ctx, rows, cols, cells)
+}
+
+/// argument positions that lift for builtins whose other arguments are ranges:
+/// `COUNTIF(range, {a;b})` answers once per criterion, `VLOOKUP` once per key.
+fn lifted_positions(name: &str) -> Option<&'static [usize]> {
+    Some(match name {
+        "AVERAGEIF" | "COUNTIF" | "SUMIF" => &[1],
+        "COUNTIFS" => &[1, 3, 5, 7, 9],
+        "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
+        "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
+        _ => return None,
+    })
 }
 
 /// scalar builtins whose every argument is a single value, so an array
@@ -523,9 +600,24 @@ fn lifts(name: &str) -> bool {
     )
 }
 
+/// whether `name` has an array-only implementation, so a cell the file did not
+/// mark as an array formula still evaluates it rather than reporting `#NAME?`.
+pub(crate) fn is_array_builtin(name: &str) -> bool {
+    lookup_array(&crate::functions::bare_name(name).to_ascii_uppercase()).is_some()
+}
+
 fn lookup_array(name: &str) -> Option<ArrayFn> {
     Some(match name {
         "ANCHORARRAY" => anchorarray,
+        "BYCOL" => bycol,
+        "BYROW" => byrow,
+        "LAMBDA" => lambda,
+        "LET" => let_,
+        "MAKEARRAY" => makearray,
+        "MAP" => map,
+        "REDUCE" => reduce,
+        "SCAN" => scan,
+        "TEXTSPLIT" => textsplit,
         "AVERAGE" => average,
         "COUNT" => count,
         "COUNTA" => counta,
@@ -553,7 +645,9 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "SEQUENCE" => sequence,
         "SORT" => sort,
         "SORTBY" => sortby,
+        "CONCAT" | "CONCATENATE" => concat,
         "TAKE" => take,
+        "TEXTJOIN" => textjoin,
         "TOCOL" => tocol,
         "TOROW" => torow,
         "TRANSPOSE" => transpose,
@@ -1048,6 +1142,8 @@ fn dimension(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 
 fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if args.first().is_some_and(|arg| as_area(arg, ctx).is_some())
+        && !whole_axis(args.get(1))
+        && !whole_axis(args.get(2))
         && let Some(f) = crate::functions::resolve("INDEX")
     {
         return Value::Scalar(f.call(args, ctx));
@@ -1078,6 +1174,14 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             (row, col) => Value::Scalar(data.at(row - 1, col - 1)),
         })
     })())
+}
+
+/// whether an `INDEX` index asks for a whole row or column rather than one
+/// cell, which the single-cell scalar path cannot answer.
+fn whole_axis(arg: Option<&Expr>) -> bool {
+    arg.is_some_and(|expr| {
+        crate::functions::omitted(expr) || matches!(expr, Expr::Number(value) if *value == 0.0)
+    })
 }
 
 /// a single condition still picks one branch lazily; an array condition
@@ -1144,6 +1248,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     let needs_fallback = match &value {
         Value::Scalar(value) => caught(value),
         Value::Array(array) => array.values.iter().any(caught),
+        Value::Lambda(_) => false,
     };
     if !needs_fallback {
         return value;
@@ -1152,7 +1257,6 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     ctx.handle_unsupported_since(unsupported);
     let other = evaluate_array(&args[1], ctx);
     match value {
-        Value::Scalar(_) => other,
         Value::Array(array) => {
             let (rows, cols) = (array.rows, array.cols);
             let cells = array
@@ -1169,6 +1273,7 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
                 .collect();
             block(ctx, rows, cols, cells)
         }
+        _ => other,
     }
 }
 
@@ -1211,6 +1316,7 @@ fn aggregate(
                 Err(_) if matches!(value, CellValue::Empty) => {}
                 Err(error) => return Value::error(error),
             },
+            Value::Lambda(_) => return Value::error(ErrorValue::Value),
         }
     }
     if numbers.is_empty() && empty_is_zero(name) {
@@ -1268,6 +1374,7 @@ fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     for value in values {
         match value {
             Value::Array(array) => total += array.values.iter().filter(|v| !blank(v)).count(),
+            Value::Lambda(_) => return Value::error(ErrorValue::Value),
             Value::Scalar(value) => total += usize::from(!blank(&value)),
         }
     }
@@ -1408,6 +1515,481 @@ fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     Value::Scalar(num(total))
 }
 
+/// `TEXTJOIN(separator, ignore_empty, ...)` over computed blocks; with no block
+/// the scalar builtin answers, so references behave exactly as before.
+fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 3 {
+            return Err(ErrorValue::Value);
+        }
+        let Some(values) = joined_values(&args[2..], ctx)? else {
+            return Ok(scalar("TEXTJOIN", args, ctx));
+        };
+        let separator = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
+        let ignore_empty = optional_bool(args, ctx, 1, false)?;
+        let mut out = String::new();
+        let mut chars = 0usize;
+        for value in values {
+            let empty = match &value {
+                CellValue::Empty => true,
+                CellValue::Text { value } => value.is_empty(),
+                _ => false,
+            };
+            if ignore_empty && empty {
+                continue;
+            }
+            if !out.is_empty() && !append_text(&mut out, &separator, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+            if !append_text(&mut out, &to_text(&value)?, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+        }
+        Ok(Value::Scalar(text(out)))
+    })())
+}
+
+fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        let Some(values) = joined_values(args, ctx)? else {
+            return Ok(scalar("CONCAT", args, ctx));
+        };
+        let mut out = String::new();
+        let mut chars = 0usize;
+        for value in values {
+            if !append_text(&mut out, &to_text(&value)?, &mut chars) {
+                return Err(ErrorValue::Value);
+            }
+        }
+        Ok(Value::Scalar(text(out)))
+    })())
+}
+
+/// every value the joined arguments contribute, or `None` when none of them is
+/// a computed block.
+fn joined_values(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Option<Vec<CellValue>>, ErrorValue> {
+    let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
+    if !values.iter().any(|value| matches!(value, Value::Array(_))) {
+        return Ok(None);
+    }
+    let mut out = Vec::new();
+    for value in values {
+        match value {
+            Value::Array(array) => out.extend(array.values),
+            Value::Lambda(_) => return Err(ErrorValue::Value),
+            Value::Scalar(value) => out.push(value),
+        }
+    }
+    Ok(Some(out))
+}
+
+/// append while the result still fits one cell.
+fn append_text(out: &mut String, piece: &str, chars: &mut usize) -> bool {
+    *chars = chars.saturating_add(piece.chars().count());
+    if *chars > crate::eval::MAX_CELL_TEXT_CHARS {
+        return false;
+    }
+    out.push_str(piece);
+    true
+}
+
+/// the scalar builtin of that name, for the paths that keep the cheap answer.
+fn scalar(name: &str, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    match crate::functions::resolve(name) {
+        Some(f) => Value::Scalar(f.call(args, ctx)),
+        None => Value::error(ErrorValue::Name),
+    }
+}
+
+// ----------------------------------------------------- names and callbacks
+
+/// `LET(name, value, ..., calculation)`: each name is bound for every later
+/// value and for the calculation, and unbound again once this call returns.
+fn let_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if args.len() < 3 || args.len().is_multiple_of(2) {
+        return Value::error(ErrorValue::Value);
+    }
+    let depth = ctx.binding_depth();
+    let mut index = 0;
+    let value = loop {
+        if index + 1 >= args.len() {
+            break evaluate_array(&args[index], ctx);
+        }
+        let Expr::Name { scope: None, name } = &args[index] else {
+            break Value::error(ErrorValue::Name);
+        };
+        let value = evaluate_array(&args[index + 1], ctx);
+        if !ctx.push_binding(Binding::new(name, value, reference_of(&args[index + 1]))) {
+            break Value::error(ErrorValue::Num);
+        }
+        index += 2;
+    };
+    ctx.truncate_bindings(depth);
+    value
+}
+
+/// the expression a name keeps standing for when it was bound to a plain
+/// reference, so `as_area` still answers for it.
+fn reference_of(expr: &Expr) -> Option<Expr> {
+    matches!(
+        expr,
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. }
+    )
+    .then(|| expr.clone())
+}
+
+/// `LAMBDA(parameter, ..., body)`: a value only the callback builtins consume.
+fn lambda(args: &[Expr], _ctx: &EvalContext<'_>) -> Value {
+    let Some((body, parameters)) = args.split_last() else {
+        return Value::error(ErrorValue::Value);
+    };
+    let mut params = Vec::with_capacity(parameters.len());
+    for parameter in parameters {
+        let Expr::Name { scope: None, name } = parameter else {
+            return Value::error(ErrorValue::Name);
+        };
+        params.push(name.clone());
+    }
+    Value::Lambda(Rc::new(Lambda {
+        params,
+        body: body.clone(),
+    }))
+}
+
+/// one argument of a lambda call: its value, plus the reference it stands for
+/// when the caller handed over part of a real range.
+type Argument = (Value, Option<Expr>);
+
+fn plain(value: Value) -> Argument {
+    (value, None)
+}
+
+fn callback(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Rc<Lambda>, ErrorValue> {
+    match args.get(index).map(|arg| evaluate_array(arg, ctx)) {
+        Some(Value::Lambda(lambda)) => Ok(lambda),
+        Some(Value::Scalar(CellValue::Error { value })) => Err(value),
+        _ => Err(ErrorValue::Value),
+    }
+}
+
+/// call a lambda with one value per parameter.
+fn invoke(lambda: &Lambda, argv: Vec<Argument>, ctx: &EvalContext<'_>) -> Value {
+    if lambda.params.len() != argv.len() {
+        return Value::error(ErrorValue::Value);
+    }
+    if !ctx.enter_lambda() {
+        return Value::error(ErrorValue::Num);
+    }
+    let depth = ctx.binding_depth();
+    let mut refused = false;
+    for (name, (value, reference)) in lambda.params.iter().zip(argv) {
+        if !ctx.push_binding(Binding::new(name, value, reference)) {
+            refused = true;
+            break;
+        }
+    }
+    let value = if refused {
+        Value::error(ErrorValue::Num)
+    } else {
+        evaluate_array(&lambda.body, ctx)
+    };
+    ctx.truncate_bindings(depth);
+    ctx.leave_lambda();
+    value
+}
+
+fn byrow(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    by_slice(args, ctx, true)
+}
+
+fn bycol(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    by_slice(args, ctx, false)
+}
+
+/// `BYROW`/`BYCOL`: one call per row or column, each result one cell of a
+/// single-column or single-row block.
+fn by_slice(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.len() != 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        let lambda = callback(args, ctx, 1)?;
+        let source = as_array_area(&args[0], ctx).filter(|area| area.sheet == ctx.sheet);
+        let count = if by_row { data.rows } else { data.cols };
+        let mut cells = Vec::with_capacity(count);
+        for index in 0..count {
+            let slice = if by_row {
+                block(ctx, 1, data.cols, rows_of(&data, index))
+            } else {
+                block(ctx, data.rows, 1, column_of(&data, index))
+            };
+            let reference = source
+                .as_ref()
+                .map(|area| slice_reference(area, index, by_row));
+            cells.push(invoke(&lambda, vec![(slice, reference)], ctx).into_scalar());
+        }
+        Ok(if by_row {
+            block(ctx, count, 1, cells)
+        } else {
+            block(ctx, 1, count, cells)
+        })
+    })())
+}
+
+/// the sub-range one `BYROW`/`BYCOL` call covers, so a callee that wants a
+/// reference sees the row or column it was handed.
+fn slice_reference(area: &Area, index: usize, by_row: bool) -> Expr {
+    let step = u32::try_from(index).unwrap_or(u32::MAX);
+    let last_row = area
+        .start
+        .row
+        .saturating_add(area.rows.saturating_sub(1) as u32);
+    let last_col = area
+        .start
+        .col
+        .saturating_add(area.cols.saturating_sub(1) as u32);
+    let (start, end) = if by_row {
+        let row = area.start.row.saturating_add(step);
+        (
+            CellRef::new(row, area.start.col),
+            CellRef::new(row, last_col),
+        )
+    } else {
+        let col = area.start.col.saturating_add(step);
+        (
+            CellRef::new(area.start.row, col),
+            CellRef::new(last_row, col),
+        )
+    };
+    Expr::Range {
+        sheet: None,
+        range: CellRange::new(start, end),
+    }
+}
+
+/// `MAP(array, ..., lambda)`: the lambda takes one element from each array and
+/// its results keep the broadcast shape.
+fn map(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 {
+            return Err(ErrorValue::Value);
+        }
+        let lambda = callback(args, ctx, args.len() - 1)?;
+        let mut values = Vec::with_capacity(args.len() - 1);
+        let (mut rows, mut cols) = (1usize, 1usize);
+        for argument in &args[..args.len() - 1] {
+            let value = evaluate_array(argument, ctx);
+            if let Some(error) = value.as_error() {
+                return Err(error);
+            }
+            let (r, c) = value.dims();
+            rows = rows.max(r);
+            cols = cols.max(c);
+            values.push(value);
+        }
+        let mut cells = Vec::with_capacity(output_cells(rows, cols)?);
+        for row in 0..rows {
+            for col in 0..cols {
+                let argv = values
+                    .iter()
+                    .map(|value| plain(Value::Scalar(value.broadcast(row, col))))
+                    .collect();
+                cells.push(invoke(&lambda, argv, ctx).into_scalar());
+            }
+        }
+        Ok(block(ctx, rows, cols, cells))
+    })())
+}
+
+/// `REDUCE(initial, array, lambda(accumulator, value))`. the accumulator may
+/// itself be a block, which is how a `VSTACK` body builds a result row by row.
+fn reduce(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let mut accumulator = evaluate_array(&args[0], ctx);
+        let data = argument(args, ctx, 1)?;
+        let lambda = callback(args, ctx, 2)?;
+        for value in &data.values {
+            let step = vec![plain(accumulator), plain(Value::Scalar(value.clone()))];
+            accumulator = invoke(&lambda, step, ctx);
+            if let Some(error) = accumulator.as_error() {
+                return Err(error);
+            }
+        }
+        Ok(accumulator)
+    })())
+}
+
+/// `SCAN(initial, array, lambda(accumulator, value))`: every intermediate
+/// accumulator, in the shape of the array scanned.
+fn scan(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let mut accumulator = evaluate_array(&args[0], ctx);
+        let data = argument(args, ctx, 1)?;
+        let lambda = callback(args, ctx, 2)?;
+        let (rows, cols) = (data.rows, data.cols);
+        let mut cells = Vec::with_capacity(output_cells(rows, cols)?);
+        for value in &data.values {
+            let step = vec![plain(accumulator), plain(Value::Scalar(value.clone()))];
+            accumulator = invoke(&lambda, step, ctx);
+            cells.push(accumulator.broadcast(0, 0));
+        }
+        Ok(block(ctx, rows, cols, cells))
+    })())
+}
+
+/// `MAKEARRAY(rows, columns, lambda(row, column))` with 1-based indices.
+fn makearray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 3 {
+            return Err(ErrorValue::Value);
+        }
+        let rows = index_of(optional_number(args, ctx, 0, 1.0)?)?;
+        let cols = index_of(optional_number(args, ctx, 1, 1.0)?)?;
+        let lambda = callback(args, ctx, 2)?;
+        let count = output_cells(rows, cols)?;
+        if !ctx.consume_cells(count as u64) {
+            return Err(ErrorValue::Num);
+        }
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                let argv = vec![
+                    plain(Value::Scalar(num(row as f64 + 1.0))),
+                    plain(Value::Scalar(num(col as f64 + 1.0))),
+                ];
+                cells.push(invoke(&lambda, argv, ctx).into_scalar());
+            }
+        }
+        Ok(block(ctx, rows, cols, cells))
+    })())
+}
+
+/// `TEXTSPLIT(text, column_delimiter, [row_delimiter], [ignore_empty],
+/// [match_mode], [pad_with])`: rows first, then columns within each row.
+fn textsplit(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 6 {
+            return Err(ErrorValue::Value);
+        }
+        let source = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
+        let columns = delimiters(args, ctx, 1)?;
+        let rows = delimiters(args, ctx, 2)?;
+        let ignore_empty = optional_bool(args, ctx, 3, false)?;
+        let insensitive = optional_number(args, ctx, 4, 0.0)? != 0.0;
+        let pad = optional(args, ctx, 5)?.unwrap_or(err(ErrorValue::NA));
+        let mut grid: Vec<Vec<String>> = split_text(&source, &rows, insensitive)
+            .into_iter()
+            .map(|row| split_text(&row, &columns, insensitive))
+            .collect();
+        if ignore_empty {
+            for row in &mut grid {
+                row.retain(|cell| !cell.is_empty());
+            }
+            grid.retain(|row| !row.is_empty());
+        }
+        let width = grid.iter().map(Vec::len).max().unwrap_or(0);
+        if width == 0 {
+            return Ok(Value::Scalar(text(String::new())));
+        }
+        let height = grid.len();
+        let mut cells = Vec::with_capacity(output_cells(height, width)?);
+        for row in &grid {
+            for col in 0..width {
+                cells.push(match row.get(col) {
+                    Some(value) => text(value.clone()),
+                    None => pad.clone(),
+                });
+            }
+        }
+        Ok(block(ctx, height, width, cells))
+    })())
+}
+
+/// the separators one `TEXTSPLIT` axis uses; an omitted or empty one never
+/// splits, so that axis stays a single row or column.
+fn delimiters(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Vec<String>, ErrorValue> {
+    let Some(argument_expr) = args.get(index) else {
+        return Ok(Vec::new());
+    };
+    if crate::functions::omitted(argument_expr) {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for value in argument(args, ctx, index)?.values {
+        if matches!(value, CellValue::Empty) {
+            continue;
+        }
+        let separator = to_text(&value)?;
+        if !separator.is_empty() {
+            out.push(separator);
+        }
+    }
+    Ok(out)
+}
+
+/// split on any separator, preferring the longest match at a position so a
+/// longer separator is never cut short by a shorter one that also matches.
+fn split_text(source: &str, separators: &[String], insensitive: bool) -> Vec<String> {
+    if separators.is_empty() {
+        return vec![source.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut at = 0usize;
+    while at < source.len() {
+        let hit = separators
+            .iter()
+            .filter(|separator| matches_at(source, at, separator, insensitive))
+            .map(String::len)
+            .max();
+        match hit {
+            Some(len) => {
+                out.push(source.get(start..at).unwrap_or_default().to_string());
+                at += len;
+                start = at;
+            }
+            None => at += next_char_width(source, at),
+        }
+    }
+    out.push(source.get(start..).unwrap_or_default().to_string());
+    out
+}
+
+fn matches_at(source: &str, at: usize, separator: &str, insensitive: bool) -> bool {
+    let Some(slice) = at
+        .checked_add(separator.len())
+        .and_then(|end| source.get(at..end))
+    else {
+        return false;
+    };
+    if insensitive {
+        slice.eq_ignore_ascii_case(separator)
+    } else {
+        slice == separator
+    }
+}
+
+fn next_char_width(source: &str, at: usize) -> usize {
+    source
+        .get(at..)
+        .and_then(|rest| rest.chars().next())
+        .map_or(1, char::len_utf8)
+}
+
 // ------------------------------------------------------------------ spill
 
 /// where an array formula's result lands and what it holds.
@@ -1421,7 +2003,8 @@ pub struct Spill {
 pub fn spill_at(anchor: CellRef, authored: Option<CellRange>, value: Value) -> Spill {
     let (rows, cols, values) = match value {
         Value::Array(array) => (array.rows, array.cols, array.values),
-        Value::Scalar(value) => {
+        value => {
+            let value = value.into_scalar();
             let (rows, cols) = match authored {
                 Some(range) => (
                     (range.end.row.saturating_sub(range.start.row) + 1) as usize,
