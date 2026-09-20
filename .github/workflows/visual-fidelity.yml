@@ -275,6 +275,12 @@ jobs:
         with:
           bun-version: "1.3.14"
 
+      - name: Install the publisher dependencies
+        if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
+        run: |
+          bun install --frozen-lockfile
+          bunx --no-install wrangler --version
+
       - name: Publish the reconciled commit renders
         if: inputs.publish_renders && github.repository == 'openooxml/betteroffice'
         env:
