@@ -37,10 +37,9 @@ pub struct VsdxPackage {
     pub master_contents: BTreeMap<String, Sheet>,
     #[serde(skip)]
     pub(crate) parts: Vec<PackagePart>,
-    /// Source container bytes, kept so unchanged members can be re-emitted
-    /// with their original compressed payload on save.
+    /// Source bytes for verbatim member passthrough on save.
     #[serde(skip)]
-    pub(crate) source_container: Option<ooxml_opc::SourceContainer>,
+    pub(crate) source_container: ooxml_opc::SourceContainer,
 }
 
 impl VsdxPackage {

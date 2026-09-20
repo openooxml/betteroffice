@@ -175,16 +175,14 @@ fn write_deflated(
         .map_err(|e| format!("write {name}: {e}"))
 }
 
-/// Original container bytes a parsed package retains so unchanged members can
-/// be re-emitted verbatim on save. A write-time cache, not model content: two
-/// packages parsed from different serializations of the same document are the
-/// same document, so equality is always true.
+/// Original container bytes, retained so unchanged members re-emit verbatim
+/// on save; a write cache, not model content, so equality is always true.
 #[derive(Clone, Default)]
-pub struct SourceContainer(Vec<u8>);
+pub struct SourceContainer(std::sync::Arc<[u8]>);
 
 impl SourceContainer {
     pub fn new(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self(bytes.into())
     }
 
     pub fn as_bytes(&self) -> &[u8] {
