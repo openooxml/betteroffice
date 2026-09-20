@@ -2421,6 +2421,10 @@ impl Workbook {
     /// the bump invalidates chart resolutions.
     fn bump_model_epoch(&mut self) {
         self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.chart_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
 
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
