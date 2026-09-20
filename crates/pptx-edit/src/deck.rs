@@ -22,9 +22,9 @@ use crate::{
     ShapeStrokeReceipt, ShapeZOrderReceipt, SlideReceipt, SlideSnapshot, TransformReceipt,
 };
 
-const SCHEMA_VERSION: f64 = 2.1;
+const SCHEMA_VERSION: f64 = 2.2;
 /// Versions [`migrate_doc`] can carry forward. Anything else is unreadable.
-const MIGRATABLE_SCHEMA_VERSIONS: [f64; 3] = [1.0, 2.0, SCHEMA_VERSION];
+const MIGRATABLE_SCHEMA_VERSIONS: [f64; 4] = [1.0, 2.0, 2.1, SCHEMA_VERSION];
 const MAX_GEOMETRY: i64 = 1_000_000_000_000_000;
 const MAX_SHAPE_DEPTH: usize = 128;
 const EMU_PER_POINT: f64 = 12_700.0;
@@ -1267,16 +1267,35 @@ pub(crate) fn fingerprint_from_doc(doc: &Doc) -> EditResult<String> {
         .ok_or_else(|| EditError::InvalidState("missing fingerprint".to_owned()))
 }
 
-/// Carries a released 1.0 or 2.0 document forward to the current schema.
+/// Carries a released 1.0, 2.0 or 2.1 document forward to the current schema.
 pub(crate) fn migrate_doc(doc: &Doc) -> EditResult<()> {
     let version = {
         let txn = doc.transact();
         let meta = required_map(&txn, META)?;
         schema_version(&meta, &txn)?
     };
-    if version < SCHEMA_VERSION {
+    if version < 2.1 {
         migrate_doc_to_v2_1(doc)?;
+    } else if version < SCHEMA_VERSION {
+        migrate_doc_to_v2_2(doc)?;
     }
+    Ok(())
+}
+
+/// Rewrites the stored package so media bytes ride as base64 strings rather
+/// than the integer arrays 2.1 wrote.
+fn migrate_doc_to_v2_2(doc: &Doc) -> EditResult<()> {
+    let mut txn = doc.transact_mut_with(MIGRATE_ORIGIN);
+    let meta = required_map(&txn, META)?;
+    let package = package_from_meta(&meta, &txn)?;
+    let package_json =
+        serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?;
+    meta.insert(
+        &mut txn,
+        "packageJson",
+        Any::Buffer(Arc::from(package_json)),
+    );
+    meta.insert(&mut txn, "schemaVersion", SCHEMA_VERSION);
     Ok(())
 }
 

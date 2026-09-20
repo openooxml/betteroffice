@@ -228,6 +228,7 @@ dependencies = [
 name = "betteroffice-pptx-parse"
 version = "0.2.0"
 dependencies = [
+ "base64",
  "betteroffice-drawingml",
  "betteroffice-opc",
  "proptest",
