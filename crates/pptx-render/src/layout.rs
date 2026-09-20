@@ -46,8 +46,7 @@ const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
 const SCRIPT_SIZE_RATIO: f32 = 0.58;
 /// `p:bgRef/@idx` counts `a:bgFillStyleLst` entries from here.
 const BACKGROUND_FILL_BASE: u32 = 1_001;
-/// Single-spaced line pitch in ems. Measured from PowerPoint 16.113 PDF exports:
-/// 1.2 em for every face, not the face's own ascent plus descent plus line gap.
+/// Measured on PowerPoint 16.113 exports: 1.2 em for every face.
 const SINGLE_LINE_PITCH_EM: f32 = 1.2;
 const MAX_FONT_BYTES: usize = 32 * 1024 * 1024;
 const MAX_FONTS: usize = 256;
