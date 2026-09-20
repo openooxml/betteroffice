@@ -19,7 +19,7 @@ QUALITY_OUTPUT=.source/office-quality/run \
 node scripts/office-quality/readme.mjs .source/office-quality/run/report.json
 ```
 
-The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The default [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) selects the current samples across all three formats. The [`docx` collection](https://corpus.betteroffice.dev/collections/docx.json) selects Word documents. Set `QUALITY_COLLECTION` to another collection or `QUALITY_SAMPLES='["betteroffice-demo"]'` to select a subset, overriding the collection. Runs support up to 100 samples.
+The runner compares the latest npm releases with the checked-out source using pinned CDN fonts. Commit source changes first and choose an empty output directory. The single [`office-quality` collection](https://corpus.betteroffice.dev/collections/office-quality.json) contains all three formats, including PPTArena. Set `QUALITY_FORMAT=docx`, `pptx`, or `xlsx` to measure one format, or `QUALITY_SAMPLES='["betteroffice-demo"]'` for explicit samples. Runs support up to 1,000 samples.
 
 DOCX references and page-bounds profiles support 1–250 pages. PPTX, XLSX, and VSDX references remain limited to 100 pages, matching their capture harness. Extra rendered DOCX pages retain their native dimensions and contribute to the page-count penalty. Source documents may be up to 128 MiB; individual reference images remain limited to 32 MiB. Assets are verified against their recorded sizes and SHA-256 hashes before capture.
 
@@ -43,13 +43,13 @@ After the [workflow](../../.github/workflows/visual-fidelity.yml) lands on `main
 gh workflow run visual-fidelity.yml --ref main -f branch=main
 ```
 
-Keep `--ref main`; set `branch` to the repository branch to measure. The optional `collection` and `samples` inputs select the corpus as above. The action uses existing bot credentials to update the [README scores](../../README.md#visual-fidelity) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. CI retains score JSON and generated Markdown; documents and page images are excluded from uploaded artifacts.
+Keep `--ref main`; set `branch` to the repository branch to measure. The optional `samples` input selects explicit samples. A preparation job freezes the source revision, package versions, and corpus metadata. DOCX, PPTX, and XLSX then evaluate in parallel, each with its own asset cache and 90-minute budget. Each browser capture retains its 600-second deadline.
 
-The measurement job allows 90 minutes for setup, builds, and both comparison channels. Each browser capture retains its default 600-second deadline. The longer job budget accommodates larger collections; incomplete captures remain recorded failures.
+The final job requires every selected format and sample, combines the original comparisons, and updates the [README scores](../../README.md#benchmarks) as `openooxml-bot[bot]`. Unchanged results create no commit; a changed branch head requires a rerun. Runs are manual only. Score JSON and generated Markdown are retained for 30 days; per-format reports and optional commit PNGs are transferred as seven-day artifacts.
 
 ## Published renders and the viewer
 
-With `publish_renders` left on, the measurement job also uploads the `commit` channel to the
+With `publish_renders` left on, the final job uploads the reconciled `commit` channel to the
 `betteroffice-fidelity` R2 bucket, keyed by the measured commit:
 
 ```text
@@ -59,11 +59,10 @@ renders/latest.json
 ```
 
 `latest.json` names the current SHA, its report key, and the published page count per sample. It is
-written last, so it never points at an incomplete upload. Every published SHA is kept. A full
-`office-quality` run is roughly 1,045 pages and 475 MiB.
+written last, so it never points at an incomplete upload. Every published SHA is kept.
 
-The upload step is deliberately soft-failing: an unprovisioned bucket or a token without R2 write
-access marks the step red without withholding the README update. [`apps/fidelity`](../../apps/fidelity)
+Missing format reports or incomplete render artifacts prevent publication. An R2 upload failure
+also stops the final job before the README update. [`apps/fidelity`](../../apps/fidelity)
 serves those renders next to the public Office references, so a page can be compared by swiping or
 by a difference blend. It reads scores only from `report.json` and never derives its own.
 
