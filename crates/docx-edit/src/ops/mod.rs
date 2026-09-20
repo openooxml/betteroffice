@@ -8,6 +8,7 @@ pub mod text;
 
 use std::collections::BTreeMap;
 
+use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
@@ -138,36 +139,76 @@ pub(crate) fn revision_id_in_range(
         })
 }
 
+fn chunk_at<T: ReadTxn>(insert: &Out, attrs: Option<&Attrs>, offset: u32, txn: &T) -> Chunk {
+    let kind = match insert {
+        Out::Any(Any::String(value)) => ChunkKind::Text(value.to_string()),
+        Out::YMap(map) if is_pilcrow(map, txn) => ChunkKind::Pilcrow(map.clone()),
+        Out::YMap(map) => ChunkKind::Embed(Some(map.clone())),
+        _ => ChunkKind::Embed(None),
+    };
+    let attrs = attrs
+        .into_iter()
+        .flat_map(|attrs| attrs.iter())
+        .map(|(key, value)| (key.to_string(), value.clone()))
+        .collect();
+    Chunk {
+        start: offset,
+        len: out_len(insert),
+        kind,
+        attrs,
+    }
+}
+
 pub(crate) fn snapshot<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<Chunk> {
     let mut offset = 0;
     story
         .diff(txn, YChange::identity)
         .into_iter()
         .map(|diff| {
-            let len = out_len(&diff.insert);
-            let kind = match &diff.insert {
-                Out::Any(Any::String(value)) => ChunkKind::Text(value.to_string()),
-                Out::YMap(map) if is_pilcrow(map, txn) => ChunkKind::Pilcrow(map.clone()),
-                Out::YMap(map) => ChunkKind::Embed(Some(map.clone())),
-                _ => ChunkKind::Embed(None),
-            };
-            let attrs = diff
-                .attributes
-                .as_deref()
-                .into_iter()
-                .flat_map(|attrs| attrs.iter())
-                .map(|(key, value)| (key.to_string(), value.clone()))
-                .collect();
-            let chunk = Chunk {
-                start: offset,
-                len,
-                kind,
-                attrs,
-            };
-            offset += len;
+            let chunk = chunk_at(&diff.insert, diff.attributes.as_deref(), offset, txn);
+            offset += chunk.len;
             chunk
         })
         .collect()
+}
+
+/// `snapshot` restricted to the chunks overlapping `[lo, hi)`: skipped items cost
+/// one length measure — no string or attribute clones — and the walk stops at `hi`.
+pub(crate) fn snapshot_range<T: ReadTxn>(story: &TextRef, txn: &T, lo: u32, hi: u32) -> Vec<Chunk> {
+    let mut offset = 0;
+    let mut chunks = Vec::new();
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if offset >= hi {
+            break;
+        }
+        if offset + len > lo {
+            chunks.push(chunk_at(
+                &diff.insert,
+                diff.attributes.as_deref(),
+                offset,
+                txn,
+            ));
+        }
+        offset += len;
+    }
+    chunks
+}
+
+/// The story's last pilcrow as `(index, map)` — a kind-only walk with no
+/// per-chunk materialization.
+pub(crate) fn last_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T) -> Option<(u32, MapRef)> {
+    let mut offset = 0;
+    let mut last = None;
+    for diff in story.diff(txn, YChange::identity) {
+        if let Out::YMap(map) = &diff.insert
+            && is_pilcrow(map, txn)
+        {
+            last = Some((offset, map.clone()));
+        }
+        offset += out_len(&diff.insert);
+    }
+    last
 }
 
 /// Captures every pilcrow property except the schema discriminator, plus the paraId.
