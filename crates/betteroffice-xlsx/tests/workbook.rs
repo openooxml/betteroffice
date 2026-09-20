@@ -2,11 +2,12 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
-    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, DEFAULT_TEXT_SEARCH_LIMIT,
-    DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink, MAX_COLLABORATION_BYTES,
-    MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS,
-    NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest, Sheet,
-    SheetChart, SheetId, StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook, WorkbookModel,
+    CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
+    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink,
+    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
+    MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest,
+    Sheet, SheetChart, SheetId, StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook,
+    WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6974,4 +6975,61 @@ fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
         bump_b2(&mut workbook);
         assert_eq!(before, plotted(&workbook), "{reason} must keep its cache");
     }
+}
+
+#[test]
+fn inserting_a_column_carries_the_column_style_with_it() {
+    let mut sheet = Sheet::new("Tinted");
+    sheet.col_styles = vec![ColStyle {
+        first: 2,
+        last: 4,
+        xf: 0,
+    }];
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    let mut workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    assert_eq!(workbook.model().sheets[0].col_style(2), Some(0));
+
+    workbook
+        .apply_ops(
+            vec![Op::InsertCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(
+        workbook.model().sheets[0].col_styles,
+        vec![ColStyle {
+            first: 4,
+            last: 6,
+            xf: 0
+        }],
+        "the run moves with the columns it formats"
+    );
+    assert_eq!(workbook.model().sheets[0].col_style(2), None);
+    assert_eq!(workbook.model().sheets[0].col_style(4), Some(0));
+
+    workbook
+        .apply_ops(
+            vec![Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 2,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap();
+    assert_eq!(workbook.model().sheets[0].col_style(2), Some(0));
 }

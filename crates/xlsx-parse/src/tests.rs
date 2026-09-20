@@ -284,6 +284,18 @@ fn a_column_style_run_survives_without_a_width() {
 }
 
 #[test]
+fn a_worksheet_past_the_column_style_cap_is_refused() {
+    let runs: String = (1..=crate::MAX_COL_STYLES + 1)
+        .map(|i| format!(r#"<col min="{i}" max="{i}" style="1"/>"#))
+        .collect();
+    let body = format!("<cols>{runs}</cols><sheetData/>");
+    assert!(matches!(
+        parse_workbook(&package(&body, &[], false)),
+        Err(ParseError::TooManyColumnStyles)
+    ));
+}
+
+#[test]
 fn flattens_rich_run_shared_string() {
     let sst = "<sst><si><r><t>Hello </t></r><r><t>World</t></r></si></sst>";
     let mut parts = package(

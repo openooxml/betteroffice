@@ -15,7 +15,9 @@ use crate::styles::parse_stylesheet;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
 };
-use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, ParseError};
+use crate::{
+    MAX_CELLS, MAX_COL_STYLES, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, ParseError,
+};
 
 /// excel's row-height ceiling in points.
 const MAX_ROW_HEIGHT_PT: f64 = 409.5;
@@ -590,6 +592,9 @@ fn parse_col(
     let min = min.clamp(1, MAX_COLS);
     let max = max.clamp(min, MAX_COLS);
     if let Some(xf) = style {
+        if sheet.col_styles.len() >= MAX_COL_STYLES {
+            return Err(ParseError::TooManyColumnStyles);
+        }
         sheet.col_styles.push(ColStyle {
             first: min - 1,
             last: max - 1,

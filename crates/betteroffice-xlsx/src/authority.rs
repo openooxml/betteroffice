@@ -134,21 +134,33 @@ impl WorkbookBase {
             fingerprints.insert(version, vec![version_fingerprint]);
         }
         if let Some(version_3) = fingerprints.get_mut(&3) {
-            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
+            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true, true)?;
             if !version_3.contains(&defined_names_v3) {
                 version_3.push(defined_names_v3);
+            }
+        }
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (without_col_styles, _) =
+                fingerprint_model_with_schema(model, version, version >= 4, false)?;
+            let accepted = fingerprints.entry(version).or_default();
+            if !accepted.contains(&without_col_styles) {
+                accepted.push(without_col_styles);
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
             for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
                 let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
+                let (without_col_styles, _) =
+                    fingerprint_model_with_schema(&legacy, version, version >= 4, false)?;
                 let accepted = fingerprints.entry(version).or_default();
-                if !accepted.contains(&legacy_fingerprint) {
-                    accepted.push(legacy_fingerprint);
+                for fingerprint in [legacy_fingerprint, without_col_styles] {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
                 }
             }
             if let Some(version_3) = fingerprints.get_mut(&3) {
-                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true)?;
+                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true, true)?;
                 if !version_3.contains(&defined_names_v3) {
                     version_3.push(defined_names_v3);
                 }
@@ -3321,13 +3333,14 @@ fn fingerprint_model_for_schema(
     model: &WorkbookModel,
     schema_version: i64,
 ) -> Result<(String, u64), String> {
-    fingerprint_model_with_schema(model, schema_version, schema_version >= 4)
+    fingerprint_model_with_schema(model, schema_version, schema_version >= 4, true)
 }
 
 fn fingerprint_model_with_schema(
     model: &WorkbookModel,
     schema_version: i64,
     include_defined_names: bool,
+    include_col_styles: bool,
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
@@ -3351,6 +3364,15 @@ fn fingerprint_model_with_schema(
     .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
     hash_u64(&mut hasher, model.sheets.len() as u64);
+    // a workbook declaring no column style hashes exactly as releases before
+    // they were read did, so only a workbook that declares one needs the
+    // pre-change fingerprint carried alongside.
+    let hash_col_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.col_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
         hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
@@ -3408,6 +3430,11 @@ fn fingerprint_model_with_schema(
             let charts = serde_json::to_vec(&sheet.charts)
                 .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
             hash_bytes(&mut hasher, &charts);
+        }
+        if hash_col_styles {
+            let col_styles = serde_json::to_vec(&sheet.col_styles)
+                .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
+            hash_bytes(&mut hasher, &col_styles);
         }
     }
     let digest = hasher.finalize();
@@ -3516,7 +3543,7 @@ mod tests {
     fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
         let base = WorkbookBase::from_model(model).unwrap();
         let (_, client_id) =
-            fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+            fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();
         let doc = Doc::with_client_id(client_id);
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
@@ -3524,7 +3551,7 @@ mod tests {
         seed(&doc, &base, model, &keys).unwrap();
         {
             let (fingerprint, _) =
-                fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+                fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();
             let mut txn = doc.transact_mut_with("test:legacy-schema");
             let meta = txn.get_map(META).unwrap();
             meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
@@ -3565,6 +3592,43 @@ mod tests {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_column_styled_workbook_still_accepts_its_pre_change_fingerprint() {
+        let mut model = rich_model();
+        model.sheets[0].col_styles = vec![ColStyle {
+            first: 0,
+            last: 3,
+            xf: 1,
+        }];
+        let base = WorkbookBase::from_model(&model).unwrap();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (pre_change, _) =
+                fingerprint_model_with_schema(&model, version, version >= 4, false).unwrap();
+            assert!(
+                base.fingerprints[&version].contains(&pre_change),
+                "schema v{version} must still recognise the fingerprint released before \
+                 column styles were read"
+            );
+        }
+        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (without, _) =
+            fingerprint_model_with_schema(&model, SCHEMA_VERSION, true, false).unwrap();
+        assert_ne!(
+            current, without,
+            "two workbooks differing only in their column styles must not share a fingerprint"
+        );
+
+        let mut plain = rich_model();
+        plain.sheets[0].col_styles.clear();
+        let (plain_current, _) = fingerprint_model_for_schema(&plain, SCHEMA_VERSION).unwrap();
+        let (plain_without, _) =
+            fingerprint_model_with_schema(&plain, SCHEMA_VERSION, true, false).unwrap();
+        assert_eq!(
+            plain_current, plain_without,
+            "a workbook declaring no column style keeps the fingerprint it always had"
+        );
     }
 
     #[test]
@@ -3797,7 +3861,7 @@ mod tests {
                     .unwrap();
                 sheet.remove(&mut txn, CHARTS);
             }
-            let (fingerprint, _) = fingerprint_model_with_schema(&model, 5, true).unwrap();
+            let (fingerprint, _) = fingerprint_model_with_schema(&model, 5, true, true).unwrap();
             let meta = txn.get_map(META).unwrap();
             meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
             meta.try_update(&mut txn, "schemaVersion", 5);

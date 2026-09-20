@@ -106,20 +106,15 @@ impl Sheet {
     }
 
     /// the style a column's `<col>` run gives every cell that declares none;
-    /// later runs win, matching how excel resolves overlapping runs.
+    /// later runs win, matching how excel resolves overlapping runs. only the
+    /// fill and the row fit read it today, so callers that want a cell's font,
+    /// number format, alignment or border still read `Cell::style` directly.
     pub fn col_style(&self, col: ColId) -> Option<u32> {
         self.col_styles
             .iter()
             .rev()
             .find(|run| (run.first..=run.last).contains(&col))
             .map(|run| run.xf)
-    }
-
-    /// the style that governs a cell: its own, else its column's.
-    pub fn effective_style(&self, at: CellRef) -> Option<u32> {
-        self.cell(at)
-            .and_then(|cell| cell.style)
-            .or_else(|| self.col_style(at.col))
     }
 
     pub fn cell_mut(&mut self, at: CellRef) -> Option<&mut Cell> {

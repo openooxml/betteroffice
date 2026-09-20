@@ -76,6 +76,9 @@ pub const MAX_DEFINED_NAMES: usize = 65_536;
 /// upper bound on hyperlinks in one worksheet.
 pub const MAX_HYPERLINKS: usize = 65_536;
 
+/// upper bound on `<col>` runs naming a style in one worksheet.
+pub const MAX_COL_STYLES: usize = 65_536;
+
 /// upper bound on entries in any single style pool (fonts, fills, borders,
 /// cellXfs, numFmts).
 pub const MAX_STYLE_ENTRIES: usize = 65_536;
@@ -120,6 +123,8 @@ pub enum ParseError {
     TooManyDefinedNames,
     /// a worksheet exceeded [`MAX_HYPERLINKS`].
     TooManyHyperlinks,
+    /// a worksheet exceeded [`MAX_COL_STYLES`].
+    TooManyColumnStyles,
     /// a style pool exceeded [`MAX_STYLE_ENTRIES`].
     TooManyStyles,
     /// a part exceeded [`MAX_TREE_BYTES`], [`MAX_TREE_NODES`] or
@@ -144,6 +149,9 @@ impl core::fmt::Display for ParseError {
             ParseError::TooManyStrings => write!(f, "shared string count exceeded cap"),
             ParseError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
             ParseError::TooManyHyperlinks => write!(f, "worksheet hyperlink count exceeded cap"),
+            ParseError::TooManyColumnStyles => {
+                write!(f, "worksheet column style count exceeded cap")
+            }
             ParseError::TooManyStyles => write!(f, "style pool count exceeded cap"),
             ParseError::TreeTooLarge => write!(f, "part exceeded the element tree cap"),
             ParseError::TooManyCharts => write!(f, "chart reference or anchor count exceeded cap"),
