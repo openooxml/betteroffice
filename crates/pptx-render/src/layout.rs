@@ -2061,7 +2061,7 @@ fn resolve_content(
     let compat_line_spacing = cascade.compat_line_spacing();
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut counters = [0_u32; 9];
+    let mut numbering = AutoNumbering::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
         let mut properties = cascade.paragraph_properties(index, paragraph.level);
         if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
@@ -2101,7 +2101,7 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters);
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering);
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -4008,25 +4008,46 @@ fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
     }
 }
 
+/// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
+/// the run was seeded from.
+#[derive(Default)]
+struct AutoNumbering {
+    numbers: [u32; 9],
+    starts: [u32; 9],
+}
+
 /// Resolves a marker once per paragraph.
-fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
-    let level = (level as usize).min(counters.len() - 1);
-    counters[level + 1..].fill(0);
+fn resolve_marker(
+    bullet: Option<&Bullet>,
+    level: u32,
+    numbering: &mut AutoNumbering,
+) -> Option<String> {
+    let level = (level as usize).min(numbering.numbers.len() - 1);
+    numbering.numbers[level + 1..].fill(0);
+    numbering.starts[level + 1..].fill(0);
     match bullet {
         Some(Bullet::AutoNumber {
             scheme,
             start_at,
             restart,
         }) => {
-            counters[level] = match counters[level] {
-                0 => (*start_at).clamp(1, 32_767),
-                _ if *restart => (*start_at).clamp(1, 32_767),
+            let start = (*start_at).clamp(1, 32_767);
+            // PowerPoint writes the list's `startAt` on every one of its
+            // paragraphs, so repeating the seed continues the run; only a
+            // different declared start opens a new list.
+            numbering.numbers[level] = match numbering.numbers[level] {
+                0 => start,
+                _ if *restart && numbering.starts[level] != start => start,
                 current => current.saturating_add(1),
             };
-            Some(format_autonum(counters[level], scheme))
+            if numbering.numbers[level] == start {
+                numbering.starts[level] = start;
+            }
+            Some(format_autonum(numbering.numbers[level], scheme))
         }
         _ => {
-            counters[level] = 0;
+            numbering.numbers[level] = 0;
+            numbering.starts[level] = 0;
             match bullet {
                 Some(Bullet::Character { value }) if !value.trim().is_empty() => {
                     Some(value.clone())
@@ -4347,8 +4368,8 @@ mod tests {
 
     #[test]
     fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = [0_u32; 9];
-        let number = |level, counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4359,7 +4380,7 @@ mod tests {
                 counters,
             )
         };
-        let dash = |level, counters: &mut [u32; 9]| {
+        let dash = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::Character {
                     value: "-".to_owned(),
@@ -4382,8 +4403,8 @@ mod tests {
 
     #[test]
     fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = [0_u32; 9];
-        let number = |counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4396,7 +4417,7 @@ mod tests {
         };
         assert_eq!(number(&mut counters).as_deref(), Some("7."));
         assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let last_start = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 32_767,
@@ -4429,7 +4450,7 @@ mod tests {
 
     #[test]
     fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let number = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 1,
@@ -4479,6 +4500,38 @@ mod tests {
         assert_eq!(
             resolve_marker(Some(&number), 0, &mut counters).as_deref(),
             Some("1.")
+        );
+    }
+
+    /// `pptarena-018-original` slide 11 declares `startAt="4"` on all four of
+    /// its paragraphs and PowerPoint renders 4, 5, 6, 7;
+    /// `pptarena-034-original` slide 11 declares `startAt="1"` on all five and
+    /// PowerPoint renders a) through e).
+    #[test]
+    fn a_repeated_declared_start_continues_the_list() {
+        let mut counters = AutoNumbering::default();
+        let arabic = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 4,
+            restart: true,
+        };
+        let alpha = Bullet::AutoNumber {
+            scheme: "alphaLcParenR".to_owned(),
+            start_at: 1,
+            restart: true,
+        };
+        assert_eq!(
+            (0..4)
+                .filter_map(|_| resolve_marker(Some(&arabic), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["4.", "5.", "6.", "7."]
+        );
+        let mut counters = AutoNumbering::default();
+        assert_eq!(
+            (0..5)
+                .filter_map(|_| resolve_marker(Some(&alpha), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["a)", "b)", "c)", "d)", "e)"]
         );
     }
 
