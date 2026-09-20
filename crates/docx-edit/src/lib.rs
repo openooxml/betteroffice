@@ -306,8 +306,7 @@ impl EditingDoc {
         doc.get_or_insert_map(COMMENTS);
         let epoch = Arc::new(AtomicU64::new(0));
         let observed = Arc::clone(&epoch);
-        // after_transaction fires on every commit without materializing an update;
-        // observe_update_v1 would encode one and so costs (and can fail) per commit.
+        // after_transaction: bumps on any store-changing commit without encoding an update.
         let update_sub = doc
             .observe_after_transaction(move |txn| {
                 if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
@@ -325,12 +324,10 @@ impl EditingDoc {
         }
     }
 
-    /// Segment geometry for `story_id`, built once per committed document change and
-    /// reused until the next update lands.
+    /// Cached segment geometry for `story_id`, rebuilt when the doc changes.
     pub(crate) fn segment_index(&self, story_id: &str) -> EditResult<Arc<SegmentIndex>> {
-        // The epoch is sampled before opening the read transaction: a commit landing in
-        // between tags the fresh index with the older epoch, forcing one extra rebuild
-        // rather than serving a pre-commit snapshot as current.
+        // Sampling before the read txn lets a racing commit tag the fresh index
+        // stale rather than serve a pre-commit snapshot as current.
         let epoch = self.epoch.load(Ordering::Relaxed);
         {
             let cache = self.segment_indexes.lock().unwrap();
@@ -343,11 +340,12 @@ impl EditingDoc {
         let txn = self.doc.transact();
         let story = story_ref(&txn, story_id)?;
         let index = Arc::new(SegmentIndex::build(&story, &txn));
+        let mut cache = self.segment_indexes.lock().unwrap();
+        if let Some(stories) = txn.get_map(STORIES) {
+            cache.retain(|key, _| &**key == story_id || stories.get(&txn, key).is_some());
+        }
         drop(txn);
-        self.segment_indexes
-            .lock()
-            .unwrap()
-            .insert(story_id.into(), (epoch, Arc::clone(&index)));
+        cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
         Ok(index)
     }
 

@@ -37,10 +37,7 @@ pub(crate) struct Seg {
     pub kind: SegKind,
 }
 
-/// Materialized segment geometry for one story at one committed epoch, built by a
-/// single `diff` walk that keeps only what the location/index helpers read. Lookups
-/// then answer by binary search or hash lookup instead of re-walking
-/// `story_segments` on every call.
+/// Materialized segment geometry for one story at one committed epoch.
 pub(crate) struct SegmentIndex {
     len: u32,
     segs: Vec<Seg>,
