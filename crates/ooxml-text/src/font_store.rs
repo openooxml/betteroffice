@@ -175,6 +175,28 @@ pub struct RequestedLineMetrics {
     /// `1.0` leaves the substitute's own pitch alone, which is what every
     /// family whose ratio is unmeasured carries — see [`crate::word_fonts`].
     pub advance_scale: f32,
+    /// The measured ratio of the family's bold, italic and bold-italic faces,
+    /// where one was measured; `None` falls back to `advance_scale`.
+    pub advance_scale_bold: Option<f32>,
+    pub advance_scale_italic: Option<f32>,
+    pub advance_scale_bold_italic: Option<f32>,
+}
+
+impl RequestedLineMetrics {
+    /// The advance ratio for the requested style, falling back to the regular
+    /// face's ratio wherever the styled face is unmeasured.
+    pub fn advance_scale_for(&self, bold: bool, italic: bool) -> f32 {
+        match (bold, italic) {
+            (true, true) => self
+                .advance_scale_bold_italic
+                .or(self.advance_scale_bold)
+                .or(self.advance_scale_italic),
+            (true, false) => self.advance_scale_bold,
+            (false, true) => self.advance_scale_italic,
+            (false, false) => None,
+        }
+        .unwrap_or(self.advance_scale)
+    }
 }
 
 /// Design-space metrics extracted at registration time, in font units.
@@ -328,13 +350,16 @@ impl FontStore {
     /// unchanged; hosts put the returned id at the head of the fallback chain.
     /// A Latin entry mirrors the span into the win box and clears the East
     /// Asian code pages, so the view measures the same under either line rule
-    /// whatever the substitute claims. A `requested.advance_scale` other than
-    /// `1.0` widens every advance, offset and outline the view reports, so the
-    /// same id measures and paints at the requested face's pitch.
+    /// whatever the substitute claims. An `advance_scale_for(bold, italic)`
+    /// other than `1.0` widens every advance, offset and outline the view
+    /// reports, so the same id measures and paints at the requested face's
+    /// pitch.
     pub fn register_substitute(
         &mut self,
         base: FontId,
         requested: RequestedLineMetrics,
+        bold: bool,
+        italic: bool,
     ) -> Result<FontId, FontError> {
         let entry = self.entry(base)?;
         let owner = entry.bytes_of.unwrap_or(base.0 as usize);
@@ -342,11 +367,13 @@ impl FontStore {
         if requested.units_per_em == 0 || metrics.units_per_em == 0 {
             return Ok(base);
         }
-        let advance_scale = if requested.advance_scale.is_finite() && requested.advance_scale > 0.0
-        {
-            requested.advance_scale
-        } else {
-            1.0
+        let advance_scale = {
+            let scale = requested.advance_scale_for(bold, italic);
+            if scale.is_finite() && scale > 0.0 {
+                scale
+            } else {
+                1.0
+            }
         };
         let scale = f32::from(metrics.units_per_em) / f32::from(requested.units_per_em);
         let rescale = |design: i16| {

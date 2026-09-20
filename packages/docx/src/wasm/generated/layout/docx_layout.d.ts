@@ -126,7 +126,7 @@ export function register_measure_font(bytes: Uint8Array): number;
  * family's chain. Pagination, the display list and glyph outlines all read
  * this one store, so a widened view measures and paints at one pitch.
  */
-export function register_substitute_measure_font(base: number, requested_family: string): number;
+export function register_substitute_measure_font(base: number, requested_family: string, bold: boolean, italic: boolean): number;
 
 /**
  * wasm wrapper over [`session::update_display_list`]: apply a page-delta
@@ -157,7 +157,7 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
-    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
