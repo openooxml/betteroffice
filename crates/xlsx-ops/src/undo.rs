@@ -41,7 +41,13 @@ impl UndoStack {
     /// apply a transaction's ops and record its inverse for undo; clears the
     /// redo stack.
     pub fn commit(&mut self, wb: &mut Workbook, tx: &Transaction) -> Result<(), OpError> {
-        let inverse = apply_ops(wb, &tx.ops)?;
+        self.commit_ops(wb, &tx.ops)
+    }
+
+    /// apply borrowed ops directly, skipping the transaction clone a caller
+    /// holding `&[Op]` would make to build one.
+    pub fn commit_ops(&mut self, wb: &mut Workbook, ops: &[Op]) -> Result<(), OpError> {
+        let inverse = apply_ops(wb, ops)?;
         self.undo.push(inverse);
         self.redo.clear();
         Ok(())
@@ -60,22 +66,22 @@ impl UndoStack {
 
     /// reverse the most recent transaction, returning the ops applied.
     pub fn undo(&mut self, wb: &mut Workbook) -> Result<Option<Vec<Op>>, OpError> {
-        let Some(ops) = self.undo.last().cloned() else {
+        let Some(ops) = self.undo.last() else {
             return Ok(None);
         };
-        let redo_inverse = apply_ops(wb, &ops)?;
-        self.undo.pop();
+        let redo_inverse = apply_ops(wb, ops)?;
+        let ops = self.undo.pop().expect("peeked above");
         self.redo.push(redo_inverse);
         Ok(Some(ops))
     }
 
     /// re-apply the most recently undone transaction.
     pub fn redo(&mut self, wb: &mut Workbook) -> Result<Option<Vec<Op>>, OpError> {
-        let Some(ops) = self.redo.last().cloned() else {
+        let Some(ops) = self.redo.last() else {
             return Ok(None);
         };
-        let undo_inverse = apply_ops(wb, &ops)?;
-        self.redo.pop();
+        let undo_inverse = apply_ops(wb, ops)?;
+        let ops = self.redo.pop().expect("peeked above");
         self.undo.push(undo_inverse);
         Ok(Some(ops))
     }

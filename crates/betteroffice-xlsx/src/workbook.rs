@@ -12,9 +12,9 @@ use xlsx_model::{
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
-    NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, Provenance,
-    StylePatch, TextWrapping, Transaction, UndoStack, VerticalAlignment,
-    cell_state_for_input_no_eval, insertion_keeps_chart_anchor_on_grid,
+    NumberFormatMutation, Op, Proposal, ProposalGhost, ProposalSet, ProposedEdit, StylePatch,
+    TextWrapping, UndoStack, VerticalAlignment, cell_state_for_input_no_eval,
+    insertion_keeps_chart_anchor_on_grid,
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
@@ -174,8 +174,8 @@ impl PreservedSheetState {
 /// identity; a fresh add never inherits one.
 #[derive(Clone)]
 struct PreservedStateHistory {
-    before: PreservedSheetState,
-    after: PreservedSheetState,
+    before: Arc<PreservedSheetState>,
+    after: Arc<PreservedSheetState>,
 }
 
 pub struct Workbook {
@@ -184,7 +184,7 @@ pub struct Workbook {
     pending_remote_updates: Vec<Vec<u8>>,
     model: WorkbookModel,
     source_package: Option<xlsx_parse::PreservedPackage>,
-    preserved: PreservedSheetState,
+    preserved: Arc<PreservedSheetState>,
     preserved_undo: Vec<PreservedStateHistory>,
     preserved_redo: Vec<PreservedStateHistory>,
     edited_since_open: bool,
@@ -358,6 +358,7 @@ impl Workbook {
                 axes: vec![None; model.sheets.len()],
             },
         };
+        let preserved = Arc::new(preserved);
         Ok(Self {
             authority,
             mode,
@@ -485,7 +486,7 @@ impl Workbook {
         let mut calculation = calculation_result(&recalc);
         calculation.changed = changed_cells_between(&self.model, &model);
         self.authority = candidate;
-        self.preserved.resize(model.sheets.len());
+        self.preserved_mut().resize(model.sheets.len());
         self.install_model(model)?;
         self.graph = Some(graph);
         self.last_calculation = calculation;
@@ -494,8 +495,8 @@ impl Workbook {
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
-        self.preserved.forget_shared_strings();
-        self.preserved.forget_axes();
+        self.preserved_mut().forget_shared_strings();
+        self.preserved_mut().forget_axes();
         self.authority.clear_history();
         self.proposals.clear();
         self.edited_since_open = true;
@@ -633,8 +634,8 @@ impl Workbook {
         self.undo.clear();
         self.preserved_undo.clear();
         self.preserved_redo.clear();
-        self.preserved.forget_shared_strings();
-        self.preserved.forget_axes();
+        self.preserved_mut().forget_shared_strings();
+        self.preserved_mut().forget_axes();
         self.authority.clear_history();
         self.edited_since_open = true;
         self.emit_update(UpdateEvent {
@@ -1220,14 +1221,18 @@ impl Workbook {
         }
         let active_name = self.active_sheet_name();
         let names_before = self.sheet_names();
-        let Some(ops) = self.undo.next_undo().map(<[Op]>::to_vec) else {
+        let Some(ops) = self.undo.undo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Undo)
+            .sync_applied(
+                &self.model,
+                &ops,
+                SyncOrigin::Undo,
+                self.has_update_listeners(),
+            )
             .map_err(authority_error)?;
-        self.undo.undo(&mut self.model)?;
         if let Some(history) = self.preserved_undo.pop() {
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
@@ -1259,14 +1264,18 @@ impl Workbook {
         }
         let active_name = self.active_sheet_name();
         let names_before = self.sheet_names();
-        let Some(ops) = self.undo.next_redo().map(<[Op]>::to_vec) else {
+        let Some(ops) = self.undo.redo(&mut self.model)? else {
             return Ok(MutationResult::default());
         };
         let update = self
             .authority
-            .apply_ops(&ops, SyncOrigin::Redo)
+            .sync_applied(
+                &self.model,
+                &ops,
+                SyncOrigin::Redo,
+                self.has_update_listeners(),
+            )
             .map_err(authority_error)?;
-        self.undo.redo(&mut self.model)?;
         if let Some(history) = self.preserved_redo.pop() {
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
@@ -1347,8 +1356,8 @@ impl Workbook {
         self.install_model(history.model)?;
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
-        self.preserved.forget_shared_strings();
-        self.preserved.forget_axes();
+        self.preserved_mut().forget_shared_strings();
+        self.preserved_mut().forget_axes();
         self.proposals.clear();
         let result = self.rebuild_and_recalculate(options);
         let changed = changed_cells_between(&before, &self.model);
@@ -1956,12 +1965,16 @@ impl Workbook {
                 origin: UpdateOrigin::Local,
             });
         } else {
+            self.undo.commit_ops(&mut self.model, ops)?;
             let update = self
                 .authority
-                .apply_ops(ops, SyncOrigin::User)
+                .sync_applied(
+                    &self.model,
+                    ops,
+                    SyncOrigin::User,
+                    self.has_update_listeners(),
+                )
                 .map_err(authority_error)?;
-            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -1981,7 +1994,7 @@ impl Workbook {
         Ok(())
     }
 
-    fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+    fn commit_agent(&mut self, ops: &[Op], _agent_id: String) -> Result<()> {
         self.bump_model_epoch();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
@@ -1998,11 +2011,15 @@ impl Workbook {
                 origin: UpdateOrigin::Local,
             });
         } else {
-            let transaction = Transaction::new(ops.to_vec(), Provenance::Agent { id: agent_id });
-            self.undo.commit(&mut self.model, &transaction)?;
+            self.undo.commit_ops(&mut self.model, ops)?;
             let update = self
                 .authority
-                .apply_ops(ops, SyncOrigin::Agent)
+                .sync_applied(
+                    &self.model,
+                    ops,
+                    SyncOrigin::Agent,
+                    self.has_update_listeners(),
+                )
                 .map_err(authority_error)?;
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
@@ -2038,6 +2055,17 @@ impl Workbook {
         validate_collaboration_size(&staged.update)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         Ok(staged)
+    }
+
+    /// Whether update events have listeners: encoding the diff is wasted when
+    /// nobody is listening.
+    fn has_update_listeners(&self) -> bool {
+        !self
+            .update_observers
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .listeners
+            .is_empty()
     }
 
     fn emit_update(&self, event: UpdateEvent) {
@@ -2109,6 +2137,13 @@ impl Workbook {
             .map(|sheet| sheet.name.clone())
     }
 
+    /// Mutates the canonical preserved state in place: history entries hold
+    /// `Arc`s of the states around it, so the inner state is only cloned when a
+    /// snapshot still shares it.
+    fn preserved_mut(&mut self) -> &mut PreservedSheetState {
+        Arc::make_mut(&mut self.preserved)
+    }
+
     /// `before` are the sheet names as they stood when `ops` were applied, so
     /// each op is read against the names it actually named rather than the ones
     /// the batch left behind.
@@ -2120,12 +2155,12 @@ impl Workbook {
         }
         for op in ops {
             match *op {
-                Op::AddSheet { index, .. } => self.preserved.insert(index),
-                Op::RemoveSheet { index } => self.preserved.remove(index),
+                Op::AddSheet { index, .. } => self.preserved_mut().insert(index),
+                Op::RemoveSheet { index } => self.preserved_mut().remove(index),
                 Op::InsertRows { sheet, .. }
                 | Op::DeleteRows { sheet, .. }
                 | Op::InsertCols { sheet, .. }
-                | Op::DeleteCols { sheet, .. } => self.preserved.shift(sheet, op),
+                | Op::DeleteCols { sheet, .. } => self.preserved_mut().shift(sheet, op),
                 _ => {}
             }
         }

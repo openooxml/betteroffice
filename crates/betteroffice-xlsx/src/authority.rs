@@ -494,6 +494,27 @@ impl WorkbookAuthority {
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
     }
 
+    /// Syncs ops the caller already applied to `model`, skipping the scratch
+    /// materialization `apply_ops` stages for validation; `want_update` skips
+    /// encoding a diff nobody is listening for.
+    pub(crate) fn sync_applied(
+        &mut self,
+        model: &WorkbookModel,
+        ops: &[Op],
+        origin: SyncOrigin,
+        want_update: bool,
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        let state_vector = self.doc.transact().state_vector();
+        self.base.defined_names = model.defined_names.clone();
+        self.sync_model(model, ops, origin)
+            .map_err(AuthorityError::InvalidState)?;
+        if !want_update {
+            return Ok(None);
+        }
+        let update = self.doc.transact().encode_diff_v1(&state_vector);
+        Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
+    }
+
     pub(crate) fn encode_state_vector_v1(&self) -> Vec<u8> {
         let state_vector = self.doc.transact().state_vector();
         let mut entries = state_vector
