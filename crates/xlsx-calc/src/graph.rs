@@ -2,6 +2,7 @@
 //! cell changes, which formulas must re-evaluate?".
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
@@ -42,7 +43,7 @@ pub struct DepGraph {
     defined_names: Vec<DefinedName>,
     defined_name_indices: HashMap<(Option<SheetId>, String), usize>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
-    deps: HashMap<NodeKey, Vec<(SheetId, CellRange)>>,
+    deps: HashMap<NodeKey, NodeEntry>,
     /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
     by_sheet: HashMap<SheetId, Vec<(CellRange, NodeKey)>>,
     /// formula cells that must re-evaluate every recalc regardless of edits.
@@ -50,6 +51,12 @@ pub struct DepGraph {
     /// parsed formula text -> ast, shared with recalc eval so each formula
     /// parses once across graph construction and every subsequent recalc.
     asts: ParseCache,
+}
+
+/// one formula node: its parsed ast and the cells/ranges it reads.
+struct NodeEntry {
+    ast: Arc<Expr>,
+    edges: Vec<(SheetId, CellRange)>,
 }
 
 impl DepGraph {
@@ -145,6 +152,14 @@ impl DepGraph {
         &self.asts
     }
 
+    /// the node's parsed ast; `None` when the cell carries no (parseable)
+    /// formula.
+    pub(crate) fn ast(&self, sheet: SheetId, cell: CellRef) -> Option<Arc<Expr>> {
+        self.deps
+            .get(&NodeKey::new(sheet, cell))
+            .map(|n| Arc::clone(&n.ast))
+    }
+
     /// parse a formula and register its edges + volatility. no-op on parse error.
     fn install(&mut self, key: NodeKey, src: &str) {
         let Some(expr) = parse_cached(&self.asts, src) else {
@@ -157,13 +172,13 @@ impl DepGraph {
         if self.is_volatile(key.sheet, &expr) {
             self.volatile.insert(key);
         }
-        self.deps.insert(key, edges);
+        self.deps.insert(key, NodeEntry { ast: expr, edges });
     }
 
     /// drop a node's edges from every index it appears in.
     fn uninstall(&mut self, key: NodeKey) {
-        if let Some(edges) = self.deps.remove(&key) {
-            for (sid, _) in &edges {
+        if let Some(entry) = self.deps.remove(&key) {
+            for (sid, _) in &entry.edges {
                 if let Some(list) = self.by_sheet.get_mut(sid) {
                     list.retain(|(_, node)| *node != key);
                 }
@@ -420,6 +435,7 @@ mod tests {
             g.deps
                 .get(&NodeKey::new(SheetId(0), a1("C1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -451,6 +467,7 @@ mod tests {
             g.deps
                 .get(&NodeKey::new(SheetId(1), a1("A1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -533,6 +550,7 @@ mod tests {
                 .deps
                 .get(&NodeKey::new(SheetId(0), a1("C1")))
                 .unwrap()
+                .edges
                 .len(),
             1
         );
@@ -618,7 +636,11 @@ mod tests {
 
         let graph = DepGraph::build(&wb);
 
-        assert!(graph.deps[&NodeKey::new(SheetId(0), a1("B1"))].is_empty());
+        assert!(
+            graph.deps[&NodeKey::new(SheetId(0), a1("B1"))]
+                .edges
+                .is_empty()
+        );
         assert!(graph.volatile_cells().next().is_none());
     }
 }
