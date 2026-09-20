@@ -104,12 +104,15 @@ pub struct PrintMetrics {
 }
 
 impl PrintMetrics {
+    /// a zero default row height is how a sheet declares `zeroHeight="1"`:
+    /// every row without an explicit `ht` collapses, exactly as a zero default
+    /// column width already collapses unsized columns.
     pub fn is_valid(&self) -> bool {
         !self.font_family.is_empty()
             && self.font_family.len() <= 1024
             && (36.0..=600.0).contains(&self.dpi)
             && (1.0..=256.0).contains(&self.max_digit_width)
-            && (1.0..=409.0).contains(&self.default_row_height_pt)
+            && (0.0..=409.0).contains(&self.default_row_height_pt)
             && self
                 .default_column_width
                 .is_none_or(|w| (0.0..=255.0).contains(&w))

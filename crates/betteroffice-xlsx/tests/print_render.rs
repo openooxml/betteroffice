@@ -423,3 +423,42 @@ fn a_sheet_that_pins_its_default_row_height_keeps_every_unsized_row_there() {
     assert_eq!(geometry.row_y(1), row_pt_to_px(15.0));
     assert_eq!(geometry.row_y(2), row_pt_to_px(30.0));
 }
+
+/// `sheetFormatPr/@zeroHeight` is written as `defaultRowHeight="0"`, so a zero
+/// default row height is a valid metric: the pinned rows keep their height and
+/// every unsized row collapses.
+#[test]
+fn zero_default_row_height_prints_only_the_sized_rows() {
+    let mut sheet = Sheet::new("Cover");
+    sheet.col_widths.insert(0, 12.0);
+    sheet.format.custom_height = true;
+    sheet.format.default_row_height_pt = Some(0.0);
+    sheet.row_heights.insert(1, 30.0);
+    for row in 0..3 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: format!("Row {row}"),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let mut metrics = metrics();
+    metrics.default_row_height_pt = 0.0;
+    let printed = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:A3").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    assert!((printed.height - row_pt_to_px(30.0)).abs() < 0.001);
+}
