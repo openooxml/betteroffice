@@ -4,10 +4,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 @AGENTS.md
 
-## Review artifacts
-
-See [AGENTS.md](AGENTS.md#review-artifacts) for the review artifact policy and upload commands.
-
 ## Commands
 
 Package manager is **bun**, not npm.
