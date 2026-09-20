@@ -623,6 +623,17 @@ where
             Align::Center => cell_box.x + cell_box.w / 2.0,
         };
         let ty = text_baseline(cell_box, size, valign, print.map(|(m, _)| m));
+        let clip = spill_clip(
+            &geom,
+            &cols,
+            sheet_ref,
+            styles,
+            wb.date_system,
+            at,
+            cell,
+            align,
+            cell_box,
+        );
 
         commands.push(DrawCmd::Text {
             x: tx,
@@ -630,7 +641,7 @@ where
             text,
             font_size: size,
             color,
-            clip: cell_box.clip,
+            clip,
             align,
             bold: font.is_some_and(|f| f.bold),
             italic: font.is_some_and(|f| f.italic),
@@ -925,9 +936,93 @@ fn visible_anchors<'a>(
     cells
 }
 
+/// whether the painter draws a hyperlink's own label at `at`, which it does
+/// only at the link range's start and only when the cell has no text of its own.
+fn draws_hyperlink_label(sheet: &Sheet, at: CellRef) -> bool {
+    sheet.hyperlink_at(at).is_some_and(|link| {
+        link.range.start == at && link.display.as_ref().is_some_and(|d| !d.is_empty())
+    })
+}
+
 /// the merge (if any) that covers a cell.
 fn covering_merge(merges: &[CellRange], at: CellRef) -> Option<CellRange> {
     merges.iter().copied().find(|m| m.contains(at))
+}
+
+/// Excel lets text that outgrows its cell run into the blank cells beside it,
+/// towards whichever side its alignment points. The run stops at the first
+/// neighbour that draws something, at a merge, at a frozen-pane split, and at
+/// the edge of the columns this frame lays out.
+#[allow(clippy::too_many_arguments)]
+fn spill_clip(
+    geom: &GridGeometry,
+    cols: &AxisLayout,
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    date_system: xlsx_model::DateSystem,
+    at: CellRef,
+    cell: &xlsx_model::Cell,
+    align: Align,
+    cell_box: CellBox,
+) -> Rect {
+    if !matches!(cell.value, CellValue::Text { .. })
+        || covering_merge(&sheet.merges, at).is_some()
+        || cell
+            .style
+            .and_then(|style| styles.alignment_for(style))
+            .is_some_and(|a| a.wrap_text || a.shrink_to_fit)
+    {
+        return cell_box.clip;
+    }
+    let Ok(anchor) = cols
+        .tracks
+        .binary_search_by_key(&at.col, |track| track.index)
+    else {
+        return cell_box.clip;
+    };
+    let blank = |col: u32| {
+        let neighbour = CellRef::new(at.row, col);
+        covering_merge(&sheet.merges, neighbour).is_none()
+            && sheet
+                .cell(neighbour)
+                .is_none_or(|cell| cell_display_text(styles, date_system, cell).is_none())
+            && !draws_hyperlink_label(sheet, neighbour)
+    };
+    let pane = cols.tracks[anchor].pinned;
+    let mut first = anchor;
+    if matches!(align, Align::Right | Align::Center) {
+        while first > 0
+            && cols.tracks[first - 1].pinned == pane
+            && cols.tracks[first - 1].index + 1 == cols.tracks[first].index
+            && blank(cols.tracks[first - 1].index)
+        {
+            first -= 1;
+        }
+    }
+    let mut last = anchor;
+    if matches!(align, Align::Left | Align::Center) {
+        while last + 1 < cols.tracks.len()
+            && cols.tracks[last + 1].pinned == pane
+            && cols.tracks[last].index + 1 == cols.tracks[last + 1].index
+            && blank(cols.tracks[last + 1].index)
+        {
+            last += 1;
+        }
+    }
+    if first == anchor && last == anchor {
+        return cell_box.clip;
+    }
+    cols.span(
+        cols.tracks[first].index,
+        cols.tracks[last].index,
+        |column| geom.col_x(column),
+    )
+    .map_or(cell_box.clip, |span| Rect {
+        x: span.start,
+        y: cell_box.clip.y,
+        w: span.end - span.start,
+        h: cell_box.clip.h,
+    })
 }
 
 /// viewport-local `(x, y, w, h)` of a cell's box, spanning its merged range
@@ -1185,6 +1280,7 @@ fn border_stroke(style: BorderStyle) -> (f32, Option<String>) {
 mod tests {
     use super::*;
     use xlsx_model::Hyperlink;
+    use xlsx_model::styles::{Alignment, HAlign, Xf};
     use xlsx_model::workbook::{Cell, FreezePane, Sheet};
 
     fn text_cell(s: &str) -> Cell {
@@ -1248,7 +1344,164 @@ mod tests {
             .unwrap();
         let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
         assert_eq!(long_text.x, dc * 2.0);
-        assert_eq!(long_text.w, dc);
+        assert_eq!(long_text.w, dc * 5.0);
+    }
+
+    /// A neighbour the painter draws is not blank, whatever draws it: it also
+    /// paints a hyperlink's own label where the cell carries no text.
+    #[test]
+    fn spilling_text_stops_at_a_hyperlink_label() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let clip_of = |sheet: Sheet| {
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            build_display_list(&wb, SheetId(0), &vp)
+                .unwrap()
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text { text, clip, .. } if text == long => Some(clip.w),
+                    _ => None,
+                })
+                .unwrap()
+        };
+
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.set_cell(CellRef::new(0, 1), text_cell(long));
+        sheet.hyperlinks.push(Hyperlink {
+            range: CellRange::parse_a1("D1:D1").unwrap(),
+            external_target: Some("https://example.com".into()),
+            location: None,
+            tooltip: None,
+            display: Some("Open".into()),
+        });
+        assert_eq!(clip_of(sheet), dc * 2.0);
+    }
+
+    /// A frozen split is a pane boundary: Excel does not run text across it,
+    /// and `span` clamps a pinned start to the frozen extent, so a spill that
+    /// crossed the split would be clipped away from where its text sits.
+    #[test]
+    fn spilling_text_stops_at_a_frozen_split() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let mut styles = Stylesheet::default();
+        styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                h: Some(HAlign::Right),
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("Sheet1");
+        sheet.freeze_pane = Some(FreezePane {
+            rows: 0,
+            cols: 1,
+            top_left: CellRef::new(0, 1),
+        });
+        let mut cell = text_cell(long);
+        cell.style = Some(0);
+        sheet.set_cell(CellRef::new(0, 1), cell);
+        let mut wb = Workbook::default();
+        wb.sheets.push(sheet);
+        wb.styles = styles;
+        let clip = build_display_list(&wb, SheetId(0), &vp)
+            .unwrap()
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(clip.x, dc, "the run must not reach into the frozen column");
+    }
+
+    #[test]
+    fn text_spills_over_blank_neighbours_and_stops_at_the_next_value() {
+        let long = "a very long label that overflows its cell";
+        let dc = geometry::col_chars_to_px(geometry::DEFAULT_COL_WIDTH_CHARS);
+        let vp = Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: dc * 6.0,
+            height: 100.0,
+        };
+        let clip_of = |sheet: Sheet, styles: Stylesheet| {
+            let mut wb = Workbook::default();
+            wb.sheets.push(sheet);
+            wb.styles = styles;
+            let clip = build_display_list(&wb, SheetId(0), &vp)
+                .unwrap()
+                .commands
+                .iter()
+                .find_map(|command| match command {
+                    DrawCmd::Text { text, clip, .. } if text == long => Some(*clip),
+                    _ => None,
+                })
+                .unwrap();
+            (clip.x, clip.w)
+        };
+
+        let mut open = Sheet::new("Sheet1");
+        open.set_cell(CellRef::new(0, 1), text_cell(long));
+        assert_eq!(clip_of(open, Stylesheet::default()), (dc, dc * 6.0));
+
+        let mut blocked = Sheet::new("Sheet1");
+        blocked.set_cell(CellRef::new(0, 1), text_cell(long));
+        blocked.set_cell(CellRef::new(0, 3), num_cell(1.0));
+        assert_eq!(clip_of(blocked, Stylesheet::default()), (dc, dc * 2.0));
+
+        let mut merged = Sheet::new("Sheet1");
+        merged.set_cell(CellRef::new(0, 1), text_cell(long));
+        merged.merges.push(CellRange::parse_a1("D1:E1").unwrap());
+        assert_eq!(clip_of(merged, Stylesheet::default()), (dc, dc * 2.0));
+
+        let mut wrapped_styles = Stylesheet::default();
+        wrapped_styles.cell_xfs.push(Xf {
+            alignment: Some(Alignment {
+                wrap_text: true,
+                ..Alignment::default()
+            }),
+            ..Xf::default()
+        });
+        let mut wrapped = Sheet::new("Sheet1");
+        wrapped.set_cell(
+            CellRef::new(0, 1),
+            Cell {
+                style: Some(0),
+                ..text_cell(long)
+            },
+        );
+        assert_eq!(clip_of(wrapped, wrapped_styles), (dc, dc));
+
+        let mut numeric = Sheet::new("Sheet1");
+        numeric.set_cell(CellRef::new(0, 1), num_cell(123_456_789_012_345.0));
+        let mut wb = Workbook::default();
+        wb.sheets.push(numeric);
+        let clip = build_display_list(&wb, SheetId(0), &vp)
+            .unwrap()
+            .commands
+            .iter()
+            .find_map(|command| match command {
+                DrawCmd::Text { clip, .. } => Some(*clip),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!((clip.x, clip.w), (dc, dc));
     }
 
     #[test]
@@ -1391,7 +1644,7 @@ mod tests {
                 Rect {
                     x: dc,
                     y: dr,
-                    w: dc,
+                    w: dc * 3.0,
                     h: dr
                 }
             )

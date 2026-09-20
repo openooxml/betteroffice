@@ -22,7 +22,7 @@ DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope
 - [@betteroffice/pptx-react](https://www.npmjs.com/package/@betteroffice/pptx-react): the slides editor and viewer as a React component.
 - [@betteroffice/pptx-i18n](https://www.npmjs.com/package/@betteroffice/pptx-i18n): UI locale strings for the PPTX React editor.
 
-The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
+The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF and EMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
 
 There is no Vue package. React and framework-free JavaScript are the supported entry points.
 

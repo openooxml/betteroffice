@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 pub use ooxml_drawingml::ShapeStyle;
 use ooxml_drawingml::{
-    ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline, StyleReference,
-    TableStyleList, Theme, ThemeFormatScheme,
+    ColorMap, ColorValue, GeometryPathCommand, ShapeEffects, ShapeFill, ShapeOutline,
+    StyleReference, TableStyleList, Theme, ThemeFormatScheme,
 };
 use serde::{Deserialize, Serialize};
 
@@ -142,6 +142,9 @@ pub struct Slide {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the parent map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
 }
@@ -160,6 +163,9 @@ pub struct SlideLayout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
+    /// `p:clrMapOvr/a:overrideClrMapping`; absent when the master map applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color_map_override: Option<ColorMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -176,6 +182,9 @@ pub struct SlideMaster {
     pub background_reference: Option<StyleReference>,
     pub shapes: Vec<ShapeNode>,
     pub text_styles: TextStyleSet,
+    /// `p:clrMap`; absent from packages serialized before it was parsed.
+    #[serde(default, skip_serializing_if = "ColorMap::is_identity")]
+    pub color_map: ColorMap,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -767,6 +776,35 @@ pub struct TextRun {
     pub line_break: bool,
 }
 
+/// `a:rPr/@cap`: how a run is cased when drawn. Display only — the stored text
+/// keeps the author's casing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextCaps {
+    None,
+    Small,
+    All,
+}
+
+impl TextCaps {
+    pub fn from_attribute(value: &str) -> Option<Self> {
+        match value {
+            "none" => Some(Self::None),
+            "small" => Some(Self::Small),
+            "all" => Some(Self::All),
+            _ => None,
+        }
+    }
+
+    pub fn as_attribute(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Small => "small",
+            Self::All => "all",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunProperties {
@@ -779,6 +817,8 @@ pub struct RunProperties {
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caps: Option<TextCaps>,
     pub font_family: Option<String>,
     pub color: Option<ColorValue>,
     pub language: Option<String>,

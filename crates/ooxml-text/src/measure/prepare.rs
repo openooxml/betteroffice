@@ -32,6 +32,9 @@
 //!   `topAndBottom` or block image takes its own line, everything else is
 //!   inline. A dimensionless image is zero-size, never a refusal.
 
+use crate::caps::{
+    BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
+};
 use crate::font_store::{FontId, FontStore};
 use crate::line_break::break_opportunities;
 use crate::shape::{ShapeDirection, ShapeFeature, shape_with_direction, shape_with_properties};
@@ -139,14 +142,6 @@ pub(super) enum PreparedRun {
         utf16_len: u32,
     },
 }
-
-/// Advance scale for a synthesized small cap — an uppercase glyph standing in
-/// for a lowercase character because the face carries no `smcp` substitution.
-/// The browser value is Blink and WebKit's synthesis multiplier; the Word
-/// value is what Word renders small caps at, and applies under
-/// `authoritativeShaping`.
-const BROWSER_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.7;
-const WORD_SMALL_CAPS_ADVANCE_SCALE: f32 = 0.8;
 
 /// Characters that UAX-14 treats as mandatory breaks (plus tab, which DOCX
 /// represents as a `TabRun`). Their appearance inside a text run means the
@@ -679,17 +674,6 @@ fn prepare_text_run(
             FontSlot::Cs => language.bidi.as_deref().or(language.latin.as_deref()),
             FontSlot::Ascii | FontSlot::HAnsi => language.latin.as_deref(),
         }
-    }
-    fn uppercase_for_language(ch: char, language: Option<&str>) -> Vec<char> {
-        let lang = language.unwrap_or("").to_ascii_lowercase();
-        if lang.starts_with("tr") || lang.starts_with("az") {
-            match ch {
-                'i' => return vec!['İ'],
-                'ı' => return vec!['I'],
-                _ => {}
-            }
-        }
-        ch.to_uppercase().collect()
     }
     fn supports_smcp(store: &FontStore, font: FontId, ch: char, size_px: f32, level: u8) -> bool {
         let text = ch.to_string();

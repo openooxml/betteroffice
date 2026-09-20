@@ -1,12 +1,13 @@
 //! lookup and reference functions: VLOOKUP/HLOOKUP/MATCH exact and approximate
-//! modes, INDEX area form, XLOOKUP exact-match subset.
+//! modes, INDEX area form, XLOOKUP exact-match subset, OFFSET.
 
 use std::cmp::Ordering;
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
+use crate::reference::offset_rect;
 
 use super::{nth_int, nth_number};
 
@@ -183,6 +184,53 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// OFFSET(reference, rows, cols, [height], [width]): a negative size extends
+/// back from the shifted corner; a zero size or a rectangle off the sheet is
+/// #REF!, and a multi-cell result in scalar context is #VALUE!.
+pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match offset_area(args, ctx) {
+        Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+            Ok(value) => value,
+            Err(error) => err(error),
+        },
+        Ok(_) => err(ErrorValue::Value),
+        Err(error) => err(error),
+    }
+}
+
+/// OFFSET's reference result, for callers that take an area rather than a
+/// value; `as_area` routes nested OFFSET calls back through here.
+pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.len() < 3 || args.len() > 5 {
+        return Err(ErrorValue::Value);
+    }
+    let anchor = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let rows = nth_int(args, ctx, 1)?;
+    let cols = nth_int(args, ctx, 2)?;
+    let height = match args.get(3) {
+        Some(_) => Some(nth_int(args, ctx, 3)?),
+        None => None,
+    };
+    let width = match args.get(4) {
+        Some(_) => Some(nth_int(args, ctx, 4)?),
+        None => None,
+    };
+    let bounds = CellRange::new(
+        anchor.start,
+        CellRef::new(
+            anchor.start.row + anchor.rows as u32 - 1,
+            anchor.start.col + anchor.cols as u32 - 1,
+        ),
+    );
+    let rect = offset_rect(bounds, rows, cols, height, width).ok_or(ErrorValue::Ref)?;
+    Ok(Area {
+        sheet: anchor.sheet,
+        start: rect.start,
+        rows: (rect.end.row - rect.start.row + 1) as usize,
+        cols: (rect.end.col - rect.start.col + 1) as usize,
+    })
+}
+
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match
 /// subset; a missing value returns `if_not_found` or #N/A.
 pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -250,15 +298,26 @@ pub(crate) fn choose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     evaluate(&choices[idx as usize - 1], ctx)
 }
 
-/// ROW([reference]): the 1-based row of the reference's top-left cell;
-/// referenceless form is #VALUE! (calling cell unknown).
+/// ROW([reference]): the 1-based row of the reference's top-left cell, or of
+/// the calling cell when no reference is given.
 pub(crate) fn row(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reference_scalar(args, ctx, |area| area.start.row as f64 + 1.0)
+    reference_scalar(
+        args,
+        ctx,
+        |area| area.start.row as f64 + 1.0,
+        |cell| cell.row as f64 + 1.0,
+    )
 }
 
-/// COLUMN([reference]): the 1-based column of the reference's top-left cell.
+/// COLUMN([reference]): the 1-based column of the reference's top-left cell, or
+/// of the calling cell when no reference is given.
 pub(crate) fn column(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reference_scalar(args, ctx, |area| area.start.col as f64 + 1.0)
+    reference_scalar(
+        args,
+        ctx,
+        |area| area.start.col as f64 + 1.0,
+        |cell| cell.col as f64 + 1.0,
+    )
 }
 
 /// ROWS(area): the number of rows in a reference.
@@ -289,13 +348,22 @@ fn approximate_row(
     found
 }
 
-fn reference_scalar(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(&Area) -> f64) -> CellValue {
-    if args.len() != 1 {
-        return err(ErrorValue::Value);
-    }
-    match as_area(&args[0], ctx) {
-        Some(area) => num(pick(&area)),
-        None => err(ErrorValue::Value),
+fn reference_scalar(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    pick: fn(&Area) -> f64,
+    here: fn(CellRef) -> f64,
+) -> CellValue {
+    match args {
+        [] => match ctx.cell {
+            Some(cell) => num(here(cell)),
+            None => err(ErrorValue::Value),
+        },
+        [arg] => match as_area(arg, ctx) {
+            Some(area) => num(pick(&area)),
+            None => err(ErrorValue::Value),
+        },
+        _ => err(ErrorValue::Value),
     }
 }
 
@@ -305,6 +373,32 @@ fn reference_dim(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(&Area) -> usize)
     }
     match as_area(&args[0], ctx) {
         Some(area) => num(pick(&area) as f64),
-        None => err(ErrorValue::Value),
+        None => match evaluate(&args[0], ctx) {
+            value @ CellValue::Error { .. } => value,
+            _ => err(ErrorValue::Value),
+        },
+    }
+}
+
+/// TRANSPOSE(array): a 1x1 input transposes to itself and a blank to 0; a
+/// wider one is the array form, which the engine does not implement.
+pub(crate) fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let value = match as_area(&args[0], ctx) {
+        Some(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+            Ok(value) => value,
+            Err(error) => return err(error),
+        },
+        Some(_) => {
+            ctx.record_unsupported_function();
+            return err(ErrorValue::Value);
+        }
+        None => evaluate(&args[0], ctx),
+    };
+    match value {
+        CellValue::Empty => num(0.0),
+        value => value,
     }
 }

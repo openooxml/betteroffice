@@ -73,7 +73,7 @@ pub fn resolve_color_value_to_hex_with_theme(
     let rgb = color.rgb.as_deref().or_else(|| {
         color.theme_color.as_deref().map(|slot| {
             theme
-                .and_then(|theme| theme.color_scheme.get(slot))
+                .and_then(|theme| theme.color_scheme.get(theme.color_map.resolve(slot)))
                 .unwrap_or_else(|| default_theme_color(slot))
         })
     })?;

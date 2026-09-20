@@ -9,6 +9,9 @@ __pycache__/
 *.pyd
 .next/
 .source/
+.oq/
+.oq-collection.json
+.cargo-target/
 .open-next/
 .wrangler/
 .dev.vars

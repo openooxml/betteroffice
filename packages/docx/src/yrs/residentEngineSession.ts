@@ -65,8 +65,8 @@ export async function createResidentEngineSession(): Promise<ResidentEngineSessi
 
   return {
     registerFont: (bytes) => session.register_measure_font(bytes),
-    registerSubstituteFont: (base, family) =>
-      session.register_substitute_measure_font(base, family),
+    registerSubstituteFont: (base, family, bold, italic) =>
+      session.register_substitute_measure_font(base, family, bold, italic),
     clearFonts: () => session.clear_measure_fonts(),
     encodeStateVector: () => session.encode_state_vector(),
     measureParagraphJson: (input) => session.measure_paragraph_json(input),

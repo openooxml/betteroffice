@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
 
-use crate::deps::references;
+use crate::deps::{offset_target, positional_argument, references};
 use crate::parser::{Expr, parse_formula};
 
 /// a formula cell, normalized so `$`-anchoring never splits a node.
@@ -31,7 +31,8 @@ impl NodeKey {
 }
 
 /// case-insensitive names of functions whose value can change with no input
-/// edit; cells calling them re-evaluate on every recalc.
+/// edit; cells calling them re-evaluate on every recalc. OFFSET joins them per
+/// call site, but only where its target is not statically resolvable.
 const VOLATILE_FNS: [&str; 4] = ["TODAY", "NOW", "RAND", "RANDBETWEEN"];
 
 pub struct DepGraph {
@@ -295,7 +296,13 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
                 expressions.push(rhs);
                 expressions.push(lhs);
             }
-            Expr::FuncCall { args, .. } => expressions.extend(args.iter().rev()),
+            Expr::FuncCall { name, args } => expressions.extend(
+                args.iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(index, arg)| !positional_argument(name, *index, arg))
+                    .map(|(_, arg)| arg),
+            ),
             Expr::Number(_)
             | Expr::Text(_)
             | Expr::Bool(_)
@@ -315,7 +322,9 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
         match expression {
             Expr::FuncCall { name, args } => {
                 let upper = name.to_ascii_uppercase();
-                if VOLATILE_FNS.contains(&upper.as_str()) {
+                if VOLATILE_FNS.contains(&upper.as_str())
+                    || (upper == "OFFSET" && offset_target(args).is_none())
+                {
                     return true;
                 }
                 expressions.extend(args.iter().rev());
@@ -464,6 +473,30 @@ mod tests {
         let mut vol: Vec<String> = g.volatile_cells().map(|(_, c)| c.to_a1()).collect();
         vol.sort();
         assert_eq!(vol, vec!["A1", "A2"]);
+    }
+
+    #[test]
+    fn static_offset_target_is_an_edge_and_not_volatile() {
+        let mut wb = wb2();
+        let s = wb.sheet_mut(SheetId(0)).unwrap();
+        s.set_cell(a1("C1"), formula_cell("OFFSET($A$1, 0, 1)"));
+        s.set_cell(a1("C2"), formula_cell("SUM(OFFSET(A1, 1, 0, 3, 1))"));
+        let g = DepGraph::build(&wb);
+        assert_eq!(deps_a1(&g, "Sheet1", "B1", &wb), vec!["Sheet1!C1"]);
+        assert_eq!(deps_a1(&g, "Sheet1", "A3", &wb), vec!["Sheet1!C2"]);
+        assert!(g.volatile_cells().next().is_none());
+    }
+
+    #[test]
+    fn only_a_computed_offset_is_volatile() {
+        let mut wb = wb2();
+        let s = wb.sheet_mut(SheetId(0)).unwrap();
+        s.set_cell(a1("C1"), formula_cell("OFFSET($A$1, B1, 0)"));
+        s.set_cell(a1("C2"), formula_cell("OFFSET($A$1, 0, 1)"));
+        s.set_cell(a1("C3"), formula_cell("OFFSET($A$1, -1, 0)"));
+        let g = DepGraph::build(&wb);
+        let vol: Vec<String> = g.volatile_cells().map(|(_, c)| c.to_a1()).collect();
+        assert_eq!(vol, vec!["C1"]);
     }
 
     #[test]

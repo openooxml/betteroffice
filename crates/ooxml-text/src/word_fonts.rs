@@ -1,15 +1,18 @@
-//! Vertical metrics of the faces Word ships but this package does not bundle,
-//! keyed by the requested family. Read off `head` and `hhea` of Word's own
-//! copies and cross-checked against the font programs it embeds in its exports.
-//! A family with no entry keeps its substitute's own metrics.
+//! Metrics of the faces Word ships but this package does not bundle, keyed by
+//! the requested family. Read off `head` and `hhea` of Word's own copies and
+//! cross-checked against the font programs it embeds in its exports. A family
+//! with no entry keeps its substitute's own metrics.
 //!
-//! A family is listed only when its span is the same under either reading of
-//! Word's line rule, and when the substitute's advances are already close: the
-//! view moves vertical metrics only, so correcting the pitch of a much
-//! narrower or wider face moves a document past Word rather than onto it.
-//! Gigi is the measured counter-example — its span is 1.382 em against the
-//! last-resort face's 1.150, and correcting it alone lands one corpus document
-//! on an extra page.
+//! A family is listed with vertical metrics only when its span is the same
+//! under either reading of Word's line rule. Gigi is the measured
+//! counter-example — its span is 1.382 em against the last-resort face's
+//! 1.150, and correcting it alone lands one corpus document on an extra page.
+//!
+//! `advance_scale` is the horizontal twin, and stays `1.0` unless the ratio
+//! has been measured against the substitute the host actually supplies: a face
+//! much wider or narrower than its substitute paginates past Word rather than
+//! onto it, and a scale that is right on average is still wrong per glyph, so
+//! it buys line and page counts, not line breaks.
 //!
 //! A family Word has no face for carries its substitute's metrics, taken from
 //! the document's `w:altName` or identified against Word's reference render.
@@ -23,6 +26,10 @@ const fn ea(units_per_em: u16, hhea_ascender: i16, hhea_descender: i16) -> Reque
         hhea_descender,
         hhea_line_gap: 0,
         east_asian: true,
+        advance_scale: 1.0,
+        advance_scale_bold: None,
+        advance_scale_italic: None,
+        advance_scale_bold_italic: None,
     }
 }
 
@@ -38,6 +45,35 @@ const fn latin(
         hhea_descender,
         hhea_line_gap,
         east_asian: false,
+        advance_scale: 1.0,
+        advance_scale_bold: None,
+        advance_scale_italic: None,
+        advance_scale_bold_italic: None,
+    }
+}
+
+/// [`latin`] for a family whose advance ratio against its substitute has been
+/// measured off the font program Word embeds in its own export; `bold` and
+/// `italic` carry that face's ratio where one was measured.
+const fn latin_scaled(
+    units_per_em: u16,
+    hhea_ascender: i16,
+    hhea_descender: i16,
+    hhea_line_gap: i16,
+    advance_scale: f32,
+    bold: Option<f32>,
+    italic: Option<f32>,
+) -> RequestedLineMetrics {
+    RequestedLineMetrics {
+        units_per_em,
+        hhea_ascender,
+        hhea_descender,
+        hhea_line_gap,
+        east_asian: false,
+        advance_scale,
+        advance_scale_bold: bold,
+        advance_scale_italic: italic,
+        advance_scale_bold_italic: None,
     }
 }
 
@@ -234,10 +270,16 @@ const LATIN_FACES: &[(&[&str], RequestedLineMetrics)] = &[
     (&["cambria math"], latin(2048, 1595, -455, 353)),
     (&["calibri light"], latin(2048, 1536, -512, 452)),
     (&["roboto"], latin(2048, 1900, -500, 0)),
+    // Lucida Bright runs 1.113x the last-resort Liberation Sans it falls back
+    // to: advances over a-z, weighted by English letter frequency and one space
+    // per 5.1 letters, measured off the subset Word embeds in `oxi-en-creative-01`.
+    // Demi and Italic measured 1.068 and 1.093; Demi Italic is unmeasured and
+    // takes Demi's. Lucida Sans is a different design, so it stays unscaled.
     (
-        &["lucida bright", "lucida sans"],
-        latin(2048, 1900, -432, 0),
+        &["lucida bright"],
+        latin_scaled(2048, 1900, -432, 0, 1.113, Some(1.068), Some(1.093)),
     ),
+    (&["lucida sans"], latin(2048, 1900, -432, 0)),
     (&["lucida calligraphy"], latin(2048, 1900, -666, 0)),
     (&["wingdings 3"], latin(2048, 1900, -432, 0)),
 ];
@@ -348,6 +390,28 @@ mod tests {
         ] {
             assert_eq!(requested_line_metrics(family), None, "{family}");
         }
+    }
+
+    /// Lucida Bright is the one family whose advances are corrected.
+    #[test]
+    fn lucida_bright_carries_the_advance_ratio_word_embeds() {
+        let bright = requested_line_metrics("Lucida Bright").expect("Lucida Bright");
+        assert!(
+            (bright.advance_scale - 1.113).abs() < 1e-6,
+            "{}",
+            bright.advance_scale
+        );
+        let scaled: Vec<&str> = EAST_ASIAN_FACES
+            .iter()
+            .chain(LATIN_FACES)
+            .filter(|(_, metrics)| (metrics.advance_scale - 1.0).abs() >= 1e-6)
+            .flat_map(|(names, _)| names.iter().copied())
+            .collect();
+        assert_eq!(
+            scaled,
+            ["lucida bright"],
+            "an unmeasured family must keep its substitute's advances"
+        );
     }
 
     /// Spans read off the font programs Word embeds in its own exports of the
