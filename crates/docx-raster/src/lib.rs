@@ -72,16 +72,11 @@ const PATH_SEGMENT_BYTES: u64 = 40;
 const MAX_CACHED_CROP_MASKS: usize = 16;
 const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
 const CLIP_SURFACE_SLACK: u64 = 4;
-/// Decoded pixels one export's [`ImageCache`] may hold: every pixel a page is
-/// allowed to decode, at RGBA8. A page that stays inside its own decode
-/// budget always fits the cache, so eviction only ever drops work another
-/// page did; past the cap the least recently resolved image leaves first.
+/// Decoded-pixel cap for one export's [`ImageCache`], at RGBA8.
 pub const MAX_IMAGE_CACHE_BYTES: u64 = 268_435_456;
-/// Map, recency-queue and key bookkeeping one cached image costs beyond its
-/// pixels, charged so the byte budget bounds entry count too.
+/// Bookkeeping one cached image costs beyond its pixels.
 const IMAGE_CACHE_ENTRY_BYTES: u64 = 128;
-/// Decodes this backend has run. Benchmarks and cache tests read it; it is
-/// monotonic per process and not a stability surface.
+/// Process-monotonic decode counter for benchmarks and cache tests.
 #[doc(hidden)]
 pub static IMAGE_DECODE_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -179,9 +174,7 @@ pub fn render_page(
     )
 }
 
-/// Renders one display-list page into caller-owned caches, so a multi-page
-/// export reuses the outlines and decoded images it still holds. The caches
-/// are bounded: an export past either cap re-does what it evicted.
+/// Renders one display-list page into caches shared across an export's renders.
 pub fn render_page_cached(
     display_list: &DisplayList,
     page_ordinal: usize,
@@ -1290,9 +1283,7 @@ fn legacy_body_image<'b>(
     resources.images.get(rel_id).map(Vec::as_slice)
 }
 
-/// What resolving one source charged a page's image budget, in the order the
-/// checks run. A refused decode leaves only the prefix it actually spent: the
-/// rest of a replay is zeros, which any page affords.
+/// What resolving one source charged a page's image budget, in check order.
 #[derive(Clone, Copy, Default)]
 struct ImageCharge {
     bytes_pre: u64,
@@ -1300,8 +1291,7 @@ struct ImageCharge {
     bytes_post: u64,
 }
 
-/// What a decode learned about a source: a rendered pixmap, a refusal the
-/// bytes alone explain, or a refusal this page's spent budget caused.
+/// What a decode learned about a source.
 enum Decode {
     Decoded(Pixmap),
     Refused,
@@ -1316,14 +1306,8 @@ struct CachedImage {
     stamp: u64,
 }
 
-/// Decoded page images shared across an export's renders. Entries are keyed
-/// by source content rather than by reference, so two relationships carrying
-/// the same bytes resolve to one decode, and bytes re-registered under an old
-/// id cannot go stale. Keys are digests seeded per cache, so a hostile display
-/// list cannot pick collisions, and nothing here copies a `data:` URL.
-///
-/// The cache is bounded by decoded bytes, not entry count: past
-/// [`MAX_IMAGE_CACHE_BYTES`] the least recently resolved image is evicted.
+/// Decoded page images shared across an export's renders, keyed by seeded
+/// content digest and bounded by [`MAX_IMAGE_CACHE_BYTES`] with LRU eviction.
 pub struct ImageCache {
     entries: HashMap<u64, CachedImage>,
     recency: BTreeMap<(u64, u64), ()>,
@@ -1375,9 +1359,7 @@ impl ImageCache {
         Some((entry.outcome.clone(), entry.charge))
     }
 
-    /// Caches one decode, evicting least-recently-resolved entries until the
-    /// cache is back inside its byte budget. An entry heavier than the budget
-    /// evicts everything including itself.
+    /// Caches one decode, evicting least-recently-resolved entries until under budget.
     fn insert(&mut self, key: u64, outcome: Option<Arc<Pixmap>>, charge: ImageCharge) {
         let weight = outcome
             .as_ref()
@@ -1411,11 +1393,8 @@ impl ImageCache {
     }
 }
 
-/// One page's view over a shared [`ImageCache`]. The first reference to a
-/// source on a page pays the page's decode budget — replayed from the cache's
-/// recorded charge, or run as a fresh decode — and later references on the
-/// same page resolve free. The pixel and byte budgets stay per-page, so a
-/// page cannot borrow spend a neighbour already used.
+/// One page's view over a shared [`ImageCache`]: the first reference to a
+/// source pays this page's decode budget, later references resolve free.
 struct PageImages<'c> {
     cache: &'c mut ImageCache,
     resolved: HashMap<u64, Option<Arc<Pixmap>>>,
@@ -1451,10 +1430,8 @@ impl<'c> PageImages<'c> {
         outcome
     }
 
-    /// Charges this page what the cached decode spent on its own page, running
-    /// the same budget checks in the same order. `false` means this page's
-    /// budget is spent; it says nothing about the source, so nothing is
-    /// written back to the shared cache.
+    /// Charges this page what the cached decode spent; `false` means this
+    /// page's budget is spent and nothing is written back.
     fn charge(&mut self, charge: ImageCharge) -> bool {
         if self.bytes + charge.bytes_pre > MAX_PAGE_IMAGE_BYTES {
             return false;
