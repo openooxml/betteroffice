@@ -455,7 +455,7 @@ impl WorkbookAuthority {
         let state_vector = self.doc.transact().state_vector();
         let mut model = self.materialize()?;
         for op in ops {
-            xlsx_ops::apply(&mut model, op).map_err(|error| {
+            xlsx_ops::apply_in_place(&mut model, op).map_err(|error| {
                 AuthorityError::InvalidState(format!(
                     "cannot apply local operation to authored state: {error}"
                 ))

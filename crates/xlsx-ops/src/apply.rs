@@ -69,8 +69,22 @@ impl fmt::Display for OpError {
 
 impl std::error::Error for OpError {}
 
-/// apply one op, mutating `wb` and returning its inverse.
+/// apply one op, mutating `wb` and returning its inverse. structural ops are
+/// staged on a clone first, so a refused op leaves `wb` untouched.
 pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
+    match op {
+        Op::InsertRows { .. }
+        | Op::DeleteRows { .. }
+        | Op::InsertCols { .. }
+        | Op::DeleteCols { .. } => apply_atomically(wb, |next| apply_in_place(next, op)),
+        _ => apply_in_place(wb, op),
+    }
+}
+
+/// apply one op directly, with no rollback clone. a refused structural op can
+/// leave `wb` partially mutated, so this is only for models the caller drops
+/// on error — batch and preview paths already stage a clone of their own.
+pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
     match op {
         Op::SetCell { sheet, at, cell } => {
             let s = sheet_mut(wb, *sheet)?;
@@ -313,18 +327,10 @@ pub fn apply(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError> {
                 defined_names: previous,
             }]))
         }
-        Op::InsertRows { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_rows(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteRows { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_rows(next, *sheet, *at, *count, op))
-        }
-        Op::InsertCols { sheet, at, count } => {
-            apply_atomically(wb, |next| insert_cols(next, *sheet, *at, *count, op))
-        }
-        Op::DeleteCols { sheet, at, count } => {
-            apply_atomically(wb, |next| delete_cols(next, *sheet, *at, *count, op))
-        }
+        Op::InsertRows { sheet, at, count } => insert_rows(wb, *sheet, *at, *count, op),
+        Op::DeleteRows { sheet, at, count } => delete_rows(wb, *sheet, *at, *count, op),
+        Op::InsertCols { sheet, at, count } => insert_cols(wb, *sheet, *at, *count, op),
+        Op::DeleteCols { sheet, at, count } => delete_cols(wb, *sheet, *at, *count, op),
     }
 }
 
@@ -446,7 +452,7 @@ pub fn apply_ops(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
 fn apply_ops_in_place(wb: &mut Workbook, ops: &[Op]) -> Result<Vec<Op>, OpError> {
     let mut per_op: Vec<Vec<Op>> = Vec::with_capacity(ops.len());
     for op in ops {
-        per_op.push(apply(wb, op)?.0);
+        per_op.push(apply_in_place(wb, op)?.0);
     }
     let mut inverse = Vec::new();
     for chunk in per_op.into_iter().rev() {

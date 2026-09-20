@@ -1036,7 +1036,7 @@ impl Workbook {
             at: cell,
             cell: state,
         }];
-        self.commit_user(&ops)?;
+        self.commit_user(&ops, None)?;
         self.graph.as_mut().expect("graph initialized").set_formula(
             sheet,
             cell,
@@ -1065,14 +1065,13 @@ impl Workbook {
         let mut touched = Vec::with_capacity(edits.len());
         let mut ops = Vec::with_capacity(edits.len());
         let mut preview = self.model.clone();
+        let mut per_op = Vec::with_capacity(edits.len());
         for edit in edits {
             self.validate_cell(edit.cell)?;
             let state = edit_cell_state(&preview, sheet, edit.cell, &edit.input);
             validate_cell_state(&state)?;
-            if cell_states_semantically_equal(
-                &current_cell_state(&preview, sheet, edit.cell),
-                &state,
-            ) {
+            let old = current_cell_state(&preview, sheet, edit.cell);
+            if cell_states_semantically_equal(&old, &state) {
                 continue;
             }
             preview
@@ -1080,6 +1079,11 @@ impl Workbook {
                 .expect("sheet validated")
                 .set_cell(edit.cell, state.clone().into());
             touched.push((sheet, edit.cell, state.formula.clone()));
+            per_op.push(vec![Op::SetCell {
+                sheet,
+                at: edit.cell,
+                cell: old,
+            }]);
             ops.push(Op::SetCell {
                 sheet,
                 at: edit.cell,
@@ -1089,8 +1093,12 @@ impl Workbook {
         if ops.is_empty() || models_semantically_equal(&preview, &self.model) {
             return Ok(MutationResult::default());
         }
+        let mut inverse = Vec::new();
+        for chunk in per_op.into_iter().rev() {
+            inverse.extend(chunk);
+        }
         self.ensure_graph();
-        self.commit_user(&ops)?;
+        self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         for (sheet, cell, formula) in &touched {
             self.graph.as_mut().expect("graph initialized").set_formula(
                 *sheet,
@@ -1125,6 +1133,7 @@ impl Workbook {
         let invalidates_proposals = ops.iter().any(invalidates_proposals);
         let mut preview = self.model.clone();
         let mut names = self.sheet_names();
+        let mut per_op = Vec::with_capacity(ops.len());
         for op in &ops {
             if let Some(sheet) = worksheet_edit_target(op) {
                 self.ensure_worksheet_sheet(sheet)?;
@@ -1132,16 +1141,20 @@ impl Workbook {
             self.ensure_references_stay_valid(&names, op)?;
             validate_op(&preview, op)?;
             validate_insert_capacity(&preview, op)?;
-            xlsx_ops::apply(&mut preview, op)?;
-            validate_model_sheets(&preview)?;
+            per_op.push(xlsx_ops::apply_in_place(&mut preview, op)?.0);
             rename_sheet_view(&mut names, op);
         }
+        validate_model_sheets(&preview)?;
         validate_shared_drawings(&preview)?;
         if preview == self.model {
             return Ok(MutationResult::default());
         }
+        let mut inverse = Vec::new();
+        for chunk in per_op.into_iter().rev() {
+            inverse.extend(chunk);
+        }
         let active_name = self.active_sheet_name();
-        self.commit_user(&ops)?;
+        self.commit_user(&ops, Some(StagedApply::new(preview, inverse)))?;
         self.restore_active_sheet(active_name.as_deref());
         if invalidates_proposals {
             self.proposals.clear();
@@ -1931,7 +1944,7 @@ impl Workbook {
         Ok(())
     }
 
-    fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
+    fn commit_user(&mut self, ops: &[Op], staged: Option<StagedApply>) -> Result<()> {
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
         if self.is_collaborative() {
@@ -1951,8 +1964,16 @@ impl Workbook {
                 .authority
                 .apply_ops(ops, SyncOrigin::User)
                 .map_err(authority_error)?;
-            let transaction = Transaction::new(ops.to_vec(), Provenance::User);
-            self.undo.commit(&mut self.model, &transaction)?;
+            match staged {
+                Some(staged) => {
+                    self.install_model(staged.model)?;
+                    self.undo.record(staged.inverse);
+                }
+                None => {
+                    let transaction = Transaction::new(ops.to_vec(), Provenance::User);
+                    self.undo.commit(&mut self.model, &transaction)?;
+                }
+            }
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -2400,6 +2421,20 @@ fn changed_cells_between(before: &WorkbookModel, after: &WorkbookModel) -> Vec<C
 
 fn validate_model(model: &WorkbookModel) -> Result<()> {
     validate_model_sheets(model)
+}
+
+/// A batch already applied to a scratch model, plus the inverse that undoes
+/// it. Committing adopts the result instead of replaying the ops against the
+/// live model under a second clone.
+struct StagedApply {
+    model: WorkbookModel,
+    inverse: Vec<Op>,
+}
+
+impl StagedApply {
+    fn new(model: WorkbookModel, inverse: Vec<Op>) -> Self {
+        Self { model, inverse }
+    }
 }
 
 impl Workbook {
@@ -3201,7 +3236,7 @@ fn apply_proposed_number_format(
     cell: CellRef,
     format: &NumberFormatMutation,
 ) -> Result<()> {
-    xlsx_ops::apply(
+    xlsx_ops::apply_in_place(
         workbook,
         &Op::SetRangeNumberFormat {
             sheet,
