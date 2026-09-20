@@ -9,7 +9,9 @@ mod font;
 
 pub use font::GlyphCache;
 
-use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, VecDeque};
+use std::hash::{Hash, Hasher};
 use std::io::Cursor;
 use std::sync::Arc;
 
@@ -44,6 +46,9 @@ pub const MAX_SLIDE_IMAGE_PIXELS: u64 = 67_108_864;
 pub const MAX_IMAGE_BYTES: u64 = 268_435_456;
 /// The same, summed across every image one slide decodes.
 pub const MAX_SLIDE_IMAGE_BYTES: u64 = 536_870_912;
+/// Decoded pixmaps one [`ImageCache`] retains, at the bytes one slide's decodes
+/// may cost. Past the cap the oldest insertion evicts first.
+const MAX_CACHED_IMAGE_BYTES: u64 = MAX_SLIDE_IMAGE_BYTES;
 /// Scratch pixels every shadow on one slide may blur between them, eight full surfaces.
 /// A slide may carry 100_000 shapes and each shadow blurs its own buffer six times over.
 pub const MAX_SHADOW_PIXELS: u64 = 134_217_728;
@@ -136,8 +141,16 @@ pub fn render_png(
     dl: &SurfaceDisplayList,
     resources: &RenderResources<'_>,
 ) -> Result<Vec<u8>, String> {
-    let mut cache = GlyphCache::default();
-    Ok(render_slide_cached(dl, resources, &RenderOptions::default(), &mut cache)?.bytes)
+    let mut glyphs = GlyphCache::default();
+    let mut images = ImageCache::default();
+    Ok(render_slide_cached(
+        dl,
+        resources,
+        &RenderOptions::default(),
+        &mut glyphs,
+        &mut images,
+    )?
+    .bytes)
 }
 
 /// Paint a slide display list at `options.scale`.
@@ -146,17 +159,20 @@ pub fn render_slide(
     resources: &RenderResources<'_>,
     options: &RenderOptions,
 ) -> Result<RenderedSlide, String> {
-    let mut cache = GlyphCache::default();
-    render_slide_cached(dl, resources, options, &mut cache)
+    let mut glyphs = GlyphCache::default();
+    let mut images = ImageCache::default();
+    render_slide_cached(dl, resources, options, &mut glyphs, &mut images)
 }
 
-/// The same, reusing glyph outlines an earlier slide extracted. The cache binds
-/// to the font store that fills it and refuses any other.
+/// The same, reusing glyph outlines and decoded assets an earlier slide
+/// extracted. The glyph cache binds to the font store that fills it and refuses
+/// any other; the image cache keys by content, so it stays valid across decks.
 pub fn render_slide_cached(
     dl: &SurfaceDisplayList,
     resources: &RenderResources<'_>,
     options: &RenderOptions,
     glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
 ) -> Result<RenderedSlide, String> {
     if !options.scale.is_finite() || options.scale <= 0.0 {
         return Err("render scale must be finite and positive".to_string());
@@ -193,7 +209,9 @@ pub fn render_slide_cached(
         scale: options.scale,
         resources,
         glyphs,
-        images: ImageCache::default(),
+        images,
+        image_budget: ImageBudget::default(),
+        asset_hashes: HashMap::new(),
         shape_clip_cache: None,
         skipped_images: 0,
         shadow_pixels: 0,
@@ -306,7 +324,9 @@ struct Painter<'a, 'b> {
     max_shadow_pixels: u64,
     resources: &'a RenderResources<'b>,
     glyphs: &'a mut GlyphCache,
-    images: ImageCache,
+    images: &'a mut ImageCache,
+    image_budget: ImageBudget,
+    asset_hashes: HashMap<String, u64>,
     shape_clip_cache: Option<ShapeClipCache>,
     skipped_images: usize,
 }
@@ -585,7 +605,7 @@ impl Painter<'_, '_> {
         let (kept_x, kept_y) = crop.kept();
         let bounded = !crop.is_whole() || commands.is_some();
         let mut mask = None;
-        let mut decoded = None;
+        let mut decoded: Option<(Arc<Pixmap>, Transform)> = None;
         if kept_x > 0.0 && kept_y > 0.0 {
             if bounded {
                 let Some(bound) = self.clipped_path(clip, outline.clone(), transform)? else {
@@ -612,7 +632,7 @@ impl Painter<'_, '_> {
             self.paint_image_shadow(
                 [x, y, w, h],
                 &outline,
-                decoded.as_ref().map(|(source, fit)| (source, *fit)),
+                decoded.clone(),
                 bounded,
                 stroke,
                 shadow,
@@ -624,7 +644,7 @@ impl Painter<'_, '_> {
             self.pixmap.draw_pixmap(
                 0,
                 0,
-                source.as_ref(),
+                (**source).as_ref(),
                 &PixmapPaint {
                     quality: FilterQuality::Bicubic,
                     ..PixmapPaint::default()
@@ -645,7 +665,7 @@ impl Painter<'_, '_> {
         &mut self,
         bounds: [f32; 4],
         outline: &Path,
-        decoded: Option<(&Pixmap, Transform)>,
+        decoded: Option<(Arc<Pixmap>, Transform)>,
         bounded: bool,
         stroke: Option<&SlideStroke>,
         shadow: &SlideShadow,
@@ -676,7 +696,7 @@ impl Painter<'_, '_> {
             |scratch, local| {
                 for part in &paths {
                     if part.fill
-                        && let Some((source, fit)) = decoded
+                        && let Some((source, fit)) = &decoded
                     {
                         let mask = if bounded || !shadow.paths.is_empty() {
                             let mut mask = Mask::new(scratch.width(), scratch.height())
@@ -689,12 +709,12 @@ impl Painter<'_, '_> {
                         scratch.draw_pixmap(
                             0,
                             0,
-                            source.as_ref(),
+                            (**source).as_ref(),
                             &PixmapPaint {
                                 quality: FilterQuality::Bicubic,
                                 ..PixmapPaint::default()
                             },
-                            local.pre_concat(fit),
+                            local.pre_concat(*fit),
                             mask.as_ref(),
                         );
                     }
@@ -890,9 +910,26 @@ impl Painter<'_, '_> {
         Ok(())
     }
 
-    fn decode(&mut self, asset_id: &str, effects: &[pptx_render::ImageEffect]) -> Option<Pixmap> {
+    fn decode(
+        &mut self,
+        asset_id: &str,
+        effects: &[pptx_render::ImageEffect],
+    ) -> Option<Arc<Pixmap>> {
         let bytes = self.resources.images.get(asset_id)?;
-        self.images.decode(bytes, effects)
+        let content = match self.asset_hashes.get(asset_id) {
+            Some(content) => *content,
+            None => {
+                let content = content_hash(bytes);
+                self.asset_hashes.insert(asset_id.to_owned(), content);
+                content
+            }
+        };
+        self.images.decode(
+            (content, effects_fingerprint(effects)),
+            bytes,
+            effects,
+            &mut self.image_budget,
+        )
     }
 }
 
@@ -1146,15 +1183,113 @@ fn stroke_paint(
     )))
 }
 
-/// Decoded images for one slide, budgeted so a hostile deck cannot allocate its
-/// way out of the surface caps.
+/// Decoded assets keyed by `(content hash, effects fingerprint)`, shared across
+/// the slides of one render job so a picture paints once rather than once per
+/// reference. Keys are content, so the cache stays valid even when an asset id
+/// resolves to new bytes, and duplicate parts under different ids share one
+/// entry. Retained pixmaps are bounded by [`MAX_CACHED_IMAGE_BYTES`].
 #[derive(Default)]
-struct ImageCache {
+pub struct ImageCache {
+    decoded: HashMap<ImageKey, Arc<Pixmap>>,
+    order: VecDeque<ImageKey>,
+    retained: u64,
+}
+
+type ImageKey = (u64, u64);
+
+impl ImageCache {
+    /// The pixmap for `key`, or `None` for content this backend will not draw.
+    /// A hit is free; a miss decodes through `budget` once. A failed decode is
+    /// not retained, so a later slide's fresh `budget` may still retry it.
+    fn decode(
+        &mut self,
+        key: ImageKey,
+        bytes: &[u8],
+        effects: &[pptx_render::ImageEffect],
+        budget: &mut ImageBudget,
+    ) -> Option<Arc<Pixmap>> {
+        if let Some(pixmap) = self.decoded.get(&key) {
+            return Some(Arc::clone(pixmap));
+        }
+        let pixmap = Arc::new(budget.decode(bytes, effects)?);
+        self.remember(key, Arc::clone(&pixmap));
+        Some(pixmap)
+    }
+
+    /// Keeps a decode while the cache has room, evicting the oldest insertions
+    /// first. A pixmap bigger than the cap on its own never enters.
+    fn remember(&mut self, key: ImageKey, pixmap: Arc<Pixmap>) {
+        let cost = pixmap.data().len() as u64;
+        while self.retained + cost > MAX_CACHED_IMAGE_BYTES {
+            let Some(oldest) = self.order.pop_front() else {
+                return;
+            };
+            if let Some(evicted) = self.decoded.remove(&oldest) {
+                self.retained -= evicted.data().len() as u64;
+            }
+        }
+        self.retained += cost;
+        self.order.push_back(key);
+        self.decoded.insert(key, pixmap);
+    }
+}
+
+/// The encoded bytes identify a decode: an asset id that starts resolving to
+/// new content gets a new entry, and identical media under different names
+/// shares one.
+fn content_hash(bytes: &[u8]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    hasher.finish()
+}
+
+#[cfg(test)]
+fn image_key(bytes: &[u8], effects: &[pptx_render::ImageEffect]) -> ImageKey {
+    (content_hash(bytes), effects_fingerprint(effects))
+}
+
+fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for effect in effects {
+        std::mem::discriminant(effect).hash(&mut hasher);
+        match effect {
+            pptx_render::ImageEffect::BiLevel { threshold } => {
+                threshold.to_bits().hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::Grayscale => {}
+            pptx_render::ImageEffect::Luminance {
+                brightness,
+                contrast,
+            } => {
+                brightness.to_bits().hash(&mut hasher);
+                contrast.to_bits().hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::Duotone { shadow, highlight } => {
+                shadow.hash(&mut hasher);
+                highlight.hash(&mut hasher);
+            }
+            pptx_render::ImageEffect::ColorChange {
+                from,
+                to,
+                use_alpha,
+            } => {
+                from.hash(&mut hasher);
+                to.hash(&mut hasher);
+                use_alpha.hash(&mut hasher);
+            }
+        }
+    }
+    hasher.finish()
+}
+
+/// One slide's decode budget: what its fresh decodes may still cost.
+#[derive(Default)]
+struct ImageBudget {
     pixels: u64,
     bytes: u64,
 }
 
-impl ImageCache {
+impl ImageBudget {
     /// Decoded pixels, or `None` for content this backend will not draw: bytes
     /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the slide
     /// has no budget left for. Declared pixels are charged before the decoder
@@ -1341,8 +1476,13 @@ mod tests {
         }
         let image = ImageCache::default()
             .decode(
+                image_key(
+                    &bytes,
+                    &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+                ),
                 &bytes,
                 &[pptx_render::ImageEffect::BiLevel { threshold: 0.25 }],
+                &mut ImageBudget::default(),
             )
             .unwrap();
         assert_eq!(
@@ -1350,10 +1490,52 @@ mod tests {
             ColorU8::from_rgba(255, 255, 255, 128).premultiply()
         );
         assert_eq!(image.pixel(1, 0).unwrap().alpha(), 0);
-        let source = ImageCache::default().decode(&bytes, &[]).unwrap();
+        let source = ImageCache::default()
+            .decode(
+                image_key(&bytes, &[]),
+                &bytes,
+                &[],
+                &mut ImageBudget::default(),
+            )
+            .unwrap();
         assert_eq!(
             source.pixel(0, 0).unwrap(),
             ColorU8::from_rgba(3, 167, 223, 128).premultiply()
+        );
+    }
+
+    #[test]
+    fn a_cached_decode_serves_repeats_and_distinct_effects_separately() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 2, 1);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[3, 167, 223, 128, 255, 255, 255, 0])
+                .unwrap();
+        }
+        let mut cache = ImageCache::default();
+        let mut budget = ImageBudget::default();
+        let effects = [pptx_render::ImageEffect::Grayscale];
+        let first = cache
+            .decode(image_key(&bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        let repeat = cache
+            .decode(image_key(&bytes, &[]), &bytes, &[], &mut budget)
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &repeat));
+        assert_eq!(cache.decoded.len(), 1);
+        let gray = cache
+            .decode(image_key(&bytes, &effects), &bytes, &effects, &mut budget)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &gray));
+        assert_eq!(cache.decoded.len(), 2);
+        assert!(
+            budget.pixels > 0,
+            "each miss still charges the slide budget"
         );
     }
 
@@ -2050,20 +2232,22 @@ mod tests {
         let images = AssetMap::default();
         let resources = resources(&fonts, &images);
         let mut glyphs = GlyphCache::default();
+        let mut image_cache = ImageCache::default();
         let list = shadow_probe(40.0, Some("#FF0000"), None, 0.0, 0.0);
         let options = RenderOptions {
             max_shadow_pixels: 42 * 42,
             ..Default::default()
         };
         for _ in 0..2 {
-            render_slide_cached(&list, &resources, &options, &mut glyphs).unwrap();
+            render_slide_cached(&list, &resources, &options, &mut glyphs, &mut image_cache)
+                .unwrap();
         }
         let options = RenderOptions {
             max_shadow_pixels: 42 * 42 - 1,
             ..options
         };
         assert!(
-            render_slide_cached(&list, &resources, &options, &mut glyphs)
+            render_slide_cached(&list, &resources, &options, &mut glyphs, &mut image_cache)
                 .unwrap_err()
                 .contains("shadows cover")
         );

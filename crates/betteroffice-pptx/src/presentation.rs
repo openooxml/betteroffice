@@ -20,7 +20,7 @@ pub struct Presentation {
     session: DeckSession,
     renderer: SlideRenderer,
     #[cfg(feature = "raster")]
-    glyphs: crate::render::GlyphRegistry,
+    caches: crate::render::RenderCaches,
 }
 
 impl Presentation {
@@ -82,7 +82,7 @@ impl Presentation {
             session,
             renderer: SlideRenderer::new(),
             #[cfg(feature = "raster")]
-            glyphs: crate::render::GlyphRegistry::default(),
+            caches: crate::render::RenderCaches::default(),
         })
     }
 
@@ -425,8 +425,8 @@ impl Presentation {
     }
 
     #[cfg(feature = "raster")]
-    pub(crate) fn glyphs(&self) -> &crate::render::GlyphRegistry {
-        &self.glyphs
+    pub(crate) fn caches(&self) -> &crate::render::RenderCaches {
+        &self.caches
     }
 
     pub fn render_slide(&self, slide_index: usize) -> Result<RenderedSlide> {
