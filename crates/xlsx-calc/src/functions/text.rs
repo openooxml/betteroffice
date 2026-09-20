@@ -1,6 +1,8 @@
 //! text functions. positions are 1-based, counted in unicode scalar values
 //! (excel counts utf-16 units). FIND is case-sensitive, SEARCH case-insensitive.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
@@ -378,19 +380,19 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut first = true;
     for arg in &args[2..] {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            let empty = matches!(v, CellValue::Empty)
-                || matches!(&v, CellValue::Text { value } if value.is_empty());
+            let empty = matches!(v.as_ref(), CellValue::Empty)
+                || matches!(v.as_ref(), CellValue::Text { value } if value.is_empty());
             if ignore_empty && empty {
                 continue;
             }
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) => {
                     if !first && !append_limited(&mut output, &delim, &mut output_chars) {
                         return err(ErrorValue::Value);
@@ -413,14 +415,14 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     for arg in args {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) if append_limited(&mut out, &s, &mut output_chars) => {}
                 Ok(_) => return err(ErrorValue::Value),
                 Err(e) => return err(e),

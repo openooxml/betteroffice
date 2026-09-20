@@ -7,8 +7,8 @@ use xlsx_calc::graph::DepGraph;
 use xlsx_calc::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 use xlsx_model::{
     Border, BorderEdge, BorderStyle, CellFormat, CellRange, CellRef, CellValue, ChartAnchor, Fill,
-    FormatCode, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart, SheetId,
-    Stylesheet, VAlign, Workbook as WorkbookModel,
+    FormatCode, FreezePane, HAlign, Hyperlink, MAX_COLS, MAX_ROWS, NumberFormat, Sheet, SheetChart,
+    SheetId, Stylesheet, VAlign, Workbook as WorkbookModel,
 };
 use xlsx_ops::{
     BorderLineStyle, BorderPreset, CapturedFormat, CellState, HorizontalAlignment,
@@ -18,8 +18,9 @@ use xlsx_ops::{
 };
 use xlsx_render::{
     ChartRegion, DisplayList, GhostEdit, GridGeometry, PrintMetrics, RenderError, Viewport,
-    build_display_list_with_charts_and_ghosts, build_print_display_list_with_charts,
-    chart_at_point, chart_regions, display_text, moved_chart_anchor, resolve_chart_anchor,
+    autofit_relevant, build_display_list_with_charts_and_ghosts,
+    build_print_display_list_with_charts, chart_at_point, chart_regions, display_text,
+    moved_chart_anchor, resolve_chart_anchor,
 };
 #[cfg(feature = "raster")]
 use xlsx_render::{
@@ -178,6 +179,97 @@ struct PreservedStateHistory {
     after: PreservedSheetState,
 }
 
+/// A memoized `sheet_info` plus the two inputs that decide whether a committed
+/// op can have moved it: the active sheet's used range and the grid geometry
+/// the content extent was measured in.
+struct SheetInfoCache {
+    info: SheetInfo,
+    bounds: Option<CellRange>,
+    geometry: GridGeometry,
+}
+
+impl SheetInfoCache {
+    /// Grow the used range to cover `at` and re-derive the fields it drives.
+    /// Ids, names, the active sheet and the freeze pane can't move here.
+    fn extend_bounds(&mut self, at: CellRef, freeze_pane: Option<FreezePane>) {
+        let bounds = self.bounds.get_or_insert(CellRange::new(at, at));
+        *bounds = CellRange::new(
+            CellRef::new(bounds.start.row.min(at.row), bounds.start.col.min(at.col)),
+            CellRef::new(bounds.end.row.max(at.row), bounds.end.col.max(at.col)),
+        );
+        let content = sheet_content(self.bounds, freeze_pane, &self.geometry);
+        self.info.content_width = content.width;
+        self.info.content_height = content.height;
+        self.info.frozen_rows = content.frozen_rows;
+        self.info.frozen_cols = content.frozen_cols;
+        self.info.initial_scroll_x = content.initial_scroll_x;
+        self.info.initial_scroll_y = content.initial_scroll_y;
+    }
+}
+
+/// The fields `SheetInfo` derives from the used range, the freeze pane and the
+/// grid geometry — split out so the memoized copy can re-derive just these
+/// when a cell edit grows the bounds.
+struct SheetContent {
+    width: f32,
+    height: f32,
+    frozen_rows: u32,
+    frozen_cols: u32,
+    initial_scroll_x: f32,
+    initial_scroll_y: f32,
+}
+
+fn sheet_content(
+    bounds: Option<CellRange>,
+    freeze_pane: Option<FreezePane>,
+    geometry: &GridGeometry,
+) -> SheetContent {
+    let mut content_col = bounds
+        .map_or(26, |range| range.end.col.saturating_add(2))
+        .min(MAX_COLS);
+    let mut content_row = bounds
+        .map_or(50, |range| range.end.row.saturating_add(2))
+        .min(MAX_ROWS);
+    let (frozen_rows, frozen_cols, initial_scroll_x, initial_scroll_y) = match freeze_pane {
+        Some(pane) => {
+            content_col = content_col
+                .max(pane.cols.saturating_add(1))
+                .max(pane.top_left.col.saturating_add(2))
+                .min(MAX_COLS);
+            content_row = content_row
+                .max(pane.rows.saturating_add(1))
+                .max(pane.top_left.row.saturating_add(2))
+                .min(MAX_ROWS);
+            (
+                pane.rows,
+                pane.cols,
+                (geometry.col_x(pane.top_left.col) - geometry.col_x(pane.cols)).max(0.0),
+                (geometry.row_y(pane.top_left.row) - geometry.row_y(pane.rows)).max(0.0),
+            )
+        }
+        None => (0, 0, 0.0, 0.0),
+    };
+    SheetContent {
+        width: geometry.col_x(content_col),
+        height: geometry.row_y(content_row),
+        frozen_rows,
+        frozen_cols,
+        initial_scroll_x,
+        initial_scroll_y,
+    }
+}
+
+/// On the used range's edge — the only place removing a cell can shrink it.
+fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
+    bounds.is_some_and(|bounds| {
+        bounds.contains(at)
+            && (at.row == bounds.start.row
+                || at.row == bounds.end.row
+                || at.col == bounds.start.col
+                || at.col == bounds.end.col)
+    })
+}
+
 pub struct Workbook {
     authority: WorkbookAuthority,
     mode: WorkbookMode,
@@ -195,10 +287,29 @@ pub struct Workbook {
     proposals: ProposalSet,
     last_calculation: CalculationResult,
     update_observers: Arc<Mutex<UpdateObservers>>,
-    /// Where each chart frame sat in the source package, by `frame_id`. Every
-    /// replica opens the same bytes, so this is the one anchor baseline they
-    /// all agree on however far their own editing has since diverged.
+    /// Anchor of each chart frame in the source package, by `frame_id`.
     opened_anchors: BTreeMap<String, ChartAnchor>,
+    /// `sheet_info` walks the whole model; memoized between edits because the
+    /// ops a commit applies almost always prove it unchanged.
+    sheet_info_cache: Mutex<Option<SheetInfoCache>>,
+    /// Mutation counter; chart resolutions cache against it.
+    model_epoch: u64,
+    /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
+    /// stored epoch and part-bytes hash.
+    chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
+}
+
+struct CachedChartSpace {
+    bytes_hash: u64,
+    epoch: u64,
+    space: Arc<ChartSpace>,
+}
+
+fn chart_bytes_hash(bytes: &[u8]) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::hash::Hasher::write(&mut h, bytes);
+    std::hash::Hasher::write_usize(&mut h, bytes.len());
+    std::hash::Hasher::finish(&h)
 }
 
 impl Workbook {
@@ -360,6 +471,9 @@ impl Workbook {
             last_calculation: CalculationResult::default(),
             update_observers: Arc::new(Mutex::new(UpdateObservers::default())),
             opened_anchors,
+            sheet_info_cache: Mutex::new(None),
+            model_epoch: 0,
+            chart_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -469,6 +583,7 @@ impl Workbook {
         self.authority = candidate;
         self.preserved.resize(model.sheets.len());
         self.install_model(model)?;
+        self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation;
         self.mode = WorkbookMode::Collaborative { structure };
@@ -610,6 +725,7 @@ impl Workbook {
             .apply_staged_update_v1(&commit_update)
             .map_err(authority_error)?;
         self.install_model(model)?;
+        self.invalidate_sheet_info();
         self.graph = Some(graph);
         self.last_calculation = calculation.clone();
         self.undo.clear();
@@ -715,46 +831,29 @@ impl Workbook {
     pub fn set_active_sheet(&mut self, sheet: SheetId) -> Result<()> {
         self.sheet(sheet)?;
         self.active_sheet = sheet;
+        self.invalidate_sheet_info();
         Ok(())
     }
 
     pub fn sheet_info(&self) -> Result<SheetInfo> {
+        let mut slot = self
+            .sheet_info_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(cached) = &*slot {
+            return Ok(cached.info.clone());
+        }
         let sheet = self.sheet(self.active_sheet)?;
         let geometry = GridGeometry::new(sheet, &self.model.styles);
+        let bounds = sheet.used_range();
+        let content = sheet_content(bounds, sheet.freeze_pane, &geometry);
         let sheet_ids = match &self.mode {
             WorkbookMode::Collaborative { structure } => structure.sheet_keys.clone(),
             WorkbookMode::Standalone => (0..self.model.sheets.len())
                 .map(|index| format!("sheet:{index}"))
                 .collect(),
         };
-        let used_range = sheet.used_range();
-        let mut content_col = used_range
-            .map_or(26, |range| range.end.col.saturating_add(2))
-            .min(MAX_COLS);
-        let mut content_row = used_range
-            .map_or(50, |range| range.end.row.saturating_add(2))
-            .min(MAX_ROWS);
-        let (frozen_rows, frozen_cols, initial_scroll_x, initial_scroll_y) = match sheet.freeze_pane
-        {
-            Some(pane) => {
-                content_col = content_col
-                    .max(pane.cols.saturating_add(1))
-                    .max(pane.top_left.col.saturating_add(2))
-                    .min(MAX_COLS);
-                content_row = content_row
-                    .max(pane.rows.saturating_add(1))
-                    .max(pane.top_left.row.saturating_add(2))
-                    .min(MAX_ROWS);
-                (
-                    pane.rows,
-                    pane.cols,
-                    (geometry.col_x(pane.top_left.col) - geometry.col_x(pane.cols)).max(0.0),
-                    (geometry.row_y(pane.top_left.row) - geometry.row_y(pane.rows)).max(0.0),
-                )
-            }
-            None => (0, 0, 0.0, 0.0),
-        };
-        Ok(SheetInfo {
+        let info = SheetInfo {
             sheet_ids,
             sheet_names: self
                 .model
@@ -763,13 +862,19 @@ impl Workbook {
                 .map(|sheet| sheet.name.clone())
                 .collect(),
             active_sheet: self.active_sheet,
-            content_width: geometry.col_x(content_col),
-            content_height: geometry.row_y(content_row),
-            frozen_rows,
-            frozen_cols,
-            initial_scroll_x,
-            initial_scroll_y,
-        })
+            content_width: content.width,
+            content_height: content.height,
+            frozen_rows: content.frozen_rows,
+            frozen_cols: content.frozen_cols,
+            initial_scroll_x: content.initial_scroll_x,
+            initial_scroll_y: content.initial_scroll_y,
+        };
+        *slot = Some(SheetInfoCache {
+            info: info.clone(),
+            bounds,
+            geometry,
+        });
+        Ok(info)
     }
 
     pub fn cell_scroll_position(&self, sheet: SheetId, cell: CellRef) -> Result<(f32, f32)> {
@@ -1209,7 +1314,9 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Undo)
             .map_err(authority_error)?;
+        let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.undo(&mut self.model)?;
+        self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_undo.pop() {
             self.preserved = history.before.clone();
             self.preserved_redo.push(history);
@@ -1248,7 +1355,9 @@ impl Workbook {
             .authority
             .apply_ops(&ops, SyncOrigin::Redo)
             .map_err(authority_error)?;
+        let prior_styles = self.pre_edit_cell_styles(&ops);
         self.undo.redo(&mut self.model)?;
+        self.update_sheet_info_cache(&ops, &prior_styles);
         if let Some(history) = self.preserved_redo.pop() {
             self.preserved = history.after.clone();
             self.preserved_undo.push(history);
@@ -1327,6 +1436,7 @@ impl Workbook {
         let active_name = self.active_sheet_name();
         let before = self.model.clone();
         self.install_model(history.model)?;
+        self.invalidate_sheet_info();
         self.edited_since_open = true;
         self.restore_active_sheet(active_name.as_deref());
         self.preserved.forget_shared_strings();
@@ -1563,15 +1673,7 @@ impl Workbook {
             &viewport,
             metrics,
             gridlines,
-            |chart| {
-                resolve_chart_space(
-                    self.source_package.as_ref(),
-                    &self.model.styles.theme,
-                    &self.model,
-                    &sheet_ref.name,
-                    chart,
-                )
-            },
+            |chart| self.resolve_chart_space(&sheet_ref.name, chart),
         )
         .map_err(Error::from)?;
         if gridlines {
@@ -1628,12 +1730,9 @@ impl Workbook {
             }
         }
         let ghosts: Vec<GhostEdit> = ghosts.into_values().collect();
-        let source_package = self.source_package.as_ref();
-        let theme = &self.model.styles.theme;
-        let model = &self.model;
         let owner = sheet_ref.name.clone();
         build_display_list_with_charts_and_ghosts(&self.model, sheet, viewport, &ghosts, |chart| {
-            resolve_chart_space(source_package, theme, model, &owner, chart)
+            self.resolve_chart_space(&owner, chart)
         })
         .map_err(Error::from)
     }
@@ -1761,13 +1860,10 @@ impl Workbook {
         let height = ((viewport.height * options.scale).ceil() as u32).max(1);
         validate_render_size(width, height)?;
         validate_display_region(sheet_ref, &self.model.styles, &viewport)?;
-        let source_package = self.source_package.as_ref();
-        let theme = &self.model.styles.theme;
-        let model = &self.model;
         let owner = sheet_ref.name.clone();
         let display_list =
             build_display_list_with_charts(&self.model, sheet, &viewport, |chart| {
-                resolve_chart_space(source_package, theme, model, &owner, chart)
+                self.resolve_chart_space(&owner, chart)
             })?;
         let display_list = if options.scale == 1.0 {
             display_list
@@ -1936,8 +2032,10 @@ impl Workbook {
     }
 
     fn commit_user(&mut self, ops: &[Op]) -> Result<()> {
+        self.bump_model_epoch();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
+        let prior_styles = self.pre_edit_cell_styles(ops);
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::User)?;
             self.authority
@@ -1946,6 +2044,7 @@ impl Workbook {
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
+            self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
                 origin: UpdateOrigin::Local,
@@ -1957,6 +2056,7 @@ impl Workbook {
                 .map_err(authority_error)?;
             let transaction = Transaction::new(ops.to_vec(), Provenance::User);
             self.undo.commit(&mut self.model, &transaction)?;
+            self.update_sheet_info_cache(ops, &prior_styles);
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -1977,8 +2077,10 @@ impl Workbook {
     }
 
     fn commit_agent(&mut self, ops: &[Op], agent_id: String) -> Result<()> {
+        self.bump_model_epoch();
         let preserved_before = (!self.is_collaborative()).then(|| self.preserved.clone());
         let names_before = self.sheet_names();
+        let prior_styles = self.pre_edit_cell_styles(ops);
         if self.is_collaborative() {
             let staged = self.stage_local_update(ops, SyncOrigin::Agent)?;
             self.authority
@@ -1987,6 +2089,7 @@ impl Workbook {
             let mut model = self.authority.materialize().map_err(authority_error)?;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
+            self.update_sheet_info_cache(ops, &prior_styles);
             self.emit_update(UpdateEvent {
                 update: staged.update,
                 origin: UpdateOrigin::Local,
@@ -1998,6 +2101,7 @@ impl Workbook {
                 .authority
                 .apply_ops(ops, SyncOrigin::Agent)
                 .map_err(authority_error)?;
+            self.update_sheet_info_cache(ops, &prior_styles);
             if let Some(update) = update {
                 self.emit_update(UpdateEvent {
                     update,
@@ -2049,7 +2153,130 @@ impl Workbook {
         }
     }
 
+    /// Forget the memoized `sheet_info`: the model or the active sheet moved
+    /// in a way ops alone cannot describe.
+    fn invalidate_sheet_info(&self) {
+        *self
+            .sheet_info_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// Style indices `SetCell` ops overwrite, read before a commit mutates the
+    /// model — after it, the prior style is gone. `prior_styles` maps each
+    /// `SetCell` target on the active sheet to its pre-commit style; an absent
+    /// key means the cell didn't exist.
+    fn pre_edit_cell_styles(&self, ops: &[Op]) -> HashMap<CellRef, Option<u32>> {
+        if self
+            .sheet_info_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .is_none()
+        {
+            return HashMap::new();
+        }
+        ops.iter()
+            .filter_map(|op| match op {
+                Op::SetCell { sheet, at, .. } if *sheet == self.active_sheet => Some(*at),
+                _ => None,
+            })
+            .filter_map(|at| {
+                self.model
+                    .sheet(self.active_sheet)
+                    .and_then(|sheet| sheet.cell(at))
+                    .map(|cell| (at, cell.style))
+            })
+            .collect()
+    }
+
+    /// Fold a committed op batch into the `sheet_info` memo. A `SetCell` that
+    /// keeps its target's style and can't contribute to row autofit only moves
+    /// the used range outward, which `extend_bounds` folds in without a rescan;
+    /// a cell leaving the used-range edge, a style change (fonts feed autofit),
+    /// or an op touching sheets, names, geometry or the freeze drops the memo
+    /// for the next `sheet_info` to rebuild.
+    fn update_sheet_info_cache(&self, ops: &[Op], prior_styles: &HashMap<CellRef, Option<u32>>) {
+        let mut slot = self
+            .sheet_info_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(cache) = slot.as_mut() else {
+            return;
+        };
+        for op in ops {
+            match op {
+                Op::AddSheet { .. }
+                | Op::RemoveSheet { .. }
+                | Op::RenameSheet { .. }
+                | Op::RestoreSheet { .. } => {
+                    *slot = None;
+                    return;
+                }
+                Op::InsertRows { sheet, .. }
+                | Op::DeleteRows { sheet, .. }
+                | Op::InsertCols { sheet, .. }
+                | Op::DeleteCols { sheet, .. }
+                | Op::SetColWidth { sheet, .. }
+                | Op::SetRowHeight { sheet, .. }
+                | Op::SetFreezePane { sheet, .. }
+                | Op::SetHyperlinks { sheet, .. }
+                | Op::MergeCells { sheet, .. }
+                | Op::UnmergeCells { sheet, .. }
+                | Op::PatchRangeStyle { sheet, .. }
+                | Op::SetRangeNumberFormat { sheet, .. }
+                | Op::ApplyRangeFormat { sheet, .. } => {
+                    if *sheet == self.active_sheet {
+                        *slot = None;
+                        return;
+                    }
+                }
+                Op::SetCell { sheet, at, cell } => {
+                    if *sheet != self.active_sheet {
+                        continue;
+                    }
+                    let prior = prior_styles.get(at);
+                    let invalid = if *cell == CellState::default() {
+                        prior.is_some()
+                            && (on_used_edge(cache.bounds, *at)
+                                || self.cell_moves_row_fit(*at, prior.copied().flatten()))
+                    } else {
+                        match prior {
+                            // style moved -> the autofit contribution moved
+                            Some(&prior) if prior != cell.style => true,
+                            // pure value change on a live cell
+                            Some(_) => false,
+                            // new cell: only grows the result if its font fits
+                            // its row taller than what the row already had
+                            None => self.cell_moves_row_fit(*at, cell.style),
+                        }
+                    };
+                    if invalid {
+                        *slot = None;
+                        return;
+                    }
+                    cache.extend_bounds(*at, self.active_sheet_freeze_pane());
+                }
+                Op::SetCharts { .. } | Op::SetChartAnchor { .. } | Op::SetDefinedNames { .. } => {}
+            }
+        }
+    }
+
+    /// Whether a cell carrying `style` at `at` participates in the active
+    /// sheet's row autofit — unsized rows take their tallest content.
+    fn cell_moves_row_fit(&self, at: CellRef, style: Option<u32>) -> bool {
+        self.model
+            .sheet(self.active_sheet)
+            .is_some_and(|sheet| autofit_relevant(sheet, &self.model.styles, at, style))
+    }
+
+    fn active_sheet_freeze_pane(&self) -> Option<FreezePane> {
+        self.model
+            .sheet(self.active_sheet)
+            .and_then(|sheet| sheet.freeze_pane)
+    }
+
     fn rebuild_and_recalculate(&mut self, options: CalculationOptions) -> CalculationResult {
+        self.bump_model_epoch();
         self.edited_since_open = true;
         let (graph, result) = rebuild_and_recalc_all(&mut self.model, options.now_serial);
         self.graph = Some(graph);
@@ -2407,11 +2634,28 @@ fn validate_model(model: &WorkbookModel) -> Result<()> {
 }
 
 impl Workbook {
-    /// The one way a model becomes this workbook's own. Everything arriving
-    /// from the shared document is projected on the way out, so what is left to
-    /// check here is what a local batch can still get wrong.
+    /// Model writes funnel through here, `commit_*` or `rebuild_and_recalculate`;
+    /// the bump invalidates chart resolutions.
+    fn bump_model_epoch(&mut self) {
+        self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.chart_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+    }
+
+    /// The one way a model becomes this workbook's own. Per-op commit paths
+    /// fold their op list into the `sheet_info` memo after this; wholesale
+    /// replacements (snapshot restore, remote state, replayed history) must
+    /// `invalidate_sheet_info` instead — there is no op list that explains
+    /// what changed.
     fn install_model(&mut self, model: WorkbookModel) -> Result<()> {
         self.model = model;
+        self.model_epoch = self.model_epoch.wrapping_add(1);
+        self.chart_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
         Ok(())
     }
 }
@@ -3374,29 +3618,52 @@ fn validate_viewport(viewport: &Viewport) -> Result<()> {
     Ok(())
 }
 
-/// The `ChartSpace` both renderers draw. The part supplies the chart's shape;
-/// the references inside it are resolved against the current workbook, so an
-/// ordinary cell edit reaches the chart without a save.
-fn resolve_chart_space(
-    package: Option<&xlsx_parse::PreservedPackage>,
-    theme: &xlsx_model::Theme,
-    model: &WorkbookModel,
-    owner: &str,
-    chart: &SheetChart,
-) -> std::result::Result<ChartSpace, RenderError> {
-    let package = package.ok_or_else(|| RenderError::ChartSourceUnavailable {
-        part: chart.part.clone(),
-    })?;
-    let bytes = package
-        .part_bytes(&chart.part)
-        .ok_or_else(|| RenderError::ChartPartMissing {
-            part: chart.part.clone(),
-        })?;
-    xlsx_parse::preserved_chart_space(bytes, model, owner, theme).ok_or_else(|| {
-        RenderError::ChartParseFailed {
-            part: chart.part.clone(),
+impl Workbook {
+    /// `ChartSpace` for a chart part, resolved against `owner`; cached per
+    /// epoch and part bytes.
+    fn resolve_chart_space(
+        &self,
+        owner: &str,
+        chart: &SheetChart,
+    ) -> std::result::Result<Arc<ChartSpace>, RenderError> {
+        let package =
+            self.source_package
+                .as_ref()
+                .ok_or_else(|| RenderError::ChartSourceUnavailable {
+                    part: chart.part.clone(),
+                })?;
+        let bytes =
+            package
+                .part_bytes(&chart.part)
+                .ok_or_else(|| RenderError::ChartPartMissing {
+                    part: chart.part.clone(),
+                })?;
+        let bytes_hash = chart_bytes_hash(bytes);
+        let epoch = self.model_epoch;
+        let key = (chart.part.clone(), owner.to_owned());
+        let mut cache = self.chart_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(hit) = cache.get(&key)
+            && hit.epoch == epoch
+            && hit.bytes_hash == bytes_hash
+        {
+            return Ok(hit.space.clone());
         }
-    })
+        let space =
+            xlsx_parse::preserved_chart_space(bytes, &self.model, owner, &self.model.styles.theme)
+                .ok_or_else(|| RenderError::ChartParseFailed {
+                    part: chart.part.clone(),
+                })
+                .map(Arc::new)?;
+        cache.insert(
+            key,
+            CachedChartSpace {
+                bytes_hash,
+                epoch,
+                space: space.clone(),
+            },
+        );
+        Ok(space)
+    }
 }
 
 fn validate_display_region(sheet: &Sheet, styles: &Stylesheet, viewport: &Viewport) -> Result<()> {

@@ -101,7 +101,7 @@ impl Expr {
                 let s = format!("{}{}{}", lhs.print(bp), binary_token(op), rhs.print(bp + 1));
                 if bp < parent_bp { format!("({s})") } else { s }
             }
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 let inner: Vec<String> = args.iter().map(|a| a.print(0)).collect();
                 format!("{}({})", name, inner.join(","))
             }
