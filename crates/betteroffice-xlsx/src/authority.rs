@@ -495,7 +495,7 @@ impl WorkbookAuthority {
             })
             .collect::<HashMap<_, _>>();
         for op in ops {
-            xlsx_ops::apply(&mut model, op).map_err(|error| {
+            xlsx_ops::apply_in_place(&mut model, op).map_err(|error| {
                 AuthorityError::InvalidState(format!(
                     "cannot apply local operation to authored state: {error}"
                 ))

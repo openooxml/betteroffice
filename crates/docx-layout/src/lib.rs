@@ -562,6 +562,13 @@ pub fn clear_measure_fonts() {
     MEASURE_FONTS.with(|store| {
         *store.borrow_mut() = ooxml_text::FontStore::new();
     });
+    measure_blocks::clear_extent_cache();
+}
+
+/// Unique id of the current measurement font store, for caches keyed by store
+/// contents. Changes whenever [`clear_measure_fonts`] installs a new store.
+pub(crate) fn measure_store_id() -> u64 {
+    MEASURE_FONTS.with(|store| store.borrow().id())
 }
 
 /// Measures a paragraph: measurement input JSON in, `ParagraphExtent` JSON

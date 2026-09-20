@@ -215,7 +215,7 @@ pub(crate) fn contextual_spacing_pair(curr: &mut LayoutBlock, next: &mut LayoutB
     }
 }
 
-pub(crate) fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
+pub fn apply_contextual_spacing_blocks(blocks: &mut [LayoutBlock]) {
     for i in 0..blocks.len().saturating_sub(1) {
         let (head, tail) = blocks.split_at_mut(i + 1);
         contextual_spacing_pair(&mut head[i], &mut tail[0]);

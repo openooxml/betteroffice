@@ -18,9 +18,9 @@ export const register_substitute_measure_font: (a: number, b: number, c: number)
 export const update_display_list: (a: number, b: number, c: number) => [number, number];
 export const vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const clear_measure_fonts: () => void;
 export const install_panic_hook: () => void;
 export const close_display_list: (a: number) => void;
-export const clear_measure_fonts: () => void;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
