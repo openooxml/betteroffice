@@ -47,6 +47,7 @@ pub fn lookup(name: &str) -> Option<BuiltIn> {
         "LOG10" => math::log10,
         "PI" => math::pi,
         "TANH" => math::tanh,
+        "RANDBETWEEN" => math::randbetween,
         "AVERAGE" => stats::average,
         "COUNT" => stats::count,
         "COUNTA" => stats::counta,

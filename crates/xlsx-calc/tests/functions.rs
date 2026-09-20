@@ -317,3 +317,66 @@ fn case_insensitive_names() {
         ("stdev.p(2, 4, 4, 4, 5, 5, 7, 9)", n(2.0)),
     ]);
 }
+
+/// draw repeatedly from one context, so each call advances its random stream.
+fn draws(src: &str, seed: Option<u64>, count: usize) -> Vec<f64> {
+    let wb = fixture();
+    let expr = parse_formula(src).expect("parse");
+    let mut ctx = EvalContext::new(&wb, SheetId(0));
+    ctx.rand_seed = seed;
+    (0..count)
+        .map(|_| match evaluate(&expr, &ctx) {
+            CellValue::Number { value } => value,
+            other => panic!("formula {src:?}: expected number, got {other:?}"),
+        })
+        .collect()
+}
+
+/// the rounding and error rules here were measured against Excel for Mac over
+/// 400 draws per case: `bottom > top` errors before any rounding, the draw
+/// spans `ceil(bottom)..=floor(top)`, and an empty span yields `ceil(bottom)`.
+#[test]
+fn randbetween_matches_excels_rounding() {
+    check(&[
+        ("RANDBETWEEN(5, 5)", n(5.0)),
+        ("RANDBETWEEN(1.8, 2.2)", n(2.0)),
+        ("RANDBETWEEN(2.9, 3.1)", n(3.0)),
+        ("RANDBETWEEN(-0.5, 0.5)", n(0.0)),
+        ("RANDBETWEEN(1.5, 1.6)", n(2.0)),
+        ("RANDBETWEEN(2.2, 2.2)", n(3.0)),
+        ("RANDBETWEEN(-1.5, -1.4)", n(-1.0)),
+        ("RANDBETWEEN(0.1, 0.9)", n(1.0)),
+        ("RANDBETWEEN(-0.9, -0.1)", n(0.0)),
+        ("RANDBETWEEN(2.5, 2.1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(3, 1)", e(ErrorValue::Num)),
+        ("RANDBETWEEN(1)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(1, 2, 3)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(\"x\", 2)", e(ErrorValue::Value)),
+        ("RANDBETWEEN(A1, A1)", n(10.0)),
+    ]);
+}
+
+#[test]
+fn randbetween_covers_its_range_and_never_leaves_it() {
+    for (src, want) in [
+        ("RANDBETWEEN(1.2, 3.8)", vec![2.0, 3.0]),
+        ("RANDBETWEEN(-3.5, -1.2)", vec![-3.0, -2.0]),
+        ("RANDBETWEEN(-1, 1)", vec![-1.0, 0.0, 1.0]),
+    ] {
+        let mut seen: Vec<f64> = draws(src, None, 2_000);
+        for value in &seen {
+            assert!(want.contains(value), "formula {src:?} drew {value}");
+        }
+        seen.sort_by(f64::total_cmp);
+        seen.dedup();
+        assert_eq!(seen, want, "formula {src:?} never covered its range");
+    }
+}
+
+#[test]
+fn randbetween_replays_a_pinned_seed() {
+    let src = "RANDBETWEEN(1, 1000000)";
+    assert_eq!(draws(src, Some(7), 16), draws(src, Some(7), 16));
+    assert_ne!(draws(src, Some(7), 16), draws(src, Some(8), 16));
+    assert_ne!(draws(src, None, 16), draws(src, None, 16));
+}

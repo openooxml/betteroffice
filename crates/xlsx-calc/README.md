@@ -58,6 +58,7 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `LN`, `LOG10`, `LOG(n, [base])` | Non-positive input → `#NUM!`; `LN`/`LOG10` use the dedicated libm routine. |
 | `PI` | — |
 | `TANH` | Hyperbolic tangent. |
+| `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
 
 ### Statistics
 
@@ -160,9 +161,14 @@ with `~` escaping a literal `*`, `?`, or `~`.
 - **`TEXT`** implements only the five format codes listed above; the full
   §18.8.31 number-format interpreter is a separate PR.
 - **1904 date system** is not yet wired (see Date & time).
-- **`RAND` / `RANDBETWEEN`** are intentionally **not implemented** here — the
-  engine is kept pure and deterministic; volatility is handled generically by
-  the dependency graph.
+- **`RAND`** is not implemented; **`RANDBETWEEN`** is, and draws from
+  `EvalContext::rand_seed` — pin it before the first draw and the sequence
+  replays exactly. Left `None`, each context takes a fresh stream from a
+  process-local counter, so sibling cells differ and every recalc re-draws,
+  while a process that evaluates in the same order replays the same draws. The
+  seed is not reachable through `CalculationOptions` yet, so a render harness
+  that needs pinned output has to construct its own `EvalContext`. Volatility
+  itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
 

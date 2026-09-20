@@ -351,3 +351,25 @@ fn directional(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) -> Ce
 pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::tanh)
 }
+
+/// RANDBETWEEN(bottom, top): a volatile integer draw. measured against excel:
+/// a raw `bottom > top` is `#NUM!`, the draw spans `ceil(bottom)..=floor(top)`,
+/// and a span that rounds away to nothing collapses to `ceil(bottom)`.
+pub(crate) fn randbetween(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let (bottom, top) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(bottom), Ok(top)) => (bottom, top),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    if bottom > top {
+        return err(ErrorValue::Num);
+    }
+    let (lo, hi) = (bottom.ceil(), top.floor());
+    if hi < lo {
+        return num(lo);
+    }
+    let span = hi - lo + 1.0;
+    finite(lo + (ctx.next_random_unit() * span).floor().min(hi - lo))
+}

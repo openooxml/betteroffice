@@ -499,6 +499,25 @@ mod tests {
     }
 
     #[test]
+    fn randbetween_redraws_on_every_recalc() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "RANDBETWEEN(1, 1000000)");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(graph.volatile_cells().count(), 1);
+
+        let sentinel = num(-1.0);
+        set_cached(&mut wb, s, "B1", sentinel.clone());
+        put_num(&mut wb, s, "A1", 2.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        assert_eq!(changed_a1(&r), vec!["B1"]);
+        match value(&wb, s, "B1") {
+            CellValue::Number { value } => assert!((1.0..=1_000_000.0).contains(&value)),
+            other => panic!("expected a number, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn changed_list_excludes_unmoved_dependents() {
         let (mut wb, s) = one_sheet();
         put_num(&mut wb, s, "A1", 1.0);

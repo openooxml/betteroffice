@@ -4,6 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
@@ -47,6 +48,11 @@ pub struct EvalContext<'a> {
     pub sheet: SheetId,
     /// wall-clock as an excel date serial; `None` -> TODAY()/NOW() return #VALUE!.
     pub now_serial: Option<f64>,
+    /// seed for the volatile random functions; `None` takes a fresh stream from
+    /// a process-local counter. set before the first draw; later writes are
+    /// ignored because the stream has already started.
+    pub rand_seed: Option<u64>,
+    random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
     unhandled_budget_errors: Rc<Cell<u64>>,
@@ -61,6 +67,8 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
@@ -75,6 +83,8 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: Some(now_serial),
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
@@ -93,6 +103,8 @@ impl<'a> EvalContext<'a> {
             provider,
             sheet,
             now_serial: None,
+            rand_seed: None,
+            random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
             unhandled_budget_errors: Rc::new(Cell::new(0)),
@@ -107,6 +119,8 @@ impl<'a> EvalContext<'a> {
             provider: self.provider,
             sheet,
             now_serial: self.now_serial,
+            rand_seed: self.rand_seed,
+            random_state: Rc::clone(&self.random_state),
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
             exhausted: Rc::clone(&self.exhausted),
             unhandled_budget_errors: Rc::clone(&self.unhandled_budget_errors),
@@ -132,6 +146,21 @@ impl<'a> EvalContext<'a> {
         }
         self.remaining_cell_visits.set(remaining - count);
         true
+    }
+
+    /// next draw in [0, 1) from this context's stream; advances it.
+    pub(crate) fn next_random_unit(&self) -> f64 {
+        let seed = self
+            .random_state
+            .get()
+            .or(self.rand_seed)
+            .unwrap_or_else(next_random_stream)
+            .wrapping_add(0x9E37_79B9_7F4A_7C15);
+        self.random_state.set(Some(seed));
+        let mut z = seed;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
     }
 
     pub(crate) fn exhausted(&self) -> bool {
@@ -170,6 +199,14 @@ impl<'a> EvalContext<'a> {
         self.defined_name_stack.borrow_mut().pop();
         value
     }
+}
+
+/// one stream per unseeded context, so sibling cells draw different values and
+/// each recalc re-draws; a process that evaluates in the same order replays the
+/// same draws.
+fn next_random_stream() -> u64 {
+    static NEXT_STREAM: AtomicU64 = AtomicU64::new(0);
+    NEXT_STREAM.fetch_add(0x2545_F491_4F6C_DD1D, Ordering::Relaxed)
 }
 
 pub(crate) fn err(value: ErrorValue) -> CellValue {
