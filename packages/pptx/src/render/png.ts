@@ -1,5 +1,10 @@
 import type { SlideDisplayList } from '../types';
-import { type CanvasImageResolver, paintSlide, sizeCanvasForSlide } from './canvas';
+import {
+  type CanvasImageResolver,
+  paintSlide,
+  sizeCanvasForSlide,
+  slideBackingStore,
+} from './canvas';
 
 export interface SlideToPngOptions {
   /** Output scale, e.g. 2 for hidpi. */
@@ -28,13 +33,12 @@ export async function slideToPng(
 type ExportCanvas = HTMLCanvasElement | OffscreenCanvas;
 
 function createCanvas(list: SlideDisplayList, scale: number): ExportCanvas {
-  const width = Math.round(list.width * scale);
-  const height = Math.round(list.height * scale);
-  if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(width, height);
+  if (typeof OffscreenCanvas === 'function') {
+    const { width, height } = slideBackingStore(list, 1, scale);
+    return new OffscreenCanvas(width, height);
+  }
   if (typeof document === 'undefined') throw new Error('no canvas backend in this environment');
   const canvas = document.createElement('canvas');
-  // The style properties `sizeCanvasForSlide` writes are inert off-screen, but
-  // going through it keeps one rounding rule for both paths.
   sizeCanvasForSlide(canvas, list, 1, scale);
   return canvas;
 }

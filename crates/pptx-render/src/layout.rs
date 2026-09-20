@@ -11,14 +11,16 @@ use ooxml_drawingml::{
     style_fill, style_outline,
 };
 use ooxml_text::{
-    CompatFlags, FontId, FontStore, ShapeFeature, break_opportunities, shape, single_line_box,
+    CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
+    break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::{DeckSnapshot, ShapeKind, ShapeSnapshot, StorySnapshot, TextStyle};
 use pptx_parse::{
     BlipEffect, Bullet, BulletColor, BulletFont, BulletSize, ChartSpace, CustomGeometryPath,
     GraphicFrameData, LineSpacing, ParagraphProperties, Picture, PictureCrop, PictureFill,
     Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform, Slide, SlideLayout,
-    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextOverflow,
+    SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps, TextOverflow,
+    effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -32,6 +34,8 @@ use crate::{
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
+const EMU_PER_POINT: f64 = 12_700.0;
+const CSS_PIXELS_PER_POINT: f64 = 96.0 / 72.0;
 const PICTURE_FILL: &str = "picture";
 const LINE_END_MIN_BASE_PX: f32 = 0.7 / 25.4 * 96.0;
 const ANGLE_UNITS_PER_DEGREE: f64 = 60_000.0;
@@ -201,7 +205,19 @@ impl SlideRenderer {
             .and_then(|path| package.themes.iter().find(|theme| theme.part_path == path))
             .or_else(|| package.themes.first());
         let default_theme = Theme::default();
-        let theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        let base_theme = theme_part.map(|part| &part.theme).unwrap_or(&default_theme);
+        // The slot mapping is per slide, not per theme part.
+        let color_map = effective_color_map(parsed_slide, layout, master);
+        let mapped_theme;
+        let theme = if color_map.is_identity() {
+            base_theme
+        } else {
+            mapped_theme = Theme {
+                color_map,
+                ..base_theme.clone()
+            };
+            &mapped_theme
+        };
         let default_format_scheme = ThemeFormatScheme::default();
         let format_scheme = theme_part
             .map(|part| &part.format_scheme)
@@ -246,8 +262,8 @@ impl SlideRenderer {
                     color: "#ffffff".to_owned(),
                 })
             });
-        let width = emu_to_px(deck.width_emu);
-        let height = emu_to_px(deck.height_emu);
+        let width = slide_extent_px(deck.width_emu);
+        let height = slide_extent_px(deck.height_emu);
         let mut builder = LayoutBuilder {
             renderer: self,
             package,
@@ -2017,6 +2033,9 @@ struct ResolvedStyle {
     face: FontFace,
     family: String,
     font_size_pt: f32,
+    /// Size the line box and percentage line spacing read. Small caps shape
+    /// smaller than the run was authored at without shortening its line.
+    line_font_size_pt: f32,
     /// `spc`: tracking added after every cluster, in points.
     spacing_pt: f32,
     baseline_shift_px: f32,
@@ -2024,6 +2043,7 @@ struct ResolvedStyle {
     italic: bool,
     underline: bool,
     color: String,
+    caps: TextCaps,
 }
 
 fn resolve_content(
@@ -2061,7 +2081,7 @@ fn resolve_content(
     let compat_line_spacing = cascade.compat_line_spacing();
     let mut story_offset = 0_u32;
     let mut paragraphs = Vec::with_capacity(content.paragraphs.len());
-    let mut counters = [0_u32; 9];
+    let mut numbering = AutoNumbering::default();
     for (index, paragraph) in content.paragraphs.iter().enumerate() {
         let mut properties = cascade.paragraph_properties(index, paragraph.level);
         if matches!(paragraph.bullet, Some(Bullet::AutoNumber { .. })) {
@@ -2073,17 +2093,17 @@ fn resolve_content(
                 *restart |= *start_at != 1;
             }
         }
+        let language = properties
+            .default_run
+            .as_ref()
+            .and_then(|value| value.language.as_deref());
         let mut runs = Vec::with_capacity(paragraph.runs.len().max(1));
         for run in &paragraph.runs {
             let style =
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            runs.push(ResolvedRun {
-                text: run.text.clone(),
-                start,
-                style,
-            });
+            push_cased_runs(&mut runs, &run.text, start, language, style);
         }
         if runs.is_empty() {
             runs.push(ResolvedRun {
@@ -2101,7 +2121,7 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut counters)
+        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
@@ -2124,6 +2144,88 @@ fn resolve_content(
         story_offset = story_offset.saturating_add(1);
     }
     Ok(ResolvedContent { paragraphs })
+}
+
+/// Cases one run for drawing. `a:rPr/@cap` is a display property: the stored
+/// run text keeps the author's casing, so only the runs handed to the shaper
+/// change and the save projection is untouched.
+fn push_cased_runs(
+    out: &mut Vec<ResolvedRun>,
+    text: &str,
+    start: u32,
+    language: Option<&str>,
+    style: ResolvedStyle,
+) {
+    if text.is_empty() || style.caps == TextCaps::None {
+        out.push(ResolvedRun {
+            text: text.to_owned(),
+            start,
+            style,
+        });
+        return;
+    }
+    if style.caps == TextCaps::All {
+        out.push(ResolvedRun {
+            text: display_uppercase(text, language),
+            start,
+            style,
+        });
+        return;
+    }
+    let mut small = style.clone();
+    small.font_size_pt = style.font_size_pt * WORD_SMALL_CAPS_ADVANCE_SCALE;
+    let mut offset = start;
+    for (lowercase, segment) in case_segments(text) {
+        let cased = display_uppercase(segment, language);
+        let length = utf16_len(&cased);
+        out.push(ResolvedRun {
+            text: cased,
+            start: offset,
+            style: if lowercase {
+                small.clone()
+            } else {
+                style.clone()
+            },
+        });
+        offset = offset.saturating_add(length);
+    }
+}
+
+/// Uppercases for drawing only, keeping every character's UTF-16 width so the
+/// display list still reports the authored story offsets. A character whose
+/// uppercase form is wider (ß → SS) stays as authored.
+fn display_uppercase(text: &str, language: Option<&str>) -> String {
+    text.chars()
+        .map(|character| {
+            let mut upper = uppercase_for_language(character, language).into_iter();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) if single.len_utf16() == character.len_utf16() => single,
+                _ => character,
+            }
+        })
+        .collect()
+}
+
+/// Splits `text` where its characters stop being lowercase, so small caps can
+/// draw the lowercase stretches at a reduced size.
+fn case_segments(text: &str) -> Vec<(bool, &str)> {
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut current = None;
+    for (index, character) in text.char_indices() {
+        let lowercase = character.is_lowercase();
+        if current != Some(lowercase) {
+            if let Some(previous) = current {
+                segments.push((previous, &text[start..index]));
+            }
+            start = index;
+            current = Some(lowercase);
+        }
+    }
+    if let Some(previous) = current {
+        segments.push((previous, &text[start..]));
+    }
+    segments
 }
 
 fn resolve_bullet_style(
@@ -2229,6 +2331,7 @@ fn resolve_style(
         family: face.family.clone(),
         face,
         font_size_pt,
+        line_font_size_pt: font_size_pt,
         spacing_pt,
         baseline_shift_px,
         bold,
@@ -2239,6 +2342,10 @@ fn resolve_style(
             .or_else(|| fallback.and_then(|value| value.underline.as_deref()))
             .is_some_and(|value| value != "none"),
         color,
+        caps: direct
+            .caps
+            .or_else(|| fallback.and_then(|value| value.caps))
+            .unwrap_or(TextCaps::None),
     })
 }
 
@@ -3046,7 +3153,7 @@ fn style_line_box(
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(
         metrics,
-        points_to_px(style.font_size_pt * scale),
+        points_to_px(style.line_font_size_pt * scale),
         &CompatFlags::default(),
     ))
 }
@@ -3055,7 +3162,7 @@ fn style_line_box(
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.font_size_pt * scale))
+        .map(|cluster| points_to_px(cluster.style.line_font_size_pt * scale))
         .fold(0.0_f32, f32::max)
 }
 
@@ -3527,6 +3634,9 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     if source.baseline_pct.is_some() {
         target.baseline_pct = source.baseline_pct;
     }
+    if source.caps.is_some() {
+        target.caps = source.caps;
+    }
 }
 
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
@@ -3539,6 +3649,7 @@ fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle
         underline: properties.underline.clone(),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
+        caps: properties.caps,
     }
 }
 
@@ -4031,25 +4142,46 @@ fn symbol_bullet(marker: &str, font: Option<&BulletFont>, theme: &Theme) -> Stri
         .collect()
 }
 
+/// Per-level `a:buAutoNum` state: the number last drawn and the `startAt`
+/// the run was seeded from.
+#[derive(Default)]
+struct AutoNumbering {
+    numbers: [u32; 9],
+    starts: [u32; 9],
+}
+
 /// Resolves a marker once per paragraph.
-fn resolve_marker(bullet: Option<&Bullet>, level: u32, counters: &mut [u32; 9]) -> Option<String> {
-    let level = (level as usize).min(counters.len() - 1);
-    counters[level + 1..].fill(0);
+fn resolve_marker(
+    bullet: Option<&Bullet>,
+    level: u32,
+    numbering: &mut AutoNumbering,
+) -> Option<String> {
+    let level = (level as usize).min(numbering.numbers.len() - 1);
+    numbering.numbers[level + 1..].fill(0);
+    numbering.starts[level + 1..].fill(0);
     match bullet {
         Some(Bullet::AutoNumber {
             scheme,
             start_at,
             restart,
         }) => {
-            counters[level] = match counters[level] {
-                0 => (*start_at).clamp(1, 32_767),
-                _ if *restart => (*start_at).clamp(1, 32_767),
+            let start = (*start_at).clamp(1, 32_767);
+            // PowerPoint writes the list's `startAt` on every one of its
+            // paragraphs, so repeating the seed continues the run; only a
+            // different declared start opens a new list.
+            numbering.numbers[level] = match numbering.numbers[level] {
+                0 => start,
+                _ if *restart && numbering.starts[level] != start => start,
                 current => current.saturating_add(1),
             };
-            Some(format_autonum(counters[level], scheme))
+            if numbering.numbers[level] == start {
+                numbering.starts[level] = start;
+            }
+            Some(format_autonum(numbering.numbers[level], scheme))
         }
         _ => {
-            counters[level] = 0;
+            numbering.numbers[level] = 0;
+            numbering.starts[level] = 0;
             match bullet {
                 Some(Bullet::Character { value }) if !value.trim().is_empty() => {
                     Some(value.clone())
@@ -4140,6 +4272,12 @@ fn emu_to_px(value: i64) -> f32 {
     safe_geometry(value as f32 / EMU_PER_CSS_PIXEL)
 }
 
+/// A slide's page box is a whole number of points, the unit PowerPoint
+/// exports and prints it in, so the extent snaps there before the px scale.
+fn slide_extent_px(value: i64) -> f32 {
+    safe_geometry(((value as f64 / EMU_PER_POINT).round() * CSS_PIXELS_PER_POINT) as f32)
+}
+
 fn safe_geometry(value: f32) -> f32 {
     if value.is_finite() {
         value.clamp(-1.0e12, 1.0e12)
@@ -4180,6 +4318,22 @@ mod tests {
         include_bytes!("../../../packages/fonts/assets/LiberationSans-Italic.ttf");
     const BOLD_ITALIC_FONT: &[u8] =
         include_bytes!("../../../packages/fonts/assets/LiberationSans-BoldItalic.ttf");
+
+    #[test]
+    fn a_slide_extent_matches_the_page_powerpoint_exports() {
+        let page_px = |emu| (f64::from(slide_extent_px(emu)) * 150.0 / 96.0).ceil() as u32;
+        for (emu, px, dots) in [
+            (12_192_000, 1280.0, 2000),
+            (6_858_000, 720.0, 1125),
+            (10_691_813, 1122.6666, 1755),
+            (7_559_675, 793.3333, 1240),
+            (7_556_500, 793.3333, 1240),
+            (10_693_400, 1122.6666, 1755),
+        ] {
+            assert!((slide_extent_px(emu) - px).abs() < 0.001, "{emu}");
+            assert_eq!(page_px(emu), dots, "{emu}");
+        }
+    }
 
     #[test]
     fn a_source_crop_converts_to_fractions_and_refuses_what_cannot_be_drawn() {
@@ -4370,8 +4524,8 @@ mod tests {
 
     #[test]
     fn autonumbering_counts_per_level_and_resumes_across_other_levels() {
-        let mut counters = [0_u32; 9];
-        let number = |level, counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4382,7 +4536,7 @@ mod tests {
                 counters,
             )
         };
-        let dash = |level, counters: &mut [u32; 9]| {
+        let dash = |level, counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::Character {
                     value: "-".to_owned(),
@@ -4405,8 +4559,8 @@ mod tests {
 
     #[test]
     fn inherited_autonumber_start_at_applies_only_to_the_first_item() {
-        let mut counters = [0_u32; 9];
-        let number = |counters: &mut [u32; 9]| {
+        let mut counters = AutoNumbering::default();
+        let number = |counters: &mut AutoNumbering| {
             resolve_marker(
                 Some(&Bullet::AutoNumber {
                     scheme: "arabicPeriod".to_owned(),
@@ -4419,7 +4573,7 @@ mod tests {
         };
         assert_eq!(number(&mut counters).as_deref(), Some("7."));
         assert_eq!(number(&mut counters).as_deref(), Some("8."));
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let last_start = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 32_767,
@@ -4452,7 +4606,7 @@ mod tests {
 
     #[test]
     fn autonumber_sequences_restart_after_plain_paragraphs_and_explicit_starts() {
-        let mut counters = [0; 9];
+        let mut counters = AutoNumbering::default();
         let number = Bullet::AutoNumber {
             scheme: "arabicPeriod".to_owned(),
             start_at: 1,
@@ -4502,6 +4656,38 @@ mod tests {
         assert_eq!(
             resolve_marker(Some(&number), 0, &mut counters).as_deref(),
             Some("1.")
+        );
+    }
+
+    /// `pptarena-018-original` slide 11 declares `startAt="4"` on all four of
+    /// its paragraphs and PowerPoint renders 4, 5, 6, 7;
+    /// `pptarena-034-original` slide 11 declares `startAt="1"` on all five and
+    /// PowerPoint renders a) through e).
+    #[test]
+    fn a_repeated_declared_start_continues_the_list() {
+        let mut counters = AutoNumbering::default();
+        let arabic = Bullet::AutoNumber {
+            scheme: "arabicPeriod".to_owned(),
+            start_at: 4,
+            restart: true,
+        };
+        let alpha = Bullet::AutoNumber {
+            scheme: "alphaLcParenR".to_owned(),
+            start_at: 1,
+            restart: true,
+        };
+        assert_eq!(
+            (0..4)
+                .filter_map(|_| resolve_marker(Some(&arabic), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["4.", "5.", "6.", "7."]
+        );
+        let mut counters = AutoNumbering::default();
+        assert_eq!(
+            (0..5)
+                .filter_map(|_| resolve_marker(Some(&alpha), 0, &mut counters))
+                .collect::<Vec<_>>(),
+            ["a)", "b)", "c)", "d)", "e)"]
         );
     }
 
@@ -4556,12 +4742,14 @@ mod tests {
                     face,
                     family: "Arial".to_owned(),
                     font_size_pt: 18.0,
+                    line_font_size_pt: 18.0,
                     spacing_pt: 0.0,
                     baseline_shift_px: 0.0,
                     bold: false,
                     italic: false,
                     underline: false,
                     color: "#000000".to_owned(),
+                    caps: TextCaps::None,
                 },
             }],
         }
@@ -4780,12 +4968,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let mut variants = vec![style.clone(); 7];
         variants[0].color = "#A99A72".to_owned();
@@ -4861,12 +5051,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 14.0,
+            line_font_size_pt: 14.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: true,
             color: "#A99A72".to_owned(),
+            caps: TextCaps::None,
         };
         let paragraph = |parts: &[&str]| {
             let mut start = 0;
@@ -4922,12 +5114,14 @@ mod tests {
             face: renderer.resolve_face("Arial", false, false).unwrap(),
             family: "Arial".to_owned(),
             font_size_pt: 24.0,
+            line_font_size_pt: 24.0,
             spacing_pt: 0.0,
             baseline_shift_px: 0.0,
             bold: false,
             italic: false,
             underline: false,
             color: "#000000".to_owned(),
+            caps: TextCaps::None,
         };
         let stack = |text: &str| {
             let paragraph = ResolvedParagraph {

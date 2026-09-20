@@ -528,10 +528,11 @@ export class EditSession {
     register_measure_font(bytes: Uint8Array): number;
     /**
      * Registers a measurement view of `base` carrying the vertical metrics
-     * Word measures `requested_family` with — for a face this host had to
-     * substitute. Returns `base` for a family whose metrics are unknown.
+     * and advance pitch Word measures `requested_family` with — for a face
+     * this host had to substitute. Returns `base` for a family whose metrics
+     * are unknown. `bold`/`italic` pick that face's measured advance ratio.
      */
-    register_substitute_measure_font(base: number, requested_family: string): number;
+    register_substitute_measure_font(base: number, requested_family: string, bold: boolean, italic: boolean): number;
     /**
      * Rejects tracked changes — the inverse of
      * [`EditSession::accept_change`]: pending insertions roll back, pending
@@ -1000,12 +1001,14 @@ export function range_rects_region_json(display_list: string, region: string, pa
 export function register_measure_font(bytes: Uint8Array): number;
 
 /**
- * Register a measurement view of `base` carrying the vertical metrics Word
- * measures `requested_family` with, and return its id; returns `base`
- * unchanged for a family with no known metrics. Hosts call this for a face
- * they substituted, and put the result at the head of that family's chain.
+ * Register a measurement view of `base` carrying the vertical metrics and
+ * advance pitch Word measures `requested_family` with, and return its id;
+ * returns `base` unchanged for a family with no known metrics. Hosts call
+ * this for a face they substituted, and put the result at the head of that
+ * family's chain. Pagination, the display list and glyph outlines all read
+ * this one store, so a widened view measures and paints at one pitch.
  */
-export function register_substitute_measure_font(base: number, requested_family: string): number;
+export function register_substitute_measure_font(base: number, requested_family: string, bold: boolean, italic: boolean): number;
 
 /**
  * Serializes an S10 request.
@@ -1112,7 +1115,7 @@ export interface InitOutput {
     readonly editsession_paragraphs: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_redo: (a: number) => number;
     readonly editsession_register_measure_font: (a: number, b: number, c: number) => [number, number, number];
-    readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly editsession_register_substitute_measure_font: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number];
     readonly editsession_reject_change: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_replace_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
     readonly editsession_resident_caret_snapshot_json: (a: number) => [number, number, number, number];
@@ -1179,7 +1182,7 @@ export interface InitOutput {
     readonly range_rects_region_by_handle: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly range_rects_region_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly register_measure_font: (a: number, b: number) => [number, number, number];
-    readonly register_substitute_measure_font: (a: number, b: number, c: number) => [number, number, number];
+    readonly register_substitute_measure_font: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly update_display_list: (a: number, b: number, c: number) => [number, number];
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];

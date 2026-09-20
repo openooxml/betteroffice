@@ -57,6 +57,8 @@ function). Aliases map to a single implementation: `CONCAT`/`CONCATENATE`,
 | `POWER`, `SQRT`, `EXP` | Non-finite result → `#NUM!`; `SQRT` of a negative → `#NUM!`. |
 | `LN`, `LOG10`, `LOG(n, [base])` | Non-positive input → `#NUM!`; `LN`/`LOG10` use the dedicated libm routine. |
 | `PI` | — |
+| `TANH` | Hyperbolic tangent. |
+| `RANDBETWEEN(bottom, top)` | Volatile. `bottom > top` → `#NUM!`; draws from `ceil(bottom)..=floor(top)`; an empty span yields `ceil(bottom)`. |
 
 ### Statistics
 
@@ -129,8 +131,8 @@ is not yet wired — a follow-up.
 | `INDEX(area, row, [col])` | Single-row/column areas accept one index; out of range → `#REF!`. |
 | `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
-| `ROW` / `COLUMN([ref])` | **A reference is required** — the evaluator has no notion of the calling cell, so the no-arg form is `#VALUE!`. |
-| `ROWS` / `COLUMNS(area)` | Dimension counts. |
+| `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. A context built without a calling cell (`EvalContext::new`) still answers `#VALUE!` to the no-arg form. |
+| `ROWS` / `COLUMNS(area)` | Dimension counts; the area is required. |
 
 ### Information
 
@@ -159,10 +161,24 @@ with `~` escaping a literal `*`, `?`, or `~`.
 - **`TEXT`** implements only the five format codes listed above; the full
   §18.8.31 number-format interpreter is a separate PR.
 - **1904 date system** is not yet wired (see Date & time).
-- **`RAND` / `RANDBETWEEN`** are intentionally **not implemented** here — the
-  engine is kept pure and deterministic; volatility is handled generically by
-  the dependency graph.
+- **`RAND`** is not implemented; **`RANDBETWEEN`** is, and draws from
+  `EvalContext::rand_seed` — pin it before the first draw and the sequence
+  replays exactly. Left `None`, each context takes a fresh stream from a
+  process-local counter, so sibling cells differ and every recalc re-draws,
+  while a process that evaluates in the same order replays the same draws. The
+  seed is not reachable through `CalculationOptions` yet, so a render harness
+  that needs pinned output has to construct its own `EvalContext`. Volatility
+  itself is handled generically by the dependency graph.
 - **`TODAY` / `NOW`** return `#VALUE!` when no clock is injected via
   `EvalContext::with_now`.
+- **`ROW` / `COLUMN`** with no reference answer the calling cell's own position.
+  Recalculation supplies it; a context built directly by `EvalContext::new`
+  leaves `cell` unset and those forms stay `#VALUE!`.
+- **`ROW` / `COLUMN` / `ROWS` / `COLUMNS` of a direct reference** are positional
+  queries, not value reads, so they contribute no dependency edge: `ROW($X$1)`
+  written in `$X$1` is not a cycle. A computed argument
+  (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads. A **defined
+  name** counts as a direct reference, so `ROW(MyName)` is not expanded: a name
+  bound to a computed reference keeps no edge to what that reference reads.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.

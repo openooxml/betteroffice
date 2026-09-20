@@ -238,7 +238,13 @@ function hydrate(snapshot: YrsResidentWorkerSnapshot) {
     session.clearFonts();
     for (const font of snapshot.fonts) {
       if (font instanceof Uint8Array) session.registerFont(font);
-      else session.registerSubstituteFont(font.substituteOf, font.family);
+      else
+        session.registerSubstituteFont(
+          font.substituteOf,
+          font.family,
+          font.bold,
+          font.italic
+        );
     }
     fontsRevision = snapshot.fontsRevision;
   }

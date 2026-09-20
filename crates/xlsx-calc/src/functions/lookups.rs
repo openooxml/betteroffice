@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
@@ -250,15 +250,26 @@ pub(crate) fn choose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     evaluate(&choices[idx as usize - 1], ctx)
 }
 
-/// ROW([reference]): the 1-based row of the reference's top-left cell;
-/// referenceless form is #VALUE! (calling cell unknown).
+/// ROW([reference]): the 1-based row of the reference's top-left cell, or of
+/// the calling cell when no reference is given.
 pub(crate) fn row(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reference_scalar(args, ctx, |area| area.start.row as f64 + 1.0)
+    reference_scalar(
+        args,
+        ctx,
+        |area| area.start.row as f64 + 1.0,
+        |cell| cell.row as f64 + 1.0,
+    )
 }
 
-/// COLUMN([reference]): the 1-based column of the reference's top-left cell.
+/// COLUMN([reference]): the 1-based column of the reference's top-left cell, or
+/// of the calling cell when no reference is given.
 pub(crate) fn column(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    reference_scalar(args, ctx, |area| area.start.col as f64 + 1.0)
+    reference_scalar(
+        args,
+        ctx,
+        |area| area.start.col as f64 + 1.0,
+        |cell| cell.col as f64 + 1.0,
+    )
 }
 
 /// ROWS(area): the number of rows in a reference.
@@ -289,13 +300,22 @@ fn approximate_row(
     found
 }
 
-fn reference_scalar(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(&Area) -> f64) -> CellValue {
-    if args.len() != 1 {
-        return err(ErrorValue::Value);
-    }
-    match as_area(&args[0], ctx) {
-        Some(area) => num(pick(&area)),
-        None => err(ErrorValue::Value),
+fn reference_scalar(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    pick: fn(&Area) -> f64,
+    here: fn(CellRef) -> f64,
+) -> CellValue {
+    match args {
+        [] => match ctx.cell {
+            Some(cell) => num(here(cell)),
+            None => err(ErrorValue::Value),
+        },
+        [arg] => match as_area(arg, ctx) {
+            Some(area) => num(pick(&area)),
+            None => err(ErrorValue::Value),
+        },
+        _ => err(ErrorValue::Value),
     }
 }
 
