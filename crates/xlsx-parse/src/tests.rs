@@ -251,6 +251,21 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
 }
 
+/// a negative `<col>` width is unrenderable, so the model narrows it to zero
+/// while the authored attribute survives a save untouched.
+#[test]
+fn negative_column_width_narrows_to_zero_and_saves_verbatim() {
+    let body = r#"<cols><col min="1" max="1" width="-0.42" customWidth="1"/><col min="2" max="2" width="12.5" customWidth="1"/></cols><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let source = parts[2].1.clone();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(sheet.col_widths.get(&0), Some(&0.0));
+    assert_eq!(sheet.col_widths.get(&1), Some(&12.5));
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&saved, "xl/worksheets/sheet1.xml"), source);
+}
+
 #[test]
 fn flattens_rich_run_shared_string() {
     let sst = "<sst><si><r><t>Hello </t></r><r><t>World</t></r></si></sst>";
