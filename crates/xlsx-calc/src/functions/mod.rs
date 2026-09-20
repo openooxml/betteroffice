@@ -1,6 +1,6 @@
-//! builtin function library: `resolve` interns a case-insensitive name to a
-//! `Func` bound at parse time; `Func::call` dispatches. builtins receive
-//! arguments unevaluated so control-flow can skip branches.
+//! builtin function library: `resolve` folds a case-insensitive name to a
+//! `Func`; `Func::call` dispatches. builtins receive arguments unevaluated so
+//! control-flow can skip branches.
 
 use xlsx_model::{CellValue, ErrorValue};
 
@@ -16,8 +16,8 @@ pub mod math;
 pub mod stats;
 pub mod text;
 
-/// a builtin's interned identity, bound once at parse time; `call` dispatches
-/// on it during evaluation so the hot loop never touches the name.
+/// a builtin's interned identity; `call` dispatches on it so evaluation never
+/// touches the name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Func {
     Sum,
@@ -432,3 +432,138 @@ pub(crate) fn finite(x: f64) -> CellValue {
         err(ErrorValue::Num)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Func, resolve};
+
+    #[test]
+    fn every_builtin_name_and_alias_resolves_to_its_variant() {
+        let canonical: &[(Func, &str)] = &[
+            (Func::Sum, "SUM"),
+            (Func::SumIf, "SUMIF"),
+            (Func::SumIfs, "SUMIFS"),
+            (Func::SumProduct, "SUMPRODUCT"),
+            (Func::Product, "PRODUCT"),
+            (Func::Abs, "ABS"),
+            (Func::Sign, "SIGN"),
+            (Func::Round, "ROUND"),
+            (Func::RoundUp, "ROUNDUP"),
+            (Func::RoundDown, "ROUNDDOWN"),
+            (Func::Mround, "MROUND"),
+            (Func::Ceiling, "CEILING"),
+            (Func::Floor, "FLOOR"),
+            (Func::Int, "INT"),
+            (Func::Trunc, "TRUNC"),
+            (Func::Mod, "MOD"),
+            (Func::Power, "POWER"),
+            (Func::Sqrt, "SQRT"),
+            (Func::Exp, "EXP"),
+            (Func::Ln, "LN"),
+            (Func::Log, "LOG"),
+            (Func::Log10, "LOG10"),
+            (Func::Pi, "PI"),
+            (Func::Average, "AVERAGE"),
+            (Func::Count, "COUNT"),
+            (Func::CountA, "COUNTA"),
+            (Func::CountBlank, "COUNTBLANK"),
+            (Func::CountIf, "COUNTIF"),
+            (Func::CountIfs, "COUNTIFS"),
+            (Func::AverageIf, "AVERAGEIF"),
+            (Func::AverageIfs, "AVERAGEIFS"),
+            (Func::Min, "MIN"),
+            (Func::Max, "MAX"),
+            (Func::Median, "MEDIAN"),
+            (Func::Mode, "MODE"),
+            (Func::StdevS, "STDEV"),
+            (Func::StdevP, "STDEVP"),
+            (Func::VarS, "VAR"),
+            (Func::VarP, "VARP"),
+            (Func::Large, "LARGE"),
+            (Func::Small, "SMALL"),
+            (Func::Rank, "RANK"),
+            (Func::Len, "LEN"),
+            (Func::Left, "LEFT"),
+            (Func::Right, "RIGHT"),
+            (Func::Mid, "MID"),
+            (Func::Find, "FIND"),
+            (Func::Search, "SEARCH"),
+            (Func::Substitute, "SUBSTITUTE"),
+            (Func::Replace, "REPLACE"),
+            (Func::Trim, "TRIM"),
+            (Func::Upper, "UPPER"),
+            (Func::Lower, "LOWER"),
+            (Func::Proper, "PROPER"),
+            (Func::Clean, "CLEAN"),
+            (Func::Rept, "REPT"),
+            (Func::Exact, "EXACT"),
+            (Func::T, "T"),
+            (Func::Char, "CHAR"),
+            (Func::Code, "CODE"),
+            (Func::Value, "VALUE"),
+            (Func::NumberValue, "NUMBERVALUE"),
+            (Func::Text, "TEXT"),
+            (Func::TextJoin, "TEXTJOIN"),
+            (Func::Concat, "CONCATENATE"),
+            (Func::Date, "DATE"),
+            (Func::Year, "YEAR"),
+            (Func::Month, "MONTH"),
+            (Func::Day, "DAY"),
+            (Func::Weekday, "WEEKDAY"),
+            (Func::Edate, "EDATE"),
+            (Func::Eomonth, "EOMONTH"),
+            (Func::Today, "TODAY"),
+            (Func::Now, "NOW"),
+            (Func::Hour, "HOUR"),
+            (Func::Minute, "MINUTE"),
+            (Func::Second, "SECOND"),
+            (Func::Time, "TIME"),
+            (Func::DateDif, "DATEDIF"),
+            (Func::If, "IF"),
+            (Func::IfError, "IFERROR"),
+            (Func::IfNa, "IFNA"),
+            (Func::Ifs, "IFS"),
+            (Func::Switch, "SWITCH"),
+            (Func::And, "AND"),
+            (Func::Or, "OR"),
+            (Func::Not, "NOT"),
+            (Func::Xor, "XOR"),
+            (Func::Vlookup, "VLOOKUP"),
+            (Func::Hlookup, "HLOOKUP"),
+            (Func::Index, "INDEX"),
+            (Func::Match, "MATCH"),
+            (Func::Xlookup, "XLOOKUP"),
+            (Func::Choose, "CHOOSE"),
+            (Func::Row, "ROW"),
+            (Func::Column, "COLUMN"),
+            (Func::Rows, "ROWS"),
+            (Func::Columns, "COLUMNS"),
+            (Func::IsBlank, "ISBLANK"),
+            (Func::IsNumber, "ISNUMBER"),
+            (Func::IsText, "ISTEXT"),
+            (Func::IsLogical, "ISLOGICAL"),
+            (Func::IsError, "ISERROR"),
+            (Func::IsErr, "ISERR"),
+            (Func::IsNa, "ISNA"),
+            (Func::Na, "NA"),
+            (Func::N, "N"),
+        ];
+        for &(func, name) in canonical {
+            assert_eq!(resolve(name), Some(func), "{name}");
+            assert_eq!(resolve(&name.to_ascii_lowercase()), Some(func), "{name}");
+        }
+        let aliases: &[(&str, Func)] = &[
+            ("MODE.SNGL", Func::Mode),
+            ("STDEV.S", Func::StdevS),
+            ("STDEV.P", Func::StdevP),
+            ("VAR.S", Func::VarS),
+            ("VAR.P", Func::VarP),
+            ("RANK.EQ", Func::Rank),
+            ("CONCAT", Func::Concat),
+        ];
+        for &(name, func) in aliases {
+            assert_eq!(resolve(name), Some(func), "{name}");
+        }
+    }
+}
+
