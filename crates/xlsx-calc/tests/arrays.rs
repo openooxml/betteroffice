@@ -799,3 +799,50 @@ fn reading_a_bound_block_charges_the_budget() {
     );
     assert!(small.iter().all(|value| *value == n(4.0)));
 }
+
+/// `LINEST` lays its coefficients out right to left with the intercept last,
+/// so a two-predictor fit of `y = 2*x1 + 3*x2 + 5` answers `[3, 2, 5]`.
+#[test]
+fn linest_returns_coefficients_in_excel_order() {
+    let workbook = fixture();
+    let ys = "{13;12;23;22;33;32;43}";
+    let xs = "{1,2;2,1;3,4;4,3;5,6;6,5;7,8}";
+    let (rows, cols, values) = arrayed(&format!("LINEST({ys},{xs})"), &workbook);
+    assert_eq!((rows, cols), (1, 3));
+    for (value, want) in values.iter().zip([3.0, 2.0, 5.0]) {
+        assert!(matches!(value, CellValue::Number { value } if (value - want).abs() < 1e-9));
+    }
+}
+
+/// a single predictor with `stats` on reports five rows, and R² for an exact
+/// fit is 1 with a residual sum of squares of 0.
+#[test]
+fn linest_reports_the_statistics_block() {
+    let workbook = fixture();
+    let (rows, cols, values) = arrayed("LINEST({10;20;30;40;50},{1;2;3;4;5},TRUE,TRUE)", &workbook);
+    assert_eq!((rows, cols), (5, 2));
+    let close = |index: usize, want: f64| {
+        assert!(
+            matches!(&values[index], CellValue::Number { value } if (value - want).abs() < 1e-9),
+            "cell {index} was {:?}, wanted {want}",
+            values[index]
+        );
+    };
+    close(0, 10.0);
+    close(1, 0.0);
+    close(4, 1.0);
+    close(7, 3.0);
+    close(9, 0.0);
+}
+
+/// fewer observations than terms has no unique fit.
+#[test]
+fn linest_refuses_an_underdetermined_fit() {
+    let workbook = fixture();
+    assert_eq!(
+        values("LINEST({1;2},{1,2;3,4})", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Num
+        }]
+    );
+}

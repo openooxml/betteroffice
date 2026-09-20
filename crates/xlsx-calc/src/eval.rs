@@ -372,6 +372,11 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Literal(value) => normalize_provider_value(value.clone()),
         Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
         Expr::FuncCall { func, name, args } => match func {
+            Some(_)
+                if crate::array::is_array_builtin(name) && crate::array::args_need_array(args) =>
+            {
+                evaluate_array(expr, ctx).into_scalar()
+            }
             Some(f) => f.call(args, ctx),
             None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
             None => {

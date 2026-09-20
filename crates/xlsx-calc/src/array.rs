@@ -618,6 +618,27 @@ fn lifts(name: &str) -> bool {
 
 /// whether `name` has an array-only implementation, so a cell the file did not
 /// mark as an array formula still evaluates it rather than reporting `#NAME?`.
+/// whether an argument tree calls a builtin that only exists in array form, so
+/// a scalar cell calling an array-aware function over it still needs the array
+/// evaluator — `INDEX(LINEST(..), 3, 1)` is the shape this catches.
+pub(crate) fn args_need_array(args: &[Expr]) -> bool {
+    fn walk(expr: &Expr, depth: usize) -> bool {
+        if depth == 0 {
+            return false;
+        }
+        match expr {
+            Expr::FuncCall { func, name, args } => {
+                (func.is_none() && is_array_builtin(name))
+                    || args.iter().any(|arg| walk(arg, depth - 1))
+            }
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, depth - 1),
+            Expr::Binary { lhs, rhs, .. } => walk(lhs, depth - 1) || walk(rhs, depth - 1),
+            _ => false,
+        }
+    }
+    args.iter().any(|arg| walk(arg, 32))
+}
+
 pub(crate) fn is_array_builtin(name: &str) -> bool {
     lookup_array(&crate::functions::bare_name(name).to_ascii_uppercase()).is_some()
 }
@@ -638,6 +659,7 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "COUNT" => count,
         "COUNTA" => counta,
         "MATCH" => match_,
+        "LINEST" => linest,
         "MMULT" => mmult,
         "MAX" => max,
         "MIN" => min,
@@ -1472,6 +1494,231 @@ fn indices(args: &[Expr], ctx: &EvalContext<'_>, name: &str, by_row: bool) -> Va
 
 /// MMULT(a, b): matrix product; the inner dimensions must agree and every cell
 /// must be numeric.
+/// LINEST(known_y, [known_x], [const], [stats]): least squares over one or
+/// more predictors. coefficients come back in reverse column order with the
+/// intercept last, which is excel's layout; `stats` adds four more rows.
+fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let ys_block = argument(args, ctx, 0)?;
+        let n = output_cells(ys_block.rows, ys_block.cols)?;
+        let mut ys = Vec::with_capacity(n);
+        for row in 0..ys_block.rows {
+            for col in 0..ys_block.cols {
+                ys.push(to_number(&ys_block.at(row, col))?);
+            }
+        }
+        // predictors as columns; a y vector laid out in rows means x is too
+        let down = ys_block.cols == 1 && ys_block.rows > 1;
+        let xs: Vec<Vec<f64>> = match args.get(1) {
+            Some(_) => {
+                let xb = argument(args, ctx, 1)?;
+                let (vars, obs) = if down {
+                    (xb.cols, xb.rows)
+                } else {
+                    (xb.rows, xb.cols)
+                };
+                if obs != ys.len() {
+                    return Err(ErrorValue::Ref);
+                }
+                let mut columns = Vec::with_capacity(vars);
+                for v in 0..vars {
+                    let mut column = Vec::with_capacity(obs);
+                    for o in 0..obs {
+                        let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
+                        column.push(to_number(&cell)?);
+                    }
+                    columns.push(column);
+                }
+                columns
+            }
+            None => vec![(1..=ys.len()).map(|i| i as f64).collect()],
+        };
+        let intercept = match args.get(2) {
+            Some(_) => to_bool(&evaluate(&args[2], ctx))?,
+            None => true,
+        };
+        let stats = match args.get(3) {
+            Some(_) => to_bool(&evaluate(&args[3], ctx))?,
+            None => false,
+        };
+        let fit = least_squares(&ys, &xs, intercept).ok_or(ErrorValue::Num)?;
+        let vars = xs.len();
+        // excel emits the coefficients right to left, intercept last
+        let mut first: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.beta[i])).collect();
+        first.push(num(fit.intercept));
+        if !stats {
+            return Ok(block(ctx, 1, vars + 1, first));
+        }
+        let mut second: Vec<CellValue> = (0..vars).rev().map(|i| num(fit.se[i])).collect();
+        second.push(if intercept {
+            num(fit.se_intercept)
+        } else {
+            CellValue::Error {
+                value: ErrorValue::NA,
+            }
+        });
+        let blank = || CellValue::Error {
+            value: ErrorValue::NA,
+        };
+        let mut rows = vec![first, second];
+        let mut row = vec![num(fit.r2), num(fit.se_y)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        let mut row = vec![num(fit.f), num(fit.df)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        let mut row = vec![num(fit.ss_reg), num(fit.ss_resid)];
+        row.resize(vars + 1, blank());
+        rows.push(row);
+        Ok(from_rows(ctx, vars + 1, rows))
+    })())
+}
+
+/// coefficients and the regression statistics excel reports beside them.
+struct Fit {
+    beta: Vec<f64>,
+    intercept: f64,
+    se: Vec<f64>,
+    se_intercept: f64,
+    r2: f64,
+    se_y: f64,
+    f: f64,
+    df: f64,
+    ss_reg: f64,
+    ss_resid: f64,
+}
+
+/// ordinary least squares by householder QR. the normal equations square the
+/// design matrix's condition number, which a polynomial fit like
+/// `LINEST(y, x^{1,2,3,4,5,6})` does not survive; QR works on the matrix itself.
+#[allow(clippy::needless_range_loop)]
+fn least_squares(ys: &[f64], xs: &[Vec<f64>], intercept: bool) -> Option<Fit> {
+    let n = ys.len();
+    let vars = xs.len();
+    if n == 0 || vars == 0 || xs.iter().any(|column| column.len() != n) {
+        return None;
+    }
+    let terms = vars + usize::from(intercept);
+    if n <= terms {
+        return None;
+    }
+    // design matrix, predictors first and the constant column last
+    let mut a = vec![vec![0.0; terms]; n];
+    for (r, row) in a.iter_mut().enumerate() {
+        for (t, cell) in row.iter_mut().enumerate() {
+            *cell = if intercept && t == vars {
+                1.0
+            } else {
+                xs[t][r]
+            };
+        }
+    }
+    let mut b = ys.to_vec();
+    // householder reflections: A becomes R in place, b becomes Q'b
+    for k in 0..terms {
+        let norm = (k..n).map(|r| a[r][k] * a[r][k]).sum::<f64>().sqrt();
+        if norm < 1e-300 {
+            return None;
+        }
+        let alpha = if a[k][k] > 0.0 { -norm } else { norm };
+        let mut v = vec![0.0; n];
+        v[k] = a[k][k] - alpha;
+        for (r, slot) in v.iter_mut().enumerate().take(n).skip(k + 1) {
+            *slot = a[r][k];
+        }
+        let vtv = (k..n).map(|r| v[r] * v[r]).sum::<f64>();
+        if vtv < 1e-300 {
+            a[k][k] = alpha;
+            continue;
+        }
+        for c in k..terms {
+            let dot = (k..n).map(|r| v[r] * a[r][c]).sum::<f64>();
+            let factor = 2.0 * dot / vtv;
+            for r in k..n {
+                a[r][c] -= factor * v[r];
+            }
+        }
+        let dot = (k..n).map(|r| v[r] * b[r]).sum::<f64>();
+        let factor = 2.0 * dot / vtv;
+        for r in k..n {
+            b[r] -= factor * v[r];
+        }
+    }
+    // back-substitute R x = Q'b
+    let mut coefficients = vec![0.0; terms];
+    for i in (0..terms).rev() {
+        if a[i][i].abs() < 1e-12 {
+            return None;
+        }
+        let sum: f64 = (i + 1..terms).map(|j| a[i][j] * coefficients[j]).sum();
+        coefficients[i] = (b[i] - sum) / a[i][i];
+    }
+    // (X'X)^-1 = R^-1 R^-T, for the standard errors
+    let mut r_inverse = vec![vec![0.0; terms]; terms];
+    for i in (0..terms).rev() {
+        r_inverse[i][i] = 1.0 / a[i][i];
+        for j in i + 1..terms {
+            let sum: f64 = (i + 1..=j).map(|k| a[i][k] * r_inverse[k][j]).sum();
+            r_inverse[i][j] = -sum / a[i][i];
+        }
+    }
+    let covariance =
+        |i: usize| -> f64 { (i..terms).map(|k| r_inverse[i][k] * r_inverse[i][k]).sum() };
+    let mean = ys.iter().sum::<f64>() / n as f64;
+    let mut ss_resid = 0.0;
+    let mut ss_total = 0.0;
+    for r in 0..n {
+        let predicted: f64 = (0..terms)
+            .map(|t| {
+                coefficients[t]
+                    * if intercept && t == vars {
+                        1.0
+                    } else {
+                        xs[t][r]
+                    }
+            })
+            .sum();
+        ss_resid += (ys[r] - predicted).powi(2);
+        ss_total += if intercept {
+            (ys[r] - mean).powi(2)
+        } else {
+            ys[r].powi(2)
+        };
+    }
+    let df = (n - terms) as f64;
+    let variance = ss_resid / df;
+    let ss_reg = ss_total - ss_resid;
+    Some(Fit {
+        beta: coefficients[..vars].to_vec(),
+        intercept: if intercept { coefficients[vars] } else { 0.0 },
+        se: (0..vars)
+            .map(|i| (variance * covariance(i)).sqrt())
+            .collect(),
+        se_intercept: if intercept {
+            (variance * covariance(vars)).sqrt()
+        } else {
+            0.0
+        },
+        r2: if ss_total == 0.0 {
+            1.0
+        } else {
+            1.0 - ss_resid / ss_total
+        },
+        se_y: variance.sqrt(),
+        f: if ss_resid == 0.0 {
+            f64::INFINITY
+        } else {
+            (ss_reg / vars as f64) / variance
+        },
+        df,
+        ss_reg,
+        ss_resid,
+    })
+}
+
 fn mmult(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     result((|| {
         if args.len() != 2 {
