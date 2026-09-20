@@ -1,7 +1,0 @@
-### fmt
-### clippy
-error: function `merge_index_matches_linear_scan` is never used
-error: could not compile `betteroffice-xlsx-render` (lib test) due to 1 previous error
-### test
-passed=699 failed=0
-### GATE RED
