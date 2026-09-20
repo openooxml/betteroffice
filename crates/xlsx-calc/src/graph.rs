@@ -43,15 +43,83 @@ const MAX_EXPANDED_RANGE_CELLS: u64 = 1024;
 /// how many small-range edges a formula-heavy sheet registers.
 const MAX_EXPANDED_CELLS_PER_SHEET: u64 = 262_144;
 
+/// unexpanded ranges index by SPAN_TILE x SPAN_TILE grid tiles; a lookup probes
+/// one tile instead of scanning every range on the sheet.
+const SPAN_TILE_ROWS: u32 = 8192;
+const SPAN_TILE_COLS: u32 = 512;
+
+/// ranges covering more tiles than this are probed by every lookup, keeping
+/// per-span insert cost bounded for sheet-sized ranges.
+const MAX_SPAN_TILES: u64 = 512;
+
+/// tile index over unexpanded ranges: lookup cost tracks ranges overlapping the
+/// target's tile rather than every span on the sheet.
+#[derive(Default)]
+struct SpanIndex {
+    /// tile -> ranges overlapping it.
+    tiles: HashMap<(u32, u32), Vec<(CellRange, NodeKey)>>,
+    /// ranges covering too many tiles to index; probed by every lookup.
+    wide: Vec<(CellRange, NodeKey)>,
+}
+
+impl SpanIndex {
+    fn insert(&mut self, range: CellRange, node: NodeKey) {
+        let row_lo = range.start.row / SPAN_TILE_ROWS;
+        let row_hi = range.end.row / SPAN_TILE_ROWS;
+        let col_lo = range.start.col / SPAN_TILE_COLS;
+        let col_hi = range.end.col / SPAN_TILE_COLS;
+        let tiles = (row_hi as u64 - row_lo as u64 + 1) * (col_hi as u64 - col_lo as u64 + 1);
+        if tiles > MAX_SPAN_TILES {
+            self.wide.push((range, node));
+            return;
+        }
+        for r in row_lo..=row_hi {
+            for c in col_lo..=col_hi {
+                self.tiles.entry((r, c)).or_default().push((range, node));
+            }
+        }
+    }
+
+    fn remove(&mut self, range: &CellRange, node: NodeKey) {
+        let row_lo = range.start.row / SPAN_TILE_ROWS;
+        let row_hi = range.end.row / SPAN_TILE_ROWS;
+        let col_lo = range.start.col / SPAN_TILE_COLS;
+        let col_hi = range.end.col / SPAN_TILE_COLS;
+        let tiles = (row_hi as u64 - row_lo as u64 + 1) * (col_hi as u64 - col_lo as u64 + 1);
+        if tiles > MAX_SPAN_TILES {
+            self.wide.retain(|(r, n)| !(*n == node && r == range));
+            return;
+        }
+        for r in row_lo..=row_hi {
+            for c in col_lo..=col_hi {
+                if let Some(list) = self.tiles.get_mut(&(r, c)) {
+                    list.retain(|(rr, n)| !(*n == node && rr == range));
+                    if list.is_empty() {
+                        self.tiles.remove(&(r, c));
+                    }
+                }
+            }
+        }
+    }
+
+    /// ranges possibly covering `target`: the target tile's bucket plus `wide`.
+    fn overlapping(&self, target: CellRef) -> impl Iterator<Item = &(CellRange, NodeKey)> {
+        self.tiles
+            .get(&(target.row / SPAN_TILE_ROWS, target.col / SPAN_TILE_COLS))
+            .into_iter()
+            .flatten()
+            .chain(self.wide.iter())
+    }
+}
+
 /// reverse edges into one sheet, indexed so `dependents_of` is near O(hits)
 /// instead of scanning every range on the sheet.
 #[derive(Default)]
 struct SheetDeps {
     /// covered cell -> dependent formula nodes, for small ranges.
     cells: HashMap<(RowId, ColId), Vec<NodeKey>>,
-    /// `(range, dependent)` pairs for ranges too large to expand or registered
-    /// after the expansion budget ran out.
-    spans: Vec<(CellRange, NodeKey)>,
+    /// ranges too large to expand or registered after the budget ran out.
+    spans: SpanIndex,
     /// point-index entries currently held in `cells`.
     expanded: u64,
 }
@@ -62,7 +130,7 @@ impl SheetDeps {
         if cells > MAX_EXPANDED_RANGE_CELLS
             || self.expanded.saturating_add(cells) > MAX_EXPANDED_CELLS_PER_SHEET
         {
-            self.spans.push((range, node));
+            self.spans.insert(range, node);
             return;
         }
         for row in range.start.row..=range.end.row {
@@ -76,7 +144,7 @@ impl SheetDeps {
     fn remove(&mut self, range: &CellRange, node: NodeKey) {
         // a range may live in `spans` either because it is large or because the
         // expansion budget was full when it was inserted.
-        self.spans.retain(|(r, n)| !(*n == node && r == range));
+        self.spans.remove(range, node);
         if range_cells(range) > MAX_EXPANDED_RANGE_CELLS {
             return;
         }
@@ -112,7 +180,7 @@ impl SheetDeps {
             .collect();
         nodes.extend(
             self.spans
-                .iter()
+                .overlapping(target)
                 .filter(move |(range, _)| range.contains(target))
                 .map(|(_, node)| *node),
         );
@@ -506,7 +574,11 @@ mod tests {
         }
         assert!(deps_a1(&graph, "Data", "W1", &wb).is_empty());
         assert!(deps_a1(&graph, "Sheet1", "S1", &wb).is_empty());
-        assert_eq!(graph.by_sheet[&SheetId(1)].spans.len(), 1);
+        let spans = &graph.by_sheet[&SheetId(1)].spans;
+        assert_eq!(
+            spans.tiles.values().map(Vec::len).sum::<usize>() + spans.wide.len(),
+            128
+        );
         assert_eq!(wb.sheets[1].iter_cells().count(), 0);
     }
 
