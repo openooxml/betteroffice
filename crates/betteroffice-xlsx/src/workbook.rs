@@ -406,7 +406,7 @@ impl Workbook {
         if self.restore_snapshot(update, options)? {
             return Ok(self.remote_mutation_result(&before, true));
         }
-        let staged = self.stage_remote_updates(&[update])?;
+        let staged = self.stage_remote_updates(&[update], None)?;
         if staged.structure != structure {
             return Err(Error::CollaborativeStructureChanged);
         }
@@ -484,10 +484,14 @@ impl Workbook {
         Ok(true)
     }
 
-    fn stage_remote_updates(&self, updates: &[&[u8]]) -> Result<StagedUpdate> {
+    fn stage_remote_updates(
+        &self,
+        updates: &[&[u8]],
+        baseline: Option<&[u8]>,
+    ) -> Result<StagedUpdate> {
         let staged = self
             .authority
-            .stage_updates_v1(updates)
+            .stage_updates_v1(updates, baseline)
             .map_err(authority_error)?;
         validate_collaboration_state(staged.state_bytes, staged.state_vector_entries)?;
         self.gate_incoming(&staged.model)
@@ -536,15 +540,24 @@ impl Workbook {
     ) -> Result<bool> {
         let mut applied = false;
         let mut index = 0;
+        // Re-encoding this replica's state for each pending retry reads the
+        // same document until one is adopted, so the bytes are cached between
+        // iterations and dropped whenever an apply invalidates them.
+        let mut baseline = None;
         while index < self.pending_remote_updates.len() {
             let update = self.pending_remote_updates[index].clone();
-            match self.stage_remote_updates(&[&update]) {
+            let staged = self.stage_remote_updates(
+                &[&update],
+                Some(baseline.get_or_insert_with(|| self.authority.encode_state_as_update_v1())),
+            );
+            match staged {
                 Ok(staged) if &staged.structure != structure => {
                     self.pending_remote_updates.remove(index);
                 }
                 Ok(staged) if staged.pending => {
                     if staged.effective {
                         applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                        baseline = None;
                         index = 0;
                     } else {
                         index += 1;
@@ -553,6 +566,7 @@ impl Workbook {
                 Ok(staged) => {
                     self.pending_remote_updates.remove(index);
                     applied |= self.apply_staged_remote_update(staged, options)?.applied;
+                    baseline = None;
                     index = 0;
                 }
                 Err(_) => {
@@ -1939,7 +1953,7 @@ impl Workbook {
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
-            let mut model = self.authority.materialize().map_err(authority_error)?;
+            let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
@@ -1980,7 +1994,7 @@ impl Workbook {
             self.authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
                 .map_err(authority_error)?;
-            let mut model = self.authority.materialize().map_err(authority_error)?;
+            let mut model = staged.model;
             retain_formula_caches(&self.model, &mut model);
             self.install_model(model)?;
             self.emit_update(UpdateEvent {
