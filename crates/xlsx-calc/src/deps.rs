@@ -4,7 +4,8 @@ use std::collections::HashSet;
 
 use xlsx_model::{CellRange, CellRef};
 
-use crate::parser::Expr;
+use crate::parser::{Expr, UnaryOp};
+use crate::reference::offset_rect;
 
 /// collect every reference a formula reads as `(sheet, range)` pairs;
 /// `sheet` is `None` for unqualified refs. order-preserving, de-duplicated.
@@ -62,8 +63,67 @@ fn walk(
                 }
                 walk(arg, out, seen);
             }
+            if name.eq_ignore_ascii_case("OFFSET")
+                && let Some(Some((sheet, range))) = offset_target(args)
+            {
+                push_unique(out, seen, sheet, range);
+            }
         }
         Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name { .. } => {}
+    }
+}
+
+/// what an OFFSET call reads, decided without evaluating it. the outer `None`
+/// means an argument is not a literal, so only evaluation can resolve the
+/// target and the caller must treat the formula as volatile; `Some(None)` means
+/// the literals resolve to #REF!, which reads nothing.
+pub(crate) fn offset_target(args: &[Expr]) -> Option<Option<(Option<String>, CellRange)>> {
+    if args.len() < 3 || args.len() > 5 {
+        return Some(None);
+    }
+    let (sheet, anchor) = anchor_range(&args[0])?;
+    let rows = const_int(&args[1])?;
+    let cols = const_int(&args[2])?;
+    let height = match args.get(3) {
+        Some(arg) => Some(const_int(arg)?),
+        None => None,
+    };
+    let width = match args.get(4) {
+        Some(arg) => Some(const_int(arg)?),
+        None => None,
+    };
+    Some(offset_rect(anchor, rows, cols, height, width).map(|rect| (sheet, rect)))
+}
+
+fn anchor_range(expr: &Expr) -> Option<(Option<String>, CellRange)> {
+    match expr {
+        Expr::Ref { sheet, cell } => Some((
+            sheet.clone(),
+            CellRange {
+                start: *cell,
+                end: *cell,
+            },
+        )),
+        Expr::Range { sheet, range } => {
+            Some((sheet.clone(), CellRange::new(range.start, range.end)))
+        }
+        Expr::ColumnRange { sheet, range } => Some((sheet.clone(), range.cell_range())),
+        _ => None,
+    }
+}
+
+fn const_int(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Number(n) if n.is_finite() => Some(n.trunc() as i64),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            expr,
+        } => const_int(expr).and_then(i64::checked_neg),
+        Expr::Unary {
+            op: UnaryOp::Plus,
+            expr,
+        } => const_int(expr),
+        _ => None,
     }
 }
 
@@ -87,6 +147,13 @@ fn push_unique(
 mod tests {
     use super::*;
     use crate::parser::parse_formula;
+
+    fn args(src: &str) -> Vec<Expr> {
+        match parse_formula(src).unwrap() {
+            Expr::FuncCall { args, .. } => args,
+            other => panic!("not a call: {other:?}"),
+        }
+    }
 
     fn refs(src: &str) -> Vec<String> {
         references(&parse_formula(src).unwrap())
@@ -134,5 +201,36 @@ mod tests {
     #[test]
     fn walks_nested_expressions() {
         assert_eq!(refs("IF(A1>0, B1, -C1%)"), vec!["A1", "B1", "C1"]);
+    }
+
+    #[test]
+    fn static_offset_reads_its_target() {
+        assert_eq!(refs("OFFSET(A1, 1, 1)"), vec!["A1", "B2"]);
+        assert_eq!(refs("SUM(OFFSET($A$1, 1, 0, 3, 2))"), vec!["A1", "A2:B4"]);
+        assert_eq!(refs("OFFSET(C3, -2, -2)"), vec!["C3", "A1"]);
+        assert_eq!(refs("SUM(OFFSET(A5, 0, 0, -3, 1))"), vec!["A5", "A3:A5"]);
+        assert_eq!(refs("ROWS(OFFSET(E1:F4, 1, 0))"), vec!["E1:F4", "E2:F5"]);
+        assert_eq!(
+            refs("OFFSET(Sheet2!A1, 1, 0)"),
+            vec!["Sheet2!A1", "Sheet2!A2"]
+        );
+    }
+
+    #[test]
+    fn offset_without_a_target_reads_only_its_arguments() {
+        assert_eq!(refs("OFFSET(A1, B1, 0)"), vec!["A1", "B1"]);
+        assert_eq!(refs("OFFSET(A1, ROW(), 0)"), vec!["A1"]);
+        assert_eq!(refs("OFFSET(A1, -1, 0)"), vec!["A1"]);
+        assert_eq!(refs("OFFSET(A1, 0, 0, 0, 1)"), vec!["A1"]);
+    }
+
+    #[test]
+    fn offset_separates_dynamic_arguments_from_a_static_ref_error() {
+        assert!(offset_target(&args("OFFSET(A1, B1, 0)")).is_none());
+        assert!(offset_target(&args("OFFSET(Named, 1, 0)")).is_none());
+        assert_eq!(offset_target(&args("OFFSET(A1, -1, 0)")), Some(None));
+        assert_eq!(offset_target(&args("OFFSET(A1, 0, 0, 0, 1)")), Some(None));
+        assert_eq!(offset_target(&args("OFFSET(A1, 1)")), Some(None));
+        assert!(offset_target(&args("OFFSET(A1, 1, 1)")).is_some_and(|t| t.is_some()));
     }
 }

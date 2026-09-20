@@ -640,9 +640,13 @@ impl Area {
 }
 
 /// interpret an argument as a rectangular reference (1x1 for single cells);
-/// `None` for non-references or unknown sheets.
+/// `None` for non-references, unknown sheets, and reference functions whose
+/// result is #REF!.
 pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     match arg {
+        Expr::FuncCall { name, args } if name.eq_ignore_ascii_case("OFFSET") => {
+            crate::functions::lookups::offset_area(args, ctx).ok()
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,

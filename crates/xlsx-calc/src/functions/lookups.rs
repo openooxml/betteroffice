@@ -1,12 +1,13 @@
 //! lookup and reference functions: VLOOKUP/HLOOKUP/MATCH exact and approximate
-//! modes, INDEX area form, XLOOKUP exact-match subset.
+//! modes, INDEX area form, XLOOKUP exact-match subset, OFFSET.
 
 use std::cmp::Ordering;
 
-use xlsx_model::{CellRef, CellValue, ErrorValue};
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
 use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
+use crate::reference::offset_rect;
 
 use super::{nth_int, nth_number};
 
@@ -181,6 +182,55 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Ok(value) => value,
         Err(error) => err(error),
     }
+}
+
+/// OFFSET(reference, rows, cols, [height], [width]): the rectangle `rows` down
+/// and `cols` right of `reference`, sized `height` x `width` (defaults: the
+/// reference's own size, negatives extend back from the shifted corner). a zero
+/// size or a rectangle off the sheet is #REF!. like a bare range, a multi-cell
+/// result in scalar context is #VALUE! -- there is no implicit intersection.
+pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match offset_area(args, ctx) {
+        Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+            Ok(value) => value,
+            Err(error) => err(error),
+        },
+        Ok(_) => err(ErrorValue::Value),
+        Err(error) => err(error),
+    }
+}
+
+/// OFFSET's reference result, for callers that take an area rather than a
+/// value; `as_area` routes nested OFFSET calls back through here.
+pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.len() < 3 || args.len() > 5 {
+        return Err(ErrorValue::Value);
+    }
+    let anchor = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let rows = nth_int(args, ctx, 1)?;
+    let cols = nth_int(args, ctx, 2)?;
+    let height = match args.get(3) {
+        Some(_) => Some(nth_int(args, ctx, 3)?),
+        None => None,
+    };
+    let width = match args.get(4) {
+        Some(_) => Some(nth_int(args, ctx, 4)?),
+        None => None,
+    };
+    let bounds = CellRange::new(
+        anchor.start,
+        CellRef::new(
+            anchor.start.row + anchor.rows as u32 - 1,
+            anchor.start.col + anchor.cols as u32 - 1,
+        ),
+    );
+    let rect = offset_rect(bounds, rows, cols, height, width).ok_or(ErrorValue::Ref)?;
+    Ok(Area {
+        sheet: anchor.sheet,
+        start: rect.start,
+        rows: (rect.end.row - rect.start.row + 1) as usize,
+        cols: (rect.end.col - rect.start.col + 1) as usize,
+    })
 }
 
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match

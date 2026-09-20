@@ -406,6 +406,42 @@ mod tests {
     }
 
     #[test]
+    fn static_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3", "A4"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_formula(&mut wb, s, "B1", "SUM(OFFSET(A1, 1, 0, 3, 1))");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(9.0));
+
+        put_num(&mut wb, s, "A3", 100.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(106.0));
+        assert_eq!(changed_a1(&r), vec!["B1"]);
+    }
+
+    #[test]
+    fn unresolvable_offset_recalcs_when_its_target_changes() {
+        let (mut wb, s) = one_sheet();
+        for (i, cell) in ["A1", "A2", "A3"].iter().enumerate() {
+            put_num(&mut wb, s, cell, (i + 1) as f64);
+        }
+        put_num(&mut wb, s, "D1", 2.0);
+        put_formula(&mut wb, s, "B1", "OFFSET(A1, D1, 0)");
+        let (mut graph, _) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(3.0));
+
+        put_num(&mut wb, s, "A3", 30.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("A3"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(30.0));
+
+        put_num(&mut wb, s, "D1", 1.0);
+        recalc_after(&mut wb, &mut graph, &[(s, a1("D1"))], None);
+        assert_eq!(value(&wb, s, "B1"), num(2.0));
+    }
+
+    #[test]
     fn cross_sheet_chain() {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Sheet1"));

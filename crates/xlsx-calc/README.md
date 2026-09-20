@@ -129,6 +129,7 @@ is not yet wired — a follow-up.
 | `VLOOKUP` / `HLOOKUP(value, table, index, [range_lookup])` | `range_lookup` defaults to TRUE (approximate on a sorted first column/row); index out of range → `#REF!`. **No wildcards in exact mode.** |
 | `MATCH(value, area, [type])` | Types 1 (default, ascending), 0 (exact), -1 (descending). **No wildcards in type 0.** |
 | `INDEX(area, row, [col])` | Single-row/column areas accept one index; out of range → `#REF!`. |
+| `OFFSET(reference, rows, cols, [height], [width])` | Returns a reference, so it feeds the area-taking functions. Sizes default to the reference's own; a negative size extends back from the shifted corner; a zero size or a rectangle off the sheet → `#REF!`. A multi-cell result in scalar context is `#VALUE!` (see below). |
 | `XLOOKUP(value, lookup, return, [if_not_found], …)` | **Exact match only**; match/search modes beyond exact are not yet implemented. |
 | `CHOOSE(index, …)` | Only the chosen argument is evaluated. |
 | `ROW` / `COLUMN([ref])` | The reference's top-left position; with no reference, the calling cell's own. A context built without a calling cell (`EvalContext::new`) still answers `#VALUE!` to the no-arg form. |
@@ -180,5 +181,14 @@ with `~` escaping a literal `*`, `?`, or `~`.
   (`ROW(OFFSET(A1,B1,0))`) is still walked for the cells it reads. A **defined
   name** counts as a direct reference, so `ROW(MyName)` is not expanded: a name
   bound to a computed reference keeps no edge to what that reference reads.
+- **`OFFSET` in scalar context** follows the evaluator's no-implicit-intersection
+  rule: a multi-cell result is `#VALUE!`, exactly as a bare `A1:A5` would be.
+- **`OFFSET`'s dependencies** are exact — the resolved rectangle is a graph edge
+  — whenever its offsets and sizes are literal numbers over a literal anchor.
+  When any of them is computed, the target is unknowable before evaluation, so
+  the calling cell is marked volatile and re-evaluates on every recalc (Excel
+  treats *every* `OFFSET` this way). Volatility guarantees the cell is never
+  skipped; it does not order the cell after a target it has no static edge to,
+  so a same-pass write to that target may be read one recalc late.
 
 Part of [BetterOffice](https://betteroffice.dev). Apache-2.0.
