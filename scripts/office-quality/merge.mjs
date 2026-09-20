@@ -15,6 +15,8 @@ import { FORMATS, renderSection } from './readme.mjs';
 import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
+import { mergePptxBenchmark } from './pptx-benchmark.mjs';
+import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 
 function fail(message) {
   throw new Error(`Invalid fidelity merge: ${message}`);
@@ -212,6 +214,8 @@ export async function mergeFromPaths({
   output,
   requireRenders = false,
   requireDocxBenchmark = false,
+  requirePptxBenchmark = false,
+  requireXlsxBenchmark = false,
 }) {
   const planBytes = await readFile(planPath);
   const plan = normalizePlan(JSON.parse(planBytes));
@@ -231,6 +235,15 @@ export async function mergeFromPaths({
     const benchmarks = await Promise.all(docxShards(plan).map(async (_, shard) =>
       JSON.parse(await readFile(resolve(parts, `docx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
     report = mergeDocxBenchmarks(plan, report, benchmarks, digest(planBytes));
+  }
+  if (requirePptxBenchmark && plan.formats.includes('pptx')) {
+    const benchmark = JSON.parse(await readFile(resolve(parts, 'pptx-benchmark-report', 'report.json'), 'utf8'));
+    report = mergePptxBenchmark(plan, report, benchmark, digest(planBytes));
+  }
+  if (requireXlsxBenchmark && xlsxShards(plan).length) {
+    const benchmarks = await Promise.all(xlsxShards(plan).map(async (_, shard) =>
+      JSON.parse(await readFile(resolve(parts, `xlsx-benchmark-report-${shard}`, 'report.json'), 'utf8'))));
+    report = mergeXlsxBenchmarks(plan, report, benchmarks, digest(planBytes));
   }
   const section = renderSection(report);
   await emptyOutput(output);
@@ -259,5 +272,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
     output: resolve(QUALITY_OUTPUT),
     requireRenders: QUALITY_REQUIRE_RENDERS === 'true',
     requireDocxBenchmark: process.env.QUALITY_REQUIRE_DOCX_BENCHMARK === 'true',
+    requirePptxBenchmark: process.env.QUALITY_REQUIRE_PPTX_BENCHMARK === 'true',
+    requireXlsxBenchmark: process.env.QUALITY_REQUIRE_XLSX_BENCHMARK === 'true',
   });
 }

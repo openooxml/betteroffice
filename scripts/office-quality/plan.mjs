@@ -34,7 +34,7 @@ function validateSample(sample) {
   validateReferenceMetadata(sample.metadata, sample.id);
 }
 
-export function createPlan({ source_sha, commit, versions, react_version, samples, docx_published_source_sha }) {
+export function createPlan({ source_sha, commit, versions, react_version, samples, docx_published_source_sha, xlsx_published_source_sha, pptx_published_source_sha }) {
   if (!isSha(source_sha) || !isSha(commit))
     throw new Error('Invalid fidelity plan revision');
   if (
@@ -57,6 +57,10 @@ export function createPlan({ source_sha, commit, versions, react_version, sample
   );
   if (docx_published_source_sha !== undefined && !isSha(docx_published_source_sha))
     throw new Error('Invalid published DOCX source revision');
+  if (xlsx_published_source_sha !== undefined && !isSha(xlsx_published_source_sha))
+    throw new Error('Invalid published XLSX source revision');
+  if (pptx_published_source_sha !== undefined && !isSha(pptx_published_source_sha))
+    throw new Error('Invalid published PPTX source revision');
   return {
     schema_version: PLAN_SCHEMA_VERSION,
     source_sha,
@@ -66,6 +70,8 @@ export function createPlan({ source_sha, commit, versions, react_version, sample
     formats,
     samples,
     ...(docx_published_source_sha === undefined ? {} : { docx_published_source_sha }),
+    ...(pptx_published_source_sha === undefined ? {} : { pptx_published_source_sha }),
+    ...(xlsx_published_source_sha === undefined ? {} : { xlsx_published_source_sha }),
   };
 }
 
@@ -144,6 +150,12 @@ export async function preparePlan(environment, dependencies) {
     samples,
     ...(samples.some((sample) => sample.format === 'docx')
       ? { docx_published_source_sha: published[0].gitHead ?? 'missing' }
+      : {}),
+    ...(samples.some((sample) => sample.format === 'pptx')
+      ? { pptx_published_source_sha: published[1].gitHead ?? 'missing' }
+      : {}),
+    ...(samples.some((sample) => sample.format === 'xlsx')
+      ? { xlsx_published_source_sha: published[2].gitHead ?? 'missing' }
       : {}),
   });
 }
