@@ -48,3 +48,30 @@ fn optional(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<f64, E
         _ => Ok(0.0),
     }
 }
+
+/// NPV(rate, value1, ...): cash flows discounted from the end of period one.
+/// Referenced cells contribute only their numbers; a value written into the
+/// call coerces.
+pub(crate) fn npv(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 {
+        return err(ErrorValue::Value);
+    }
+    let rate = match nth_number(args, ctx, 0) {
+        Ok(rate) => rate,
+        Err(e) => return err(e),
+    };
+    if rate == -1.0 {
+        return err(ErrorValue::Div0);
+    }
+    let flows = match super::collect_numbers(&args[1..], ctx) {
+        Ok(flows) => flows,
+        Err(e) => return err(e),
+    };
+    let mut total = 0.0;
+    let mut discount = 1.0;
+    for flow in flows {
+        discount *= 1.0 + rate;
+        total += flow / discount;
+    }
+    finite(total)
+}

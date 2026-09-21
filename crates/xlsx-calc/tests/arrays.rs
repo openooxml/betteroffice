@@ -1237,3 +1237,28 @@ fn range_join_reads_as_a_block_in_array_mode() {
         }]
     );
 }
+
+/// FORMULATEXT shows the formula a cell holds, braced when the cell is an
+/// array formula, and reports `#N/A` for a cell that holds none.
+#[test]
+fn formulatext_reads_the_formula_a_cell_holds() {
+    let mut workbook = Workbook::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        a1("A1"),
+        Cell {
+            value: n(3.0),
+            formula: Some("1+2".into()),
+            ..Cell::default()
+        },
+    );
+    put(&mut sheet, "A2", n(7.0));
+    workbook.sheets.push(sheet);
+    assert_eq!(values("_xlfn.FORMULATEXT(A1)", &workbook), vec![t("=1+2")]);
+    assert_eq!(
+        values("_xlfn.FORMULATEXT(A2)", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::NA
+        }]
+    );
+}

@@ -225,6 +225,11 @@ fn math_functions() {
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
+        // NPV discounts from the end of period one
+        ("NPV(0.1,100)", n(100.0 / 1.1)),
+        ("NPV(0,10,20,30)", n(60.0)),
+        ("NPV(-1,10)", e(ErrorValue::Div0)),
+        ("NPV(0.1)", e(ErrorValue::Value)),
         // a date function reads text where a date is wanted
         ("MONTH(\"2024-03-05\")", n(3.0)),
         ("YEAR(\"2024-03-05\")", n(2024.0)),

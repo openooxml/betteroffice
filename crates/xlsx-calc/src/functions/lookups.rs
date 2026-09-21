@@ -776,3 +776,24 @@ pub(crate) fn hyperlink(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         value => value,
     }
 }
+
+/// FORMULATEXT(reference): the formula the top-left cell of `reference` holds,
+/// as excel shows it — braced when the cell is an array formula. A cell with
+/// no formula is `#N/A`.
+pub(crate) fn formulatext(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let Some(area) = as_area(&args[0], ctx) else {
+        return err(ErrorValue::NA);
+    };
+    let at = area.start;
+    let Some(formula) = ctx.provider.formula(area.sheet, at) else {
+        return err(ErrorValue::NA);
+    };
+    let text = match ctx.provider.spill_range(area.sheet, at) {
+        Some(_) => format!("{{={formula}}}"),
+        None => format!("={formula}"),
+    };
+    CellValue::Text { value: text }
+}
