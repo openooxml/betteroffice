@@ -541,11 +541,13 @@ fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
 }
 
 pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
+    // the lotus-style leading `+` passes its operand through whatever it is,
+    // so `+A1` on text is that text; only negation needs a number
+    if op == UnaryOp::Plus {
+        return v.clone();
+    }
     match to_number(v) {
-        Ok(n) => match op {
-            UnaryOp::Neg => num(-n),
-            UnaryOp::Plus => num(n),
-        },
+        Ok(n) => num(-n),
         Err(e) => err(e),
     }
 }
