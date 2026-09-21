@@ -5,6 +5,20 @@ use wasm_bindgen::prelude::*;
 pub use pptx_edit::wasm::PptxDocument;
 
 #[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
+
+/// stage latencies of one slide layout, in milliseconds. the clock comes from
+/// the caller, so the ordinary layout path pays no timer calls.
+struct LayoutProfile {
+    scope_ms: f64,
+    layout_ms: f64,
+    serialize_ms: f64,
+}
+
+#[wasm_bindgen]
 pub struct PptxRenderer {
     renderer: pptx_render::SlideRenderer,
     rendered: Option<pptx_render::RenderedSlide>,
@@ -39,15 +53,27 @@ impl PptxRenderer {
         document: &PptxDocument,
         slide_index: u32,
     ) -> Result<String, JsValue> {
-        let session = document.session();
-        let scope = slide_scope(session, slide_index)?;
-        let rendered = self
-            .renderer
-            .layout_scoped_slide(session.package(), &scope)
-            .map_err(js_error)?;
-        let json = serde_json::to_string(&rendered.display_list).map_err(js_error)?;
-        self.rendered = Some(rendered);
-        Ok(json)
+        Ok(self
+            .layout_slide_timed(document, slide_index, &mut || 0.0)?
+            .0)
+    }
+
+    /// `layoutSlideJson` with its stages timed, returned as
+    /// `{"layout": ..., "profile": {"scopeMs", "layoutMs", "serializeMs"}}`.
+    #[wasm_bindgen(js_name = layoutSlideProfiledJson)]
+    pub fn layout_slide_profiled_json(
+        &mut self,
+        document: &PptxDocument,
+        slide_index: u32,
+    ) -> Result<String, JsValue> {
+        let (json, profile) =
+            self.layout_slide_timed(document, slide_index, &mut performance_now)?;
+        let profile = serde_json::json!({
+            "scopeMs": profile.scope_ms,
+            "layoutMs": profile.layout_ms,
+            "serializeMs": profile.serialize_ms,
+        });
+        Ok(format!("{{\"layout\":{json},\"profile\":{profile}}}"))
     }
 
     #[wasm_bindgen(js_name = hitTestJson)]
@@ -107,6 +133,36 @@ impl PptxRenderer {
             "frame": rendered.display_list,
         }))
         .map_err(js_error)
+    }
+}
+
+impl PptxRenderer {
+    fn layout_slide_timed(
+        &mut self,
+        document: &PptxDocument,
+        slide_index: u32,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<(String, LayoutProfile), JsValue> {
+        let started = now();
+        let session = document.session();
+        let scope = slide_scope(session, slide_index)?;
+        let scoped = now();
+        let rendered = self
+            .renderer
+            .layout_scoped_slide(session.package(), &scope)
+            .map_err(js_error)?;
+        let laid_out = now();
+        let json = serde_json::to_string(&rendered.display_list).map_err(js_error)?;
+        let serialized = now();
+        self.rendered = Some(rendered);
+        Ok((
+            json,
+            LayoutProfile {
+                scope_ms: scoped - started,
+                layout_ms: laid_out - scoped,
+                serialize_ms: serialized - laid_out,
+            },
+        ))
     }
 }
 
