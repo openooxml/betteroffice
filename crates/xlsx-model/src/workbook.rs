@@ -414,6 +414,12 @@ pub trait CellProvider {
         0
     }
 
+    /// columns worth materializing for a whole-row reference; `0` means the
+    /// sheet is empty. bounds array evaluation to authored data.
+    fn used_cols(&self, _sheet: SheetId) -> ColId {
+        0
+    }
+
     /// the rectangle the array formula anchored at `at` fills, if any.
     fn spill_range(&self, _sheet: SheetId, _at: CellRef) -> Option<CellRange> {
         None
@@ -452,6 +458,12 @@ impl CellProvider for Workbook {
         self.sheet(sheet)
             .and_then(Sheet::used_range)
             .map_or(0, |range| range.end.row.saturating_add(1))
+    }
+
+    fn used_cols(&self, sheet: SheetId) -> ColId {
+        self.sheet(sheet)
+            .and_then(Sheet::used_range)
+            .map_or(0, |range| range.end.col.saturating_add(1))
     }
 
     fn spill_range(&self, sheet: SheetId, at: CellRef) -> Option<CellRange> {

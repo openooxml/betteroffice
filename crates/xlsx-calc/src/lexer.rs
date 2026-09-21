@@ -5,8 +5,8 @@ use std::fmt;
 
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
-use crate::reference::{MAX_TABLE_SPEC_ITEMS, column};
-use crate::{ColumnRange, TableBand, TableSpec};
+use crate::reference::{MAX_TABLE_SPEC_ITEMS, column, row};
+use crate::{ColumnRange, RowRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
@@ -79,6 +79,10 @@ pub enum TokKind {
         sheet: Option<String>,
         range: ColumnRange,
     },
+    RowRange {
+        sheet: Option<String>,
+        range: RowRange,
+    },
     /// `Table[...]`: a structured reference to a table's rows and columns.
     TableRef {
         table: String,
@@ -129,6 +133,7 @@ impl Lexer<'_> {
             let start = self.pos;
             let Some(c) = self.peek() else { break };
             let kind = match c {
+                '0'..='9' if self.starts_row_range() => self.lex_word_or_ref()?,
                 '0'..='9' | '.' => self.lex_number()?,
                 '"' => self.lex_string()?,
                 '#' => self.lex_error_literal()?,
@@ -357,6 +362,9 @@ impl Lexer<'_> {
         if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
             return self.finish_columns(None, &word, start);
         }
+        if self.input[self.pos..].trim_start().starts_with(':') && row(&word).is_ok() {
+            return self.finish_rows(None, &word, start);
+        }
         if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
             return self.finish_range(None, &word, start);
         }
@@ -443,6 +451,9 @@ impl Lexer<'_> {
         if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
             return self.finish_columns(sheet, &word, start);
         }
+        if self.input[self.pos..].trim_start().starts_with(':') && row(&word).is_ok() {
+            return self.finish_rows(sheet, &word, start);
+        }
         if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
             return self.finish_range(sheet, &word, start);
         }
@@ -488,6 +499,34 @@ impl Lexer<'_> {
         let range = ColumnRange::parse_a1(&format!("{start_word}:{end_word}"))
             .map_err(|error| ParseError::new(start, format!("invalid column range: {error}")))?;
         Ok(TokKind::ColumnRange { sheet, range })
+    }
+
+    fn finish_rows(
+        &mut self,
+        sheet: Option<String>,
+        start_word: &str,
+        start: usize,
+    ) -> Result<TokKind, ParseError> {
+        self.skip_ws();
+        self.bump();
+        self.skip_ws();
+        let end_word = self.read_word();
+        let range = RowRange::parse_a1(&format!("{start_word}:{end_word}"))
+            .map_err(|error| ParseError::new(start, format!("invalid row range: {error}")))?;
+        Ok(TokKind::RowRange { sheet, range })
+    }
+
+    /// whether the digits at the cursor open a `12:34` whole-row reference
+    /// rather than a plain number.
+    fn starts_row_range(&self) -> bool {
+        let rest = &self.input[self.pos..];
+        let after_digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        let Some(tail) = after_digits.trim_start().strip_prefix(':') else {
+            return false;
+        };
+        let tail = tail.trim_start();
+        let tail = tail.strip_prefix('$').unwrap_or(tail);
+        tail.starts_with(|c: char| c.is_ascii_digit())
     }
 }
 

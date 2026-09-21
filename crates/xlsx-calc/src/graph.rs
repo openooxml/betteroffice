@@ -468,7 +468,8 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
             | Expr::Ref { .. }
             | Expr::Range { .. }
             | Expr::TableRef { .. }
-            | Expr::ColumnRange { .. } => {}
+            | Expr::ColumnRange { .. }
+            | Expr::RowRange { .. } => {}
         }
     }
     pending.extend(uses.into_iter().rev());
@@ -503,7 +504,8 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
             | Expr::Ref { .. }
             | Expr::Range { .. }
             | Expr::TableRef { .. }
-            | Expr::ColumnRange { .. } => {}
+            | Expr::ColumnRange { .. }
+            | Expr::RowRange { .. } => {}
         }
     }
     pending.extend(uses.into_iter().rev());

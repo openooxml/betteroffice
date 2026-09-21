@@ -355,7 +355,7 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     let expr = crate::parse_formula(&text).map_err(|_| ErrorValue::Ref)?;
     if !matches!(
         expr,
-        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. }
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. }
     ) {
         return Err(ErrorValue::Ref);
     }

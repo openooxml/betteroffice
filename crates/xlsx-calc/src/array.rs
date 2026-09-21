@@ -209,10 +209,12 @@ fn block(ctx: &EvalContext<'_>, rows: usize, cols: usize, values: Vec<CellValue>
 /// evaluate an expression as a possibly rectangular value.
 pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
     match expr {
-        Expr::Range { .. } | Expr::ColumnRange { .. } => match as_array_area(expr, ctx) {
-            Some(area) => area_values(&area, ctx),
-            None => Value::error(ErrorValue::Ref),
-        },
+        Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
+            match as_array_area(expr, ctx) {
+                Some(area) => area_values(&area, ctx),
+                None => Value::error(ErrorValue::Ref),
+            }
+        }
         Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
             Ok(area) => area_values(&area, ctx),
             Err(error) => Value::error(error),
@@ -301,13 +303,18 @@ fn map2(
     block(ctx, rows, cols, cells)
 }
 
-/// a rectangular reference, with whole-column ranges cut to the rows the sheet
-/// actually uses so `A:A` costs the authored data, not a million blanks.
+/// a rectangular reference, with whole-column and whole-row ranges cut to the
+/// extent the sheet actually uses so `A:A` costs the authored data, not a
+/// million blanks.
 fn as_array_area(expr: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     let mut area = as_area(expr, ctx)?;
     if area.rows >= xlsx_model::MAX_ROWS as usize {
         let used = ctx.provider.used_rows(area.sheet) as usize;
         area.rows = used.saturating_sub(area.start.row as usize).max(1);
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize {
+        let used = ctx.provider.used_cols(area.sheet) as usize;
+        area.cols = used.saturating_sub(area.start.col as usize).max(1);
     }
     Some(area)
 }
@@ -1898,7 +1905,11 @@ fn let_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 fn reference_of(expr: &Expr) -> Option<Expr> {
     matches!(
         expr,
-        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::TableRef { .. }
+        Expr::Ref { .. }
+            | Expr::Range { .. }
+            | Expr::ColumnRange { .. }
+            | Expr::RowRange { .. }
+            | Expr::TableRef { .. }
     )
     .then(|| expr.clone())
 }

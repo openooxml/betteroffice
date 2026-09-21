@@ -31,6 +31,7 @@ pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
             Expr::Ref { .. }
                 | Expr::Range { .. }
                 | Expr::ColumnRange { .. }
+                | Expr::RowRange { .. }
                 | Expr::TableRef { .. }
                 | Expr::Name { .. }
         )
@@ -57,6 +58,9 @@ fn walk(
             push_unique(out, seen, sheet.clone(), *range);
         }
         Expr::ColumnRange { sheet, range } => {
+            push_unique(out, seen, sheet.clone(), range.cell_range());
+        }
+        Expr::RowRange { sheet, range } => {
             push_unique(out, seen, sheet.clone(), range.cell_range());
         }
         Expr::Literal(_) => {}
@@ -126,6 +130,7 @@ fn anchor_range(expr: &Expr) -> Option<(Option<String>, CellRange)> {
             Some((sheet.clone(), CellRange::new(range.start, range.end)))
         }
         Expr::ColumnRange { sheet, range } => Some((sheet.clone(), range.cell_range())),
+        Expr::RowRange { sheet, range } => Some((sheet.clone(), range.cell_range())),
         _ => None,
     }
 }

@@ -1,5 +1,5 @@
-//! Whole-column formula references, distinct from finite cell rectangles, plus
-//! the rectangle arithmetic OFFSET is defined by.
+//! Whole-column and whole-row formula references, distinct from finite cell
+//! rectangles, plus the rectangle arithmetic OFFSET is defined by.
 
 use std::cmp::Ordering;
 
@@ -50,6 +50,55 @@ impl ColumnRange {
             col_to_letters(self.start),
             if self.abs_end { "$" } else { "" },
             col_to_letters(self.end),
+        )
+    }
+}
+
+/// `2:7`, every column of a span of rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RowRange {
+    pub start: u32,
+    pub end: u32,
+    pub abs_start: bool,
+    pub abs_end: bool,
+}
+
+impl RowRange {
+    pub fn parse_a1(source: &str) -> Result<Self, AddrError> {
+        let (start, end) = source.split_once(':').ok_or(AddrError::Malformed)?;
+        let mut start = row(start)?;
+        let mut end = row(end)?;
+        if start.row > end.row {
+            std::mem::swap(&mut start, &mut end);
+        }
+        Ok(Self {
+            start: start.row,
+            end: end.row,
+            abs_start: start.abs_row,
+            abs_end: end.abs_row,
+        })
+    }
+
+    pub fn cell_range(&self) -> CellRange {
+        CellRange {
+            start: CellRef {
+                abs_row: self.abs_start,
+                ..CellRef::new(self.start, 0)
+            },
+            end: CellRef {
+                abs_row: self.abs_end,
+                ..CellRef::new(self.end, MAX_COLS - 1)
+            },
+        }
+    }
+
+    pub fn to_a1(&self) -> String {
+        format!(
+            "{}{}:{}{}",
+            if self.abs_start { "$" } else { "" },
+            self.start + 1,
+            if self.abs_end { "$" } else { "" },
+            self.end + 1,
         )
     }
 }
@@ -189,6 +238,17 @@ fn offset_span(origin: i64, delta: i64, size: i64, limit: i64) -> Option<(u32, u
         Ordering::Equal => return None,
     };
     (start >= 0 && end < limit).then_some((start as u32, end as u32))
+}
+
+pub(crate) fn row(source: &str) -> Result<CellRef, AddrError> {
+    let digits = source.strip_prefix('$').unwrap_or(source);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(AddrError::Malformed);
+    }
+    CellRef::parse_a1(&format!("A{digits}")).map(|cell| CellRef {
+        abs_row: source.starts_with('$'),
+        ..cell
+    })
 }
 
 pub(crate) fn column(source: &str) -> Result<CellRef, AddrError> {

@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use xlsx_calc::lexer::MAX_FORMULA_BYTES;
 use xlsx_calc::parser::Expr;
-use xlsx_calc::{ColumnRange, parse_formula};
+use xlsx_calc::{ColumnRange, RowRange, parse_formula};
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS, col_to_letters};
 use xlsx_model::{
     AnchorCell, AnchorEditAs, CellRange, CellRef, ChartAnchor, DefinedName, ErrorValue, SheetId,
@@ -1263,7 +1263,8 @@ fn contains_unqualified_reference(expr: &Expr) -> bool {
     match expr {
         Expr::Ref { sheet: None, .. }
         | Expr::Range { sheet: None, .. }
-        | Expr::ColumnRange { sheet: None, .. } => true,
+        | Expr::ColumnRange { sheet: None, .. }
+        | Expr::RowRange { sheet: None, .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_unqualified_reference(expr),
         Expr::Binary { lhs, rhs, .. } => {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
@@ -1290,7 +1291,7 @@ fn contains_table_reference(expr: &Expr) -> bool {
 
 fn contains_column_range(expr: &Expr) -> bool {
     match expr {
-        Expr::ColumnRange { .. } => true,
+        Expr::ColumnRange { .. } | Expr::RowRange { .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_column_range(expr),
         Expr::Binary { lhs, rhs, .. } => contains_column_range(lhs) || contains_column_range(rhs),
         Expr::FuncCall { args, .. } => args.iter().any(contains_column_range),
@@ -2053,6 +2054,20 @@ fn transform(
                 }
             }
         }
+        Expr::RowRange { sheet, range } if matches_target(sheet) => match remap_rows(*range, op) {
+            Remapped::Unchanged => expr.clone(),
+            Remapped::Moved(range) => {
+                *changed = true;
+                Expr::RowRange {
+                    sheet: sheet.clone(),
+                    range,
+                }
+            }
+            Remapped::Deleted => {
+                *changed = true;
+                Expr::Error(ErrorValue::Ref)
+            }
+        },
         Expr::Unary { op: u, expr: e } => Expr::Unary {
             op: *u,
             expr: Box::new(transform(e, op, matches_target, changed)),
@@ -2088,6 +2103,27 @@ fn remap_columns(range: ColumnRange, op: &Op) -> Remapped<ColumnRange> {
     match axis.shifted(op) {
         Remapped::Unchanged => Remapped::Unchanged,
         Remapped::Moved((start, end)) => Remapped::Moved(ColumnRange {
+            start,
+            end,
+            ..range
+        }),
+        Remapped::Deleted => Remapped::Deleted,
+    }
+}
+
+fn remap_rows(range: RowRange, op: &Op) -> Remapped<RowRange> {
+    let axis = AxisRange {
+        qualifier: "",
+        sheet: None,
+        axis: Axis::Row,
+        start: range.start,
+        end: range.end,
+        start_absolute: range.abs_start,
+        end_absolute: range.abs_end,
+    };
+    match axis.shifted(op) {
+        Remapped::Unchanged => Remapped::Unchanged,
+        Remapped::Moved((start, end)) => Remapped::Moved(RowRange {
             start,
             end,
             ..range

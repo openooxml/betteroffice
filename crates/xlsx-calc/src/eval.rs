@@ -363,7 +363,9 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Error(e) => err(*e),
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
-        Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
+        Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::RowRange { .. } => {
+            err(ErrorValue::Value)
+        }
         Expr::TableRef { table, spec } => match table_area(table, spec, ctx) {
             Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
                 Ok(value) => value,
@@ -827,6 +829,12 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             start: CellRef::new(0, range.start),
             rows: xlsx_model::addr::MAX_ROWS as usize,
             cols: (range.end - range.start + 1) as usize,
+        }),
+        Expr::RowRange { sheet, range } => Some(Area {
+            sheet: resolve_sheet(sheet, ctx)?,
+            start: CellRef::new(range.start, 0),
+            rows: (range.end - range.start + 1) as usize,
+            cols: xlsx_model::addr::MAX_COLS as usize,
         }),
         Expr::TableRef { table, spec } => table_area(table, spec, ctx).ok(),
         Expr::Name { scope, name } => {

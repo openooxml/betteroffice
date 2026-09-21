@@ -88,6 +88,9 @@ impl Expr {
             Expr::ColumnRange { sheet, range } => {
                 format!("{}{}", sheet_prefix(sheet), range.to_a1())
             }
+            Expr::RowRange { sheet, range } => {
+                format!("{}{}", sheet_prefix(sheet), range.to_a1())
+            }
             Expr::TableRef { table, spec } => format!("{table}{}", table_spec(spec)),
             Expr::Name { scope, name } => format!("{}{name}", sheet_prefix(scope)),
             Expr::Unary { op, expr } => {
