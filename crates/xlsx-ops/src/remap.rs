@@ -2109,9 +2109,33 @@ fn transform(
                 .map(|a| transform(a, op, matches_target, changed))
                 .collect(),
         },
-        Expr::RangeJoin { start, end } => Expr::RangeJoin {
-            start: Box::new(transform(start, op, matches_target, changed)),
-            end: Box::new(transform(end, op, matches_target, changed)),
+        // two cell ends are one span: clipping them apart would strand the
+        // near one on `#REF!` while the far one still named a live cell
+        Expr::RangeJoin { start, end } => match joined_cells(start, end, matches_target) {
+            Some((sheet, span)) => match remap_span(span, op) {
+                Remapped::Unchanged => expr.clone(),
+                Remapped::Moved(span) => {
+                    *changed = true;
+                    Expr::RangeJoin {
+                        start: Box::new(Expr::Ref {
+                            sheet: sheet.clone(),
+                            cell: span.start,
+                        }),
+                        end: Box::new(Expr::Ref {
+                            sheet,
+                            cell: span.end,
+                        }),
+                    }
+                }
+                Remapped::Deleted => {
+                    *changed = true;
+                    Expr::Error(ErrorValue::Ref)
+                }
+            },
+            None => Expr::RangeJoin {
+                start: Box::new(transform(start, op, matches_target, changed)),
+                end: Box::new(transform(end, op, matches_target, changed)),
+            },
         },
         _ => expr.clone(),
     }
@@ -2170,6 +2194,22 @@ fn remap_cell(cell: CellRef, op: &Op) -> Remapped<CellRef> {
 
 /// remap a range: inserts shift both corners; deletes clip the span, collapsing
 /// to `#REF!` only when the whole span is deleted.
+/// a join whose two ends are plain cells on the sheet being edited, which a
+/// structural edit moves as one span rather than as two references.
+fn joined_cells(
+    start: &Expr,
+    end: &Expr,
+    matches_target: &dyn Fn(&Option<String>) -> bool,
+) -> Option<(Option<String>, CellRange)> {
+    let (Expr::Ref { sheet: a, cell: s }, Expr::Ref { sheet: b, cell: e }) = (start, end) else {
+        return None;
+    };
+    if a != b || !matches_target(a) {
+        return None;
+    }
+    Some((a.clone(), CellRange::new(*s, *e)))
+}
+
 fn remap_span(range: CellRange, op: &Op) -> Remapped<CellRange> {
     match *op {
         Op::DeleteRows { at, count, .. } => clip_span(range, Axis::Row, at, count),
@@ -2297,6 +2337,30 @@ mod tests {
 
     fn formula(wb: &Workbook, sheet: SheetId, at: &str) -> Option<String> {
         wb.formula(sheet, r(at)).map(str::to_string)
+    }
+
+    /// a join of two cells is one span: deleting the row its near end sits on
+    /// clips the span rather than stranding that end on `#REF!` while the far
+    /// end still names a live cell.
+    #[test]
+    fn a_deletion_inside_a_joined_range_clips_it_as_one_span() {
+        let mut workbook = wb(&["Data"]);
+        // written with a space the lexer reads this as a join rather than as
+        // one range token
+        set_formula(&mut workbook, SheetId(0), "D1", "SUM(A1: B4)");
+        remap_formulas(
+            &mut workbook,
+            &Op::DeleteRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            formula(&workbook, SheetId(0), "D1").as_deref(),
+            Some("SUM(A1:B3)")
+        );
     }
 
     #[test]
