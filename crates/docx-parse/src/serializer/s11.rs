@@ -121,21 +121,21 @@ fn parse_back(family: &str, xml: &str, seed: &str) -> Result<serde_json::Value, 
             let child = fragment_child(xml)?.ok_or_else(|| {
                 ParseError::Canonical("serialized drawing has no root".to_owned())
             })?;
-            serde_json::to_value(crate::image::parse_drawing(&child, None, None))
+            serde_json::to_string(&crate::image::parse_drawing(&child, None, None)).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         }
         "shape" => {
             let child = fragment_child(xml)?
                 .ok_or_else(|| ParseError::Canonical("serialized shape has no root".to_owned()))?;
-            serde_json::to_value(crate::shape::parse_shape_from_drawing(&child))
+            serde_json::to_string(&crate::shape::parse_shape_from_drawing(&child)).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         }
-        "run" => serde_json::to_value(parse_run_back(xml)?),
-        "inlineSdt" => serde_json::to_value(find_inline(
+        "run" => serde_json::to_string(&parse_run_back(xml)?).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        "inlineSdt" => serde_json::to_string(&find_inline(
             parse_story(&format!("<w:p>{xml}</w:p>"), seed)?,
             "inlineSdt",
-        )),
+        )).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         "paragraph" | "table" | "blockSdt" => {
             let blocks = parse_story(xml, seed)?;
-            serde_json::to_value(blocks.into_iter().next())
+            serde_json::to_string(&blocks.into_iter().next()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         }
         _ => unreachable!("all S11 families are matched above"),
     };

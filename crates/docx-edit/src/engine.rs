@@ -545,8 +545,9 @@ fn strip_absolute_positions(value: &mut serde_json::Value) {
 }
 
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
-    let mut value = serde_json::to_value(measured)
-        .map_err(|error| format!("fingerprint measured block: {error}"))?;
+    let mut value: serde_json::Value = serde_json::to_string(measured)
+        .map_err(|error| format!("fingerprint measured block: {error}"))
+        .and_then(|s| serde_json::from_str(&s).map_err(|error| format!("fingerprint measured block: {error}")))?;
     strip_absolute_positions(&mut value);
     serde_json::to_vec(&value)
         .map(|bytes| hash_bytes(&bytes))
@@ -1044,8 +1045,9 @@ impl EngineSession {
             if !template.resident_safe {
                 return None;
             }
-            let block: LayoutBlock =
-                serde_json::from_value(template.envelope.get("block")?.clone()).ok()?;
+            let block: LayoutBlock = serde_json::to_string(template.envelope.get("block")?)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())?;
             (block == *previous_block).then(|| template.envelope.clone())
         })
     }
@@ -1076,8 +1078,10 @@ impl EngineSession {
             .map(|measured| measured.block)
             .collect::<Vec<_>>();
         if let Some(body_story) = body_story {
-            let render_env: RenderEnv = serde_json::from_value(render_env)
-                .map_err(|error| format!("parse render environment: {error}"))?;
+            let render_env: RenderEnv = serde_json::to_string(&render_env)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .ok_or_else(|| "parse render environment".to_owned())?;
             let mut stories = BTreeSet::from([body_story]);
             for section_index in 0..regions.sections.len() {
                 let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
@@ -1206,8 +1210,10 @@ impl EngineSession {
             None
         } else {
             Some(
-                serde_json::from_value::<RenderEnv>(render_env)
-                    .map_err(|error| format!("parse render environment: {error}"))?,
+                serde_json::to_string(&render_env)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<RenderEnv>(&s).ok())
+                    .ok_or_else(|| "parse render environment".to_owned())?,
             )
         };
         if regions.sections.len() <= 1
@@ -1385,8 +1391,10 @@ impl EngineSession {
             .as_mut()
             .map(|payload| {
                 resolve_header_footer_field_widths(payload, layout, &measurement)?;
-                serde_json::to_value(payload)
-                    .map_err(|error| format!("serialize headers/footers: {error}"))
+                serde_json::to_string(payload)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                    .ok_or_else(|| "serialize headers/footers".to_owned())
             })
             .transpose()?;
         let headers_footers = measured_headers_footers.or_else(|| regions.headers_footers.clone());
@@ -1766,8 +1774,10 @@ impl EngineSession {
                     })?;
                     fields.insert(
                         "block".to_owned(),
-                        serde_json::to_value(&*next_block)
-                            .map_err(|error| format!("serialize dirty paragraph: {error}"))?,
+                        serde_json::to_string(&*next_block)
+                            .ok()
+                            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+                            .ok_or_else(|| "serialize dirty paragraph".to_owned())?,
                     );
                     let envelope_json = serde_json::to_string(&envelope)
                         .map_err(|error| format!("serialize measurement envelope: {error}"))?;

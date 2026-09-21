@@ -591,7 +591,7 @@ pub fn apply_document_regions(layout: &mut Layout, regions: &DocumentRegions) {
                     number as i64,
                     numbering.format.as_deref().unwrap_or("decimal"),
                 ));
-                page.page_numbering = serde_json::to_value(numbering).ok();
+                page.page_numbering = serde_json::to_string(&numbering).ok().and_then(|s| serde_json::from_str(&s).ok());
             }
         } else {
             page.section_id = Some(section_index.to_string());

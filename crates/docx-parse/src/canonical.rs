@@ -60,7 +60,7 @@ pub fn canonical_sha256(value: &CanonicalValue) -> Result<String, CanonicalError
 pub fn from_serializable<T: Serialize + ?Sized>(
     value: &T,
 ) -> Result<CanonicalValue, CanonicalError> {
-    let value = serde_json::to_value(value)
+    let value = serde_json::to_string(&value).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         .map_err(|error| CanonicalError::Serialization(error.to_string()))?;
     from_json_value(value)
 }

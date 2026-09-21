@@ -104,18 +104,18 @@ impl<'de> Deserialize<'de> for ParagraphContent {
             .ok_or_else(|| serde::de::Error::custom("paragraph content requires a string type"))?;
         let decoded = match node_type {
             "insertion" | "deletion" | "moveFrom" | "moveTo" => {
-                serde_json::from_value(value).map(Self::Tracked)
+                serde_json::to_string(&(value)).and_then(|s| serde_json::from_str(&s)).map(Self::Tracked)
             }
             "moveFromRangeStart" | "moveToRangeStart" => {
-                serde_json::from_value(value).map(Self::RangeStart)
+                serde_json::to_string(&(value)).and_then(|s| serde_json::from_str(&s)).map(Self::RangeStart)
             }
             "moveFromRangeEnd" | "moveToRangeEnd" => {
-                serde_json::from_value(value).map(Self::RangeEnd)
+                serde_json::to_string(&(value)).and_then(|s| serde_json::from_str(&s)).map(Self::RangeEnd)
             }
             "commentRangeStart" | "commentRangeEnd" => {
-                serde_json::from_value(value).map(Self::CommentRange)
+                serde_json::to_string(&(value)).and_then(|s| serde_json::from_str(&s)).map(Self::CommentRange)
             }
-            _ => serde_json::from_value(value).map(Self::Inline),
+            _ => serde_json::to_string(&(value)).and_then(|s| serde_json::from_str(&s)).map(Self::Inline),
         };
         decoded.map_err(serde::de::Error::custom)
     }

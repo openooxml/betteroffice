@@ -212,9 +212,9 @@ fn project_drawing(
 ) -> Result<Option<DrawingLeaf>, ParseError> {
     let chart = parse_chart_from_drawing(drawing, relationships, Some(charts))?;
     let (kind, value) = if let Some(text_box) = parse_text_box(drawing) {
-        ("textBox", serde_json::to_value(text_box))
+        ("textBox", serde_json::to_string(&text_box).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)))
     } else if let DrawingChart::Chart(chart) = &chart {
-        ("chart", serde_json::to_value(chart))
+        ("chart", serde_json::to_string(&chart).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)))
     } else if matches!(chart, DrawingChart::Unread) {
         return Ok(None);
     } else if is_smart_art_drawing(drawing) {
@@ -223,18 +223,18 @@ fn project_drawing(
         else {
             return Ok(None);
         };
-        ("smartArt", serde_json::to_value(shape))
+        ("smartArt", serde_json::to_string(&shape).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)))
     } else if is_shape_drawing(drawing) {
         let Some(mut shape) = parse_shape_from_drawing(drawing) else {
             return Ok(None);
         };
         resolve_shape_fill_pictures(&mut shape, relationships, Some(media));
-        ("shape", serde_json::to_value(shape))
+        ("shape", serde_json::to_string(&shape).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)))
     } else {
         let Some(image) = parse_drawing(drawing, relationships, Some(media)) else {
             return Ok(None);
         };
-        ("image", serde_json::to_value(image))
+        ("image", serde_json::to_string(&image).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)))
     };
     Ok(Some(DrawingLeaf {
         element: "drawing".to_owned(),
