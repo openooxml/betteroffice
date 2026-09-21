@@ -237,6 +237,40 @@ fn index_over_a_table_keeps_a_reference() {
     assert_eq!(error("SUM(INDEX(Sales[],,9))", None), Some(ErrorValue::Ref));
 }
 
+/// a structured reference reached through a defined name, or through the
+/// range operator, is still a read: the graph has to carry the edge or the
+/// formula runs before the cells it depends on.
+#[test]
+fn structured_reads_behind_a_name_or_a_join_are_edges() {
+    let mut workbook = workbook();
+    workbook.defined_names.push(DefinedName {
+        name: "TotalAmount".into(),
+        formula: "SUM(Sales[Amount])".into(),
+        local_sheet: None,
+        hidden: false,
+    });
+    workbook.sheets[1].set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            formula: Some("TotalAmount".into()),
+            ..Cell::default()
+        },
+    );
+    workbook.sheets[0].set_cell(
+        CellRef::parse_a1("E3").unwrap(),
+        Cell {
+            formula: Some("SUM(INDEX(Sales[Amount],1,1):Sales[[#This Row],[Amount]])".into()),
+            ..Cell::default()
+        },
+    );
+    let graph = DepGraph::build(&workbook);
+    let dependents: Vec<_> = graph
+        .dependents_of(SheetId(0), CellRef::parse_a1("B3").unwrap())
+        .collect();
+    assert!(dependents.contains(&(SheetId(1), CellRef::parse_a1("A1").unwrap())));
+    assert!(dependents.contains(&(SheetId(0), CellRef::parse_a1("E3").unwrap())));
+}
+
 /// a column whose rows read the rows above them through `INDEX` reads no
 /// cell twice, however wide the range graph thinks the precedent is.
 #[test]
