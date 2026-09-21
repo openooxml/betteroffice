@@ -85,6 +85,17 @@ fn vlookup_accepts_whole_columns() {
     ]);
 }
 
+#[test]
+fn match_accepts_a_computed_block() {
+    check(&[
+        ("MATCH(\"3three\",E1:E4&F1:F4,0)", n(3.0)),
+        ("INDEX(F1:F4,MATCH(\"3three\",E1:E4&F1:F4,0))", t("three")),
+        ("MATCH(\"nope\",E1:E4&F1:F4,0)", e(ErrorValue::NA)),
+        ("MATCH(6,C1:C5*2,0)", n(3.0)),
+        ("MATCH(2,{1,2,3},0)", n(2.0)),
+    ]);
+}
+
 /// like `eval` but with an injected clock (2020-01-01 12:00) for TODAY/NOW.
 fn eval_now(src: &str) -> CellValue {
     let wb = fixture();

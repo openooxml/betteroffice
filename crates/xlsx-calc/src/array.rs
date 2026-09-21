@@ -68,6 +68,11 @@ impl Array {
         &self.values
     }
 
+    /// the block's cells, row-major.
+    pub fn into_values(self) -> Vec<CellValue> {
+        self.values
+    }
+
     fn row_values(&self, row: usize) -> &[CellValue] {
         &self.values[row * self.cols..(row + 1) * self.cols]
     }

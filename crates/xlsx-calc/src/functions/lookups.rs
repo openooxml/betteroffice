@@ -109,10 +109,6 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let area = match as_area(&args[1], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
-    };
     let match_type = if args.len() == 3 {
         match nth_int(args, ctx, 2) {
             Ok(n) => n,
@@ -121,7 +117,7 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         1
     };
-    let values = match area.values_ref(ctx) {
+    let values = match block_values(&args[1], ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
     };
@@ -145,6 +141,25 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match pos {
         Some(i) => num(i as f64 + 1.0),
         None => err(ErrorValue::NA),
+    }
+}
+
+/// the cells a lookup argument offers: a reference reads through to the sheet,
+/// anything else is evaluated as a block, so `MATCH(k, a:a&b:b, 0)` works.
+fn block_values<'p>(
+    arg: &Expr,
+    ctx: &EvalContext<'p>,
+) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
+    if let Some(area) = as_area(arg, ctx) {
+        return area.values_ref(ctx);
+    }
+    match crate::array::evaluate_array(arg, ctx) {
+        crate::array::Value::Array(array) => {
+            Ok(array.into_values().into_iter().map(Cow::Owned).collect())
+        }
+        crate::array::Value::Scalar(CellValue::Error { value }) => Err(value),
+        crate::array::Value::Scalar(value) => Ok(vec![Cow::Owned(value)]),
+        crate::array::Value::Lambda(_) => Err(ErrorValue::Value),
     }
 }
 
