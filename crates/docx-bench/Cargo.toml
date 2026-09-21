@@ -1,0 +1,10 @@
+[package]
+name = "betteroffice-docx-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+readme = "README.md"
+
+[dependencies]
+betteroffice-docx.workspace = true
