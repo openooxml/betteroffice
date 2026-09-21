@@ -74,10 +74,20 @@ fn positioned(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Vec<Option<f64>>, Err
                 _ => Ok(None),
             })
             .collect(),
-        None => match evaluate(arg, ctx) {
-            CellValue::Error { value } => Err(value),
-            CellValue::Number { value } => Ok(vec![Some(value)]),
-            _ => Ok(vec![None]),
+        None => match crate::array::evaluate_array(arg, ctx) {
+            crate::array::Value::Array(array) => (0..array.rows())
+                .flat_map(|row| (0..array.cols()).map(move |col| (row, col)))
+                .map(|(row, col)| match array.at(row, col) {
+                    CellValue::Number { value } => Ok(Some(value)),
+                    CellValue::Error { value } => Err(value),
+                    _ => Ok(None),
+                })
+                .collect(),
+            value => match value.into_scalar() {
+                CellValue::Error { value } => Err(value),
+                CellValue::Number { value } => Ok(vec![Some(value)]),
+                _ => Ok(vec![None]),
+            },
         },
     }
 }

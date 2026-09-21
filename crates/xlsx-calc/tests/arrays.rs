@@ -1099,3 +1099,76 @@ fn frequency_measures_the_longest_run() {
         vec![n(1.0)]
     );
 }
+
+/// the legacy CSE idiom: `IF(range=key, range)` hands an aggregate an array
+/// whose unmatched positions are `FALSE`. excel ignores non-numerics in an
+/// array argument the way it ignores them in a reference, so only the matched
+/// numbers count. A2 and A4 are "apple", carrying B2 = 1 and B4 = 2.
+#[test]
+fn aggregates_take_a_computed_array_the_way_they_take_a_range() {
+    let workbook = fixture();
+    let matched = "IF(A1:A4=\"apple\",B1:B4)";
+    assert_eq!(
+        values(&format!("MEDIAN({matched})"), &workbook),
+        vec![n(1.5)]
+    );
+    assert_eq!(
+        values(&format!("_xlfn.STDEV.P({matched})"), &workbook),
+        vec![n(0.5)]
+    );
+    assert_eq!(
+        values(&format!("_xlfn.VAR.P({matched})"), &workbook),
+        vec![n(0.25)]
+    );
+    assert_eq!(
+        values(&format!("SMALL({matched},1)"), &workbook),
+        vec![n(1.0)]
+    );
+    assert_eq!(
+        values(&format!("LARGE({matched},1)"), &workbook),
+        vec![n(2.0)]
+    );
+    assert_eq!(
+        values(&format!("PERCENTILE({matched},0.5)"), &workbook),
+        vec![n(1.5)]
+    );
+    assert_eq!(
+        values(&format!("SUBTOTAL(1,{matched})"), &workbook),
+        vec![n(1.5)]
+    );
+    assert_eq!(
+        values(&format!("CORREL({matched},B1:B4)"), &workbook),
+        vec![n(1.0)]
+    );
+}
+
+/// an argument written out rather than computed still coerces: a logical typed
+/// directly into an aggregate counts, where one arriving inside an array does
+/// not.
+#[test]
+fn a_directly_written_logical_still_counts_toward_an_aggregate() {
+    let workbook = fixture();
+    assert_eq!(values("MEDIAN(TRUE,2,3)", &workbook), vec![n(2.0)]);
+    assert_eq!(values("MEDIAN(B1:B4)", &workbook), vec![n(2.5)]);
+    assert_eq!(values("SMALL({3;1;2},1)", &workbook), vec![n(1.0)]);
+}
+
+/// `SUMPRODUCT(--(range=key))` counts matches from a computed block, so a cell
+/// that is not an array formula still reads its operands as arrays rather than
+/// coercing them to one value.
+#[test]
+fn sumproduct_reads_a_computed_operand_as_a_block() {
+    let workbook = fixture();
+    assert_eq!(
+        values("SUMPRODUCT(--(A1:A4=\"apple\"))", &workbook),
+        vec![n(2.0)]
+    );
+    assert_eq!(
+        values("SUMPRODUCT(--(A1:A4=\"apple\"),B1:B4)", &workbook),
+        vec![n(3.0)]
+    );
+    assert_eq!(
+        values("SUMPRODUCT((A1:A4=\"apple\")*1)", &workbook),
+        vec![n(2.0)]
+    );
+}

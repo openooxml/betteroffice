@@ -96,7 +96,7 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() {
         return err(ErrorValue::Value);
     }
-    let mut arrays: Vec<Vec<f64>> = Vec::with_capacity(args.len());
+    let mut arrays: Vec<((usize, usize), Vec<f64>)> = Vec::with_capacity(args.len());
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
@@ -112,22 +112,41 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                         _ => col.push(0.0),
                     }
                 }
-                arrays.push(col);
+                arrays.push(((area.rows, area.cols), col));
             }
-            None => match to_number(&evaluate(arg, ctx)) {
-                Ok(n) => arrays.push(vec![n]),
-                Err(e) => return err(e),
+            // `--(range=key)` and the other computed operands are arrays, not
+            // references, so they are read as blocks rather than coerced
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    let mut col = Vec::with_capacity(array.rows() * array.cols());
+                    for row in 0..array.rows() {
+                        for c in 0..array.cols() {
+                            match array.at(row, c) {
+                                CellValue::Number { value } => col.push(value),
+                                CellValue::Error { value } => return err(value),
+                                _ => col.push(0.0),
+                            }
+                        }
+                    }
+                    arrays.push(((array.rows(), array.cols()), col));
+                }
+                value => match to_number(&value.into_scalar()) {
+                    Ok(n) => arrays.push(((1, 1), vec![n])),
+                    Err(e) => return err(e),
+                },
             },
         }
     }
-    let len = arrays[0].len();
-    if arrays.iter().any(|a| a.len() != len) {
+    // excel pairs the operands by position, so they must share a shape: a
+    // column and a row of the same length are not the same operand
+    let shape = arrays[0].0;
+    if arrays.iter().any(|(dims, _)| *dims != shape) {
         return err(ErrorValue::Value);
     }
     let mut total = 0.0;
-    for i in 0..len {
+    for i in 0..arrays[0].1.len() {
         let mut prod = 1.0;
-        for a in &arrays {
+        for (_, a) in &arrays {
             prod *= a[i];
         }
         total += prod;

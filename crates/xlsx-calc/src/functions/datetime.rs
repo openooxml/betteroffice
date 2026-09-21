@@ -160,8 +160,8 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if jan1 < 0 {
         return err(ErrorValue::Num);
     }
-    // serial 1 is a sunday, so `serial % 7` is the offset from sunday
-    let offset = (jan1.rem_euclid(7) - start).rem_euclid(7);
+    // serial 1 is a sunday, so `(serial - 1) % 7` is the offset from sunday
+    let offset = ((jan1 - 1).rem_euclid(7) - start).rem_euclid(7);
     num(((serial - jan1 + offset) / 7 + 1) as f64)
 }
 

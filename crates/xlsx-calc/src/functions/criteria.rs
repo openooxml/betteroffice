@@ -75,7 +75,9 @@ impl Criterion {
         }
         let cell_text = cell_text_lower(v);
         if self.wildcard {
-            wildcard_match(&self.text, &cell_text)
+            // a wildcard describes text, so `*` counts text cells rather than
+            // every cell in the range
+            matches!(v, CellValue::Text { .. }) && wildcard_match(&self.text, &cell_text)
         } else {
             cell_text == self.text
         }
@@ -89,10 +91,15 @@ impl Criterion {
                 None => return false,
             }
         } else {
-            // numeric cells never satisfy a text inequality in excel
+            // numeric cells never satisfy a text inequality in excel, and an
+            // empty string counts as blank rather than as the smallest text
             match v {
-                CellValue::Text { value } => Some(value.to_lowercase().cmp(&self.text)),
-                CellValue::Empty if self.text.is_empty() => Some(Ordering::Equal),
+                CellValue::Text { value } if !value.is_empty() => {
+                    Some(value.to_lowercase().cmp(&self.text))
+                }
+                CellValue::Text { .. } | CellValue::Empty if self.text.is_empty() => {
+                    Some(Ordering::Equal)
+                }
                 _ => return false,
             }
         };
@@ -352,6 +359,33 @@ mod tests {
     fn blank_criteria() {
         assert!(Criterion::parse("").matches(&CellValue::Empty));
         assert!(!Criterion::parse("").matches(&txt("x")));
+    }
+
+    /// a wildcard describes text: `*` counts the text cells in a range, not
+    /// its numbers or its blanks.
+    #[test]
+    fn a_wildcard_criterion_matches_only_text() {
+        let any = Criterion::parse("*");
+        assert!(any.matches(&txt("TSLA")));
+        assert!(any.matches(&txt("")));
+        assert!(!any.matches(&num(5.0)));
+        assert!(!any.matches(&CellValue::Empty));
+        let prefix = Criterion::parse("TS*");
+        assert!(prefix.matches(&txt("TSLA")));
+        assert!(!prefix.matches(&txt("AAPL")));
+        assert!(!prefix.matches(&num(5.0)));
+    }
+
+    /// a cell holding "" counts as blank for an ordering criterion, so a
+    /// column padded with empty strings does not report them all as the
+    /// smallest text.
+    #[test]
+    fn an_empty_string_is_blank_to_an_ordering_criterion() {
+        let less = Criterion::parse("<m");
+        assert!(less.matches(&txt("abc")));
+        assert!(!less.matches(&txt("")));
+        assert!(!less.matches(&CellValue::Empty));
+        assert!(!less.matches(&num(1.0)));
     }
 
     #[test]

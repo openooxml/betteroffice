@@ -656,15 +656,24 @@ pub(crate) fn collect_numbers(
                     push_reference_number(&mut nums, &value)?;
                 }
             }
-            None => match evaluate(arg, ctx) {
-                CellValue::Number { value } => nums.push(value),
-                CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
-                CellValue::Empty => {}
-                CellValue::Text { value } => match parse_num(&value) {
-                    Some(n) => nums.push(n),
-                    None => return Err(ErrorValue::Value),
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    for row in 0..array.rows() {
+                        for col in 0..array.cols() {
+                            push_reference_number(&mut nums, &array.at(row, col))?;
+                        }
+                    }
+                }
+                value => match value.into_scalar() {
+                    CellValue::Number { value } => nums.push(value),
+                    CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
+                    CellValue::Empty => {}
+                    CellValue::Text { value } => match parse_num(&value) {
+                        Some(n) => nums.push(n),
+                        None => return Err(ErrorValue::Value),
+                    },
+                    CellValue::Error { value } => return Err(value),
                 },
-                CellValue::Error { value } => return Err(value),
             },
         }
     }

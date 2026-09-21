@@ -160,6 +160,13 @@ fn math_functions() {
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
+        // week 1 holds jan 1, so the count depends on which weekday that is:
+        // 2005-01-01 is a saturday, 2023-01-01 a sunday, 2024-01-01 a monday
+        ("WEEKNUM(38580)", n(34.0)),
+        ("WEEKNUM(38580, 2)", n(34.0)),
+        ("WEEKNUM(45291)", n(53.0)),
+        ("WEEKNUM(45292)", n(1.0)),
+        ("WEEKNUM(45292, 2)", n(1.0)),
         ("WEEKNUM(46023, 99)", e(ErrorValue::Num)),
         ("TEXTAFTER(\"\u{130}a\", \"a\", 1, 1)", t("")),
         ("TEXTBEFORE(\"\u{130}a\", \"a\", 1, 1)", t("\u{130}")),
@@ -525,16 +532,17 @@ fn transpose_is_identity_on_single_values() {
     ]);
 }
 
-/// the engine has no array value type, so a multi-cell TRANSPOSE is #VALUE!
-/// wherever it appears rather than flowing into the caller.
+/// a multi-cell TRANSPOSE has no single-cell value, so reading one as a scalar
+/// is #VALUE!; an aggregate consumes the block instead.
 #[test]
-fn transpose_of_a_multi_cell_area_has_no_representable_result() {
+fn transpose_of_a_multi_cell_area_aggregates_but_has_no_scalar_value() {
     check(&[
         ("TRANSPOSE(A1:A5)", e(ErrorValue::Value)),
         ("TRANSPOSE(H1:K1)", e(ErrorValue::Value)),
         ("TRANSPOSE(E1:F4)", e(ErrorValue::Value)),
         ("TRANSPOSE(A:A)", e(ErrorValue::Value)),
-        ("SUM(TRANSPOSE(A1:A5))", e(ErrorValue::Value)),
+        ("SUM(TRANSPOSE(A1:A5))", n(150.0)),
+        ("MEDIAN(TRANSPOSE(A1:A5))", n(30.0)),
         ("SUMPRODUCT(C1:C5, TRANSPOSE(A1:A5))", e(ErrorValue::Value)),
         ("ROWS(TRANSPOSE(E1:F4))", e(ErrorValue::Value)),
     ]);
