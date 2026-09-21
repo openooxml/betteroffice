@@ -777,6 +777,30 @@ fn index_returns_a_whole_axis() {
 }
 
 /// `INDEX(block, {3;1})` answers once per index, over the rectangle the row
+/// `MATCH` answers once per key, so `ISERROR(MATCH(range, seen, 0))` is a
+/// mask over the range rather than one verdict for all of it.
+#[test]
+fn match_answers_once_per_key() {
+    let workbook = fixture();
+    assert_eq!(
+        values(r#"MATCH({"pear";"apple"},A1:A4,0)"#, &workbook),
+        vec![n(3.0), n(2.0)]
+    );
+    assert_eq!(
+        values("MATCH({4;1},_xlfn.VSTACK(B1:B4),0)", &workbook),
+        vec![n(3.0), n(2.0)]
+    );
+    assert_eq!(
+        values(r#"ISERROR(MATCH(A1:A4,{"apple"},0))"#, &workbook),
+        vec![
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: false },
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: false },
+        ]
+    );
+}
+
 /// `INDEX` over a reference is excel's reference form: it answers with one
 /// reference, so an array index collapses to its first element.
 #[test]

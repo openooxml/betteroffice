@@ -1603,41 +1603,60 @@ fn counta(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 /// MATCH over a computed block; a plain reference keeps the scalar path, which
 /// can stop early on a big range.
 fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    if args.len() >= 2
-        && as_area(&args[1], ctx).is_some()
+    if args.len() < 2 || args.len() > 3 {
+        return Value::error(ErrorValue::Value);
+    }
+    // a block of keys answers once per key; over a reference the scalar
+    // implementation still streams the lookup range rather than copying it
+    if as_area(&args[1], ctx).is_some()
         && let Some(scalar) = crate::functions::resolve("MATCH")
     {
-        return Value::Scalar(scalar.call(args, ctx));
+        return lift(scalar, args, ctx, Some(&[0]));
     }
     result((|| {
-        if args.len() < 2 || args.len() > 3 {
-            return Err(ErrorValue::Value);
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
         }
-        let target = match evaluate_array(&args[0], ctx).into_scalar() {
-            CellValue::Error { value } => return Err(value),
-            value => value,
-        };
         let data = argument(args, ctx, 1)?;
         let kind = optional_number(args, ctx, 2, 1.0)?.trunc();
-        let mut best = None;
-        for (position, value) in data.values.iter().enumerate() {
-            let ordering = cmp_values(value, &target);
-            let hit = match kind {
-                0.0 => ordering == std::cmp::Ordering::Equal,
-                k if k > 0.0 => ordering != std::cmp::Ordering::Greater,
-                _ => ordering != std::cmp::Ordering::Less,
-            };
-            if !hit {
-                continue;
-            }
-            best = Some(position + 1);
-            if kind == 0.0 {
-                break;
+        let (rows, cols) = keys.dims();
+        let count = output_cells(rows, cols)?;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(
+                    match match_position(&data, &keys.broadcast(row, col), kind) {
+                        Some(position) => num(position as f64),
+                        None => err(ErrorValue::NA),
+                    },
+                );
             }
         }
-        best.map(|position| Value::Scalar(num(position as f64)))
-            .ok_or(ErrorValue::NA)
+        Ok(block(ctx, rows, cols, cells))
     })())
+}
+
+/// `MATCH`'s 1-based hit: exact for kind 0, otherwise the last value that
+/// stays on the wanted side of the key, as an ordered scan gives it.
+fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> {
+    let mut best = None;
+    for (position, value) in data.values.iter().enumerate() {
+        let ordering = cmp_values(value, target);
+        let hit = match kind {
+            0.0 => ordering == std::cmp::Ordering::Equal,
+            k if k > 0.0 => ordering != std::cmp::Ordering::Greater,
+            _ => ordering != std::cmp::Ordering::Less,
+        };
+        if !hit {
+            continue;
+        }
+        best = Some(position + 1);
+        if kind == 0.0 {
+            break;
+        }
+    }
+    best
 }
 
 /// the position `key` takes in a lookup vector, honouring excel's match and
