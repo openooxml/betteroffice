@@ -9,7 +9,9 @@ use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
-use super::{collect_numbers, finite, nth_int, nth_number};
+use super::{
+    collect_numbers, collect_numbers_anytype, collect_numbers_deep, finite, nth_int, nth_number,
+};
 
 pub(crate) fn average(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
@@ -890,4 +892,169 @@ fn scaled_exp(y: f64) -> f64 {
     let grid = (y * 16.0).trunc() / 16.0;
     let delta = (y - grid) * (y + grid);
     (-grid * grid).exp() * (-delta).exp()
+}
+
+/// AVERAGEA(value, ...): the mean with text as zero and logicals as one/zero.
+pub(crate) fn averagea(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match collect_numbers_anytype(args, ctx) {
+        Ok(nums) if nums.is_empty() => err(ErrorValue::Div0),
+        Ok(nums) => num(nums.iter().sum::<f64>() / nums.len() as f64),
+        Err(e) => err(e),
+    }
+}
+
+/// MAXA(value, ...): like MAX, but text and logicals count.
+pub(crate) fn maxa(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match collect_numbers_anytype(args, ctx) {
+        Ok(nums) if nums.is_empty() => num(0.0),
+        Ok(nums) => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        Err(e) => err(e),
+    }
+}
+
+/// MINA(value, ...): like MIN, but text and logicals count.
+pub(crate) fn mina(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match collect_numbers_anytype(args, ctx) {
+        Ok(nums) if nums.is_empty() => num(0.0),
+        Ok(nums) => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
+        Err(e) => err(e),
+    }
+}
+
+/// STDEVA(value, ...): the sample standard deviation with text as zero.
+pub(crate) fn stdeva(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match collect_numbers_anytype(args, ctx) {
+        Ok(nums) if nums.len() < 2 => err(ErrorValue::Div0),
+        Ok(nums) => finite(centered(&nums).1.sqrt()),
+        Err(e) => err(e),
+    }
+}
+
+/// GEOMEAN(number, ...): the nth root of the product; every value must be
+/// strictly positive.
+pub(crate) fn geomean(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    if nums.is_empty() || nums.iter().any(|x| *x <= 0.0) {
+        return err(ErrorValue::Num);
+    }
+    // the logs keep a long product from overflowing before the root shrinks it
+    let mean_log = nums.iter().map(|x| x.ln()).sum::<f64>() / nums.len() as f64;
+    finite(mean_log.exp())
+}
+
+/// HARMEAN(number, ...): the reciprocal of the mean reciprocal; every value
+/// must be strictly positive.
+pub(crate) fn harmean(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    if nums.is_empty() || nums.iter().any(|x| *x <= 0.0) {
+        return err(ErrorValue::Num);
+    }
+    finite(nums.len() as f64 / nums.iter().map(|x| 1.0 / x).sum::<f64>())
+}
+
+/// AVEDEV(number, ...): the mean absolute deviation from the mean.
+pub(crate) fn avedev(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    if nums.is_empty() {
+        return err(ErrorValue::Num);
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    let total: f64 = nums.iter().map(|x| (x - mean).abs()).sum();
+    finite(total / nums.len() as f64)
+}
+
+/// DEVSQ(number, ...): the sum of squared deviations from the mean.
+pub(crate) fn devsq(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    if nums.is_empty() {
+        return err(ErrorValue::Num);
+    }
+    let mean = nums.iter().sum::<f64>() / nums.len() as f64;
+    finite(nums.iter().map(|x| (x - mean) * (x - mean)).sum())
+}
+
+/// SKEW(number, ...): the sample skewness; needs at least three values with
+/// some spread between them.
+pub(crate) fn skew(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    let n = nums.len() as f64;
+    let (mean, variance) = centered(&nums);
+    if nums.len() < 3 || variance <= 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    let sd = variance.sqrt();
+    let total: f64 = nums.iter().map(|x| ((x - mean) / sd).powi(3)).sum();
+    finite(n / ((n - 1.0) * (n - 2.0)) * total)
+}
+
+/// KURT(number, ...): the sample excess kurtosis; needs at least four values
+/// with some spread between them.
+pub(crate) fn kurt(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let nums = match collect_numbers_deep(args, ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    let n = nums.len() as f64;
+    let (mean, variance) = centered(&nums);
+    if nums.len() < 4 || variance <= 0.0 {
+        return err(ErrorValue::Div0);
+    }
+    let sd = variance.sqrt();
+    let total: f64 = nums.iter().map(|x| ((x - mean) / sd).powi(4)).sum();
+    let scale = n * (n + 1.0) / ((n - 1.0) * (n - 2.0) * (n - 3.0));
+    let correction = 3.0 * (n - 1.0) * (n - 1.0) / ((n - 2.0) * (n - 3.0));
+    finite(scale * total - correction)
+}
+
+/// TRIMMEAN(array, percent): the mean after dropping `percent` of the values,
+/// split evenly between the two tails and rounded down to a whole pair.
+pub(crate) fn trimmean(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    let percent = match nth_number(args, ctx, 1) {
+        Ok(p) => p,
+        Err(e) => return err(e),
+    };
+    if !(0.0..1.0).contains(&percent) {
+        return err(ErrorValue::Num);
+    }
+    let mut nums = match collect_numbers_deep(&args[..1], ctx) {
+        Ok(nums) => nums,
+        Err(e) => return err(e),
+    };
+    if nums.is_empty() {
+        return err(ErrorValue::Num);
+    }
+    nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    // excel trims whole pairs, so an odd count rounds down
+    let trim = ((nums.len() as f64 * percent) / 2.0).floor() as usize;
+    let kept = &nums[trim..nums.len() - trim];
+    finite(kept.iter().sum::<f64>() / kept.len() as f64)
+}
+
+/// the mean and sample variance of a set, in one pass over the deviations.
+fn centered(nums: &[f64]) -> (f64, f64) {
+    let n = nums.len() as f64;
+    let mean = nums.iter().sum::<f64>() / n;
+    if nums.len() < 2 {
+        return (mean, 0.0);
+    }
+    let total: f64 = nums.iter().map(|x| (x - mean) * (x - mean)).sum();
+    (mean, total / (n - 1.0))
 }

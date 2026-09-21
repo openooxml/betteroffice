@@ -922,3 +922,63 @@ fn norm_dist_covers_density_and_cumulative() {
     approx("NORM.DIST(42, 40, 1.5, TRUE)", 0.9087887802741321);
     approx("NORM.DIST(42, 40, 1.5, FALSE)", 0.10934004978399577);
 }
+
+/// the `-A` aggregates count text as zero and logicals as one or zero, where
+/// the plain forms skip both. B1:B5 holds fruit names.
+#[test]
+fn a_suffixed_aggregates_count_text_and_logicals() {
+    check(&[
+        ("AVERAGE(B1:B5)", e(ErrorValue::Div0)),
+        ("AVERAGEA(B1:B5)", n(0.0)),
+        ("AVERAGEA(A1:A5)", n(30.0)),
+        ("AVERAGEA(A1:B5)", n(15.0)),
+        ("AVERAGEA(B1:B1)", n(0.0)),
+        ("AVERAGEA()", e(ErrorValue::Div0)),
+        ("AVERAGEA(\"x\")", e(ErrorValue::Value)),
+        ("AVERAGEA(TRUE, TRUE, 4)", n(2.0)),
+        ("MAXA(B1:B5)", n(0.0)),
+        ("MAXA(A1:B5)", n(50.0)),
+        ("MINA(A1:B5)", n(0.0)),
+        ("MIN(A1:B5)", n(10.0)),
+        ("MAXA(1/0)", e(ErrorValue::Div0)),
+        ("STDEVA(A1:A5)", n(15.811388300841896)),
+        ("STDEVA(5)", e(ErrorValue::Div0)),
+    ]);
+    approx("STDEVA(A1:B5)", 19.0029237516523);
+}
+
+/// the remaining aggregates, over C1:C5 = 1..5 and A1:A5 = 10..50.
+#[test]
+fn descriptive_aggregates() {
+    check(&[
+        ("SUMSQ(1, 2, 3)", n(14.0)),
+        ("SUMSQ(C1:C5)", n(55.0)),
+        ("SUMSQ()", n(0.0)),
+        ("SUMSQ(1/0)", e(ErrorValue::Div0)),
+        ("DEVSQ(C1:C5)", n(10.0)),
+        ("DEVSQ(B1:B5)", e(ErrorValue::Num)),
+        ("AVEDEV(C1:C5)", n(1.2)),
+        ("AVEDEV(B1:B5)", e(ErrorValue::Num)),
+        ("GEOMEAN(1, 4)", n(2.0)),
+        ("GEOMEAN(1, 0)", e(ErrorValue::Num)),
+        ("GEOMEAN(-1, 4)", e(ErrorValue::Num)),
+        ("GEOMEAN(B1:B5)", e(ErrorValue::Num)),
+        ("HARMEAN(1, 2, 4)", n(12.0 / 7.0)),
+        ("HARMEAN(1, 0)", e(ErrorValue::Num)),
+        ("SKEW(C1:C5)", n(0.0)),
+        ("SKEW(1, 2)", e(ErrorValue::Div0)),
+        ("SKEW(3, 3, 3)", e(ErrorValue::Div0)),
+        ("KURT(1, 2, 3)", e(ErrorValue::Div0)),
+        ("TRIMMEAN(C1:C5, 0.4)", n(3.0)),
+        ("TRIMMEAN(C1:C5, 0)", n(3.0)),
+        ("TRIMMEAN(C1:C5, 1)", e(ErrorValue::Num)),
+        ("TRIMMEAN(C1:C5, -0.1)", e(ErrorValue::Num)),
+        ("TRIMMEAN(B1:B5, 0.2)", e(ErrorValue::Num)),
+        ("TRIMMEAN(C1:C5)", e(ErrorValue::Value)),
+    ]);
+    approx("GEOMEAN(A1:A5)", 26.051710846973528);
+    approx("KURT(1, 2, 3, 10)", 3.228);
+    approx("TRIMMEAN({1,2,3,4,100}, 0.4)", 3.0);
+    approx("SUMSQ({1,2,3})", 14.0);
+    approx("AVEDEV({1,2,3,4})", 1.0);
+}

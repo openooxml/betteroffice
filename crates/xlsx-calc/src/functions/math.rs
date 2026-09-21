@@ -562,3 +562,11 @@ pub(crate) fn randbetween(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let span = hi - lo + 1.0;
     finite(lo + (ctx.next_random_unit() * span).floor().min(hi - lo))
 }
+
+/// SUMSQ(number, ...): the sum of the squares of every numeric argument.
+pub(crate) fn sumsq(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match super::collect_numbers_deep(args, ctx) {
+        Ok(nums) => finite(nums.iter().map(|x| x * x).sum()),
+        Err(e) => err(e),
+    }
+}

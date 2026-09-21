@@ -88,6 +88,18 @@ pub enum Func {
     Large,
     Small,
     Rank,
+    AverageA,
+    MaxA,
+    MinA,
+    StdevA,
+    GeoMean,
+    HarMean,
+    AveDev,
+    DevSq,
+    Skew,
+    Kurt,
+    TrimMean,
+    SumSq,
     Len,
     Left,
     Right,
@@ -275,6 +287,18 @@ pub fn resolve(name: &str) -> Option<Func> {
         "LARGE" => Func::Large,
         "SMALL" => Func::Small,
         "RANK" | "RANK.EQ" => Func::Rank,
+        "AVERAGEA" => Func::AverageA,
+        "MAXA" => Func::MaxA,
+        "MINA" => Func::MinA,
+        "STDEVA" => Func::StdevA,
+        "GEOMEAN" => Func::GeoMean,
+        "HARMEAN" => Func::HarMean,
+        "AVEDEV" => Func::AveDev,
+        "DEVSQ" => Func::DevSq,
+        "SKEW" => Func::Skew,
+        "KURT" => Func::Kurt,
+        "TRIMMEAN" => Func::TrimMean,
+        "SUMSQ" => Func::SumSq,
         "LEN" => Func::Len,
         "LEFT" => Func::Left,
         "RIGHT" => Func::Right,
@@ -436,6 +460,18 @@ impl Func {
             Func::Large => stats::large(args, ctx),
             Func::Small => stats::small(args, ctx),
             Func::Rank => stats::rank(args, ctx),
+            Func::AverageA => stats::averagea(args, ctx),
+            Func::MaxA => stats::maxa(args, ctx),
+            Func::MinA => stats::mina(args, ctx),
+            Func::StdevA => stats::stdeva(args, ctx),
+            Func::GeoMean => stats::geomean(args, ctx),
+            Func::HarMean => stats::harmean(args, ctx),
+            Func::AveDev => stats::avedev(args, ctx),
+            Func::DevSq => stats::devsq(args, ctx),
+            Func::Skew => stats::skew(args, ctx),
+            Func::Kurt => stats::kurt(args, ctx),
+            Func::TrimMean => stats::trimmean(args, ctx),
+            Func::SumSq => math::sumsq(args, ctx),
             Func::Len => text::len(args, ctx),
             Func::Left => text::left(args, ctx),
             Func::Right => text::right(args, ctx),
@@ -524,6 +560,86 @@ impl Func {
             Func::N => info::n(args, ctx),
         }
     }
+}
+
+/// what one argument contributes, and whether it came from the sheet: a
+/// reference lends its own cells, anything else the block it evaluates to, so
+/// `{1;2;3}` reads like `A1:A3`. a lone computed value still counts as typed
+/// into the call, where excel coerces instead of skipping.
+pub(crate) fn argument_cells(
+    arg: &Expr,
+    ctx: &EvalContext<'_>,
+) -> Result<(Vec<CellValue>, bool), ErrorValue> {
+    if let Some(area) = as_area(arg, ctx) {
+        let cells = area
+            .values_ref(ctx)?
+            .into_iter()
+            .map(std::borrow::Cow::into_owned)
+            .collect();
+        return Ok((cells, true));
+    }
+    let cells = crate::array::evaluate_array(arg, ctx)
+        .into_array()
+        .cells()
+        .to_vec();
+    let from_sheet = cells.len() > 1;
+    Ok((cells, from_sheet))
+}
+
+/// like [`collect_numbers`], but a computed block contributes every numeric
+/// cell instead of only its first, so `MEDIAN(IF(..))` sees the whole block.
+pub(crate) fn collect_numbers_deep(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
+    for arg in args {
+        let (cells, from_sheet) = argument_cells(arg, ctx)?;
+        for value in cells {
+            if from_sheet {
+                push_reference_number(&mut nums, &value)?;
+                continue;
+            }
+            match value {
+                CellValue::Number { value } => nums.push(value),
+                CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
+                CellValue::Empty => {}
+                CellValue::Text { value } => match parse_num(&value) {
+                    Some(n) => nums.push(n),
+                    None => return Err(ErrorValue::Value),
+                },
+                CellValue::Error { value } => return Err(value),
+            }
+        }
+    }
+    Ok(nums)
+}
+
+/// the values the `-A` aggregates see: text counts as zero and logicals as
+/// one or zero, where the plain forms skip both. blanks are still skipped,
+/// and text typed straight into the call must still be a number.
+pub(crate) fn collect_numbers_anytype(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
+    for arg in args {
+        let (cells, from_sheet) = argument_cells(arg, ctx)?;
+        for value in cells {
+            match value {
+                CellValue::Number { value } => nums.push(value),
+                CellValue::Bool { value } => nums.push(if value { 1.0 } else { 0.0 }),
+                CellValue::Error { value } => return Err(value),
+                CellValue::Empty => {}
+                CellValue::Text { .. } if from_sheet => nums.push(0.0),
+                CellValue::Text { value } => match parse_num(&value) {
+                    Some(n) => nums.push(n),
+                    None => return Err(ErrorValue::Value),
+                },
+            }
+        }
+    }
+    Ok(nums)
 }
 
 /// collect numbers for aggregation: referenced cells contribute only numeric
@@ -651,6 +767,18 @@ mod tests {
             (Func::Large, "LARGE"),
             (Func::Small, "SMALL"),
             (Func::Rank, "RANK"),
+            (Func::AverageA, "AVERAGEA"),
+            (Func::MaxA, "MAXA"),
+            (Func::MinA, "MINA"),
+            (Func::StdevA, "STDEVA"),
+            (Func::GeoMean, "GEOMEAN"),
+            (Func::HarMean, "HARMEAN"),
+            (Func::AveDev, "AVEDEV"),
+            (Func::DevSq, "DEVSQ"),
+            (Func::Skew, "SKEW"),
+            (Func::Kurt, "KURT"),
+            (Func::TrimMean, "TRIMMEAN"),
+            (Func::SumSq, "SUMSQ"),
             (Func::Len, "LEN"),
             (Func::Left, "LEFT"),
             (Func::Right, "RIGHT"),
