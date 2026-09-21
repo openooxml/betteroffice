@@ -2280,6 +2280,7 @@ impl Workbook {
                 | Op::SetRowHeight { sheet, .. }
                 | Op::SetFreezePane { sheet, .. }
                 | Op::SetHyperlinks { sheet, .. }
+                | Op::RestoreColStyles { sheet, .. }
                 | Op::MergeCells { sheet, .. }
                 | Op::UnmergeCells { sheet, .. }
                 | Op::PatchRangeStyle { sheet, .. }
@@ -2901,6 +2902,7 @@ fn worksheet_edit_target(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::RestoreColStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }
@@ -3043,7 +3045,10 @@ fn validate_op(model: &WorkbookModel, op: &Op) -> Result<()> {
         Op::RenameSheet { sheet, .. } => {
             require_sheet(model, *sheet)?;
         }
-        Op::RestoreSheet { .. } | Op::SetDefinedNames { .. } | Op::SetCharts { .. } => {
+        Op::RestoreSheet { .. }
+        | Op::SetDefinedNames { .. }
+        | Op::SetCharts { .. }
+        | Op::RestoreColStyles { .. } => {
             return Err(Error::InvalidOperation(
                 "restore sheet operations are internal".to_string(),
             ));
@@ -3854,6 +3859,7 @@ fn invalidates_proposals(op: &Op) -> bool {
             | Op::InsertCols { .. }
             | Op::DeleteCols { .. }
             | Op::SetHyperlinks { .. }
+            | Op::RestoreColStyles { .. }
             | Op::SetCharts { .. }
             | Op::AddSheet { .. }
             | Op::RemoveSheet { .. }

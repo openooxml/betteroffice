@@ -63,6 +63,36 @@ describe('wasm loader', () => {
     }
   });
 
+  it('restores inherited column formatting when undoing a deletion', () => {
+    const bytes = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/column-style-undo.xlsx'
+    )));
+    const handle = openWorkbook(bytes);
+    const viewport = { x: 0, y: 0, width: 500, height: 250 };
+    const redFills = () => JSON.stringify(handle.displayList(viewport)).match(/#ff0000/gi)?.length ?? 0;
+    try {
+      expect(redFills()).toBeGreaterThan(0);
+      const before = handle.displayList(viewport);
+      handle.applyOps([{ type: 'deleteCols', sheet: 0, at: 1, count: 1 }]);
+      expect(redFills()).toBe(0);
+      for (let i = 0; i < 2; i += 1) {
+        handle.undo();
+        expect(handle.displayList(viewport)).toEqual(before);
+        const reopened = openWorkbook(handle.save());
+        try {
+          expect(reopened.displayList(viewport)).toEqual(before);
+        } finally {
+          reopened.dispose();
+        }
+        handle.redo();
+        expect(redFills()).toBe(0);
+      }
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('searches formatted cell text without changing workbook state', () => {
     const handle = openWorkbook(sampleBytes());
     try {

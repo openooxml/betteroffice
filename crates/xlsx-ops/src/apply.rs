@@ -146,6 +146,14 @@ pub fn apply_in_place(wb: &mut Workbook, op: &Op) -> Result<InvertedOp, OpError>
                 hyperlinks: old,
             }]))
         }
+        Op::RestoreColStyles { sheet, styles } => {
+            let s = sheet_mut(wb, *sheet)?;
+            let old = std::mem::replace(&mut s.col_styles, styles.clone());
+            Ok(InvertedOp(vec![Op::RestoreColStyles {
+                sheet: *sheet,
+                styles: old,
+            }]))
+        }
         Op::SetCharts { sheet, charts } => {
             let sheet_ref = sheet_mut(wb, *sheet)?;
             let old = std::mem::replace(&mut sheet_ref.charts, charts.clone());
@@ -626,6 +634,7 @@ fn insert_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let dropped = shift_cells(s, op);
     shift_col_widths_up(s, at, count);
     shift_col_styles_up(s, at, count);
@@ -633,6 +642,12 @@ fn insert_cols(
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::DeleteCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in dropped {
         inv.push(Op::SetCell {
             sheet,
@@ -665,6 +680,7 @@ fn delete_cols(
     let hyperlink_restores = remap_hyperlink_locations(wb, op);
     let s = sheet_mut(wb, sheet)?;
     let old_hyperlinks = s.hyperlinks.clone();
+    let old_col_styles = s.col_styles.clone();
     let deleted = shift_cells(s, op);
     let dropped_widths = shift_col_widths_down(s, at, count);
     shift_col_styles_down(s, at, count);
@@ -672,6 +688,12 @@ fn delete_cols(
     remap_hyperlinks(s, op);
 
     let mut inv = vec![Op::InsertCols { sheet, at, count }];
+    if !old_col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: old_col_styles,
+        });
+    }
     for (r, c) in deleted {
         inv.push(Op::SetCell {
             sheet,
@@ -931,6 +953,12 @@ fn remove_sheet(wb: &mut Workbook, index: usize) -> Result<InvertedOp, OpError> 
         inv.push(Op::SetHyperlinks {
             sheet,
             hyperlinks: removed.hyperlinks,
+        });
+    }
+    if !removed.col_styles.is_empty() {
+        inv.push(Op::RestoreColStyles {
+            sheet,
+            styles: removed.col_styles,
         });
     }
     if !removed.charts.is_empty() {
@@ -1339,6 +1367,62 @@ mod tests {
             apply(&mut wb, operation).unwrap();
         }
         assert_eq!(wb, before);
+    }
+
+    #[test]
+    fn column_style_runs_survive_structural_undo_and_redo() {
+        let runs = vec![
+            ColStyle {
+                first: 0,
+                last: 6,
+                xf: 1,
+            },
+            ColStyle {
+                first: 2,
+                last: 3,
+                xf: 2,
+            },
+            ColStyle {
+                first: 3,
+                last: 7,
+                xf: 3,
+            },
+            ColStyle {
+                first: MAX_COLS - 1,
+                last: MAX_COLS - 1,
+                xf: 4,
+            },
+        ];
+        for op in [
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 2,
+                count: 2,
+            },
+            Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 0,
+                count: 8,
+            },
+            Op::InsertCols {
+                sheet: SheetId(0),
+                at: 3,
+                count: 2,
+            },
+            Op::RemoveSheet { index: 0 },
+        ] {
+            let mut workbook = wb_one_sheet();
+            workbook.sheets[0].col_styles = runs.clone();
+            let before = workbook.clone();
+            let inverse = apply_ops(&mut workbook, &[op]).unwrap();
+            let edited = workbook.clone();
+            let redo = apply_ops(&mut workbook, &inverse).unwrap();
+            assert_eq!(workbook, before);
+            let undo = apply_ops(&mut workbook, &redo).unwrap();
+            assert_eq!(workbook, edited);
+            apply_ops(&mut workbook, &undo).unwrap();
+            assert_eq!(workbook, before);
+        }
     }
 
     #[test]

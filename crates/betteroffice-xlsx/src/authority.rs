@@ -1516,6 +1516,7 @@ pub(crate) fn is_structural_op(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
+            | Op::RestoreColStyles { .. }
             | Op::MergeCells { .. }
             | Op::UnmergeCells { .. }
             | Op::AddSheet { .. }
@@ -2308,6 +2309,7 @@ fn requires_full_semantic_sync(op: &Op) -> bool {
             | Op::DeleteCols { .. }
             | Op::SetFreezePane { .. }
             | Op::SetHyperlinks { .. }
+            | Op::RestoreColStyles { .. }
             | Op::SetCharts { .. }
             | Op::SetChartAnchor { .. }
             | Op::RemoveSheet { .. }
@@ -2401,6 +2403,7 @@ fn op_sheet(op: &Op) -> Option<SheetId> {
         | Op::SetRowHeight { sheet, .. }
         | Op::SetFreezePane { sheet, .. }
         | Op::SetHyperlinks { sheet, .. }
+        | Op::RestoreColStyles { sheet, .. }
         | Op::SetCharts { sheet, .. }
         | Op::SetChartAnchor { sheet, .. }
         | Op::MergeCells { sheet, .. }

@@ -7066,6 +7066,54 @@ fn an_imported_chart_keeps_a_cache_it_cannot_resolve_safely() {
 }
 
 #[test]
+fn column_style_restoration_is_internal() {
+    let mut workbook = Workbook::open(include_bytes!("fixtures/column-style-undo.xlsx")).unwrap();
+    let before = workbook.model().clone();
+    let error = workbook
+        .apply_ops(
+            vec![Op::RestoreColStyles {
+                sheet: SheetId(0),
+                styles: Vec::new(),
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidOperation(message) if message.contains("internal")));
+    assert_eq!(workbook.model(), &before);
+}
+
+#[test]
+fn deleting_a_styled_column_then_undoing_restores_its_rendering() {
+    let source = include_bytes!("fixtures/column-style-undo.xlsx");
+    let mut workbook = Workbook::open(source).unwrap();
+    let columns = workbook.model().sheets[0].col_styles.clone();
+    assert!(!columns.is_empty());
+    let before = plotted(&workbook);
+    let options = CalculationOptions::default();
+    workbook
+        .apply_ops(
+            vec![Op::DeleteCols {
+                sheet: SheetId(0),
+                at: 1,
+                count: 1,
+            }],
+            options,
+        )
+        .unwrap();
+    assert!(workbook.model().sheets[0].col_styles.is_empty());
+    assert_ne!(plotted(&workbook), before);
+    for _ in 0..2 {
+        workbook.undo(options).unwrap();
+        assert_eq!(workbook.model().sheets[0].col_styles, columns);
+        assert_eq!(plotted(&workbook), before);
+        let reopened = Workbook::open(&workbook.save().unwrap()).unwrap();
+        assert_eq!(reopened.model().sheets[0].col_styles, columns);
+        workbook.redo(options).unwrap();
+        assert!(workbook.model().sheets[0].col_styles.is_empty());
+    }
+}
+
+#[test]
 fn inserting_a_column_carries_the_column_style_with_it() {
     let mut sheet = Sheet::new("Tinted");
     sheet.col_styles = vec![ColStyle {
