@@ -12,6 +12,7 @@
 //! assert_eq!(evaluate(&expr, &ctx), xlsx_model::CellValue::Number { value: 7.0 });
 //! ```
 
+pub mod array;
 pub mod deps;
 pub mod engine;
 pub mod eval;
@@ -22,9 +23,10 @@ pub mod parser;
 pub mod printer;
 mod reference;
 
+pub use array::{Array, MAX_ARRAY_CELLS, Spill, Value, evaluate_array, evaluate_spill};
 pub use deps::references;
 pub use engine::{RecalcResult, rebuild_and_recalc_all, recalc_after};
 pub use eval::{EvalContext, evaluate};
 pub use lexer::{ParseError, TokKind, Token, lex};
 pub use parser::{BinaryOp, Expr, MAX_DEPTH, UnaryOp, parse_formula};
-pub use reference::ColumnRange;
+pub use reference::{ColumnRange, TableBand, TableSpec};

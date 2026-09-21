@@ -630,6 +630,15 @@ pub struct ParagraphAttrs {
     /// document-grid snapping.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snap_to_grid: Option<bool>,
+    /// Effective `w:autoSpaceDE` (§17.3.1.11) — the space Word inserts
+    /// between East Asian and Latin text. Absent is the OOXML default (on);
+    /// `Some(false)` opts the paragraph out.
+    #[serde(rename = "autoSpaceDE", skip_serializing_if = "Option::is_none")]
+    pub auto_space_de: Option<bool>,
+    /// Effective `w:autoSpaceDN` (§17.3.1.12) — the same between East Asian
+    /// text and numbers.
+    #[serde(rename = "autoSpaceDN", skip_serializing_if = "Option::is_none")]
+    pub auto_space_dn: Option<bool>,
     /// Section grid pitch in px (`w:docGrid w:linePitch`), set by the
     /// section-grid resolve pass for the paragraph's section and already
     /// gated to an activating grid type. `None` disables snapping.
@@ -1215,6 +1224,40 @@ impl PartialEq for LayoutBlock {
             | (Self::PageBreak(_), _)
             | (Self::ColumnBreak(_), _)
             | (Self::Unsupported, _) => false,
+        }
+    }
+}
+
+impl LayoutBlock {
+    /// Identity used for delta bookkeeping; every block kind that can place
+    /// a fragment has one.
+    pub fn block_id(&self) -> Option<&BlockId> {
+        match self {
+            Self::Paragraph(block) => Some(&block.id),
+            Self::Table(block) => Some(&block.id),
+            Self::Image(block) => Some(&block.id),
+            Self::Shape(block) => Some(&block.id),
+            Self::Chart(block) => Some(&block.id),
+            Self::TextBox(block) => Some(&block.id),
+            Self::SectionBreak(block) => Some(&block.id),
+            Self::PageBreak(block) => Some(&block.id),
+            Self::ColumnBreak(block) => Some(&block.id),
+            Self::Unsupported => None,
+        }
+    }
+
+    /// Document start offset, regardless of block flavor.
+    pub fn pm_start(&self) -> Option<f64> {
+        match self {
+            Self::Paragraph(block) => block.pm_start,
+            Self::Table(block) => block.pm_start,
+            Self::Image(block) => block.pm_start,
+            Self::Shape(block) => block.pm_start,
+            Self::Chart(block) => block.pm_start,
+            Self::TextBox(block) => block.pm_start,
+            Self::PageBreak(block) => block.pm_start,
+            Self::ColumnBreak(block) => block.pm_start,
+            Self::SectionBreak(_) | Self::Unsupported => None,
         }
     }
 }

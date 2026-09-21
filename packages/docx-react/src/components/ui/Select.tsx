@@ -8,6 +8,45 @@ import * as React from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
 import { cn } from '../../lib/utils';
 
+// Radix portals escape `.oox-root`, so dark-mode detection is a document-wide probe.
+const darkRootListeners = new Set<() => void>();
+let darkRootObserver: MutationObserver | null = null;
+let darkRootCached: boolean | null = null;
+
+function probeDarkRoot(): boolean {
+  return typeof document !== 'undefined' && !!document.querySelector('.oox-root.dark');
+}
+
+function getDarkRootSnapshot(): boolean {
+  if (darkRootCached === null) darkRootCached = probeDarkRoot();
+  return darkRootCached;
+}
+
+function subscribeDarkRoot(listener: () => void): () => void {
+  darkRootListeners.add(listener);
+  if (!darkRootObserver && typeof document !== 'undefined' && document.documentElement) {
+    darkRootObserver = new MutationObserver(() => {
+      const next = probeDarkRoot();
+      if (next === darkRootCached) return;
+      darkRootCached = next;
+      for (const cb of darkRootListeners) cb();
+    });
+    darkRootObserver.observe(document.documentElement, {
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class'],
+    });
+  }
+  darkRootCached = probeDarkRoot();
+  return () => {
+    darkRootListeners.delete(listener);
+    if (darkRootListeners.size === 0) {
+      darkRootObserver?.disconnect();
+      darkRootObserver = null;
+    }
+  };
+}
+
 const Select = SelectPrimitive.Root;
 const SelectGroup = SelectPrimitive.Group;
 const SelectValue = SelectPrimitive.Value;
@@ -50,9 +89,7 @@ function SelectContent({
   onCloseAutoFocus,
   ...props
 }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>) {
-  // Radix renders into a portal outside the editor's `.oox-root.dark` subtree,
-  // so the wrapper must re-assert the theme for tokens to resolve in dark mode.
-  const isDark = typeof document !== 'undefined' && !!document.querySelector('.oox-root.dark');
+  const isDark = React.useSyncExternalStore(subscribeDarkRoot, getDarkRootSnapshot, () => false);
   return (
     <SelectPrimitive.Portal>
       {/* Wrap in .oox-root so Tailwind scoped utilities apply inside the portal */}

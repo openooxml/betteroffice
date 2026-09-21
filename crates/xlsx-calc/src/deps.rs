@@ -28,7 +28,11 @@ pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
     positional
         && matches!(
             arg,
-            Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::Name { .. }
+            Expr::Ref { .. }
+                | Expr::Range { .. }
+                | Expr::ColumnRange { .. }
+                | Expr::TableRef { .. }
+                | Expr::Name { .. }
         )
 }
 
@@ -55,12 +59,18 @@ fn walk(
         Expr::ColumnRange { sheet, range } => {
             push_unique(out, seen, sheet.clone(), range.cell_range());
         }
+        Expr::Literal(_) => {}
+        Expr::ArrayLiteral { values, .. } => {
+            for value in values {
+                walk(value, out, seen);
+            }
+        }
         Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, out, seen),
         Expr::Binary { lhs, rhs, .. } => {
             walk(lhs, out, seen);
             walk(rhs, out, seen);
         }
-        Expr::FuncCall { name, args } => {
+        Expr::FuncCall { name, args, .. } => {
             for (index, arg) in args.iter().enumerate() {
                 if positional_argument(name, index, arg) {
                     continue;
@@ -73,7 +83,12 @@ fn walk(
                 push_unique(out, seen, sheet, range);
             }
         }
-        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name { .. } => {}
+        Expr::Number(_)
+        | Expr::Text(_)
+        | Expr::Bool(_)
+        | Expr::Error(_)
+        | Expr::TableRef { .. }
+        | Expr::Name { .. } => {}
     }
 }
 

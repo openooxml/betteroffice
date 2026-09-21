@@ -487,3 +487,57 @@ fn inline_diff_uses_current_targets_and_handles_long_replacements() {
     assert!(!diff.text_changes.is_empty());
     assert_eq!(session.proposals().unwrap().len(), 1);
 }
+
+#[test]
+fn scoped_diff_preview_matches_the_deck_wide_one() {
+    let session = DeckSession::open(FILE, 509).unwrap();
+    let proposal = session.propose(request(edits(&session))).unwrap();
+    let deck = session.preview_proposal_diff(&proposal.id).unwrap();
+    let scoped = session
+        .preview_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert_eq!(scoped.proposal, deck.proposal);
+    assert_eq!(scoped.text_changes, deck.text_changes);
+    assert_eq!(scoped.scope.slide, deck.snapshot.slides[0]);
+    assert_eq!(scoped.snapshot.slides.len(), 1);
+    assert_eq!(scoped.snapshot.slides[0], scoped.scope.slide);
+}
+
+#[test]
+fn scoped_diff_preview_reports_stale_targets_like_the_deck_wide_one() {
+    let session = DeckSession::open(FILE, 510).unwrap();
+    let proposal = session.propose(request(edits(&session))).unwrap();
+    let story_id = match &proposal.edits[0] {
+        ProposalEdit::ReplaceText { story_id, .. } => story_id.clone(),
+        _ => unreachable!(),
+    };
+    session
+        .insert_text(
+            &EditCtx::local("human"),
+            &story_id,
+            0,
+            "Human ",
+            &Default::default(),
+        )
+        .unwrap();
+    let deck = session.preview_proposal_diff(&proposal.id).unwrap();
+    let scoped = session
+        .preview_proposal_diff_slide(&proposal.id, 0)
+        .unwrap();
+    assert_eq!(scoped.proposal.stale_targets, deck.proposal.stale_targets);
+    assert!(!scoped.proposal.stale_targets.is_empty());
+    assert_eq!(scoped.text_changes, deck.text_changes);
+}
+
+#[test]
+fn scoped_diff_preview_rejects_unknown_ids_and_out_of_range_slides() {
+    let session = DeckSession::open(FILE, 511).unwrap();
+    let proposal = session.propose(request(edits(&session))).unwrap();
+    let slide_count = session.snapshot().unwrap().slides.len();
+    assert!(session.preview_proposal_diff_slide("nope", 0).is_err());
+    assert!(
+        session
+            .preview_proposal_diff_slide(&proposal.id, slide_count)
+            .is_err()
+    );
+}

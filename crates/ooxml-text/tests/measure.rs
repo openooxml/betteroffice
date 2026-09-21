@@ -3377,3 +3377,73 @@ fn an_image_grown_line_clears_a_band_inside_its_growth() {
         "the image box reaches the band",
     );
 }
+
+// ---------------------------------------------------------------------------
+// East Asian auto-spacing (w:autoSpaceDE / w:autoSpaceDN)
+// ---------------------------------------------------------------------------
+
+/// Word widens each East Asian / Latin boundary by a quarter em, measured off
+/// its own PDF exports. Two boundaries in `国a国` cost half an em at 12pt.
+#[test]
+fn east_asian_latin_boundaries_take_a_quarter_em_each() {
+    let boundary = measure_with(
+        json!({ "kind": "paragraph", "runs": [{ "kind": "text", "text": "国a国" }] }),
+        400.0,
+    )
+    .unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap();
+    let off = measure_with(
+        json!({
+            "kind": "paragraph",
+            "runs": [{ "kind": "text", "text": "国a国" }],
+            "attrs": { "autoSpaceDE": false }
+        }),
+        400.0,
+    )
+    .unwrap()["lines"][0]["width"]
+        .as_f64()
+        .unwrap();
+    approx(boundary - off, 8.0, "two boundaries at 0.25em of 12pt");
+}
+
+/// A boundary that straddles two runs is spaced once, and `w:autoSpaceDN`
+/// gates the digit side on its own.
+#[test]
+fn auto_spacing_crosses_runs_and_gates_digits_separately() {
+    let width = |runs: Value, attrs: Value| {
+        measure_with(
+            json!({ "kind": "paragraph", "runs": runs, "attrs": attrs }),
+            400.0,
+        )
+        .unwrap()["lines"][0]["width"]
+            .as_f64()
+            .unwrap()
+    };
+    let split = width(
+        json!([
+            { "kind": "text", "text": "国" },
+            { "kind": "text", "text": "a" }
+        ]),
+        json!({}),
+    );
+    let joined = width(json!([{ "kind": "text", "text": "国a" }]), json!({}));
+    approx(split, joined, "a boundary between runs");
+    let digits = width(json!([{ "kind": "text", "text": "国1" }]), json!({}));
+    let digits_off = width(
+        json!([{ "kind": "text", "text": "国1" }]),
+        json!({ "autoSpaceDN": false }),
+    );
+    approx(digits - digits_off, 4.0, "one digit boundary");
+    approx(
+        width(
+            json!([{ "kind": "text", "text": "国a" }]),
+            json!({ "autoSpaceDN": false }),
+        ) - width(
+            json!([{ "kind": "text", "text": "国a" }]),
+            json!({ "autoSpaceDE": false }),
+        ),
+        4.0,
+        "the digit opt-out leaves the letter boundary alone",
+    );
+}

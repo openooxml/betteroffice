@@ -513,6 +513,10 @@ export type ParagraphAttrs = {
   pPrDel?: import('../../types/content/trackedChange').RevisionInfo | null;
   /** Paragraph-level document-grid opt-out (OOXML w:snapToGrid, §17.3.1). Absent = on. */
   snapToGrid?: boolean;
+  /** East Asian / Latin auto-spacing opt-out (OOXML w:autoSpaceDE, §17.3.1.11). Absent = on. */
+  autoSpaceDE?: boolean;
+  /** East Asian / number auto-spacing opt-out (OOXML w:autoSpaceDN, §17.3.1.12). Absent = on. */
+  autoSpaceDN?: boolean;
   /** Section grid pitch in px (w:docGrid w:linePitch), gated to an activating grid type. Absent = no snap. */
   docGridPitchPx?: number;
 };

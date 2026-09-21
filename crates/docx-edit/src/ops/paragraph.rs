@@ -31,7 +31,7 @@ use crate::format::{PROTECTED_ATTRS, Patch};
 use crate::op::{OpError, OpResult, ParaBounds, Receipt, SplitReceipt, para_bounds};
 use crate::ops::{
     adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow, capture_pilcrow,
-    revision_id_in_range, snapshot,
+    revision_id_in_range, snapshot_range,
 };
 use crate::{
     DEL, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, ParagraphId,
@@ -377,7 +377,12 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = snapshot_range(
+            &story,
+            &txn,
+            at.index.saturating_sub(1),
+            at.index.saturating_add(1),
+        );
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, crate::INS, &ctx.author)
                 .or_else(|| {
@@ -507,7 +512,13 @@ impl EditingDoc {
             .then(|| paragraph_revision_id(&boundary.map, &txn, PPR_INS, &ctx.author))
             .flatten();
         let revision_id = (ctx.is_suggesting() && own_insert.is_none()).then(|| {
-            adjacent_revision_id(&snapshot(&story, &txn), pilcrow_index, DEL, &ctx.author)
+            let chunks = snapshot_range(
+                &story,
+                &txn,
+                pilcrow_index.saturating_sub(1),
+                pilcrow_index.saturating_add(1),
+            );
+            adjacent_revision_id(&chunks, pilcrow_index, DEL, &ctx.author)
                 .unwrap_or_else(|| self.next_id())
         });
 
@@ -570,7 +581,12 @@ impl EditingDoc {
                 .iter()
                 .find_map(|target| {
                     revision_id_in_range(
-                        &snapshot(&target.story, &txn),
+                        &snapshot_range(
+                            &target.story,
+                            &txn,
+                            target.bounds.start,
+                            target.bounds.pilcrow + 1,
+                        ),
                         target.bounds.start,
                         target.bounds.pilcrow + 1,
                         crate::INS,

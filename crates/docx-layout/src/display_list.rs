@@ -1852,6 +1852,11 @@ pub(crate) struct ParaAttrsIn {
     /// `<w:pPr><w:rPr><w:del/>`: tracked deletion on the paragraph mark.
     #[serde(default)]
     p_pr_del: Option<RevisionInfoIn>,
+    /// `w:autoSpaceDE` / `w:autoSpaceDN` opt-outs; absent is the default (on).
+    #[serde(default, rename = "autoSpaceDE")]
+    auto_space_de: Option<bool>,
+    #[serde(default, rename = "autoSpaceDN")]
+    auto_space_dn: Option<bool>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -5841,6 +5846,10 @@ fn emit_line(
 ) -> Option<LinePaintMetrics> {
     let segments = resolve_line_segments(&block.runs, line);
     let attrs = block.attrs.as_ref();
+    let auto_space = ooxml_text::AutoSpace::from_options(
+        attrs.and_then(|attrs| attrs.auto_space_de),
+        attrs.and_then(|attrs| attrs.auto_space_dn),
+    );
     let default_bidi_level = base_bidi_level(geom.is_rtl);
     let authoritative_items = authoritative_line_items(block, line, ctx, default_bidi_level);
     let authoritative_active = authoritative_items.is_some();
@@ -6252,6 +6261,7 @@ fn emit_line(
                     line_bottom,
                     block_ref,
                     ctx.shape,
+                    auto_space,
                     item.field,
                 );
                 if item.pm_start.is_some() {
@@ -6668,6 +6678,7 @@ fn emit_text_segment(
     line_bottom: f64,
     block_ref: &BlockRef,
     shape: Option<&ShapeFonts<'_>>,
+    auto_space: ooxml_text::AutoSpace,
     field: Option<&FieldRunIn>,
 ) {
     let font_px = effective_font_px_of(fmt);
@@ -6836,6 +6847,7 @@ fn emit_text_segment(
             &attrs,
             &color,
             &paint_clip,
+            auto_space,
         ),
         None => false,
     };
@@ -6954,6 +6966,7 @@ fn try_emit_glyph_runs(
     attrs: &DocAttrs,
     color: &str,
     paint_clip: &Option<ClipRect>,
+    auto_space: ooxml_text::AutoSpace,
 ) -> bool {
     if text.is_empty() {
         return false;
@@ -7062,6 +7075,22 @@ fn try_emit_glyph_runs(
     let mut local: Vec<Primitive> = Vec::new();
     let mut acc = 0.0_f64; // pen advance from the segment origin `x`
     let segment_count = segments.len();
+    // East Asian auto-space (`w:autoSpaceDE` / `w:autoSpaceDN`): the measure
+    // pass already widened the cluster before each boundary, so the pen has to
+    // widen with it or the segment's `exact_width` reconciliation would dump
+    // every boundary's gap onto its last glyph. A boundary that falls between
+    // two same-font subranges is spaced from the next subrange's first
+    // character. RTL never mixes with East Asian text here, so it is left out.
+    let auto_space_active =
+        auto_space.any() && direction != ooxml_text::ShapeDirection::Rtl && segment_count > 0;
+    let subrange_first: Vec<Option<char>> = if auto_space_active {
+        segments
+            .iter()
+            .map(|segment| segment.text.chars().next())
+            .collect()
+    } else {
+        Vec::new()
+    };
     let range_order: Box<dyn Iterator<Item = usize>> =
         if direction == ooxml_text::ShapeDirection::Rtl {
             Box::new((0..segment_count).rev())
@@ -7091,12 +7120,41 @@ fn try_emit_glyph_runs(
         };
 
         let sub_bytes = sub_text.as_bytes();
+        let auto_gaps: Vec<(usize, f64)> = if auto_space_active {
+            let mut gaps = Vec::new();
+            let mut chars = sub_text.char_indices().peekable();
+            while let Some((offset, ch)) = chars.next() {
+                let next = chars
+                    .peek()
+                    .map(|&(_, next)| next)
+                    .or_else(|| subrange_first.get(range_index + 1).copied().flatten());
+                let Some(next) = next else { break };
+                let extra = auto_space.extra_px(ch, next, size_px as f32, size_px as f32) as f64;
+                if extra > 0.0 {
+                    gaps.push((offset, extra));
+                }
+            }
+            gaps
+        } else {
+            Vec::new()
+        };
         let mut placed: Vec<PlacedGlyph> = Vec::with_capacity(glyphs.len());
-        for g in &glyphs {
+        for (index, g) in glyphs.iter().enumerate() {
             // Fold the justified U+0020 stretch into the glyph advance.
             let mut advance = g.x_advance as f64;
             if ws_px != 0.0 && sub_bytes.get(g.cluster as usize) == Some(&b' ') {
                 advance += ws_px;
+            }
+            if !auto_gaps.is_empty() {
+                let cluster_end = glyphs
+                    .get(index + 1)
+                    .map(|next| next.cluster as usize)
+                    .unwrap_or(sub_bytes.len());
+                advance += auto_gaps
+                    .iter()
+                    .filter(|(offset, _)| *offset >= g.cluster as usize && *offset < cluster_end)
+                    .map(|(_, extra)| extra)
+                    .sum::<f64>();
             }
             placed.push(PlacedGlyph {
                 id: g.glyph_id,

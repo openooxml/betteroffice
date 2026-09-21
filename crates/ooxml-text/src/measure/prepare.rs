@@ -32,6 +32,7 @@
 //!   `topAndBottom` or block image takes its own line, everything else is
 //!   inline. A dimensionless image is zero-size, never a refusal.
 
+use crate::auto_space::AutoSpace;
 use crate::caps::{
     BROWSER_SMALL_CAPS_ADVANCE_SCALE, WORD_SMALL_CAPS_ADVANCE_SCALE, uppercase_for_language,
 };
@@ -261,7 +262,92 @@ pub(super) fn prepare_runs(
             }
         }
     }
+    apply_auto_space(input, &mut prepared);
     Ok(prepared)
+}
+
+/// Widens the cluster before each East Asian / Latin boundary by the
+/// paragraph's auto-space (`w:autoSpaceDE` / `w:autoSpaceDN`). Boundaries
+/// straddle runs, so this walks the prepared paragraph once; anything that is
+/// not adjacent text — a tab, image, field, line break or hidden run — ends
+/// the adjacency rather than spacing across it.
+fn apply_auto_space(input: &MeasureRequest<'_>, prepared: &mut [PreparedRun]) {
+    let attrs = input.block.attrs.as_ref();
+    let auto = AutoSpace::from_options(
+        attrs.and_then(|a| a.auto_space_de),
+        attrs.and_then(|a| a.auto_space_dn),
+    );
+    if !auto.any() {
+        return;
+    }
+    let mut widen: Vec<(usize, usize, f32)> = Vec::new();
+    let mut previous: Option<(usize, usize, char, f32)> = None;
+    for (run_index, run) in prepared.iter().enumerate() {
+        let PreparedRun::Text(text) = run else {
+            previous = None;
+            continue;
+        };
+        let Some(source) = input
+            .block
+            .runs
+            .get(run_index)
+            .and_then(|run| run.text.as_deref())
+        else {
+            previous = None;
+            continue;
+        };
+        let offsets = utf16_chars(source);
+        let mut order: Vec<usize> = (0..text.chars.len()).collect();
+        order.sort_by_key(|&index| text.chars[index].utf16_offset);
+        for index in order {
+            let cluster = &text.chars[index];
+            let size_px = pt_to_px(cluster.font_size_pt);
+            let Some(first) = char_at(&offsets, cluster.utf16_offset) else {
+                previous = None;
+                continue;
+            };
+            let last =
+                char_before(&offsets, cluster.utf16_offset + cluster.utf16_len).unwrap_or(first);
+            if let Some((prev_run, prev_index, prev_char, prev_px)) = previous {
+                let extra = auto.extra_px(prev_char, first, prev_px, size_px);
+                if extra > 0.0 {
+                    widen.push((prev_run, prev_index, extra));
+                }
+            }
+            previous = Some((run_index, index, last, size_px));
+        }
+    }
+    for (run_index, cluster_index, extra) in widen {
+        if let Some(PreparedRun::Text(text)) = prepared.get_mut(run_index)
+            && let Some(cluster) = text.chars.get_mut(cluster_index)
+        {
+            cluster.advance += extra;
+        }
+    }
+}
+
+/// `(utf16 offset, char)` for every character of a run, ascending.
+fn utf16_chars(text: &str) -> Vec<(u32, char)> {
+    let mut offset = 0u32;
+    text.chars()
+        .map(|ch| {
+            let at = offset;
+            offset += ch.len_utf16() as u32;
+            (at, ch)
+        })
+        .collect()
+}
+
+fn char_at(offsets: &[(u32, char)], offset: u32) -> Option<char> {
+    offsets
+        .binary_search_by_key(&offset, |entry| entry.0)
+        .ok()
+        .map(|index| offsets[index].1)
+}
+
+fn char_before(offsets: &[(u32, char)], end: u32) -> Option<char> {
+    let index = offsets.partition_point(|entry| entry.0 < end);
+    index.checked_sub(1).map(|index| offsets[index].1)
 }
 
 /// Per-character UBA levels for every run, resolved over the paragraph's

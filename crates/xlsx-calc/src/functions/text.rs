@@ -1,6 +1,8 @@
 //! text functions. positions are 1-based, counted in unicode scalar values
 //! (excel counts utf-16 units). FIND is case-sensitive, SEARCH case-insensitive.
 
+use std::borrow::Cow;
+
 use xlsx_model::{CellValue, ErrorValue};
 
 use crate::eval::{
@@ -31,6 +33,117 @@ pub(crate) fn lower(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// TRIM: collapse runs of spaces to one and strip the ends (excel trims only
 /// the ascii space, u+0020).
+/// TEXTBEFORE(text, delimiter, [instance], [match_mode], [if_not_found]).
+/// a negative instance counts from the end. missing delimiter is `#N/A`
+/// unless `if_not_found` is given.
+pub(crate) fn textbefore(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, true)
+}
+
+/// TEXTAFTER, the same rules taking the remainder instead.
+pub(crate) fn textafter(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    split_at_delimiter(args, ctx, false)
+}
+
+/// byte spans in `source` that `delimiter` matches, left to right and
+/// non-overlapping. the end is returned rather than assumed from the
+/// delimiter's own length, because a case-insensitive match can cover a
+/// different number of bytes than it.
+fn delimiter_spans(source: &str, delimiter: &str, insensitive: bool) -> Vec<(usize, usize)> {
+    let span_at = |rest: &str| -> Option<usize> {
+        if !insensitive {
+            return rest.starts_with(delimiter).then_some(delimiter.len());
+        }
+        let mut wanted = delimiter.chars().flat_map(char::to_lowercase).peekable();
+        let mut taken = 0;
+        for character in rest.chars() {
+            if wanted.peek().is_none() {
+                break;
+            }
+            for lowered in character.to_lowercase() {
+                match wanted.next() {
+                    Some(expected) if expected == lowered => {}
+                    _ => return None,
+                }
+            }
+            taken += character.len_utf8();
+        }
+        wanted.peek().is_none().then_some(taken)
+    };
+    let mut spans = Vec::new();
+    let mut at = 0;
+    while at < source.len() {
+        match span_at(&source[at..]).filter(|length| *length > 0) {
+            Some(length) => {
+                spans.push((at, at + length));
+                at += length;
+            }
+            None => at += source[at..].chars().next().map_or(1, char::len_utf8),
+        }
+    }
+    spans
+}
+
+fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> CellValue {
+    if args.len() < 2 || args.len() > 5 {
+        return err(ErrorValue::Value);
+    }
+    let source = match nth_text(args, ctx, 0) {
+        Ok(t) => t,
+        Err(e) => return err(e),
+    };
+    let delimiter = match nth_text(args, ctx, 1) {
+        Ok(d) => d,
+        Err(e) => return err(e),
+    };
+    let instance = match args.get(2) {
+        Some(_) => match nth_int(args, ctx, 2) {
+            Ok(0) => return err(ErrorValue::Value),
+            Ok(i) => i,
+            Err(e) => return err(e),
+        },
+        None => 1,
+    };
+    let insensitive = match args.get(3) {
+        Some(_) => match nth_int(args, ctx, 3) {
+            Ok(m) => m != 0,
+            Err(e) => return err(e),
+        },
+        None => false,
+    };
+    if delimiter.is_empty() {
+        return text(if before { String::new() } else { source });
+    }
+    // offsets must index `source`, so a case-insensitive search compares in
+    // place rather than searching a lowercased copy: unicode case mappings
+    // change byte length, and `İ` would slide every later offset.
+    let spans = delimiter_spans(&source, &delimiter, insensitive);
+    let index = if instance > 0 {
+        instance as usize - 1
+    } else {
+        match spans.len().checked_sub(instance.unsigned_abs() as usize) {
+            Some(i) => i,
+            None => return not_found(args, ctx),
+        }
+    };
+    let Some(&(start, end)) = spans.get(index) else {
+        return not_found(args, ctx);
+    };
+    let out = if before {
+        source[..start].to_owned()
+    } else {
+        source[end..].to_owned()
+    };
+    text(out)
+}
+
+fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match args.get(4) {
+        Some(fallback) => evaluate(fallback, ctx),
+        None => err(ErrorValue::NA),
+    }
+}
+
 pub(crate) fn trim(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     map_text(args, ctx, |s| {
         s.split(' ')
@@ -378,19 +491,19 @@ pub(crate) fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut first = true;
     for arg in &args[2..] {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            let empty = matches!(v, CellValue::Empty)
-                || matches!(&v, CellValue::Text { value } if value.is_empty());
+            let empty = matches!(v.as_ref(), CellValue::Empty)
+                || matches!(v.as_ref(), CellValue::Text { value } if value.is_empty());
             if ignore_empty && empty {
                 continue;
             }
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) => {
                     if !first && !append_limited(&mut output, &delim, &mut output_chars) {
                         return err(ErrorValue::Value);
@@ -413,14 +526,14 @@ pub(crate) fn concat(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     let mut output_chars = 0;
     for arg in args {
         let values = match as_area(arg, ctx) {
-            Some(area) => match area.values(ctx) {
+            Some(area) => match area.values_ref(ctx) {
                 Ok(v) => v,
                 Err(e) => return err(e),
             },
-            None => vec![evaluate(arg, ctx)],
+            None => vec![Cow::Owned(evaluate(arg, ctx))],
         };
         for v in values {
-            match to_text(&v) {
+            match to_text(v.as_ref()) {
                 Ok(s) if append_limited(&mut out, &s, &mut output_chars) => {}
                 Ok(_) => return err(ErrorValue::Value),
                 Err(e) => return err(e),

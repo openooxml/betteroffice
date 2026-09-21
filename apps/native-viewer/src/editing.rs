@@ -4,6 +4,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use docx_edit::frame_delta::{
@@ -1711,6 +1712,7 @@ impl SaveProjection {
         let mut paragraph_index = 0;
         for block in &mut package.document.content {
             if let BlockContent::Paragraph(paragraph) = block {
+                let paragraph = Arc::make_mut(paragraph);
                 if paragraph.para_id.is_none() {
                     let para_id = format!("{BODY_STORY}:p{paragraph_index}");
                     paragraph.para_id = Some(para_id.clone());
@@ -1762,6 +1764,7 @@ impl SaveProjection {
             let BlockContent::Paragraph(paragraph) = block else {
                 continue;
             };
+            let paragraph = Arc::make_mut(paragraph);
             paragraph_number += 1;
             let para_id = paragraph
                 .para_id

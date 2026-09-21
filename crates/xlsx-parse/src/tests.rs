@@ -7,12 +7,34 @@ use xlsx_model::{
     SheetId, Workbook,
 };
 
-use crate::write::{serialize_workbook_with_package, serialize_workbook_with_package_and_origins};
+use crate::write::{
+    serialize_workbook_with_package, serialize_workbook_with_package_and_origins,
+    serialize_workbook_with_package_and_origins_after_edits,
+};
 use crate::{
-    ParseError, SaveEdits, SharedStringCells, SheetAxes, parse_workbook,
-    parse_workbook_with_package, serialize_workbook,
+    ParseError, SaveEdits, SharedStringCells, SheetAxes, serialize_workbook,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
 };
+
+/// Materializes entries a borrowed-entry save returns, so a fixture stays
+/// usable after the parse; production callers hand ownership to
+/// `crate::parse_workbook_with_package` instead.
+fn owned_parts<S: AsRef<[u8]>>(parts: &[(String, S)]) -> Vec<(String, Vec<u8>)> {
+    parts
+        .iter()
+        .map(|(path, bytes)| (path.clone(), bytes.as_ref().to_vec()))
+        .collect()
+}
+
+fn parse_workbook_with_package(
+    parts: &[(String, impl AsRef<[u8]>)],
+) -> Result<crate::ParsedWorkbook, ParseError> {
+    crate::parse_workbook_with_owned_package(owned_parts(parts))
+}
+
+fn parse_workbook(parts: &[(String, impl AsRef<[u8]>)]) -> Result<Workbook, ParseError> {
+    crate::parse_workbook(&owned_parts(parts))
+}
 
 /// assemble a one-sheet package around a worksheet body and optional shared
 /// strings, so each test only spells out the part under exercise.
@@ -53,6 +75,91 @@ fn package(worksheet_body: &str, shared: &[&str], date1904: bool) -> Vec<(String
 fn cell_at(wb: &Workbook, a1: &str) -> Cell {
     let addr = CellRef::parse_a1(a1).unwrap();
     wb.sheets[0].cell(addr).cloned().unwrap_or_default()
+}
+
+/// One sheet plus a table part reached through the worksheet relationships.
+fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package("<sheetData/>", &[], false);
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_string(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/tables/table1.xml".to_string(),
+        table.as_bytes().to_vec(),
+    ));
+    parts
+}
+
+#[test]
+fn reads_a_table_part_through_the_worksheet_relationships() {
+    let table = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12" totalsRowCount="1"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Extra_x000a_Cost"/><tableColumn id="3" name="_x005F_x0041_"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+
+    assert_eq!(wb.tables.len(), 1);
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.name, "Sales");
+    assert_eq!(parsed.sheet, SheetId(0));
+    assert_eq!(parsed.range.to_a1(), "B2:D12");
+    assert_eq!(parsed.header_rows, 1);
+    assert_eq!(parsed.totals_rows, 1);
+    assert_eq!(parsed.columns, ["Region", "Extra\nCost", "_x0041_"]);
+    assert_eq!(parsed.data_rows(), Some((2, 10)));
+    assert_eq!(parsed.header_range(), Some((1, 1)));
+    assert_eq!(parsed.totals_range(), Some((11, 11)));
+    assert_eq!(
+        wb.table("sALES").map(|table| table.name.as_str()),
+        Some("Sales")
+    );
+}
+
+#[test]
+fn a_table_part_without_a_usable_ref_or_name_is_skipped() {
+    for table in [
+        r#"<table id="1" displayName="Sales"><tableColumns/></table>"#,
+        r#"<table id="1" displayName="Sales" ref="not-a-range"><tableColumns/></table>"#,
+        r#"<table id="1" ref="A1:B2"><tableColumns/></table>"#,
+    ] {
+        let wb = parse_workbook(&package_with_table(table)).unwrap();
+        assert!(wb.tables.is_empty(), "{table}");
+    }
+}
+
+#[test]
+fn table_bands_are_clamped_to_the_rows_the_ref_spans() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:A2" headerRowCount="9" totalsRowCount="9"><tableColumns><tableColumn id="1" name="Only"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.header_rows, 2);
+    assert_eq!(parsed.totals_rows, 0);
+    assert_eq!(parsed.data_rows(), None);
+}
+
+#[test]
+fn a_table_column_flood_is_refused() {
+    let columns: String = (0..=crate::MAX_TABLE_COLUMNS)
+        .map(|index| format!(r#"<tableColumn id="{index}" name="c{index}"/>"#))
+        .collect();
+    let table = format!(
+        r#"<table id="1" displayName="Sales" ref="A1:B2"><tableColumns>{columns}</tableColumns></table>"#
+    );
+    assert!(matches!(
+        parse_workbook(&package_with_table(&table)),
+        Err(ParseError::Malformed(_))
+    ));
+}
+
+#[test]
+fn a_table_survives_the_round_trip_untouched() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:B3"><tableColumns><tableColumn id="1" name="Region"/><tableColumn id="2" name="Amount"/></tableColumns></table>"#;
+    let parts = package_with_table(table);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    let table_part = saved
+        .iter()
+        .find(|(path, _)| path == "xl/tables/table1.xml")
+        .expect("table part is preserved");
+    assert_eq!(table_part.1.as_slice(), table.as_bytes());
 }
 
 #[test]
@@ -147,6 +254,81 @@ fn expands_shared_formulas_and_preserves_source_until_edited() {
             cell_at(&edited, address).formula
         );
     }
+}
+
+#[test]
+fn package_save_borrows_unchanged_parts() {
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/><sheet name="Sheet2" sheetId="2" r:id="rId2"/></sheets></workbook>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Target="worksheets/sheet2.xml"/></Relationships>"#;
+    let body = r#"<sheetData><row r="1"><c r="A1"><v>1</v></c></row></sheetData>"#;
+    let parts: Vec<(String, Vec<u8>)> = vec![
+        ("xl/workbook.xml".into(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".into(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+        (
+            "xl/worksheets/sheet2.xml".into(),
+            format!("<worksheet>{body}</worksheet>").into_bytes(),
+        ),
+    ];
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let origins = vec![Some(0), Some(1)];
+    let shared = vec![
+        parsed.package.source_shared_string_cells(0),
+        parsed.package.source_shared_string_cells(1),
+    ];
+
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &parsed.workbook,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits::default(),
+    )
+    .unwrap();
+    assert!(
+        saved
+            .iter()
+            .all(|(_, bytes)| matches!(bytes, std::borrow::Cow::Borrowed(_)))
+    );
+
+    let mut edited = parsed.workbook.clone();
+    edited.sheets[0].set_cell(
+        CellRef::parse_a1("B2").unwrap(),
+        Cell {
+            value: CellValue::Number { value: 5.0 },
+            ..Cell::default()
+        },
+    );
+    let saved = serialize_workbook_with_package_and_origins_after_edits(
+        &edited,
+        &parsed.package,
+        &origins,
+        &shared,
+        SaveEdits {
+            changed: true,
+            moved_references: false,
+        },
+    )
+    .unwrap();
+    let mut borrowed = 0;
+    for (path, bytes) in &saved {
+        if path == "xl/worksheets/sheet1.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Owned(_)), "{path}");
+        }
+        if path == "xl/worksheets/sheet2.xml" {
+            assert!(matches!(bytes, std::borrow::Cow::Borrowed(_)), "{path}");
+        }
+        if matches!(bytes, std::borrow::Cow::Borrowed(_)) {
+            borrowed += 1;
+        }
+    }
+    assert!(borrowed > 0, "unchanged parts must stay borrowed");
 }
 
 #[test]
@@ -249,6 +431,21 @@ fn hidden_rows_and_columns_have_zero_render_extent() {
     assert_eq!(sheet.col_widths.get(&3), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&1), Some(&0.0));
     assert_eq!(sheet.row_heights.get(&2), Some(&0.0));
+}
+
+/// a negative `<col>` width is unrenderable, so the model narrows it to zero
+/// while the authored attribute survives a save untouched.
+#[test]
+fn negative_column_width_narrows_to_zero_and_saves_verbatim() {
+    let body = r#"<cols><col min="1" max="1" width="-0.42" customWidth="1"/><col min="2" max="2" width="12.5" customWidth="1"/></cols><sheetData/>"#;
+    let parts = package(body, &[], false);
+    let source = parts[2].1.clone();
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(sheet.col_widths.get(&0), Some(&0.0));
+    assert_eq!(sheet.col_widths.get(&1), Some(&12.5));
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    assert_eq!(part_bytes(&saved, "xl/worksheets/sheet1.xml"), source);
 }
 
 #[test]
@@ -1307,13 +1504,14 @@ fn two_sheet_package(first_body: &str, second_body: &str) -> Vec<(String, Vec<u8
     ]
 }
 
-fn part_bytes(parts: &[(String, Vec<u8>)], path: &str) -> Vec<u8> {
+fn part_bytes<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> Vec<u8> {
     parts
         .iter()
         .find(|(name, _)| name == path)
         .unwrap_or_else(|| panic!("missing {path}"))
         .1
-        .clone()
+        .as_ref()
+        .to_vec()
 }
 
 /// The parser models a subset of row, column and cell markup. An edit to one
@@ -1431,7 +1629,7 @@ fn set_number(workbook: &mut Workbook, sheet: usize, address: &str, value: f64) 
     );
 }
 
-fn sheet_text(parts: &[(String, Vec<u8>)], path: &str) -> String {
+fn sheet_text<S: AsRef<[u8]>>(parts: &[(String, S)], path: &str) -> String {
     String::from_utf8(part_bytes(parts, path)).unwrap()
 }
 
@@ -1979,14 +2177,15 @@ fn writes_a_strict_theme_for_a_strict_package() {
     );
 }
 
-fn content_types_text(parts: &[(String, Vec<u8>)]) -> String {
+fn content_types_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "[Content_Types].xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -2171,14 +2370,15 @@ fn resolves_shared_strings_through_the_workbook_relationship() {
     );
 }
 
-fn shared_strings_text(parts: &[(String, Vec<u8>)]) -> String {
+fn shared_strings_text<S: AsRef<[u8]>>(parts: &[(String, S)]) -> String {
     String::from_utf8(
         parts
             .iter()
             .find(|(path, _)| path == "xl/sharedStrings.xml")
             .unwrap()
             .1
-            .clone(),
+            .as_ref()
+            .to_vec(),
     )
     .unwrap()
 }
@@ -4327,6 +4527,7 @@ fn save_shared(
             moved_references: false,
         },
     )
+    .map(|parts| parts.iter().map(|(p, b)| (p.clone(), b.to_vec())).collect())
 }
 
 /// One chart part cannot hold two sheets' references at once. A save where the
@@ -5787,4 +5988,33 @@ fn writes_sparse_and_height_only_rows_in_one_ascending_pass() {
     assert_eq!(reparsed.sheets[0].row_heights.get(&0), Some(&20.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&2), Some(&15.0));
     assert_eq!(reparsed.sheets[0].row_heights.get(&119), Some(&0.0));
+}
+
+/// `<f t="array" ref>` records the rectangle the result occupies; a shared
+/// formula's `ref` and an oversized array `ref` are not array anchors.
+#[test]
+fn captures_array_formula_rectangles() {
+    let body = r#"<sheetData>
+      <row r="1">
+        <c r="A1"><f t="array" ref="A1:B2">SEQUENCE(2,2)</f></c>
+        <c r="D1"><f t="shared" ref="D1:D2" si="0">1+1</f></c>
+        <c r="F1"><f t="array" ref="F1:XFD1048576">SEQUENCE(1)</f></c>
+        <c r="H1"><f t="array" ref="ZZZ">1</f></c>
+      </row>
+      <row r="2"><c r="D2"><f t="shared" si="0"/></c></row>
+    </sheetData>"#;
+    let parsed = parse_workbook_with_package(&package(body, &[], false)).unwrap();
+    let sheet = &parsed.workbook.sheets[0];
+    assert_eq!(
+        sheet.array_formula(CellRef::parse_a1("A1").unwrap()),
+        Some(xlsx_model::CellRange::parse_a1("A1:B2").unwrap())
+    );
+    for address in ["D1", "F1", "H1"] {
+        assert_eq!(
+            sheet.array_formula(CellRef::parse_a1(address).unwrap()),
+            None,
+            "{address} is not an array anchor"
+        );
+    }
+    assert_eq!(sheet.array_formulas().count(), 1);
 }

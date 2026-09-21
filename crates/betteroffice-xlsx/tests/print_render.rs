@@ -69,14 +69,11 @@ fn printing_uses_font_device_metrics_without_changing_screen_or_source() {
     assert!((printed.height - printed_rows).abs() < 0.001);
     assert_eq!(printed.grid.start_row, 1);
     assert_eq!(printed.grid.col_offsets[1], 96.0);
-    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Text { text, font_family, .. } if text == "Row 1" && font_family.as_deref() == Some("Calibri"))));
-    assert!(
-        !printed
-            .commands
-            .iter()
-            .any(|c| matches!(c, DrawCmd::Text { text, .. } if text == "Row 0" || text == "Row 3"))
-    );
-    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Line { color, width, .. } if color == "#000000" && (*width - 4.0 / 3.0).abs() < 0.001)));
+    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Text { text, font_family, .. } if &**text == "Row 1" && font_family.as_deref() == Some("Calibri"))));
+    assert!(!printed.commands.iter().any(
+        |c| matches!(c, DrawCmd::Text { text, .. } if &**text == "Row 0" || &**text == "Row 3")
+    ));
+    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Line { color, width, .. } if &**color == "#000000" && (*width - 4.0 / 3.0).abs() < 0.001)));
     assert_eq!(workbook.model(), &model);
     assert_eq!(workbook.active_sheet(), SheetId(1));
     assert_eq!(workbook.save().unwrap(), saved);
@@ -140,7 +137,7 @@ fn printing_with_hidden_default_columns_keeps_explicit_columns_visible() {
         .commands
         .iter()
         .filter_map(|command| match command {
-            DrawCmd::Text { text, .. } => Some(text.as_str()),
+            DrawCmd::Text { text, .. } => Some(&**text),
             _ => None,
         })
         .collect();
@@ -274,14 +271,14 @@ fn partial_merged_print_ranges_clip_without_moving_the_anchor() {
     assert_eq!(partial_text[0].2.h, partial.height);
     assert!(partial.commands.iter().any(|cmd| matches!(cmd,
         DrawCmd::FillRect { x, y, w, h, color, .. }
-        if *x == 0.0 && *y == 0.0 && *w == partial.width && *h == partial.height && color == "#ffd700"
+        if *x == 0.0 && *y == 0.0 && *w == partial.width && *h == partial.height && &**color == "#ffd700"
     )));
     assert_eq!(
         partial
             .commands
             .iter()
             .filter(|cmd| matches!(cmd,
-                DrawCmd::Line { color, .. } if color == "#0000ff"
+                DrawCmd::Line { color, .. } if &**color == "#0000ff"
             ))
             .count(),
         2
@@ -474,7 +471,7 @@ fn a_column_style_fills_the_cells_it_formats() {
         .filter_map(|cmd| match cmd {
             DrawCmd::FillRect {
                 x, y, w, h, color, ..
-            } if color == "#204060" => Some((*x, *y, *w, *h)),
+            } if &**color == "#204060" => Some((*x, *y, *w, *h)),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -505,4 +502,43 @@ fn a_column_style_fills_the_cells_it_formats() {
         !tinted.iter().any(|rect| rect.0 > 2.0 * 64.0),
         "the unstyled column C takes no fill: {tinted:?}"
     );
+}
+
+/// `sheetFormatPr/@zeroHeight` is written as `defaultRowHeight="0"`, so a zero
+/// default row height is a valid metric: the pinned rows keep their height and
+/// every unsized row collapses.
+#[test]
+fn zero_default_row_height_prints_only_the_sized_rows() {
+    let mut sheet = Sheet::new("Cover");
+    sheet.col_widths.insert(0, 12.0);
+    sheet.format.custom_height = true;
+    sheet.format.default_row_height_pt = Some(0.0);
+    sheet.row_heights.insert(1, 30.0);
+    for row in 0..3 {
+        sheet.set_cell(
+            CellRef::new(row, 0),
+            Cell {
+                value: CellValue::Text {
+                    value: format!("Row {row}"),
+                },
+                ..Cell::default()
+            },
+        );
+    }
+    let workbook = Workbook::from_model(WorkbookModel {
+        sheets: vec![sheet],
+        ..WorkbookModel::default()
+    })
+    .unwrap();
+    let mut metrics = metrics();
+    metrics.default_row_height_pt = 0.0;
+    let printed = workbook
+        .print_display_list(
+            SheetId(0),
+            CellRange::parse_a1("A1:A3").unwrap(),
+            &metrics,
+            false,
+        )
+        .unwrap();
+    assert!((printed.height - row_pt_to_px(30.0)).abs() < 0.001);
 }

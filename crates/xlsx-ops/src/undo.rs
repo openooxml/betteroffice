@@ -42,9 +42,15 @@ impl UndoStack {
     /// redo stack.
     pub fn commit(&mut self, wb: &mut Workbook, tx: &Transaction) -> Result<(), OpError> {
         let inverse = apply_ops(wb, &tx.ops)?;
+        self.record(inverse);
+        Ok(())
+    }
+
+    /// record the inverse of a transaction the caller already applied to the
+    /// workbook, skipping a second apply pass; clears the redo stack.
+    pub fn record(&mut self, inverse: Vec<Op>) {
         self.undo.push(inverse);
         self.redo.clear();
-        Ok(())
     }
 
     /// the ops the next `undo` would apply, so a caller that must clear a
