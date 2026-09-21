@@ -31,9 +31,9 @@ pub(crate) fn sumif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 2 && args.len() != 3 {
         return err(ErrorValue::Value);
     }
-    let crit_area = match as_area(&args[0], ctx) {
-        Some(a) => bound_area(a, ctx),
-        None => return err(ErrorValue::Value),
+    let crit_area = match crate::eval::required_area(&args[0], ctx) {
+        Ok(a) => bound_area(a, ctx),
+        Err(error) => return err(error),
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
     let values = if args.len() == 3 { &args[2] } else { &args[0] };

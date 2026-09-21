@@ -1438,13 +1438,22 @@ fn if_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     for row in 0..rows {
         for col in 0..cols {
             cells.push(match to_bool(&condition.broadcast(row, col)) {
-                Ok(true) => whenever.broadcast(row, col),
-                Ok(false) => otherwise.broadcast(row, col),
+                Ok(true) => selected(whenever.broadcast(row, col)),
+                Ok(false) => selected(otherwise.broadcast(row, col)),
                 Err(error) => err(error),
             });
         }
     }
     block(ctx, rows, cols, cells)
+}
+
+/// a block holds values rather than references, so the blank cell `IF` picked
+/// lands in it as the zero excel reads there.
+fn selected(value: CellValue) -> CellValue {
+    match value {
+        CellValue::Empty => CellValue::Number { value: 0.0 },
+        value => value,
+    }
 }
 
 fn iferror(args: &[Expr], ctx: &EvalContext<'_>) -> Value {

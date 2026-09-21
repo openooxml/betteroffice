@@ -493,7 +493,7 @@ fn serial_argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result
 
 /// parse the date part of a textual timestamp to a serial, `None` when it is
 /// not a date this locale (US order) recognises.
-fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
+pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     let fields = date_fields(raw)?;
     let (y, m, d) = match fields.as_slice() {
         [a, b, c] => three_fields(a, b, c)?,

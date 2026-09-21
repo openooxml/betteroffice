@@ -541,11 +541,13 @@ fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
 }
 
 pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
+    // the lotus-style leading `+` passes its operand through whatever it is,
+    // so `+A1` on text is that text; only negation needs a number
+    if op == UnaryOp::Plus {
+        return v.clone();
+    }
     match to_number(v) {
-        Ok(n) => match op {
-            UnaryOp::Neg => num(-n),
-            UnaryOp::Plus => num(n),
-        },
+        Ok(n) => num(-n),
         Err(e) => err(e),
     }
 }
@@ -883,6 +885,18 @@ impl Area {
         u64::try_from(self.rows)
             .ok()?
             .checked_mul(u64::try_from(self.cols).ok()?)
+    }
+}
+
+/// the rectangle a reference argument designates, or the error excel reports
+/// for it: an unresolved name is #NAME? wherever it appears, not a bad value.
+pub(crate) fn required_area(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    match as_area(arg, ctx) {
+        Some(area) => Ok(area),
+        None => match evaluate(arg, ctx) {
+            CellValue::Error { value } => Err(value),
+            _ => Err(ErrorValue::Value),
+        },
     }
 }
 

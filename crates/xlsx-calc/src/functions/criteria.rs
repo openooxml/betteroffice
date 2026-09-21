@@ -99,15 +99,12 @@ impl Criterion {
                 None => return false,
             }
         } else {
-            // numeric cells never satisfy a text inequality in excel, and an
-            // empty string counts as blank rather than as the smallest text
+            // numeric cells never satisfy a text inequality in excel; a cell
+            // holding the empty string is the smallest text there is, while a
+            // blank one is not text at all
             match v {
-                CellValue::Text { value } if !value.is_empty() => {
-                    Some(value.to_lowercase().cmp(&self.text))
-                }
-                CellValue::Text { .. } | CellValue::Empty if self.text.is_empty() => {
-                    Some(Ordering::Equal)
-                }
+                CellValue::Text { value } => Some(value.to_lowercase().cmp(&self.text)),
+                CellValue::Empty if self.text.is_empty() => Some(Ordering::Equal),
                 _ => return false,
             }
         };
@@ -397,16 +394,25 @@ mod tests {
         assert!(!written.matches(&num(0.0)));
     }
 
-    /// a cell holding "" counts as blank for an ordering criterion, so a
-    /// column padded with empty strings does not report them all as the
-    /// smallest text.
+    /// A cell holding "" — what `=""` caches — sorts below every other text
+    /// and takes part in a text inequality; a blank cell takes part in none.
     #[test]
-    fn an_empty_string_is_blank_to_an_ordering_criterion() {
+    fn the_empty_string_is_the_smallest_text() {
         let less = Criterion::parse("<m");
         assert!(less.matches(&txt("abc")));
-        assert!(!less.matches(&txt("")));
+        assert!(less.matches(&txt("")));
         assert!(!less.matches(&CellValue::Empty));
         assert!(!less.matches(&num(1.0)));
+
+        let c = Criterion::parse("<14/0430");
+        assert!(c.matches(&txt("")));
+        assert!(c.matches(&txt("13/0450")));
+        assert!(!c.matches(&txt("14/0431")));
+        assert!(!c.matches(&CellValue::Empty));
+
+        assert!(!Criterion::parse(">14/0430").matches(&txt("")));
+        assert!(Criterion::parse(">=").matches(&txt("")));
+        assert!(Criterion::parse(">=").matches(&CellValue::Empty));
     }
 
     #[test]

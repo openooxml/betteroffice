@@ -31,9 +31,9 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let area = match as_area(&args[1], ctx) {
-        Some(a) => crate::eval::bound_area(a, ctx),
-        None => return err(ErrorValue::Value),
+    let area = match crate::eval::required_area(&args[1], ctx) {
+        Ok(a) => crate::eval::bound_area(a, ctx),
+        Err(error) => return err(error),
     };
     let index = match nth_int(args, ctx, 2) {
         Ok(n) => n,
@@ -188,8 +188,9 @@ pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let Some(area) = as_area(&args[1], ctx) else {
-        return err(ErrorValue::Value);
+    let area = match crate::eval::required_area(&args[1], ctx) {
+        Ok(area) => area,
+        Err(error) => return err(error),
     };
     let mode = match args.get(2) {
         Some(_) => match nth_int(args, ctx, 2) {
@@ -259,9 +260,9 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 2 || args.len() > 3 {
         return err(ErrorValue::Value);
     }
-    let area = match as_area(&args[0], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
+    let area = match crate::eval::required_area(&args[0], ctx) {
+        Ok(a) => a,
+        Err(error) => return err(error),
     };
     let first = match nth_int_lifted(args, ctx, 1) {
         Ok(n) => n,
@@ -296,7 +297,7 @@ pub(crate) fn index_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, E
     if args.len() < 2 || args.len() > 3 {
         return Err(ErrorValue::Value);
     }
-    let area = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let area = crate::eval::required_area(&args[0], ctx)?;
     let first = axis_index(args, ctx, 1)?;
     let second = match args.len() {
         3 => Some(axis_index(args, ctx, 2)?),
@@ -406,7 +407,7 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
     if args.len() < 3 || args.len() > 5 {
         return Err(ErrorValue::Value);
     }
-    let anchor = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let anchor = crate::eval::required_area(&args[0], ctx)?;
     let rows = nth_int_lifted(args, ctx, 1)?;
     let cols = nth_int_lifted(args, ctx, 2)?;
     let height = match args.get(3) {
@@ -504,13 +505,13 @@ pub(crate) fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if let CellValue::Error { value } = target {
         return err(value);
     }
-    let lookup = match as_area(&args[1], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
+    let lookup = match crate::eval::required_area(&args[1], ctx) {
+        Ok(a) => a,
+        Err(error) => return err(error),
     };
-    let result = match as_area(&args[2], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
+    let result = match crate::eval::required_area(&args[2], ctx) {
+        Ok(a) => a,
+        Err(error) => return err(error),
     };
     if lookup.cell_count() != result.cell_count() {
         return err(ErrorValue::Value);
