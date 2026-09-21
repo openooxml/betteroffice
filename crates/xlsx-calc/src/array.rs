@@ -471,8 +471,6 @@ fn result(value: Result<Value, ErrorValue>) -> Value {
     value.unwrap_or_else(Value::error)
 }
 
-// ---------------------------------------------------------------- dispatch
-
 /// an array-aware builtin: lazy arguments in, one rectangular value out.
 type ArrayFn = fn(&[Expr], &EvalContext<'_>) -> Value;
 
@@ -699,8 +697,6 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         _ => return None,
     })
 }
-
-// --------------------------------------------------------------- builtins
 
 /// the block a spilled formula produced, addressed by its anchor cell.
 fn anchorarray(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -1872,8 +1868,6 @@ fn scalar(name: &str, args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     }
 }
 
-// ----------------------------------------------------- names and callbacks
-
 /// `LET(name, value, ..., calculation)`: each name is bound for every later
 /// value and for the calculation, and unbound again once this call returns.
 fn let_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
@@ -2257,8 +2251,6 @@ fn next_char_width(source: &str, at: usize) -> usize {
         .and_then(|rest| rest.chars().next())
         .map_or(1, char::len_utf8)
 }
-
-// ------------------------------------------------------------------ spill
 
 /// where an array formula's result lands and what it holds.
 pub struct Spill {
