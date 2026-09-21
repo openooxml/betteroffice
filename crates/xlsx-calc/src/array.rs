@@ -1684,7 +1684,7 @@ fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> 
 /// search modes. `None` is `#N/A`.
 /// excel's lookup modes: match 0, -1, 1 or 2; search 1, -1, 2 or -2.
 fn lookup_modes(mode: f64, search: f64) -> Result<(), ErrorValue> {
-    if !matches!(mode as i64, 0 | -1 | 1 | 2) || !matches!(search as i64, 1 | -1 | 2 | -2) {
+    if !matches!(mode as i64, -1..=2) || !matches!(search as i64, 1 | -1 | 2 | -2) {
         return Err(ErrorValue::Value);
     }
     Ok(())
