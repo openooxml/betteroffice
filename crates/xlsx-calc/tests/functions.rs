@@ -276,7 +276,7 @@ fn math_functions() {
         // holidays rule out the whole-week shortcut, so a far date walks and
         // the walk is bounded by the evaluation budget
         ("WORKDAY(1,1000000,{2})", e(ErrorValue::Num)),
-        ("WORKDAY(1,5,{2})", n(8.0)),
+        ("WORKDAY(1,5,{2})", n(9.0)),
         // excel calls serial 0 "january 0, 1900", which a blank date reads as
         ("YEAR(0)", n(1900.0)),
         ("MONTH(0)", n(1.0)),

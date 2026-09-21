@@ -1125,6 +1125,11 @@ mod tests {
     #[test]
     fn calculation_limits_are_visible_on_the_wire() {
         let mut session = Session::open(&sample_xlsx(), None).unwrap();
+        // a cell in the far corner gives Empty the extent the limit is for,
+        // now that a whole-column read costs only the rows a sheet reaches
+        session
+            .edit_cell_json(r#"{"sheet":1,"row":1048575,"col":16383,"input":"1"}"#, None)
+            .unwrap();
         let result = session
             .edit_cell_json(
                 r#"{"sheet":0,"row":2,"col":0,"input":"=SUM(Empty!A1:XFD1048576)"}"#,
