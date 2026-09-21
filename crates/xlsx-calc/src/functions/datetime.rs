@@ -6,7 +6,7 @@ use xlsx_model::{CellValue, ErrorValue};
 use crate::eval::{EvalContext, err, evaluate, num, to_text};
 use crate::parser::Expr;
 
-use super::{nth_int, nth_number};
+use super::{nth_int, nth_number, omitted};
 
 /// the phantom 1900-02-29; serials above it are shifted by one real day.
 const PHANTOM: i64 = 60;
@@ -422,3 +422,442 @@ fn time_part(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(i64) -> i64) -> Cell
     let secs = (frac * 86_400.0).round() as i64 % 86_400;
     num(pick(secs) as f64)
 }
+
+/// DATEVALUE(text): the serial of a date written as text. a trailing time is
+/// dropped; a two-digit year below 30 is 2000s, otherwise 1900s.
+pub(crate) fn datevalue(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let raw = match evaluate(&args[0], ctx) {
+        CellValue::Error { value } => return err(value),
+        CellValue::Text { value } => value,
+        _ => return err(ErrorValue::Value),
+    };
+    match parse_date_text(&raw, ctx) {
+        Some(serial) => num(serial as f64),
+        None => err(ErrorValue::Value),
+    }
+}
+
+/// parse the date part of a textual timestamp to a serial, `None` when it is
+/// not a date this locale (US order) recognises.
+fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
+    let fields = date_fields(raw)?;
+    let (y, m, d) = match fields.as_slice() {
+        [a, b, c] => three_fields(a, b, c)?,
+        [a, b] => two_fields(a, b)?,
+        _ => return None,
+    };
+    let y = match y {
+        Some(y) => y,
+        None => current_year(ctx)?,
+    };
+    if !(1900..=9999).contains(&y) || !(1..=12).contains(&m) {
+        return None;
+    }
+    // excel's phantom 1900-02-29 parses even though 1900 was not a leap year
+    if (y, m, d) == (1900, 2, 29) {
+        return Some(PHANTOM);
+    }
+    if d < 1 || d > days_in_month(y, m) {
+        return None;
+    }
+    Some(date_to_serial(y, m, d))
+}
+
+/// the date words and numbers of a timestamp: time-of-day chunks, meridiem
+/// markers and the separators between fields are stripped.
+fn date_fields(raw: &str) -> Option<Vec<String>> {
+    let mut fields: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for chunk in raw.split_whitespace() {
+        if chunk.contains(':') {
+            break;
+        }
+        if chunk.eq_ignore_ascii_case("am")
+            || chunk.eq_ignore_ascii_case("pm")
+            || chunk.eq_ignore_ascii_case("a.m.")
+            || chunk.eq_ignore_ascii_case("p.m.")
+        {
+            continue;
+        }
+        for ch in chunk.chars() {
+            if ch.is_alphanumeric() {
+                current.push(ch);
+            } else if matches!(ch, '/' | '-' | ',' | '.') {
+                if !current.is_empty() {
+                    fields.push(std::mem::take(&mut current));
+                }
+            } else {
+                return None;
+            }
+        }
+        if !current.is_empty() {
+            fields.push(std::mem::take(&mut current));
+        }
+    }
+    (fields.len() == 2 || fields.len() == 3).then_some(fields)
+}
+
+/// a three-field date: `yyyy-m-d` when the first field is a four-digit year,
+/// otherwise US `m/d/y` with either field allowed to be a month name.
+fn three_fields(a: &str, b: &str, c: &str) -> Option<(Option<i64>, i64, i64)> {
+    if let Some(month) = month_name(a) {
+        return Some((Some(year_field(c)?), month, b.parse().ok()?));
+    }
+    if let Some(month) = month_name(b) {
+        return Some((Some(year_field(c)?), month, a.parse().ok()?));
+    }
+    if a.len() == 4 && a.chars().all(|ch| ch.is_ascii_digit()) {
+        return Some((Some(a.parse().ok()?), b.parse().ok()?, c.parse().ok()?));
+    }
+    Some((Some(year_field(c)?), a.parse().ok()?, b.parse().ok()?))
+}
+
+/// a two-field date: a month and a day in the current year, unless the other
+/// field is a year (four digits, or any number a day cannot be).
+fn two_fields(a: &str, b: &str) -> Option<(Option<i64>, i64, i64)> {
+    if let Some(month) = month_name(a) {
+        return Some(match year_only(b) {
+            Some(year) => (Some(year), month, 1),
+            None => (None, month, b.parse().ok()?),
+        });
+    }
+    if let Some(month) = month_name(b) {
+        return Some(match year_only(a) {
+            Some(year) => (Some(year), month, 1),
+            None => (None, month, a.parse().ok()?),
+        });
+    }
+    let month: i64 = a.parse().ok()?;
+    match year_only(b) {
+        Some(year) => Some((Some(year), month, 1)),
+        None => Some((None, month, b.parse().ok()?)),
+    }
+}
+
+/// a field that can only be a year: four digits, or a number above 31.
+fn year_only(field: &str) -> Option<i64> {
+    let value: i64 = field.parse().ok()?;
+    (field.len() == 4 || value > 31).then_some(value)
+}
+
+/// a year field, windowing two-digit years as excel does: 0..=29 is 2000s.
+fn year_field(field: &str) -> Option<i64> {
+    let value: i64 = field.parse().ok()?;
+    if value < 0 {
+        return None;
+    }
+    Some(match field.len() {
+        1 | 2 if value < 30 => 2000 + value,
+        1 | 2 => 1900 + value,
+        _ => value,
+    })
+}
+
+fn month_name(field: &str) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "january",
+        "february",
+        "march",
+        "april",
+        "may",
+        "june",
+        "july",
+        "august",
+        "september",
+        "october",
+        "november",
+        "december",
+    ];
+    let lower = field.to_ascii_lowercase();
+    if lower.len() < 3 {
+        return None;
+    }
+    MONTHS
+        .iter()
+        .position(|full| *full == lower || full.starts_with(&lower))
+        .map(|index| index as i64 + 1)
+}
+
+fn current_year(ctx: &EvalContext<'_>) -> Option<i64> {
+    let serial = ctx.now_serial?.floor() as i64;
+    serial_to_ymd(serial).map(|(y, _, _)| y)
+}
+
+/// YEARFRAC(start, end, [basis]): the fraction of a year between two dates
+/// under day-count bases 0..=4. the order of the dates does not matter.
+pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let basis = if args.len() == 3 && !omitted(&args[2]) {
+        match nth_int(args, ctx, 2) {
+            Ok(b) => b,
+            Err(e) => return err(e),
+        }
+    } else {
+        0
+    };
+    if start < 0 || end < 0 {
+        return err(ErrorValue::Num);
+    }
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    match year_fraction(lo, hi, basis) {
+        Some(value) => num(value),
+        None => err(ErrorValue::Num),
+    }
+}
+
+fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
+    let actual = (hi - lo) as f64;
+    match basis {
+        0 => Some(days_30_360(lo, hi, false)? / 360.0),
+        1 => Some(actual / actual_denominator(lo, hi)?),
+        2 => Some(actual / 360.0),
+        3 => Some(actual / 365.0),
+        4 => Some(days_30_360(lo, hi, true)? / 360.0),
+        _ => None,
+    }
+}
+
+/// day count on a 30/360 calendar; `european` clamps both days to 30, the US
+/// rule instead folds the 31st and the end of february onto the 30th.
+fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
+    let (y1, m1, mut d1) = serial_to_ymd(lo.max(1))?;
+    let (y2, m2, mut d2) = serial_to_ymd(hi.max(1))?;
+    if european {
+        d1 = d1.min(30);
+        d2 = d2.min(30);
+    } else {
+        if m1 == 2 && d1 == days_in_month(y1, 2) {
+            if m2 == 2 && d2 == days_in_month(y2, 2) {
+                d2 = 30;
+            }
+            d1 = 30;
+        }
+        if d1 == 31 {
+            d1 = 30;
+        }
+        if d2 == 31 && d1 == 30 {
+            d2 = 30;
+        }
+    }
+    Some(((y2 - y1) * 360 + (m2 - m1) * 30 + (d2 - d1)) as f64)
+}
+
+/// the denominator basis 1 divides by: the length of the single year a short
+/// span sits in, or the average year length across the years a long span
+/// touches.
+fn actual_denominator(lo: i64, hi: i64) -> Option<f64> {
+    let (y1, m1, d1) = serial_to_ymd(lo.max(1))?;
+    let (y2, m2, d2) = serial_to_ymd(hi.max(1))?;
+    let within_a_year = y1 == y2 || (y1 + 1 == y2 && (m1, d1) >= (m2, d2));
+    if !within_a_year {
+        let years = (y2 - y1 + 1) as f64;
+        let days: i64 = (y1..=y2).map(|y| if is_leap(y) { 366 } else { 365 }).sum();
+        return Some(days as f64 / years);
+    }
+    if y1 == y2 && is_leap(y1) {
+        return Some(366.0);
+    }
+    let leap_day = |y: i64| is_leap(y).then(|| date_to_serial(y, 2, 29));
+    let covered = [y1, y2]
+        .into_iter()
+        .filter_map(leap_day)
+        .any(|serial| (lo..=hi).contains(&serial));
+    Some(if covered { 366.0 } else { 365.0 })
+}
+
+/// the weekend pattern of the `.INTL` workday functions: seven flags starting
+/// at monday.
+#[derive(Clone, Copy)]
+struct Weekend([bool; 7]);
+
+impl Weekend {
+    /// `true` when the serial falls on a weekend day. serial 1 is a sunday, so
+    /// `serial % 7 == 2` is a monday.
+    fn covers(&self, serial: i64) -> bool {
+        self.0[(serial - 2).rem_euclid(7) as usize]
+    }
+
+    fn days(&self) -> usize {
+        self.0.iter().filter(|day| **day).count()
+    }
+}
+
+/// read the weekend argument: a seven-character mask starting at monday, or
+/// one of excel's numbered patterns (1..=7 pairs, 11..=17 single days).
+fn weekend_of(value: &CellValue) -> Result<Weekend, ErrorValue> {
+    if let CellValue::Text { value } = value {
+        let flags: Vec<bool> = value.chars().map(|ch| ch == '1').collect();
+        if flags.len() != 7 || value.chars().any(|ch| ch != '0' && ch != '1') {
+            return Err(ErrorValue::Value);
+        }
+        let mut mask = [false; 7];
+        mask.copy_from_slice(&flags);
+        return Ok(Weekend(mask));
+    }
+    let code = crate::eval::to_number(value)?.trunc() as i64;
+    let mut mask = [false; 7];
+    match code {
+        1..=7 => {
+            mask[(code + 4) as usize % 7] = true;
+            mask[(code + 5) as usize % 7] = true;
+        }
+        11..=17 => mask[(code - 12).rem_euclid(7) as usize] = true,
+        _ => return Err(ErrorValue::Num),
+    }
+    Ok(Weekend(mask))
+}
+
+fn weekend_arg(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<Weekend, ErrorValue> {
+    match args.get(index) {
+        None => weekend_of(&CellValue::Number { value: 1.0 }),
+        Some(arg) if omitted(arg) => weekend_of(&CellValue::Number { value: 1.0 }),
+        Some(arg) => match evaluate(arg, ctx) {
+            CellValue::Empty => weekend_of(&CellValue::Number { value: 1.0 }),
+            value => weekend_of(&value),
+        },
+    }
+}
+
+/// the holiday serials of the optional trailing argument.
+fn holidays_arg(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Vec<i64>, ErrorValue> {
+    let Some(arg) = args.get(index).filter(|arg| !omitted(arg)) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for value in crate::array::evaluate_array(arg, ctx).into_array().cells() {
+        match value {
+            CellValue::Number { value } => out.push(value.floor() as i64),
+            CellValue::Error { value } => return Err(*value),
+            CellValue::Text { value } => match crate::eval::parse_num(value) {
+                Some(number) => out.push(number.floor() as i64),
+                None => return Err(ErrorValue::Value),
+            },
+            _ => {}
+        }
+    }
+    Ok(out)
+}
+
+/// NETWORKDAYS.INTL(start, end, [weekend], [holidays]): working days between
+/// two dates, both ends included; a range that runs backwards counts negative.
+pub(crate) fn networkdays_intl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 4 {
+        return err(ErrorValue::Value);
+    }
+    let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let weekend = match weekend_arg(args, ctx, 2) {
+        Ok(w) => w,
+        Err(e) => return err(e),
+    };
+    let holidays = match holidays_arg(args, ctx, 3) {
+        Ok(h) => h,
+        Err(e) => return err(e),
+    };
+    if start < 0 || end < 0 {
+        return err(ErrorValue::Num);
+    }
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    let mut count = workdays_between(lo, hi, weekend);
+    let mut seen: Vec<i64> = Vec::new();
+    for holiday in holidays {
+        if (lo..=hi).contains(&holiday) && !weekend.covers(holiday) && !seen.contains(&holiday) {
+            seen.push(holiday);
+            count -= 1;
+        }
+    }
+    num(if start <= end {
+        count as f64
+    } else {
+        -count as f64
+    })
+}
+
+/// non-weekend days in an inclusive serial range, counted by whole weeks plus
+/// the remainder so a wide range costs no more than a narrow one.
+fn workdays_between(lo: i64, hi: i64, weekend: Weekend) -> i64 {
+    let span = hi - lo + 1;
+    let weeks = span / 7;
+    let mut count = weeks * (7 - weekend.days() as i64);
+    for offset in 0..span % 7 {
+        if !weekend.covers(lo + weeks * 7 + offset) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// WORKDAY.INTL(start, days, [weekend], [holidays]): the date `days` working
+/// days from `start`, skipping weekend days and holidays.
+pub(crate) fn workday_intl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 4 {
+        return err(ErrorValue::Value);
+    }
+    let (start, days) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(a), Ok(b)) => (a.floor() as i64, b.trunc() as i64),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let weekend = match weekend_arg(args, ctx, 2) {
+        Ok(w) => w,
+        Err(e) => return err(e),
+    };
+    let holidays = match holidays_arg(args, ctx, 3) {
+        Ok(h) => h,
+        Err(e) => return err(e),
+    };
+    if start < 0 {
+        return err(ErrorValue::Num);
+    }
+    if weekend.days() == 7 {
+        return err(ErrorValue::Value);
+    }
+    let step = if days < 0 { -1 } else { 1 };
+    let mut remaining = days.abs();
+    let mut current = start;
+    // whole weeks land on the same weekday, so only the remainder needs walking
+    let per_week = 7 - weekend.days() as i64;
+    let weeks = remaining / per_week;
+    if weeks > 0 && holidays.is_empty() {
+        current += step * weeks * 7;
+        remaining -= weeks * per_week;
+        if !(0..=MAX_SERIAL).contains(&current) {
+            return err(ErrorValue::Num);
+        }
+    }
+    while remaining > 0 {
+        current += step;
+        if !(0..=MAX_SERIAL).contains(&current) {
+            return err(ErrorValue::Num);
+        }
+        if !weekend.covers(current) && !holidays.contains(&current) {
+            remaining -= 1;
+        }
+    }
+    num(current as f64)
+}
+
+/// 9999-12-31, the last date excel can hold.
+const MAX_SERIAL: i64 = 2_958_465;

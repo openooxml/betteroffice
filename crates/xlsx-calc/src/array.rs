@@ -63,6 +63,11 @@ impl Array {
         )
     }
 
+    /// every cell, row-major.
+    pub fn cells(&self) -> &[CellValue] {
+        &self.values
+    }
+
     fn row_values(&self, row: usize) -> &[CellValue] {
         &self.values[row * self.cols..(row + 1) * self.cols]
     }
@@ -691,6 +696,8 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "XLOOKUP" => xlookup,
         "XMATCH" => xmatch,
         "LINEST" => linest,
+        "TREND" => trend,
+        "FREQUENCY" => frequency,
         "MMULT" => mmult,
         "MAX" => max,
         "MIN" => min,
@@ -1870,6 +1877,169 @@ fn linest(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         rows.push(row);
         Ok(from_rows(ctx, vars + 1, rows))
     })())
+}
+
+/// TREND(known_y, [known_x], [new_x], [const]): the least-squares line LINEST
+/// fits, evaluated at `new_x` (at the known predictors when it is omitted).
+fn trend(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.is_empty() || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let ys_block = argument(args, ctx, 0)?;
+        let n = output_cells(ys_block.rows, ys_block.cols)?;
+        let mut ys = Vec::with_capacity(n);
+        for row in 0..ys_block.rows {
+            for col in 0..ys_block.cols {
+                ys.push(to_number(&ys_block.at(row, col))?);
+            }
+        }
+        // predictors as columns; a y vector laid out in rows means x is too
+        let down = ys_block.cols == 1 && ys_block.rows > 1;
+        let xs = known_x(args, ctx, ys.len(), down)?;
+        let intercept = optional_bool(args, ctx, 3, true)?;
+        let fit = least_squares(&ys, &xs, intercept).ok_or(ErrorValue::Num)?;
+        let predict = |point: &[f64]| -> f64 {
+            fit.intercept + point.iter().zip(&fit.beta).map(|(x, b)| x * b).sum::<f64>()
+        };
+        let Some(new_block) = optional_block(args, ctx, 2)? else {
+            let cells = (0..ys.len())
+                .map(|o| num(predict(&column_at(&xs, o))))
+                .collect();
+            return Ok(block(ctx, ys_block.rows, ys_block.cols, cells));
+        };
+        if xs.len() == 1 {
+            let count = output_cells(new_block.rows, new_block.cols)?;
+            let mut cells = Vec::with_capacity(count);
+            for row in 0..new_block.rows {
+                for col in 0..new_block.cols {
+                    cells.push(num(predict(&[to_number(&new_block.at(row, col))?])));
+                }
+            }
+            return Ok(block(ctx, new_block.rows, new_block.cols, cells));
+        }
+        let (vars, points) = if down {
+            (new_block.cols, new_block.rows)
+        } else {
+            (new_block.rows, new_block.cols)
+        };
+        if vars != xs.len() {
+            return Err(ErrorValue::Ref);
+        }
+        let mut cells = Vec::with_capacity(points);
+        for point in 0..points {
+            let mut coordinates = Vec::with_capacity(vars);
+            for v in 0..vars {
+                let cell = if down {
+                    new_block.at(point, v)
+                } else {
+                    new_block.at(v, point)
+                };
+                coordinates.push(to_number(&cell)?);
+            }
+            cells.push(num(predict(&coordinates)));
+        }
+        Ok(if down {
+            block(ctx, points, 1, cells)
+        } else {
+            block(ctx, 1, points, cells)
+        })
+    })())
+}
+
+/// the predictor columns of a regression argument: the `known_x` block laid
+/// out one column per variable, or `{1;2;3;...}` when it is omitted.
+fn known_x(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    observations: usize,
+    down: bool,
+) -> Result<Vec<Vec<f64>>, ErrorValue> {
+    let Some(xb) = optional_block(args, ctx, 1)? else {
+        return Ok(vec![(1..=observations).map(|i| i as f64).collect()]);
+    };
+    let (vars, obs) = if down {
+        (xb.cols, xb.rows)
+    } else {
+        (xb.rows, xb.cols)
+    };
+    if obs != observations {
+        return Err(ErrorValue::Ref);
+    }
+    let mut columns = Vec::with_capacity(vars);
+    for v in 0..vars {
+        let mut column = Vec::with_capacity(obs);
+        for o in 0..obs {
+            let cell = if down { xb.at(o, v) } else { xb.at(v, o) };
+            column.push(to_number(&cell)?);
+        }
+        columns.push(column);
+    }
+    Ok(columns)
+}
+
+/// one observation's coordinates across every predictor column.
+fn column_at(xs: &[Vec<f64>], observation: usize) -> Vec<f64> {
+    xs.iter().map(|column| column[observation]).collect()
+}
+
+/// an optional block argument; an omitted or blank slot gives `None`.
+fn optional_block(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    index: usize,
+) -> Result<Option<Array>, ErrorValue> {
+    let Some(arg) = args.get(index) else {
+        return Ok(None);
+    };
+    if crate::functions::omitted(arg) {
+        return Ok(None);
+    }
+    match evaluate_array(arg, ctx) {
+        Value::Scalar(CellValue::Error { value }) => Err(value),
+        Value::Scalar(CellValue::Empty) => Ok(None),
+        Value::Scalar(value) => Array::new(1, 1, vec![value]).map(Some),
+        Value::Array(array) => Ok(Some(array)),
+        Value::Lambda(_) => Err(ErrorValue::Value),
+    }
+}
+
+/// FREQUENCY(data, bins): how many of `data` land in each interval the sorted
+/// `bins` cut out, as a column one taller than `bins`. non-numeric cells are
+/// ignored on both sides.
+fn frequency(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() != 2 {
+            return Err(ErrorValue::Value);
+        }
+        let data = numbers_in(&argument(args, ctx, 0)?)?;
+        let mut bins = numbers_in(&argument(args, ctx, 1)?)?;
+        bins.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let mut counts = vec![0.0; bins.len() + 1];
+        for value in data {
+            counts[bins.partition_point(|bin| *bin < value)] += 1.0;
+        }
+        Ok(block(
+            ctx,
+            counts.len(),
+            1,
+            counts.into_iter().map(num).collect(),
+        ))
+    })())
+}
+
+/// the numbers a block holds, skipping text, blanks and logicals as the
+/// distribution functions do; an error cell propagates.
+fn numbers_in(array: &Array) -> Result<Vec<f64>, ErrorValue> {
+    let mut out = Vec::new();
+    for value in array.cells() {
+        match value {
+            CellValue::Number { value } => out.push(*value),
+            CellValue::Error { value } => return Err(*value),
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 /// coefficients and the regression statistics excel reports beside them.
