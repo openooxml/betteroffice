@@ -743,7 +743,27 @@ pub(crate) fn parse_num(s: &str) -> Option<f64> {
     if let Some(rest) = s.strip_suffix('%') {
         return parse_num(rest).map(|value| value / 100.0);
     }
-    parse_clock(s)
+    parse_mixed_fraction(s).or_else(|| parse_clock(s))
+}
+
+/// a mixed number — `"1 1/4"` — as excel coerces it. a bare `"1/4"` is not
+/// one: excel reads that as a date, so it stays for the caller to refuse.
+fn parse_mixed_fraction(s: &str) -> Option<f64> {
+    let (whole, fraction) = s.split_once(' ')?;
+    let (numerator, denominator) = fraction.trim_start().split_once('/')?;
+    let digits = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<f64>().ok())
+            .flatten()
+    };
+    let (sign, whole) = match whole.strip_prefix('-') {
+        Some(rest) => (-1.0, rest),
+        None => (1.0, whole.strip_prefix('+').unwrap_or(whole)),
+    };
+    let whole = digits(whole)?;
+    let numerator = digits(numerator)?;
+    let denominator = digits(denominator).filter(|value| *value != 0.0)?;
+    Some(sign * (whole + numerator / denominator))
 }
 
 /// a text time — `"0:15"`, `"12:30:45"`, either with a meridiem — as the

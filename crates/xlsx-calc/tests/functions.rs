@@ -1232,3 +1232,25 @@ fn text_compares_by_collation() {
         ("MATCH(\"[a]\",{\"[a]\";\"[a0]\"},0)", n(1.0)),
     ]);
 }
+
+/// a mixed number coerces the way excel coerces it. a bare fraction does
+/// not: excel reads `"1/4"` as a date, so reading it as a quarter would be
+/// wrong even where the year is unknown.
+#[test]
+fn mixed_numbers_coerce() {
+    check(&[
+        ("\"1 1/4\"+0", n(1.25)),
+        ("\"0 3/4\"+0", n(0.75)),
+        ("\"-2 1/2\"+0", n(-2.5)),
+        ("\"1 5/4\"+0", n(2.25)),
+        ("VALUE(\"3 1/2\")", n(3.5)),
+        ("CONVERT(\"1 1/4\", \"in\", \"m\")", n(0.03175)),
+        ("\"1/4\"+0", e(ErrorValue::Value)),
+        ("\"1 1/0\"+0", e(ErrorValue::Value)),
+        ("\"1 1/4 cups\"+0", e(ErrorValue::Value)),
+        ("\"a 1/4\"+0", e(ErrorValue::Value)),
+        ("\"1 x/4\"+0", e(ErrorValue::Value)),
+        // the clock reading the same helper does is untouched
+        ("\"0:15\"+0", n(0.010416666666666666)),
+    ]);
+}
