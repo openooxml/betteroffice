@@ -1285,8 +1285,13 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         Some(Value::Scalar(CellValue::Empty)) | None => None,
         Some(value) => Some(value),
     };
-    // an array index answers once per element, over the broadcast rectangle
-    if matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_))) {
+    // excel picks the form from the first argument: over a reference INDEX
+    // answers with one reference, so an array index collapses to its first
+    // element; only the array form answers once per index
+    let reference = args
+        .first()
+        .is_some_and(|arg| indexes_a_reference(arg, ctx));
+    if !reference && (matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_)))) {
         return index_each(args, ctx, &rows, cols.as_ref());
     }
     let mut spliced = args.to_vec();
@@ -1294,11 +1299,23 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if let Some(value) = cols {
         spliced[2] = Expr::Literal(value.into_scalar());
     }
-    index_one(&spliced, ctx)
+    index_one(&spliced, ctx, reference)
 }
 
-fn index_one(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
-    if args.first().is_some_and(|arg| as_area(arg, ctx).is_some())
+/// whether `INDEX`'s first argument is a reference, which selects its
+/// reference form. a `LET` name holds the value it was bound to, so indexing
+/// one takes the array form even when that value came from a range.
+fn indexes_a_reference(expr: &Expr, ctx: &EvalContext<'_>) -> bool {
+    if let Expr::Name { scope, name } = expr
+        && crate::eval::bound(scope, name, ctx).is_some()
+    {
+        return false;
+    }
+    as_area(expr, ctx).is_some()
+}
+
+fn index_one(args: &[Expr], ctx: &EvalContext<'_>, reference: bool) -> Value {
+    if reference
         && !whole_axis(args.get(1))
         && !whole_axis(args.get(2))
         && let Some(f) = crate::functions::resolve("INDEX")

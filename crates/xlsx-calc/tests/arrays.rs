@@ -777,20 +777,43 @@ fn index_returns_a_whole_axis() {
 }
 
 /// `INDEX(block, {3;1})` answers once per index, over the rectangle the row
-/// and column indices broadcast to.
+/// `INDEX` over a reference is excel's reference form: it answers with one
+/// reference, so an array index collapses to its first element.
 #[test]
-fn index_answers_once_per_array_index() {
+fn index_over_a_reference_takes_the_first_index() {
+    let workbook = fixture();
+    assert_eq!(values("INDEX(A1:A4,{3;1})", &workbook), vec![t("pear")]);
+    assert_eq!(values("INDEX(A1:B4,1,{2,1})", &workbook), vec![n(3.0)]);
+    assert_eq!(
+        values(
+            "INDEX(A1:B4,MATCH(\"pear\",A1:A4,0),COLUMN(A1:B1))",
+            &workbook
+        ),
+        vec![t("pear")]
+    );
+}
+
+/// over a value it is the array form, which answers once per index. a `LET`
+/// name holds a value, so indexing one lifts even though it came from a range.
+#[test]
+fn index_over_a_block_answers_once_per_array_index() {
     let workbook = fixture();
     assert_eq!(
-        arrayed("INDEX(A1:A4,_xlfn.SEQUENCE(3,,4,-1))", &workbook),
+        arrayed(
+            "INDEX(_xlfn.VSTACK(A1:A4),_xlfn.SEQUENCE(3,,4,-1))",
+            &workbook
+        ),
         (3, 1, vec![t("apple"), t("pear"), t("apple")])
     );
     assert_eq!(
-        arrayed("INDEX(A1:B4,{2;3},{1,2})", &workbook),
+        arrayed(
+            "_xlfn.LET(_xlpm.d,A1:B4,INDEX(_xlpm.d,{2;3},{1,2}))",
+            &workbook
+        ),
         (2, 2, vec![t("apple"), n(1.0), t("pear"), n(4.0)])
     );
     assert_eq!(
-        arrayed("INDEX(A1:A4,{1;9})", &workbook),
+        arrayed("INDEX(_xlfn.VSTACK(A1:A4),{1;9})", &workbook),
         (
             2,
             1,
