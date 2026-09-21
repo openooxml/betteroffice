@@ -553,7 +553,8 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "COUNTIFS" => &[1, 3, 5, 7, 9],
         "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
         "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
-        "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" => &[0],
+        "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" | "XMATCH" => &[0],
+        "LARGE" | "SMALL" => &[1],
         _ => return None,
     })
 }
@@ -564,13 +565,20 @@ fn lifts(name: &str) -> bool {
     matches!(
         name,
         "ABS"
+            | "ACOS"
+            | "ASIN"
+            | "ATAN"
+            | "ATAN2"
             | "CEILING"
             | "CHAR"
             | "CLEAN"
             | "CODE"
+            | "COS"
+            | "COSH"
             | "DATE"
             | "DATEDIF"
             | "DAY"
+            | "DEGREES"
             | "EDATE"
             | "EOMONTH"
             | "EXACT"
@@ -582,9 +590,12 @@ fn lifts(name: &str) -> bool {
             | "ISBLANK"
             | "ISERR"
             | "ISERROR"
+            | "ISEVEN"
             | "ISLOGICAL"
             | "ISNA"
             | "ISNUMBER"
+            | "ISODD"
+            | "ISOWEEKNUM"
             | "ISTEXT"
             | "LEFT"
             | "LEN"
@@ -602,6 +613,8 @@ fn lifts(name: &str) -> bool {
             | "NUMBERVALUE"
             | "POWER"
             | "PROPER"
+            | "QUOTIENT"
+            | "RADIANS"
             | "REPLACE"
             | "REPT"
             | "RIGHT"
@@ -611,17 +624,23 @@ fn lifts(name: &str) -> bool {
             | "SEARCH"
             | "SECOND"
             | "SIGN"
+            | "SIN"
+            | "SINH"
             | "SQRT"
             | "SUBSTITUTE"
             | "T"
+            | "TAN"
             | "TANH"
             | "TEXT"
+            | "TEXTAFTER"
+            | "TEXTBEFORE"
             | "TIME"
             | "TRIM"
             | "TRUNC"
             | "UPPER"
             | "VALUE"
             | "WEEKDAY"
+            | "WEEKNUM"
             | "YEAR"
     )
 }
@@ -1187,6 +1206,27 @@ fn dimension(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 }
 
 fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    if args.len() < 2 || args.len() > 3 {
+        return Value::error(ErrorValue::Value);
+    }
+    let rows = evaluate_array(&args[1], ctx);
+    let cols = match args.get(2).map(|arg| evaluate_array(arg, ctx)) {
+        Some(Value::Scalar(CellValue::Empty)) | None => None,
+        Some(value) => Some(value),
+    };
+    // an array index answers once per element, over the broadcast rectangle
+    if matches!(rows, Value::Array(_)) || matches!(cols, Some(Value::Array(_))) {
+        return index_each(args, ctx, &rows, cols.as_ref());
+    }
+    let mut spliced = args.to_vec();
+    spliced[1] = Expr::Literal(rows.into_scalar());
+    if let Some(value) = cols {
+        spliced[2] = Expr::Literal(value.into_scalar());
+    }
+    index_one(&spliced, ctx)
+}
+
+fn index_one(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     if args.first().is_some_and(|arg| as_area(arg, ctx).is_some())
         && !whole_axis(args.get(1))
         && !whole_axis(args.get(2))
@@ -1195,9 +1235,6 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         return Value::Scalar(f.call(args, ctx));
     }
     result((|| {
-        if args.len() < 2 || args.len() > 3 {
-            return Err(ErrorValue::Value);
-        }
         let data = argument(args, ctx, 0)?;
         let first = optional_number(args, ctx, 1, 0.0)?.trunc();
         let second = match args.len() {
@@ -1222,11 +1259,59 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     })())
 }
 
+/// `INDEX(block, {1;3;2})`: one pick per index, laid out over the rectangle
+/// the row and column indices broadcast to.
+fn index_each(args: &[Expr], ctx: &EvalContext<'_>, rows: &Value, cols: Option<&Value>) -> Value {
+    result((|| {
+        let data = argument(args, ctx, 0)?;
+        let (index_rows, index_cols) = rows.dims();
+        let (other_rows, other_cols) = cols.map_or((1, 1), Value::dims);
+        let out_rows = index_rows.max(other_rows);
+        let out_cols = index_cols.max(other_cols);
+        let count = output_cells(out_rows, out_cols)?;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..out_rows {
+            for col in 0..out_cols {
+                cells.push(pick(
+                    &data,
+                    rows.broadcast(row, col),
+                    cols.map(|c| c.broadcast(row, col)),
+                ));
+            }
+        }
+        Ok(block(ctx, out_rows, out_cols, cells))
+    })())
+}
+
+fn pick(data: &Array, row: CellValue, col: Option<CellValue>) -> CellValue {
+    let index = |value: CellValue| to_number(&value).map(f64::trunc);
+    let first = match index(row) {
+        Ok(value) => value,
+        Err(error) => return err(error),
+    };
+    let second = match col.map(index) {
+        Some(Ok(value)) => Some(value),
+        Some(Err(error)) => return err(error),
+        None => None,
+    };
+    let (row, col) = match second {
+        Some(col) => (first, col),
+        None if data.rows == 1 && data.cols > 1 => (1.0, first),
+        None => (first, 1.0),
+    };
+    if row < 1.0 || col < 1.0 || row > data.rows as f64 || col > data.cols as f64 {
+        return err(ErrorValue::Ref);
+    }
+    data.at(row as usize - 1, col as usize - 1)
+}
+
 /// whether an `INDEX` index asks for a whole row or column rather than one
 /// cell, which the single-cell scalar path cannot answer.
 fn whole_axis(arg: Option<&Expr>) -> bool {
     arg.is_some_and(|expr| {
-        crate::functions::omitted(expr) || matches!(expr, Expr::Number(value) if *value == 0.0)
+        crate::functions::omitted(expr)
+            || matches!(expr, Expr::Number(value) if *value == 0.0)
+            || matches!(expr, Expr::Literal(CellValue::Number { value }) if *value == 0.0)
     })
 }
 

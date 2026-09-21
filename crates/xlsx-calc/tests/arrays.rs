@@ -776,6 +776,53 @@ fn index_returns_a_whole_axis() {
     );
 }
 
+/// `INDEX(block, {3;1})` answers once per index, over the rectangle the row
+/// and column indices broadcast to.
+#[test]
+fn index_answers_once_per_array_index() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("INDEX(A1:A4,_xlfn.SEQUENCE(3,,4,-1))", &workbook),
+        (3, 1, vec![t("apple"), t("pear"), t("apple")])
+    );
+    assert_eq!(
+        arrayed("INDEX(A1:B4,{2;3},{1,2})", &workbook),
+        (2, 2, vec![t("apple"), n(1.0), t("pear"), n(4.0)])
+    );
+    assert_eq!(
+        arrayed("INDEX(A1:A4,{1;9})", &workbook),
+        (
+            2,
+            1,
+            vec![
+                t("  pear "),
+                CellValue::Error {
+                    value: ErrorValue::Ref
+                }
+            ]
+        )
+    );
+}
+
+/// a text builtin with no array-aware form still answers once per element.
+#[test]
+fn text_builtins_lift_over_a_range() {
+    let workbook = fixture();
+    assert_eq!(
+        values(r#"_xlfn.TEXTBEFORE(A1:A4,"p")"#, &workbook),
+        vec![t("  "), t("a"), t(""), t("a")]
+    );
+    assert_eq!(
+        values("ISODD(B1:B4)", &workbook),
+        vec![
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: true },
+            CellValue::Bool { value: false },
+            CellValue::Bool { value: false },
+        ]
+    );
+}
+
 /// a callback body that reads a bound block pays for each read, so a large one
 /// cannot be copied for free once per output cell.
 #[test]
