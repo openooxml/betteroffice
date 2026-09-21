@@ -96,7 +96,7 @@ fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> Cel
         Ok(d) => d,
         Err(e) => return err(e),
     };
-    let instance = match args.get(2) {
+    let instance = match given(args, 2) {
         Some(_) => match nth_int(args, ctx, 2) {
             Ok(0) => return err(ErrorValue::Value),
             Ok(i) => i,
@@ -104,14 +104,14 @@ fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> Cel
         },
         None => 1,
     };
-    let insensitive = match args.get(3) {
+    let insensitive = match given(args, 3) {
         Some(_) => match nth_int(args, ctx, 3) {
             Ok(m) => m != 0,
             Err(e) => return err(e),
         },
         None => false,
     };
-    let match_end = match args.get(4) {
+    let match_end = match given(args, 4) {
         Some(_) => match nth_int(args, ctx, 4) {
             Ok(m) => m != 0,
             Err(e) => return err(e),
@@ -148,10 +148,17 @@ fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> Cel
 }
 
 fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    match args.get(5) {
+    match given(args, 5) {
         Some(fallback) => evaluate(fallback, ctx),
         None => err(ErrorValue::NA),
     }
+}
+
+/// an argument the call actually supplies; `f(a,b,,,,c)` leaves the skipped
+/// ones as blanks, which mean "use the default", not "use zero".
+fn given<'a>(args: &'a [Expr], index: usize) -> Option<&'a Expr> {
+    args.get(index)
+        .filter(|arg| !crate::functions::omitted(arg))
 }
 
 pub(crate) fn trim(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {

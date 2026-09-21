@@ -804,6 +804,52 @@ fn index_answers_once_per_array_index() {
     );
 }
 
+/// `XLOOKUP` over a two-dimensional result answers with the whole row its
+/// lookup vector picks, and accepts a vector the formula computed.
+#[test]
+fn xlookup_picks_a_row_of_a_block() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed(r#"_xlfn.XLOOKUP("pear",A1:A4,A1:B4)"#, &workbook),
+        (1, 2, vec![t("pear"), n(4.0)])
+    );
+    assert_eq!(
+        values(r#"_xlfn.XLOOKUP(1,(A1:A4="apple")*1,B1:B4)"#, &workbook),
+        vec![n(1.0)]
+    );
+    assert_eq!(
+        values(r#"_xlfn.XLOOKUP("fig",A1:A4,B1:B4,"none")"#, &workbook),
+        vec![t("none")]
+    );
+}
+
+/// match mode picks the nearest value either side of the key; search mode -1
+/// reads the vector from the end.
+#[test]
+fn xlookup_honours_match_and_search_modes() {
+    let workbook = fixture();
+    assert_eq!(
+        values("_xlfn.XLOOKUP(3.5,B1:B4,A1:A4,,-1)", &workbook),
+        vec![t("  pear ")]
+    );
+    assert_eq!(
+        values("_xlfn.XLOOKUP(3.5,B1:B4,A1:A4,,1)", &workbook),
+        vec![t("pear")]
+    );
+    assert_eq!(
+        values(r#"_xlfn.XMATCH("apple",A1:A4)"#, &workbook),
+        vec![n(2.0)]
+    );
+    assert_eq!(
+        values(r#"_xlfn.XMATCH("apple",A1:A4,0,-1)"#, &workbook),
+        vec![n(4.0)]
+    );
+    assert_eq!(
+        values(r#"_xlfn.XMATCH({"pear";"apple"},A1:A4)"#, &workbook),
+        vec![n(3.0), n(2.0)]
+    );
+}
+
 /// a text builtin with no array-aware form still answers once per element.
 #[test]
 fn text_builtins_lift_over_a_range() {

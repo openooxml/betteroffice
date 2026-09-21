@@ -688,6 +688,8 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "COUNT" => count,
         "COUNTA" => counta,
         "MATCH" => match_,
+        "XLOOKUP" => xlookup,
+        "XMATCH" => xmatch,
         "LINEST" => linest,
         "MMULT" => mmult,
         "MAX" => max,
@@ -1549,6 +1551,156 @@ fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         }
         best.map(|position| Value::Scalar(num(position as f64)))
             .ok_or(ErrorValue::NA)
+    })())
+}
+
+/// the position `key` takes in a lookup vector, honouring excel's match and
+/// search modes. `None` is `#N/A`.
+fn lookup_position(lookup: &Array, key: &CellValue, mode: f64, search: f64) -> Option<usize> {
+    use std::cmp::Ordering;
+    let count = lookup.values.len();
+    let reverse = search < 0.0;
+    let mut approximate: Option<(usize, &CellValue)> = None;
+    for step in 0..count {
+        let position = if reverse { count - 1 - step } else { step };
+        let value = &lookup.values[position];
+        if mode == 2.0 {
+            let (Ok(pattern), Ok(text)) = (to_text(key), to_text(value)) else {
+                continue;
+            };
+            if crate::functions::criteria::wildcard_match(
+                &pattern.to_lowercase(),
+                &text.to_lowercase(),
+            ) {
+                return Some(position);
+            }
+            continue;
+        }
+        let ordering = cmp_values(value, key);
+        if ordering == Ordering::Equal {
+            return Some(position);
+        }
+        // -1 keeps the largest value below the key, 1 the smallest above it
+        let wanted = match mode {
+            m if m < 0.0 => Ordering::Less,
+            m if m > 0.0 => Ordering::Greater,
+            _ => continue,
+        };
+        if ordering != wanted {
+            continue;
+        }
+        let better = approximate.is_none_or(|(_, best)| match wanted {
+            Ordering::Less => cmp_values(value, best) == Ordering::Greater,
+            _ => cmp_values(value, best) == Ordering::Less,
+        });
+        if better {
+            approximate = Some((position, value));
+        }
+    }
+    approximate.map(|(position, _)| position)
+}
+
+/// how a lookup vector addresses a result block: down its rows, or across its
+/// columns. `None` is a mismatch between the two.
+fn lookup_axis(lookup: &Array, data: &Array) -> Option<bool> {
+    if lookup.rows > 1 && lookup.cols > 1 {
+        return None;
+    }
+    let count = lookup.values.len();
+    if lookup.cols == 1 && data.rows == count {
+        return Some(true);
+    }
+    if lookup.rows == 1 && data.cols == count {
+        return Some(false);
+    }
+    match (data.rows == count, data.cols == count) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// `XLOOKUP(key, lookup, result, [if_not_found], [match_mode], [search_mode])`:
+/// the lookup vector picks a whole row or column of the result block, so a
+/// two-dimensional result answers with a block rather than one cell.
+fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 3 || args.len() > 6 {
+            return Err(ErrorValue::Value);
+        }
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
+        }
+        let lookup = argument(args, ctx, 1)?;
+        let data = argument(args, ctx, 2)?;
+        let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
+        let search = optional_number(args, ctx, 5, 1.0)?.trunc();
+        let down = lookup_axis(&lookup, &data).ok_or(ErrorValue::Value)?;
+        let missing = || match args.get(3).filter(|arg| !crate::functions::omitted(arg)) {
+            Some(arg) => evaluate_array(arg, ctx).into_scalar(),
+            None => err(ErrorValue::NA),
+        };
+        let slice = |key: &CellValue| match lookup_position(&lookup, key, mode, search) {
+            Some(position) if down => rows_of(&data, position),
+            Some(position) => column_of(&data, position),
+            None => vec![missing()],
+        };
+        // one key against a vector answers per key; a block result needs one
+        if (down && data.cols == 1) || (!down && data.rows == 1) {
+            let (rows, cols) = keys.dims();
+            let count = output_cells(rows, cols)?;
+            let mut cells = Vec::with_capacity(count);
+            for row in 0..rows {
+                for col in 0..cols {
+                    cells.push(
+                        slice(&keys.broadcast(row, col))
+                            .into_iter()
+                            .next()
+                            .unwrap_or(err(ErrorValue::NA)),
+                    );
+                }
+            }
+            return Ok(block(ctx, rows, cols, cells));
+        }
+        let picked = slice(&keys.broadcast(0, 0));
+        let (rows, cols) = if down {
+            (1, picked.len())
+        } else {
+            (picked.len(), 1)
+        };
+        Ok(block(ctx, rows, cols, picked))
+    })())
+}
+
+/// `XMATCH(key, lookup, [match_mode], [search_mode])`: the key's 1-based
+/// position, once per key.
+fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 4 {
+            return Err(ErrorValue::Value);
+        }
+        let keys = evaluate_array(&args[0], ctx);
+        if let Some(error) = keys.as_error() {
+            return Err(error);
+        }
+        let lookup = argument(args, ctx, 1)?;
+        let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
+        let search = optional_number(args, ctx, 3, 1.0)?.trunc();
+        let (rows, cols) = keys.dims();
+        let count = output_cells(rows, cols)?;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                cells.push(
+                    match lookup_position(&lookup, &keys.broadcast(row, col), mode, search) {
+                        Some(position) => num(position as f64 + 1.0),
+                        None => err(ErrorValue::NA),
+                    },
+                );
+            }
+        }
+        Ok(block(ctx, rows, cols, cells))
     })())
 }
 
