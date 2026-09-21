@@ -516,21 +516,6 @@ impl Lexer<'_> {
         }
     }
 
-    fn finish_rows(
-        &mut self,
-        sheet: Option<String>,
-        start_word: &str,
-        start: usize,
-    ) -> Result<TokKind, ParseError> {
-        self.skip_ws();
-        self.bump();
-        self.skip_ws();
-        let end_word = self.read_word();
-        let range = RowRange::parse_a1(&format!("{start_word}:{end_word}"))
-            .map_err(|error| ParseError::new(start, format!("invalid row range: {error}")))?;
-        Ok(TokKind::RowRange { sheet, range })
-    }
-
     /// whether the digits at the cursor open a `12:34` whole-row reference
     /// rather than a plain number.
     fn starts_row_range(&self) -> bool {
