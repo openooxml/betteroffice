@@ -220,6 +220,12 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
                 None => Value::error(ErrorValue::Ref),
             }
         }
+        // a join's ends may fail for their own reason, which scalar
+        // evaluation reports and `as_area` would flatten to "not a reference"
+        Expr::RangeJoin { .. } => match as_array_area(expr, ctx) {
+            Some(area) => area_values(&area, ctx),
+            None => Value::Scalar(evaluate(expr, ctx)),
+        },
         Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
             Ok(area) => area_values(&area, ctx),
             Err(error) => Value::error(error),
@@ -667,6 +673,7 @@ pub(crate) fn args_need_array(args: &[Expr]) -> bool {
             }
             Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, depth - 1),
             Expr::Binary { lhs, rhs, .. } => walk(lhs, depth - 1) || walk(rhs, depth - 1),
+            Expr::RangeJoin { start, end } => walk(start, depth - 1) || walk(end, depth - 1),
             _ => false,
         }
     }

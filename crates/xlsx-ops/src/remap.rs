@@ -757,10 +757,11 @@ fn rewrite_defined_name(
             continue;
         }
         // Whole-column names still need the token rewriter's ambiguity checks.
-        let Some(expr) = parse_formula(component)
-            .ok()
-            .filter(|expr| !contains_column_range(expr) && !contains_table_reference(expr))
-        else {
+        let Some(expr) = parse_formula(component).ok().filter(|expr| {
+            !contains_column_range(expr)
+                && !contains_table_reference(expr)
+                && !contains_range_join(expr)
+        }) else {
             match rewrite_reference_tokens(component, op, matches_target, global, names) {
                 DefinedNameRewrite::Unchanged => {
                     rewritten.push(component.to_owned());
@@ -1269,6 +1270,9 @@ fn contains_unqualified_reference(expr: &Expr) -> bool {
         Expr::Binary { lhs, rhs, .. } => {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
         }
+        Expr::RangeJoin { start, end } => {
+            contains_unqualified_reference(start) || contains_unqualified_reference(end)
+        }
         Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
         _ => false,
     }
@@ -1284,7 +1288,23 @@ fn contains_table_reference(expr: &Expr) -> bool {
         Expr::Binary { lhs, rhs, .. } => {
             contains_table_reference(lhs) || contains_table_reference(rhs)
         }
+        Expr::RangeJoin { start, end } => {
+            contains_table_reference(start) || contains_table_reference(end)
+        }
         Expr::FuncCall { args, .. } => args.iter().any(contains_table_reference),
+        _ => false,
+    }
+}
+
+/// A name written with the range operator keeps the token rewriter, whose
+/// ambiguity checks the ast path does not reproduce — an unqualified end of a
+/// workbook name binds to whichever sheet is active, so it cannot be moved.
+fn contains_range_join(expr: &Expr) -> bool {
+    match expr {
+        Expr::RangeJoin { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_range_join(expr),
+        Expr::Binary { lhs, rhs, .. } => contains_range_join(lhs) || contains_range_join(rhs),
+        Expr::FuncCall { args, .. } => args.iter().any(contains_range_join),
         _ => false,
     }
 }
@@ -1294,6 +1314,9 @@ fn contains_column_range(expr: &Expr) -> bool {
         Expr::ColumnRange { .. } | Expr::RowRange { .. } => true,
         Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_column_range(expr),
         Expr::Binary { lhs, rhs, .. } => contains_column_range(lhs) || contains_column_range(rhs),
+        Expr::RangeJoin { start, end } => {
+            contains_column_range(start) || contains_column_range(end)
+        }
         Expr::FuncCall { args, .. } => args.iter().any(contains_column_range),
         _ => false,
     }
@@ -2085,6 +2108,10 @@ fn transform(
                 .iter()
                 .map(|a| transform(a, op, matches_target, changed))
                 .collect(),
+        },
+        Expr::RangeJoin { start, end } => Expr::RangeJoin {
+            start: Box::new(transform(start, op, matches_target, changed)),
+            end: Box::new(transform(end, op, matches_target, changed)),
         },
         _ => expr.clone(),
     }

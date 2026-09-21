@@ -992,3 +992,70 @@ fn descriptive_aggregates() {
     approx("SUMSQ({1,2,3})", 14.0);
     approx("AVEDEV({1,2,3,4})", 1.0);
 }
+
+/// the range operator spans two references that only resolve at evaluation
+/// time. A1:A5 = 10..50, C1:C5 = 1..5.
+#[test]
+fn range_operator_spans_resolved_endpoints() {
+    check(&[
+        ("SUM(A1:INDEX(A1:A5,3))", n(60.0)),
+        ("MIN(A1:INDEX(A1:A5,3))", n(10.0)),
+        ("SUM(INDEX(A1:A5,2):INDEX(A1:A5,4))", n(90.0)),
+        ("SUM(A1:OFFSET(A1,2,0))", n(60.0)),
+        ("SUM($A$1:OFFSET($A$1,,))", n(10.0)),
+        ("COUNT(A1:INDEX(A:A,5))", n(5.0)),
+        ("ROWS(A1:INDEX(A1:A5,3))", n(3.0)),
+        ("SUM(A1:INDEX(A1:C5,3,2))", n(60.0)),
+        ("INDEX(A1:A5,1):INDEX(A1:A5,1)", n(10.0)),
+        // an end that cannot resolve reports its own error, not #VALUE!
+        ("SUM(A1:INDEX(A1:A5,MATCH(99,C1:C5,0)))", e(ErrorValue::NA)),
+        (
+            "IFERROR(MIN(A1:INDEX(A1:A5,MATCH(99,C1:C5,0))),\"x\")",
+            t("x"),
+        ),
+        ("SUM(A1:INDEX(A1:A5,99))", e(ErrorValue::Ref)),
+        ("SUM(A1:#REF!)", e(ErrorValue::Ref)),
+        ("SUM(A1:OFFSET(A1,-1,0))", e(ErrorValue::Ref)),
+        ("SUM(A1:SUM(1))", e(ErrorValue::Ref)),
+    ]);
+}
+
+/// a join whose ends sit on different sheets designates nothing.
+#[test]
+fn range_operator_refuses_two_sheets() {
+    let mut workbook = Workbook::default();
+    let mut first = Sheet::new("Sheet1");
+    first.set_cell(
+        CellRef::parse_a1("A1").unwrap(),
+        Cell {
+            value: n(7.0),
+            ..Cell::default()
+        },
+    );
+    workbook.sheets.push(first);
+    workbook.sheets.push(Sheet::new("Other"));
+    let context = EvalContext::new(&workbook, SheetId(0));
+    let value = |src: &str| evaluate(&parse_formula(src).unwrap(), &context);
+    assert_eq!(value("SUM(A1:Other!B2)"), e(ErrorValue::Ref));
+    assert_eq!(
+        value("SUM(Sheet1!A1:INDEX(Other!A1:A9,2))"),
+        e(ErrorValue::Ref)
+    );
+    assert_eq!(value("SUM(Sheet1!A1:INDEX(Sheet1!A1:A9,2))"), n(7.0));
+}
+
+/// INDEX and OFFSET resolve references inside array formulas too, so an
+/// index scalar evaluation cannot read is retried elementwise. B1:B5 holds
+/// fruit names of length 5, 6, 5, 6, 5.
+#[test]
+fn reference_indexes_fall_back_to_array_evaluation() {
+    check(&[
+        ("LEN(B1:B5)", e(ErrorValue::Value)),
+        ("INDEX(A1:A5,MATCH(6,LEN(B1:B5),0))", n(20.0)),
+        ("OFFSET(A1,MATCH(6,LEN(B1:B5),0),0)", n(30.0)),
+        ("SUM(A1:INDEX(A1:A5,MATCH(6,LEN(B1:B5),0)))", n(30.0)),
+        // a reference index keeps its scalar answer rather than its first cell
+        ("INDEX(A1:A5,C1:C3)", e(ErrorValue::Value)),
+        ("INDEX(A1:A5,1/0)", e(ErrorValue::Div0)),
+    ]);
+}

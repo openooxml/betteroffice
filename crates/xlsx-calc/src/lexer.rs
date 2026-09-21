@@ -104,6 +104,9 @@ pub enum TokKind {
     LParen,
     RParen,
     Comma,
+    /// the range operator between two references, as in `A1:INDEX(..)`.
+    /// a literal `A1:B2` is one `Range` token and never reaches here.
+    Colon,
     LBrace,
     RBrace,
     Semicolon,
@@ -141,6 +144,7 @@ impl Lexer<'_> {
                 '(' => self.punct(TokKind::LParen),
                 ')' => self.punct(TokKind::RParen),
                 ',' => self.punct(TokKind::Comma),
+                ':' => self.punct(TokKind::Colon),
                 '{' => self.punct(TokKind::LBrace),
                 '}' => self.punct(TokKind::RBrace),
                 ';' => self.punct(TokKind::Semicolon),
@@ -359,14 +363,8 @@ impl Lexer<'_> {
             return Ok(TokKind::Ident(word));
         }
 
-        if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
-            return self.finish_columns(None, &word, start);
-        }
-        if self.input[self.pos..].trim_start().starts_with(':') && row(&word).is_ok() {
-            return self.finish_rows(None, &word, start);
-        }
-        if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
-            return self.finish_range(None, &word, start);
+        if let Some(kind) = self.try_range_token(&None, &word) {
+            return Ok(kind);
         }
 
         match CellRef::parse_a1(&word) {
@@ -448,14 +446,8 @@ impl Lexer<'_> {
         if word.is_empty() {
             return Err(ParseError::new(start, "expected reference or defined name"));
         }
-        if self.input[self.pos..].trim_start().starts_with(':') && column(&word).is_ok() {
-            return self.finish_columns(sheet, &word, start);
-        }
-        if self.input[self.pos..].trim_start().starts_with(':') && row(&word).is_ok() {
-            return self.finish_rows(sheet, &word, start);
-        }
-        if self.peek() == Some(':') && CellRef::parse_a1(&word).is_ok() {
-            return self.finish_range(sheet, &word, start);
+        if let Some(kind) = self.try_range_token(&sheet, &word) {
+            return Ok(kind);
         }
         match CellRef::parse_a1(&word) {
             Ok(cell) => Ok(TokKind::Ref { sheet, cell }),
@@ -466,39 +458,61 @@ impl Lexer<'_> {
         }
     }
 
-    /// consume `:end` and build a range from an already-read start segment.
-    fn finish_range(
-        &mut self,
-        sheet: Option<String>,
-        start_word: &str,
-        start: usize,
-    ) -> Result<TokKind, ParseError> {
+    /// `word:end` as one token when `end` is also written out as a reference.
+    /// anything else leaves the `:` for the parser, which reads it as the
+    /// range operator — `A1:INDEX(..)` joins two references at evaluation
+    /// time, not here.
+    fn try_range_token(&mut self, sheet: &Option<String>, word: &str) -> Option<TokKind> {
+        if !self.input[self.pos..].trim_start().starts_with(':') {
+            return None;
+        }
+        let save = self.pos;
+        if column(word).is_ok() {
+            self.skip_ws();
+            self.bump();
+            self.skip_ws();
+            let end = self.read_word();
+            match ColumnRange::parse_a1(&format!("{word}:{end}")) {
+                Ok(range) => {
+                    return Some(TokKind::ColumnRange {
+                        sheet: sheet.clone(),
+                        range,
+                    });
+                }
+                Err(_) => self.pos = save,
+            }
+        }
+        if row(word).is_ok() {
+            self.skip_ws();
+            self.bump();
+            self.skip_ws();
+            let end = self.read_word();
+            match RowRange::parse_a1(&format!("{word}:{end}")) {
+                Ok(range) => {
+                    return Some(TokKind::RowRange {
+                        sheet: sheet.clone(),
+                        range,
+                    });
+                }
+                Err(_) => self.pos = save,
+            }
+        }
+        let start = CellRef::parse_a1(word).ok()?;
+        if self.peek() != Some(':') {
+            return None;
+        }
         self.bump();
-        let end_word = self.read_word();
-        let a = CellRef::parse_a1(start_word).map_err(|e| {
-            ParseError::new(start, format!("invalid range start {start_word:?}: {e}"))
-        })?;
-        let b = CellRef::parse_a1(&end_word)
-            .map_err(|e| ParseError::new(start, format!("invalid range end {end_word:?}: {e}")))?;
-        Ok(TokKind::Range {
-            sheet,
-            range: CellRange::new(a, b),
-        })
-    }
-
-    fn finish_columns(
-        &mut self,
-        sheet: Option<String>,
-        start_word: &str,
-        start: usize,
-    ) -> Result<TokKind, ParseError> {
-        self.skip_ws();
-        self.bump();
-        self.skip_ws();
-        let end_word = self.read_word();
-        let range = ColumnRange::parse_a1(&format!("{start_word}:{end_word}"))
-            .map_err(|error| ParseError::new(start, format!("invalid column range: {error}")))?;
-        Ok(TokKind::ColumnRange { sheet, range })
+        let end = self.read_word();
+        match CellRef::parse_a1(&end) {
+            Ok(end) => Some(TokKind::Range {
+                sheet: sheet.clone(),
+                range: CellRange::new(start, end),
+            }),
+            Err(_) => {
+                self.pos = save;
+                None
+            }
+        }
     }
 
     fn finish_rows(
@@ -642,6 +656,36 @@ mod tests {
             TokKind::Range { sheet: None, range } => assert_eq!(range.to_a1(), "A1:B2"),
             other => panic!("expected range, got {other:?}"),
         }
+    }
+
+    /// a literal `A1:B2` stays one token; anything else after the `:` leaves
+    /// the colon for the parser to read as the range operator.
+    #[test]
+    fn lexes_the_range_operator_only_when_the_end_is_not_an_address() {
+        assert!(matches!(kinds("A1:B2").as_slice(), [TokKind::Range { .. }]));
+        assert!(matches!(
+            kinds("A:A").as_slice(),
+            [TokKind::ColumnRange { .. }]
+        ));
+        assert!(matches!(
+            kinds("A1:INDEX(A1:A9,3)").as_slice(),
+            [
+                TokKind::Ref { .. },
+                TokKind::Colon,
+                TokKind::Ident(_),
+                TokKind::LParen,
+                ..
+            ]
+        ));
+        assert!(matches!(
+            kinds("Data!$J$2:INDEX(Data!$J:$J,4)").as_slice(),
+            [TokKind::Ref { .. }, TokKind::Colon, TokKind::Ident(_), ..]
+        ));
+        assert!(matches!(
+            kinds("A:OFFSET(A1,1,1)").as_slice(),
+            [TokKind::Ident(_), TokKind::Colon, TokKind::Ident(_), ..]
+        ));
+        assert_eq!(kinds("A1:B2:C3").len(), 3);
     }
 
     #[test]

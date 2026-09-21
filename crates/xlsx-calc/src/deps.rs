@@ -69,6 +69,14 @@ fn walk(
                 walk(value, out, seen);
             }
         }
+        Expr::RangeJoin { start, end } => {
+            walk(start, out, seen);
+            walk(end, out, seen);
+            // the ends alone miss the cells the span sweeps between them
+            if let Some((sheet, range)) = range_join_span(start, end) {
+                push_unique(out, seen, sheet, range);
+            }
+        }
         Expr::Unary { expr, .. } | Expr::Percent(expr) => walk(expr, out, seen),
         Expr::Binary { lhs, rhs, .. } => {
             walk(lhs, out, seen);
@@ -93,6 +101,46 @@ fn walk(
         | Expr::Error(_)
         | Expr::TableRef { .. }
         | Expr::Name { .. } => {}
+    }
+}
+
+/// the rectangle `start:end` can never reach outside, read off the source
+/// alone. `None` when an end is unknowable without evaluating, which makes
+/// the formula volatile rather than under-reported.
+pub(crate) fn range_join_span(start: &Expr, end: &Expr) -> Option<(Option<String>, CellRange)> {
+    let (sheet, first) = endpoint_span(start)?;
+    let (other, second) = endpoint_span(end)?;
+    if sheet != other {
+        return None;
+    }
+    Some((
+        sheet,
+        CellRange::new(
+            CellRef::new(
+                first.start.row.min(second.start.row),
+                first.start.col.min(second.start.col),
+            ),
+            CellRef::new(
+                first.end.row.max(second.end.row),
+                first.end.col.max(second.end.col),
+            ),
+        ),
+    ))
+}
+
+/// the widest rectangle one end of a join can land in. `INDEX` cannot leave
+/// the area it indexes, so that area bounds it; a static `OFFSET` resolves
+/// outright, and a dynamic one is unknowable.
+fn endpoint_span(expr: &Expr) -> Option<(Option<String>, CellRange)> {
+    match expr {
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            endpoint_span(args.first()?)
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("OFFSET") => {
+            offset_target(args)?
+        }
+        Expr::RangeJoin { start, end } => range_join_span(start, end),
+        other => anchor_range(other),
     }
 }
 
@@ -219,6 +267,24 @@ mod tests {
     #[test]
     fn positional_queries_still_read_computed_arguments() {
         assert_eq!(refs("ROW(OFFSET(A1,B1,0))"), vec!["B1"]);
+    }
+
+    /// the two ends alone miss the cells the span sweeps between them, so a
+    /// join also reports its bounding box.
+    #[test]
+    fn range_join_reports_the_span_between_its_ends() {
+        assert_eq!(refs("SUM(A1:INDEX(A1:A9,3))"), vec!["A1", "A1:A9"]);
+        assert_eq!(refs("SUM(A1:INDEX(Z1:Z9,3))"), vec!["A1", "Z1:Z9", "A1:Z9"]);
+        assert_eq!(
+            refs("SUM(INDEX(B2:B9,1):INDEX(D2:D9,4))"),
+            vec!["B2:B9", "D2:D9", "B2:D9"]
+        );
+        assert_eq!(
+            refs("SUM($B$4:OFFSET($B$4,0,2))"),
+            vec!["B4", "D4", "B4:D4"]
+        );
+        // a dynamic end cannot be bounded from the source alone
+        assert_eq!(refs("SUM(B4:OFFSET(B4,0,C1))"), vec!["B4", "C1"]);
     }
 
     #[test]

@@ -10,7 +10,7 @@ use crate::eval::{Area, EvalContext, as_area, cmp_values, err, evaluate, num};
 use crate::parser::Expr;
 use crate::reference::offset_rect;
 
-use super::{nth_int, nth_number};
+use super::{nth_int, nth_int_lifted, nth_number};
 
 /// VLOOKUP(value, table, col_index, [range_lookup]). range_lookup defaults to
 /// TRUE (approximate match on a first column sorted ascending).
@@ -234,12 +234,12 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         Some(a) => a,
         None => return err(ErrorValue::Value),
     };
-    let first = match nth_int(args, ctx, 1) {
+    let first = match nth_int_lifted(args, ctx, 1) {
         Ok(n) => n,
         Err(e) => return err(e),
     };
     let second = if args.len() == 3 {
-        match nth_int(args, ctx, 2) {
+        match nth_int_lifted(args, ctx, 2) {
             Ok(n) => Some(n),
             Err(e) => return err(e),
         }
@@ -315,7 +315,7 @@ fn axis_index(args: &[Expr], ctx: &EvalContext<'_>, at: usize) -> Result<usize, 
     if args.get(at).is_some_and(crate::functions::omitted) {
         return Ok(0);
     }
-    let value = crate::functions::nth_int(args, ctx, at)?;
+    let value = crate::functions::nth_int_lifted(args, ctx, at)?;
     usize::try_from(value).map_err(|_| ErrorValue::Value)
 }
 
@@ -378,14 +378,14 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
         return Err(ErrorValue::Value);
     }
     let anchor = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
-    let rows = nth_int(args, ctx, 1)?;
-    let cols = nth_int(args, ctx, 2)?;
+    let rows = nth_int_lifted(args, ctx, 1)?;
+    let cols = nth_int_lifted(args, ctx, 2)?;
     let height = match args.get(3) {
-        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 3)?),
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int_lifted(args, ctx, 3)?),
         _ => None,
     };
     let width = match args.get(4) {
-        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 4)?),
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int_lifted(args, ctx, 4)?),
         _ => None,
     };
     let bounds = CellRange::new(
