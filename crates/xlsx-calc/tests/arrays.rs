@@ -804,6 +804,33 @@ fn index_answers_once_per_array_index() {
     );
 }
 
+/// `WRAPROWS`/`WRAPCOLS` cut a vector into a rectangle, padding the tail.
+#[test]
+fn wrapping_a_vector_pads_its_last_group() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("_xlfn.WRAPROWS(_xlfn.SEQUENCE(5),2,0)", &workbook),
+        (3, 2, vec![n(1.0), n(2.0), n(3.0), n(4.0), n(5.0), n(0.0)])
+    );
+    assert_eq!(
+        arrayed("_xlfn.WRAPCOLS(_xlfn.SEQUENCE(5),2)", &workbook),
+        (
+            2,
+            3,
+            vec![
+                n(1.0),
+                n(3.0),
+                n(5.0),
+                n(2.0),
+                n(4.0),
+                CellValue::Error {
+                    value: ErrorValue::NA
+                }
+            ]
+        )
+    );
+}
+
 /// a whole-column criteria range costs the rows the sheet uses, so one
 /// `COUNTIFS` per key of a spilled block stays inside the evaluation budget.
 #[test]

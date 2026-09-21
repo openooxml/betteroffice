@@ -384,9 +384,16 @@ fn blocked(
         if previous.is_some_and(|previous| previous.contains(at)) {
             return false;
         }
-        wb.formula(sheet, at).is_some()
-            || !matches!(wb.value_cow(sheet, at).as_ref(), CellValue::Empty)
+        owns_formula(wb, sheet, at) || !matches!(wb.value_cow(sheet, at).as_ref(), CellValue::Empty)
     })
+}
+
+/// whether a cell carries a formula of its own. producers mark the interior
+/// of a spilled rectangle with an empty `<f/>`, which is the anchor's formula
+/// reaching that cell, not one the cell owns.
+fn owns_formula(wb: &Workbook, sheet: SheetId, at: CellRef) -> bool {
+    wb.formula(sheet, at)
+        .is_some_and(|formula| !formula.trim().is_empty())
 }
 
 fn write_spilled_cell(
@@ -396,7 +403,7 @@ fn write_spilled_cell(
     changed: &mut Vec<(SheetId, CellRef)>,
     moved: &mut Vec<(SheetId, CellRef)>,
 ) {
-    if wb.formula(u.0, cell_of(u)).is_some() {
+    if owns_formula(wb, u.0, cell_of(u)) {
         return;
     }
     if write_if_changed(wb, u, value) {
@@ -500,6 +507,37 @@ mod tests {
                 style: None,
             },
         );
+    }
+
+    /// producers mark the interior of a spilled rectangle with an empty
+    /// `<f/>`; that is the anchor's formula reaching the cell, so the result
+    /// still lands there.
+    #[test]
+    fn an_empty_formula_element_does_not_block_a_spill() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 5.0);
+        put_num(&mut wb, s, "A2", 7.0);
+        wb.sheet_mut(s).unwrap().set_cell(
+            a1("C1"),
+            Cell {
+                value: CellValue::Empty,
+                formula: Some("A1:A2".into()),
+                style: None,
+            },
+        );
+        wb.sheet_mut(s).unwrap().set_cell(
+            a1("C2"),
+            Cell {
+                value: CellValue::Empty,
+                formula: Some(String::new()),
+                style: None,
+            },
+        );
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("C1"), xlsx_model::CellRange::parse_a1("C1:C2").unwrap());
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C2"), num(7.0));
     }
 
     /// excel reads a blank cell as zero, so a formula that resolves to one

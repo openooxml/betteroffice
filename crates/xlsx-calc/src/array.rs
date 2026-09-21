@@ -722,6 +722,8 @@ fn lookup_array(name: &str) -> Option<ArrayFn> {
         "TRANSPOSE" => transpose,
         "UNIQUE" => unique,
         "VSTACK" => vstack,
+        "WRAPCOLS" => wrapcols,
+        "WRAPROWS" => wraprows,
         _ => return None,
     })
 }
@@ -849,6 +851,54 @@ fn sortby(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             data.cols,
             order.into_iter().map(|row| rows_of(&data, row)).collect(),
         ))
+    })())
+}
+
+/// `WRAPROWS(vector, count, [pad])`: fill rows of `count` from the vector,
+/// padding the last one. `WRAPCOLS` fills columns instead.
+fn wraprows(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    wrap(args, ctx, true)
+}
+
+fn wrapcols(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
+    wrap(args, ctx, false)
+}
+
+fn wrap(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
+    result((|| {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(ErrorValue::Value);
+        }
+        let data = argument(args, ctx, 0)?;
+        if data.rows > 1 && data.cols > 1 {
+            return Err(ErrorValue::Value);
+        }
+        let width = index_of(optional_number(args, ctx, 1, 0.0)?)?;
+        let pad = optional(args, ctx, 2)?.unwrap_or(err(ErrorValue::NA));
+        let groups = data.values.len().div_ceil(width);
+        let (rows, cols) = if by_row {
+            (groups, width)
+        } else {
+            (width, groups)
+        };
+        let count = output_cells(rows, cols)?;
+        let mut cells = Vec::with_capacity(count);
+        for row in 0..rows {
+            for col in 0..cols {
+                let index = if by_row {
+                    row * width + col
+                } else {
+                    col * width + row
+                };
+                cells.push(
+                    data.values
+                        .get(index)
+                        .cloned()
+                        .unwrap_or_else(|| pad.clone()),
+                );
+            }
+        }
+        Ok(block(ctx, rows, cols, cells))
     })())
 }
 
