@@ -65,6 +65,8 @@ type CellMoves = Vec<((RowId, ColId), Option<(RowId, ColId)>)>;
 pub struct SheetFormat {
     pub default_row_height_pt: Option<f64>,
     pub custom_height: bool,
+    /// `zeroHeight`: every row without its own `ht` is hidden.
+    pub zero_height: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]

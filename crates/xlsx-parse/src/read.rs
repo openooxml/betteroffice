@@ -455,6 +455,8 @@ fn parse_worksheet(
                             .filter(|h| h.is_finite() && (0.0..=MAX_ROW_HEIGHT_PT).contains(h)),
                         custom_height: attr(&e, b"customHeight")?
                             .is_some_and(|value| is_truthy(&value)),
+                        zero_height: attr(&e, b"zeroHeight")?
+                            .is_some_and(|value| is_truthy(&value)),
                     };
                 }
                 _ => {}
