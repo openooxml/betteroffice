@@ -5473,7 +5473,7 @@ mod tests {
                 let fill = ShapeFill {
                     fill_type: "gradient".to_owned(),
                     color: None,
-                    gradient: Some(GradientFill {
+                    gradient: Some(ooxml_drawingml::GradientFill {
                         gradient_type: kind.to_owned(),
                         angle: Some(45.0),
                         stops: indices.map(|index| ordered[index].clone()).to_vec(),
@@ -6155,6 +6155,57 @@ mod tests {
                 color: "#ffffff".to_owned()
             })
         );
+    }
+
+    /// a gradient whose every stop is transparent is paper too, while one
+    /// visible stop keeps the gradient.
+    #[test]
+    fn a_gradient_paints_unless_every_stop_is_transparent() {
+        let clear = |alpha: f64| ColorValue {
+            rgb: Some("123456".to_owned()),
+            alpha: Some(alpha),
+            ..ColorValue::default()
+        };
+        let gradient = |stops: Vec<ColorValue>| ShapeFill {
+            fill_type: "gradient".to_owned(),
+            color: None,
+            gradient: Some(ooxml_drawingml::GradientFill {
+                gradient_type: "linear".to_owned(),
+                angle: None,
+                stops: stops
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, color)| ooxml_drawingml::GradientStop {
+                        position: index as f64,
+                        color,
+                    })
+                    .collect(),
+            }),
+        };
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_317).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(0.0)]));
+        assert_eq!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
+        );
+        package.slides[0].background = Some(gradient(vec![clear(0.0), clear(1.0)]));
+        assert!(matches!(
+            renderer()
+                .layout_slide(&package, &snapshot, 0)
+                .unwrap()
+                .display_list
+                .background,
+            Some(Paint::Gradient { .. })
+        ));
     }
 
     #[test]
