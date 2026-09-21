@@ -665,7 +665,24 @@ pub(crate) fn cmp_values(a: &CellValue, b: &CellValue) -> std::cmp::Ordering {
 }
 
 fn cmp_text(a: &str, b: &str) -> std::cmp::Ordering {
-    a.to_lowercase().cmp(&b.to_lowercase())
+    a.to_lowercase()
+        .chars()
+        .map(collation_key)
+        .cmp(b.to_lowercase().chars().map(collation_key))
+}
+
+/// excel orders text by a collation rather than by code point: punctuation
+/// and symbols come before digits, and digits before letters. that is what
+/// puts `[Person_1]` above `[Person_10]`, where `]` against `0` would not.
+fn collation_key(ch: char) -> (u8, char) {
+    let class = if ch.is_alphabetic() {
+        2
+    } else if ch.is_numeric() {
+        1
+    } else {
+        0
+    };
+    (class, ch)
 }
 
 fn type_rank(v: &CellValue) -> u8 {

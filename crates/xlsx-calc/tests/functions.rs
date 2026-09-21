@@ -1200,3 +1200,35 @@ fn timevalue_reads_a_written_clock() {
     approx("TIMEVALUE(\"25:00\")", 0.041666666666666664);
     approx("TIMEVALUE(\"12:30\" & \" \" & \"PM\")", 0.5208333333333334);
 }
+
+/// DAYS counts whole days either way round, and reads a written date.
+#[test]
+fn days_between_two_dates() {
+    check(&[
+        ("DAYS(DATE(2020,3,1), DATE(2020,2,1))", n(29.0)),
+        ("DAYS(DATE(2020,2,1), DATE(2020,3,1))", n(-29.0)),
+        ("DAYS(43831, 43831)", n(0.0)),
+        ("DAYS(\"3/1/2021\", \"2/1/2021\")", n(28.0)),
+        ("DAYS(43831.9, 43830.1)", n(1.0)),
+        ("DAYS(\"hello\", 1)", e(ErrorValue::Value)),
+        ("DAYS(-1, 1)", e(ErrorValue::Num)),
+        ("DAYS(1)", e(ErrorValue::Value)),
+        ("DAYS(1/0, 1)", e(ErrorValue::Div0)),
+    ]);
+}
+
+/// text compares by excel's collation, not by code point: punctuation and
+/// symbols rank below digits, and digits below letters.
+#[test]
+fn text_compares_by_collation() {
+    check(&[
+        ("\"[a]\"<\"[a0]\"", b(true)),
+        ("\"[b]\"<\"c\"", b(true)),
+        ("\"_\"<\"1\"", b(true)),
+        ("\"1\"<\"a\"", b(true)),
+        ("\"a\"<\"b\"", b(true)),
+        ("\"A\"=\"a\"", b(true)),
+        ("\"apple\"<\"apples\"", b(true)),
+        ("MATCH(\"[a]\",{\"[a]\";\"[a0]\"},0)", n(1.0)),
+    ]);
+}

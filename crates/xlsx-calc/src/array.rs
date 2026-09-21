@@ -257,8 +257,10 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
             let right = evaluate_array(rhs, ctx);
             map2(left, right, ctx, |a, b| apply_binary(*op, a, b))
         }
-        // OFFSET yields a reference, so a multi-cell result is a block here
-        Expr::FuncCall { name, .. } if name.eq_ignore_ascii_case("OFFSET") => {
+        // these yield a reference, so a multi-cell result is a block here
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
             match as_array_area(expr, ctx) {
                 Some(area) => area_values(&area, ctx),
                 None => Value::Scalar(evaluate(expr, ctx)),
@@ -2554,6 +2556,25 @@ fn by_slice(args: &[Expr], ctx: &EvalContext<'_>, by_row: bool) -> Value {
 
 /// the sub-range one `BYROW`/`BYCOL` call covers, so a callee that wants a
 /// reference sees the row or column it was handed.
+/// the rectangle a callback argument came from, when it came from one this
+/// sheet holds and the callback walks it cell for cell rather than
+/// broadcasting it.
+fn cell_source(expr: &Expr, ctx: &EvalContext<'_>, rows: usize, cols: usize) -> Option<Area> {
+    as_array_area(expr, ctx)
+        .filter(|area| area.sheet == ctx.sheet && area.rows == rows && area.cols == cols)
+}
+
+/// the single cell at `(row, col)` of a reference argument, so a callback
+/// that wants a reference — `OFFSET(c,,1)`, or `D8:c` — still has one.
+fn cell_reference(area: &Area, row: usize, col: usize) -> Expr {
+    let step =
+        |base: u32, offset: usize| base.saturating_add(u32::try_from(offset).unwrap_or(u32::MAX));
+    Expr::Ref {
+        sheet: None,
+        cell: CellRef::new(step(area.start.row, row), step(area.start.col, col)),
+    }
+}
+
 fn slice_reference(area: &Area, index: usize, by_row: bool) -> Expr {
     let step = u32::try_from(index).unwrap_or(u32::MAX);
     let last_row = area
@@ -2603,12 +2624,22 @@ fn map(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             cols = cols.max(c);
             values.push(value);
         }
+        let sources: Vec<Option<Area>> = args[..args.len() - 1]
+            .iter()
+            .map(|argument| cell_source(argument, ctx, rows, cols))
+            .collect();
         let mut cells = Vec::with_capacity(output_cells(rows, cols)?);
         for row in 0..rows {
             for col in 0..cols {
                 let argv = values
                     .iter()
-                    .map(|value| plain(Value::Scalar(value.broadcast(row, col))))
+                    .zip(&sources)
+                    .map(|(value, source)| {
+                        (
+                            Value::Scalar(value.broadcast(row, col)),
+                            source.as_ref().map(|area| cell_reference(area, row, col)),
+                        )
+                    })
                     .collect();
                 cells.push(invoke(&lambda, argv, ctx).into_scalar());
             }
@@ -2627,8 +2658,15 @@ fn reduce(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let mut accumulator = evaluate_array(&args[0], ctx);
         let data = argument(args, ctx, 1)?;
         let lambda = callback(args, ctx, 2)?;
-        for value in &data.values {
-            let step = vec![plain(accumulator), plain(Value::Scalar(value.clone()))];
+        let source = cell_source(&args[1], ctx, data.rows, data.cols);
+        for (index, value) in data.values.iter().enumerate() {
+            let reference = source
+                .as_ref()
+                .map(|area| cell_reference(area, index / data.cols, index % data.cols));
+            let step = vec![
+                plain(accumulator),
+                (Value::Scalar(value.clone()), reference),
+            ];
             accumulator = invoke(&lambda, step, ctx);
             if let Some(error) = accumulator.as_error() {
                 return Err(error);
