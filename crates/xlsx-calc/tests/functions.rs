@@ -63,6 +63,26 @@ fn eval(src: &str) -> CellValue {
     evaluate(&expr, &ctx)
 }
 
+/// A name the workbook does not define is #NAME? wherever it stands, so a
+/// function that wanted a reference there reports that rather than #VALUE!.
+#[test]
+fn an_unknown_name_in_a_reference_argument_is_a_name_error() {
+    check(&[
+        ("nosuchname", e(ErrorValue::Name)),
+        ("VLOOKUP(2,nosuchname,2,FALSE)", e(ErrorValue::Name)),
+        ("HLOOKUP(2,nosuchname,2,FALSE)", e(ErrorValue::Name)),
+        ("MATCH(2,nosuchname,0)", e(ErrorValue::Name)),
+        ("XMATCH(2,nosuchname)", e(ErrorValue::Name)),
+        ("XLOOKUP(2,nosuchname,E1:E4)", e(ErrorValue::Name)),
+        ("XLOOKUP(2,E1:E4,nosuchname)", e(ErrorValue::Name)),
+        ("INDEX(nosuchname,1,1)", e(ErrorValue::Name)),
+        ("OFFSET(nosuchname,0,0)", e(ErrorValue::Name)),
+        ("SUMIF(nosuchname,\">1\")", e(ErrorValue::Name)),
+        ("VLOOKUP(2,E1:F4,9,FALSE)", e(ErrorValue::Ref)),
+        ("VLOOKUP(2,\"x\",2,FALSE)", e(ErrorValue::Value)),
+    ]);
+}
+
 #[test]
 fn vlookup_accepts_whole_columns() {
     for columns in [

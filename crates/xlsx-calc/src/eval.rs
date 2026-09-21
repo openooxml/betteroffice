@@ -869,6 +869,18 @@ impl Area {
     }
 }
 
+/// the rectangle a reference argument designates, or the error excel reports
+/// for it: an unresolved name is #NAME? wherever it appears, not a bad value.
+pub(crate) fn required_area(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    match as_area(arg, ctx) {
+        Some(area) => Ok(area),
+        None => match evaluate(arg, ctx) {
+            CellValue::Error { value } => Err(value),
+            _ => Err(ErrorValue::Value),
+        },
+    }
+}
+
 /// interpret an argument as a rectangular reference (1x1 for single cells);
 /// `None` for non-references, unknown sheets, and reference functions whose
 /// result is #REF!.
