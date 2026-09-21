@@ -41,12 +41,43 @@ fn pairs(args: &[Expr], ctx: &EvalContext<'_>) -> Result<(Vec<f64>, Vec<f64>), E
     if args.len() != 2 {
         return Err(ErrorValue::Value);
     }
-    let ys = collect_numbers(&args[..1], ctx)?;
-    let xs = collect_numbers(&args[1..2], ctx)?;
-    if xs.len() != ys.len() || xs.is_empty() {
+    let ys = positioned(&args[0], ctx)?;
+    let xs = positioned(&args[1], ctx)?;
+    if xs.len() != ys.len() {
+        return Err(ErrorValue::NA);
+    }
+    // a coordinate counts only where both sides are numeric, so dropping one
+    // side's blank cannot slide every later pair onto the wrong partner
+    let (ys, xs): (Vec<f64>, Vec<f64>) = ys
+        .into_iter()
+        .zip(xs)
+        .filter_map(|(y, x)| Some((y?, x?)))
+        .unzip();
+    if xs.is_empty() {
         return Err(ErrorValue::NA);
     }
     Ok((ys, xs))
+}
+
+/// every cell of an argument in order, `None` where it is not a number, so two
+/// ranges stay aligned by position.
+fn positioned(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Vec<Option<f64>>, ErrorValue> {
+    match as_area(arg, ctx) {
+        Some(area) => area
+            .values_ref(ctx)?
+            .into_iter()
+            .map(|value| match value.as_ref() {
+                CellValue::Number { value } => Ok(Some(*value)),
+                CellValue::Error { value } => Err(*value),
+                _ => Ok(None),
+            })
+            .collect(),
+        None => match evaluate(arg, ctx) {
+            CellValue::Error { value } => Err(value),
+            CellValue::Number { value } => Ok(vec![Some(value)]),
+            _ => Ok(vec![None]),
+        },
+    }
 }
 
 /// sums a linear fit needs: n, mean x, mean y, Sxx, Syy, Sxy.
