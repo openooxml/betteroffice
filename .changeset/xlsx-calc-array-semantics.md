@@ -8,4 +8,4 @@ xlsx: recalculation now reads an argument that computes an array wherever a rang
 
 `INDEX` now picks its reference or array form from its first argument as Excel does, `MATCH` answers once per key, and a formula whose result is an empty reference stores 0 rather than staying blank. A whole-column reference costs the rows the sheet actually reaches, so a handful of `COUNTIFS(F:F,…)` formulas no longer exhaust the recalculation budget and leave the rest of the workbook reporting `#NUM!`.
 
-On the 165-workbook calculation benchmark, which strips cached values and compares against Excel's own full rebuild, this moves the corpus from 92.0076% to 99.0254% of cells matching Excel — 115 of 165 workbooks now match exactly, up from 49 — with no workbook regressing. LibreOffice scores 85.8713% on the same corpus.
+On the 165-workbook calculation benchmark, which strips cached values and compares against Excel's own full rebuild, this moves the corpus from 92.0076% to 99.3688% of cells matching Excel — 125 of 165 workbooks now match exactly, up from 49 — with no workbook regressing. LibreOffice scores 85.8713% on the same corpus.
