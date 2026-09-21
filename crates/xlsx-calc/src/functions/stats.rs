@@ -203,6 +203,118 @@ pub(crate) fn quartile(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// SUBTOTAL(code, ...): one of eleven aggregates, chosen by code. 1-11 and
+/// 101-111 select the same function; the 100 series also skips manually
+/// hidden rows, which we do not model, so both behave alike here.
+pub(crate) fn subtotal(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 {
+        return err(ErrorValue::Value);
+    }
+    let code = match nth_int(args, ctx, 0) {
+        Ok(code) => code,
+        Err(e) => return err(e),
+    };
+    let rest = &args[1..];
+    match code {
+        1 | 101 => average(rest, ctx),
+        2 | 102 => count(rest, ctx),
+        3 | 103 => counta(rest, ctx),
+        4 | 104 => max(rest, ctx),
+        5 | 105 => min(rest, ctx),
+        6 | 106 => super::math::product(rest, ctx),
+        7 | 107 => stdev_s(rest, ctx),
+        8 | 108 => stdev_p(rest, ctx),
+        9 | 109 => super::math::sum(rest, ctx),
+        10 | 110 => var_s(rest, ctx),
+        11 | 111 => var_p(rest, ctx),
+        _ => err(ErrorValue::Value),
+    }
+}
+
+/// AGGREGATE(code, options, ...): the SUBTOTAL aggregates plus LARGE, SMALL,
+/// PERCENTILE and QUARTILE, with an options flag that says what to ignore.
+/// Options 2,3,6,7 ignore errors, which is the whole point of the function in
+/// most sheets; nested subtotals and hidden rows are not modelled.
+pub(crate) fn aggregate(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 3 {
+        return err(ErrorValue::Value);
+    }
+    let code = match nth_int(args, ctx, 0) {
+        Ok(code) => code,
+        Err(e) => return err(e),
+    };
+    let options = match nth_int(args, ctx, 1) {
+        Ok(options) => options,
+        Err(e) => return err(e),
+    };
+    if !(1..=19).contains(&code) || !(0..=7).contains(&options) {
+        return err(ErrorValue::Value);
+    }
+    let rest = &args[2..];
+    let skip_errors = matches!(options, 2 | 3 | 6 | 7);
+    let value = match code {
+        1 => average(rest, ctx),
+        2 => count(rest, ctx),
+        3 => counta(rest, ctx),
+        4 => max(rest, ctx),
+        5 => min(rest, ctx),
+        6 => super::math::product(rest, ctx),
+        7 => stdev_s(rest, ctx),
+        8 => stdev_p(rest, ctx),
+        9 => super::math::sum(rest, ctx),
+        10 => var_s(rest, ctx),
+        11 => var_p(rest, ctx),
+        12 => median(rest, ctx),
+        13 => mode(rest, ctx),
+        14 => large(rest, ctx),
+        15 => small(rest, ctx),
+        16 => percentile(rest, ctx),
+        17 => quartile(rest, ctx),
+        _ => return err(ErrorValue::Value),
+    };
+    match (&value, skip_errors) {
+        (CellValue::Error { .. }, true) => aggregate_ignoring_errors(code, rest, ctx),
+        _ => value,
+    }
+}
+
+/// re-run an aggregate over only the cells that are not errors.
+fn aggregate_ignoring_errors(code: i64, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let mut nums = Vec::new();
+    for arg in args {
+        match as_area(arg, ctx) {
+            Some(area) => match area.values_ref(ctx) {
+                Ok(values) => {
+                    for value in values {
+                        if let CellValue::Number { value } = value.as_ref() {
+                            nums.push(*value);
+                        }
+                    }
+                }
+                Err(_) => continue,
+            },
+            None => {
+                if let CellValue::Number { value } = evaluate(arg, ctx) {
+                    nums.push(value);
+                }
+            }
+        }
+    }
+    if nums.is_empty() {
+        return err(ErrorValue::Div0);
+    }
+    let n = nums.len() as f64;
+    match code {
+        1 => num(nums.iter().sum::<f64>() / n),
+        2 | 3 => num(n),
+        4 => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+        5 => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
+        6 => num(nums.iter().product()),
+        9 => num(nums.iter().sum()),
+        _ => err(ErrorValue::Value),
+    }
+}
+
 pub(crate) fn median(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match collect_numbers(args, ctx) {
         Ok(nums) if nums.is_empty() => err(ErrorValue::Num),

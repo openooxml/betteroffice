@@ -148,6 +148,77 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// XMATCH(value, array, [match_mode], [search_mode]). match modes: 0 exact,
+/// -1 exact or next smaller, 1 exact or next larger, 2 wildcard (treated as
+/// exact here). a negative search mode scans from the end.
+pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 4 {
+        return err(ErrorValue::Value);
+    }
+    let target = evaluate(&args[0], ctx);
+    if let CellValue::Error { value } = target {
+        return err(value);
+    }
+    let Some(area) = as_area(&args[1], ctx) else {
+        return err(ErrorValue::Value);
+    };
+    let mode = match args.get(2) {
+        Some(_) => match nth_int(args, ctx, 2) {
+            Ok(m) => m,
+            Err(e) => return err(e),
+        },
+        None => 0,
+    };
+    let search = match args.get(3) {
+        Some(_) => match nth_int(args, ctx, 3) {
+            Ok(m) => m,
+            Err(e) => return err(e),
+        },
+        None => 1,
+    };
+    let values = match area.values_ref(ctx) {
+        Ok(values) => values,
+        Err(error) => return err(error),
+    };
+    let order: Vec<usize> = if search < 0 {
+        (0..values.len()).rev().collect()
+    } else {
+        (0..values.len()).collect()
+    };
+    let mut best: Option<usize> = None;
+    for &i in &order {
+        let ordering = cmp_values(values[i].as_ref(), &target);
+        if ordering == Ordering::Equal {
+            return num(i as f64 + 1.0);
+        }
+        let candidate = match mode {
+            -1 => ordering == Ordering::Less,
+            1 => ordering == Ordering::Greater,
+            _ => false,
+        };
+        if !candidate {
+            continue;
+        }
+        best = match best {
+            None => Some(i),
+            Some(current) => {
+                let better = match mode {
+                    -1 => {
+                        cmp_values(values[i].as_ref(), values[current].as_ref())
+                            == Ordering::Greater
+                    }
+                    _ => cmp_values(values[i].as_ref(), values[current].as_ref()) == Ordering::Less,
+                };
+                Some(if better { i } else { current })
+            }
+        };
+    }
+    match best {
+        Some(i) => num(i as f64 + 1.0),
+        None => err(ErrorValue::NA),
+    }
+}
+
 /// INDEX(area, row_num, [col_num]). for a single-row or single-column area the
 /// lone index selects along that axis. 1-based; out of range -> #REF!.
 pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
