@@ -46,6 +46,7 @@ const ERROR_LITERALS: &[(&str, ErrorValue)] = &[
     ("#REF!", ErrorValue::Ref),
     ("#VALUE!", ErrorValue::Value),
     ("#SPILL!", ErrorValue::Spill),
+    ("#CALC!", ErrorValue::Calc),
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -620,6 +621,7 @@ mod tests {
         assert_eq!(kinds("#REF!"), vec![TokKind::ErrLit(ErrorValue::Ref)]);
         assert_eq!(kinds("#N/A"), vec![TokKind::ErrLit(ErrorValue::NA)]);
         assert_eq!(kinds("#DIV/0!"), vec![TokKind::ErrLit(ErrorValue::Div0)]);
+        assert_eq!(kinds("#CALC!"), vec![TokKind::ErrLit(ErrorValue::Calc)]);
     }
 
     #[test]

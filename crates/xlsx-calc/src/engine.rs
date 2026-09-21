@@ -16,7 +16,7 @@ use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, 
 use crate::graph::DepGraph;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
-/// forced to `0` by cycle participation.
+/// settled by cycle participation rather than by their own formula.
 pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
@@ -103,7 +103,7 @@ const MAX_SPILL_ROUNDS: usize = 4;
 const MAX_DEFERRED_CYCLE_CELLS: usize = 4096;
 
 /// topologically order `recompute` and evaluate it, writing changed values into
-/// `wb`. cells caught in a cycle are zeroed and reported separately.
+/// `wb`. cells caught in a cycle are settled and reported separately.
 fn run_recalc(
     wb: &mut Workbook,
     graph: &DepGraph,
@@ -146,7 +146,7 @@ fn run_recalc(
             &mut limited_cells,
         );
         for u in &circular {
-            if write_if_changed(wb, *u, CellValue::Number { value: 0.0 }) {
+            if write_if_changed(wb, *u, circular_value(wb, *u)) {
                 changed.push((u.0, cell_of(*u)));
             }
             cycle_cells.push((u.0, cell_of(*u)));
@@ -456,6 +456,21 @@ pub(crate) fn computed(value: CellValue) -> CellValue {
     match value {
         CellValue::Empty => CellValue::Number { value: 0.0 },
         value => value,
+    }
+}
+
+/// what a cell caught in a cycle settles at. excel settles an ordinary
+/// circular reference at `0`, but an array formula has no rectangle to settle
+/// into and caches an empty string instead.
+fn circular_value(wb: &Workbook, u: Key) -> CellValue {
+    match wb
+        .sheet(u.0)
+        .and_then(|sheet| sheet.array_formula(cell_of(u)))
+    {
+        Some(_) => CellValue::Text {
+            value: String::new(),
+        },
+        None => CellValue::Number { value: 0.0 },
     }
 }
 
@@ -1089,6 +1104,27 @@ mod tests {
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(r.cycle_cells, vec![(s, a1("A1"))]);
         assert_eq!(value(&wb, s, "A1"), num(0.0));
+    }
+
+    /// an array formula caught in a cycle has no rectangle to settle into, so
+    /// it caches an empty string where an ordinary one settles at `0`.
+    #[test]
+    fn a_circular_array_formula_settles_at_empty_text() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "A1", "A1+1");
+        put_formula(&mut wb, s, "B1", "B1+1");
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("B1"), xlsx_model::CellRange::parse_a1("B1").unwrap());
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(r.cycle_cells, vec![(s, a1("A1")), (s, a1("B1"))]);
+        assert_eq!(value(&wb, s, "A1"), num(0.0));
+        assert_eq!(
+            value(&wb, s, "B1"),
+            CellValue::Text {
+                value: String::new()
+            }
+        );
     }
 
     #[test]

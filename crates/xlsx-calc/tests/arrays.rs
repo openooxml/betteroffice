@@ -829,6 +829,27 @@ fn textsplit_of_nothing_is_not_found() {
     );
 }
 
+/// an empty array is `#CALC!`: no cell can hold one, so a filter that keeps
+/// nothing answers with it unless the call names a replacement.
+#[test]
+fn an_empty_filter_is_a_calculation_error() {
+    let workbook = fixture();
+    assert_eq!(
+        values("_xlfn._xlws.FILTER(A1:A4,B1:B4>9)", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Calc
+        }]
+    );
+    assert_eq!(
+        values(r#"_xlfn._xlws.FILTER(A1:A4,B1:B4>9,"none")"#, &workbook),
+        vec![t("none")]
+    );
+    assert_eq!(
+        values("IFERROR(_xlfn._xlws.FILTER(A1:A4,B1:B4>9),0)", &workbook),
+        vec![n(0.0)]
+    );
+}
+
 /// `MATCH` answers once per key, so `ISERROR(MATCH(range, seen, 0))` is a
 /// mask over the range rather than one verdict for all of it.
 #[test]

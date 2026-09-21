@@ -790,9 +790,11 @@ fn filter(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             }
         }
         if keep.is_empty() {
+            // nothing kept is an empty array, which no cell can hold: excel
+            // answers `#CALC!` unless the call names something to show
             return Ok(match optional(args, ctx, 2)? {
                 Some(value) => Value::Scalar(value),
-                None => Value::error(ErrorValue::NA),
+                None => Value::error(ErrorValue::Calc),
             });
         }
         Ok(if by_rows {
