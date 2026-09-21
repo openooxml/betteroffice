@@ -364,6 +364,14 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
+        Expr::RangeJoin { start, end } => match range_join_area(start, end, ctx) {
+            Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+                Ok(value) => value,
+                Err(error) => err(error),
+            },
+            Ok(_) => err(ErrorValue::Value),
+            Err(error) => err(error),
+        },
         Expr::TableRef { table, spec } => match table_area(table, spec, ctx) {
             Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
                 Ok(value) => value,
@@ -828,6 +836,7 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             rows: xlsx_model::addr::MAX_ROWS as usize,
             cols: (range.end - range.start + 1) as usize,
         }),
+        Expr::RangeJoin { start, end } => range_join_area(start, end, ctx).ok(),
         Expr::TableRef { table, spec } => table_area(table, spec, ctx).ok(),
         Expr::Name { scope, name } => {
             if let Some(binding) = bound(scope, name, ctx) {
@@ -838,6 +847,58 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             ctx.inside_defined_name(&definition, as_area)
         }
         _ => None,
+    }
+}
+
+/// the rectangle `start:end` designates: the bounding box of both ends, on
+/// the sheet they share. unlike [`as_area`] this reports why an end has no
+/// rectangle, so a failed `MATCH` inside `A1:INDEX(..)` surfaces as `#N/A`
+/// rather than as "this argument is not a reference".
+pub(crate) fn range_join_area(
+    start: &Expr,
+    end: &Expr,
+    ctx: &EvalContext<'_>,
+) -> Result<Area, ErrorValue> {
+    let a = endpoint_area(start, ctx)?;
+    let b = endpoint_area(end, ctx)?;
+    if a.sheet != b.sheet {
+        return Err(ErrorValue::Ref);
+    }
+    let last = |area: &Area| {
+        (
+            area.start.row.saturating_add(area.rows as u32 - 1),
+            area.start.col.saturating_add(area.cols as u32 - 1),
+        )
+    };
+    let (a_bottom, a_right) = last(&a);
+    let (b_bottom, b_right) = last(&b);
+    let top = a.start.row.min(b.start.row);
+    let left = a.start.col.min(b.start.col);
+    Ok(Area {
+        sheet: a.sheet,
+        start: CellRef::new(top, left),
+        rows: (a_bottom.max(b_bottom) - top + 1) as usize,
+        cols: (a_right.max(b_right) - left + 1) as usize,
+    })
+}
+
+/// one end of a `:` join. the reference-returning builtins already report
+/// their own errors, so those pass straight through.
+fn endpoint_area(expr: &Expr, ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    match expr {
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("OFFSET") => {
+            crate::functions::lookups::offset_area(args, ctx)
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            crate::functions::lookups::index_area(args, ctx)
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDIRECT") => {
+            crate::functions::lookups::indirect_area(args, ctx)
+        }
+        Expr::TableRef { table, spec } => table_area(table, spec, ctx),
+        Expr::RangeJoin { start, end } => range_join_area(start, end, ctx),
+        Expr::Error(value) => Err(*value),
+        _ => as_area(expr, ctx).ok_or(ErrorValue::Ref),
     }
 }
 

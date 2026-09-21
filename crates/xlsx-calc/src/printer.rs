@@ -99,6 +99,8 @@ impl Expr {
                 }
             }
             Expr::Percent(expr) => format!("{}%", expr.print(6)),
+            // 7 > every other bp: `:` binds tighter than anything around it
+            Expr::RangeJoin { start, end } => format!("{}:{}", start.print(7), end.print(7)),
             Expr::Binary { op, lhs, rhs } => {
                 let bp = binary_bp(op);
                 // left-associative: the right child needs parens at equal bp
@@ -201,6 +203,13 @@ mod tests {
             "1-2-3",
             "2^3^2",
             "-(1+2)",
+            "A1:INDEX(A1:A9,3)",
+            "MIN(AA9:INDEX(AA9:AH9,MATCH(4,AI9:AP9,0)))",
+            "SUM($B$4:OFFSET($B$4,0,2))",
+            "INDEX(A:A,1):INDEX(A:A,4)",
+            "-A1:B2",
+            "Sheet1!A1:INDEX(Sheet1!A:A,2)",
+            "A1:B2:C3",
         ] {
             round_trips(src);
         }

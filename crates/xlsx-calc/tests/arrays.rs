@@ -964,3 +964,21 @@ fn frequency_measures_the_longest_run() {
         vec![n(1.0)]
     );
 }
+
+/// a `:` join is a reference, so array mode reads it as the block it spans
+/// and a failing end surfaces as that end's error. B1:B4 = 3, 1, 4, 2.
+#[test]
+fn range_join_reads_as_a_block_in_array_mode() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("B1:INDEX(B1:B4,3)", &workbook),
+        (3, 1, vec![n(3.0), n(1.0), n(4.0)])
+    );
+    assert_eq!(values("MAX(B1:INDEX(B1:B4,3))", &workbook), vec![n(4.0)]);
+    assert_eq!(
+        values("SUM(B1:INDEX(B1:B4,MATCH(9,B1:B4,0)))", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::NA
+        }]
+    );
+}
