@@ -9,6 +9,7 @@ Python. Choose a runtime below, then select the packages for your file format.
 | Runtime | Install | Guide |
 | --- | --- | --- |
 | Browser, React, or Node | `npm install @betteroffice/docx-react` | [JavaScript](./javascript) |
+| Native Node.js and Bun | `npm install @betteroffice/docx-native` | [JavaScript](./javascript#run-natively-in-nodejs-and-bun) |
 | Native Rust | `cargo add betteroffice-docx` | [Rust](./rust) |
 | Python | `pip install betteroffice-docx` | [Python](./python) |
 
@@ -16,11 +17,11 @@ Python. Choose a runtime below, then select the packages for your file format.
 
 | Format | npm | crates.io | PyPI |
 | --- | --- | --- | --- |
-| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react` | `betteroffice-docx` | `betteroffice-docx` |
-| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react` | `betteroffice-xlsx` | `betteroffice-xlsx` |
-| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react` | `betteroffice-pptx` | `betteroffice-pptx` |
+| DOCX | `@betteroffice/docx`, `@betteroffice/docx-react`, `@betteroffice/docx-native` | `betteroffice-docx` | `betteroffice-docx` |
+| XLSX | `@betteroffice/xlsx`, `@betteroffice/xlsx-react`, `@betteroffice/xlsx-native` | `betteroffice-xlsx` | `betteroffice-xlsx` |
+| PPTX | `@betteroffice/pptx`, `@betteroffice/pptx-react`, `@betteroffice/pptx-native` | `betteroffice-pptx` | `betteroffice-pptx` |
 
-All three registries carry DOCX, XLSX, and PPTX. The core, React, and locale
+All three registries carry DOCX, XLSX, and PPTX. The core, React, locale, and native
 packages for each format are released together. Version numbers differ between
 formats and registries; use the registry links for current releases.
 
@@ -61,6 +62,8 @@ See the language guides for font setup in other formats and runtimes.
   keyboard controls, and review UI.
 - **Custom JavaScript UI:** use a framework-free core for editing, display lists,
   and hit-testing.
+- **Node.js and Bun servers, CLIs, and Electron apps:** use the `-native`
+  packages for direct Rust execution and PNG rendering.
 - **Native Rust:** use a `betteroffice-docx`, `betteroffice-xlsx`, or
   `betteroffice-pptx` crate.
 - **Python scripts and services:** use the corresponding package on PyPI.

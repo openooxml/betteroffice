@@ -1,5 +1,5 @@
 [workspace]
-members = ["python-*"]
+members = ["node-*", "python-*"]
 resolver = "3"
 
 [profile.release]

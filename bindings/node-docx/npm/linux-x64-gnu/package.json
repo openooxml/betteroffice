@@ -1,0 +1,41 @@
+{
+  "name": "@betteroffice/docx-native-linux-x64-gnu",
+  "version": "0.2.1",
+  "cpu": [
+    "x64"
+  ],
+  "main": "betteroffice-docx-native.linux-x64-gnu.node",
+  "files": [
+    "betteroffice-docx-native.linux-x64-gnu.node"
+  ],
+  "description": "Native Rust bindings for the BetterOffice DOCX engine in Node.js and Bun.",
+  "keywords": [
+    "docx",
+    "word",
+    "ooxml",
+    "nodejs",
+    "node-api",
+    "bun",
+    "native",
+    "rust"
+  ],
+  "homepage": "https://betteroffice.dev/",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openooxml/betteroffice.git",
+    "directory": "bindings/node-docx"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "os": [
+    "linux"
+  ],
+  "libc": [
+    "glibc"
+  ]
+}

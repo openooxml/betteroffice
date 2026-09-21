@@ -2,19 +2,22 @@ import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { publishedCrates, publishedPackageVersions } from './published-packages.mjs';
+import { platformPackageVersions } from './node-bindings.mjs';
 import { RUST_PUBLISH_CRATES } from './rust-crates.mjs';
 
 const script = fileURLToPath(new URL('./check-publish-targets.mjs', import.meta.url));
 const releaseWorkflow = fileURLToPath(new URL('../.github/workflows/release.yml', import.meta.url));
 
 const release = Bun.YAML.parse(readFileSync(releaseWorkflow, 'utf8')) as any;
-const packages = publishedPackageVersions();
+const packages = [...publishedPackageVersions(), ...platformPackageVersions()];
 const crates = RUST_PUBLISH_CRATES.map((crate) => crate.name);
 
-const NOT_FOUND = new Response('{"error":"Not found"}', { status: 404 });
+const notFound = () => new Response('{"error":"Not found"}', { status: 404 });
 
 function versions(...published: string[]) {
-  return Response.json({ versions: Object.fromEntries(published.map((v) => [v, {}])) });
+  return Response.json({
+    versions: Object.fromEntries(published.map((v) => [v, {}]))
+  });
 }
 
 // Bun.spawnSync would block the loop this fake registry answers on.
@@ -72,7 +75,11 @@ function published(name: string) {
 
 describe('npm publish targets', () => {
   test('VSDX packages stay out of npm publication', () => {
-    for (const name of ['@betteroffice/vsdx', '@betteroffice/vsdx-react', '@betteroffice/vsdx-i18n']) {
+    for (const name of [
+      '@betteroffice/vsdx',
+      '@betteroffice/vsdx-react',
+      '@betteroffice/vsdx-i18n'
+    ]) {
       expect(packages.map((entry) => entry.name)).not.toContain(name);
     }
   });
@@ -80,7 +87,7 @@ describe('npm publish targets', () => {
   test('a package that exists at its release version passes', async () => {
     const result = await guard('--npm', (name) => {
       const found = packages.find((entry) => entry.name === name);
-      return found ? versions(found.version) : NOT_FOUND;
+      return found ? versions(found.version) : notFound();
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`${packages[0]!.name}@${packages[0]!.version} is on npm.`);
@@ -96,7 +103,7 @@ describe('npm publish targets', () => {
   test('a package that does not exist fails, by name', async () => {
     const missing = packages[0]!.name;
     const result = await guard('--npm', (name) => {
-      if (name === missing) return NOT_FOUND;
+      if (name === missing) return notFound();
       const found = packages.find((entry) => entry.name === name);
       return versions(found!.version);
     });
@@ -120,7 +127,7 @@ describe('crates.io publish targets', () => {
 
   test('a crate that does not exist fails, by name', async () => {
     const result = await guard('--crates', (name) =>
-      name === crates[0] ? NOT_FOUND : Response.json({})
+      name === crates[0] ? notFound() : Response.json({})
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(`${crates[0]} is not on crates.io.`);
@@ -130,7 +137,7 @@ describe('crates.io publish targets', () => {
   test('a bootstrap token creates missing crates, so a missing one only prints', async () => {
     const result = await guard(
       '--crates',
-      (name) => (name === crates[0] ? NOT_FOUND : Response.json({})),
+      (name) => (name === crates[0] ? notFound() : Response.json({})),
       { CRATES_IO_BOOTSTRAP_TOKEN: 'cio_bootstrap' }
     );
     expect(result.status).toBe(0);
@@ -158,13 +165,15 @@ describe('release wiring', () => {
   });
 
   test('both registries are checked before the first upload of either', () => {
-    const publishes = ['Publish Rust crates', 'Release PR or publish'].map((step) =>
+    const publishes = ['Publish Node native bindings', 'Publish Rust crates', 'Release PR or publish'].map((step) =>
       steps.indexOf(step)
     );
     for (const guard of ['Check crates.io publish targets', 'Check npm publish targets']) {
       for (const publish of publishes) expect(steps.indexOf(guard)).toBeLessThan(publish);
     }
-    expect(guards[0].env.CRATES_IO_BOOTSTRAP_TOKEN).toBe('${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}');
+    expect(guards[0].env.CRATES_IO_BOOTSTRAP_TOKEN).toBe(
+      '${{ secrets.CRATES_IO_BOOTSTRAP_TOKEN }}'
+    );
   });
 
   test('the npm guard reads what the pin that follows it cannot change', () => {
@@ -205,9 +214,10 @@ describe('crates OIDC-first wiring', () => {
 });
 
 describe('the npm publish set', () => {
-  test('is every non-private workspace, so no new package escapes the guard', () => {
+  test('covers non-private workspaces and native platform packages', () => {
     const names = packages.map((entry) => entry.name);
     expect(names).toContain('@betteroffice/fonts');
+    expect(names).toContain('@betteroffice/docx-native-darwin-arm64');
     expect(names).not.toContain('@betteroffice/rust-crates');
     expect(names).not.toContain('@betteroffice/collaboration-relay');
   });
@@ -236,7 +246,9 @@ describe('a registry that misbehaves', () => {
     const registry = flaky((name, call) =>
       name === first && call === 1 ? new Promise<Response>(() => {}) : published(name)
     );
-    const result = await guard('--npm', registry.respond, { REGISTRY_TIMEOUT_MS: '400' });
+    const result = await guard('--npm', registry.respond, {
+      REGISTRY_TIMEOUT_MS: '400'
+    });
 
     expect(result.status).toBe(0);
     expect(registry.calls.get(first)).toBe(2);
@@ -246,7 +258,9 @@ describe('a registry that misbehaves', () => {
   test('retries a body that stops mid-JSON', async () => {
     const registry = flaky((name, call) =>
       name === first && call === 1
-        ? new Response('{"versions":{"0.0.1"', { headers: { 'Content-Type': 'application/json' } })
+        ? new Response('{"versions":{"0.0.1"', {
+            headers: { 'Content-Type': 'application/json' }
+          })
         : published(name)
     );
     const result = await guard('--npm', registry.respond);
@@ -258,7 +272,10 @@ describe('a registry that misbehaves', () => {
   test('stops after five attempts instead of publishing on a guess', async () => {
     const registry = flaky(
       () =>
-        new Response('{"error":"unavailable"}', { status: 503, headers: { 'Retry-After': '0' } })
+        new Response('{"error":"unavailable"}', {
+          status: 503,
+          headers: { 'Retry-After': '0' }
+        })
     );
     const result = await guard('--npm', registry.respond);
 

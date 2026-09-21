@@ -1,0 +1,20 @@
+[package]
+name = "betteroffice-xlsx-node"
+version = "0.2.1"
+edition = "2024"
+license = "Apache-2.0"
+homepage = "https://betteroffice.dev"
+repository = "https://github.com/openooxml/betteroffice"
+description = "Node.js bindings for the BetterOffice XLSX engine."
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+betteroffice-xlsx = { path = "../../crates/betteroffice-xlsx" }
+napi = { version = "3.12.4", features = ["napi8"] }
+napi-derive = "3.6.5"
+
+[build-dependencies]
+napi-build = "2.4.2"

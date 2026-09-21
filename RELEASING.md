@@ -64,7 +64,7 @@ error fails the release instead of guessing a crate is new.
 that already exists, so **a brand-new package name cannot be published by the
 workflow** — its first version must be pushed by hand.
 
-Do this *before* merging a release PR that would publish the new name.
+Do this _before_ merging a release PR that would publish the new name.
 `changeset publish` publishes each package independently: a run where the new
 package fails auth but its dependents succeed leaves those dependents live on
 npm depending on a name that 404s.
@@ -86,6 +86,22 @@ npm depending on a name that 404s.
 8. Only then merge the release PR. Subsequent versions publish through OIDC
    like every other package.
 
+Native Node packages have one root package and one optional package per
+platform. Bootstrap every name in that set together:
+
+1. Run **Publish a Node native binding** with `dry_run=true` and the release
+   commit SHA. Download its five `node-<format>.*` artifacts into
+   `bindings/node-<format>/artifacts` in a clean checkout of that SHA.
+2. Run `bun install --frozen-lockfile`, then
+   `bunx napi artifacts --cwd bindings/node-<format>`.
+3. Log in to npm with an account that can publish the `@betteroffice` scope and
+   run `npm publish --access public --provenance=false` from
+   `bindings/node-<format>`. Its `prepublishOnly` publishes the five platform
+   packages before npm publishes the root package.
+4. Configure all six package names with workflow
+   `publish-node-binding.yml` and environment `npm-<format>`, then use the
+   workflow for later versions.
+
 An optional peer that 404s does not make installation fail: npm silently omits
 it. Consumers then fall back to synthetic metrics while being told to install a
 package that does not exist. `scripts/check-publish-targets.mjs --npm` fails the
@@ -96,6 +112,33 @@ leave the release half-published, and a crate cannot be unpublished. The
 versions it reads are the ones about to be published: the publish path runs only
 when no changesets are pending, and `changesets/action` runs no `version`
 command then.
+
+## Node native bindings
+
+`scripts/node-bindings.mjs` is the single registry for the DOCX, PPTX, and XLSX
+Node bindings. Each native package shares its format's fixed Changesets group
+with the core, React, and locale packages. They start at the same version:
+DOCX and XLSX at `0.2.1`, PPTX at `0.1.1`. Bumping any package in a format's group
+releases the native package with it. `version-packages.mjs` synchronizes the
+Cargo manifest, platform manifests, generated loader version checks, and locks.
+
+`publish-node-binding.yml` is the only workflow that uploads native Node
+packages. It builds macOS arm64/x64, Linux arm64/x64 GNU, and Windows x64 MSVC
+artifacts at the release commit, assembles the NAPI-RS optional packages, and
+publishes through npm Trusted Publishing. `release.yml` detects unpublished
+native versions, dispatches one run per format, and waits before publishing the
+remaining npm packages and Rust crates.
+
+Every root and platform package for one format uses the same GitHub environment,
+`npm-<format>`, and names owner `openooxml`, repository `betteroffice`, workflow
+`publish-node-binding.yml` in its npm Trusted Publisher configuration. The
+workflow rejects `NPM_TOKEN`; there is no repository-token fallback.
+
+The native API follows Node.js conventions rather than copying Python call
+shapes: document bytes are `Buffer`, CPU-heavy operations are promises,
+structured data uses camel-case JavaScript objects, and filesystem I/O stays in
+Node. Engine data, validation, resource limits, editing behavior, and save
+semantics remain aligned with the Rust facades and Python bindings.
 
 ## Python bindings
 
