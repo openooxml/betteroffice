@@ -297,6 +297,7 @@ impl SlideRenderer {
                     .and_then(|source| source.fill)
                     .and_then(|fill| paint(fill, theme))
             })
+            .filter(|paint| !is_invisible(paint))
             .or_else(|| {
                 Some(Paint::Solid {
                     color: "#ffffff".to_owned(),
@@ -4546,6 +4547,18 @@ fn emu_to_px(value: i64) -> f32 {
 
 /// A slide's page box is a whole number of points, the unit PowerPoint
 /// exports and prints it in, so the extent snaps there before the px scale.
+/// a slide is white paper, so a background the deck made fully transparent is
+/// not a hole onto whatever is behind it.
+fn is_invisible(paint: &Paint) -> bool {
+    fn clear(color: &str) -> bool {
+        color.len() == 9 && color.as_bytes()[7..] == *b"00"
+    }
+    match paint {
+        Paint::Solid { color } => clear(color),
+        Paint::Gradient { stops, .. } => !stops.is_empty() && stops.iter().all(|s| clear(&s.color)),
+    }
+}
+
 fn slide_extent_px(value: i64) -> f32 {
     safe_geometry(((value as f64 / EMU_PER_POINT).round() * CSS_PIXELS_PER_POINT) as f32)
 }
@@ -6116,6 +6129,31 @@ mod tests {
         assert_eq!(
             referenced.display_list.primitives[0],
             rendered.display_list.primitives[0]
+        );
+    }
+
+    /// a deck whose master fills the slide at alpha 0 still renders on paper.
+    #[test]
+    fn a_fully_transparent_background_renders_as_white_paper() {
+        let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
+        let session = DeckSession::open(FIXTURE, 8_311).unwrap();
+        let snapshot = session.snapshot().unwrap();
+        package.slides[0].background_reference = None;
+        package.slides[0].background = Some(ShapeFill {
+            fill_type: "solid".to_owned(),
+            color: Some(ColorValue {
+                rgb: Some("123456".to_owned()),
+                alpha: Some(0.0),
+                ..ColorValue::default()
+            }),
+            gradient: None,
+        });
+        let rendered = renderer().layout_slide(&package, &snapshot, 0).unwrap();
+        assert_eq!(
+            rendered.display_list.background,
+            Some(Paint::Solid {
+                color: "#ffffff".to_owned()
+            })
         );
     }
 
