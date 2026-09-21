@@ -556,10 +556,23 @@ pub(crate) fn count(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
                     .filter(|v| matches!(v.as_ref(), CellValue::Number { .. }))
                     .count() as i64;
             }
-            None => match evaluate(arg, ctx) {
-                CellValue::Number { .. } | CellValue::Bool { .. } => count += 1,
-                CellValue::Text { value } if crate::eval::parse_num(&value).is_some() => count += 1,
-                _ => {}
+            // `COUNT(1/(range=key))` counts the matches: the misses are
+            // #DIV/0!, and an error is simply not a number
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    count += array
+                        .cells()
+                        .iter()
+                        .filter(|v| matches!(v, CellValue::Number { .. }))
+                        .count() as i64;
+                }
+                value => match value.into_scalar() {
+                    CellValue::Number { .. } | CellValue::Bool { .. } => count += 1,
+                    CellValue::Text { value } if crate::eval::parse_num(&value).is_some() => {
+                        count += 1;
+                    }
+                    _ => {}
+                },
             },
         }
     }

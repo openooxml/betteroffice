@@ -1262,3 +1262,17 @@ fn formulatext_reads_the_formula_a_cell_holds() {
         }]
     );
 }
+
+/// `COUNT(1/(range=key))` counts the matches: the misses divide by zero, and
+/// an error is simply not a number. A2 and A4 are "apple".
+#[test]
+fn count_reads_a_computed_block_and_skips_its_errors() {
+    let workbook = fixture();
+    assert_eq!(values("COUNT({1;2})", &workbook), vec![n(2.0)]);
+    assert_eq!(values("COUNT({1;2},{3;4})", &workbook), vec![n(4.0)]);
+    assert_eq!(
+        values("COUNT(1/(A1:A4=\"apple\"))", &workbook),
+        vec![n(2.0)]
+    );
+    assert_eq!(values("SUM({1;2})", &workbook), vec![n(3.0)]);
+}

@@ -1508,6 +1508,9 @@ fn aggregate(
     fn empty_is_zero(name: &str) -> bool {
         matches!(name, "MIN" | "MAX")
     }
+    // COUNT asks how many numbers there are, so an error is simply not one;
+    // every other aggregate has to answer with it
+    let skip_errors = name == "COUNT";
     let values: Vec<Value> = args.iter().map(|arg| evaluate_array(arg, ctx)).collect();
     if !values.iter().any(|value| matches!(value, Value::Array(_)))
         && let Some(scalar) = crate::functions::resolve(name)
@@ -1521,14 +1524,16 @@ fn aggregate(
                 for value in &array.values {
                     match value {
                         CellValue::Number { value } => numbers.push(*value),
-                        CellValue::Error { value } => return Value::error(*value),
+                        CellValue::Error { value } if !skip_errors => {
+                            return Value::error(*value);
+                        }
                         _ => {}
                     }
                 }
             }
             Value::Scalar(value) if as_area(arg, ctx).is_some() => match value {
                 CellValue::Number { value } => numbers.push(value),
-                CellValue::Error { value } => return Value::error(value),
+                CellValue::Error { value } if !skip_errors => return Value::error(value),
                 _ => {}
             },
             Value::Scalar(value) => match to_number(&value) {
