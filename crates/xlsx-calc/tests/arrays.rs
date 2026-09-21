@@ -846,3 +846,18 @@ fn linest_refuses_an_underdetermined_fit() {
         }]
     );
 }
+
+/// `RANK` over a range of values answers one rank per value, the shape the
+/// classic `LOOKUP(2, 1/(RANK(..)=n), ..)` idiom depends on.
+#[test]
+fn rank_ranks_every_value_it_is_given() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("RANK(B1:B4,B1:B4,1)", &workbook),
+        (4, 1, vec![n(3.0), n(1.0), n(4.0), n(2.0)])
+    );
+    assert_eq!(
+        arrayed("RANK(B1:B4,B1:B4)", &workbook),
+        (4, 1, vec![n(2.0), n(4.0), n(1.0), n(3.0)])
+    );
+}

@@ -544,6 +544,7 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "COUNTIFS" => &[1, 3, 5, 7, 9],
         "AVERAGEIFS" | "MAXIFS" | "MINIFS" | "SUMIFS" => &[2, 4, 6, 8, 10],
         "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
+        "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" => &[0],
         _ => return None,
     })
 }
