@@ -146,6 +146,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "betteroffice-docx-wasm-all"
+version = "0.2.0"
+dependencies = [
+ "betteroffice-docx-edit",
+ "betteroffice-docx-layout",
+ "betteroffice-docx-parse",
+ "betteroffice-opc",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "betteroffice-drawingml"
 version = "0.2.0"
 dependencies = [
