@@ -5,6 +5,7 @@
 //! paragraph remains authored exactly as it appeared in the source package.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -112,14 +113,25 @@ fn default_true() -> bool {
 /// `ooxml-opc` writer. Original entries seed the output in archive order;
 /// only editor-owned parts are overwritten or appended.
 pub fn write_docx_s13(
-    mut request: S13SaveRequest,
+    request: S13SaveRequest,
     original_docx: &[u8],
 ) -> Result<Vec<u8>, ParseError> {
-    request.determinism.validate()?;
     let original_parts = ooxml_opc::unzip_parts(original_docx).map_err(ParseError::Container)?;
+    write_docx_s13_parts(request, &original_parts, Some(original_docx))
+}
+
+/// [`write_docx_s13`] seeded from already-inflated parts. `source` is the
+/// original container, when the caller still holds it, so unchanged members
+/// re-emit verbatim instead of being re-deflated.
+pub fn write_docx_s13_parts(
+    mut request: S13SaveRequest,
+    original_parts: &[(String, Vec<u8>)],
+    source: Option<&[u8]>,
+) -> Result<Vec<u8>, ParseError> {
+    request.determinism.validate()?;
     let limits = crate::xml::ParseLimits::default();
     let mut budget = crate::xml::ParseBudget::new(&limits);
-    let document_path = crate::relationships::office_document_path(&original_parts, &mut budget)?;
+    let document_path = crate::relationships::office_document_path(original_parts, &mut budget)?;
     let mut package = Package::new(original_parts, document_path);
     let relationships: IndexMap<_, _> = request.relationship_entries.iter().cloned().collect();
 
@@ -200,20 +212,28 @@ pub fn write_docx_s13(
         }
     }
 
-    ooxml_opc::rezip_parts_preserving(&package.parts, original_docx).map_err(ParseError::Container)
+    match source {
+        Some(source) => ooxml_opc::rezip_parts_preserving(&package.refs(), source),
+        None => ooxml_opc::rezip_parts_borrowed(&package.refs()),
+    }
+    .map_err(ParseError::Container)
 }
 
-#[derive(Clone, Debug)]
-struct Package {
-    parts: Vec<(String, Vec<u8>)>,
+/// Edits overlay borrowed `original` entries so unchanged parts are never copied.
+#[derive(Debug)]
+struct Package<'a> {
+    original: &'a [(String, Vec<u8>)],
+    appended: Vec<(String, Vec<u8>)>,
+    overrides: HashMap<usize, Vec<u8>>,
+    /// Maps a part path to an index into `original` followed by `appended`.
     positions: HashMap<String, usize>,
     document_path: String,
     document_relationships_path: String,
 }
 
-impl Package {
-    fn new(parts: Vec<(String, Vec<u8>)>, document_path: String) -> Self {
-        let positions = parts
+impl<'a> Package<'a> {
+    fn new(original: &'a [(String, Vec<u8>)], document_path: String) -> Self {
+        let positions = original
             .iter()
             .enumerate()
             .map(|(index, (path, _))| (path.clone(), index))
@@ -221,14 +241,16 @@ impl Package {
         let document_relationships_path =
             crate::relationships::relationship_part_path(&document_path);
         Self {
-            parts,
+            original,
+            appended: Vec::new(),
+            overrides: HashMap::new(),
             positions,
             document_path,
             document_relationships_path,
         }
     }
 
-    fn resolve_path<'a>(&'a self, path: &'a str) -> &'a str {
+    fn resolve_path<'b>(&'b self, path: &'b str) -> &'b str {
         match path {
             "word/document.xml" => &self.document_path,
             "word/_rels/document.xml.rels" => &self.document_relationships_path,
@@ -241,9 +263,14 @@ impl Package {
     }
 
     fn bytes(&self, path: &str) -> Option<&[u8]> {
-        self.positions
-            .get(self.resolve_path(path))
-            .map(|index| self.parts[*index].1.as_slice())
+        let index = *self.positions.get(self.resolve_path(path))?;
+        Some(if index < self.original.len() {
+            self.overrides
+                .get(&index)
+                .map_or(self.original[index].1.as_slice(), Vec::as_slice)
+        } else {
+            self.appended[index - self.original.len()].1.as_slice()
+        })
     }
 
     fn text(&self, path: &str) -> Option<String> {
@@ -255,15 +282,46 @@ impl Package {
         let path = path.into();
         let path = self.resolve_path(&path).to_owned();
         if let Some(index) = self.positions.get(&path).copied() {
-            self.parts[index].1 = bytes;
+            if index < self.original.len() {
+                self.overrides.insert(index, bytes);
+            } else {
+                self.appended[index - self.original.len()].1 = bytes;
+            }
         } else {
-            self.positions.insert(path.clone(), self.parts.len());
-            self.parts.push((path, bytes));
+            self.positions
+                .insert(path.clone(), self.original.len() + self.appended.len());
+            self.appended.push((path, bytes));
         }
     }
 
     fn set_text(&mut self, path: impl Into<String>, xml: String) {
         self.set(path, xml.into_bytes());
+    }
+
+    fn paths(&self) -> impl Iterator<Item = &str> {
+        self.original
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .chain(self.appended.iter().map(|(path, _)| path.as_str()))
+    }
+
+    /// Effective `(path, bytes)` entries in archive order: originals with
+    /// overlays applied, then appends.
+    fn refs(&self) -> Vec<(String, &[u8])> {
+        let mut entries = Vec::with_capacity(self.original.len() + self.appended.len());
+        for (index, (path, bytes)) in self.original.iter().enumerate() {
+            let bytes = self
+                .overrides
+                .get(&index)
+                .map_or(bytes.as_slice(), Vec::as_slice);
+            entries.push((path.clone(), bytes));
+        }
+        entries.extend(
+            self.appended
+                .iter()
+                .map(|(path, bytes)| (path.clone(), bytes.as_slice())),
+        );
+        entries
     }
 }
 
@@ -929,14 +987,43 @@ fn process_image_part<'a>(
     Ok(())
 }
 
+fn run_has_drawing_image(run: &Run) -> bool {
+    run.content
+        .iter()
+        .any(|content| matches!(content, RunContent::Drawing { .. }))
+}
+
+fn blocks_have_drawing_image(blocks: &[BlockContent]) -> bool {
+    blocks.iter().any(|block| match block {
+        BlockContent::Paragraph(paragraph) => {
+            paragraph.content.iter().any(|content| match content {
+                ParagraphContent::Inline(InlineNode::Run(run)) => run_has_drawing_image(run),
+                ParagraphContent::Tracked(tracked) => tracked.content.iter().any(
+                    |inline| matches!(inline, InlineNode::Run(run) if run_has_drawing_image(run)),
+                ),
+                _ => false,
+            })
+        }
+        BlockContent::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| blocks_have_drawing_image(&cell.content))
+        }),
+        BlockContent::BlockSdt(_) | BlockContent::RawXml(_) => false,
+    })
+}
+
 fn visit_new_images(
     blocks: &mut [BlockContent],
     visit: &mut impl FnMut(&mut Image) -> Result<(), ParseError>,
 ) -> Result<(), ParseError> {
     for block in blocks {
+        if !blocks_have_drawing_image(std::slice::from_ref(block)) {
+            continue;
+        }
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     match content {
                         ParagraphContent::Inline(InlineNode::Run(run)) => {
                             visit_run_images(run, visit)?
@@ -953,7 +1040,7 @@ fn visit_new_images(
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_new_images(&mut cell.content, visit)?;
                     }
@@ -1005,9 +1092,8 @@ fn decode_image_data_url(source: &str) -> Result<(Vec<u8>, String), ParseError> 
 
 fn find_max_image_number(package: &Package) -> u64 {
     package
-        .parts
-        .iter()
-        .filter_map(|(path, _)| {
+        .paths()
+        .filter_map(|path| {
             let suffix = path.strip_prefix("word/media/image")?;
             let digits: String = suffix.chars().take_while(char::is_ascii_digit).collect();
             (!digits.is_empty() && suffix[digits.len()..].starts_with('.'))
@@ -1028,7 +1114,7 @@ fn register_image_extensions(package: &mut Package, extensions: &HashSet<String>
     let mut changed = false;
     // Preserve package discovery order for newly appended image parts.
     let mut ordered = Vec::new();
-    for (path, _) in &package.parts {
+    for path in package.paths() {
         let Some(extension) = path
             .strip_prefix("word/media/")
             .and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension))
@@ -1332,24 +1418,43 @@ fn process_hyperlink_part<'a>(
     }
 }
 
+fn block_has_hyperlink(block: &BlockContent) -> bool {
+    match block {
+        BlockContent::Paragraph(paragraph) => paragraph
+            .content
+            .iter()
+            .any(|content| matches!(content, ParagraphContent::Inline(InlineNode::Hyperlink(_)))),
+        BlockContent::Table(table) => table.rows.iter().any(|row| {
+            row.cells
+                .iter()
+                .any(|cell| cell.content.iter().any(block_has_hyperlink))
+        }),
+        BlockContent::BlockSdt(sdt) => sdt.content.iter().any(block_has_hyperlink),
+        BlockContent::RawXml(_) => false,
+    }
+}
+
 fn visit_hyperlinks(blocks: &mut [BlockContent], visit: &mut impl FnMut(&mut Hyperlink)) {
     for block in blocks {
+        if !block_has_hyperlink(block) {
+            continue;
+        }
         match block {
             BlockContent::Paragraph(paragraph) => {
-                for content in &mut paragraph.content {
+                for content in &mut Arc::make_mut(paragraph).content {
                     if let ParagraphContent::Inline(InlineNode::Hyperlink(hyperlink)) = content {
                         visit(hyperlink);
                     }
                 }
             }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         visit_hyperlinks(&mut cell.content, visit);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut sdt.content, visit),
+            BlockContent::BlockSdt(sdt) => visit_hyperlinks(&mut Arc::make_mut(sdt).content, visit),
             BlockContent::RawXml(_) => {}
         }
     }

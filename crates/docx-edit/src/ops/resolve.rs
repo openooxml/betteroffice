@@ -38,7 +38,7 @@ use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, TextRef, TransactionMut};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::table::resolve_table_row_revisions;
-use crate::ops::{ChunkKind, snapshot};
+use crate::ops::{ChunkKind, last_pilcrow, snapshot, snapshot_range};
 use crate::queries::revision_parts;
 use crate::{
     DEL, EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PPR_CHANGE, PPR_DEL, PPR_INS, RevisionId,
@@ -201,12 +201,20 @@ fn resolve_story(
     filter: Option<&str>,
     resolved: &mut Vec<String>,
 ) -> u32 {
-    let chunks = snapshot(story, txn);
-    let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
-        ChunkKind::Pilcrow(_) => Some(chunk.start),
-        _ => None,
-    });
     let (span_start, span_end) = span.unwrap_or((0, u32::MAX));
+    let (chunks, final_pilcrow) = if span.is_some() {
+        (
+            snapshot_range(story, txn, span_start, span_end),
+            last_pilcrow(story, txn).map(|(index, _)| index),
+        )
+    } else {
+        let chunks = snapshot(story, txn);
+        let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
+            ChunkKind::Pilcrow(_) => Some(chunk.start),
+            _ => None,
+        });
+        (chunks, final_pilcrow)
+    };
     let mut removed = 0;
     // Reverse walk so physical removals never shift the indices still to be visited.
     for chunk in chunks.iter().rev() {

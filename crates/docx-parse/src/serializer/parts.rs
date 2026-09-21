@@ -610,6 +610,8 @@ fn same_number(left: f64, right: f64) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crate::block::BlockContent;
     use crate::comments::Comment;
     use crate::formatting::TextFormatting;
@@ -653,7 +655,7 @@ mod tests {
     }
 
     fn paragraph(text: &str) -> BlockContent {
-        BlockContent::Paragraph(Paragraph {
+        BlockContent::Paragraph(Arc::new(Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: None,
             text_id: None,
@@ -674,14 +676,16 @@ mod tests {
             list_rendering: None,
             rendered_page_break_before: None,
             section_properties: None,
-        })
+        }))
     }
 
     fn comment(id: f64, parent_id: Option<f64>, text: &str) -> Comment {
         let BlockContent::Paragraph(mut paragraph) = paragraph(text) else {
             unreachable!()
         };
-        if let ParagraphContent::Inline(InlineNode::Run(run)) = &mut paragraph.content[0] {
+        if let ParagraphContent::Inline(InlineNode::Run(run)) =
+            &mut Arc::make_mut(&mut paragraph).content[0]
+        {
             run.formatting = Some(TextFormatting {
                 bold: Some(true),
                 italic: Some(true),
@@ -693,7 +697,7 @@ mod tests {
             author: "Alice <&>".to_owned(),
             initials: None,
             date: Some("2024-01-01T12:30:45.123Z".to_owned()),
-            content: vec![paragraph.clone()],
+            content: vec![paragraph.as_ref().clone()],
             parent_id,
             done: Some(parent_id.is_none()),
             status: "active".to_owned(),

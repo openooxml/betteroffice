@@ -10,12 +10,20 @@ use std::sync::{Arc, Mutex};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
+use crate::TableSpec;
+use crate::array::{Binding, evaluate_array};
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
+use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
 pub const MAX_CELL_TEXT_CHARS: usize = 32_767;
 const MAX_DEFINED_NAME_DEPTH: usize = 256;
+/// names one formula may have bound at once across nested `LET`/`LAMBDA`.
+const MAX_BINDINGS: usize = 1024;
+/// nested `LAMBDA` invocations, so a callback chain cannot exhaust the stack.
+/// the parser's depth cap already keeps real formulas well under this.
+const MAX_LAMBDA_DEPTH: usize = 64;
 
 #[cfg(test)]
 thread_local! {
@@ -64,6 +72,8 @@ pub struct EvalContext<'a> {
     unsupported_functions: Rc<Cell<u64>>,
     defined_name_stack: Rc<RefCell<Vec<DefinedNameKey>>>,
     defined_name_values: Rc<RefCell<HashMap<DefinedNameKey, (CellValue, bool)>>>,
+    bindings: Rc<RefCell<Vec<Binding>>>,
+    lambda_depth: Rc<Cell<usize>>,
     shared_budget: Option<Rc<EvaluationBudget>>,
     /// recalc-wide parse memo; `None` for one-off `evaluate` calls.
     pub(crate) parse_cache: Option<&'a ParseCache>,
@@ -84,6 +94,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
         }
@@ -103,6 +115,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: None,
             parse_cache: None,
         }
@@ -126,6 +140,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::new(Cell::new(0)),
             defined_name_stack: Rc::new(RefCell::new(Vec::new())),
             defined_name_values: Rc::new(RefCell::new(HashMap::new())),
+            bindings: Rc::new(RefCell::new(Vec::new())),
+            lambda_depth: Rc::new(Cell::new(0)),
             shared_budget: Some(budget),
             parse_cache: None,
         }
@@ -145,6 +161,8 @@ impl<'a> EvalContext<'a> {
             unsupported_functions: Rc::clone(&self.unsupported_functions),
             defined_name_stack: Rc::clone(&self.defined_name_stack),
             defined_name_values: Rc::clone(&self.defined_name_values),
+            bindings: Rc::clone(&self.bindings),
+            lambda_depth: Rc::clone(&self.lambda_depth),
             shared_budget: self.shared_budget.clone(),
             parse_cache: self.parse_cache,
         }
@@ -226,6 +244,50 @@ impl<'a> EvalContext<'a> {
             .set(self.unhandled_budget_errors.get().saturating_add(1));
     }
 
+    pub(crate) fn binding_depth(&self) -> usize {
+        self.bindings.borrow().len()
+    }
+
+    /// bind a `LET` name or `LAMBDA` parameter; `false` once the formula holds
+    /// as many as it may.
+    pub(crate) fn push_binding(&self, binding: Binding) -> bool {
+        let mut bindings = self.bindings.borrow_mut();
+        if bindings.len() >= MAX_BINDINGS {
+            return false;
+        }
+        bindings.push(binding);
+        true
+    }
+
+    pub(crate) fn truncate_bindings(&self, depth: usize) {
+        self.bindings.borrow_mut().truncate(depth);
+    }
+
+    /// innermost binding for `name`, so a `LAMBDA` parameter shadows an outer
+    /// `LET` name and both shadow a defined name.
+    pub(crate) fn binding(&self, name: &str) -> Option<Binding> {
+        self.bindings
+            .borrow()
+            .iter()
+            .rev()
+            .find(|binding| binding.matches(name))
+            .cloned()
+    }
+
+    pub(crate) fn enter_lambda(&self) -> bool {
+        let depth = self.lambda_depth.get();
+        if depth >= MAX_LAMBDA_DEPTH {
+            return false;
+        }
+        self.lambda_depth.set(depth + 1);
+        true
+    }
+
+    pub(crate) fn leave_lambda(&self) {
+        self.lambda_depth
+            .set(self.lambda_depth.get().saturating_sub(1));
+    }
+
     /// evaluate a bound definition with the name held on the re-entry stack.
     fn inside_defined_name<T>(
         &self,
@@ -302,15 +364,31 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
-        Expr::Name { scope, name } => evaluate_defined_name(scope, name, ctx),
+        Expr::TableRef { table, spec } => match table_area(table, spec, ctx) {
+            Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+                Ok(value) => value,
+                Err(error) => err(error),
+            },
+            Ok(_) => err(ErrorValue::Value),
+            Err(error) => err(error),
+        },
+        Expr::Name { scope, name } => match bound(scope, name, ctx) {
+            Some(binding) => binding.scalar(),
+            None => evaluate_defined_name(scope, name, ctx),
+        },
         Expr::Unary { op, expr } => eval_unary(*op, expr, ctx),
         Expr::Binary { op, lhs, rhs } => eval_binary(*op, lhs, rhs, ctx),
-        Expr::Percent(inner) => match to_number(&evaluate(inner, ctx)) {
-            Ok(n) => num(n / 100.0),
-            Err(e) => err(e),
-        },
-        Expr::FuncCall { func, args, .. } => match func {
+        Expr::Percent(inner) => apply_percent(&evaluate(inner, ctx)),
+        Expr::Literal(value) => normalize_provider_value(value.clone()),
+        Expr::ArrayLiteral { .. } => crate::array::evaluate_array(expr, ctx).into_scalar(),
+        Expr::FuncCall { func, name, args } => match func {
+            Some(_)
+                if crate::array::is_array_builtin(name) && crate::array::args_need_array(args) =>
+            {
+                evaluate_array(expr, ctx).into_scalar()
+            }
             Some(f) => f.call(args, ctx),
+            None if crate::array::is_array_builtin(name) => evaluate_array(expr, ctx).into_scalar(),
             None => {
                 ctx.record_unsupported_function();
                 err(ErrorValue::Name)
@@ -411,6 +489,15 @@ fn bind_defined_name(
     })
 }
 
+/// the `LET`/`LAMBDA` binding a bare name stands for, if any. a sheet
+/// qualifier always means a defined name.
+pub(crate) fn bound(scope: &Option<String>, name: &str, ctx: &EvalContext<'_>) -> Option<Binding> {
+    match scope {
+        Some(_) => None,
+        None => ctx.binding(name),
+    }
+}
+
 /// resolve a possibly sheet-qualified cell reference to its stored value.
 pub(crate) fn resolve_ref(
     sheet: &Option<String>,
@@ -440,12 +527,22 @@ pub(crate) fn resolve_sheet(sheet: &Option<String>, ctx: &EvalContext<'_>) -> Op
 }
 
 fn eval_unary(op: UnaryOp, expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
-    let v = evaluate(expr, ctx);
-    match to_number(&v) {
+    apply_unary(op, &evaluate(expr, ctx))
+}
+
+pub(crate) fn apply_unary(op: UnaryOp, v: &CellValue) -> CellValue {
+    match to_number(v) {
         Ok(n) => match op {
             UnaryOp::Neg => num(-n),
             UnaryOp::Plus => num(n),
         },
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn apply_percent(v: &CellValue) -> CellValue {
+    match to_number(v) {
+        Ok(n) => num(n / 100.0),
         Err(e) => err(e),
     }
 }
@@ -459,30 +556,42 @@ fn eval_binary(op: BinaryOp, lhs: &Expr, rhs: &Expr, ctx: &EvalContext<'_>) -> C
     if let CellValue::Error { value } = rv {
         return err(value);
     }
+    apply_binary(op, &lv, &rv)
+}
+
+/// the operator itself, over values already evaluated; errors propagate
+/// leftmost-first.
+pub(crate) fn apply_binary(op: BinaryOp, lv: &CellValue, rv: &CellValue) -> CellValue {
+    if let CellValue::Error { value } = lv {
+        return err(*value);
+    }
+    if let CellValue::Error { value } = rv {
+        return err(*value);
+    }
     match op {
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Pow => {
-            let a = match to_number(&lv) {
+            let a = match to_number(lv) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
-            let b = match to_number(&rv) {
+            let b = match to_number(rv) {
                 Ok(n) => n,
                 Err(e) => return err(e),
             };
             arithmetic(op, a, b)
         }
         BinaryOp::Concat => {
-            let a = match to_text(&lv) {
+            let a = match to_text(lv) {
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
-            let b = match to_text(&rv) {
+            let b = match to_text(rv) {
                 Ok(s) => s,
                 Err(e) => return err(e),
             };
             text(a + &b)
         }
-        _ => compare(op, &lv, &rv),
+        _ => compare(op, lv, rv),
     }
 }
 
@@ -695,6 +804,12 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("OFFSET") => {
             crate::functions::lookups::offset_area(args, ctx).ok()
         }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDIRECT") => {
+            crate::functions::lookups::indirect_area(args, ctx).ok()
+        }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            crate::functions::lookups::index_area(args, ctx).ok()
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,
@@ -713,12 +828,42 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             rows: xlsx_model::addr::MAX_ROWS as usize,
             cols: (range.end - range.start + 1) as usize,
         }),
+        Expr::TableRef { table, spec } => table_area(table, spec, ctx).ok(),
         Expr::Name { scope, name } => {
+            if let Some(binding) = bound(scope, name, ctx) {
+                return binding.reference().and_then(|expr| as_area(expr, ctx));
+            }
             let key = defined_name_key(scope, name, ctx).ok()?;
-            let binding = bind_defined_name(key, name, ctx).ok()?;
-            ctx.inside_defined_name(&binding, as_area)
+            let definition = bind_defined_name(key, name, ctx).ok()?;
+            ctx.inside_defined_name(&definition, as_area)
         }
         _ => None,
+    }
+}
+
+/// the rectangle a structured reference designates, on the sheet its table
+/// lives on. an unknown table name is #REF!.
+pub(crate) fn table_area(
+    table: &str,
+    spec: &TableSpec,
+    ctx: &EvalContext<'_>,
+) -> Result<Area, ErrorValue> {
+    let definition = ctx.provider.table(table).ok_or(ErrorValue::Ref)?;
+    let rect = table_rect(definition, spec, ctx.cell)?;
+    Ok(Area {
+        sheet: definition.sheet,
+        start: rect.start,
+        rows: (rect.end.row - rect.start.row + 1) as usize,
+        cols: (rect.end.col - rect.start.col + 1) as usize,
+    })
+}
+
+/// the value a stored cell surfaces as, with invalid stored values mapped to
+/// errors.
+pub(crate) fn normalize_provider_value(value: CellValue) -> CellValue {
+    match provider_error(&value) {
+        Some(error) => err(error),
+        None => value,
     }
 }
 

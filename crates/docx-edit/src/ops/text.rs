@@ -10,7 +10,7 @@ use crate::format::{FormatPolicy, HYPERLINK, PROTECTED_ATTRS};
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
 use crate::ops::{
     Chunk, ChunkKind, adjacent_paragraph_change_revision_id, adjacent_revision_id, adopt_pilcrow,
-    capture_pilcrow, snapshot, utf16_len,
+    capture_pilcrow, last_pilcrow, snapshot_range, utf16_len,
 };
 use crate::{
     BREAK_KIND, DEL, EditCtx, EditingDoc, INS, KIND_KEY, Position, StoryRange, check_position,
@@ -100,6 +100,11 @@ pub(crate) struct DeleteOutcome {
     pub removed: u32,
 }
 
+/// Chunks covering the insertion/deletion boundary.
+fn boundary_chunks<T: yrs::ReadTxn>(story: &TextRef, txn: &T, index: u32) -> Vec<Chunk> {
+    snapshot_range(story, txn, index.saturating_sub(1), index.saturating_add(1))
+}
+
 /// Stamps retained content, removes owned insertions, and protects the final pilcrow.
 pub(crate) fn suggest_delete(
     txn: &mut TransactionMut<'_>,
@@ -108,12 +113,9 @@ pub(crate) fn suggest_delete(
     revision: &Any,
     start: u32,
     end: u32,
+    chunks: &[Chunk],
 ) -> DeleteOutcome {
-    let chunks = snapshot(story, txn);
-    let final_pilcrow = chunks.iter().rev().find_map(|chunk| match chunk.kind {
-        ChunkKind::Pilcrow(_) => Some(chunk.start),
-        _ => None,
-    });
+    let final_pilcrow = last_pilcrow(story, txn).map(|(index, _)| index);
     let mut removed = 0;
     for chunk in chunks.iter().rev() {
         let overlap_start = chunk.start.max(start);
@@ -163,8 +165,8 @@ pub(crate) fn plain_delete(
     story: &TextRef,
     start: u32,
     end: u32,
+    chunks: &[Chunk],
 ) -> DeleteOutcome {
-    let chunks = snapshot(story, txn);
     let pilcrows_in_range: Vec<(u32, yrs::MapRef)> = chunks
         .iter()
         .filter_map(|chunk| match &chunk.kind {
@@ -174,10 +176,7 @@ pub(crate) fn plain_delete(
             _ => None,
         })
         .collect();
-    let final_pilcrow = chunks.iter().rev().find_map(|chunk| match &chunk.kind {
-        ChunkKind::Pilcrow(map) => Some((chunk.start, map.clone())),
-        _ => None,
-    });
+    let final_pilcrow = last_pilcrow(story, txn);
     let donor = pilcrows_in_range
         .first()
         .map(|(_, map)| capture_pilcrow(map, txn));
@@ -200,12 +199,7 @@ pub(crate) fn plain_delete(
         let survivor = if pilcrows_in_range.is_empty() {
             None
         } else {
-            snapshot(story, txn)
-                .into_iter()
-                .find_map(|chunk| match chunk.kind {
-                    ChunkKind::Pilcrow(map) if chunk.start >= start => Some(map),
-                    _ => None,
-                })
+            crate::next_pilcrow(story, txn, start).map(|(_, map)| map)
         };
         (end - start, survivor)
     };
@@ -239,7 +233,7 @@ impl EditingDoc {
                 ..Receipt::default()
             });
         }
-        let chunks = snapshot(&story, &txn);
+        let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {
@@ -270,7 +264,12 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = snapshot_range(
+            &story,
+            &txn,
+            range.start.saturating_sub(1),
+            range.end.saturating_add(1),
+        );
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, DEL, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.end, DEL, &ctx.author))
@@ -278,10 +277,18 @@ impl EditingDoc {
         });
         let result_end = if let Some(id) = revision_id.as_ref() {
             let revision = revision_value(id, &ctx.revision_author());
-            let outcome = suggest_delete(&mut txn, &story, ctx, &revision, range.start, range.end);
+            let outcome = suggest_delete(
+                &mut txn,
+                &story,
+                ctx,
+                &revision,
+                range.start,
+                range.end,
+                &chunks,
+            );
             range.end - outcome.removed
         } else {
-            plain_delete(&mut txn, &story, range.start, range.end);
+            plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             range.start
         };
         let loc_range = loc_range_in_txn(&range.story, &story, &txn, range.start, result_end)?;
@@ -307,7 +314,12 @@ impl EditingDoc {
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
 
-        let chunks = snapshot(&story, &txn);
+        let chunks = snapshot_range(
+            &story,
+            &txn,
+            range.start.saturating_sub(1),
+            range.end.saturating_add(1),
+        );
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -339,9 +351,17 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                suggest_delete(&mut txn, &story, ctx, revision, range.start, range.end);
+                suggest_delete(
+                    &mut txn,
+                    &story,
+                    ctx,
+                    revision,
+                    range.start,
+                    range.end,
+                    &chunks,
+                );
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end);
+                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             }
         }
         if !text.is_empty() {
@@ -380,7 +400,12 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &range.story)?;
         check_range(&story, &txn, range.start, len)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = snapshot_range(
+            &story,
+            &txn,
+            range.start.saturating_sub(1),
+            range.end.saturating_add(1),
+        );
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, range.start, INS, &ctx.author)
                 .or_else(|| adjacent_revision_id(&chunks, range.start, DEL, &ctx.author))
@@ -393,9 +418,17 @@ impl EditingDoc {
             .map(|id| revision_value(id, &ctx.revision_author()));
         if len > 0 {
             if let Some(revision) = revision.as_ref() {
-                suggest_delete(&mut txn, &story, ctx, revision, range.start, range.end);
+                suggest_delete(
+                    &mut txn,
+                    &story,
+                    ctx,
+                    revision,
+                    range.start,
+                    range.end,
+                    &chunks,
+                );
             } else {
-                plain_delete(&mut txn, &story, range.start, range.end);
+                plain_delete(&mut txn, &story, range.start, range.end, &chunks);
             }
         }
         let mut cursor = range.start;
@@ -431,7 +464,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())
@@ -461,7 +494,7 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = boundary_chunks(&story, &txn, at.index);
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .unwrap_or_else(|| self.next_id())

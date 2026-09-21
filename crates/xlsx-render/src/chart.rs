@@ -584,7 +584,7 @@ fn paint_chart_placeholder(
         y,
         w,
         h,
-        color: PLACEHOLDER_FILL.to_string(),
+        color: PLACEHOLDER_FILL.into(),
         clip: Some(clip),
     })?;
     if w <= PLACEHOLDER_BORDER_WIDTH || h <= PLACEHOLDER_BORDER_WIDTH {
@@ -605,7 +605,7 @@ fn paint_chart_placeholder(
             x2,
             y2,
             width: PLACEHOLDER_BORDER_WIDTH,
-            color: PLACEHOLDER_BORDER.to_string(),
+            color: PLACEHOLDER_BORDER.into(),
             style: None,
             clip: Some(clip),
         })?;
@@ -813,7 +813,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             y: finite_f32(y)?,
             w: positive_f32(w)?,
             h: positive_f32(h)?,
-            color: fill,
+            color: fill.into(),
             clip: Some(chart_clip),
         })),
         PlotOp::Text {
@@ -838,9 +838,9 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             Ok(text_clip.map(|clip| DrawCmd::Text {
                 x,
                 y,
-                text,
+                text: text.into(),
                 font_size,
-                color,
+                color: color.into(),
                 clip,
                 align,
                 bold: font.weight >= 600,
@@ -849,7 +849,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
                 strike: false,
                 highlight: None,
                 dashed_underline: false,
-                font_family: Some(font.family.to_string()),
+                font_family: Some(font.family.into()),
                 ghost: false,
                 chart: true,
             }))
@@ -867,7 +867,7 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             x2: finite_f32(x2)?,
             y2: finite_f32(y2)?,
             width: positive_f32(width)?,
-            color,
+            color: color.into(),
             style: None,
             clip: Some(chart_clip),
         })),
@@ -880,11 +880,11 @@ fn translate_op(op: PlotOp, chart_clip: Rect) -> Result<Option<DrawCmd>, ()> {
             validate_path(&commands)?;
             Ok(Some(DrawCmd::Path {
                 commands,
-                fill,
+                fill: fill.into(),
                 stroke: stroke
                     .map(|stroke| {
                         Ok(PathStroke {
-                            color: stroke.color,
+                            color: stroke.color.into(),
                             width: positive_f32(stroke.width)?,
                         })
                     })

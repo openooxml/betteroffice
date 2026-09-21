@@ -148,6 +148,82 @@ pub(crate) fn match_(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// XMATCH(value, array, [match_mode], [search_mode]). match modes: 0 exact,
+/// -1 exact or next smaller, 1 exact or next larger, 2 wildcard (treated as
+/// exact here). a negative search mode scans from the end.
+pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 4 {
+        return err(ErrorValue::Value);
+    }
+    let target = evaluate(&args[0], ctx);
+    if let CellValue::Error { value } = target {
+        return err(value);
+    }
+    let Some(area) = as_area(&args[1], ctx) else {
+        return err(ErrorValue::Value);
+    };
+    let mode = match args.get(2) {
+        Some(_) => match nth_int(args, ctx, 2) {
+            Ok(m) => m,
+            Err(e) => return err(e),
+        },
+        None => 0,
+    };
+    let search = match args.get(3) {
+        Some(_) => match nth_int(args, ctx, 3) {
+            Ok(m) => m,
+            Err(e) => return err(e),
+        },
+        None => 1,
+    };
+    // wildcard mode 2 is not implemented, so it is refused rather than
+    // silently answered as an exact match
+    if !(-1..=1).contains(&mode) || !matches!(search, -2 | -1 | 1 | 2) {
+        return err(ErrorValue::Value);
+    }
+    let values = match area.values_ref(ctx) {
+        Ok(values) => values,
+        Err(error) => return err(error),
+    };
+    let order: Vec<usize> = if search < 0 {
+        (0..values.len()).rev().collect()
+    } else {
+        (0..values.len()).collect()
+    };
+    let mut best: Option<usize> = None;
+    for &i in &order {
+        let ordering = cmp_values(values[i].as_ref(), &target);
+        if ordering == Ordering::Equal {
+            return num(i as f64 + 1.0);
+        }
+        let candidate = match mode {
+            -1 => ordering == Ordering::Less,
+            1 => ordering == Ordering::Greater,
+            _ => false,
+        };
+        if !candidate {
+            continue;
+        }
+        best = match best {
+            None => Some(i),
+            Some(current) => {
+                let better = match mode {
+                    -1 => {
+                        cmp_values(values[i].as_ref(), values[current].as_ref())
+                            == Ordering::Greater
+                    }
+                    _ => cmp_values(values[i].as_ref(), values[current].as_ref()) == Ordering::Less,
+                };
+                Some(if better { i } else { current })
+            }
+        };
+    }
+    match best {
+        Some(i) => num(i as f64 + 1.0),
+        None => err(ErrorValue::NA),
+    }
+}
+
 /// INDEX(area, row_num, [col_num]). for a single-row or single-column area the
 /// lone index selects along that axis. 1-based; out of range -> #REF!.
 pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -185,6 +261,64 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// `INDEX` used where a reference is expected: a zero or omitted index keeps
+/// the whole row or column as a reference instead of collapsing it to a value.
+pub(crate) fn index_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(ErrorValue::Value);
+    }
+    let area = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let first = axis_index(args, ctx, 1)?;
+    let second = match args.len() {
+        3 => Some(axis_index(args, ctx, 2)?),
+        _ => None,
+    };
+    let (row, col) = match second {
+        Some(col) => (first, col),
+        None if area.rows == 1 && area.cols > 1 => (0, first),
+        None => (first, 0),
+    };
+    if row > area.rows || col > area.cols {
+        return Err(ErrorValue::Ref);
+    }
+    let (start_row, rows) = match row {
+        0 => (area.start.row, area.rows),
+        row => (
+            area.start
+                .row
+                .checked_add(row as u32 - 1)
+                .ok_or(ErrorValue::Ref)?,
+            1,
+        ),
+    };
+    let (start_col, cols) = match col {
+        0 => (area.start.col, area.cols),
+        col => (
+            area.start
+                .col
+                .checked_add(col as u32 - 1)
+                .ok_or(ErrorValue::Ref)?,
+            1,
+        ),
+    };
+    Ok(Area {
+        sheet: area.sheet,
+        start: CellRef::new(start_row, start_col),
+        rows,
+        cols,
+    })
+}
+
+/// one `INDEX` index as a 0-based-or-whole-axis count: a gap reads as 0, and a
+/// negative index is #VALUE!.
+fn axis_index(args: &[Expr], ctx: &EvalContext<'_>, at: usize) -> Result<usize, ErrorValue> {
+    if args.get(at).is_some_and(crate::functions::omitted) {
+        return Ok(0);
+    }
+    let value = crate::functions::nth_int(args, ctx, at)?;
+    usize::try_from(value).map_err(|_| ErrorValue::Value)
+}
+
 /// OFFSET(reference, rows, cols, [height], [width]): a negative size extends
 /// back from the shifted corner; a zero size or a rectangle off the sheet is
 /// #REF!, and a multi-cell result in scalar context is #VALUE!.
@@ -201,6 +335,44 @@ pub(crate) fn offset(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// OFFSET's reference result, for callers that take an area rather than a
 /// value; `as_area` routes nested OFFSET calls back through here.
+/// INDIRECT(text, [a1]): the reference `text` spells. only a reference-shaped
+/// expression is accepted, so the text cannot smuggle in another call.
+pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(ErrorValue::Value);
+    }
+    if let Some(style) = args.get(1) {
+        // a bad a1 argument is the caller's error, not a silent A1 default
+        if !crate::eval::to_bool(&evaluate(style, ctx))? {
+            return Err(ErrorValue::Ref);
+        }
+    }
+    let text = match evaluate(&args[0], ctx) {
+        CellValue::Text { value } => value,
+        CellValue::Error { value } => return Err(value),
+        _ => return Err(ErrorValue::Ref),
+    };
+    let expr = crate::parse_formula(&text).map_err(|_| ErrorValue::Ref)?;
+    if !matches!(
+        expr,
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. }
+    ) {
+        return Err(ErrorValue::Ref);
+    }
+    as_area(&expr, ctx).ok_or(ErrorValue::Ref)
+}
+
+/// INDIRECT used as a value: the top-left cell of the reference it spells.
+pub(crate) fn indirect(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match indirect_area(args, ctx) {
+        Ok(area) => match area.get(ctx, 0, 0) {
+            Ok(value) => value,
+            Err(e) => err(e),
+        },
+        Err(e) => err(e),
+    }
+}
+
 pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
     if args.len() < 3 || args.len() > 5 {
         return Err(ErrorValue::Value);
@@ -209,12 +381,12 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
     let rows = nth_int(args, ctx, 1)?;
     let cols = nth_int(args, ctx, 2)?;
     let height = match args.get(3) {
-        Some(_) => Some(nth_int(args, ctx, 3)?),
-        None => None,
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 3)?),
+        _ => None,
     };
     let width = match args.get(4) {
-        Some(_) => Some(nth_int(args, ctx, 4)?),
-        None => None,
+        Some(arg) if !crate::functions::omitted(arg) => Some(nth_int(args, ctx, 4)?),
+        _ => None,
     };
     let bounds = CellRange::new(
         anchor.start,
@@ -230,6 +402,67 @@ pub(crate) fn offset_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, 
         rows: (rect.end.row - rect.start.row + 1) as usize,
         cols: (rect.end.col - rect.start.col + 1) as usize,
     })
+}
+
+/// LOOKUP(value, vector, [result]) and LOOKUP(value, array): approximate match
+/// over data assumed sorted ascending, returning the last entry not past the
+/// target. the array form searches the longer edge and returns the far one.
+pub(crate) fn lookup_fn(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    let target = evaluate(&args[0], ctx);
+    if let CellValue::Error { value } = target {
+        return err(value);
+    }
+    let source = crate::array::evaluate_array(&args[1], ctx).into_array();
+    let (keys, results) = match args.get(2) {
+        Some(_) => (
+            flatten_vector(&source),
+            flatten_vector(&crate::array::evaluate_array(&args[2], ctx).into_array()),
+        ),
+        None if source.cols() > source.rows() => (
+            (0..source.cols()).map(|col| source.at(0, col)).collect(),
+            (0..source.cols())
+                .map(|col| source.at(source.rows() - 1, col))
+                .collect(),
+        ),
+        None => (
+            (0..source.rows()).map(|row| source.at(row, 0)).collect(),
+            (0..source.rows())
+                .map(|row| source.at(row, source.cols() - 1))
+                .collect(),
+        ),
+    };
+    let keys: Vec<CellValue> = keys;
+    let results: Vec<CellValue> = results;
+    let mut best = None;
+    for (index, key) in keys.iter().enumerate() {
+        if comparable(key, &target) && cmp_values(key, &target) != std::cmp::Ordering::Greater {
+            best = Some(index);
+        }
+    }
+    match best.and_then(|index| results.get(index)) {
+        Some(value) => value.clone(),
+        None => err(ErrorValue::NA),
+    }
+}
+
+fn flatten_vector(block: &crate::array::Array) -> Vec<CellValue> {
+    (0..block.rows())
+        .flat_map(|row| (0..block.cols()).map(move |col| (row, col)))
+        .map(|(row, col)| block.at(row, col))
+        .collect()
+}
+
+/// LOOKUP only compares entries of the target's own kind.
+fn comparable(value: &CellValue, target: &CellValue) -> bool {
+    matches!(
+        (value, target),
+        (CellValue::Number { .. }, CellValue::Number { .. })
+            | (CellValue::Text { .. }, CellValue::Text { .. })
+            | (CellValue::Bool { .. }, CellValue::Bool { .. })
+    )
 }
 
 /// XLOOKUP(value, lookup_array, return_array, [if_not_found], ...): exact-match

@@ -32,6 +32,8 @@ pub enum Func {
     RoundUp,
     RoundDown,
     Mround,
+    Quotient,
+    SeriesSum,
     Ceiling,
     Floor,
     Int,
@@ -45,6 +47,24 @@ pub enum Func {
     Log10,
     Pi,
     Tanh,
+    Sin,
+    Cos,
+    Tan,
+    Sinh,
+    Cosh,
+    Asin,
+    Acos,
+    Atan,
+    Atan2,
+    Degrees,
+    Radians,
+    Correl,
+    CovarianceP,
+    CovarianceS,
+    Slope,
+    Intercept,
+    Percentile,
+    Quartile,
     Randbetween,
     Average,
     Count,
@@ -54,6 +74,8 @@ pub enum Func {
     CountIfs,
     AverageIf,
     AverageIfs,
+    MaxIfs,
+    MinIfs,
     Min,
     Max,
     Median,
@@ -93,6 +115,10 @@ pub enum Func {
     Month,
     Day,
     Weekday,
+    WeekNum,
+    IsoWeekNum,
+    TextBefore,
+    TextAfter,
     Edate,
     Eomonth,
     Today,
@@ -117,6 +143,9 @@ pub enum Func {
     Offset,
     Match,
     Xlookup,
+    XMatch,
+    Subtotal,
+    Aggregate,
     Choose,
     Row,
     Column,
@@ -130,15 +159,36 @@ pub enum Func {
     IsError,
     IsErr,
     IsNa,
+    IsEven,
+    IsOdd,
     Na,
     N,
+    Lookup,
+    Indirect,
+}
+
+/// drop the `_xlfn.` / `_xlfn._xlws.` prefix excel stores post-2007 functions
+/// under; the prefix belongs to the stored name, not to the function.
+pub(crate) fn bare_name(name: &str) -> &str {
+    match strip_ascii_prefix(name, "_xlfn.") {
+        Some(rest) => strip_ascii_prefix(rest, "_xlws.").unwrap_or(rest),
+        None => name,
+    }
+}
+
+fn strip_ascii_prefix<'a>(name: &'a str, prefix: &str) -> Option<&'a str> {
+    name.as_bytes()
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+        .and_then(|_| name.get(prefix.len()..))
 }
 
 /// resolve a function name (case-insensitive) to its interned id; aliases map
-/// to the same id. every builtin name is at most 11 ascii bytes, so the
-/// uppercase fold fits in a stack buffer and never allocates.
+/// to the same id. the stored `_xlfn.` prefix is stripped first, so the
+/// uppercase fold only has to hold the bare name and never allocates.
 pub fn resolve(name: &str) -> Option<Func> {
     const MAX_BUILTIN_LEN: usize = 16;
+    let name = bare_name(name);
     let bytes = name.as_bytes();
     if bytes.len() > MAX_BUILTIN_LEN {
         return None;
@@ -161,6 +211,8 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ROUNDUP" => Func::RoundUp,
         "ROUNDDOWN" => Func::RoundDown,
         "MROUND" => Func::Mround,
+        "QUOTIENT" => Func::Quotient,
+        "SERIESSUM" => Func::SeriesSum,
         "CEILING" => Func::Ceiling,
         "FLOOR" => Func::Floor,
         "INT" => Func::Int,
@@ -174,6 +226,24 @@ pub fn resolve(name: &str) -> Option<Func> {
         "LOG10" => Func::Log10,
         "PI" => Func::Pi,
         "TANH" => Func::Tanh,
+        "SIN" => Func::Sin,
+        "COS" => Func::Cos,
+        "TAN" => Func::Tan,
+        "SINH" => Func::Sinh,
+        "COSH" => Func::Cosh,
+        "ASIN" => Func::Asin,
+        "ACOS" => Func::Acos,
+        "ATAN" => Func::Atan,
+        "ATAN2" => Func::Atan2,
+        "DEGREES" => Func::Degrees,
+        "RADIANS" => Func::Radians,
+        "CORREL" => Func::Correl,
+        "COVAR" | "COVARIANCE.P" => Func::CovarianceP,
+        "COVARIANCE.S" => Func::CovarianceS,
+        "SLOPE" => Func::Slope,
+        "INTERCEPT" => Func::Intercept,
+        "PERCENTILE" | "PERCENTILE.INC" => Func::Percentile,
+        "QUARTILE" | "QUARTILE.INC" => Func::Quartile,
         "RANDBETWEEN" => Func::Randbetween,
         "AVERAGE" => Func::Average,
         "COUNT" => Func::Count,
@@ -183,6 +253,8 @@ pub fn resolve(name: &str) -> Option<Func> {
         "COUNTIFS" => Func::CountIfs,
         "AVERAGEIF" => Func::AverageIf,
         "AVERAGEIFS" => Func::AverageIfs,
+        "MAXIFS" => Func::MaxIfs,
+        "MINIFS" => Func::MinIfs,
         "MIN" => Func::Min,
         "MAX" => Func::Max,
         "MEDIAN" => Func::Median,
@@ -222,6 +294,10 @@ pub fn resolve(name: &str) -> Option<Func> {
         "MONTH" => Func::Month,
         "DAY" => Func::Day,
         "WEEKDAY" => Func::Weekday,
+        "WEEKNUM" => Func::WeekNum,
+        "ISOWEEKNUM" => Func::IsoWeekNum,
+        "TEXTBEFORE" => Func::TextBefore,
+        "TEXTAFTER" => Func::TextAfter,
         "EDATE" => Func::Edate,
         "EOMONTH" => Func::Eomonth,
         "TODAY" => Func::Today,
@@ -246,6 +322,11 @@ pub fn resolve(name: &str) -> Option<Func> {
         "OFFSET" => Func::Offset,
         "MATCH" => Func::Match,
         "XLOOKUP" => Func::Xlookup,
+        "XMATCH" => Func::XMatch,
+        "SUBTOTAL" => Func::Subtotal,
+        "AGGREGATE" => Func::Aggregate,
+        "LOOKUP" => Func::Lookup,
+        "INDIRECT" => Func::Indirect,
         "CHOOSE" => Func::Choose,
         "ROW" => Func::Row,
         "COLUMN" => Func::Column,
@@ -259,6 +340,8 @@ pub fn resolve(name: &str) -> Option<Func> {
         "ISERROR" => Func::IsError,
         "ISERR" => Func::IsErr,
         "ISNA" => Func::IsNa,
+        "ISEVEN" => Func::IsEven,
+        "ISODD" => Func::IsOdd,
         "NA" => Func::Na,
         "N" => Func::N,
         _ => return None,
@@ -281,6 +364,8 @@ impl Func {
             Func::RoundUp => math::roundup(args, ctx),
             Func::RoundDown => math::rounddown(args, ctx),
             Func::Mround => math::mround(args, ctx),
+            Func::Quotient => math::quotient(args, ctx),
+            Func::SeriesSum => math::seriessum(args, ctx),
             Func::Ceiling => math::ceiling(args, ctx),
             Func::Floor => math::floor(args, ctx),
             Func::Int => math::int(args, ctx),
@@ -294,6 +379,24 @@ impl Func {
             Func::Log10 => math::log10(args, ctx),
             Func::Pi => math::pi(args, ctx),
             Func::Tanh => math::tanh(args, ctx),
+            Func::Sin => math::sin(args, ctx),
+            Func::Cos => math::cos(args, ctx),
+            Func::Tan => math::tan(args, ctx),
+            Func::Sinh => math::sinh(args, ctx),
+            Func::Cosh => math::cosh(args, ctx),
+            Func::Asin => math::asin(args, ctx),
+            Func::Acos => math::acos(args, ctx),
+            Func::Atan => math::atan(args, ctx),
+            Func::Atan2 => math::atan2(args, ctx),
+            Func::Degrees => math::degrees(args, ctx),
+            Func::Radians => math::radians(args, ctx),
+            Func::Correl => stats::correl(args, ctx),
+            Func::CovarianceP => stats::covariance_p(args, ctx),
+            Func::CovarianceS => stats::covariance_s(args, ctx),
+            Func::Slope => stats::slope(args, ctx),
+            Func::Intercept => stats::intercept(args, ctx),
+            Func::Percentile => stats::percentile(args, ctx),
+            Func::Quartile => stats::quartile(args, ctx),
             Func::Randbetween => math::randbetween(args, ctx),
             Func::Average => stats::average(args, ctx),
             Func::Count => stats::count(args, ctx),
@@ -303,6 +406,8 @@ impl Func {
             Func::CountIfs => stats::countifs(args, ctx),
             Func::AverageIf => stats::averageif(args, ctx),
             Func::AverageIfs => stats::averageifs(args, ctx),
+            Func::MaxIfs => stats::maxifs(args, ctx),
+            Func::MinIfs => stats::minifs(args, ctx),
             Func::Min => stats::min(args, ctx),
             Func::Max => stats::max(args, ctx),
             Func::Median => stats::median(args, ctx),
@@ -342,6 +447,10 @@ impl Func {
             Func::Month => datetime::month(args, ctx),
             Func::Day => datetime::day(args, ctx),
             Func::Weekday => datetime::weekday(args, ctx),
+            Func::WeekNum => datetime::weeknum(args, ctx),
+            Func::IsoWeekNum => datetime::isoweeknum(args, ctx),
+            Func::TextBefore => text::textbefore(args, ctx),
+            Func::TextAfter => text::textafter(args, ctx),
             Func::Edate => datetime::edate(args, ctx),
             Func::Eomonth => datetime::eomonth(args, ctx),
             Func::Today => datetime::today(args, ctx),
@@ -366,6 +475,11 @@ impl Func {
             Func::Offset => lookups::offset(args, ctx),
             Func::Match => lookups::match_(args, ctx),
             Func::Xlookup => lookups::xlookup(args, ctx),
+            Func::XMatch => lookups::xmatch(args, ctx),
+            Func::Subtotal => stats::subtotal(args, ctx),
+            Func::Aggregate => stats::aggregate(args, ctx),
+            Func::Lookup => lookups::lookup_fn(args, ctx),
+            Func::Indirect => lookups::indirect(args, ctx),
             Func::Choose => lookups::choose(args, ctx),
             Func::Row => lookups::row(args, ctx),
             Func::Column => lookups::column(args, ctx),
@@ -379,6 +493,8 @@ impl Func {
             Func::IsError => info::iserror(args, ctx),
             Func::IsErr => info::iserr(args, ctx),
             Func::IsNa => info::isna(args, ctx),
+            Func::IsEven => info::iseven(args, ctx),
+            Func::IsOdd => info::isodd(args, ctx),
             Func::Na => info::na(args, ctx),
             Func::N => info::n(args, ctx),
         }
@@ -425,6 +541,12 @@ fn push_reference_number(nums: &mut Vec<f64>, v: &CellValue) -> Result<(), Error
     Ok(())
 }
 
+/// whether an argument was written as a gap, as in `OFFSET(a,,,n,)`. excel
+/// reads those as absent, not as zero.
+pub(crate) fn omitted(arg: &Expr) -> bool {
+    matches!(arg, Expr::Literal(CellValue::Empty))
+}
+
 /// evaluate one argument and coerce it to a number, propagating errors.
 pub(crate) fn nth_number(
     args: &[Expr],
@@ -467,6 +589,8 @@ mod tests {
             (Func::RoundUp, "ROUNDUP"),
             (Func::RoundDown, "ROUNDDOWN"),
             (Func::Mround, "MROUND"),
+            (Func::Quotient, "QUOTIENT"),
+            (Func::SeriesSum, "SERIESSUM"),
             (Func::Ceiling, "CEILING"),
             (Func::Floor, "FLOOR"),
             (Func::Int, "INT"),
@@ -489,6 +613,8 @@ mod tests {
             (Func::CountIfs, "COUNTIFS"),
             (Func::AverageIf, "AVERAGEIF"),
             (Func::AverageIfs, "AVERAGEIFS"),
+            (Func::MaxIfs, "MAXIFS"),
+            (Func::MinIfs, "MINIFS"),
             (Func::Min, "MIN"),
             (Func::Max, "MAX"),
             (Func::Median, "MEDIAN"),
@@ -552,6 +678,8 @@ mod tests {
             (Func::Offset, "OFFSET"),
             (Func::Match, "MATCH"),
             (Func::Xlookup, "XLOOKUP"),
+            (Func::Lookup, "LOOKUP"),
+            (Func::Indirect, "INDIRECT"),
             (Func::Choose, "CHOOSE"),
             (Func::Row, "ROW"),
             (Func::Column, "COLUMN"),
@@ -565,6 +693,8 @@ mod tests {
             (Func::IsError, "ISERROR"),
             (Func::IsErr, "ISERR"),
             (Func::IsNa, "ISNA"),
+            (Func::IsEven, "ISEVEN"),
+            (Func::IsOdd, "ISODD"),
             (Func::Na, "NA"),
             (Func::N, "N"),
         ];

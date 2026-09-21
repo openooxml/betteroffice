@@ -90,6 +90,7 @@ export {
   applyFrameDelta,
   applyFrameDeltaOwned,
   decodeFrameDelta,
+  displayPageRevision,
   FRAME_DELTA_HEADER_BYTES,
   FRAME_DELTA_PAGE_OP_BYTES,
   FRAME_DELTA_VERSION,

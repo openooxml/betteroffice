@@ -297,9 +297,10 @@ pub struct EditingDoc {
     client_id: u64,
     id_counter: AtomicU64,
     /// Bumped once per committed update (local ops, remote merges, undo/redo); segment
-    /// indexes older than the current value are rebuilt on next lookup.
+    /// indexes and chunk snapshots older than the current value are rebuilt on next lookup.
     epoch: Arc<AtomicU64>,
     segment_indexes: Mutex<HashMap<Box<str>, (u64, Arc<SegmentIndex>)>>,
+    chunk_snapshots: Mutex<HashMap<Box<str>, (u64, Arc<Vec<ops::Chunk>>)>>,
     _update_sub: Subscription,
 }
 
@@ -329,6 +330,7 @@ impl EditingDoc {
             id_counter: AtomicU64::new(0),
             epoch,
             segment_indexes: Mutex::new(HashMap::new()),
+            chunk_snapshots: Mutex::new(HashMap::new()),
             _update_sub: update_sub,
         }
     }
@@ -356,6 +358,31 @@ impl EditingDoc {
         drop(txn);
         cache.insert(story_id.into(), (epoch, Arc::clone(&index)));
         Ok(index)
+    }
+
+    /// Shared `ops::snapshot` for `story_id`, rebuilt per committed epoch.
+    pub(crate) fn chunk_snapshot<T: ReadTxn>(
+        &self,
+        story_id: &str,
+        story: &TextRef,
+        txn: &T,
+    ) -> Arc<Vec<ops::Chunk>> {
+        let epoch = self.epoch.load(Ordering::Relaxed);
+        {
+            let cache = self.chunk_snapshots.lock().unwrap();
+            if let Some((cached_epoch, chunks)) = cache.get(story_id)
+                && *cached_epoch == epoch
+            {
+                return Arc::clone(chunks);
+            }
+        }
+        let chunks = Arc::new(ops::snapshot(story, txn));
+        let mut cache = self.chunk_snapshots.lock().unwrap();
+        if let Some(stories) = txn.get_map(STORIES) {
+            cache.retain(|key, _| &**key == story_id || stories.get(txn, key).is_some());
+        }
+        cache.insert(story_id.into(), (epoch, Arc::clone(&chunks)));
+        chunks
     }
 
     pub fn client_id(&self) -> u64 {
@@ -494,6 +521,7 @@ impl EditingDoc {
             .get_map(STORIES)
             .expect("stories root is declared by EditingDoc::new");
         if stories.remove(&mut txn, story_id).is_some() {
+            self.chunk_snapshots.lock().unwrap().remove(story_id);
             Ok(())
         } else {
             Err(EditError::StoryNotFound(story_id.to_owned()))
@@ -806,9 +834,18 @@ fn pilcrows<T: ReadTxn>(story: &TextRef, txn: &T) -> Vec<(u32, MapRef)> {
 }
 
 fn next_pilcrow<T: ReadTxn>(story: &TextRef, txn: &T, from: u32) -> Option<(u32, MapRef)> {
-    pilcrows(story, txn)
-        .into_iter()
-        .find(|(offset, _)| *offset >= from)
+    let mut offset = 0;
+    for diff in story.diff(txn, YChange::identity) {
+        let len = out_len(&diff.insert);
+        if offset >= from
+            && let Out::YMap(map) = diff.insert
+            && is_pilcrow(&map, txn)
+        {
+            return Some((offset, map));
+        }
+        offset += len;
+    }
+    None
 }
 
 fn out_len(value: &Out) -> u32 {

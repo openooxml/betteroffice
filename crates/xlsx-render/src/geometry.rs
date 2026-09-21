@@ -58,10 +58,40 @@ fn normal_font(styles: &Stylesheet) -> Option<&Font> {
     styles.font_for(0).or_else(|| styles.fonts.first())
 }
 
+/// the normal font the row grid measures with; on the print path it is the
+/// same value the text falls back to, so the two cannot disagree.
+#[derive(Debug, Clone, Copy)]
+struct NormalFace<'a> {
+    size_pt: f64,
+    family: Option<&'a str>,
+}
+
+impl<'a> NormalFace<'a> {
+    fn from_styles(styles: &'a Stylesheet) -> Self {
+        let font = normal_font(styles);
+        Self {
+            size_pt: font
+                .and_then(|font| font.size_pt)
+                .filter(|pt| pt.is_finite() && *pt > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PT),
+            family: font.and_then(|font| font.name.as_deref()),
+        }
+    }
+
+    fn from_metrics(metrics: &'a PrintMetrics) -> Self {
+        Self {
+            size_pt: Some(metrics.font_size_pt as f64)
+                .filter(|pt| pt.is_finite() && *pt > 0.0)
+                .unwrap_or(DEFAULT_FONT_SIZE_PT),
+            family: Some(metrics.font_family.as_str()),
+        }
+    }
+}
+
 /// the factor excel applies to every stored `ht` when `defaultRowHeight` is a
 /// cached hint it recomputes; `None` keeps stored heights. gated on calibri
 /// because [`autofit_row_height_pt`] is a calibri measurement.
-fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
+fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>) -> Option<f64> {
     if sheet.format.custom_height {
         return None;
     }
@@ -69,18 +99,13 @@ fn stored_height_scale(sheet: &Sheet, styles: &Stylesheet) -> Option<f64> {
         .format
         .default_row_height_pt
         .filter(|pt| pt.is_finite() && *pt > 0.0)?;
-    let normal = normal_font(styles);
     if !normal
-        .and_then(|font| font.name.as_deref())
+        .family
         .is_none_or(|name| name.eq_ignore_ascii_case("calibri"))
     {
         return None;
     }
-    let size = normal
-        .and_then(|font| font.size_pt)
-        .filter(|pt| pt.is_finite() && *pt > 0.0)
-        .unwrap_or(DEFAULT_FONT_SIZE_PT);
-    let fitted = autofit_row_height_pt(size);
+    let fitted = autofit_row_height_pt(normal.size_pt);
     (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
 }
 
@@ -92,11 +117,13 @@ fn autofit_height(
     style: Option<u32>,
     default_pt: f64,
     cached_default: bool,
+    normal: NormalFace<'_>,
 ) -> Option<f64> {
     let size = style
         .and_then(|style| styles.font_for(style))
         .and_then(|font| font.size_pt)
-        .unwrap_or(DEFAULT_FONT_SIZE_PT);
+        .filter(|pt| pt.is_finite() && *pt > 0.0)
+        .unwrap_or(normal.size_pt);
     let height = autofit_row_height_pt(size);
     (cached_default || height > default_pt).then_some(height)
 }
@@ -127,15 +154,22 @@ pub fn autofit_relevant(
         style,
         default_pt,
         sheet.format.default_row_height_pt.is_some(),
+        NormalFace::from_styles(styles),
     )
     .is_some()
 }
+
 /// rows excel auto-fits, with the height each takes: every row that carries no
 /// `ht` and is not pinned by `sheetFormatPr/@customHeight`. a declared
 /// `defaultRowHeight` is a cached hint excel recomputes, so a row with content
 /// takes its fitted height outright; without one the sheet default is already
 /// the normal font's fitted height and only taller content grows a row.
-fn autofit_rows(sheet: &Sheet, styles: &Stylesheet, default_pt: f64) -> BTreeMap<RowId, f64> {
+fn autofit_rows(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    default_pt: f64,
+    normal: NormalFace<'_>,
+) -> BTreeMap<RowId, f64> {
     let mut fitted = BTreeMap::new();
     if sheet.format.custom_height {
         return fitted;
@@ -151,7 +185,8 @@ fn autofit_rows(sheet: &Sheet, styles: &Stylesheet, default_pt: f64) -> BTreeMap
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
-        if let Some(height) = autofit_height(styles, cell.style, default_pt, cached_default) {
+        if let Some(height) = autofit_height(styles, cell.style, default_pt, cached_default, normal)
+        {
             let entry = fitted.entry(at.row).or_insert(height);
             if height > *entry {
                 *entry = height;
@@ -226,6 +261,7 @@ impl GridGeometry {
                 .format
                 .default_row_height_pt
                 .unwrap_or(DEFAULT_ROW_HEIGHT_PT),
+            NormalFace::from_styles(styles),
             col_chars_to_px,
         )
     }
@@ -240,6 +276,7 @@ impl GridGeometry {
                     metrics.column_pixels(width)
                 }),
             metrics.default_row_height_pt as f64,
+            NormalFace::from_metrics(metrics),
             |width| metrics.column_pixels(width),
         )
     }
@@ -249,11 +286,12 @@ impl GridGeometry {
         styles: &Stylesheet,
         default_col_px: f32,
         default_row_pt: f64,
+        normal: NormalFace<'_>,
         column_pixels: impl Fn(f64) -> f32,
     ) -> Self {
         let default_row_px = row_pt_to_px(default_row_pt);
-        let fitted = autofit_rows(sheet, styles, default_row_pt);
-        let scale = stored_height_scale(sheet, styles);
+        let fitted = autofit_rows(sheet, styles, default_row_pt, normal);
+        let scale = stored_height_scale(sheet, normal);
         let n_cols = sheet
             .col_widths
             .keys()
@@ -461,6 +499,86 @@ mod tests {
     }
 
     #[test]
+    fn an_unstyled_row_fits_the_normal_size_not_eleven_points() {
+        let mut styles = Stylesheet::default();
+        styles.fonts.push(Font {
+            name: Some("Arial".into()),
+            size_pt: Some(10.0),
+            ..Font::default()
+        });
+        styles.cell_xfs.push(Xf {
+            font: Some(0),
+            ..Xf::default()
+        });
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                style: Some(0),
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::new(&sheet, &styles);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(10.0))).abs() < 0.001);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(11.0))).abs() > 1.0);
+    }
+
+    #[test]
+    fn printing_ignores_a_non_finite_metric_font_size() {
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: f32::INFINITY,
+            font_family: "Calibri".into(),
+            font_ascent: 14.0,
+            font_descent: 4.0,
+        };
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                value: xlsx_model::value::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
+        assert!(grid.row_y(1).is_finite());
+        assert!(
+            (grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(DEFAULT_FONT_SIZE_PT))).abs()
+                < 0.001
+        );
+    }
+
+    #[test]
+    fn printing_fits_an_unstyled_row_to_the_metrics_the_text_falls_back_to() {
+        let metrics = PrintMetrics {
+            dpi: 72.0,
+            max_digit_width: 6.0,
+            default_row_height_pt: 12.75,
+            default_column_width: None,
+            font_size_pt: 16.0,
+            font_family: "Arial".into(),
+            font_ascent: 14.0,
+            font_descent: 4.0,
+        };
+        let mut sheet = Sheet::new("S");
+        sheet.format.default_row_height_pt = Some(12.75);
+        sheet.set_cell(
+            CellRef::new(0, 0),
+            xlsx_model::workbook::Cell {
+                value: xlsx_model::value::CellValue::Number { value: 1.0 },
+                ..Default::default()
+            },
+        );
+        let grid = GridGeometry::for_print(&sheet, &Stylesheet::default(), &metrics);
+        assert!((grid.row_y(1) - row_pt_to_px(autofit_row_height_pt(16.0))).abs() < 0.001);
+    }
+
+    #[test]
     fn the_normal_face_comes_from_the_first_cell_format_not_the_font_table() {
         let mut styles = Stylesheet::default();
         styles.fonts.push(Font {
@@ -579,6 +697,7 @@ mod tests {
             &styles(),
             0.0,
             DEFAULT_ROW_HEIGHT_PT,
+            NormalFace::from_styles(&styles()),
             col_chars_to_px,
         );
         let first_width = col_chars_to_px(12.0);

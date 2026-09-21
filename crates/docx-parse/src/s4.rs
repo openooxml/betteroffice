@@ -70,19 +70,19 @@ pub fn parse_docx_s4_projection(data: &[u8]) -> Result<S4Projection, ParseError>
             let lower = path.to_ascii_lowercase();
             lower.ends_with(".xml") || lower.ends_with(".rels")
         })
-        .cloned()
-        .collect::<IndexMap<_, _>>();
+        .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
+        .collect::<IndexMap<String, &[u8]>>();
     let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let mut relationship_parts = IndexMap::new();
-    for (path, xml) in &all_xml {
+    for (path, &xml) in &all_xml {
         if path.to_ascii_lowercase().ends_with(".rels") {
             relationship_parts.insert(path.clone(), parse_relationships(xml, path, &mut budget)?);
         }
     }
     let document_relationships = relationship_parts.get("word/_rels/document.xml.rels");
     let mut xml_parts = Vec::new();
-    for (path, xml) in &all_xml {
+    for (path, &xml) in &all_xml {
         // Chart parts carry no drawing, VML or watermark leaf, and
         // `parse_chart_parts` has already read them on their own budget.
         if !path.to_ascii_lowercase().ends_with(".xml") || is_chart_part(path) || xml.contains(&0) {
