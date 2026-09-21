@@ -32,7 +32,7 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
         return err(value);
     }
     let area = match as_area(&args[1], ctx) {
-        Some(a) => a,
+        Some(a) => crate::eval::bound_area(a, ctx),
         None => return err(ErrorValue::Value),
     };
     let index = match nth_int(args, ctx, 2) {
@@ -58,27 +58,41 @@ fn table_lookup(args: &[Expr], ctx: &EvalContext<'_>, vertical: bool) -> CellVal
     if index as usize > depth {
         return err(ErrorValue::Ref);
     }
-    let mut found = None;
-    for i in 0..lines {
-        let key = if vertical {
+    let key = |i: usize| {
+        if vertical {
             area.get_ref(ctx, i, 0)
         } else {
             area.get_ref(ctx, 0, i)
-        };
-        let key = match key {
-            Ok(key) => key,
-            Err(error) => return err(error),
-        };
-        let ordering = cmp_values(key.as_ref(), &target);
-        if approximate {
-            if ordering != Ordering::Greater {
-                found = Some(i);
+        }
+    };
+    let mut found = None;
+    if approximate {
+        // excel binary-searches an approximate lookup, so a header or any
+        // other out-of-order row above the data does not end the search
+        let (mut lo, mut hi) = (0usize, lines);
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let key = match key(mid) {
+                Ok(key) => key,
+                Err(error) => return err(error),
+            };
+            if cmp_values(key.as_ref(), &target) == Ordering::Greater {
+                hi = mid;
             } else {
+                found = Some(mid);
+                lo = mid + 1;
+            }
+        }
+    } else {
+        for i in 0..lines {
+            let key = match key(i) {
+                Ok(key) => key,
+                Err(error) => return err(error),
+            };
+            if cmp_values(key.as_ref(), &target) == Ordering::Equal {
+                found = Some(i);
                 break;
             }
-        } else if ordering == Ordering::Equal {
-            found = Some(i);
-            break;
         }
     }
     match found {

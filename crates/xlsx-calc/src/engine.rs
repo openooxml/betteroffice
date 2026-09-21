@@ -1020,6 +1020,15 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
         wb.sheets.push(Sheet::new("Formula"));
+        // a cell in the far corner gives Data the extent the guard is for
+        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
+            a1("XFD1048576"),
+            Cell {
+                value: num(1.0),
+                formula: None,
+                style: None,
+            },
+        );
         wb.sheet_mut(SheetId(1)).unwrap().set_cell(
             a1("A1"),
             Cell {
@@ -1039,6 +1048,15 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
         wb.sheets.push(Sheet::new("Formula"));
+        // a cell in the far corner gives Data the extent the guard is for
+        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
+            a1("XFD1048576"),
+            Cell {
+                value: num(1.0),
+                formula: None,
+                style: None,
+            },
+        );
         put_formula(
             &mut wb,
             SheetId(1),
@@ -1055,6 +1073,15 @@ mod tests {
         let mut wb = Workbook::default();
         wb.sheets.push(Sheet::new("Data"));
         wb.sheets.push(Sheet::new("Formula"));
+        // a cell in the far corner gives Data the extent the guard is for
+        wb.sheet_mut(SheetId(0)).unwrap().set_cell(
+            a1("XFD1048576"),
+            Cell {
+                value: num(1.0),
+                formula: None,
+                style: None,
+            },
+        );
         wb.sheet_mut(SheetId(1)).unwrap().set_cell(
             a1("A1"),
             Cell {

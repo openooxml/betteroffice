@@ -797,6 +797,7 @@ pub(crate) fn used_width(area: &Area, ctx: &EvalContext<'_>) -> usize {
 
 /// a resolved rectangular reference: absolute top-left plus dimensions on a
 /// known sheet, for positional access by function modules.
+#[derive(Clone, Copy)]
 pub(crate) struct Area {
     pub sheet: SheetId,
     pub start: CellRef,
@@ -843,15 +844,19 @@ impl Area {
         &self,
         ctx: &EvalContext<'p>,
     ) -> Result<Vec<Cow<'p, CellValue>>, ErrorValue> {
-        let count = self.cell_count().ok_or(ErrorValue::Num)?;
+        // reading a whole-column or whole-row band for its values costs the
+        // extent the sheet reaches; the blanks past it contribute nothing and
+        // would spend the recalculation's budget on the address space
+        let area = bound_area(*self, ctx);
+        let count = area.cell_count().ok_or(ErrorValue::Num)?;
         if !ctx.consume_cells(count) {
             return Err(ErrorValue::Num);
         }
         let capacity = usize::try_from(count).map_err(|_| ErrorValue::Num)?;
         let mut out = Vec::with_capacity(capacity);
-        for row in 0..self.rows {
-            for col in 0..self.cols {
-                out.push(self.get_unmetered_ref(ctx, row, col));
+        for row in 0..area.rows {
+            for col in 0..area.cols {
+                out.push(area.get_unmetered_ref(ctx, row, col));
             }
         }
         Ok(out)
@@ -1250,6 +1255,14 @@ mod tests {
         let mut workbook = Workbook::default();
         workbook.sheets.push(Sheet::new("Data"));
         workbook.sheets.push(Sheet::new("Formula"));
+        // a cell in the far corner gives Data the extent the guard is for
+        workbook.sheet_mut(SheetId(0)).unwrap().set_cell(
+            CellRef::parse_a1("XFD1048576").unwrap(),
+            xlsx_model::Cell {
+                value: CellValue::Number { value: 1.0 },
+                ..xlsx_model::Cell::default()
+            },
+        );
         let expression = parse_formula("SUM(Data!A1:XFD1048576)").unwrap();
         let context = EvalContext::new(&workbook, SheetId(1));
         assert_eq!(

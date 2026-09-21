@@ -81,6 +81,97 @@ impl CellProvider for CountedData {
     fn sheet_id(&self, name: &str) -> Option<SheetId> {
         name.eq_ignore_ascii_case("Data").then_some(SheetId(0))
     }
+
+    fn used_rows(&self, _sheet: SheetId) -> u32 {
+        MAX_ROWS
+    }
+
+    fn used_cols(&self, _sheet: SheetId) -> u32 {
+        MAX_COLS
+    }
+}
+
+#[test]
+fn an_approximate_lookup_reads_past_an_out_of_order_header() {
+    struct Listed;
+    impl CellProvider for Listed {
+        fn value(&self, _sheet: SheetId, at: CellRef) -> CellValue {
+            match (at.col, at.row) {
+                (0, 0) => CellValue::Text { value: "ID".into() },
+                (0, row) if row <= 4 => CellValue::Number { value: row as f64 },
+                (1, row) if row >= 1 && row <= 4 => CellValue::Number {
+                    value: row as f64 * 10.0,
+                },
+                _ => CellValue::Empty,
+            }
+        }
+
+        fn formula(&self, _sheet: SheetId, _at: CellRef) -> Option<&str> {
+            None
+        }
+
+        fn sheet_id(&self, _name: &str) -> Option<SheetId> {
+            None
+        }
+
+        fn used_rows(&self, _sheet: SheetId) -> u32 {
+            5
+        }
+    }
+    let context = EvalContext::new(&Listed, SheetId(0));
+    for (formula, expected) in [
+        ("VLOOKUP(1,A1:B5,2)", 10.0),
+        ("VLOOKUP(3,A1:B5,2)", 30.0),
+        ("VLOOKUP(3.5,A1:B5,2)", 30.0),
+        ("VLOOKUP(9,A:B,2)", 40.0),
+    ] {
+        assert_eq!(
+            evaluate(&parse_formula(formula).unwrap(), &context),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
+}
+
+#[test]
+fn criteria_over_a_whole_column_stop_at_the_used_range() {
+    struct Sparse;
+    impl CellProvider for Sparse {
+        fn value(&self, _sheet: SheetId, at: CellRef) -> CellValue {
+            match (at.col, at.row) {
+                (0, 0) => CellValue::Number { value: 1.0 },
+                (0, 1) => CellValue::Number { value: 3.0 },
+                (0, 2) => CellValue::Number { value: 5.0 },
+                _ => CellValue::Empty,
+            }
+        }
+
+        fn formula(&self, _sheet: SheetId, _at: CellRef) -> Option<&str> {
+            None
+        }
+
+        fn sheet_id(&self, _name: &str) -> Option<SheetId> {
+            None
+        }
+
+        fn used_rows(&self, _sheet: SheetId) -> u32 {
+            3
+        }
+    }
+    let context = EvalContext::new(&Sparse, SheetId(0));
+    for (formula, expected) in [
+        ("COUNTIF(A:A,\">2\")", 2.0),
+        ("SUMIF(A:A,\">2\")", 8.0),
+        ("COUNTIFS(A:A,\">2\",B:B,\"\")", 2.0),
+        ("COUNT(A:A)", 3.0),
+        ("SUM(A:A)", 9.0),
+    ] {
+        assert_eq!(
+            evaluate(&parse_formula(formula).unwrap(), &context),
+            CellValue::Number { value: expected },
+            "{formula}"
+        );
+    }
 }
 
 #[test]
@@ -94,11 +185,11 @@ fn lookups_and_metadata_do_not_materialize_entire_columns() {
             3,
         ),
         (
-            "VLOOKUP(2.5,S:V,4,TRUE)",
+            "VLOOKUP(2.5,S2:V3,4,TRUE)",
             CellValue::Text {
                 value: "two".into(),
             },
-            4,
+            3,
         ),
         (
             "ROWS(S:V)",
