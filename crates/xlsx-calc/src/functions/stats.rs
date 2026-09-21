@@ -305,11 +305,25 @@ fn numeric_literals(args: &[Expr], ctx: &EvalContext<'_>) -> Vec<f64> {
                     }
                 }
             }
-            None => {
-                if let CellValue::Number { value } = evaluate(arg, ctx) {
-                    nums.push(value);
+            // `ROW(range)/(range=key)` is the nth-match idiom: a computed
+            // block whose misses are #DIV/0!, which the skip-errors options
+            // exist to drop
+            None => match crate::array::evaluate_array(arg, ctx) {
+                crate::array::Value::Array(array) => {
+                    for row in 0..array.rows() {
+                        for col in 0..array.cols() {
+                            if let CellValue::Number { value } = array.at(row, col) {
+                                nums.push(value);
+                            }
+                        }
+                    }
                 }
-            }
+                value => {
+                    if let CellValue::Number { value } = value.into_scalar() {
+                        nums.push(value);
+                    }
+                }
+            },
         }
     }
     nums
