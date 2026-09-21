@@ -44,7 +44,7 @@ pub fn edit(document: &mut Presentation, probe: &Value) -> Result<()> {
     document.insert_text(
         &EditCtx::local("roundtrip-benchmark"),
         &story.id,
-        story.length,
+        u32::try_from(old.encode_utf16().count())?,
         added,
         &story.paragraphs[0].runs[0].style,
     )?;
