@@ -22,7 +22,9 @@ const MODULES: WasmModule[] = [
     crate: 'docx-edit',
     name: 'docx_edit',
     generated: 'packages/docx/src/wasm/generated/edit',
-    cargoArgs: ['--locked', '--features', 'wasm,tiff'],
+    // TIFF transcode stays parse-side; leftover TIFFs seeded through edit are
+    // converted lazily by the TS fallback via the parse module's decodeTiffPng.
+    cargoArgs: ['--locked', '--features', 'wasm'],
   },
   {
     crate: 'docx-parse',
