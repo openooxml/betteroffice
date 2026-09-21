@@ -257,8 +257,10 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
             let right = evaluate_array(rhs, ctx);
             map2(left, right, ctx, |a, b| apply_binary(*op, a, b))
         }
-        // OFFSET yields a reference, so a multi-cell result is a block here
-        Expr::FuncCall { name, .. } if name.eq_ignore_ascii_case("OFFSET") => {
+        // these yield a reference, so a multi-cell result is a block here
+        Expr::FuncCall { name, .. }
+            if name.eq_ignore_ascii_case("OFFSET") || name.eq_ignore_ascii_case("INDIRECT") =>
+        {
             match as_array_area(expr, ctx) {
                 Some(area) => area_values(&area, ctx),
                 None => Value::Scalar(evaluate(expr, ctx)),

@@ -1402,3 +1402,25 @@ fn a_callback_argument_keeps_the_cell_it_came_from() {
         ]
     );
 }
+
+/// INDIRECT names a reference, so array mode reads the whole rectangle the
+/// way it already does for OFFSET.
+#[test]
+fn indirect_reads_as_a_block() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("INDIRECT(\"B1:B4\")", &workbook),
+        (4, 1, vec![n(3.0), n(1.0), n(4.0), n(2.0)])
+    );
+    assert_eq!(
+        values("_xlfn.TOROW(INDIRECT(\"B1:B4\"))", &workbook),
+        vec![n(3.0), n(1.0), n(4.0), n(2.0)]
+    );
+    assert_eq!(values("INDIRECT(\"B2\")", &workbook), vec![n(1.0)]);
+    assert_eq!(
+        values("INDIRECT(\"nonsense\")", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Ref
+        }]
+    );
+}
