@@ -47,8 +47,13 @@ fn unix_to_serial(unix: i64) -> i64 {
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// serial < 1 has no calendar date here (returns None).
 fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
-    if serial < 1 {
+    if serial < 0 {
         return None;
+    }
+    // excel calls serial 0 "january 0, 1900", which is what a blank date cell
+    // reads as, so YEAR, MONTH and DATEDIF all answer for it
+    if serial == 0 {
+        return Some((1900, 1, 0));
     }
     if serial == PHANTOM {
         return Some((1900, 2, 29));

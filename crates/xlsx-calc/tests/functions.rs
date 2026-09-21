@@ -225,6 +225,12 @@ fn math_functions() {
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
+        // excel calls serial 0 "january 0, 1900", which a blank date reads as
+        ("YEAR(0)", n(1900.0)),
+        ("MONTH(0)", n(1.0)),
+        ("DAY(0)", n(0.0)),
+        ("DATEDIF(0,41115,\"y\")", n(112.0)),
+        ("DATEDIF(0,0,\"y\")", n(0.0)),
         // NPV discounts from the end of period one
         ("NPV(0.1,100)", n(100.0 / 1.1)),
         ("NPV(0,10,20,30)", n(60.0)),
