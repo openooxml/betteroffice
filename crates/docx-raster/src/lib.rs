@@ -7,10 +7,12 @@ mod font;
 
 pub use font::{GlyphCache, measure_text};
 
-use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::hash::{BuildHasher, Hasher};
 use std::io::Cursor;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine as _;
 use docx_layout::display_list::{
@@ -70,8 +72,13 @@ const PATH_SEGMENT_BYTES: u64 = 40;
 const MAX_CACHED_CROP_MASKS: usize = 16;
 const MAX_CACHED_CROP_MASK_BYTES_PER_PIXEL: u64 = 8;
 const CLIP_SURFACE_SLACK: u64 = 4;
-const MAX_IMAGE_CACHE_ENTRIES: usize = 256;
-const MAX_IMAGE_CACHE_KEY_BYTES: usize = 65_536;
+/// Decoded-pixel cap for one export's [`ImageCache`], at RGBA8.
+pub const MAX_IMAGE_CACHE_BYTES: u64 = 268_435_456;
+/// Bookkeeping one cached image costs beyond its pixels.
+const IMAGE_CACHE_ENTRY_BYTES: u64 = 128;
+/// Process-monotonic decode counter for benchmarks and cache tests.
+#[doc(hidden)]
+pub static IMAGE_DECODE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// The part whose relationships own a display-list relationship id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,17 +170,17 @@ pub fn render_page(
         page_ordinal,
         resources,
         &mut GlyphCache::default(),
+        &mut ImageCache::default(),
     )
 }
 
-/// Renders one display-list page into a caller-owned glyph cache, so a
-/// multi-page export reuses the outlines it still holds. The cache is bounded:
-/// an export past its cap re-extracts what it evicted.
+/// Renders one display-list page into caches shared across an export's renders.
 pub fn render_page_cached(
     display_list: &DisplayList,
     page_ordinal: usize,
     resources: &RenderResources<'_>,
     glyphs: &mut GlyphCache,
+    images: &mut ImageCache,
 ) -> Result<RenderedPage, String> {
     let page = display_list
         .pages
@@ -184,7 +191,7 @@ pub fn render_page_cached(
     validate_page_surface(width, height)?;
     let mut pixmap = Pixmap::new(width, height).ok_or_else(|| "invalid pixmap size".to_string())?;
     pixmap.fill(Color::WHITE);
-    let mut renderer = Renderer::new(width, height, glyphs);
+    let mut renderer = Renderer::new(width, height, glyphs, images);
     renderer.paint_page(&mut pixmap, page, resources)?;
     Ok(RenderedPage {
         bytes: encode_png(pixmap, width, height)?,
@@ -368,7 +375,7 @@ fn mask_bytes(width: u32, height: u32) -> u64 {
 struct Scratch<'k> {
     glyphs: &'k mut GlyphCache,
     specs: FontSpecCache,
-    images: ImageCache<'k>,
+    images: PageImages<'k>,
     masks: MaskCache,
     budget: PageBudget,
 }
@@ -379,13 +386,18 @@ struct Renderer<'k> {
 }
 
 impl<'k> Renderer<'k> {
-    fn new(width: u32, height: u32, glyphs: &'k mut GlyphCache) -> Self {
+    fn new(
+        width: u32,
+        height: u32,
+        glyphs: &'k mut GlyphCache,
+        images: &'k mut ImageCache,
+    ) -> Self {
         Self {
             clips: ClipSurface::default(),
             scratch: Scratch {
                 glyphs,
                 specs: FontSpecCache::default(),
-                images: ImageCache::default(),
+                images: PageImages::new(images),
                 masks: MaskCache::new(width, height),
                 budget: PageBudget::new(width, height),
             },
@@ -1133,11 +1145,11 @@ fn paint_image<'k>(
     if !image.attrs.effects.is_empty() {
         return Err("unsupported image field: effects".to_string());
     }
-    let Some((key, source_bytes)) = image_source(&image.rel_id, scope, resources) else {
+    let Some(source_bytes) = image_source(&image.rel_id, scope, resources) else {
         scratch.images.skipped += 1;
         return Ok(());
     };
-    let Some(decoded) = scratch.images.resolve(key, source_bytes) else {
+    let Some(decoded) = scratch.images.resolve(source_bytes) else {
         return Ok(());
     };
     let source: &Pixmap = &decoded;
@@ -1235,26 +1247,25 @@ enum ImageSource<'k, 'b> {
     Registered(&'b [u8]),
 }
 
-/// The identity a reference resolved to and its bytes, or `None` when the
-/// reference resolves to nothing.
+/// The bytes a reference resolves to, or `None` when it resolves to nothing.
 fn image_source<'k, 'b>(
     rel_id: &'k str,
     scope: ImageScope<'_>,
     resources: &RenderResources<'b>,
-) -> Option<(Cow<'k, str>, ImageSource<'k, 'b>)> {
+) -> Option<ImageSource<'k, 'b>> {
     if rel_id.starts_with("data:") {
         let (metadata, payload) = rel_id.split_once(',')?;
         if !metadata.ends_with(";base64") {
             return None;
         }
-        return Some((Cow::Borrowed(rel_id), ImageSource::Data(payload)));
+        return Some(ImageSource::Data(payload));
     }
     let key = scoped_image_key(scope, rel_id);
     if let Some(bytes) = resources.images.get(&key) {
-        return Some((Cow::Owned(key), ImageSource::Registered(bytes.as_slice())));
+        return Some(ImageSource::Registered(bytes.as_slice()));
     }
     let bytes = legacy_body_image(rel_id, scope, resources)?;
-    Some((Cow::Borrowed(rel_id), ImageSource::Registered(bytes)))
+    Some(ImageSource::Registered(bytes))
 }
 
 /// [`ImageMap`] shipped keyed by bare relationship id, so a body image still
@@ -1272,106 +1283,267 @@ fn legacy_body_image<'b>(
     resources.images.get(rel_id).map(Vec::as_slice)
 }
 
-/// One decode per resolved image, and at most [`MAX_PAGE_IMAGE_PIXELS`]
-/// decoded for the whole page.
-#[derive(Default)]
-struct ImageCache<'k> {
-    decoded: HashMap<Cow<'k, str>, Option<Rc<Pixmap>>>,
-    key_bytes: usize,
+/// What resolving one source charged a page's image budget, in check order.
+#[derive(Clone, Copy, Default)]
+struct ImageCharge {
+    bytes_pre: u64,
+    pixels: u64,
+    bytes_post: u64,
+}
+
+/// What a decode learned about a source.
+enum Decode {
+    Decoded(Pixmap),
+    Refused,
+    OverBudget,
+}
+
+/// A decoded image and what resolving it cost the page that decoded it.
+struct CachedImage {
+    outcome: Option<Arc<Pixmap>>,
+    charge: ImageCharge,
+    weight: u64,
+    stamp: u64,
+}
+
+/// Decoded page images shared across an export's renders, keyed by seeded
+/// content digest and bounded by [`MAX_IMAGE_CACHE_BYTES`] with LRU eviction.
+pub struct ImageCache {
+    entries: HashMap<u64, CachedImage>,
+    recency: BTreeMap<(u64, u64), ()>,
+    clock: u64,
+    bytes: u64,
+    hasher: std::hash::RandomState,
+}
+
+impl Default for ImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ImageCache {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            recency: BTreeMap::new(),
+            clock: 0,
+            bytes: 0,
+            hasher: std::hash::RandomState::new(),
+        }
+    }
+
+    /// Content digest of one source's bytes, namespaced by source kind.
+    fn key(&self, source: &ImageSource<'_, '_>) -> u64 {
+        let mut hasher = self.hasher.build_hasher();
+        match source {
+            ImageSource::Data(payload) => {
+                hasher.write_u8(0);
+                hasher.write(payload.as_bytes());
+            }
+            ImageSource::Registered(bytes) => {
+                hasher.write_u8(1);
+                hasher.write(bytes);
+            }
+        }
+        hasher.finish()
+    }
+
+    /// A cached outcome, renewed as the cache's most recently resolved.
+    fn get(&mut self, key: u64) -> Option<(Option<Arc<Pixmap>>, ImageCharge)> {
+        let entry = self.entries.get_mut(&key)?;
+        self.recency.remove(&(entry.stamp, key));
+        self.clock += 1;
+        entry.stamp = self.clock;
+        self.recency.insert((self.clock, key), ());
+        Some((entry.outcome.clone(), entry.charge))
+    }
+
+    /// Caches one decode, evicting least-recently-resolved entries until under budget.
+    fn insert(&mut self, key: u64, outcome: Option<Arc<Pixmap>>, charge: ImageCharge) {
+        let weight = outcome
+            .as_ref()
+            .map_or(0, |pixmap| pixmap.data().len() as u64)
+            + IMAGE_CACHE_ENTRY_BYTES;
+        if let Some(old) = self.entries.get(&key) {
+            self.recency.remove(&(old.stamp, key));
+            self.bytes -= old.weight;
+        }
+        self.clock += 1;
+        self.entries.insert(
+            key,
+            CachedImage {
+                outcome,
+                charge,
+                weight,
+                stamp: self.clock,
+            },
+        );
+        self.recency.insert((self.clock, key), ());
+        self.bytes += weight;
+        while self.bytes > MAX_IMAGE_CACHE_BYTES {
+            let Some(&(stamp, evicted)) = self.recency.keys().next() else {
+                break;
+            };
+            self.recency.remove(&(stamp, evicted));
+            if let Some(entry) = self.entries.remove(&evicted) {
+                self.bytes -= entry.weight;
+            }
+        }
+    }
+}
+
+/// One page's view over a shared [`ImageCache`]: the first reference to a
+/// source pays this page's decode budget, later references resolve free.
+struct PageImages<'c> {
+    cache: &'c mut ImageCache,
+    resolved: HashMap<u64, Option<Arc<Pixmap>>>,
     pixels: u64,
     bytes: u64,
     skipped: usize,
 }
 
-impl<'k> ImageCache<'k> {
-    fn resolve(&mut self, key: Cow<'k, str>, source: ImageSource<'_, '_>) -> Option<Rc<Pixmap>> {
-        let decoded = match self.decoded.get(key.as_ref()) {
-            Some(entry) => entry.clone(),
-            None => {
-                let decoded = self.materialize(source).map(Rc::new);
-                self.remember(key, decoded.clone());
-                decoded
-            }
-        };
-        if decoded.is_none() {
-            self.skipped += 1;
+impl<'c> PageImages<'c> {
+    fn new(cache: &'c mut ImageCache) -> Self {
+        Self {
+            cache,
+            resolved: HashMap::new(),
+            pixels: 0,
+            bytes: 0,
+            skipped: 0,
         }
-        decoded
     }
 
-    /// Keeps a decode against its reference, while the map has room. Only an
-    /// owned key costs bytes: a `data:` URL is borrowed from the display list,
-    /// so the cache holds a pointer into it rather than a copy of it.
-    fn remember(&mut self, key: Cow<'k, str>, decoded: Option<Rc<Pixmap>>) {
-        let owned = match &key {
-            Cow::Owned(value) => value.len(),
-            Cow::Borrowed(_) => 0,
-        };
-        if self.decoded.len() >= MAX_IMAGE_CACHE_ENTRIES
-            || self.key_bytes + owned > MAX_IMAGE_CACHE_KEY_BYTES
-        {
-            return;
+    fn resolve(&mut self, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let key = self.cache.key(&source);
+        if let Some(outcome) = self.resolved.get(&key) {
+            self.skipped += usize::from(outcome.is_none());
+            return outcome.clone();
         }
-        self.key_bytes += owned;
-        self.decoded.insert(key, decoded);
+        let outcome = match self.cache.get(key) {
+            Some((cached, charge)) if self.charge(charge) => cached,
+            Some(_) => None,
+            None => self.materialize(key, source),
+        };
+        self.resolved.insert(key, outcome.clone());
+        self.skipped += usize::from(outcome.is_none());
+        outcome
     }
 
-    /// The bytes behind a reference the cache has not seen. A `data:` payload
-    /// is bounded and charged from its encoded length, before base64 expands
-    /// it into a buffer.
-    fn materialize(&mut self, source: ImageSource<'_, '_>) -> Option<Pixmap> {
-        match source {
-            ImageSource::Registered(bytes) => self.decode(bytes),
+    /// Charges this page what the cached decode spent; `false` means this
+    /// page's budget is spent and nothing is written back.
+    fn charge(&mut self, charge: ImageCharge) -> bool {
+        if self.bytes + charge.bytes_pre > MAX_PAGE_IMAGE_BYTES {
+            return false;
+        }
+        self.bytes += charge.bytes_pre;
+        if self.pixels + charge.pixels > MAX_PAGE_IMAGE_PIXELS {
+            return false;
+        }
+        if self.bytes + charge.bytes_post > MAX_PAGE_IMAGE_BYTES {
+            return false;
+        }
+        self.pixels += charge.pixels;
+        self.bytes += charge.bytes_post;
+        true
+    }
+
+    /// The bytes behind a source the shared cache has not seen. A `data:`
+    /// payload is bounded and charged from its encoded length, before base64
+    /// expands it into a buffer. Only `Decoded` and `Refused` are cached: an
+    /// over-budget refusal is this page's, and the next page spends its own
+    /// budget to retry.
+    fn materialize(&mut self, key: u64, source: ImageSource<'_, '_>) -> Option<Arc<Pixmap>> {
+        let mut charge = ImageCharge::default();
+        let decoded = match source {
+            ImageSource::Registered(bytes) => self.decode(bytes, &mut charge),
             ImageSource::Data(payload) => {
                 let declared = payload.len() as u64 / 4 * 3;
-                if declared > MAX_DATA_URL_BYTES || self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
-                    return None;
+                if declared > MAX_DATA_URL_BYTES {
+                    Decode::Refused
+                } else if self.bytes + declared > MAX_PAGE_IMAGE_BYTES {
+                    Decode::OverBudget
+                } else {
+                    self.bytes += declared;
+                    charge.bytes_pre = declared;
+                    match base64::engine::general_purpose::STANDARD.decode(payload) {
+                        Ok(bytes) => self.decode(&bytes, &mut charge),
+                        Err(_) => Decode::Refused,
+                    }
                 }
-                self.bytes += declared;
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(payload)
-                    .ok()?;
-                self.decode(&bytes)
             }
+        };
+        match decoded {
+            Decode::Decoded(pixmap) => {
+                let pixmap = Arc::new(pixmap);
+                self.cache.insert(key, Some(pixmap.clone()), charge);
+                Some(pixmap)
+            }
+            Decode::Refused => {
+                self.cache.insert(key, None, charge);
+                None
+            }
+            Decode::OverBudget => None,
         }
     }
 
-    /// Decoded pixels, or `None` for content this backend will not draw: bytes
-    /// it cannot decode, an image past [`MAX_IMAGE_PIXELS`], or one the page
-    /// has no budget left for. Declared pixels are charged before the decoder
-    /// allocates, so a stream that fails late still costs what it claimed.
-    fn decode(&mut self, bytes: &[u8]) -> Option<Pixmap> {
+    /// `Decoded` pixels, `Refused` for content this backend will not draw
+    /// (bytes it cannot decode, or an image past [`MAX_IMAGE_PIXELS`] or
+    /// [`MAX_IMAGE_BYTES`]), or `OverBudget` when the page has no decode
+    /// budget left. Declared pixels are charged before the decoder allocates,
+    /// so a stream that fails late still costs what it claimed.
+    fn decode(&mut self, bytes: &[u8], charge: &mut ImageCharge) -> Decode {
         use image::ImageDecoder as _;
 
-        let mut decoder = image::ImageReader::new(Cursor::new(bytes))
+        let Some(mut decoder) = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
-            .ok()?
-            .into_decoder()
-            .ok()?;
+            .ok()
+            .and_then(|reader| reader.into_decoder().ok())
+        else {
+            return Decode::Refused;
+        };
         let (declared_width, declared_height) = decoder.dimensions();
         let declared = u64::from(declared_width) * u64::from(declared_height);
-        if declared > MAX_IMAGE_PIXELS || self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
-            return None;
+        if declared > MAX_IMAGE_PIXELS {
+            return Decode::Refused;
+        }
+        if self.pixels + declared > MAX_PAGE_IMAGE_PIXELS {
+            return Decode::OverBudget;
         }
         let cost = decoder
             .total_bytes()
             .saturating_add(declared.saturating_mul(4));
-        if cost > MAX_IMAGE_BYTES || self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
-            return None;
+        if cost > MAX_IMAGE_BYTES {
+            return Decode::Refused;
+        }
+        if self.bytes + cost > MAX_PAGE_IMAGE_BYTES {
+            return Decode::OverBudget;
         }
         self.pixels += declared;
         self.bytes += cost;
-        let orientation = decoder.orientation().ok()?;
-        let mut decoded = image::DynamicImage::from_decoder(decoder).ok()?;
+        charge.pixels = declared;
+        charge.bytes_post = cost;
+        IMAGE_DECODE_COUNT.fetch_add(1, Ordering::Relaxed);
+        let Ok(orientation) = decoder.orientation() else {
+            return Decode::Refused;
+        };
+        let Ok(mut decoded) = image::DynamicImage::from_decoder(decoder) else {
+            return Decode::Refused;
+        };
         decoded.apply_orientation(orientation);
-        let size = IntSize::from_wh(decoded.width(), decoded.height())?;
+        let Some(size) = IntSize::from_wh(decoded.width(), decoded.height()) else {
+            return Decode::Refused;
+        };
         let mut data = decoded.into_rgba8().into_raw();
         let (pixels, _) = data.as_chunks_mut::<4>();
         for pixel in pixels {
             let color = ColorU8::from_rgba(pixel[0], pixel[1], pixel[2], pixel[3]).premultiply();
             *pixel = [color.red(), color.green(), color.blue(), color.alpha()];
         }
-        Pixmap::from_vec(data, size)
+        match Pixmap::from_vec(data, size) {
+            Some(pixmap) => Decode::Decoded(pixmap),
+            None => Decode::Refused,
+        }
     }
 }
 
@@ -2626,7 +2798,8 @@ mod tests {
     fn a_clip_surface_shrinks_back_to_the_clip_it_serves() {
         let mut pixmap = Pixmap::new(800, 1120).expect("page");
         let mut glyphs = GlyphCache::default();
-        let mut renderer = Renderer::new(800, 1120, &mut glyphs);
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(800, 1120, &mut glyphs, &mut images);
         let mut surface = ClipSurface::default();
         for rect in [clip(0.0, 0.0, 800.0, 1120.0), clip(8.0, 8.0, 64.0, 16.0)] {
             surface
@@ -2647,7 +2820,8 @@ mod tests {
     fn a_resized_clip_surface_is_charged_once_at_its_high_water_mark() {
         let mut pixmap = Pixmap::new(400, 560).expect("page");
         let mut glyphs = GlyphCache::default();
-        let mut renderer = Renderer::new(400, 560, &mut glyphs);
+        let mut images = ImageCache::default();
+        let mut renderer = Renderer::new(400, 560, &mut glyphs, &mut images);
         let mut surface = ClipSurface::default();
         for index in 0..32 {
             let rect = if index % 2 == 0 {
@@ -2668,5 +2842,64 @@ mod tests {
             renderer.scratch.budget.scratch,
             400 * 560 * CLIP_BYTES_PER_PIXEL
         );
+    }
+
+    /// One entry past the byte budget evicts the least recently resolved
+    /// entries, oldest stamp first, not every entry or the newest one.
+    #[test]
+    fn the_cache_evicts_least_recently_resolved_first() {
+        let mut cache = ImageCache::new();
+        let put = |cache: &mut ImageCache, key: u64, weight: u64| {
+            cache.clock += 1;
+            cache.entries.insert(
+                key,
+                CachedImage {
+                    outcome: None,
+                    charge: ImageCharge::default(),
+                    weight,
+                    stamp: cache.clock,
+                },
+            );
+            cache.recency.insert((cache.clock, key), ());
+            cache.bytes += weight;
+        };
+        put(&mut cache, 1, MAX_IMAGE_CACHE_BYTES / 2);
+        put(&mut cache, 2, MAX_IMAGE_CACHE_BYTES / 2);
+        put(&mut cache, 3, 1);
+        cache.get(1).expect("key 1 still cached");
+        put(&mut cache, 4, MAX_IMAGE_CACHE_BYTES / 2);
+        // `put` bypasses `insert`, so drive the same eviction loop by hand.
+        while cache.bytes > MAX_IMAGE_CACHE_BYTES {
+            let (stamp, evicted) = *cache.recency.keys().next().expect("an entry");
+            cache.recency.remove(&(stamp, evicted));
+            cache.bytes -= cache.entries.remove(&evicted).expect("entry").weight;
+        }
+        assert!(cache.entries.contains_key(&1), "recently resolved");
+        assert!(cache.entries.contains_key(&4), "newest");
+        assert!(
+            cache.entries.keys().all(|key| matches!(key, 1 | 4)),
+            "evicted the oldest-resolved keys first: {:?}",
+            cache.entries.keys().collect::<Vec<_>>()
+        );
+        assert!(cache.bytes <= MAX_IMAGE_CACHE_BYTES);
+    }
+
+    /// A page's budget is its own: replaying a cached decode spends exactly
+    /// the charge the fresh decode recorded, in the same check order.
+    #[test]
+    fn a_replayed_charge_spends_exactly_what_the_decode_spent() {
+        let mut cache = ImageCache::new();
+        let mut page = PageImages::new(&mut cache);
+        let charge = ImageCharge {
+            bytes_pre: 100,
+            pixels: 64,
+            bytes_post: 1_000,
+        };
+        assert!(page.charge(charge));
+        assert_eq!(page.bytes, 1_100);
+        assert_eq!(page.pixels, 64);
+        let mut broke = PageImages::new(&mut cache);
+        broke.bytes = MAX_PAGE_IMAGE_BYTES;
+        assert!(!broke.charge(charge));
     }
 }

@@ -245,7 +245,7 @@ pub(crate) fn matching_indices(
         let col = usize::try_from(index % cols).map_err(|_| ErrorValue::Num)?;
         let mut matches = true;
         for (area, criterion) in pairs {
-            if !criterion.matches(&area.get(ctx, row, col)?) {
+            if !criterion.matches(area.get_ref(ctx, row, col)?.as_ref()) {
                 matches = false;
                 break;
             }

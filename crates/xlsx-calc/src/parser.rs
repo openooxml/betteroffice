@@ -1,10 +1,10 @@
 //! precedence-climbing (pratt) parser: tokens -> `Expr` ast. never panics;
 //! malformed input yields a positioned `ParseError`, nesting is depth-capped.
 
-use xlsx_model::{CellRange, CellRef, ErrorValue};
+use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
-use crate::ColumnRange;
 use crate::lexer::{ParseError, TokKind, Token, lex};
+use crate::{ColumnRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
 pub const MAX_DEPTH: usize = 100;
@@ -13,9 +13,19 @@ pub const MAX_DEPTH: usize = 100;
 /// binds unary minus tighter than exponent: `-2^2 = 4`.
 const UNARY_BP: u8 = 10;
 
+/// cells one `{...}` constant may hold.
+const MAX_ARRAY_LITERAL_CELLS: usize = 8192;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Number(f64),
+    /// a value spliced in by array evaluation; the parser never produces one.
+    Literal(CellValue),
+    /// a `{1,2;3,4}` constant, row-major with uniform row width.
+    ArrayLiteral {
+        cols: usize,
+        values: Vec<Expr>,
+    },
     Text(String),
     Bool(bool),
     Error(ErrorValue),
@@ -30,6 +40,12 @@ pub enum Expr {
     ColumnRange {
         sheet: Option<String>,
         range: ColumnRange,
+    },
+    /// `Table[Col]`: a structured reference, resolved against the workbook's
+    /// table parts at evaluation time.
+    TableRef {
+        table: String,
+        spec: TableSpec,
     },
     Name {
         scope: Option<String>,
@@ -47,8 +63,23 @@ pub enum Expr {
     Percent(Box<Expr>),
     FuncCall {
         name: String,
+        /// resolved builtin, bound once at parse time; `None` = unknown name.
+        /// keep consistent with `name` — `Expr::func_call` does both.
+        func: Option<crate::functions::Func>,
         args: Vec<Expr>,
     },
+}
+
+impl Expr {
+    /// build a function call, interning the builtin binding from `name`.
+    pub fn func_call(name: impl Into<String>, args: Vec<Expr>) -> Expr {
+        let name = name.into();
+        Expr::FuncCall {
+            func: crate::functions::resolve(&name),
+            name,
+            args,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -223,11 +254,15 @@ impl Parser<'_> {
             TokKind::ColumnRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::ColumnRange { sheet, range }))
             }
+            TokKind::TableRef { table, spec } => {
+                Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
+            }
             TokKind::LParen => {
                 let inner = self.expr_bp(0, depth + 1)?;
                 self.expect(&TokKind::RParen, "')'")?;
                 Ok(inner)
             }
+            TokKind::LBrace => self.array_literal(depth),
             TokKind::Ident(name)
                 if matches!(self.peek().map(|token| &token.kind), Some(TokKind::LParen)) =>
             {
@@ -239,18 +274,70 @@ impl Parser<'_> {
         }
     }
 
+    /// `{1,2;3,4}`: `,` separates columns, `;` rows, every row the same width.
+    fn array_literal(&mut self, depth: usize) -> Result<ParsedExpr, ParseError> {
+        let mut values: Vec<ParsedExpr> = Vec::new();
+        let mut cols = 0usize;
+        let mut row = 0usize;
+        loop {
+            values.push(self.expr_bp(0, depth + 1)?);
+            row += 1;
+            if values.len() > MAX_ARRAY_LITERAL_CELLS {
+                return Err(ParseError::new(self.here(), "array constant too large"));
+            }
+            match self.peek().map(|t| &t.kind) {
+                Some(TokKind::Comma) => {
+                    self.advance();
+                }
+                Some(TokKind::Semicolon) | Some(TokKind::RBrace) => {
+                    if cols == 0 {
+                        cols = row;
+                    } else if cols != row {
+                        return Err(ParseError::new(self.here(), "ragged array constant"));
+                    }
+                    row = 0;
+                    let done = matches!(self.peek().map(|t| &t.kind), Some(TokKind::RBrace));
+                    self.advance();
+                    if done {
+                        break;
+                    }
+                }
+                _ => return Err(ParseError::new(self.here(), "expected ',', ';' or '}'")),
+            }
+        }
+        let ast_depth = values.iter().map(|value| value.depth).max().unwrap_or(0) + 1;
+        self.validate_ast_depth(ast_depth)?;
+        Ok(ParsedExpr {
+            expr: Expr::ArrayLiteral {
+                cols,
+                values: values.into_iter().map(|value| value.expr).collect(),
+            },
+            depth: ast_depth,
+        })
+    }
+
     fn func_call(&mut self, name: String, depth: usize) -> Result<ParsedExpr, ParseError> {
+        let func = crate::functions::resolve(&name);
         self.expect(&TokKind::LParen, "'(' after function name")?;
         let mut args = Vec::new();
         if matches!(self.peek().map(|t| &t.kind), Some(TokKind::RParen)) {
             self.advance();
             return Ok(ParsedExpr::leaf(Expr::FuncCall {
                 name,
+                func,
                 args: Vec::new(),
             }));
         }
         loop {
-            args.push(self.expr_bp(0, depth + 1)?);
+            // an omitted argument is an empty value, as excel reads `INDEX(a,,1)`
+            if matches!(
+                self.peek().map(|t| &t.kind),
+                Some(TokKind::Comma | TokKind::RParen)
+            ) {
+                args.push(ParsedExpr::leaf(Expr::Literal(CellValue::Empty)));
+            } else {
+                args.push(self.expr_bp(0, depth + 1)?);
+            }
             match self.peek().map(|t| &t.kind) {
                 Some(TokKind::Comma) => {
                     self.advance();
@@ -267,6 +354,7 @@ impl Parser<'_> {
         Ok(ParsedExpr {
             expr: Expr::FuncCall {
                 name,
+                func,
                 args: args.into_iter().map(|arg| arg.expr).collect(),
             },
             depth: ast_depth,
@@ -407,7 +495,7 @@ mod tests {
     #[test]
     fn function_calls_parse_args() {
         match parse("SUM(1, A1, 2+3)") {
-            Expr::FuncCall { name, args } => {
+            Expr::FuncCall { name, args, .. } => {
                 assert_eq!(name, "SUM");
                 assert_eq!(args.len(), 3);
             }
@@ -418,9 +506,33 @@ mod tests {
 
     #[test]
     fn rejects_malformed_input() {
-        for src in ["", "1+", "(1", "1 2", "SUM(1,)", "*1", ")"] {
+        for src in ["", "1+", "(1", "1 2", "*1", ")", "{1,2", "{1,2;3}"] {
             assert!(parse_formula(src).is_err(), "should reject {src:?}");
         }
+    }
+
+    /// excel writes gaps for arguments the author left out.
+    #[test]
+    fn parses_omitted_arguments_and_array_constants() {
+        match parse("INDEX(A1:C3,,2)") {
+            Expr::FuncCall { args, .. } => {
+                assert_eq!(args.len(), 3);
+                assert_eq!(args[1], Expr::Literal(CellValue::Empty));
+            }
+            other => panic!("expected func call, got {other:?}"),
+        }
+        assert_eq!(
+            parse("{1,2;3,4}"),
+            Expr::ArrayLiteral {
+                cols: 2,
+                values: vec![
+                    Expr::Number(1.0),
+                    Expr::Number(2.0),
+                    Expr::Number(3.0),
+                    Expr::Number(4.0)
+                ],
+            }
+        );
     }
 
     #[test]

@@ -38,6 +38,7 @@ import { mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
+import { noteYrsStoriesDirty } from './yrsToDocument';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -1753,6 +1754,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(session: YrsSession, document: Document): void {
+  noteYrsStoriesDirty(session, 'all');
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,

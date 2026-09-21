@@ -3,6 +3,7 @@
 //! are copied through byte for byte; only what changed is reserialized, and
 //! that reserialization carries just the subset `read` models.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque, btree_map};
 use std::io;
 use std::iter::Peekable;
@@ -26,6 +27,11 @@ use crate::package::{
 use crate::patch::SheetPatch;
 use crate::read::SharedStringCells;
 use crate::xml::{resolve_part_path, xml_err};
+
+/// A saved workbook's parts: generated entries are owned, entries the source
+/// package already held are borrowed from it.
+#[doc(hidden)]
+pub type SerializedParts<'p> = Vec<(String, Cow<'p, [u8]>)>;
 
 pub(crate) const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
 pub(crate) const NS_STRICT_MAIN: &str = "http://purl.oclc.org/ooxml/spreadsheetml/main";
@@ -174,7 +180,7 @@ pub(crate) fn serialize_workbook_with_package_and_origins(
                 .unwrap_or_default()
         })
         .collect::<Vec<_>>();
-    serialize_workbook_with_package_and_origins_after_edits(
+    let parts = serialize_workbook_with_package_and_origins_after_edits(
         wb,
         package,
         origins,
@@ -183,7 +189,11 @@ pub(crate) fn serialize_workbook_with_package_and_origins(
             changed,
             moved_references: false,
         },
-    )
+    )?;
+    Ok(parts
+        .into_iter()
+        .map(|(path, bytes)| (path, bytes.into_owned()))
+        .collect())
 }
 
 /// What a save must be told about the edits behind it, because neither the
@@ -206,13 +216,13 @@ pub struct SaveEdits {
 /// what the model does not: the source sheet each one came from and the shared
 /// string entry each of its cells was authored against.
 #[doc(hidden)]
-pub fn serialize_workbook_with_package_and_origins_after_edits(
+pub fn serialize_workbook_with_package_and_origins_after_edits<'p>(
     wb: &Workbook,
-    package: &PreservedPackage,
+    package: &'p PreservedPackage,
     origins: &[Option<usize>],
     shared_string_cells: &[SharedStringCells],
     edits: SaveEdits,
-) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+) -> Result<SerializedParts<'p>, ParseError> {
     let axes = vec![Some(SheetAxes::default()); wb.sheets.len()];
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
         wb,
@@ -226,14 +236,14 @@ pub fn serialize_workbook_with_package_and_origins_after_edits(
 }
 
 #[doc(hidden)]
-pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
+pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet<'p>(
     wb: &Workbook,
-    package: &PreservedPackage,
+    package: &'p PreservedPackage,
     origins: &[Option<usize>],
     shared_string_cells: &[SharedStringCells],
     edits: SaveEdits,
     active_sheet: SheetId,
-) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+) -> Result<SerializedParts<'p>, ParseError> {
     let axes = vec![Some(SheetAxes::default()); wb.sheets.len()];
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
         wb,
@@ -250,16 +260,19 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet(
 /// sit after the row and column edits made since the package was read. Sheets
 /// without one (`None`) are reserialized from the model, as are sheets whose
 /// source cannot be patched cell by cell.
+///
+/// Parts the package already holds come back borrowed, so a save writes them
+/// straight out of the retained copy instead of cloning each one.
 #[doc(hidden)]
-pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes(
+pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes<'p>(
     wb: &Workbook,
-    package: &PreservedPackage,
+    package: &'p PreservedPackage,
     origins: &[Option<usize>],
     shared_string_cells: &[SharedStringCells],
     sheet_axes: &[Option<SheetAxes>],
     edits: SaveEdits,
     active_sheet: SheetId,
-) -> Result<Vec<(String, Vec<u8>)>, ParseError> {
+) -> Result<SerializedParts<'p>, ParseError> {
     validate_indexed_colors(&wb.styles)?;
     if origins.len() != wb.sheets.len() || shared_string_cells.len() != wb.sheets.len() {
         return Err(ParseError::Malformed(
@@ -275,7 +288,11 @@ pub fn serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_
             .all(|(index, origin)| *origin == Some(index))
         && active_sheet == package.active_sheet
     {
-        return Ok(package.parts.clone());
+        return Ok(package
+            .parts
+            .iter()
+            .map(|(path, bytes)| (path.clone(), Cow::Borrowed(bytes.as_slice())))
+            .collect());
     }
     preflight_preserved_save(wb, package, origins, edits)?;
 
@@ -1290,12 +1307,12 @@ impl<'a> PartStore<'a> {
             .collect()
     }
 
-    fn finish(self) -> Vec<(String, Vec<u8>)> {
+    fn finish(self) -> Vec<(String, Cow<'a, [u8]>)> {
         self.slots
             .into_iter()
             .filter_map(|slot| match slot {
-                Slot::Source(path, bytes) => Some((path.to_owned(), bytes.to_vec())),
-                Slot::Owned(path, bytes) => Some((path, bytes)),
+                Slot::Source(path, bytes) => Some((path.to_owned(), Cow::Borrowed(bytes))),
+                Slot::Owned(path, bytes) => Some((path, Cow::Owned(bytes))),
                 Slot::Removed => None,
             })
             .collect()
@@ -2866,7 +2883,14 @@ where
     w.write_event(Event::Start(start))?;
     while let Some((addr, cell)) = cells.next_if(|(addr, _)| addr.row == row) {
         let retained = shared_string_index(cell, addr, wb, sst_index, retained, shared_string_plan);
-        write_cell(w, addr, cell, sst_index, retained)?;
+        write_cell(
+            w,
+            addr,
+            cell,
+            sst_index,
+            retained,
+            sheet.array_formula(addr),
+        )?;
     }
     w.write_event(Event::End(BytesEnd::new("row")))?;
     Ok(())
@@ -2902,6 +2926,7 @@ pub(crate) fn write_cell(
     cell: &Cell,
     sst_index: &HashMap<&str, usize>,
     retained: Option<usize>,
+    array_ref: Option<xlsx_model::CellRange>,
 ) -> io::Result<()> {
     let a1 = addr.to_a1();
     let has_formula = cell.formula.is_some();
@@ -2945,8 +2970,14 @@ pub(crate) fn write_cell(
     }
     w.write_event(Event::Start(start))?;
     if let Some(f) = &cell.formula {
-        w.create_element("f")
-            .write_text_content(BytesText::new(f))?;
+        let reference = array_ref.map(|range| range.to_a1());
+        let mut element = w.create_element("f");
+        if let Some(reference) = &reference {
+            element = element
+                .with_attribute(("t", "array"))
+                .with_attribute(("ref", reference.as_str()));
+        }
+        element.write_text_content(BytesText::new(f))?;
     }
     if let Some(v) = &value {
         w.create_element("v")

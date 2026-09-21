@@ -21,5 +21,6 @@ pub use styles::{
 };
 pub use value::{CellValue, ErrorValue};
 pub use workbook::{
-    Cell, CellProvider, DefinedName, FreezePane, Hyperlink, Sheet, SheetFormat, Workbook,
+    Cell, CellProvider, DefinedName, FreezePane, Hyperlink, MAX_SPILL_CELLS, Sheet, SheetFormat,
+    Table, Workbook,
 };

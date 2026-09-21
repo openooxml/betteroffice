@@ -81,9 +81,12 @@ fn sum_matching(
     };
     for i in indices {
         let (r, c) = (i / cols, i % cols);
-        match value_area.get(ctx, r, c) {
-            Ok(CellValue::Number { value }) => total += value,
-            Ok(_) => {}
+        match value_area.get_ref(ctx, r, c) {
+            Ok(v) => {
+                if let CellValue::Number { value } = *v {
+                    total += value;
+                }
+            }
             Err(error) => return err(error),
         }
     }
@@ -100,15 +103,15 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let values = match area.values(ctx) {
+                let values = match area.values_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
                 let mut col = Vec::with_capacity(values.len());
                 for v in values {
-                    match v {
-                        CellValue::Number { value } => col.push(value),
-                        CellValue::Error { value } => return err(value),
+                    match v.as_ref() {
+                        CellValue::Number { value } => col.push(*value),
+                        CellValue::Error { value } => return err(*value),
                         _ => col.push(0.0),
                     }
                 }
@@ -181,10 +184,10 @@ fn matrix(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Matrix, ErrorValue> {
             _ => Err(ErrorValue::Value),
         };
     };
-    let cells = area.values(ctx)?;
+    let cells = area.values_ref(ctx)?;
     let mut values = Vec::with_capacity(cells.len());
     for cell in cells {
-        match cell {
+        match *cell {
             CellValue::Number { value } => values.push(value),
             CellValue::Error { value } => return Err(value),
             _ => return Err(ErrorValue::Value),
@@ -300,6 +303,70 @@ pub(crate) fn int(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::floor)
 }
 
+/// every cell of the arguments as a number, refusing anything that is not one.
+fn strict_numbers(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
+    for arg in args {
+        match as_area(arg, ctx) {
+            Some(area) => {
+                for value in area.values_ref(ctx)? {
+                    match value.as_ref() {
+                        CellValue::Number { value } => nums.push(*value),
+                        CellValue::Error { value } => return Err(*value),
+                        CellValue::Empty => {}
+                        _ => return Err(ErrorValue::Value),
+                    }
+                }
+            }
+            None => match evaluate(arg, ctx) {
+                CellValue::Number { value } => nums.push(value),
+                CellValue::Error { value } => return Err(value),
+                _ => return Err(ErrorValue::Value),
+            },
+        }
+    }
+    Ok(nums)
+}
+
+/// QUOTIENT(numerator, denominator): the integer part of the division,
+/// truncated toward zero.
+pub(crate) fn quotient(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(_), Ok(0.0)) => err(ErrorValue::Div0),
+        (Ok(n), Ok(d)) => finite((n / d).trunc()),
+        (Err(e), _) | (_, Err(e)) => err(e),
+    }
+}
+
+/// SERIESSUM(x, n, m, coefficients): sum of `a_i * x^(n + (i-1) * m)`.
+pub(crate) fn seriessum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 4 {
+        return err(ErrorValue::Value);
+    }
+    let (x, n, m) = match (
+        nth_number(args, ctx, 0),
+        nth_number(args, ctx, 1),
+        nth_number(args, ctx, 2),
+    ) {
+        (Ok(x), Ok(n), Ok(m)) => (x, n, m),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
+    };
+    // a non-numeric coefficient is #VALUE!, not a term to skip: dropping one
+    // would shift every later power
+    let coefficients = match strict_numbers(&args[3..], ctx) {
+        Ok(c) => c,
+        Err(e) => return err(e),
+    };
+    let mut total = 0.0;
+    for (i, a) in coefficients.iter().enumerate() {
+        total += a * x.powf(n + (i as f64) * m);
+    }
+    finite(total)
+}
+
 /// TRUNC(number, [digits]); digits default 0. truncates toward zero.
 pub(crate) fn trunc(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     directional(args, ctx, |scaled| scaled.trunc())
@@ -412,6 +479,66 @@ fn directional(args: &[Expr], ctx: &EvalContext<'_>, rule: fn(f64) -> f64) -> Ce
 
 pub(crate) fn tanh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::tanh)
+}
+
+pub(crate) fn sin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::sin)
+}
+
+pub(crate) fn cos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::cos)
+}
+
+pub(crate) fn tan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::tan)
+}
+
+pub(crate) fn sinh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::sinh)
+}
+
+pub(crate) fn cosh(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::cosh)
+}
+
+/// ASIN/ACOS are `#NUM!` outside [-1, 1]; `finite` turns the NaN into it.
+pub(crate) fn asin(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => finite(x.asin()),
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn acos(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match one_number(args, ctx) {
+        Ok(x) => finite(x.acos()),
+        Err(e) => err(e),
+    }
+}
+
+pub(crate) fn atan(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::atan)
+}
+
+/// ATAN2(x, y) — excel takes the x coordinate first, the reverse of `f64::atan2`.
+/// both zero is `#DIV/0!`.
+pub(crate) fn atan2(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(0.0), Ok(0.0)) => err(ErrorValue::Div0),
+        (Ok(x), Ok(y)) => finite(y.atan2(x)),
+        (Err(e), _) | (_, Err(e)) => err(e),
+    }
+}
+
+pub(crate) fn degrees(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::to_degrees)
+}
+
+pub(crate) fn radians(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    unary(args, ctx, f64::to_radians)
 }
 
 /// RANDBETWEEN(bottom, top): a volatile integer draw. measured against excel:

@@ -95,8 +95,8 @@ pub fn parse_docx_s8_projection(data: &[u8]) -> Result<S8Projection, ParseError>
             let lower = path.to_ascii_lowercase();
             lower.ends_with(".xml") || lower.ends_with(".rels")
         })
-        .cloned()
-        .collect();
+        .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
+        .collect::<IndexMap<String, &[u8]>>();
     let charts = parse_chart_parts(&all_xml, &limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = format!("{:x}", Sha256::digest(data));

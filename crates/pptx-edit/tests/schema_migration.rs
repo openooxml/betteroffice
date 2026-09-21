@@ -38,7 +38,7 @@ fn a_fresh_deck_persists_its_list_styles() {
     let source = include_bytes!("../../pptx-render/tests/fixtures/list-style-bullets.pptx");
     let fresh = DeckSession::open(source, 29413).unwrap();
     let update = fresh.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&update), Some(2.1));
+    assert_eq!(stamped_version(&update), Some(2.2));
     let json = package_json(&update);
     assert!(json.contains("\"listStyle\""));
     assert!(json.contains("\"defaultListStyle\""));
@@ -68,7 +68,7 @@ fn current_main_v2_custom_snapshot_migrates_once_without_losing_shapes() {
     let left = DeckSession::open_from_update(CUSTOM_V2_UPDATE, 909).unwrap();
     let right = DeckSession::open_from_update(CUSTOM_V2_UPDATE, 910).unwrap();
     let migrated = left.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
+    assert_eq!(stamped_version(&migrated), Some(2.2));
     assert_eq!(package_json(&migrated), package_json(CUSTOM_V2_UPDATE));
     let snapshot = left.snapshot().unwrap();
     assert_eq!(
@@ -112,8 +112,13 @@ fn current_main_generated_v2_snapshot_preserves_content_and_default_serializatio
         "persisted-v2 Styled"
     );
     let migrated = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
-    assert_eq!(package_json(&migrated), legacy_json);
+    assert_eq!(stamped_version(&migrated), Some(2.2));
+    let migrated_package: pptx_parse::PptxPackage =
+        serde_json::from_str(&package_json(&migrated)).unwrap();
+    assert_eq!(
+        migrated_package,
+        serde_json::from_str(&legacy_json).unwrap()
+    );
     let reopened = DeckSession::open_from_update(&migrated, 910).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), snapshot);
     assert_eq!(reopened.encode_state_as_update_v1().len(), migrated.len());
@@ -148,7 +153,7 @@ fn a_fresh_current_snapshot_preserves_numbering_and_theme_formatting() {
     package.presentation.first_slide_num = 10;
     let session = DeckSession::from_package(package, 9330).unwrap();
     let update = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&update), Some(2.1));
+    assert_eq!(stamped_version(&update), Some(2.2));
     let json = package_json(&update);
     assert!(json.contains("\"firstSlideNum\":10"));
     assert!(json.contains("formatScheme"));
@@ -168,7 +173,7 @@ fn released_v1_snapshot_migrates_and_round_trips_as_v2_1() {
     assert_v1_content(&session);
 
     let migrated = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
+    assert_eq!(stamped_version(&migrated), Some(2.2));
     assert!(
         package_json(&migrated).contains("\"charts\""),
         "the migrated package must carry the v2 chart field"
@@ -187,7 +192,7 @@ fn released_v1_snapshot_migrates_and_round_trips_as_v2_1() {
     assert_eq!(
         reopened.encode_state_as_update_v1().len(),
         migrated.len(),
-        "reopening a 2.1 snapshot must not migrate again"
+        "reopening a migrated snapshot must not migrate again"
     );
 }
 
@@ -229,7 +234,7 @@ fn two_clients_migrating_the_same_v1_snapshot_converge() {
     assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
     assert_eq!(
         stamped_version(&left.encode_state_as_update_v1()),
-        Some(2.1)
+        Some(2.2)
     );
     assert_eq!(
         package_json(&left.encode_state_as_update_v1()),
@@ -241,7 +246,7 @@ fn two_clients_migrating_the_same_v1_snapshot_converge() {
 fn a_fresh_seed_persists_the_connector_filter_at_the_current_schema() {
     let session = DeckSession::open(V2_SOURCE, 909).unwrap();
     let update = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&update), Some(2.1));
+    assert_eq!(stamped_version(&update), Some(2.2));
     assert!(package_json(&update).contains("\"shapeElements\":\"withConnectors\""));
     let reopened = DeckSession::open_from_update_with_source(&update, V2_SOURCE, 910).unwrap();
     assert!(reopened.package().models_connectors());
@@ -254,7 +259,7 @@ fn a_v2_snapshot_migrates_without_changing_its_package_or_shape_ids() {
     assert_eq!(stamped_version(V2_UPDATE), Some(2.0));
     let session = DeckSession::open_from_update(V2_UPDATE, 911).unwrap();
     let migrated = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
+    assert_eq!(stamped_version(&migrated), Some(2.2));
     assert_eq!(package_json(&migrated), package_json(V2_UPDATE));
     assert!(!session.package().models_connectors());
     let snapshot = session.snapshot().unwrap();
@@ -294,7 +299,7 @@ fn v2_migration_converges_and_accepts_an_existing_peer_edit() {
     assert_eq!(left.snapshot().unwrap().slides[0].shapes[1].x, 952_500);
     assert_eq!(
         stamped_version(&left.encode_state_as_update_v1()),
-        Some(2.1)
+        Some(2.2)
     );
     assert_eq!(left.save().unwrap(), right.save().unwrap());
     assert!(!left.package().models_connectors());
@@ -303,8 +308,8 @@ fn v2_migration_converges_and_accepts_an_existing_peer_edit() {
 #[test]
 fn unmigratable_schema_versions_stay_rejected() {
     for version in [
-        0.0, 1.5, 2.05, 2.2, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0,
-        15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0,
+        0.0, 1.5, 2.05, 2.5, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0,
+        16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0,
     ] {
         assert!(
             matches!(
@@ -326,7 +331,7 @@ fn unmigratable_schema_versions_stay_rejected() {
 fn default_numbering_omits_the_default_at_the_current_schema() {
     let session = DeckSession::open(FIXTURE, 913).unwrap();
     let update = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&update), Some(2.1));
+    assert_eq!(stamped_version(&update), Some(2.2));
     assert!(!package_json(&update).contains("firstSlideNum"));
     let restored = DeckSession::open_from_update(&update, 914).unwrap();
     assert_eq!(restored.package().presentation.first_slide_num, 1);
@@ -344,7 +349,7 @@ fn default_numbering_omits_the_default_at_the_current_schema() {
 fn slide_number_offsets_survive_migration_from_released_snapshots() {
     let session = DeckSession::open(NUMBERED_FIXTURE, 910).unwrap();
     let update = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&update), Some(2.1));
+    assert_eq!(stamped_version(&update), Some(2.2));
     assert!(package_json(&update).contains("\"firstSlideNum\":10"));
     for version in [1.0, 2.0] {
         let restored =
@@ -352,7 +357,7 @@ fn slide_number_offsets_survive_migration_from_released_snapshots() {
         assert_eq!(restored.package().presentation.first_slide_num, 10);
         assert_eq!(restored.snapshot().unwrap(), session.snapshot().unwrap());
         let migrated = restored.encode_state_as_update_v1();
-        assert_eq!(stamped_version(&migrated), Some(2.1));
+        assert_eq!(stamped_version(&migrated), Some(2.2));
         assert_eq!(package_json(&migrated), package_json(&update));
         let reopened = DeckSession::open_from_update(&migrated, 912).unwrap();
         assert_eq!(
@@ -452,7 +457,7 @@ fn released_v2_snapshot_migrates_with_hidden_flags_backfilled() {
     assert_v2_content(&session);
 
     let migrated = session.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
+    assert_eq!(stamped_version(&migrated), Some(2.2));
     assert_eq!(hidden_keys(&migrated), V2_HIDDEN_SHAPE_IDS);
 
     let reopened = DeckSession::open_from_update(&migrated, 912).unwrap();
@@ -461,7 +466,7 @@ fn released_v2_snapshot_migrates_with_hidden_flags_backfilled() {
     assert_eq!(
         reopened.encode_state_as_update_v1().len(),
         migrated.len(),
-        "reopening a 2.1 snapshot must not migrate again"
+        "reopening a migrated snapshot must not migrate again"
     );
 }
 
@@ -479,7 +484,7 @@ fn two_clients_migrating_the_same_v2_snapshot_converge() {
     assert_eq!(left.snapshot().unwrap(), right.snapshot().unwrap());
     assert_v2_content(&left);
     let merged = left.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&merged), Some(2.1));
+    assert_eq!(stamped_version(&merged), Some(2.2));
     assert_eq!(hidden_keys(&merged), V2_HIDDEN_SHAPE_IDS);
 }
 
@@ -558,7 +563,7 @@ fn v2_snapshots_migrate_once_and_import_source_comments() {
     assert!(deferred.comments().unwrap().is_empty());
     assert!(deferred.package().comments.is_empty());
     let migrated = deferred.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&migrated), Some(2.1));
+    assert_eq!(stamped_version(&migrated), Some(2.2));
     let reopened = DeckSession::open_from_update(&migrated, 9611).unwrap();
     assert_eq!(reopened.snapshot().unwrap(), deferred.snapshot().unwrap());
     assert_eq!(reopened.encode_state_as_update_v1(), migrated);
@@ -571,7 +576,7 @@ fn v2_snapshots_migrate_once_and_import_source_comments() {
     assert_eq!(snapshot.comment_flavor, CommentFlavor::Modern);
     assert_eq!(snapshot.slides.len(), 3);
     let imported = attached.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&imported), Some(2.1));
+    assert_eq!(stamped_version(&imported), Some(2.2));
     assert!(package_json(&imported).contains("\"comments\""));
     let later =
         DeckSession::open_from_update_with_source(&migrated, COMMENTS_SOURCE, 9613).unwrap();
@@ -626,14 +631,14 @@ fn a_pre_2_1_chart_carries_its_stored_text_and_recovers_it_from_a_source() {
     let source = include_bytes!("../../pptx-render/tests/fixtures/chart-text-properties.pptx");
     let fresh = DeckSession::open(source, 34700).unwrap();
     let current = fresh.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&current), Some(2.1));
+    assert_eq!(stamped_version(&current), Some(2.2));
     assert!(package_json(&current).contains("\"spacingPt\":6.0"));
 
     let stored = without_chart_text(&current, 2.0);
     assert!(!package_json(&stored).contains("spacingPt"));
     let migrated = DeckSession::open_from_update(&stored, 34701).unwrap();
     let carried = migrated.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&carried), Some(2.1));
+    assert_eq!(stamped_version(&carried), Some(2.2));
     assert!(!package_json(&carried).contains("spacingPt"));
 
     let attached = DeckSession::open_from_update_with_source(&carried, source, 34702).unwrap();
@@ -705,7 +710,7 @@ fn assert_source_recovers(
     let fresh = DeckSession::open(source, client_id + 1).unwrap();
     let migrated = DeckSession::open_from_update(&stored, client_id + 2).unwrap();
     let carried = migrated.encode_state_as_update_v1();
-    assert_eq!(stamped_version(&carried), Some(2.1));
+    assert_eq!(stamped_version(&carried), Some(2.2));
     assert_ne!(
         serde_json::to_value(migrated.package()).unwrap(),
         serde_json::to_value(fresh.package()).unwrap()
@@ -853,4 +858,45 @@ fn a_2_0_snapshot_recovers_line_spacing() {
         &[],
         |value| without_keys(value, &["lineSpacing", "compatLineSpacing"]),
     );
+}
+
+#[test]
+fn a_2_1_deck_with_integer_media_arrays_migrates_to_base64() {
+    let fresh = DeckSession::open(FIXTURE, 4171).unwrap();
+    let update = fresh.encode_state_as_update_v1();
+    let json = package_json(&update);
+    assert!(
+        json.contains("\"bytes\":\""),
+        "2.2 must write base64 strings"
+    );
+
+    let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let media = value["media"]
+        .as_array_mut()
+        .expect("fixture carries media");
+    assert!(!media.is_empty());
+    for part in media.iter_mut() {
+        part["bytes"] = serde_json::json!([7, 6, 5]);
+    }
+    let doc = hydrated(&update);
+    let meta = meta(&doc);
+    {
+        let mut txn = doc.transact_mut();
+        meta.insert(
+            &mut txn,
+            "packageJson",
+            Any::Buffer(serde_json::to_vec(&value).unwrap().into()),
+        );
+        meta.insert(&mut txn, "schemaVersion", 2.1);
+    }
+    let legacy = doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default());
+
+    let migrated = DeckSession::open_from_update(&legacy, 4172).unwrap();
+    let migrated_json = package_json(&migrated.encode_state_as_update_v1());
+    assert_eq!(stamped_version(&legacy), Some(2.1));
+    assert!(migrated_json.contains("\"bytes\":\"BwYF\""));
+    assert!(!migrated_json.contains("[7,6,5]"));
+    assert!(migrated_json.contains("betteroffice-mark.png"));
 }

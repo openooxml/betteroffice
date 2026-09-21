@@ -4205,13 +4205,13 @@ mod tests {
             .unwrap();
             envelope.document.package.media_entries = vec![(
                 "word/media/image.png".to_owned(),
-                docx_parse::media::MediaFile {
+                Arc::new(docx_parse::media::MediaFile {
                     path: "word/media/image.png".to_owned(),
                     filename: Some("image.png".to_owned()),
                     mime_type: "image/png".to_owned(),
                     base64: "AQID".to_owned(),
                     data_url: src.to_owned(),
-                },
+                }),
             )];
             let mut without_media = envelope.clone();
             without_media.document.package.media_entries.clear();

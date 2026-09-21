@@ -4,7 +4,8 @@ use std::sync::{Mutex, PoisonError};
 
 use docx_layout::display_list::DisplayList;
 use docx_raster::{
-    FontChains, GlyphCache, ImageMap, ImageScope, RenderResources, RenderedPage, scoped_image_key,
+    FontChains, GlyphCache, ImageCache, ImageMap, ImageScope, RenderResources, RenderedPage,
+    scoped_image_key,
 };
 use ooxml_text::FontStore;
 use serde_json::Number;
@@ -61,10 +62,12 @@ impl FontRegistry {
 }
 
 /// Caller-supplied bytes for relationship ids the display list did not already
-/// carry as `data:` URLs, keyed by owning part.
+/// carry as `data:` URLs, keyed by owning part, plus the decoded images a page
+/// leaves for the next — behind a `Mutex` so the document stays `Send + Sync`.
 #[derive(Default)]
 pub(crate) struct ImageRegistry {
     entries: ImageMap,
+    cache: Mutex<ImageCache>,
 }
 
 impl ImageRegistry {
@@ -154,9 +157,9 @@ impl Document {
     /// Rasterizes one display-list page to deterministic PNG bytes. A page past
     /// [`MAX_PIXMAP_DIM`] or [`MAX_PIXMAP_PIXELS`] is refused before any surface
     /// is allocated; an image the backend cannot draw is skipped and counted.
-    /// Glyph outlines are cached on the document, so a page reuses what earlier
-    /// pages extracted; an export past the cache's cap re-extracts what it
-    /// evicted.
+    /// Glyph outlines and decoded images are cached on the document, so a page
+    /// reuses what earlier pages extracted and decoded; an export past either
+    /// cache's cap re-does what it evicted.
     pub fn render_png(
         &self,
         display_list: &DisplayList,
@@ -178,8 +181,19 @@ impl Document {
             .glyphs
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let mut images = self
+            .images
+            .cache
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let resources = RenderResources::new(&store, &self.fonts.chains, &self.images.entries);
-        docx_raster::render_page_cached(display_list, page_ordinal, &resources, &mut glyphs)
-            .map_err(Error::Render)
+        docx_raster::render_page_cached(
+            display_list,
+            page_ordinal,
+            &resources,
+            &mut glyphs,
+            &mut images,
+        )
+        .map_err(Error::Render)
     }
 }
