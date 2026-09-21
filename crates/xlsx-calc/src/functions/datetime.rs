@@ -589,6 +589,36 @@ fn current_year(ctx: &EvalContext<'_>) -> Option<i64> {
     serial_to_ymd(serial).map(|(y, _, _)| y)
 }
 
+/// TIMEVALUE(text): the fraction of a day a written time stands for. a date
+/// in front of the time is ignored, as excel ignores it.
+pub(crate) fn timevalue(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 1 {
+        return err(ErrorValue::Value);
+    }
+    let raw = match evaluate(&args[0], ctx) {
+        CellValue::Error { value } => return err(value),
+        CellValue::Text { value } => value,
+        _ => return err(ErrorValue::Value),
+    };
+    match clock_of(&raw) {
+        Some(fraction) => num(fraction),
+        None => err(ErrorValue::Value),
+    }
+}
+
+/// the time part of a timestamp: everything from the word holding the first
+/// colon onwards, as a fraction of a day with whole days dropped.
+fn clock_of(raw: &str) -> Option<f64> {
+    let text = raw.trim();
+    let colon = text.find(':')?;
+    let start = text[..colon]
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| ch.is_whitespace())
+        .map_or(0, |(index, ch)| index + ch.len_utf8());
+    crate::eval::parse_clock(&text[start..]).map(|day| day - day.floor())
+}
+
 /// YEARFRAC(start, end, [basis]): the fraction of a year between two dates
 /// under day-count bases 0..=4. the order of the dates does not matter.
 pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
