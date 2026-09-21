@@ -401,6 +401,20 @@ fn malformed_shared_groups_fail_instead_of_losing_formulas() {
 }
 
 #[test]
+fn reads_a_valueless_inline_string_cell_as_blank() {
+    let body = r#"<sheetData><row r="1"><c r="A1" s="2" t="inlineStr"/><c r="B1" t="inlineStr"><is><t></t></is></c></row></sheetData>"#;
+    let wb = parse_workbook(&package(body, &[], false)).unwrap();
+    assert_eq!(cell_at(&wb, "A1").value, CellValue::Empty);
+    assert_eq!(cell_at(&wb, "A1").style, Some(2));
+    assert_eq!(
+        cell_at(&wb, "B1").value,
+        CellValue::Text {
+            value: String::new()
+        }
+    );
+}
+
+#[test]
 fn parses_inline_string() {
     let body = r#"<sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>inline &lt;here&gt;</t></is></c></row></sheetData>"#;
     let wb = parse_workbook(&package(body, &[], false)).unwrap();
