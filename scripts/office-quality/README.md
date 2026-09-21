@@ -53,7 +53,7 @@ The final job requires every selected format and sample, combines the original c
 
 ## Native DOCX and LibreOffice
 
-The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX adds the same render-time comparison; XLSX adds LibreOffice SSIM and recalculation time; calculation accuracy remains in report artifacts.
+The DOCX table adds LibreOffice fidelity and a native CLI render-time row. BetterOffice fidelity still measures the browser renderer at 150 DPI. Native timings exercise the Rust rasterizer at 96 DPI; they do not claim that it has the browser renderer's fidelity or feature coverage. PPTX adds the same render-time comparison; XLSX adds LibreOffice SSIM, recalculation accuracy and recalculation time.
 
 Both BetterOffice executables use the same [`native/main.rs`](native/main.rs) host, compiled in release mode (`opt-level=3`, thin LTO), against the frozen current source and the exact source of the published npm version. The host reads the original DOCX, imports it into the engine, loads fonts, lays out the document, constructs the display list, rasterizes page one, PNG-encodes it, and writes the file. All of that work and process startup are timed. No prepared layout, display list, resident engine, Wasm, or browser is supplied to the executable. Unsupported raster operations, skipped images, blank output for a nonblank reference, and invalid output dimensions count as failures.
 
@@ -194,7 +194,7 @@ PPTX has an independent benchmark worker and two native build jobs. It renders t
 
 ## LibreOffice spreadsheet fidelity
 
-Up to four independent workers render every selected XLSX, including workbooks without formula references. They use the same frozen source, Excel PNG references, bundled fonts, pinned LibreOffice build, and 150-DPI grayscale SSIM as the other format comparisons. The XLSX table shows LibreOffice SSIM and scored/total alongside the existing recalculation times. Calculation accuracy stays in the JSON artifacts.
+Up to four independent workers render every selected XLSX, including workbooks without formula references. They use the same frozen source, Excel PNG references, bundled fonts, pinned LibreOffice build, and 150-DPI grayscale SSIM as the other format comparisons. The XLSX table shows LibreOffice SSIM and scored/total alongside recalculation accuracy and time. Per-cell mismatches and reference coverage remain in the JSON artifacts.
 
 Each recorded range is exported separately through `calc_pdf_Export`. A temporary copy selects its worksheet, hides the others, and applies the reference's print area, fixed scale, landscape paper size, margins, gridlines, and empty headers/footers and print titles. Source cells, formulas, and cached values are retained. LibreOffice may recalculate on import. [Print ranges](https://help.libreoffice.org/latest/en-GB/text/scalc/guide/printranges.html) constrain the export; whole-sheet export and fit-to-page scaling are disabled. Recorded Letter, Legal, A3 and A4 paper dimensions are supported; an unknown size fails explicitly.
 

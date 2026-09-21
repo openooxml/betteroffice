@@ -120,6 +120,7 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><th width="180"></th><th width="230" align="right">BetterOffice (<a href="https://www.npmjs.com/package/@betteroffice/xlsx/v/0.2.1">0.2.1</a>)</th><th width="230" align="right">BetterOffice (<a href="https://github.com/openooxml/betteroffice/commit/e8ce123fa9f8e9efc5096811fb98f6f0c17d2e48">e8ce123f</a>)</th><th width="230" align="right">LibreOffice (26.2.3.2)</th></tr>
 <tr><td>SSIM</td><td align="right">0.7002</td><td align="right">0.7660</td><td align="right">0.6901</td></tr>
 <tr><td>Scored/total</td><td align="right">205/208</td><td align="right">207/208</td><td align="right">204/208</td></tr>
+<tr><td>Recalc accuracy</td><td align="right">68.28%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
 <tr><td>Recalc time (avg)</td><td align="right">70 ms</td><td align="right">89 ms</td><td align="right">466 ms</td></tr>
 <tr><td>Parse success</td><td align="right">99.52%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
 <tr><td>Lossless roundtrip</td><td align="right">0.00%</td><td align="right">0.00%</td><td align="right">0.00%</td></tr>

@@ -57,13 +57,16 @@ test('rejects missing shards, stale references, mixed harnesses and malformed tr
 
 import { renderSection } from './readme.mjs';
 
-test('keeps accuracy in artifacts and renders timings without inventing LibreOffice XLSX fidelity', () => {
+test('renders accuracy including failures and common-cohort timings without inventing LibreOffice XLSX fidelity', () => {
   const input = { ...plan(), samples: samples.map(sample => ({ ...sample, comparisons: [] })) };
-  const merged = mergeXlsxBenchmarks(plan(),input,parts(),hash);
+  const inputs = parts();
+  (inputs[1].samples[0].calculations.published as any) = { status:'failed', correct:0,total:25,error:'engine failed' };
+  inputs[1].samples[0].calculations.commit = success(10,1);
+  const merged = mergeXlsxBenchmarks(plan(),input,inputs,hash);
   const text = renderSection(merged).split('### XLSX')[1];
   expect(text).toContain('LibreOffice (26.2.3.2)');
-  expect(text).not.toContain('Calc accuracy');
-  expect(merged.xlsx_benchmark.summary.channels.commit.correct).toBe(50);
+  expect(text).toContain('<td>Recalc accuracy</td><td align="right">50.00%</td><td align="right">70.00%</td><td align="right">100.00%</td>');
+  expect(merged.xlsx_benchmark.summary.channels.commit.correct).toBe(35);
   expect(text).toContain('<td>Recalc time (avg)</td><td align="right">10 ms</td><td align="right">10 ms</td><td align="right">20 ms</td>');
   expect(text).toContain('<td>Scored/total</td><td align="right">0/2</td><td align="right">0/2</td><td align="right">—</td>');
   expect(() => renderSection({...merged,source_sha:'e'.repeat(40)})).toThrow('revision');

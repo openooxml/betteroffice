@@ -31,7 +31,7 @@ test('renders real LibreOffice XLSX SSIM and scored coverage without calculation
   expect(text).toContain('LibreOffice (26.2.3.2)');
   expect(text).toContain('<td align="right">0.7500</td>');
   expect(text).toContain('<td align="right">4/5</td>');
-  expect(text).not.toContain('Calc accuracy');
+  expect(text).not.toContain('Recalc accuracy');
   expect(text).not.toContain('Exact page counts');
 });
 

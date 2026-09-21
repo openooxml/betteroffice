@@ -130,6 +130,8 @@ export function renderSection(report) {
     }
     if (format === 'xlsx' && calculation) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
+      rows.push(['Recalc accuracy', ...channels.map(channel => channel.total
+        ? `${(100 * channel.correct / channel.total).toFixed(2)}%` : '—')]);
       rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
     }
     if (preservation) {
