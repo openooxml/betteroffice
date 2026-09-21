@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { XlsxEditor } from "@betteroffice/xlsx-react";
 import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
 import { isProposalsAvailable } from "@betteroffice/xlsx";
 import { CollaborationProvider } from "@betteroffice/xlsx/collaboration";
@@ -19,6 +19,13 @@ import {
 } from "../collab";
 import { cn } from "../../lib/cn";
 import { buildTotalsEdits } from "./demoAgent";
+
+// The editor is browser-only (canvas + wasm); keep it out of SSR, matching the
+// docx/pptx/vsdx demo clients.
+const XlsxEditor = dynamic(
+  () => import("@betteroffice/xlsx-react").then((m) => m.XlsxEditor),
+  { ssr: false }
+);
 
 const SHOWCASE = { url: "/showcase.xlsx", name: "showcase.xlsx" };
 const SAMPLE = { url: "/sample.xlsx", name: "sample.xlsx" };
