@@ -43,7 +43,7 @@ test('parse and preservation use all planned files and remain separate after sav
   });
   const text = renderSection(merged).split('### DOCX')[1].split('### PPTX')[0];
   expect(text).toContain('<td>Parse success</td><td align="right">50.00%</td><td align="right">100.00%</td>');
-  expect(text).toContain('<td>Lossless roundtrip</td><td align="right">50.00%</td><td align="right">50.00%</td>');
+  expect(text).not.toContain('Lossless roundtrip');
 });
 
 test('requires exact sample/build identities and proof of a nonempty preserved edit', () => {
@@ -76,7 +76,7 @@ test('LibreOffice parse/preservation is measured and stale results are rejected'
   const report = {...merged,xlsx_fidelity_benchmark:{source_sha:sha,libreoffice_version:'26.2.3.2'}};
   const text = renderSection(report).split('### XLSX')[1];
   expect(text).toContain('<td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td>');
-  expect(text).toContain('<td>Lossless roundtrip</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td>');
+  expect(renderSection(report)).not.toContain('Lossless roundtrip');
   expect(() => renderSection({...merged,source_sha:published})).toThrow('revision');
 });
 

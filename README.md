@@ -99,7 +99,6 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><td>Scored/total</td><td align="right">63/63</td><td align="right">63/63</td><td align="right">63/63</td></tr>
 <tr><td>Render time (avg)</td><td align="right">546 ms</td><td align="right">527 ms</td><td align="right">788 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
-<tr><td>Lossless roundtrip</td><td align="right">0.00%</td><td align="right">0.00%</td><td align="right">0.00%</td></tr>
 </table>
 
 
@@ -111,7 +110,6 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><td>Scored/total</td><td align="right">88/103</td><td align="right">103/103</td><td align="right">103/103</td></tr>
 <tr><td>Render time (avg)</td><td align="right">205 ms</td><td align="right">144 ms</td><td align="right">1310 ms</td></tr>
 <tr><td>Parse success</td><td align="right">100.00%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
-<tr><td>Lossless roundtrip</td><td align="right">75.73%</td><td align="right">75.73%</td><td align="right">0.00%</td></tr>
 </table>
 
 ### XLSX
@@ -123,7 +121,6 @@ Page agreement is reported on its own because a document either paginates as Wor
 <tr><td>Recalc accuracy</td><td align="right">68.28%</td><td align="right">99.60%</td><td align="right">85.87%</td></tr>
 <tr><td>Recalc time (avg)</td><td align="right">70 ms</td><td align="right">89 ms</td><td align="right">466 ms</td></tr>
 <tr><td>Parse success</td><td align="right">99.52%</td><td align="right">100.00%</td><td align="right">100.00%</td></tr>
-<tr><td>Lossless roundtrip</td><td align="right">0.00%</td><td align="right">0.00%</td><td align="right">0.00%</td></tr>
 </table>
 
 For scoring, timing, coverage, and limitations, see the [benchmark methodology](scripts/office-quality/README.md).

@@ -139,11 +139,9 @@ export function renderSection(report) {
           preservation.builds?.commit?.source_sha !== report.source_sha)
         throw new Error('Roundtrip results do not match the report revision');
       const summary = roundtripSummary(report.samples, format);
-      for (const [label, field] of [['Parse success', 'parsed'], ['Lossless roundtrip', 'preserved']]) {
-        const values = ['published', 'commit', 'libreoffice'].map(channel => summary[channel].total
-          ? `${(100 * summary[channel][field] / summary[channel].total).toFixed(2)}%` : '—');
-        rows.push([label, ...values]);
-      }
+      const values = ['published', 'commit', 'libreoffice'].map(channel => summary[channel].total
+        ? `${(100 * summary[channel].parsed / summary[channel].total).toFixed(2)}%` : '—');
+      rows.push(['Parse success', ...values]);
     }
     const value = (text) => `<td align="right">${text}</td>`;
     const head = (text) => `<th width="${VALUE_PX}" align="right">${text}</th>`;
