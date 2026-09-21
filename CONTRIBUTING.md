@@ -41,6 +41,10 @@ bun run test
 
 # Rust engines (fmt + clippy with -D warnings + tests)
 bun run rust:check
+
+# End-to-end scenarios on pinned corpus documents, every operation timed
+# (needs the network; `test:e2e:record` refreshes scripts/e2e/results)
+bun run test:e2e
 ```
 
 ## Contributor License Agreement

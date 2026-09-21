@@ -107,19 +107,32 @@ export function describeRun(run: SampleRun): string {
   return lines.join('\n');
 }
 
-/** Whether this process should run the corpus-backed suites at all. */
+/**
+ * `BETTEROFFICE_E2E` selects the mode: `1` runs and prints, `record` also
+ * writes the run as the new baseline, `compare` holds it against the baseline
+ * and fails on regressions. Unset, the suites skip: they need the network and
+ * built wasm bundles.
+ */
 export function e2eEnabled(): boolean {
-  return process.env.BETTEROFFICE_E2E === '1' || process.env.BETTEROFFICE_E2E === 'record';
+  return ['1', 'record', 'compare'].includes(process.env.BETTEROFFICE_E2E ?? '');
 }
 
 export function shouldRecord(): boolean {
   return process.env.BETTEROFFICE_E2E === 'record';
 }
 
+export function shouldCompare(): boolean {
+  return process.env.BETTEROFFICE_E2E === 'compare';
+}
+
 export function writeRecordedRun(format: Format, samples: SampleRun[]): void {
-  const run: RecordedRun = { schemaVersion: 1, commit: currentCommit(), samples };
   fs.mkdirSync(path.dirname(resultsPath(format)), { recursive: true });
-  fs.writeFileSync(resultsPath(format), JSON.stringify(run, null, 2) + '\n');
+  fs.writeFileSync(resultsPath(format), serialize(currentCommit(), samples));
+}
+
+function serialize(commit: string, samples: SampleRun[]): string {
+  const run: RecordedRun = { schemaVersion: 1, commit, samples };
+  return JSON.stringify(run, null, 2) + '\n';
 }
 
 function currentCommit(): string {
@@ -128,19 +141,46 @@ function currentCommit(): string {
 }
 
 /**
- * Close one format's run: print every sample, then either record it or hold it
- * against the recorded run. Throws with the offending operations on a regression.
+ * Close one format's run: print every sample, publish it where the environment
+ * asks (`BETTEROFFICE_E2E_OUTPUT` dir, `GITHUB_STEP_SUMMARY`), then record or
+ * compare per mode. Throws with the offending operations on a regression.
  */
 export function finishFormat(format: Format, samples: SampleRun[]): void {
   for (const sample of samples) console.log(describeRun(sample));
+  const output = process.env.BETTEROFFICE_E2E_OUTPUT;
+  if (output) {
+    fs.mkdirSync(output, { recursive: true });
+    fs.writeFileSync(path.join(output, `${format}.json`), serialize(currentCommit(), samples));
+  }
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summaryMarkdown(format, samples));
+  }
   if (shouldRecord()) {
     writeRecordedRun(format, samples);
     return;
   }
+  if (!shouldCompare()) return;
   const previous = readRecordedRun(format);
-  if (!previous) return;
+  if (!previous) throw new Error(`no recorded ${format} run at ${resultsPath(format)}; run with BETTEROFFICE_E2E=record first`);
   const slower = regressions(previous, samples);
   if (slower.length > 0) {
     throw new Error(`${format} e2e regressions against ${previous.commit}:\n  ${slower.join('\n  ')}`);
   }
+}
+
+/** One table per sample: operation, e2e latency, then the engine's stages. */
+export function summaryMarkdown(format: Format, samples: SampleRun[]): string {
+  const lines: string[] = [];
+  for (const run of samples) {
+    lines.push(`### ${format} \`${run.sample}\` (load ${run.loadMs.toFixed(1)} ms)`, '');
+    lines.push('| op | e2e ms | stages |', '| --- | ---: | --- |');
+    for (const op of run.ops) {
+      const stages = op.internal
+        ? Object.entries(op.internal).map(([k, v]) => `${k} ${v.toFixed(2)}`).join(', ')
+        : '';
+      lines.push(`| ${op.op} | ${op.e2eMs.toFixed(2)} | ${stages} |`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
 }
