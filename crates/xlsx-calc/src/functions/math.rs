@@ -633,7 +633,7 @@ fn unit(name: &str) -> Option<(u8, f64)> {
     let head = chars.next()?;
     let rest = chars.as_str();
     let (family, scale) = base_unit(rest)?;
-    if !matches!(family, 0 | 1 | 2 | 3) {
+    if !matches!(family, 0..=3) {
         return None;
     }
     Some((family, scale * si_prefix(head)?))
@@ -664,8 +664,8 @@ fn base_unit(name: &str) -> Option<(u8, f64)> {
         "yr" => (2, 31_557_600.0),
         // 3: liquid measure, in litres
         "l" | "L" | "lt" => (3, 1.0),
-        "tsp" => (3, 0.004928921593749999),
-        "tbs" => (3, 0.014786764781249999),
+        "tsp" => (3, 0.004_928_921_593_75),
+        "tbs" => (3, 0.014_786_764_781_25),
         "oz" => (3, 0.0295735295625),
         "cup" => (3, 0.2365882365),
         "pt" | "us_pt" => (3, 0.473176473),
