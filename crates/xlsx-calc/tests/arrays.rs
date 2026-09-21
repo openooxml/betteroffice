@@ -1424,3 +1424,17 @@ fn indirect_reads_as_a_block() {
         }]
     );
 }
+
+/// SORT follows the same collation, which is what puts `[Person_1]` above
+/// `[Person_10]` and both above a plain name.
+#[test]
+fn sort_follows_excels_collation() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn._xlws.SORT({\"Callie\";\"[P_10]\";\"[P_1]\";\"[P_2]\"})",
+            &workbook
+        ),
+        vec![t("[P_1]"), t("[P_10]"), t("[P_2]"), t("Callie")]
+    );
+}

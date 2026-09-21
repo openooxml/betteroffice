@@ -1216,3 +1216,19 @@ fn days_between_two_dates() {
         ("DAYS(1/0, 1)", e(ErrorValue::Div0)),
     ]);
 }
+
+/// text compares by excel's collation, not by code point: punctuation and
+/// symbols rank below digits, and digits below letters.
+#[test]
+fn text_compares_by_collation() {
+    check(&[
+        ("\"[a]\"<\"[a0]\"", b(true)),
+        ("\"[b]\"<\"c\"", b(true)),
+        ("\"_\"<\"1\"", b(true)),
+        ("\"1\"<\"a\"", b(true)),
+        ("\"a\"<\"b\"", b(true)),
+        ("\"A\"=\"a\"", b(true)),
+        ("\"apple\"<\"apples\"", b(true)),
+        ("MATCH(\"[a]\",{\"[a]\";\"[a0]\"},0)", n(1.0)),
+    ]);
+}
