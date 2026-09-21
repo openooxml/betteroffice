@@ -1236,6 +1236,52 @@ mod tests {
     }
 
     #[test]
+    fn profiled_calls_carry_their_stage_profile() {
+        let mut session = Session::open(&formula_xlsx(), None).unwrap();
+        let mut ticks = 0.0;
+        let mut clock = || {
+            ticks += 1.0;
+            ticks
+        };
+        let edited: serde_json::Value = serde_json::from_str(
+            &session
+                .edit_cell_profiled_json(
+                    r#"{"sheet":0,"row":0,"col":0,"input":"7"}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(edited["applied"], true);
+        assert_eq!(edited["profile"]["applyMs"], 1.0);
+        assert_eq!(edited["profile"]["recalcMs"], 1.0);
+
+        let shifted: serde_json::Value = serde_json::from_str(
+            &session
+                .apply_ops_profiled_json(
+                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shifted["applied"], true);
+        assert_eq!(shifted["profile"]["validateMs"], 1.0);
+
+        let listed: serde_json::Value = serde_json::from_str(
+            &session
+                .display_list_profiled_json(r#"{"x":0,"y":0,"width":400,"height":300}"#, &mut clock)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(listed["displayList"]["commands"].is_array());
+        assert_eq!(listed["profile"]["buildMs"], 1.0);
+        assert_eq!(listed["profile"]["encodeMs"], 1.0);
+    }
+
+    #[test]
     fn structural_ops_remap_and_undo_across_the_json_boundary() {
         let mut session = Session::open(&formula_xlsx(), None).unwrap();
         let result = session

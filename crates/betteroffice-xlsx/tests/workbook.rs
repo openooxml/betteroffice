@@ -3,11 +3,11 @@ use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     AnchorCell, AnchorEditAs, AnchorExtent, CalculationOptions, Cell, CellInput, CellRange,
     CellRef, CellState, CellValue, ChartAnchor, ChartRef, ChartRefKind, ColStyle,
-    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, Error, FreezePane, GridGeometry, Hyperlink,
-    MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID, MAX_COLLABORATION_STATE_VECTOR_ENTRIES,
-    MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op, ProposalEditInput, ProposalRequest,
-    Sheet, SheetChart, SheetId, StylePatch, Stylesheet, UpdateOrigin, Viewport, Workbook,
-    WorkbookModel,
+    DEFAULT_TEXT_SEARCH_LIMIT, DefinedName, DrawCmd, EditProfile, Error, FreezePane, GridGeometry,
+    Hyperlink, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,
+    MAX_COLLABORATION_STATE_VECTOR_ENTRIES, MAX_ROWS, NumberFormatKind, NumberFormatMutation, Op,
+    ProposalEditInput, ProposalRequest, Sheet, SheetChart, SheetId, StylePatch, Stylesheet,
+    UpdateOrigin, Viewport, Workbook, WorkbookModel,
 };
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -7224,5 +7224,100 @@ fn recalculation_spills_an_array_formula_into_the_saved_sheet() {
     assert_eq!(
         projected.array_formula(CellRef::parse_a1("C1").unwrap()),
         Some(xlsx_model::CellRange::parse_a1("C1:C3").unwrap())
+    );
+}
+
+#[test]
+fn profiled_mutations_time_each_stage_once() {
+    let mut model = WorkbookModel::default();
+    let mut sheet = Sheet::new("Data");
+    sheet.set_cell(
+        cell("A1"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    sheet.set_cell(
+        cell("B1"),
+        Cell {
+            value: CellValue::Number { value: 2.0 },
+            formula: Some("A1*2".into()),
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(sheet);
+    let bytes = ooxml_opc::rezip_parts(&xlsx_parse::serialize_workbook(&model).unwrap()).unwrap();
+    let mut workbook = Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap();
+    let mut ticks = 0.0;
+    let mut clock = || {
+        ticks += 1.0;
+        ticks
+    };
+    let each_stage_once = EditProfile {
+        validate_ms: 1.0,
+        apply_ms: 1.0,
+        recalc_ms: 1.0,
+        result_ms: 1.0,
+    };
+
+    let (result, profile) = workbook
+        .edit_cell_profiled(
+            SheetId(0),
+            cell("A1"),
+            "5",
+            CalculationOptions::default(),
+            &mut clock,
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(
+        result.changed,
+        vec![betteroffice_xlsx::CellAddress {
+            sheet: SheetId(0),
+            cell: cell("B1"),
+        }]
+    );
+    assert_eq!(profile, each_stage_once);
+
+    // an unchanged input returns before any stage is entered
+    let (result, profile) = workbook
+        .edit_cell_profiled(
+            SheetId(0),
+            cell("A1"),
+            "5",
+            CalculationOptions::default(),
+            &mut clock,
+        )
+        .unwrap();
+    assert!(!result.applied);
+    assert_eq!(
+        profile,
+        EditProfile {
+            validate_ms: 1.0,
+            ..EditProfile::default()
+        }
+    );
+
+    let (result, profile) = workbook
+        .apply_ops_profiled(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+            &mut clock,
+        )
+        .unwrap();
+    assert!(result.applied);
+    assert_eq!(profile, each_stage_once);
+    assert_eq!(
+        workbook.model().sheets[0]
+            .cell(cell("B2"))
+            .unwrap()
+            .formula
+            .as_deref(),
+        Some("A2*2")
     );
 }
