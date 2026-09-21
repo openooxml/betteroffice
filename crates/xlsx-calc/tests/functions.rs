@@ -1131,3 +1131,28 @@ fn reference_indexes_fall_back_to_array_evaluation() {
         ("INDEX(A1:A5,1/0)", e(ErrorValue::Div0)),
     ]);
 }
+
+/// the annuity family, over both payment timings and the zero-rate shortcut.
+#[test]
+fn annuity_functions() {
+    check(&[
+        ("PMT(0, 10, 1000)", n(-100.0)),
+        ("PMT(0, 10, 1000, 500)", n(-150.0)),
+        ("PMT(0.05, 0, 1000)", e(ErrorValue::Num)),
+        ("PMT(0.05, 10)", e(ErrorValue::Value)),
+        ("PV(0, 10, -100)", n(1000.0)),
+        ("NPER(0, -100, 1000)", n(10.0)),
+        ("NPER(0, 0, 1000)", e(ErrorValue::Num)),
+        ("NPV(-1, 100)", e(ErrorValue::Num)),
+        ("NPV(0.05)", e(ErrorValue::Value)),
+        ("PMT(1/0, 1, 1)", e(ErrorValue::Div0)),
+    ]);
+    approx("PMT(0.04/12, 12, 5000)", -425.7495209777896);
+    approx("PMT(0.05, 10, 1000, 0, 1)", -123.337690443292);
+    approx("PV(0.05, 10, -100)", 772.1734929184817);
+    approx("NPER(0.05, -100, 1000)", 14.206699082890461);
+    approx("NPV(0.05, 100, 200, 300)", 535.795270489148);
+    approx("NPV(0.05, {100,200,300})", 535.795270489148);
+    // a loan pays itself off: the payment FV discounts back to the principal
+    approx("FV(0.04/12, 12, PMT(0.04/12, 12, 5000), 5000)", 0.0);
+}
