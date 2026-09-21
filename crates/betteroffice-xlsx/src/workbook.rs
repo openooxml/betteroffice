@@ -563,9 +563,6 @@ impl Workbook {
     /// that later builds on them would stay pending forever on a peer that
     /// never received them.
     fn restore_snapshot(&mut self, update: &[u8], options: CalculationOptions) -> Result<bool> {
-        if self.edited_since_open {
-            return Ok(false);
-        }
         let WorkbookMode::Collaborative { structure: frozen } = &self.mode else {
             return Ok(false);
         };

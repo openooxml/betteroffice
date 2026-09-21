@@ -41,6 +41,48 @@ describe('wasm loader', () => {
     expect(wasmVersion().length).toBeGreaterThan(0);
   });
 
+  it('restores persisted state from the published 0.2.1 package', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5020 });
+    const peer = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5021 });
+    try {
+      handle.applyUpdate(update);
+      expect(handle.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      handle.editCell(0, 42, 1, 'after restore');
+      peer.applyUpdate(handle.encodeStateAsUpdate());
+      expect(peer.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+      expect(peer.cell(0, 42, 1).input).toBe('after restore');
+      const reopened = openWorkbook(handle.save());
+      try {
+        expect(reopened.cell(0, 42, 0).input).toBe('PublishedReleaseState');
+        expect(reopened.cell(0, 42, 1).input).toBe('after restore');
+      } finally {
+        reopened.dispose();
+      }
+    } finally {
+      handle.dispose();
+      peer.dispose();
+    }
+  });
+
+  it('refuses an old snapshot after a local edit', () => {
+    const update = new Uint8Array(readFileSync(resolve(
+      import.meta.dir,
+      '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+    )));
+    const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5022 });
+    try {
+      handle.editCell(0, 42, 0, 'local edit');
+      expect(() => handle.applyUpdate(update)).toThrow();
+      expect(handle.cell(0, 42, 0).input).toBe('local edit');
+    } finally {
+      handle.dispose();
+    }
+  });
+
   it('opens the hand-built fixture and reads sheet info', () => {
     const handle = openWorkbook(sampleBytes());
     try {
