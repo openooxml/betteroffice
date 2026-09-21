@@ -613,6 +613,7 @@ fn lifts(name: &str) -> bool {
             | "ISODD"
             | "ISOWEEKNUM"
             | "ISTEXT"
+            | "IFS"
             | "LEFT"
             | "LEN"
             | "LN"

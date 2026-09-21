@@ -1237,3 +1237,25 @@ fn range_join_reads_as_a_block_in_array_mode() {
         }]
     );
 }
+
+/// `IFS` answers once per element when a condition or a result is a block,
+/// the way every other scalar-argument builtin does. B1:B4 = 3, 1, 4, 2.
+#[test]
+fn ifs_answers_once_per_element() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("_xlfn.IFS(B1:B4>2,\"big\",TRUE,\"small\")", &workbook),
+        (4, 1, vec![t("big"), t("small"), t("big"), t("small")])
+    );
+    // a condition column against a result grid broadcasts to the grid
+    assert_eq!(
+        arrayed("_xlfn.IFS({1;0},{10,20;30,40},1,\"\")", &workbook).0,
+        2
+    );
+    assert_eq!(
+        values("_xlfn.IFS(FALSE,1,FALSE,2)", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::NA
+        }]
+    );
+}
