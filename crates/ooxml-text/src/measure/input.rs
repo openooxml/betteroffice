@@ -394,6 +394,14 @@ pub struct AttrsIn {
     /// (on); `Some(false)` disables snapping for the whole paragraph.
     #[serde(default)]
     pub snap_to_grid: Option<bool>,
+    /// `w:autoSpaceDE` opt-out — the space between East Asian and Latin
+    /// letters. `None` is the OOXML default (on).
+    #[serde(default, rename = "autoSpaceDE")]
+    pub auto_space_de: Option<bool>,
+    /// `w:autoSpaceDN` opt-out — the same between East Asian text and
+    /// digits.
+    #[serde(default, rename = "autoSpaceDN")]
+    pub auto_space_dn: Option<bool>,
 }
 
 /// `ParagraphSpacing`: before/after in px; `line` in px or as a multiplier

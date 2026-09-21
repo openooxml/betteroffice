@@ -6,8 +6,9 @@ use crate::sheet_json::{decode_charts, decode_hyperlinks};
 use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
-    ChartAnchor, ChartRef, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, MAX_COLS,
-    MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
+    ChartAnchor, ChartRef, ColStyle, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink,
+    MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -99,11 +100,14 @@ struct WorkbookBase {
     fingerprints: BTreeMap<i64, Vec<String>>,
     freeze_panes: Vec<Option<FreezePane>>,
     formats: Vec<SheetFormat>,
+    col_styles: Vec<Vec<ColStyle>>,
     hyperlinks: Vec<Vec<Hyperlink>>,
     charts: Vec<Vec<SheetChart>>,
     hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
+    /// table parts; read-only reference data, not shared state.
+    tables: Vec<Table>,
 }
 
 impl WorkbookBase {
@@ -132,21 +136,33 @@ impl WorkbookBase {
             fingerprints.insert(version, vec![version_fingerprint]);
         }
         if let Some(version_3) = fingerprints.get_mut(&3) {
-            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true)?;
+            let (defined_names_v3, _) = fingerprint_model_with_schema(model, 3, true, true)?;
             if !version_3.contains(&defined_names_v3) {
                 version_3.push(defined_names_v3);
+            }
+        }
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (without_col_styles, _) =
+                fingerprint_model_with_schema(model, version, version >= 4, false)?;
+            let accepted = fingerprints.entry(version).or_default();
+            if !accepted.contains(&without_col_styles) {
+                accepted.push(without_col_styles);
             }
         }
         if let Some(legacy) = model_with_legacy_dimensions(model, legacy_dimensions) {
             for version in MIN_SUPPORTED_SCHEMA_VERSION..SCHEMA_VERSION {
                 let (legacy_fingerprint, _) = fingerprint_model_for_schema(&legacy, version)?;
+                let (without_col_styles, _) =
+                    fingerprint_model_with_schema(&legacy, version, version >= 4, false)?;
                 let accepted = fingerprints.entry(version).or_default();
-                if !accepted.contains(&legacy_fingerprint) {
-                    accepted.push(legacy_fingerprint);
+                for fingerprint in [legacy_fingerprint, without_col_styles] {
+                    if !accepted.contains(&fingerprint) {
+                        accepted.push(fingerprint);
+                    }
                 }
             }
             if let Some(version_3) = fingerprints.get_mut(&3) {
-                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true)?;
+                let (defined_names_v3, _) = fingerprint_model_with_schema(&legacy, 3, true, true)?;
                 if !version_3.contains(&defined_names_v3) {
                     version_3.push(defined_names_v3);
                 }
@@ -191,6 +207,11 @@ impl WorkbookBase {
             fingerprints,
             freeze_panes: model.sheets.iter().map(|sheet| sheet.freeze_pane).collect(),
             formats: model.sheets.iter().map(|sheet| sheet.format).collect(),
+            col_styles: model
+                .sheets
+                .iter()
+                .map(|sheet| sheet.col_styles.clone())
+                .collect(),
             hyperlinks: model
                 .sheets
                 .iter()
@@ -204,6 +225,7 @@ impl WorkbookBase {
             hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
+            tables: model.tables.clone(),
         })
     }
 
@@ -220,6 +242,7 @@ impl WorkbookBase {
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
+            tables: self.tables.clone(),
         }
     }
 }
@@ -336,6 +359,7 @@ pub(crate) struct StagedUpdate {
 }
 
 pub(crate) struct StagedLocalUpdate {
+    pub(crate) model: WorkbookModel,
     pub(crate) state_bytes: usize,
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
@@ -374,7 +398,7 @@ enum HistoryAction {
 
 pub(crate) struct WorkbookAuthority {
     doc: Doc,
-    base: WorkbookBase,
+    base: Arc<WorkbookBase>,
     history: SheetOrderHistory,
     next_sheet_id: u64,
     undo_stack: Vec<StackItem<()>>,
@@ -441,7 +465,7 @@ impl WorkbookAuthority {
         hydrate_local_doc(&doc, &bootstrap_update).map_err(AuthorityError::InvalidState)?;
         let authority = Self {
             doc,
-            base,
+            base: Arc::new(base),
             history: SheetOrderHistory::default(),
             next_sheet_id: 0,
             undo_stack: Vec::new(),
@@ -480,15 +504,30 @@ impl WorkbookAuthority {
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
         let mut model = self.materialize()?;
+        let authored_styles = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetCell { sheet, at, .. } => Some((
+                    (sheet.0, *at),
+                    model
+                        .sheet(*sheet)
+                        .and_then(|sheet| sheet.cell(*at))
+                        .and_then(|cell| cell.style),
+                )),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
         for op in ops {
-            xlsx_ops::apply(&mut model, op).map_err(|error| {
+            xlsx_ops::apply_in_place(&mut model, op).map_err(|error| {
                 AuthorityError::InvalidState(format!(
                     "cannot apply local operation to authored state: {error}"
                 ))
             })?;
         }
-        self.base.defined_names = model.defined_names.clone();
-        self.sync_model(&model, ops, origin)
+        if self.base.defined_names != model.defined_names {
+            Arc::make_mut(&mut self.base).defined_names = model.defined_names.clone();
+        }
+        self.sync_model(&model, ops, origin, &authored_styles)
             .map_err(AuthorityError::InvalidState)?;
         let update = self.doc.transact().encode_diff_v1(&state_vector);
         Ok((update.as_slice() != Update::EMPTY_V1).then_some(update))
@@ -592,9 +631,11 @@ impl WorkbookAuthority {
         })
     }
 
+    /// `baseline` may carry this replica's already-encoded current state.
     pub(crate) fn stage_updates_v1(
         &self,
         updates: &[&[u8]],
+        baseline: Option<&[u8]>,
     ) -> Result<StagedUpdate, AuthorityError> {
         if updates.is_empty() {
             return Err(AuthorityError::InvalidUpdate(
@@ -611,9 +652,16 @@ impl WorkbookAuthority {
             Update::merge_updates(decoded)
         };
         let before_vector = self.doc.transact().state_vector();
-        let before = self.encode_state_as_update_v1();
+        let owned;
+        let before = match baseline {
+            Some(baseline) => baseline,
+            None => {
+                owned = self.encode_state_as_update_v1();
+                &owned
+            }
+        };
         let staged_doc = Doc::with_client_id(self.client_id());
-        hydrate_local_doc(&staged_doc, &before).map_err(AuthorityError::InvalidState)?;
+        hydrate_local_doc(&staged_doc, before).map_err(AuthorityError::InvalidState)?;
         staged_doc
             .transact_mut_with(REMOTE_ORIGIN)
             .apply_update(incoming)
@@ -640,27 +688,42 @@ impl WorkbookAuthority {
         let integrated = staged.doc.transact().encode_diff_v1(&before_vector);
         let after_vector = staged.doc.transact().state_vector();
         let state_vector_entries = after_vector.len();
+        // The current state only needs materializing when the state vectors
+        // match: a differing vector already proves the update changed
+        // something, while an equal one can still hide a delete-set change, so
+        // the models must actually be compared there.
         if pending {
-            let (current_model, current_structure) = self
-                .strict_materialize()
-                .map_err(AuthorityError::InvalidState)?;
+            let mut current = None;
             if integrated.as_slice() != Update::EMPTY_V1
                 && let Ok((model, structure)) = staged.strict_materialize()
-                && (after_vector != before_vector
-                    || model != current_model
-                    || structure != current_structure)
             {
-                return Ok(StagedUpdate {
-                    commit_update: integrated.clone(),
-                    effective: true,
-                    model,
-                    pending: true,
-                    state_bytes: after.len(),
-                    state_vector_entries,
-                    structure,
-                    update: integrated,
-                });
+                let effective = after_vector != before_vector || {
+                    let state = self
+                        .strict_materialize()
+                        .map_err(AuthorityError::InvalidState)?;
+                    let effective = model != state.0 || structure != state.1;
+                    current = Some(state);
+                    effective
+                };
+                if effective {
+                    return Ok(StagedUpdate {
+                        commit_update: integrated.clone(),
+                        effective: true,
+                        model,
+                        pending: true,
+                        state_bytes: after.len(),
+                        state_vector_entries,
+                        structure,
+                        update: integrated,
+                    });
+                }
             }
+            let (current_model, current_structure) = match current {
+                Some(state) => state,
+                None => self
+                    .strict_materialize()
+                    .map_err(AuthorityError::InvalidState)?,
+            };
             return Ok(StagedUpdate {
                 commit_update: Update::EMPTY_V1.to_vec(),
                 effective: false,
@@ -675,14 +738,15 @@ impl WorkbookAuthority {
         let (model, structure) = staged
             .strict_materialize()
             .map_err(AuthorityError::InvalidState)?;
-        let (current_model, current_structure) = self
-            .strict_materialize()
-            .map_err(AuthorityError::InvalidState)?;
+        let effective = after_vector != before_vector || {
+            let (current_model, current_structure) = self
+                .strict_materialize()
+                .map_err(AuthorityError::InvalidState)?;
+            model != current_model || structure != current_structure
+        };
         Ok(StagedUpdate {
             commit_update: integrated.clone(),
-            effective: after_vector != before_vector
-                || model != current_model
-                || structure != current_structure,
+            effective,
             model,
             pending,
             state_bytes: after.len(),
@@ -697,7 +761,6 @@ impl WorkbookAuthority {
         ops: &[Op],
         origin: SyncOrigin,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        let state_vector = self.doc.transact().state_vector();
         let baseline = self.encode_state_as_update_v1();
         let staged_doc = Doc::with_client_id(self.client_id());
         hydrate_local_doc(&staged_doc, &baseline).map_err(AuthorityError::InvalidState)?;
@@ -709,12 +772,18 @@ impl WorkbookAuthority {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         };
-        let _ = staged.apply_ops(ops, origin)?;
-        let update = staged.doc.transact().encode_diff_v1(&state_vector);
+        // `apply_ops` already encoded the same diff: the staged doc is the
+        // hydrated baseline, so its pre-op state vector is this replica's own.
+        let update = staged
+            .apply_ops(ops, origin)?
+            .unwrap_or_else(|| Update::EMPTY_V1.to_vec());
         let state = staged.encode_state_as_update_v1();
         let state_vector_entries = staged.doc.transact().state_vector().len();
-        let structure = staged.structure()?;
+        let (model, structure) = staged
+            .materialize_internal(false)
+            .map_err(AuthorityError::InvalidState)?;
         Ok(StagedLocalUpdate {
+            model,
             state_bytes: state.len(),
             state_vector_entries,
             structure,
@@ -1044,6 +1113,10 @@ impl WorkbookAuthority {
                 .and_then(|base| self.base.formats.get(base))
                 .copied()
                 .unwrap_or_default();
+            let col_styles = base_sheet
+                .and_then(|base| self.base.col_styles.get(base))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             let hyperlinks = base_sheet
                 .and_then(|base| self.base.hyperlinks.get(base))
                 .map(Vec::as_slice)
@@ -1063,6 +1136,7 @@ impl WorkbookAuthority {
                 SheetFallbacks {
                     freeze_pane,
                     format,
+                    col_styles,
                     hyperlinks,
                     charts,
                     hidden_dimensions,
@@ -1128,23 +1202,25 @@ impl WorkbookAuthority {
         Ok((model, structure))
     }
 
+    /// `authored_styles` holds the pre-batch style of every `SetCell` target.
     fn sync_model(
         &mut self,
         model: &WorkbookModel,
         ops: &[Op],
         origin: SyncOrigin,
+        authored_styles: &HashMap<(u32, CellRef), Option<u32>>,
     ) -> Result<(), String> {
-        let authored_model = self.materialize().map_err(|error| match error {
-            AuthorityError::InvalidState(error) => error,
-            _ => "cannot materialize authored workbook".to_string(),
-        })?;
         let current_keys = self.current_sheet_keys()?;
         let (keys, history) =
             self.plan_sheet_keys(&current_keys, ops, model.sheets.len(), origin)?;
         self.validate_sync_state(&current_keys, &keys)?;
 
         let topology_changed = current_keys != keys;
-        let full_sync = ops.iter().any(requires_full_semantic_sync);
+        // a SetCell after AddSheet targets the post-insert index, so its
+        // pre-batch baseline lookup would read the wrong sheet.
+        let full_sync = ops.iter().any(requires_full_semantic_sync)
+            || (ops.iter().any(|op| matches!(op, Op::AddSheet { .. }))
+                && ops.iter().any(|op| matches!(op, Op::SetCell { .. })));
         let structure_delta = i64::try_from(ops.iter().filter(|op| is_structural_op(op)).count())
             .map_err(|_| "too many structural operations".to_string())?;
         let mut authored_cells = HashSet::new();
@@ -1157,10 +1233,7 @@ impl WorkbookAuthority {
             for (op, target) in ops.iter().zip(targets) {
                 match (op, target) {
                     (Op::SetCell { sheet, at, cell }, Some(key)) => {
-                        let current_style = authored_model
-                            .sheet(*sheet)
-                            .and_then(|sheet| sheet.cell(*at))
-                            .and_then(|cell| cell.style);
+                        let current_style = authored_styles.get(&(sheet.0, *at)).copied().flatten();
                         if cell.style != current_style {
                             formatted_cells.insert((key.clone(), *at));
                         }
@@ -2653,6 +2726,7 @@ fn sync_number(map: &MapRef, txn: &mut TransactionMut<'_>, index: u32, value: Op
 struct SheetFallbacks<'a> {
     freeze_pane: Option<FreezePane>,
     format: SheetFormat,
+    col_styles: &'a [ColStyle],
     hyperlinks: &'a [Hyperlink],
     charts: &'a [SheetChart],
     hidden_dimensions: &'a HiddenDimensions,
@@ -2663,6 +2737,7 @@ impl Default for SheetFallbacks<'_> {
         Self {
             freeze_pane: None,
             format: SheetFormat::default(),
+            col_styles: &[],
             hyperlinks: &[],
             charts: &[],
             hidden_dimensions: &EMPTY_HIDDEN_DIMENSIONS,
@@ -2726,6 +2801,7 @@ fn materialize_sheet<T: ReadTxn>(
         }
     }
     sheet.format = fallbacks.format;
+    sheet.col_styles = fallbacks.col_styles.to_vec();
     sheet.freeze_pane = match (version, sheet_map.get(txn, FREEZE_PANE)) {
         (FREEZE_PANE_SCHEMA_VERSION.., Some(Out::Any(value))) => freeze_pane_from_any(&value)?,
         (FREEZE_PANE_SCHEMA_VERSION.., _) => {
@@ -3306,13 +3382,14 @@ fn fingerprint_model_for_schema(
     model: &WorkbookModel,
     schema_version: i64,
 ) -> Result<(String, u64), String> {
-    fingerprint_model_with_schema(model, schema_version, schema_version >= 4)
+    fingerprint_model_with_schema(model, schema_version, schema_version >= 4, true)
 }
 
 fn fingerprint_model_with_schema(
     model: &WorkbookModel,
     schema_version: i64,
     include_defined_names: bool,
+    include_col_styles: bool,
 ) -> Result<(String, u64), String> {
     validate_schema_version(schema_version)?;
     let mut hasher = Sha256::new();
@@ -3336,6 +3413,15 @@ fn fingerprint_model_with_schema(
     .map_err(|error| format!("cannot fingerprint workbook base: {error}"))?;
     hash_bytes(&mut hasher, &base);
     hash_u64(&mut hasher, model.sheets.len() as u64);
+    // a workbook declaring no column style hashes exactly as releases before
+    // they were read did, so only a workbook that declares one needs the
+    // pre-change fingerprint carried alongside.
+    let hash_col_styles = include_col_styles
+        && schema_version >= CHARTS_SCHEMA_VERSION
+        && model
+            .sheets
+            .iter()
+            .any(|sheet| !sheet.col_styles.is_empty());
     for sheet in &model.sheets {
         hash_bytes(&mut hasher, sheet.name.as_bytes());
         hash_u64(&mut hasher, sheet.iter_cells().count() as u64);
@@ -3393,6 +3479,11 @@ fn fingerprint_model_with_schema(
             let charts = serde_json::to_vec(&sheet.charts)
                 .map_err(|error| format!("cannot fingerprint sheet charts: {error}"))?;
             hash_bytes(&mut hasher, &charts);
+        }
+        if hash_col_styles {
+            let col_styles = serde_json::to_vec(&sheet.col_styles)
+                .map_err(|error| format!("cannot fingerprint sheet column styles: {error}"))?;
+            hash_bytes(&mut hasher, &col_styles);
         }
     }
     let digest = hasher.finalize();
@@ -3501,7 +3592,7 @@ mod tests {
     fn legacy_update(model: &WorkbookModel, version: i64, include_defined_names: bool) -> Vec<u8> {
         let base = WorkbookBase::from_model(model).unwrap();
         let (_, client_id) =
-            fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+            fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();
         let doc = Doc::with_client_id(client_id);
         let keys = (0..model.sheets.len())
             .map(|index| format!("sheet:{index}"))
@@ -3509,7 +3600,7 @@ mod tests {
         seed(&doc, &base, model, &keys).unwrap();
         {
             let (fingerprint, _) =
-                fingerprint_model_with_schema(model, version, include_defined_names).unwrap();
+                fingerprint_model_with_schema(model, version, include_defined_names, true).unwrap();
             let mut txn = doc.transact_mut_with("test:legacy-schema");
             let meta = txn.get_map(META).unwrap();
             meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
@@ -3544,12 +3635,49 @@ mod tests {
         hydrate_doc(&doc, update).unwrap();
         WorkbookAuthority {
             doc,
-            base: WorkbookBase::from_model(model).unwrap(),
+            base: Arc::new(WorkbookBase::from_model(model).unwrap()),
             history: SheetOrderHistory::default(),
             next_sheet_id: 0,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_column_styled_workbook_still_accepts_its_pre_change_fingerprint() {
+        let mut model = rich_model();
+        model.sheets[0].col_styles = vec![ColStyle {
+            first: 0,
+            last: 3,
+            xf: 1,
+        }];
+        let base = WorkbookBase::from_model(&model).unwrap();
+        for version in MIN_SUPPORTED_SCHEMA_VERSION..=SCHEMA_VERSION {
+            let (pre_change, _) =
+                fingerprint_model_with_schema(&model, version, version >= 4, false).unwrap();
+            assert!(
+                base.fingerprints[&version].contains(&pre_change),
+                "schema v{version} must still recognise the fingerprint released before \
+                 column styles were read"
+            );
+        }
+        let (current, _) = fingerprint_model_for_schema(&model, SCHEMA_VERSION).unwrap();
+        let (without, _) =
+            fingerprint_model_with_schema(&model, SCHEMA_VERSION, true, false).unwrap();
+        assert_ne!(
+            current, without,
+            "two workbooks differing only in their column styles must not share a fingerprint"
+        );
+
+        let mut plain = rich_model();
+        plain.sheets[0].col_styles.clear();
+        let (plain_current, _) = fingerprint_model_for_schema(&plain, SCHEMA_VERSION).unwrap();
+        let (plain_without, _) =
+            fingerprint_model_with_schema(&plain, SCHEMA_VERSION, true, false).unwrap();
+        assert_eq!(
+            plain_current, plain_without,
+            "a workbook declaring no column style keeps the fingerprint it always had"
+        );
     }
 
     #[test]
@@ -3632,7 +3760,7 @@ mod tests {
         ));
         assert!(authority.materialize().unwrap() == model);
         assert!(matches!(
-            peer.stage_updates_v1(&[&snapshot]),
+            peer.stage_updates_v1(&[&snapshot], None),
             Err(AuthorityError::InvalidUpdate(_))
         ));
         let checkpoint = authority.checkpoint();
@@ -3654,7 +3782,7 @@ mod tests {
         authority
             .apply_local_update_v1(&staged.update, SyncOrigin::User)
             .unwrap();
-        let remote = peer.stage_updates_v1(&[&staged.update]).unwrap();
+        let remote = peer.stage_updates_v1(&[&staged.update], None).unwrap();
         peer.apply_staged_update_v1(&remote.commit_update).unwrap();
         assert!(peer.materialize().unwrap() == authority.materialize().unwrap());
 
@@ -3727,7 +3855,9 @@ mod tests {
             let authority = authority_from_update(&model, &update, 101 + index as u64);
             assert_eq!(authority.strict_materialize().unwrap().0, model);
 
-            let staged = authority.stage_updates_v1(&[Update::EMPTY_V1]).unwrap();
+            let staged = authority
+                .stage_updates_v1(&[Update::EMPTY_V1], None)
+                .unwrap();
             assert!(staged.effective);
             authority
                 .apply_staged_update_v1(&staged.commit_update)
@@ -3743,7 +3873,7 @@ mod tests {
         for (version, include_defined_names) in [(3, false), (3, true), (4, true), (5, true)] {
             let update = legacy_update(&model, version, include_defined_names);
             let authority = WorkbookAuthority::from_model_with_client_id(&model, 108).unwrap();
-            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            let staged = authority.stage_updates_v1(&[&update], None).unwrap();
             assert_eq!(staged.model, model);
             authority
                 .apply_staged_update_v1(&staged.commit_update)
@@ -3782,7 +3912,7 @@ mod tests {
                     .unwrap();
                 sheet.remove(&mut txn, CHARTS);
             }
-            let (fingerprint, _) = fingerprint_model_with_schema(&model, 5, true).unwrap();
+            let (fingerprint, _) = fingerprint_model_with_schema(&model, 5, true, true).unwrap();
             let meta = txn.get_map(META).unwrap();
             meta.try_update(&mut txn, BASE_FINGERPRINT, fingerprint);
             meta.try_update(&mut txn, "schemaVersion", 5);
@@ -3797,8 +3927,8 @@ mod tests {
         }
         let mut authority = authority_from_update(&uncharted, &update, 121);
         let fingerprints = authority.base.fingerprints.clone();
-        authority.base = WorkbookBase::from_model(&model).unwrap();
-        authority.base.fingerprints = fingerprints;
+        authority.base = Arc::new(WorkbookBase::from_model(&model).unwrap());
+        Arc::make_mut(&mut authority.base).fingerprints = fingerprints;
 
         let materialized = authority.materialize().unwrap();
         assert_eq!(materialized.sheets[0].name, "Second");
@@ -4004,7 +4134,8 @@ mod tests {
                 sheet.try_update(&mut txn, CHARTS, payload.as_str());
             }
             let update = peer.transact().encode_diff_v1(&before);
-            let Err(AuthorityError::InvalidState(error)) = authority.stage_updates_v1(&[&update])
+            let Err(AuthorityError::InvalidState(error)) =
+                authority.stage_updates_v1(&[&update], None)
             else {
                 panic!("expected invalid state");
             };
@@ -4130,7 +4261,7 @@ mod tests {
         }
 
         let update = source.encode_diff_v1(&target_vector).unwrap();
-        let staged = target.stage_updates_v1(&[&update]).unwrap();
+        let staged = target.stage_updates_v1(&[&update], None).unwrap();
         assert_eq!(staged.model, target.materialize().unwrap());
         assert_ne!(staged.structure, target_structure);
     }
@@ -4250,7 +4381,7 @@ mod tests {
             ),
         ] {
             let update = peer_chart_update(&authority, 42, charts);
-            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            let staged = authority.stage_updates_v1(&[&update], None).unwrap();
             assert_eq!(
                 staged.structure.generation, generation,
                 "{label} must not move the generation, or it proves nothing"
@@ -4283,7 +4414,7 @@ mod tests {
             ),
         ] {
             let update = peer_chart_update(&authority, 44, charts);
-            let staged = authority.stage_updates_v1(&[&update]).unwrap();
+            let staged = authority.stage_updates_v1(&[&update], None).unwrap();
             assert_ne!(
                 staged.structure, frozen,
                 "a rewritten anchor {label} must change the frozen structure"
@@ -4293,7 +4424,7 @@ mod tests {
         // sliding the same anchor across the grid is the one accepted change.
         let slid = r#"[{"part":"xl/charts/chart1.xml","drawing":"xl/drawings/drawing1.xml","anchorIndex":0,"anchor":{"kind":"twoCell","from":{"col":2,"colOff":0,"row":0,"rowOff":0},"to":{"col":6,"colOff":0,"row":8,"rowOff":0},"edit_as":"twoCell"},"refs":[{"kind":"values","formula":"Data!$A$1:$A$2"}]}]"#;
         let update = peer_chart_update(&authority, 44, slid);
-        let staged = authority.stage_updates_v1(&[&update]).unwrap();
+        let staged = authority.stage_updates_v1(&[&update], None).unwrap();
         assert_eq!(staged.structure, frozen);
     }
 
@@ -4395,7 +4526,7 @@ mod tests {
             .unwrap();
 
         // the hostile value loses the merge, so the freeze sees only the move.
-        let staged = authority.stage_updates_v1(&[&hostile]).unwrap();
+        let staged = authority.stage_updates_v1(&[&hostile], None).unwrap();
         assert_eq!(staged.structure, frozen);
         authority
             .apply_staged_update_v1(&staged.commit_update)

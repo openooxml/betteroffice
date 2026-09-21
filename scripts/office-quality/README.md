@@ -202,7 +202,6 @@ Each range must produce exactly one PDF page at the recorded physical dimensions
 
 The final reconciler requires every XLSX render shard, including explicit failures, and matching plan, source, font and LibreOffice identities. It rejects a different LibreOffice build between fidelity and recalculation. `xlsx-fidelity-diagnostics-*` retains the prepared range workbooks, PDF exports, PNGs, logs and source/prepared hashes for seven days. No generated assets are committed.
 
-
 ## Parse success and edit/save preservation
 
 The benchmark compares the published and current Rust facades with the pinned LibreOffice release for DOCX, PPTX and XLSX. Every selected corpus original is attempted, independently of its render or calculation result. Parse success is the percentage for which the normal native `open` API succeeds or LibreOffice loads the file as the correct document type. It does not establish complete feature support or rendering fidelity. A later edit, save, reopen or preservation failure cannot erase that parse success.

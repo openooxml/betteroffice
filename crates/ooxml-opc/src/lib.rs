@@ -120,12 +120,32 @@ pub fn unzip_parts_with_limits(
 
 /// Write `(path, bytes)` entries into a deflated zip, in the given order.
 pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    rezip_parts_borrowed(entries)
+}
+
+/// `rezip_parts` over borrowed entry bytes.
+pub fn rezip_parts_borrowed<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<Vec<u8>, String> {
+    validate_parts(entries)?;
+
+    let mut cursor = Cursor::new(Vec::new());
+    {
+        let mut writer = zip::ZipWriter::new(&mut cursor);
+        for (name, bytes) in entries {
+            write_deflated(&mut writer, name, bytes.as_ref())?;
+        }
+        writer.finish().map_err(|e| format!("finish: {e}"))?;
+    }
+    Ok(cursor.into_inner())
+}
+
+fn validate_parts<S: AsRef<[u8]>>(entries: &[(String, S)]) -> Result<(), String> {
     if entries.len() > MAX_ENTRY_COUNT {
         return Err(format!("zip entry count exceeds {MAX_ENTRY_COUNT}"));
     }
     let mut seen_paths = HashSet::new();
     let mut total = 0_u64;
     for (name, bytes) in entries {
+        let bytes = bytes.as_ref();
         let Some(security_path) = normalized_security_path(name) else {
             return Err(format!("unsafe zip entry path: {name}"));
         };
@@ -141,23 +161,126 @@ pub fn rezip_parts(entries: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
             ));
         }
     }
+    Ok(())
+}
+
+fn write_deflated(
+    writer: &mut zip::ZipWriter<&mut Cursor<Vec<u8>>>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), String> {
+    writer
+        .start_file(
+            name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated),
+        )
+        .map_err(|e| format!("start_file {name}: {e}"))?;
+    writer
+        .write_all(bytes)
+        .map_err(|e| format!("write {name}: {e}"))
+}
+
+/// Source bytes retained so unchanged members re-emit verbatim on save; equality is always true.
+#[derive(Clone, Default)]
+pub struct SourceContainer(std::sync::Arc<[u8]>);
+
+impl SourceContainer {
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes.into())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for SourceContainer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SourceContainer")
+            .field(&self.0.len())
+            .finish()
+    }
+}
+
+impl PartialEq for SourceContainer {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for SourceContainer {}
+
+/// As [`rezip_parts`], but unchanged members copy the source's compressed
+/// payload verbatim; unreadable `source` falls back to full rezip.
+pub fn rezip_parts_preserving<S: AsRef<[u8]>>(
+    entries: &[(String, S)],
+    source: &[u8],
+) -> Result<Vec<u8>, String> {
+    validate_parts(entries)?;
+
+    let Ok(mut archive) = zip::ZipArchive::new(Cursor::new(source)) else {
+        return rezip_parts_borrowed(entries);
+    };
+    if archive.len() > MAX_ENTRY_COUNT {
+        return rezip_parts_borrowed(entries);
+    }
 
     let mut cursor = Cursor::new(Vec::new());
     {
         let mut writer = zip::ZipWriter::new(&mut cursor);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
         for (name, bytes) in entries {
-            writer
-                .start_file(name, options)
-                .map_err(|e| format!("start_file {name}: {e}"))?;
-            writer
-                .write_all(bytes)
-                .map_err(|e| format!("write {name}: {e}"))?;
+            let bytes = bytes.as_ref();
+            if !copy_unchanged_member(&mut archive, &mut writer, name, bytes)? {
+                write_deflated(&mut writer, name, bytes)?;
+            }
         }
         writer.finish().map_err(|e| format!("finish: {e}"))?;
     }
     Ok(cursor.into_inner())
+}
+
+/// Copy `name`'s compressed source member into `writer`; false means re-deflate.
+fn copy_unchanged_member(
+    archive: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    writer: &mut zip::ZipWriter<&mut Cursor<Vec<u8>>>,
+    name: &str,
+    bytes: &[u8],
+) -> Result<bool, String> {
+    let Some(index) = archive.index_for_name(name) else {
+        return Ok(false);
+    };
+    let Ok(mut file) = archive.by_index(index) else {
+        return Ok(false);
+    };
+    if file.is_dir() || file.size() != bytes.len() as u64 || !inflated_matches(&mut file, bytes) {
+        return Ok(false);
+    }
+    drop(file);
+    let file = archive
+        .by_index(index)
+        .map_err(|e| format!("reopen {name}: {e}"))?;
+    writer
+        .raw_copy_file_rename(file, name)
+        .map_err(|e| format!("copy {name}: {e}"))?;
+    Ok(true)
+}
+
+fn inflated_matches(file: &mut zip::read::ZipFile<'_, Cursor<&[u8]>>, bytes: &[u8]) -> bool {
+    let mut rest = bytes;
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut chunk) {
+            Ok(0) => return rest.is_empty(),
+            Ok(n) => {
+                if rest.len() < n || rest[..n] != chunk[..n] {
+                    return false;
+                }
+                rest = &rest[n..];
+            }
+            Err(_) => return false,
+        }
+    }
 }
 
 /// Unzip a DOCX; returns a JS object `{ [path]: Uint8Array }`.
@@ -270,6 +393,91 @@ mod tests {
         }
         assert!(
             unzip_parts(&cursor.into_inner())
+                .unwrap_err()
+                .contains("duplicate")
+        );
+    }
+
+    fn stored_zip(entries: &[(String, Vec<u8>)], stored: &str) -> Vec<u8> {
+        let mut cursor = Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, bytes) in entries {
+                let options = zip::write::SimpleFileOptions::default().compression_method(
+                    if name == stored {
+                        zip::CompressionMethod::Stored
+                    } else {
+                        zip::CompressionMethod::Deflated
+                    },
+                );
+                writer.start_file(name, options).unwrap();
+                writer.write_all(bytes).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        cursor.into_inner()
+    }
+
+    fn entry_method(zip_bytes: &[u8], name: &str) -> zip::CompressionMethod {
+        let mut archive = zip::ZipArchive::new(Cursor::new(zip_bytes)).unwrap();
+        archive.by_name(name).unwrap().compression()
+    }
+
+    #[test]
+    fn preserving_copies_verbatim_and_keeps_methods() {
+        let entries = sample();
+        let source = stored_zip(&entries, "word/media/image1.png");
+        let out = rezip_parts_preserving(&entries, &source).expect("rezip");
+        assert_eq!(unzip_parts(&out).unwrap(), entries);
+        assert_eq!(
+            entry_method(&out, "word/media/image1.png"),
+            zip::CompressionMethod::Stored
+        );
+        assert_eq!(
+            entry_method(&out, "word/document.xml"),
+            zip::CompressionMethod::Deflated
+        );
+    }
+
+    #[test]
+    fn preserving_deflates_changed_and_new_parts() {
+        let source = stored_zip(&sample(), "word/media/image1.png");
+        let mut entries = sample();
+        entries[1].1 = b"<w:document>edited</w:document>".to_vec();
+        entries.push(("word/extra.xml".into(), b"<x/>".to_vec()));
+        let out = rezip_parts_preserving(&entries, &source).expect("rezip");
+        assert_eq!(unzip_parts(&out).unwrap(), entries);
+        assert_eq!(
+            entry_method(&out, "word/document.xml"),
+            zip::CompressionMethod::Deflated
+        );
+    }
+
+    #[test]
+    fn preserving_rejects_same_size_forgery() {
+        let source = stored_zip(&sample(), "word/media/image1.png");
+        let mut entries = sample();
+        // Same length, different content: must re-deflate, not copy.
+        entries[2].1 = vec![0x89, 0x50, 0x4e, 0x00];
+        let out = rezip_parts_preserving(&entries, &source).expect("rezip");
+        assert_eq!(unzip_parts(&out).unwrap(), entries);
+    }
+
+    #[test]
+    fn preserving_falls_back_when_source_is_not_a_zip() {
+        let out = rezip_parts_preserving(&sample(), b"not a zip").expect("rezip");
+        assert_eq!(unzip_parts(&out).unwrap(), sample());
+    }
+
+    #[test]
+    fn preserving_still_enforces_entry_guards() {
+        assert!(rezip_parts_preserving(&[("../x".into(), b"x".to_vec())], b"").is_err());
+        let entries = vec![
+            ("word/document.xml".into(), b"a".to_vec()),
+            ("WORD//./document.xml".into(), b"b".to_vec()),
+        ];
+        assert!(
+            rezip_parts_preserving(&entries, b"")
                 .unwrap_err()
                 .contains("duplicate")
         );

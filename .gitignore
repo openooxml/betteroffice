@@ -36,3 +36,8 @@ crates/docx-edit/tests/fixtures/anchored-header.docx
 crates/docx-edit/tests/fixtures/anchored-header.*.png
 crates/docx-edit/tests/fixtures/alternate-main-part.docx
 crates/docx-edit/tests/fixtures/alternate-main-part.*.png
+
+# ad-hoc local gate scripts and their logs
+/g*.log
+/gate.sh
+/gate2.sh

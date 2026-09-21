@@ -38,6 +38,7 @@ import { mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
 import type { YrsRawOp, YrsSession } from './index';
+import { noteYrsStoriesDirty } from './yrsToDocument';
 import {
   blockSdtAttrsToPayload,
   blockSdtStoryId,
@@ -936,6 +937,8 @@ function paragraphAttrs(
     attrs.widowControl = formatting?.widowControl ?? stylePpr?.widowControl ?? null;
     attrs.contextualSpacing = formatting?.contextualSpacing ?? stylePpr?.contextualSpacing ?? null;
     attrs.snapToGrid = formatting?.snapToGrid ?? stylePpr?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? stylePpr?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? stylePpr?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? stylePpr?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? stylePpr?.bidi ?? null;
 
@@ -977,6 +980,8 @@ function paragraphAttrs(
     attrs.keepLines = formatting?.keepLines ?? null;
     attrs.widowControl = formatting?.widowControl ?? null;
     attrs.snapToGrid = formatting?.snapToGrid ?? null;
+    attrs.autoSpaceDE = formatting?.autoSpaceDE ?? null;
+    attrs.autoSpaceDN = formatting?.autoSpaceDN ?? null;
     attrs.outlineLevel = formatting?.outlineLevel ?? null;
     attrs.bidi = formatting?.bidi ?? null;
     attrs.defaultTextFormatting = formatting?.runProperties ?? null;
@@ -1749,6 +1754,7 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  * @public
  */
 export function documentToYrs(session: YrsSession, document: Document): void {
+  noteYrsStoriesDirty(session, 'all');
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
     theme: document.package.theme ?? null,

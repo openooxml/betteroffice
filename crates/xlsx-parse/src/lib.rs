@@ -19,7 +19,7 @@ pub use package::PreservedPackage;
 pub use read::{LegacySheetDimensions, SharedStringCells, parse_workbook};
 pub use reference::UnpatchableReference;
 pub use write::{
-    SaveEdits, serialize_workbook, serialize_workbook_with_active_sheet,
+    SaveEdits, SerializedParts, serialize_workbook, serialize_workbook_with_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet,
     serialize_workbook_with_package_and_origins_after_edits_and_active_sheet_with_axes,
@@ -44,7 +44,15 @@ pub struct ParsedWorkbook {
 pub fn parse_workbook_with_package(
     parts: &[(String, Vec<u8>)],
 ) -> Result<ParsedWorkbook, ParseError> {
-    let parsed = read::parse_workbook_indexed(parts)?;
+    parse_workbook_with_owned_package(parts.to_vec())
+}
+
+/// [`parse_workbook_with_package`] taking ownership of `parts` so the package
+/// retains the inflated archive once instead of cloning it.
+pub fn parse_workbook_with_owned_package(
+    parts: Vec<(String, Vec<u8>)>,
+) -> Result<ParsedWorkbook, ParseError> {
+    let parsed = read::parse_workbook_indexed(&parts)?;
     let package = PreservedPackage::capture(
         parts,
         &parsed.workbook,
@@ -75,6 +83,15 @@ pub const MAX_DEFINED_NAMES: usize = 65_536;
 
 /// upper bound on hyperlinks in one worksheet.
 pub const MAX_HYPERLINKS: usize = 65_536;
+
+/// upper bound on `<col>` runs naming a style in one worksheet.
+pub const MAX_COL_STYLES: usize = 65_536;
+
+/// upper bound on table parts read from one package.
+pub const MAX_TABLES: usize = 65_536;
+
+/// upper bound on columns read from one table part.
+pub const MAX_TABLE_COLUMNS: usize = xlsx_model::MAX_COLS as usize;
 
 /// upper bound on entries in any single style pool (fonts, fills, borders,
 /// cellXfs, numFmts).
@@ -120,6 +137,8 @@ pub enum ParseError {
     TooManyDefinedNames,
     /// a worksheet exceeded [`MAX_HYPERLINKS`].
     TooManyHyperlinks,
+    /// a worksheet exceeded [`MAX_COL_STYLES`].
+    TooManyColumnStyles,
     /// a style pool exceeded [`MAX_STYLE_ENTRIES`].
     TooManyStyles,
     /// a part exceeded [`MAX_TREE_BYTES`], [`MAX_TREE_NODES`] or
@@ -144,6 +163,9 @@ impl core::fmt::Display for ParseError {
             ParseError::TooManyStrings => write!(f, "shared string count exceeded cap"),
             ParseError::TooManyDefinedNames => write!(f, "defined name count exceeded cap"),
             ParseError::TooManyHyperlinks => write!(f, "worksheet hyperlink count exceeded cap"),
+            ParseError::TooManyColumnStyles => {
+                write!(f, "worksheet column style count exceeded cap")
+            }
             ParseError::TooManyStyles => write!(f, "style pool count exceeded cap"),
             ParseError::TreeTooLarge => write!(f, "part exceeded the element tree cap"),
             ParseError::TooManyCharts => write!(f, "chart reference or anchor count exceeded cap"),

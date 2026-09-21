@@ -1,6 +1,7 @@
 //! S9 full package orchestration and the versioned read-facade wire model.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use base64::Engine as _;
 use indexmap::IndexMap;
@@ -71,7 +72,7 @@ pub struct S9PackageWire {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub endnote_separators: Option<Vec<Note>>,
     pub relationship_entries: Vec<(String, Relationship)>,
-    pub media_entries: Vec<(String, MediaFile)>,
+    pub media_entries: Vec<(String, Arc<MediaFile>)>,
     pub chart_entries: Vec<(String, Chart)>,
 }
 
@@ -186,24 +187,43 @@ pub fn parse_docx_s9_wire_with_limits(
     options: S9ParseOptions,
     limits: &ParseLimits,
 ) -> Result<S9WireEnvelope, ParseError> {
+    Ok(parse_docx_s9_wire_parts_with_limits(data, options, limits)?.0)
+}
+
+/// [`parse_docx_s9_wire_with_limits`] plus the inflated parts in archive order.
+pub fn parse_docx_s9_wire_parts_with_limits(
+    data: &[u8],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<(S9WireEnvelope, Vec<(String, Vec<u8>)>), ParseError> {
     let parts = ooxml_opc::unzip_parts(data).map_err(ParseError::Container)?;
+    let envelope = parse_s9_package(&parts, data, options, limits)?;
+    Ok((envelope, parts))
+}
+
+fn parse_s9_package(
+    parts: &[(String, Vec<u8>)],
+    data: &[u8],
+    options: S9ParseOptions,
+    limits: &ParseLimits,
+) -> Result<S9WireEnvelope, ParseError> {
     let mut budget = ParseBudget::new(limits);
-    let document_path = crate::relationships::office_document_path(&parts, &mut budget)?;
+    let document_path = crate::relationships::office_document_path(parts, &mut budget)?;
     let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
 
     let settings = parse_settings(
-        find_part(&parts, "word/settings.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/settings.xml").map(|(_, bytes)| bytes),
         "word/settings.xml",
         &mut budget,
     )?;
     let mut theme = parse_theme(
-        find_part(&parts, "word/theme/theme1.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/theme/theme1.xml").map(|(_, bytes)| bytes),
         "word/theme/theme1.xml",
         &mut budget,
     )?;
     apply_theme_font_lang(&mut theme, settings.theme_font_lang.as_ref());
 
-    let styles = find_part(&parts, "word/styles.xml")
+    let styles = find_part(parts, "word/styles.xml")
         .filter(|(_, xml)| !xml.is_empty())
         .map(|(path, xml)| parse_style_definitions(xml, Some(&theme), path, &mut budget))
         .transpose()?;
@@ -221,28 +241,28 @@ pub fn parse_docx_s9_wire_with_limits(
         .as_ref()
         .and_then(|definitions| definitions.doc_defaults.as_ref());
     let numbering = parse_numbering(
-        find_part(&parts, "word/numbering.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/numbering.xml").map(|(_, bytes)| bytes),
         "word/numbering.xml",
         &mut budget,
     )?;
     let font_table = parse_font_table(
-        find_part(&parts, "word/fontTable.xml").map(|(_, bytes)| bytes),
+        find_part(parts, "word/fontTable.xml").map(|(_, bytes)| bytes),
         "word/fontTable.xml",
         &mut budget,
     )?;
-    let relationships = match find_part(&parts, &document_relationships_path) {
+    let relationships = match find_part(parts, &document_relationships_path) {
         Some((path, xml)) => parse_relationships(xml, path, &mut budget)?,
         None => RelationshipMap::new(),
     };
-    let (media, media_warnings) = build_media_map_with_warnings(&parts);
+    let (media, media_warnings) = build_media_map_with_warnings(parts);
     let all_xml: IndexMap<_, _> = parts
         .iter()
         .filter(|(path, _)| {
             let lower = path.to_ascii_lowercase();
             lower.ends_with(".xml") || lower.ends_with(".rels")
         })
-        .cloned()
-        .collect();
+        .map(|(path, bytes)| (path.clone(), bytes.as_slice()))
+        .collect::<IndexMap<String, &[u8]>>();
     let charts = parse_chart_parts(&all_xml, limits);
     let mut smart_art = create_smart_art_context(&all_xml);
     let digest = options
@@ -251,7 +271,7 @@ pub fn parse_docx_s9_wire_with_limits(
         .unwrap_or_else(|| format!("{:x}", Sha256::digest(data)));
     let mut ids = HexIdAllocator::from_sha256(&digest)?;
 
-    let document_part = find_part(&parts, &document_path);
+    let document_part = find_part(parts, &document_path);
     let mut warnings = Vec::new();
     let mut body = match document_part.filter(|(_, xml)| !xml.is_empty()) {
         Some((path, xml)) => {
@@ -284,7 +304,7 @@ pub fn parse_docx_s9_wire_with_limits(
 
     let (mut headers, mut footers) = if options.parse_headers_footers {
         let (headers, footers) = parse_related_header_footers(
-            &parts,
+            parts,
             &relationships,
             Some(&theme),
             Some(&style_map),
@@ -304,7 +324,7 @@ pub fn parse_docx_s9_wire_with_limits(
     let (mut footnotes, mut endnotes, mut footnote_separators, mut endnote_separators) =
         if options.parse_notes {
             let all_footnotes = parse_note_part(
-                &parts,
+                parts,
                 "word/footnotes.xml",
                 true,
                 &relationships,
@@ -319,7 +339,7 @@ pub fn parse_docx_s9_wire_with_limits(
                 &mut ids,
             )?;
             let all_endnotes = parse_note_part(
-                &parts,
+                parts,
                 "word/endnotes.xml",
                 false,
                 &relationships,
@@ -346,7 +366,7 @@ pub fn parse_docx_s9_wire_with_limits(
         };
 
     let comments = parse_comment_part(
-        &parts,
+        parts,
         &relationships,
         Some(&theme),
         Some(&style_map),
@@ -454,7 +474,7 @@ pub fn parse_docx_s9_wire_with_limits(
             base64: base64::engine::general_purpose::STANDARD.encode(bytes),
         })
         .collect();
-    let font_table_relationships_xml = find_part(&parts, "word/_rels/fontTable.xml.rels")
+    let font_table_relationships_xml = find_part(parts, "word/_rels/fontTable.xml.rels")
         .filter(|(_, xml)| is_valid_utf8_xml_text(xml))
         .map(|(_, xml)| String::from_utf8_lossy(xml).into_owned());
 
@@ -513,15 +533,19 @@ fn dedupe_blocks(
 ) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => dedupe_paragraph(paragraph, seen, ids),
+            BlockContent::Paragraph(paragraph) => {
+                dedupe_paragraph(Arc::make_mut(paragraph), seen, ids)
+            }
             BlockContent::Table(table) => {
-                for row in &mut table.rows {
+                for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
                         dedupe_blocks(&mut cell.content, seen, ids);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut sdt.content, seen, ids),
+            BlockContent::BlockSdt(sdt) => {
+                dedupe_blocks(&mut Arc::make_mut(sdt).content, seen, ids)
+            }
             BlockContent::RawXml(_) => {}
         }
     }
@@ -670,7 +694,7 @@ fn ordered_map<T: Serialize>(entries: &[(String, T)]) -> Result<CanonicalValue, 
         .map(CanonicalValue::OrderedMap)
 }
 
-fn canonical_media(entries: &[(String, MediaFile)]) -> Result<CanonicalValue, ParseError> {
+fn canonical_media(entries: &[(String, Arc<MediaFile>)]) -> Result<CanonicalValue, ParseError> {
     entries
         .iter()
         .map(|(key, file)| {

@@ -1,5 +1,5 @@
-//! Baseline-diff write-back: the live CRDT state is compared against a
-//! freshly seeded copy of the source package and only differences are written.
+//! Baseline-diff write-back: the live CRDT state is compared against the
+//! package's seeded baseline snapshot and only differences are written.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -13,11 +13,10 @@ use pptx_parse::{
 };
 
 use crate::comments::{derived_guid, seeded_comment_id};
-use crate::deck::{seed_doc, snapshot_doc};
+use crate::deck::baseline_snapshot;
 use crate::{
-    BOOTSTRAP_CLIENT_ID, CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult,
-    ParagraphSnapshot, ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
-    doc_with_client_id,
+    CommentSnapshot, DeckSession, DeckSnapshot, EditError, EditResult, ParagraphSnapshot,
+    ShapeKind, ShapeSnapshot, SlideSnapshot, StorySnapshot, TextRunSnapshot,
 };
 
 /// Source shapes and inherited geometry.
@@ -93,12 +92,6 @@ impl DeckSession {
         pptx_parse::write_pptx_with_edits(&self.package, &deck)
             .map_err(|error| EditError::Write(error.to_string()))
     }
-}
-
-fn baseline_snapshot(package: &PptxPackage) -> EditResult<DeckSnapshot> {
-    let doc = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
-    seed_doc(&doc, package, "")?;
-    snapshot_doc(&doc, package)
 }
 
 fn deck_write(

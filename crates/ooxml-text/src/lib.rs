@@ -30,6 +30,8 @@
 //! - [`caps`] — the casing `w:caps`/`w:smallCaps` and `a:rPr/@cap` share:
 //!   language-aware uppercasing ([`uppercase_for_language`]) and the
 //!   synthesized small-cap advance scales.
+//! - [`auto_space`] — `w:autoSpaceDE`/`w:autoSpaceDN`: the quarter-em Word
+//!   inserts where East Asian text meets Latin letters or digits.
 //! - [`word_fonts`] — the vertical metrics of the East Asian faces Word
 //!   ships, so a substituted face measures as the one the document named.
 //! - [`symbol_font`] — what a Wingdings or Webdings character actually
@@ -46,6 +48,7 @@
 
 #![allow(clippy::type_complexity)]
 
+pub mod auto_space;
 pub mod bidi;
 pub mod caps;
 pub mod font_store;
@@ -57,6 +60,7 @@ pub mod symbol_font;
 pub mod word_fonts;
 pub mod word_metrics;
 
+pub use auto_space::{AUTO_SPACE_EM, AutoSpace};
 pub use bidi::{
     BaseDirection, BidiParagraph, BidiRun, bidi_paragraphs, level_is_rtl, visual_order_for_levels,
 };

@@ -1,5 +1,6 @@
 //! Bounded PresentationML parsing and part-preserving package writes.
 
+mod builtin_table_styles;
 mod chart;
 mod comment_patch;
 mod comments;
@@ -15,6 +16,7 @@ mod theme;
 mod write;
 mod xml;
 
+pub use builtin_table_styles::builtin_table_style;
 pub use comments::{
     Comment, CommentAuthor, CommentAuthorWrite, CommentFlavor, CommentSlide, CommentWrite,
     CommentsWrite,

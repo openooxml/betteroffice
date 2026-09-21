@@ -3000,6 +3000,10 @@ fn lower_paragraph_attrs(
     {
         result.snap_to_grid = Some(false);
     }
+    // East Asian auto-spacing opt-outs (w:autoSpaceDE / w:autoSpaceDN, both
+    // default on).
+    result.auto_space_de = false_property(values, "autoSpaceDE");
+    result.auto_space_dn = false_property(values, "autoSpaceDN");
     result.borders = lower_paragraph_borders(values, env);
     result.shading = values
         .get("shading")
