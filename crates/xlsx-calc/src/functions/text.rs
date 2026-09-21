@@ -33,9 +33,9 @@ pub(crate) fn lower(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// TRIM: collapse runs of spaces to one and strip the ends (excel trims only
 /// the ascii space, u+0020).
-/// TEXTBEFORE(text, delimiter, [instance], [match_mode], [if_not_found]).
-/// a negative instance counts from the end. missing delimiter is `#N/A`
-/// unless `if_not_found` is given.
+/// TEXTBEFORE(text, delimiter, [instance], [match_mode], [match_end],
+/// [if_not_found]). a negative instance counts from the end. missing
+/// delimiter is `#N/A` unless `if_not_found` is given.
 pub(crate) fn textbefore(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     split_at_delimiter(args, ctx, true)
 }
@@ -85,7 +85,7 @@ fn delimiter_spans(source: &str, delimiter: &str, insensitive: bool) -> Vec<(usi
 }
 
 fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> CellValue {
-    if args.len() < 2 || args.len() > 5 {
+    if args.len() < 2 || args.len() > 6 {
         return err(ErrorValue::Value);
     }
     let source = match nth_text(args, ctx, 0) {
@@ -111,13 +111,23 @@ fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> Cel
         },
         None => false,
     };
+    let match_end = match args.get(4) {
+        Some(_) => match nth_int(args, ctx, 4) {
+            Ok(m) => m != 0,
+            Err(e) => return err(e),
+        },
+        None => false,
+    };
     if delimiter.is_empty() {
         return text(if before { String::new() } else { source });
     }
     // offsets must index `source`, so a case-insensitive search compares in
     // place rather than searching a lowercased copy: unicode case mappings
     // change byte length, and `İ` would slide every later offset.
-    let spans = delimiter_spans(&source, &delimiter, insensitive);
+    let mut spans = delimiter_spans(&source, &delimiter, insensitive);
+    if match_end {
+        spans.push((source.len(), source.len()));
+    }
     let index = if instance > 0 {
         instance as usize - 1
     } else {
@@ -138,7 +148,7 @@ fn split_at_delimiter(args: &[Expr], ctx: &EvalContext<'_>, before: bool) -> Cel
 }
 
 fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    match args.get(4) {
+    match args.get(5) {
         Some(fallback) => evaluate(fallback, ctx),
         None => err(ErrorValue::NA),
     }

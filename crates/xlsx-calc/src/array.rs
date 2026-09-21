@@ -2389,11 +2389,13 @@ pub fn spill_at(anchor: CellRef, authored: Option<CellRange>, value: Value) -> S
     let mut out = Vec::with_capacity(rows * cols);
     for row in 0..rows {
         for col in 0..cols {
+            // positions the result does not reach stay blank; the ones it does
+            // carry a value, and a blank source reads as zero there
             out.push(
                 values
                     .get(row * cols + col)
                     .cloned()
-                    .unwrap_or(CellValue::Empty),
+                    .map_or(CellValue::Empty, crate::engine::computed),
             );
         }
     }

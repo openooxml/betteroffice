@@ -285,7 +285,7 @@ fn eval_node(
     ctx.parse_cache = Some(graph.asts());
     let value = match authored {
         Some(_) => NodeValue::Spill(evaluate_spill(&expr, &ctx, cell, authored)),
-        None => NodeValue::Scalar(evaluate(&expr, &ctx)),
+        None => NodeValue::Scalar(computed(evaluate(&expr, &ctx))),
     };
     let unsupported = ctx.has_unhandled_unsupported_function();
     let incomplete = ctx.has_unhandled_budget_error() || unsupported;
@@ -306,6 +306,15 @@ fn eval_node(
         value => value,
     };
     (Some(value), ctx.exhausted())
+}
+
+/// a formula never leaves its cell blank: excel reads an empty cell as the
+/// number zero, so a result that resolves to one shows `0`.
+pub(crate) fn computed(value: CellValue) -> CellValue {
+    match value {
+        CellValue::Empty => CellValue::Number { value: 0.0 },
+        value => value,
+    }
 }
 
 /// lay a spilled result out from its anchor: retire the cells the previous
@@ -491,6 +500,47 @@ mod tests {
                 style: None,
             },
         );
+    }
+
+    /// excel reads a blank cell as zero, so a formula that resolves to one
+    /// shows `0` rather than leaving its own cell blank.
+    #[test]
+    fn a_formula_reading_a_blank_cell_shows_zero() {
+        let (mut wb, s) = one_sheet();
+        put_formula(&mut wb, s, "B1", "A1");
+        put_formula(&mut wb, s, "B2", "A1&\"\"");
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "B1"), num(0.0));
+        assert_eq!(
+            value(&wb, s, "B2"),
+            CellValue::Text {
+                value: String::new()
+            }
+        );
+    }
+
+    /// the same rule inside a spill: the positions the block reaches show `0`
+    /// for a blank source, the ones beyond it stay blank.
+    #[test]
+    fn a_spilled_blank_shows_zero() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 5.0);
+        put_num(&mut wb, s, "A3", 7.0);
+        wb.sheet_mut(s).unwrap().set_cell(
+            a1("C1"),
+            Cell {
+                value: CellValue::Empty,
+                formula: Some("A1:A3".into()),
+                style: None,
+            },
+        );
+        wb.sheet_mut(s)
+            .unwrap()
+            .set_array_formula(a1("C1"), xlsx_model::CellRange::parse_a1("C1:C3").unwrap());
+        rebuild_and_recalc_all(&mut wb, None);
+        assert_eq!(value(&wb, s, "C1"), num(5.0));
+        assert_eq!(value(&wb, s, "C2"), num(0.0));
+        assert_eq!(value(&wb, s, "C3"), num(7.0));
     }
 
     /// `WEBSERVICE` stands in for any function the engine does not implement,
