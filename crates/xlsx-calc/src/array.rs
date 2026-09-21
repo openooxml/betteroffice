@@ -1304,9 +1304,8 @@ fn index(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
     index_one(&spliced, ctx, reference)
 }
 
-/// whether `INDEX`'s first argument is a reference, which selects its
-/// reference form. a `LET` name holds the value it was bound to, so indexing
-/// one takes the array form even when that value came from a range.
+/// whether `INDEX`'s first argument is a reference, picking its reference
+/// form. a `LET` name holds a value, so indexing one takes the array form.
 fn indexes_a_reference(expr: &Expr, ctx: &EvalContext<'_>) -> bool {
     if let Expr::Name { scope, name } = expr
         && crate::eval::bound(scope, name, ctx).is_some()
@@ -1679,6 +1678,14 @@ fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> 
 
 /// the position `key` takes in a lookup vector, honouring excel's match and
 /// search modes. `None` is `#N/A`.
+/// excel's lookup modes: match 0, -1, 1 or 2; search 1, -1, 2 or -2.
+fn lookup_modes(mode: f64, search: f64) -> Result<(), ErrorValue> {
+    if !matches!(mode as i64, 0 | -1 | 1 | 2) || !matches!(search as i64, 1 | -1 | 2 | -2) {
+        return Err(ErrorValue::Value);
+    }
+    Ok(())
+}
+
 fn lookup_position(lookup: &Array, key: &CellValue, mode: f64, search: f64) -> Option<usize> {
     use std::cmp::Ordering;
     let count = lookup.values.len();
@@ -1759,6 +1766,7 @@ fn xlookup(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let data = argument(args, ctx, 2)?;
         let mode = optional_number(args, ctx, 4, 0.0)?.trunc();
         let search = optional_number(args, ctx, 5, 1.0)?.trunc();
+        lookup_modes(mode, search)?;
         let down = lookup_axis(&lookup, &data).ok_or(ErrorValue::Value)?;
         let missing = || match args.get(3).filter(|arg| !crate::functions::omitted(arg)) {
             Some(arg) => evaluate_array(arg, ctx).into_scalar(),
@@ -1810,6 +1818,7 @@ fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
         let lookup = argument(args, ctx, 1)?;
         let mode = optional_number(args, ctx, 2, 0.0)?.trunc();
         let search = optional_number(args, ctx, 3, 1.0)?.trunc();
+        lookup_modes(mode, search)?;
         let (rows, cols) = keys.dims();
         let count = output_cells(rows, cols)?;
         let mut cells = Vec::with_capacity(count);

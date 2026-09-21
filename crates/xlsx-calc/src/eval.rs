@@ -921,10 +921,9 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
     }
 }
 
-/// the rectangle `start:end` designates: the bounding box of both ends, on
-/// the sheet they share. unlike [`as_area`] this reports why an end has no
-/// rectangle, so a failed `MATCH` inside `A1:INDEX(..)` surfaces as `#N/A`
-/// rather than as "this argument is not a reference".
+/// the rectangle `start:end` designates, on the sheet both ends share. it
+/// reports why an end has no rectangle, so a failed `MATCH` inside
+/// `A1:INDEX(..)` surfaces as that end's own error.
 pub(crate) fn range_join_area(
     start: &Expr,
     end: &Expr,
