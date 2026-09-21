@@ -40,6 +40,14 @@ impl Criterion {
             },
             CellValue::Bool { value } => Criterion::parse(if *value { "TRUE" } else { "FALSE" }),
             CellValue::Text { value } => Criterion::parse(value),
+            // a criterion cell that is blank reads as the number 0, unlike a
+            // `""` written into the formula, which asks for the blanks
+            CellValue::Empty => Criterion {
+                op: Op::Eq,
+                number: Some(0.0),
+                text: String::new(),
+                wildcard: false,
+            },
             _ => Criterion::parse(""),
         }
     }
@@ -374,6 +382,19 @@ mod tests {
         assert!(prefix.matches(&txt("TSLA")));
         assert!(!prefix.matches(&txt("AAPL")));
         assert!(!prefix.matches(&num(5.0)));
+    }
+
+    /// a criterion taken from a blank cell asks for zero, where a `""`
+    /// written into the formula asks for the blanks.
+    #[test]
+    fn a_blank_criterion_cell_asks_for_zero() {
+        let blank = Criterion::from_value(&CellValue::Empty);
+        assert!(blank.matches(&num(0.0)));
+        assert!(!blank.matches(&CellValue::Empty));
+        assert!(!blank.matches(&txt("A")));
+        let written = Criterion::parse("");
+        assert!(written.matches(&CellValue::Empty));
+        assert!(!written.matches(&num(0.0)));
     }
 
     /// a cell holding "" counts as blank for an ordering criterion, so a
