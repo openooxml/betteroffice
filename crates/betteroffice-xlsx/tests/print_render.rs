@@ -69,14 +69,11 @@ fn printing_uses_font_device_metrics_without_changing_screen_or_source() {
     assert!((printed.height - printed_rows).abs() < 0.001);
     assert_eq!(printed.grid.start_row, 1);
     assert_eq!(printed.grid.col_offsets[1], 96.0);
-    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Text { text, font_family, .. } if text == "Row 1" && font_family.as_deref() == Some("Calibri"))));
-    assert!(
-        !printed
-            .commands
-            .iter()
-            .any(|c| matches!(c, DrawCmd::Text { text, .. } if text == "Row 0" || text == "Row 3"))
-    );
-    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Line { color, width, .. } if color == "#000000" && (*width - 4.0 / 3.0).abs() < 0.001)));
+    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Text { text, font_family, .. } if &**text == "Row 1" && font_family.as_deref() == Some("Calibri"))));
+    assert!(!printed.commands.iter().any(
+        |c| matches!(c, DrawCmd::Text { text, .. } if &**text == "Row 0" || &**text == "Row 3")
+    ));
+    assert!(printed.commands.iter().any(|c| matches!(c, DrawCmd::Line { color, width, .. } if &**color == "#000000" && (*width - 4.0 / 3.0).abs() < 0.001)));
     assert_eq!(workbook.model(), &model);
     assert_eq!(workbook.active_sheet(), SheetId(1));
     assert_eq!(workbook.save().unwrap(), saved);
@@ -140,7 +137,7 @@ fn printing_with_hidden_default_columns_keeps_explicit_columns_visible() {
         .commands
         .iter()
         .filter_map(|command| match command {
-            DrawCmd::Text { text, .. } => Some(text.as_str()),
+            DrawCmd::Text { text, .. } => Some(&**text),
             _ => None,
         })
         .collect();
@@ -274,14 +271,14 @@ fn partial_merged_print_ranges_clip_without_moving_the_anchor() {
     assert_eq!(partial_text[0].2.h, partial.height);
     assert!(partial.commands.iter().any(|cmd| matches!(cmd,
         DrawCmd::FillRect { x, y, w, h, color, .. }
-        if *x == 0.0 && *y == 0.0 && *w == partial.width && *h == partial.height && color == "#ffd700"
+        if *x == 0.0 && *y == 0.0 && *w == partial.width && *h == partial.height && &**color == "#ffd700"
     )));
     assert_eq!(
         partial
             .commands
             .iter()
             .filter(|cmd| matches!(cmd,
-                DrawCmd::Line { color, .. } if color == "#0000ff"
+                DrawCmd::Line { color, .. } if &**color == "#0000ff"
             ))
             .count(),
         2

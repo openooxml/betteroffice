@@ -15,8 +15,9 @@ categories = ["rendering", "graphics"]
 name = "xlsx_render"
 
 [dependencies]
+hashbrown = "0.17"
 ooxml-drawingml = { workspace = true, features = ["chart"] }
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 xlsx-model.workspace = true
 
 [dev-dependencies]

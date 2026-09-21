@@ -120,6 +120,79 @@ pub(crate) fn day(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// WEEKDAY(serial, [type]): type 1 (default) = 1..7 Sun..Sat; 2/11..17 shift
 /// the first day of the week; 3 = 0..6 Mon..Sun.
+/// WEEKNUM(serial, [type]): the week containing Jan 1 is week 1, and a week
+/// starts on the day `type` names. type 21 is the ISO rule and defers to
+/// [`isoweeknum`].
+pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.is_empty() || args.len() > 2 {
+        return err(ErrorValue::Value);
+    }
+    let serial = match nth_number(args, ctx, 0) {
+        Ok(n) => n.floor() as i64,
+        Err(e) => return err(e),
+    };
+    let kind = if args.len() == 2 {
+        match nth_int(args, ctx, 1) {
+            Ok(k) => k,
+            Err(e) => return err(e),
+        }
+    } else {
+        1
+    };
+    if kind == 21 {
+        return iso_week(serial);
+    }
+    // the weekday index the week starts on, as an offset from sunday
+    let start = match kind {
+        1 | 17 => 0,
+        2 | 11 => 1,
+        12 => 2,
+        13 => 3,
+        14 => 4,
+        15 => 5,
+        16 => 6,
+        _ => return err(ErrorValue::Num),
+    };
+    let Some((year, _, _)) = serial_to_ymd(serial) else {
+        return err(ErrorValue::Num);
+    };
+    let jan1 = date_to_serial(year, 1, 1);
+    if jan1 < 0 {
+        return err(ErrorValue::Num);
+    }
+    // serial 1 is a sunday, so `serial % 7` is the offset from sunday
+    let offset = (jan1.rem_euclid(7) - start).rem_euclid(7);
+    num(((serial - jan1 + offset) / 7 + 1) as f64)
+}
+
+/// ISOWEEKNUM(serial): ISO 8601 — weeks start monday, week 1 holds the first
+/// thursday of the year.
+pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    match nth_number(args, ctx, 0) {
+        Ok(_) if args.len() != 1 => err(ErrorValue::Value),
+        Ok(n) => iso_week(n.floor() as i64),
+        Err(e) => err(e),
+    }
+}
+
+fn iso_week(serial: i64) -> CellValue {
+    if serial_to_ymd(serial).is_none() {
+        return err(ErrorValue::Num);
+    }
+    // monday=0 .. sunday=6; serial 1 is a sunday, so shift by 1
+    let weekday = (serial - 1).rem_euclid(7);
+    let monday = (weekday + 6) % 7;
+    let thursday = serial - monday + 3;
+    let Some((iso_year, _, _)) = serial_to_ymd(thursday) else {
+        return err(ErrorValue::Num);
+    };
+    let jan1 = date_to_serial(iso_year, 1, 1);
+    if jan1 < 0 {
+        return err(ErrorValue::Num);
+    }
+    num(((thursday - jan1) / 7 + 1) as f64)
+}
+
 pub(crate) fn weekday(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);

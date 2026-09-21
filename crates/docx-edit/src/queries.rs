@@ -3,11 +3,11 @@
 use std::collections::{HashMap, HashSet};
 
 use unicode_segmentation::UnicodeSegmentation;
-use yrs::{Any, Map, Out, ReadTxn, TextRef, Transact};
+use yrs::{Any, Map, Out, ReadTxn, Transact};
 
 use crate::op::{Loc, LocRange, OpError, OpResult, global_of_loc, loc_of_global};
 use crate::ops::table::{TableRowChangeKind, table_row_changes};
-use crate::ops::{ChunkKind, snapshot};
+use crate::ops::{Chunk, ChunkKind};
 use crate::{
     BREAK_KIND, COMMENTS, DEL, EditingDoc, INS, KIND_KEY, PARA_ID, ParagraphId, RevisionId,
     map_string, story_ref,
@@ -93,7 +93,7 @@ fn utf16_of_byte(text: &str, byte: usize) -> u32 {
     text[..byte].encode_utf16().count() as u32
 }
 
-pub(crate) fn para_views<T: ReadTxn>(story: &TextRef, txn: &T, view: TextView) -> Vec<ParaView> {
+pub(crate) fn para_views<T: ReadTxn>(txn: &T, view: TextView, chunks: &[Chunk]) -> Vec<ParaView> {
     let mut views = Vec::new();
     let mut text = String::new();
     let mut spans: Vec<ViewSpan> = Vec::new();
@@ -120,7 +120,7 @@ pub(crate) fn para_views<T: ReadTxn>(story: &TextRef, txn: &T, view: TextView) -
             *view_len += width;
         };
 
-    for chunk in snapshot(story, txn) {
+    for chunk in chunks {
         match &chunk.kind {
             ChunkKind::Pilcrow(map) => {
                 views.push(ParaView {
@@ -299,7 +299,8 @@ impl EditingDoc {
     fn views_for_story(&self, story_id: &str, view: TextView) -> OpResult<Vec<ParaView>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
-        Ok(para_views(&story, &txn, view))
+        let chunks = self.chunk_snapshot(story_id, &story, &txn);
+        Ok(para_views(&txn, view, &chunks))
     }
 
     fn views_everywhere(&self, view: TextView) -> Vec<(String, Vec<ParaView>)> {
@@ -318,7 +319,8 @@ impl EditingDoc {
                 use yrs::Map;
                 match stories.get(&txn, &story_id) {
                     Some(Out::YText(story)) => {
-                        Some((story_id.clone(), para_views(&story, &txn, view)))
+                        let chunks = self.chunk_snapshot(&story_id, &story, &txn);
+                        Some((story_id.clone(), para_views(&txn, view, &chunks)))
                     }
                     _ => None,
                 }
@@ -348,7 +350,11 @@ impl EditingDoc {
                 end: to,
             });
         }
-        let views = para_views(&story, &txn, view);
+        let views = para_views(
+            &txn,
+            view,
+            &self.chunk_snapshot(&range.start.story, &story, &txn),
+        );
         let mut out = String::new();
         for para in &views {
             para.view_slice_of_raw(from, to, &mut out);
@@ -466,7 +472,11 @@ impl EditingDoc {
         let a = global_of_loc(&story, &txn, anchor)?;
         let h = global_of_loc(&story, &txn, head)?;
         let (from, to) = (a.min(h), a.max(h));
-        let views = para_views(&story, &txn, TextView::Vanilla);
+        let views = para_views(
+            &txn,
+            TextView::Vanilla,
+            &self.chunk_snapshot(&anchor.story, &story, &txn),
+        );
         let para = views
             .iter()
             .find(|para| from <= para.pilcrow)
@@ -573,7 +583,7 @@ impl EditingDoc {
     pub fn list_changes(&self, story_id: &str) -> OpResult<Vec<ChangeInfo>> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, story_id)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = self.chunk_snapshot(story_id, &story, &txn);
         struct RawChange {
             id: String,
             kind: ChangeKind,
@@ -583,7 +593,7 @@ impl EditingDoc {
             end: u32,
         }
         let mut raw: Vec<RawChange> = Vec::new();
-        for chunk in &chunks {
+        for chunk in chunks.iter() {
             if let ChunkKind::Pilcrow(map) = &chunk.kind {
                 for (key, kind) in [
                     (crate::PPR_INS, ChangeKind::ParagraphMarkInsertion),
@@ -697,9 +707,10 @@ impl EditingDoc {
             let Some(Out::YText(story)) = stories.get(&txn, &story_id) else {
                 continue;
             };
+            let chunks = self.chunk_snapshot(&story_id, &story, &txn);
             let mut min: Option<u32> = None;
             let mut max: Option<u32> = None;
-            for chunk in snapshot(&story, &txn) {
+            for chunk in chunks.iter() {
                 let mut matched = [INS, DEL].iter().any(|key| {
                     chunk
                         .attrs
@@ -750,7 +761,11 @@ impl EditingDoc {
     pub fn nav_boundary(&self, loc: &Loc, unit: NavUnit, direction: NavDirection) -> OpResult<Loc> {
         let txn = self.yrs_doc().transact();
         let story = story_ref(&txn, &loc.story)?;
-        let views = para_views(&story, &txn, TextView::Raw);
+        let views = para_views(
+            &txn,
+            TextView::Raw,
+            &self.chunk_snapshot(&loc.story, &story, &txn),
+        );
         let index = views
             .iter()
             .position(|para| para.para_id == loc.para)
