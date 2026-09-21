@@ -1345,17 +1345,21 @@ fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperti
     }
 }
 
-/// `a:tabLst` positions in EMU, ascending. Negative and duplicate positions
-/// drop, and the list is capped so a hostile file cannot grow it without bound.
+/// `a:tabLst` positions in EMU, ascending. Only left stops are kept: the
+/// renderer advances to a position, so a centre, right or decimal stop would
+/// be placed as if it were left, and falling back to the default pitch is the
+/// smaller error. Negatives and duplicates drop, then the list is capped, so a
+/// hostile file cannot grow it and repeats cannot spend the allowance.
 fn parse_tab_stops(list: &XmlElement) -> Vec<i64> {
     let mut stops = list
         .children_named("tab")
+        .filter(|tab| matches!(tab.attribute("algn"), None | Some("l")))
         .filter_map(|tab| numeric_attribute(Some(tab), "pos"))
         .filter(|position| *position >= 0)
-        .take(MAX_TAB_STOPS)
         .collect::<Vec<_>>();
     stops.sort_unstable();
     stops.dedup();
+    stops.truncate(MAX_TAB_STOPS);
     stops
 }
 

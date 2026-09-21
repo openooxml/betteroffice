@@ -1042,12 +1042,20 @@ impl<'a> LayoutBuilder<'a> {
             .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
         for mut op in drawing.ops.iter().cloned() {
             place_in_source_rect(&mut op.path, crop);
-            let op_clip = match op.clip.filter(|_| !masked) {
-                Some(rect) => match metafile_clip_path(rect, crop) {
+            // one clip per primitive, so a picture mask and the metafile's own
+            // clip cannot both be carried: draw under the mask only where the
+            // metafile clip would remove nothing, and drop the op otherwise
+            // rather than paint what either region hides.
+            let op_clip = match (op.clip, masked) {
+                (Some(rect), false) => match metafile_clip_path(rect, crop) {
                     Some(path) => path,
                     None => continue,
                 },
-                None => clip.clone(),
+                (Some(rect), true) => match clipped_away(&op.path, rect, crop) {
+                    true => continue,
+                    false => clip.clone(),
+                },
+                (None, _) => clip.clone(),
             };
             self.primitives.push(Primitive::Shape {
                 clip: Some(op_clip),
@@ -3706,6 +3714,37 @@ fn source_rect(crop: Option<&PictureCrop>) -> Option<(f64, f64, f64, f64)> {
 
 /// Maps a metafile clip rectangle into the picture box, or `None` when the clip
 /// leaves nothing of the box visible.
+/// whether a metafile clip would hide any of `path`, in the normalised space
+/// `metafile_clip_path` works in.
+fn clipped_away(path: &[GeometryPathCommand], clip: [f64; 4], rect: (f64, f64, f64, f64)) -> bool {
+    let Some(bounds) = metafile_clip_path(clip, rect) else {
+        return true;
+    };
+    let (mut left, mut top, mut right, mut bottom) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for command in &bounds {
+        if let GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } = command {
+            left = left.min(*x);
+            top = top.min(*y);
+            right = right.max(*x);
+            bottom = bottom.max(*y);
+        }
+    }
+    let outside = |x: &f64, y: &f64| *x < left || *x > right || *y < top || *y > bottom;
+    path.iter().any(|command| match command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => outside(x, y),
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => outside(cpx, cpy) || outside(x, y),
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => outside(cp1x, cp1y) || outside(cp2x, cp2y) || outside(x, y),
+        GeometryPathCommand::Close => false,
+    })
+}
+
 fn metafile_clip_path(
     clip: [f64; 4],
     rect: (f64, f64, f64, f64),

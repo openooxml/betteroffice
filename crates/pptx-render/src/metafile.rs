@@ -773,6 +773,7 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Opti
             if u32_at(bytes, body)? != 0 || u32_at(bytes, body + 4)? != RGN_COPY {
                 return None;
             }
+            player.flush_pending();
             player.dc.clip = None;
         }
         68 => {
