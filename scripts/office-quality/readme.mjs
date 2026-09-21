@@ -108,9 +108,14 @@ export function renderSection(report) {
     const { versionLink, published, current } = measure(format);
     const sides = [published, current];
     const headings = [`BetterOffice (${versionLink})`, `BetterOffice (${commitLink})`];
-    const office = (format === 'xlsx' && xlsxFidelity) || report[`${format}_benchmark`];
+    const preservation = report.roundtrip_benchmark?.[format];
+    const fidelity = (format === 'xlsx' && xlsxFidelity) || (format !== 'xlsx' && report[`${format}_benchmark`]);
+    const office = fidelity || report[`${format}_benchmark`] || preservation;
+    if (preservation && (!/^\d+(?:\.\d+){2,3}$/.test(preservation.libreoffice_version ?? '') ||
+        office.libreoffice_version !== preservation.libreoffice_version))
+      throw new Error('Roundtrip LibreOffice version does not match the report');
     if (office) {
-      sides.push(format === 'xlsx' && !xlsxFidelity ? { value: '—', not_measured: true } :
+      sides.push(!fidelity ? { value: '—', not_measured: true } :
         score(report.samples.filter(sample => sample.format === format), 'libreoffice', office.libreoffice_version));
       headings.push(`LibreOffice (${office.libreoffice_version})`);
     }
@@ -127,16 +132,15 @@ export function renderSection(report) {
       const channels = ['published', 'commit', 'libreoffice'].map(channel => calculation.channels[channel]);
       rows.push(['Recalc time (avg)', ...channels.map(channel => channel.mean_ms === null ? '—' : `${channel.mean_ms.toFixed(0)} ms`)]);
     }
-    const preservation = report.roundtrip_benchmark?.[format];
     if (preservation) {
       if (preservation.published_version !== report.versions[format] ||
           preservation.builds?.commit?.source_sha !== report.source_sha)
         throw new Error('Roundtrip results do not match the report revision');
       const summary = roundtripSummary(report.samples, format);
       for (const [label, field] of [['Parse success', 'parsed'], ['Lossless roundtrip', 'preserved']]) {
-        const values = ['published', 'commit'].map(channel => summary[channel].total
+        const values = ['published', 'commit', 'libreoffice'].map(channel => summary[channel].total
           ? `${(100 * summary[channel][field] / summary[channel].total).toFixed(2)}%` : '—');
-        rows.push([label, ...values, ...(office ? ['—'] : [])]);
+        rows.push([label, ...values]);
       }
     }
     const value = (text) => `<td align="right">${text}</td>`;

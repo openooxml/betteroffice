@@ -127,7 +127,9 @@ test('native parse/edit/save probes run independently and gate the final report'
   expect(build.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-builds) }}');
   expect(build.steps[1].with.ref).toBe('${{ matrix.source }}');
   expect(probe.needs).toEqual(['prepare', 'roundtrip-build']);
-  expect(probe.strategy.matrix.format).toBe('${{ fromJSON(needs.prepare.outputs.formats) }}');
+  expect(probe.strategy.matrix.include).toBe('${{ fromJSON(needs.prepare.outputs.roundtrip-shards) }}');
+  expect(probe.env.LO_PYTHON).toBe('/opt/libreoffice26.2/program/python');
+  expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
   expect(publish.if).toContain("needs.roundtrip.result == 'success'");
   expect(publish.steps.find((step: any) => step.run?.includes('merge.mjs')).env.QUALITY_REQUIRE_ROUNDTRIP).toBe('true');
 });

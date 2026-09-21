@@ -8,7 +8,9 @@ mod format;
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 fn record(path: &Path, state: &Value) -> Result<()> {
-    fs::write(path, serde_json::to_vec_pretty(state)?)?;
+    let temporary = path.with_extension("tmp");
+    fs::write(&temporary, serde_json::to_vec_pretty(state)?)?;
+    fs::rename(temporary, path)?;
     Ok(())
 }
 

@@ -16,7 +16,7 @@ import { validatePlan as validateFidelityPlan } from './plan.mjs';
 import { validateComparison } from './results.mjs';
 import { digest, docxShards, mergeDocxBenchmarks } from './docx-benchmark.mjs';
 import { mergeXlsxFidelity, xlsxFidelityShards } from './xlsx-fidelity.mjs';
-import { mergeRoundtrips } from './roundtrip.mjs';
+import { mergeRoundtrips, roundtripShards } from './roundtrip.mjs';
 import { mergePptxBenchmark } from './pptx-benchmark.mjs';
 import { mergeXlsxBenchmarks, xlsxShards } from './xlsx-benchmark.mjs';
 
@@ -255,8 +255,8 @@ export async function mergeFromPaths({
     report = mergeXlsxFidelity(plan, report, benchmarks, digest(planBytes));
   }
   if (requireRoundtrip) {
-    const benchmarks = await Promise.all(plan.formats.map(async format =>
-      JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}`, 'report.json'), 'utf8'))));
+    const benchmarks = await Promise.all(roundtripShards(plan).map(async ({ format, shard }) =>
+      JSON.parse(await readFile(resolve(parts, `roundtrip-report-${format}-${shard}`, 'report.json'), 'utf8'))));
     report = mergeRoundtrips(plan, report, benchmarks, digest(planBytes));
   }
   const section = renderSection(report);

@@ -6,6 +6,9 @@ import os
 import re
 import signal
 import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import suppress
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -22,7 +25,9 @@ def digest(data):
 
 
 def write_json(path, value):
-    path.write_text(json.dumps(value, indent=2, allow_nan=False) + '\n')
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + '\n')
+    temporary.replace(path)
 
 
 def package(data):
@@ -155,25 +160,38 @@ def verify_preservation(before, after, probe):
                 **({} if preserved else dict(error='Package differs outside the exact intended edit')))
 
 
-def measure(binary, source, probe, output):
+def run_process(command, timeout, log):
+    with log.open('w') as stream:
+        with subprocess.Popen(command, stdout=stream, stderr=stream, start_new_session=True) as process:
+            try:
+                process.wait(timeout=timeout)
+                if process.returncode:
+                    raise RuntimeError(f'Process exited {process.returncode}')
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(f'Process timed out after {timeout}s') from error
+            finally:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+def helper(mode, arguments, result, timeout):
+    run_process([sys.executable, str(Path(__file__).resolve()), mode, *map(str, arguments), str(result)],
+                timeout, result.with_suffix('.log'))
+    return json.loads(result.read_text())
+
+
+def measure(binary, source, probe, output, timeout=180, helper_timeout=30):
     output.mkdir()
     status_path = output / 'status.json'
     saved = output / source.name
-    command = [str(binary), str(source), str(probe), str(saved), str(status_path)]
+    prefix = list(map(str, binary)) if isinstance(binary, (list, tuple)) else [str(binary)]
+    command = [*prefix, str(source), str(probe), str(saved), str(status_path)]
     failure = None
-    with (output / 'native.log').open('w') as log:
-        try:
-            with subprocess.Popen(command, stdout=log, stderr=log, start_new_session=True) as process:
-                try:
-                    process.wait(timeout=180)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
-                    raise RuntimeError('Native edit/save process timed out after 180s')
-                if process.returncode:
-                    raise RuntimeError(f'Native process exited {process.returncode}')
-        except Exception as error:
-            failure = str(error)
+    try:
+        run_process(command, timeout, output / 'native.log')
+    except Exception as error:
+        failure = str(error)
     try:
         native = json.loads(status_path.read_text())
     except (OSError, ValueError):
@@ -187,13 +205,30 @@ def measure(binary, source, probe, output):
                   roundtrip=dict(status='failed', stage=native.get('stage', 'parse'), error=error), native=native)
     if not failure and parsed and native.get('stage') == 'complete' and native.get('edit_verified') is True:
         try:
-            saved_bytes = saved.read_bytes()
-            if native.get('output_sha256') != digest(saved_bytes):
+            if native.get('output_sha256') != digest(saved.read_bytes()):
                 raise ValueError('Native output hash mismatch')
-            result['roundtrip'] = verify_preservation(package(source.read_bytes()), package(saved_bytes), json.loads(probe.read_text()))
+            result['roundtrip'] = helper('verify', [source, saved, probe], output / 'preservation.json', helper_timeout)
         except Exception as error:
             result['roundtrip'] = dict(status='failed', stage='preserve', error=str(error))
     return result
+
+
+def measure_sample(sample, root, job, binaries):
+    directory = root / sample['id']
+    source = directory / f"source.{job['format']}"
+    if digest(source.read_bytes()) != sample['metadata']['source']['sha256']:
+        raise ValueError('Source hash mismatch')
+    try:
+        probe = helper('probe', [source, job['format']], directory / 'probe.json', job['helper_timeout_seconds'])
+    except Exception as error:
+        probe = dict(status='unavailable', error=str(error))
+        write_json(directory / 'probe.json', probe)
+    row = dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'], probe=probe, channels={})
+    for channel, binary in binaries.items():
+        print(f"{job['format'].upper()} roundtrip: {sample['id']} {channel}", flush=True)
+        row['channels'][channel] = measure(binary, source, directory / 'probe.json', directory / channel,
+                                           job['timeout_seconds'], job['helper_timeout_seconds'])
+    return row
 
 
 def main():
@@ -207,26 +242,40 @@ def main():
         if build['source_sha'] != revision or build['binary_sha256'] != digest(binary.read_bytes()):
             raise ValueError('Native build does not match the frozen source')
         builds[channel], binaries[channel] = build, binary
-    report = dict(schema_version=1, plan_sha256=job['plan_sha256'], format=job['format'], samples=[], benchmark=dict(
+    if not 1 <= len(job['samples']) <= job['shard_size'] or job['shard_size'] != 16 or job['parallelism'] != 4:
+        raise ValueError('Invalid bounded roundtrip shard')
+    if job['timeout_seconds'] != 180 or job['helper_timeout_seconds'] != 30:
+        raise ValueError('Invalid roundtrip deadlines')
+    soffice = os.environ['SOFFICE']
+    lo_python = os.environ['LO_PYTHON']
+    host = Path(__file__).with_name('roundtrip_libreoffice.py')
+    subprocess.run([lo_python, str(host), '--check'], check=True, timeout=30)
+    version_text = subprocess.run([soffice, '--version'], check=True, capture_output=True, text=True, timeout=30).stdout.strip()
+    version = re.search(r'LibreOffice (\d+(?:\.\d+){2,3})\b', version_text)[1]
+    binaries['libreoffice'] = [lo_python, str(host)]
+    report = dict(schema_version=1, plan_sha256=job['plan_sha256'], format=job['format'], shard=job['shard'], samples=[], benchmark=dict(
         method=job['method'], published_version=job['published_version'], builds=builds,
-        checker_sha256=digest(Path(__file__).read_bytes()), timeout_seconds=180))
-    for index, sample in enumerate(job['samples'], 1):
-        directory = root / sample['id']
-        source = directory / f"source.{job['format']}"
-        if digest(source.read_bytes()) != sample['metadata']['source']['sha256']:
-            raise ValueError('Source hash mismatch')
-        try:
-            probe = select_probe(package(source.read_bytes()), job['format'])
-        except Exception as error:
-            probe = dict(status='unavailable', error=str(error))
-        write_json(directory / 'probe.json', probe)
-        row = dict(id=sample['id'], source_sha256=sample['metadata']['source']['sha256'], probe=probe, channels={})
-        for channel, binary in binaries.items():
-            print(f"{job['format'].upper()} roundtrip: {index}/{len(job['samples'])} {sample['id']} {channel}", flush=True)
-            row['channels'][channel] = measure(binary, source, directory / 'probe.json', directory / channel)
-        report['samples'].append(row)
-        write_json(root / 'report.json', report)
+        checker_sha256=digest(Path(__file__).read_bytes()), timeout_seconds=job['timeout_seconds'],
+        helper_timeout_seconds=job['helper_timeout_seconds'], parallelism=job['parallelism'], shard_size=job['shard_size'],
+        libreoffice_version=version, libreoffice_build=version_text, libreoffice_host_sha256=digest(host.read_bytes())))
+    rows = {}
+    with ThreadPoolExecutor(max_workers=job['parallelism']) as pool:
+        futures = [pool.submit(measure_sample, sample, root, job, binaries) for sample in job['samples']]
+        for future in as_completed(futures):
+            row = future.result()
+            rows[row['id']] = row
+            report['samples'] = [rows[sample['id']] for sample in job['samples'] if sample['id'] in rows]
+            write_json(root / 'report.json', report)
+            print(f"{job['format'].upper()} roundtrip: completed {len(rows)}/{len(job['samples'])}", flush=True)
 
 
 if __name__ == '__main__':
-    main()
+    if len(sys.argv) == 5 and sys.argv[1] == 'probe':
+        write_json(Path(sys.argv[4]), select_probe(package(Path(sys.argv[2]).read_bytes()), sys.argv[3]))
+    elif len(sys.argv) == 6 and sys.argv[1] == 'verify':
+        write_json(Path(sys.argv[5]), verify_preservation(package(Path(sys.argv[2]).read_bytes()),
+                   package(Path(sys.argv[3]).read_bytes()), json.loads(Path(sys.argv[4]).read_text())))
+    elif len(sys.argv) == 1:
+        main()
+    else:
+        raise ValueError('Invalid roundtrip helper arguments')

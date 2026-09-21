@@ -7,8 +7,20 @@ import { download } from './download.mjs';
 import { mapPool, validatePlan } from './plan.mjs';
 import { CORPUS_ORIGIN } from './samples.mjs';
 
-export const METHOD = 'office-single-edit-preservation-v1';
-const CHANNELS = ['published', 'commit'];
+export const METHOD = 'office-single-edit-preservation-v2';
+export const CHANNELS = ['published', 'commit', 'libreoffice'];
+export const PARALLELISM = 4;
+export const SHARD_SIZE = 16;
+export const ENGINE_TIMEOUT = 180;
+export const HELPER_TIMEOUT = 30;
+
+export function roundtripShards(plan) {
+  return plan.formats.flatMap(format => {
+    const ids = plan.samples.filter(sample => sample.format === format).map(sample => sample.id).sort();
+    return Array.from({ length: Math.ceil(ids.length / SHARD_SIZE) }, (_, shard) =>
+      ({ format, shard, ids: ids.slice(shard * SHARD_SIZE, (shard + 1) * SHARD_SIZE) }));
+  });
+}
 
 function validateOutcome(result) {
   const parsed = result?.parse;
@@ -47,16 +59,23 @@ export function roundtripSummary(samples, format) {
 }
 
 export function mergeRoundtrips(plan, report, parts, planHash) {
-  if (!Array.isArray(parts) || parts.length !== plan.formats.length)
+  const shards = roundtripShards(plan);
+  if (!Array.isArray(parts) || parts.length !== shards.length)
     throw new Error('Missing roundtrip format reports');
-  const benchmarks = {}, results = new Map();
-  let checker;
+  const benchmarks = {}, results = new Map(), seen = new Set();
+  let checker, office;
   for (const part of parts) {
     const format = part?.format;
     const config = part?.benchmark;
-    const expected = plan.samples.filter(sample => sample.format === format);
-    if (!plan.formats.includes(format) || benchmarks[format] || part.schema_version !== 1 ||
-        part.plan_sha256 !== planHash || config?.method !== METHOD || config.timeout_seconds !== 180 ||
+    const shard = shards.find(shard => shard.format === format && shard.shard === part?.shard);
+    const key = `${format}/${part?.shard}`;
+    const expected = plan.samples.filter(sample => shard?.ids.includes(sample.id));
+    if (!shard || seen.has(key) || part.schema_version !== 1 ||
+        part.plan_sha256 !== planHash || config?.method !== METHOD || config.timeout_seconds !== ENGINE_TIMEOUT ||
+        config.helper_timeout_seconds !== HELPER_TIMEOUT || config.parallelism !== PARALLELISM ||
+        config.shard_size !== SHARD_SIZE || !/^\d+(?:\.\d+){2,3}$/.test(config.libreoffice_version ?? '') ||
+        typeof config.libreoffice_build !== 'string' || !config.libreoffice_build.trim() ||
+        !/^[a-f0-9]{64}$/.test(config.libreoffice_host_sha256 ?? '') ||
         config.published_version !== plan.versions[format] ||
         !/^[a-f0-9]{40}$/.test(plan[`${format}_published_source_sha`] ?? '') ||
         config.builds?.published?.source_sha !== plan[`${format}_published_source_sha`] ||
@@ -66,7 +85,10 @@ export function mergeRoundtrips(plan, report, parts, planHash) {
       throw new Error('Invalid roundtrip report identity');
     if (checker && checker !== config.checker_sha256) throw new Error('Roundtrip checkers differ across formats');
     checker = config.checker_sha256;
-    if (Object.keys(config.builds).length !== CHANNELS.length ||
+    const officeIdentity = JSON.stringify([config.libreoffice_version, config.libreoffice_build, config.libreoffice_host_sha256]);
+    if (office && office !== officeIdentity) throw new Error('Roundtrip LibreOffice identities differ');
+    office = officeIdentity;
+    if (Object.keys(config.builds).length !== 2 ||
         !['harness_sha256', 'rustc', 'profile'].every(key =>
           typeof config.builds.published[key] === 'string' && config.builds.published[key].length &&
           config.builds.published[key] === config.builds.commit[key]))
@@ -75,6 +97,13 @@ export function mergeRoundtrips(plan, report, parts, planHash) {
       if (!/^[a-f0-9]{64}$/.test(build.harness_sha256 ?? '') || !/^[a-f0-9]{64}$/.test(build.binary_sha256 ?? ''))
         throw new Error('Invalid roundtrip build hashes');
     }
+    if (benchmarks[format] && JSON.stringify(benchmarks[format]) !== JSON.stringify(config))
+      throw new Error('Roundtrip shard environments differ');
+    for (const measured of [report[`${format}_benchmark`], format === 'xlsx' && report.xlsx_fidelity_benchmark]) {
+      if (measured && (measured.libreoffice_version !== config.libreoffice_version || measured.libreoffice_build !== config.libreoffice_build))
+        throw new Error('Roundtrip and fidelity use different LibreOffice builds');
+    }
+    seen.add(key);
     for (const row of part.samples) {
       const sample = expected.find(sample => sample.id === row?.id);
       if (!sample || results.has(row.id) || row.source_sha256 !== sample.metadata.source.sha256 ||
@@ -103,12 +132,14 @@ export function mergeRoundtrips(plan, report, parts, planHash) {
   return { ...report, roundtrip_benchmark: benchmarks, samples };
 }
 
-export async function stageRoundtrip(planPath, output, format, cacheDir) {
+export async function stageRoundtrip(planPath, output, format, shardIndex, cacheDir) {
   const bytes = await readFile(planPath);
   const plan = validatePlan(JSON.parse(bytes));
   if (!plan.formats.includes(format) || !plan[`${format}_published_source_sha`])
     throw new Error('Missing roundtrip format or published source');
-  const samples = plan.samples.filter(sample => sample.format === format);
+  const shard = roundtripShards(plan).find(shard => shard.format === format && shard.shard === shardIndex);
+  if (!shard) throw new Error('Invalid roundtrip shard');
+  const samples = plan.samples.filter(sample => shard.ids.includes(sample.id));
   let completed = 0;
   await mapPool(samples, 8, async sample => {
     const directory = resolve(output, sample.id);
@@ -118,14 +149,15 @@ export async function stageRoundtrip(planPath, output, format, cacheDir) {
     if (++completed % 25 === 0 || completed === samples.length)
       console.log(`${format.toUpperCase()} roundtrip: staged ${completed}/${samples.length} verified files`);
   });
-  await writeFile(resolve(output, 'job.json'), JSON.stringify({ plan_sha256: digest(bytes), samples, format, method: METHOD,
+  await writeFile(resolve(output, 'job.json'), JSON.stringify({ plan_sha256: digest(bytes), samples, format, shard: shardIndex, method: METHOD,
+    parallelism: PARALLELISM, shard_size: SHARD_SIZE, timeout_seconds: ENGINE_TIMEOUT, helper_timeout_seconds: HELPER_TIMEOUT,
     source_sha: plan.source_sha, published_source_sha: plan[`${format}_published_source_sha`],
     published_version: plan.versions[format] }, null, 2) + '\n');
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  const { QUALITY_PLAN, QUALITY_OUTPUT, QUALITY_FORMAT, QUALITY_ASSET_CACHE } = process.env;
-  if (!QUALITY_PLAN || !QUALITY_OUTPUT || !QUALITY_FORMAT)
-    throw new Error('QUALITY_PLAN, QUALITY_OUTPUT and QUALITY_FORMAT are required');
-  await stageRoundtrip(resolve(QUALITY_PLAN), resolve(QUALITY_OUTPUT), QUALITY_FORMAT, QUALITY_ASSET_CACHE);
+  const { QUALITY_PLAN, QUALITY_OUTPUT, QUALITY_FORMAT, QUALITY_SHARD, QUALITY_ASSET_CACHE } = process.env;
+  if (!QUALITY_PLAN || !QUALITY_OUTPUT || !QUALITY_FORMAT || !/^\d+$/.test(QUALITY_SHARD ?? ''))
+    throw new Error('QUALITY_PLAN, QUALITY_OUTPUT, QUALITY_FORMAT and QUALITY_SHARD are required');
+  await stageRoundtrip(resolve(QUALITY_PLAN), resolve(QUALITY_OUTPUT), QUALITY_FORMAT, Number(QUALITY_SHARD), QUALITY_ASSET_CACHE);
 }

@@ -1,4 +1,7 @@
 import json
+import signal
+import subprocess
+from types import SimpleNamespace
 import tempfile
 import unittest
 from pathlib import Path
@@ -71,22 +74,60 @@ class PreservationTests(unittest.TestCase):
             source.write_bytes(b'synthetic source')
             probe = root / 'probe.json'
             probe.write_text('{"status":"unavailable"}')
-            def start(command, **kwargs):
+            def start(command, timeout, log):
                 Path(command[-1]).write_text(json.dumps(dict(source_sha256=digest(source.read_bytes()), parse='ok', stage='save', error='save failed')))
-                class Process:
-                    returncode = 0
-                    def __enter__(self):
-                        return self
-                    def __exit__(self, *args):
-                        pass
-                    def wait(self, **kwargs):
-                        pass
-                return Process()
-            with patch('roundtrip.subprocess.Popen', side_effect=start):
+            with patch('roundtrip.run_process', side_effect=start):
                 result = measure(Path('/unused-native'), source, probe, root / 'result')
             self.assertEqual(result['parse']['status'], 'ok')
             self.assertEqual(result['roundtrip']['status'], 'failed')
             self.assertEqual(result['roundtrip']['stage'], 'save')
+
+
+    def test_timeout_kills_the_process_group_and_retains_parse_success(self):
+        from roundtrip import run_process
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            process = SimpleNamespace(pid=12345, returncode=None)
+            process.wait = lambda **kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired('engine', 180)) if kwargs else None
+            class Context:
+                def __enter__(self):
+                    return process
+                def __exit__(self, *args):
+                    pass
+            with patch('roundtrip.subprocess.Popen', return_value=Context()), patch('roundtrip.os.killpg') as kill:
+                with self.assertRaisesRegex(RuntimeError, 'timed out'):
+                    run_process(['unused'], 180, root / 'log.txt')
+                kill.assert_called_once_with(12345, signal.SIGKILL)
+            source = root / 'source.docx'
+            source.write_bytes(b'original')
+            probe = root / 'probe.json'
+            probe.write_text('{}')
+            def timeout(command, *args):
+                Path(command[-1]).write_text(json.dumps(dict(source_sha256=digest(source.read_bytes()), parse='ok', stage='save')))
+                raise RuntimeError('Process timed out after 180s')
+            with patch('roundtrip.run_process', side_effect=timeout):
+                result = measure(Path('/unused'), source, probe, root / 'timeout')
+            self.assertEqual(result['parse']['status'], 'ok')
+            self.assertEqual(result['roundtrip']['status'], 'failed')
+            self.assertIn('timed out', result['roundtrip']['error'])
+
+    def test_checker_timeout_records_a_failure_after_a_verified_edit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.docx'
+            source.write_bytes(b'original')
+            probe = root / 'probe.json'
+            probe.write_text('{}')
+            def finish(command, *args):
+                Path(command[-2]).write_bytes(b'edited')
+                Path(command[-1]).write_text(json.dumps(dict(source_sha256=digest(source.read_bytes()), parse='ok', stage='complete',
+                    edit_verified=True, output_sha256=digest(b'edited'))))
+            with patch('roundtrip.run_process', side_effect=finish), patch('roundtrip.helper', side_effect=RuntimeError('checker timed out')):
+                result = measure(Path('/unused'), source, probe, root / 'checked')
+            self.assertEqual(result['parse']['status'], 'ok')
+            self.assertEqual(result['roundtrip']['stage'], 'preserve')
+            self.assertEqual(result['roundtrip']['status'], 'failed')
+            self.assertIn('checker timed out', result['roundtrip']['error'])
 
 
 if __name__ == '__main__':
