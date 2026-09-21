@@ -174,6 +174,17 @@ pub struct SlideSnapshot {
     pub shapes: Vec<ShapeSnapshot>,
 }
 
+/// One slide's snapshot plus deck geometry — the slide-scoped render input.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SlideScope {
+    /// The slide's position in deck order.
+    pub index: usize,
+    pub slide: SlideSnapshot,
+    pub width_emu: i64,
+    pub height_emu: i64,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeckSnapshot {

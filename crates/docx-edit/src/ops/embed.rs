@@ -4,7 +4,7 @@ use yrs::types::text::YChange;
 use yrs::{Any, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef, Transact};
 
 use crate::op::{OpError, OpResult, Receipt, loc_range_in_txn};
-use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot};
+use crate::ops::{adjacent_paragraph_change_revision_id, adjacent_revision_id, snapshot_range};
 use crate::{
     EditCtx, EditingDoc, INS, KIND_KEY, PARA_ID, PILCROW_KIND, Position, check_position,
     insertion_attrs, is_pilcrow, out_len, revision_value, story_ref,
@@ -162,7 +162,12 @@ impl EditingDoc {
         let mut txn = self.transact_for(ctx);
         let story = story_ref(&txn, &at.story)?;
         check_position(&story, &txn, at.index)?;
-        let chunks = snapshot(&story, &txn);
+        let chunks = snapshot_range(
+            &story,
+            &txn,
+            at.index.saturating_sub(1),
+            at.index.saturating_add(1),
+        );
         let revision_id = ctx.is_suggesting().then(|| {
             adjacent_revision_id(&chunks, at.index, INS, &ctx.author)
                 .or_else(|| {

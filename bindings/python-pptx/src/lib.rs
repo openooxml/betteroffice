@@ -1139,14 +1139,7 @@ impl PyPresentation {
     }
 
     fn all_slide_ids(&self) -> PyResult<Vec<String>> {
-        Ok(self
-            .presentation
-            .snapshot()
-            .map_err(map_error)?
-            .slides
-            .into_iter()
-            .map(|slide| slide.id)
-            .collect())
+        self.presentation.slide_ids().map_err(map_error)
     }
 
     /// bool is an int subclass, so True would otherwise select slide 1.

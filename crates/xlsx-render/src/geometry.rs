@@ -6,7 +6,7 @@ use std::ops::Range;
 
 use xlsx_model::styles::{Font, Stylesheet};
 use xlsx_model::workbook::Sheet;
-use xlsx_model::{ColId, RowId};
+use xlsx_model::{CellRef, ColId, RowId};
 
 use crate::Viewport;
 
@@ -109,6 +109,56 @@ fn stored_height_scale(sheet: &Sheet, normal: NormalFace<'_>) -> Option<f64> {
     (fitted.is_finite() && fitted > 0.0 && fitted != declared).then_some(fitted / declared)
 }
 
+/// the height a cell's font contributes to row autofit, if any: a declared
+/// `defaultRowHeight` makes every styled cell count, otherwise only fonts
+/// taller than the sheet default grow a row.
+fn autofit_height(
+    styles: &Stylesheet,
+    style: Option<u32>,
+    default_pt: f64,
+    cached_default: bool,
+    normal: NormalFace<'_>,
+) -> Option<f64> {
+    let size = style
+        .and_then(|style| styles.font_for(style))
+        .and_then(|font| font.size_pt)
+        .filter(|pt| pt.is_finite() && *pt > 0.0)
+        .unwrap_or(normal.size_pt);
+    let height = autofit_row_height_pt(size);
+    (cached_default || height > default_pt).then_some(height)
+}
+
+/// whether a cell at `at` carrying `style` participates in row autofit —
+/// the single-cell form of the skip rules in `autofit_rows`; keep in sync.
+pub fn autofit_relevant(
+    sheet: &Sheet,
+    styles: &Stylesheet,
+    at: CellRef,
+    style: Option<u32>,
+) -> bool {
+    if sheet.format.custom_height
+        || sheet.row_heights.contains_key(&at.row)
+        || sheet
+            .merges
+            .iter()
+            .any(|range| range.end.row > range.start.row && range.start == at)
+    {
+        return false;
+    }
+    let default_pt = sheet
+        .format
+        .default_row_height_pt
+        .unwrap_or(DEFAULT_ROW_HEIGHT_PT);
+    autofit_height(
+        styles,
+        style,
+        default_pt,
+        sheet.format.default_row_height_pt.is_some(),
+        NormalFace::from_styles(styles),
+    )
+    .is_some()
+}
+
 /// rows excel auto-fits, with the height each takes: every row that carries no
 /// `ht` and is not pinned by `sheetFormatPr/@customHeight`. a declared
 /// `defaultRowHeight` is a cached hint excel recomputes, so a row with content
@@ -135,19 +185,12 @@ fn autofit_rows(
         if sheet.row_heights.contains_key(&at.row) || spanned.contains(&(at.row, at.col)) {
             continue;
         }
-        let size = cell
-            .style
-            .and_then(|style| styles.font_for(style))
-            .and_then(|font| font.size_pt)
-            .filter(|pt| pt.is_finite() && *pt > 0.0)
-            .unwrap_or(normal.size_pt);
-        let height = autofit_row_height_pt(size);
-        if !cached_default && height <= default_pt {
-            continue;
-        }
-        let entry = fitted.entry(at.row).or_insert(height);
-        if height > *entry {
-            *entry = height;
+        if let Some(height) = autofit_height(styles, cell.style, default_pt, cached_default, normal)
+        {
+            let entry = fitted.entry(at.row).or_insert(height);
+            if height > *entry {
+                *entry = height;
+            }
         }
     }
     fitted

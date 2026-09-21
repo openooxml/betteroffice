@@ -81,9 +81,12 @@ fn sum_matching(
     };
     for i in indices {
         let (r, c) = (i / cols, i % cols);
-        match value_area.get(ctx, r, c) {
-            Ok(CellValue::Number { value }) => total += value,
-            Ok(_) => {}
+        match value_area.get_ref(ctx, r, c) {
+            Ok(v) => {
+                if let CellValue::Number { value } = *v {
+                    total += value;
+                }
+            }
             Err(error) => return err(error),
         }
     }
@@ -100,15 +103,15 @@ pub(crate) fn sumproduct(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     for arg in args {
         match as_area(arg, ctx) {
             Some(area) => {
-                let values = match area.values(ctx) {
+                let values = match area.values_ref(ctx) {
                     Ok(values) => values,
                     Err(error) => return err(error),
                 };
                 let mut col = Vec::with_capacity(values.len());
                 for v in values {
-                    match v {
-                        CellValue::Number { value } => col.push(value),
-                        CellValue::Error { value } => return err(value),
+                    match v.as_ref() {
+                        CellValue::Number { value } => col.push(*value),
+                        CellValue::Error { value } => return err(*value),
                         _ => col.push(0.0),
                     }
                 }
@@ -181,10 +184,10 @@ fn matrix(arg: &Expr, ctx: &EvalContext<'_>) -> Result<Matrix, ErrorValue> {
             _ => Err(ErrorValue::Value),
         };
     };
-    let cells = area.values(ctx)?;
+    let cells = area.values_ref(ctx)?;
     let mut values = Vec::with_capacity(cells.len());
     for cell in cells {
-        match cell {
+        match *cell {
             CellValue::Number { value } => values.push(value),
             CellValue::Error { value } => return Err(value),
             _ => return Err(ErrorValue::Value),

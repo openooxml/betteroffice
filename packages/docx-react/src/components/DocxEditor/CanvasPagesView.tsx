@@ -130,12 +130,14 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   pageKey,
   zoom,
   interactive,
+  deferChrome,
   registerCanvas,
 }: {
   page: DisplayPage;
   pageKey: string;
   zoom: number;
   interactive: boolean;
+  deferChrome: boolean;
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
@@ -151,8 +153,10 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
           boxShadow: '0 1px 3px var(--doc-shadow)',
         }}
       />
-      <CanvasPageMirror page={page} zoom={zoom} />
-      {interactive ? <CanvasInteractiveOverlay page={page} zoom={zoom} /> : null}
+      <CanvasPageMirror page={page} zoom={zoom} defer={deferChrome} />
+      {interactive ? (
+        <CanvasInteractiveOverlay page={page} zoom={zoom} defer={deferChrome} />
+      ) : null}
     </div>
   );
 });
@@ -257,6 +261,7 @@ export function CanvasPagesView({
   }, []);
   const windowingEnabled = pageWindowAllowed && displayList.pages.length > PAGE_WINDOW_MIN_PAGES;
   const [pageWindow, setPageWindow] = useState<PageWindowRange | null>(null);
+  const windowMeasuredRef = useRef(false);
   // Column-space page tops/bottoms from display-list geometry alone (no DOM
   // reads): padding, then each page height at the current zoom plus the gap.
   const pageOffsets = useMemo(() => {
@@ -272,6 +277,7 @@ export function CanvasPagesView({
   }, [displayList, zoom]);
   useLayoutEffect(() => {
     if (!windowingEnabled) {
+      windowMeasuredRef.current = false;
       setPageWindow(null);
       return;
     }
@@ -317,12 +323,15 @@ export function CanvasPagesView({
           break;
         }
       }
+      windowMeasuredRef.current = true;
       setPageWindow((previous) => nextPageWindow(previous, first, last, tops.length));
     };
     const schedule = (): void => {
       if (rafId === null) rafId = requestAnimationFrame(recompute);
     };
-    recompute();
+    // The first measurement must land before paint; later re-measures coalesce.
+    if (windowMeasuredRef.current) schedule();
+    else recompute();
     scrollTarget.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
     return () => {
@@ -339,6 +348,10 @@ export function CanvasPagesView({
   const effectiveWindow: PageWindowRange | null = windowingEnabled ? pageWindow : null;
   const pageInWindow = (index: number): boolean =>
     effectiveWindow === null || (index >= effectiveWindow.start && index <= effectiveWindow.end);
+  const chromeInWindow = (index: number): boolean =>
+    effectiveWindow === null
+      ? !windowingEnabled || index < PAGE_WINDOW_MIN_PAGES
+      : pageInWindow(index);
 
   // One glyph-outline cache for the canvas lifetime (task contract: not
   // per-render). The wasm-backed outline provider loads lazily through the
@@ -549,6 +562,7 @@ export function CanvasPagesView({
               pageKey={pageKey}
               zoom={zoom}
               interactive={interactive}
+              deferChrome={!chromeInWindow(i)}
               registerCanvas={registerCanvas}
             />
           );

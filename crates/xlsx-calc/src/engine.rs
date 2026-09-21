@@ -1,14 +1,15 @@
 //! recalc driver: given edited cells, re-evaluate exactly the formulas that
 //! could have changed, in dependency order, and report what moved.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
-use xlsx_model::{CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
+use xlsx_model::{Cell, CellProvider, CellRef, CellValue, ColId, RowId, SheetId, Workbook};
 
-use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate};
+use crate::eval::{
+    DefinedNameState, EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, evaluate,
+};
 use crate::graph::DepGraph;
-use crate::parser::parse_formula;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
 /// forced to `0` by cycle participation.
@@ -95,11 +96,19 @@ fn run_recalc(
 ) -> RecalcResult {
     let (order, cycle) = topo_order(graph, &recompute);
     let budget = Rc::new(EvaluationBudget::new(MAX_RECALCULATION_CELL_VISITS));
+    let defined_names = Rc::new(DefinedNameState::default());
 
     let mut changed: Vec<(SheetId, CellRef)> = Vec::new();
     let mut limited_cells = Vec::new();
     for u in &order {
-        let (value, limited) = eval_node(wb, *u, now_serial, Rc::clone(&budget));
+        let (value, limited) = eval_node(
+            wb,
+            *u,
+            now_serial,
+            Rc::clone(&budget),
+            Rc::clone(&defined_names),
+            graph,
+        );
         if limited {
             limited_cells.push((u.0, cell_of(*u)));
         }
@@ -129,16 +138,38 @@ fn run_recalc(
 /// kahn's sort over the sub-graph induced by `recompute`: returns the evaluable
 /// order and, separately, the cells caught in (or only reachable through) a cycle.
 fn topo_order(graph: &DepGraph, recompute: &HashSet<Key>) -> (Vec<Key>, Vec<Key>) {
+    let mut points: HashMap<SheetId, BTreeMap<RowId, Vec<ColId>>> = HashMap::new();
+    for &(sheet, row, col) in recompute {
+        points
+            .entry(sheet)
+            .or_default()
+            .entry(row)
+            .or_default()
+            .push(col);
+    }
+
     let mut adj: HashMap<Key, Vec<Key>> = HashMap::new();
     let mut indegree: HashMap<Key, usize> = recompute.iter().map(|k| (*k, 0)).collect();
+    let mut seen: HashSet<(Key, Key)> = HashSet::new();
 
-    for &u in recompute {
-        let mut seen: HashSet<Key> = HashSet::new();
-        for (ds, dc) in graph.dependents_of(u.0, cell_of(u)) {
-            let v = key(ds, dc);
-            if recompute.contains(&v) && seen.insert(v) {
-                adj.entry(u).or_default().push(v);
-                *indegree.get_mut(&v).unwrap() += 1;
+    for (es, range, vs, vc) in graph.edges() {
+        let v = key(vs, vc);
+        if !recompute.contains(&v) {
+            continue;
+        }
+        let Some(rows) = points.get(&es) else {
+            continue;
+        };
+        for (&row, cols) in rows.range(range.start.row..=range.end.row) {
+            for &col in cols {
+                if col < range.start.col || col > range.end.col {
+                    continue;
+                }
+                let u = (es, row, col);
+                if seen.insert((u, v)) {
+                    adj.entry(u).or_default().push(v);
+                    *indegree.get_mut(&v).unwrap() += 1;
+                }
             }
         }
     }
@@ -187,19 +218,19 @@ fn eval_node(
     u: Key,
     now_serial: Option<f64>,
     budget: Rc<EvaluationBudget>,
+    defined_names: Rc<DefinedNameState>,
+    graph: &DepGraph,
 ) -> (Option<CellValue>, bool) {
-    let Some(src) = wb.formula(u.0, cell_of(u)).map(str::to_string) else {
+    let Some(expr) = graph.ast(u.0, cell_of(u)) else {
         return (None, false);
     };
-    let Ok(expr) = parse_formula(&src) else {
-        return (None, false);
-    };
-    let mut ctx = EvalContext::with_budget(wb, u.0, budget);
+    let mut ctx = EvalContext::with_budget(wb, u.0, budget, defined_names);
     ctx.cell = Some(cell_of(u));
     ctx.now_serial = now_serial;
+    ctx.parse_cache = Some(graph.asts());
     let value = evaluate(&expr, &ctx);
     let incomplete = ctx.has_unhandled_budget_error() || ctx.has_unhandled_unsupported_function();
-    if incomplete && !matches!(wb.value(u.0, cell_of(u)), CellValue::Empty) {
+    if incomplete && !matches!(wb.value_cow(u.0, cell_of(u)).as_ref(), CellValue::Empty) {
         return (None, ctx.exhausted());
     }
     (Some(value), ctx.exhausted())
@@ -208,13 +239,25 @@ fn eval_node(
 /// write `value` only if it differs from the stored value; returns whether
 /// anything changed. formula and style are preserved.
 fn write_if_changed(wb: &mut Workbook, u: Key, value: CellValue) -> bool {
-    if wb.value(u.0, cell_of(u)) == value {
+    if *wb.value_cow(u.0, cell_of(u)) == value {
         return false;
     }
     if let Some(sheet) = wb.sheet_mut(u.0) {
-        let mut cell = sheet.cell(cell_of(u)).cloned().unwrap_or_default();
-        cell.value = value;
-        sheet.set_cell(cell_of(u), cell);
+        let at = cell_of(u);
+        if let Some(cell) = sheet.cell_mut(at) {
+            cell.value = value;
+            if *cell == Cell::default() {
+                sheet.set_cell(at, Cell::default());
+            }
+        } else {
+            sheet.set_cell(
+                at,
+                Cell {
+                    value,
+                    ..Cell::default()
+                },
+            );
+        }
     }
     true
 }

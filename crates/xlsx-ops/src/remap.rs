@@ -2045,8 +2045,9 @@ fn transform(
             lhs: Box::new(transform(lhs, op, matches_target, changed)),
             rhs: Box::new(transform(rhs, op, matches_target, changed)),
         },
-        Expr::FuncCall { name, args } => Expr::FuncCall {
+        Expr::FuncCall { name, func, args } => Expr::FuncCall {
             name: name.clone(),
+            func: *func,
             args: args
                 .iter()
                 .map(|a| transform(a, op, matches_target, changed))

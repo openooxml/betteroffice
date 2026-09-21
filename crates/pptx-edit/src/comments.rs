@@ -1,8 +1,8 @@
 use pptx_parse::{CommentFlavor, PptxPackage};
 use sha2::{Digest, Sha256};
-use yrs::{Any, Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
+use yrs::{Map, MapPrelim, MapRef, ReadTxn, Transact, TransactionMut, WriteTxn};
 
-use crate::deck::{map_bool, map_number, map_string, required_map};
+use crate::deck::{SourceImport, map_bool, map_number, map_string, required_map};
 use crate::{
     BOOTSTRAP_CLIENT_ID, COMMENTS, CommentReceipt, CommentSnapshot, DeckSession, EditCtx,
     EditError, EditResult, META, MIGRATE_ORIGIN, SLIDES, doc_with_client_id, hydrate_doc,
@@ -70,7 +70,7 @@ pub(crate) fn seed_comments(
 
 pub(crate) fn import_source_comments(
     session: &DeckSession,
-    source: &PptxPackage,
+    import: &mut SourceImport<'_>,
 ) -> EditResult<()> {
     {
         let txn = session.doc.transact();
@@ -81,7 +81,8 @@ pub(crate) fn import_source_comments(
     }
     let bootstrap = doc_with_client_id(BOOTSTRAP_CLIENT_ID);
     hydrate_doc(&bootstrap, &session.encode_state_as_update_v1())?;
-    let slide_ids: std::collections::HashMap<_, _> = source
+    let slide_ids: std::collections::HashMap<_, _> = import
+        .source
         .presentation
         .slides
         .iter()
@@ -95,30 +96,25 @@ pub(crate) fn import_source_comments(
         .collect();
     seed_comments(
         &mut bootstrap.transact_mut_with(MIGRATE_ORIGIN),
-        source,
+        import.source,
         &|part| slide_ids.get(part).cloned(),
     )?;
     let update = bootstrap
         .transact()
         .encode_diff_v1(&session.doc.transact().state_vector());
     hydrate_doc(&session.doc, &update)?;
-    let mut package = session.package().clone();
-    package.comments = source.comments.clone();
-    package.comment_authors = source.comment_authors.clone();
-    package.comment_flavor = source.comment_flavor;
+    import.package.comments.clone_from(&import.source.comments);
+    import
+        .package
+        .comment_authors
+        .clone_from(&import.source.comment_authors);
+    import.package.comment_flavor = import.source.comment_flavor;
     let mut txn = session.doc.transact_mut_with(MIGRATE_ORIGIN);
     let meta = required_map(&txn, META)?;
     meta.insert(
         &mut txn,
-        "packageJson",
-        Any::Buffer(std::sync::Arc::from(
-            serde_json::to_vec(&package).map_err(|error| EditError::Json(error.to_string()))?,
-        )),
-    );
-    meta.insert(
-        &mut txn,
         "commentFlavor",
-        flavor_key(source.comment_flavor.unwrap_or_default()),
+        flavor_key(import.source.comment_flavor.unwrap_or_default()),
     );
     meta.insert(&mut txn, "commentsPendingSource", false);
     Ok(())
@@ -177,6 +173,82 @@ fn live_parent<T: ReadTxn>(comments: &MapRef, entry: &MapRef, txn: &T) -> Option
         };
         depth += 1;
         next = map_string(&parent, txn, "parentId");
+    }
+    (depth % 2 == 1).then_some(parent_id)
+}
+
+/// The comments `snapshot_comments` returns for a doc `seed_comments` wrote,
+/// computed without materializing a scratch document.
+pub(crate) fn baseline_comments(
+    package: &PptxPackage,
+    slide_id_by_part: &dyn Fn(&str) -> Option<String>,
+) -> Vec<CommentSnapshot> {
+    let mut parents: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    let mut comments = Vec::new();
+    for (index, comment) in package.comments.iter().enumerate() {
+        let Some(slide_id) = slide_id_by_part(&comment.slide_part_path) else {
+            continue;
+        };
+        let author = package
+            .comment_authors
+            .iter()
+            .find(|author| author.id == comment.author_id);
+        let id = seeded_comment_id(index, &comment.id);
+        let parent_id = comment.parent_id.as_ref().and_then(|parent| {
+            package
+                .comments
+                .iter()
+                .position(|candidate| &candidate.id == parent)
+                .map(|parent_index| seeded_comment_id(parent_index, parent))
+        });
+        parents.insert(id.clone(), parent_id.clone());
+        comments.push(CommentSnapshot {
+            id,
+            slide_id,
+            author: author.map(|author| author.name.clone()).unwrap_or_default(),
+            initials: author
+                .map(|author| author.initials.clone())
+                .unwrap_or_default(),
+            text: comment.text.clone(),
+            created: comment.created.clone(),
+            x_emu: comment.x_emu as f64 as i64,
+            y_emu: comment.y_emu as f64 as i64,
+            parent_id,
+            resolved: comment.status.as_deref() == Some("resolved"),
+        });
+    }
+    for comment in &mut comments {
+        if let Some(parent_id) = comment.parent_id.take() {
+            comment.parent_id = baseline_parent(&parents, parent_id);
+        }
+    }
+    comments.sort_by(|left, right| {
+        left.created
+            .cmp(&right.created)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    comments
+}
+
+/// `live_parent` over the seeded map: a reply keeps its parent only when the
+/// chain depth above it is odd.
+fn baseline_parent(
+    parents: &std::collections::HashMap<String, Option<String>>,
+    parent_id: String,
+) -> Option<String> {
+    let mut next = Some(parent_id.clone());
+    let mut seen = std::collections::HashSet::new();
+    let mut depth = 0;
+    while let Some(id) = next {
+        if !seen.insert(id.clone()) || depth == 128 {
+            return None;
+        }
+        let Some(parent) = parents.get(&id) else {
+            break;
+        };
+        depth += 1;
+        next = parent.clone();
     }
     (depth % 2 == 1).then_some(parent_id)
 }
