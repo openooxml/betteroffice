@@ -727,3 +727,198 @@ fn xlfn_prefixed_names_resolve_to_the_same_builtin() {
         ("_xlws.CONCAT(\"a\", \"b\")", e(ErrorValue::Name)),
     ]);
 }
+
+/// DATEVALUE reads the date orders a US locale writes, ignores a trailing
+/// time, and refuses anything that is not a date.
+#[test]
+fn datevalue_reads_written_dates() {
+    check(&[
+        ("DATEVALUE(\"3/28/2001\")", n(36978.0)),
+        ("DATEVALUE(\"03/28/01\")", n(36978.0)),
+        ("DATEVALUE(\"2001-03-28\")", n(36978.0)),
+        ("DATEVALUE(\"28-Mar-2001\")", n(36978.0)),
+        ("DATEVALUE(\"March 28, 2001\")", n(36978.0)),
+        ("DATEVALUE(\"Mar 28, 01\")", n(36978.0)),
+        ("DATEVALUE(\"1/1/2020 13:30\")", n(43831.0)),
+        ("DATEVALUE(\"1/1/1900\")", n(1.0)),
+        ("DATEVALUE(\"2/29/1900\")", n(60.0)),
+        ("DATEVALUE(TEXT(36978, \"mm/dd/yy\"))", n(36978.0)),
+        ("DATEVALUE(\"1/1/35\")", n(12785.0)),
+        ("DATEVALUE(\"hello\")", e(ErrorValue::Value)),
+        ("DATEVALUE(\"13/1/2001\")", e(ErrorValue::Value)),
+        ("DATEVALUE(\"2/30/2001\")", e(ErrorValue::Value)),
+        ("DATEVALUE(\"12:00\")", e(ErrorValue::Value)),
+        ("DATEVALUE(\"1/1/1899\")", e(ErrorValue::Value)),
+        ("DATEVALUE(43831)", e(ErrorValue::Value)),
+        ("DATEVALUE(\"1/1/2020\", 1)", e(ErrorValue::Value)),
+        ("DATEVALUE(1/0)", e(ErrorValue::Div0)),
+    ]);
+    // a month and a day alone need a clock to know which year they belong to
+    assert_eq!(eval("DATEVALUE(\"3/28\")"), e(ErrorValue::Value));
+    assert_eq!(eval_now("DATEVALUE(\"1/1\")"), n(43831.0));
+}
+
+/// YEARFRAC's five day-count bases, including the 30/360 rules that only
+/// differ on month ends.
+#[test]
+fn yearfrac_counts_days_on_every_basis() {
+    check(&[
+        ("YEARFRAC(DATE(2020,1,1), DATE(2021,1,1))", n(1.0)),
+        ("YEARFRAC(DATE(2021,1,1), DATE(2020,1,1))", n(1.0)),
+        ("YEARFRAC(DATE(2020,1,1), DATE(2021,1,1), 1)", n(1.0)),
+        ("YEARFRAC(DATE(2020,1,1), DATE(2020,12,31), 3)", n(1.0)),
+        (
+            "YEARFRAC(DATE(2020,1,1), DATE(2020,2,1), 5)",
+            e(ErrorValue::Num),
+        ),
+        ("YEARFRAC(DATE(2020,1,1))", e(ErrorValue::Value)),
+        ("YEARFRAC(1/0, 2)", e(ErrorValue::Div0)),
+    ]);
+    approx(
+        "YEARFRAC(DATE(2020,1,31), DATE(2020,3,31), 0)",
+        60.0 / 360.0,
+    );
+    approx(
+        "YEARFRAC(DATE(2020,2,29), DATE(2020,3,31), 0)",
+        30.0 / 360.0,
+    );
+    approx(
+        "YEARFRAC(DATE(2020,2,29), DATE(2020,3,31), 4)",
+        31.0 / 360.0,
+    );
+    approx(
+        "YEARFRAC(DATE(2020,1,1), DATE(2020,12,31), 2)",
+        365.0 / 360.0,
+    );
+    approx("YEARFRAC(DATE(2019,1,1), DATE(2019,7,1), 1)", 181.0 / 365.0);
+}
+
+/// the `.INTL` workday pair, over both weekend encodings. 2020-01-01 is a
+/// wednesday, so 2020-01-04 and 2020-01-05 are the weekend of that week.
+#[test]
+fn intl_workday_functions_read_both_weekend_encodings() {
+    check(&[
+        ("NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7))", n(5.0)),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), \"0000011\")",
+            n(5.0),
+        ),
+        ("NETWORKDAYS.INTL(DATE(2020,1,7), DATE(2020,1,1))", n(-5.0)),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), 11)",
+            n(6.0),
+        ),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), 1, DATE(2020,1,2))",
+            n(4.0),
+        ),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), 1, DATE(2020,1,4))",
+            n(5.0),
+        ),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), \"1111111\")",
+            n(0.0),
+        ),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), \"012\")",
+            e(ErrorValue::Value),
+        ),
+        (
+            "NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), 8)",
+            e(ErrorValue::Num),
+        ),
+        ("NETWORKDAYS.INTL(DATE(2020,1,1))", e(ErrorValue::Value)),
+        ("WORKDAY.INTL(DATE(2020,1,3), 1)", n(43836.0)),
+        ("WORKDAY.INTL(DATE(2020,1,3), 1, \"0000000\")", n(43834.0)),
+        ("WORKDAY.INTL(DATE(2020,1,6), -1)", n(43833.0)),
+        ("WORKDAY.INTL(DATE(2020,1,3), 0)", n(43833.0)),
+        ("WORKDAY.INTL(DATE(2020,1,3), 10)", n(43847.0)),
+        (
+            "WORKDAY.INTL(DATE(2020,1,3), 1, 1, DATE(2020,1,6))",
+            n(43837.0),
+        ),
+        (
+            "WORKDAY.INTL(DATE(2020,1,3), 1, \"1111111\")",
+            e(ErrorValue::Value),
+        ),
+        ("WORKDAY.INTL(DATE(2020,1,3))", e(ErrorValue::Value)),
+    ]);
+    // the weekend argument written as a gap falls back to saturday and sunday
+    assert_eq!(
+        eval("NETWORKDAYS.INTL(DATE(2020,1,1), DATE(2020,1,7), \"0000011\",)"),
+        n(5.0)
+    );
+}
+
+/// ADDRESS in both notations, with every absolute/relative combination.
+#[test]
+fn address_writes_a_reference_as_text() {
+    check(&[
+        ("ADDRESS(1, 1)", t("$A$1")),
+        ("ADDRESS(2, 3)", t("$C$2")),
+        ("ADDRESS(2, 3, 2)", t("C$2")),
+        ("ADDRESS(2, 3, 3)", t("$C2")),
+        ("ADDRESS(2, 3, 4)", t("C2")),
+        ("ADDRESS(35, 1)", t("$A$35")),
+        ("ADDRESS(1, 27)", t("$AA$1")),
+        ("ADDRESS(2, 3, 1, FALSE)", t("R2C3")),
+        ("ADDRESS(2, 3, 4, FALSE)", t("R[2]C[3]")),
+        ("ADDRESS(1, 1, 1, TRUE, \"Sheet1\")", t("Sheet1!$A$1")),
+        ("ADDRESS(1, 1, 1, TRUE, \"My Sheet\")", t("'My Sheet'!$A$1")),
+        ("ADDRESS(0, 1)", e(ErrorValue::Value)),
+        ("ADDRESS(1, 0)", e(ErrorValue::Value)),
+        ("ADDRESS(1, 16385)", e(ErrorValue::Value)),
+        ("ADDRESS(1, 1, 5)", e(ErrorValue::Value)),
+        ("ADDRESS(1)", e(ErrorValue::Value)),
+        ("ADDRESS(1/0, 1)", e(ErrorValue::Div0)),
+        ("INDIRECT(ADDRESS(2, 1))", n(20.0)),
+    ]);
+}
+
+/// HYPERLINK shows the caption, but an error in the jump target still wins.
+#[test]
+fn hyperlink_shows_its_caption() {
+    check(&[
+        ("HYPERLINK(\"http://x\", \"go\")", t("go")),
+        ("HYPERLINK(\"http://x\")", t("http://x")),
+        ("HYPERLINK(\"#a\", 5)", n(5.0)),
+        ("HYPERLINK(1/0, \"go\")", e(ErrorValue::Div0)),
+        ("HYPERLINK(\"#a\", 1/0)", e(ErrorValue::Div0)),
+        ("HYPERLINK(\"a\", \"b\", \"c\")", e(ErrorValue::Value)),
+    ]);
+}
+
+/// FV over both payment timings, the zero-rate shortcut, and its error cases.
+#[test]
+fn fv_discounts_an_annuity() {
+    check(&[
+        ("FV(0, 10, -100)", n(1000.0)),
+        ("FV(0, 10, -100, -500)", n(1500.0)),
+        ("FV(0.1, 2)", e(ErrorValue::Value)),
+        ("FV(0.1, 2, 0, -100, 1, 9)", e(ErrorValue::Value)),
+        ("FV(1/0, 1, 1)", e(ErrorValue::Div0)),
+    ]);
+    approx("FV(0.05, 10, 0, -1000)", 1628.894626777442);
+    approx("FV(0.05, 10, -100, 0)", 1_257.789_253_554_884);
+    approx("FV(0.05, 10, -100, 0, 1)", 1320.6787162326282);
+    approx("FV(0.05/12, 120, -100, -1000)", 17175.237442257);
+}
+
+/// NORM.DIST in both modes; the cumulative branch must hold to full double
+/// precision because the corpus subtracts neighbouring values.
+#[test]
+fn norm_dist_covers_density_and_cumulative() {
+    check(&[
+        ("NORM.DIST(1, 0, 0, TRUE)", e(ErrorValue::Num)),
+        ("NORM.DIST(1, 0, -1, TRUE)", e(ErrorValue::Num)),
+        ("NORM.DIST(1, 0, 1)", e(ErrorValue::Value)),
+        ("_xlfn.NORM.DIST(0, 0, 1, TRUE)", n(0.5)),
+    ]);
+    approx("NORM.DIST(0, 0, 1, FALSE)", 0.3989422804014327);
+    approx("NORM.DIST(1.96, 0, 1, TRUE)", 0.9750021048517795);
+    approx("NORM.DIST(-1.96, 0, 1, TRUE)", 0.024997895148220435);
+    approx("NORM.DIST(-8, 0, 1, TRUE)", 6.220960574271786e-16);
+    approx("NORM.DIST(42, 40, 1.5, TRUE)", 0.9087887802741321);
+    approx("NORM.DIST(42, 40, 1.5, FALSE)", 0.10934004978399577);
+}

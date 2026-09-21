@@ -766,3 +766,128 @@ impl IntoCell for Result<f64, ErrorValue> {
         }
     }
 }
+
+/// NORM.DIST(x, mean, sd, cumulative): the normal distribution's density, or
+/// its cumulative probability when `cumulative` is true.
+pub(crate) fn norm_dist(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 4 {
+        return err(ErrorValue::Value);
+    }
+    let (x, mean, sd) = match (
+        nth_number(args, ctx, 0),
+        nth_number(args, ctx, 1),
+        nth_number(args, ctx, 2),
+    ) {
+        (Ok(x), Ok(m), Ok(s)) => (x, m, s),
+        (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
+    };
+    let cumulative = match crate::eval::to_bool(&evaluate(&args[3], ctx)) {
+        Ok(b) => b,
+        Err(e) => return err(e),
+    };
+    if sd <= 0.0 {
+        return err(ErrorValue::Num);
+    }
+    let z = (x - mean) / sd;
+    if cumulative {
+        finite(0.5 * erfc(-z * std::f64::consts::FRAC_1_SQRT_2))
+    } else {
+        finite((-0.5 * z * z).exp() / (sd * (2.0 * std::f64::consts::PI).sqrt()))
+    }
+}
+
+/// the complementary error function, by w. j. cody's rational approximations
+/// (algorithm 715); accurate to near machine precision across the real line.
+fn erfc(x: f64) -> f64 {
+    const A: [f64; 5] = [
+        3.161_123_743_870_565_6e0,
+        1.138_641_541_510_501_6e2,
+        3.774_852_376_853_02e2,
+        3.209_377_589_138_469_5e3,
+        1.857_777_061_846_031_5e-1,
+    ];
+    const B: [f64; 4] = [
+        2.360_129_095_234_412e1,
+        2.440_246_379_344_441_7e2,
+        1.282_616_526_077_372_3e3,
+        2.844_236_833_439_171e3,
+    ];
+    const C: [f64; 9] = [
+        5.641_884_969_886_701e-1,
+        8.883_149_794_388_376e0,
+        6.611_919_063_714_163e1,
+        2.986_351_381_974_001e2,
+        8.819_522_212_417_69e2,
+        1.712_047_612_634_070_6e3,
+        2.051_078_377_826_071_5e3,
+        1.230_339_354_797_997_3e3,
+        2.153_115_354_744_038_5e-8,
+    ];
+    const D: [f64; 8] = [
+        1.574_492_611_070_983_5e1,
+        1.176_939_508_913_125e2,
+        5.371_811_018_620_099e2,
+        1.621_389_574_566_690_2e3,
+        3.290_799_235_733_459_6e3,
+        4.362_619_090_143_247e3,
+        3.439_367_674_143_721_5e3,
+        1.230_339_354_803_749_4e3,
+    ];
+    const P: [f64; 6] = [
+        3.053_266_349_612_323_4e-1,
+        3.603_448_999_498_044_4e-1,
+        1.257_817_261_112_292_5e-1,
+        1.608_378_514_874_228e-2,
+        6.587_491_615_298_378e-4,
+        1.631_538_713_730_209_8e-2,
+    ];
+    const Q: [f64; 5] = [
+        2.568_520_192_289_822,
+        1.872_952_849_923_460_5e0,
+        5.279_051_029_514_284e-1,
+        6.051_834_131_244_132e-2,
+        2.335_204_976_268_691_8e-3,
+    ];
+    /// 1/sqrt(pi)
+    const SQRT_1_PI: f64 = 5.641_895_835_477_563e-1;
+
+    let y = x.abs();
+    let value = if y <= 0.468_75 {
+        let z = y * y;
+        let mut numerator = A[4] * z;
+        let mut denominator = z;
+        for index in 0..3 {
+            numerator = (numerator + A[index]) * z;
+            denominator = (denominator + B[index]) * z;
+        }
+        return 1.0 - x * (numerator + A[3]) / (denominator + B[3]);
+    } else if y <= 4.0 {
+        let mut numerator = C[8] * y;
+        let mut denominator = y;
+        for index in 0..7 {
+            numerator = (numerator + C[index]) * y;
+            denominator = (denominator + D[index]) * y;
+        }
+        scaled_exp(y) * (numerator + C[7]) / (denominator + D[7])
+    } else if y >= 26.543 {
+        0.0
+    } else {
+        let z = 1.0 / (y * y);
+        let mut numerator = P[5] * z;
+        let mut denominator = z;
+        for index in 0..4 {
+            numerator = (numerator + P[index]) * z;
+            denominator = (denominator + Q[index]) * z;
+        }
+        let tail = z * (numerator + P[4]) / (denominator + Q[4]);
+        scaled_exp(y) * (SQRT_1_PI - tail) / y
+    };
+    if x < 0.0 { 2.0 - value } else { value }
+}
+
+/// `exp(-y*y)` split around a 1/16-grid point so the squaring loses no bits.
+fn scaled_exp(y: f64) -> f64 {
+    let grid = (y * 16.0).trunc() / 16.0;
+    let delta = (y - grid) * (y + grid);
+    (-grid * grid).exp() * (-delta).exp()
+}

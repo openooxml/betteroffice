@@ -63,6 +63,11 @@ impl Array {
         )
     }
 
+    /// every cell, row-major.
+    pub fn cells(&self) -> &[CellValue] {
+        &self.values
+    }
+
     fn row_values(&self, row: usize) -> &[CellValue] {
         &self.values[row * self.cols..(row + 1) * self.cols]
     }

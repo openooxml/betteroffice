@@ -9,6 +9,7 @@ use crate::parser::Expr;
 
 pub mod criteria;
 pub mod datetime;
+pub mod financial;
 pub mod info;
 pub mod logical;
 pub mod lookups;
@@ -128,6 +129,10 @@ pub enum Func {
     Second,
     Time,
     DateDif,
+    DateValue,
+    YearFrac,
+    WorkdayIntl,
+    NetworkdaysIntl,
     If,
     IfError,
     IfNa,
@@ -165,6 +170,10 @@ pub enum Func {
     N,
     Lookup,
     Indirect,
+    Address,
+    Hyperlink,
+    Fv,
+    NormDist,
 }
 
 /// drop the `_xlfn.` / `_xlfn._xlws.` prefix excel stores post-2007 functions
@@ -307,6 +316,14 @@ pub fn resolve(name: &str) -> Option<Func> {
         "SECOND" => Func::Second,
         "TIME" => Func::Time,
         "DATEDIF" => Func::DateDif,
+        "DATEVALUE" => Func::DateValue,
+        "YEARFRAC" => Func::YearFrac,
+        "WORKDAY.INTL" => Func::WorkdayIntl,
+        "NETWORKDAYS.INTL" => Func::NetworkdaysIntl,
+        "ADDRESS" => Func::Address,
+        "HYPERLINK" => Func::Hyperlink,
+        "FV" => Func::Fv,
+        "NORM.DIST" | "NORMDIST" => Func::NormDist,
         "IF" => Func::If,
         "IFERROR" => Func::IfError,
         "IFNA" => Func::IfNa,
@@ -460,6 +477,14 @@ impl Func {
             Func::Second => datetime::second(args, ctx),
             Func::Time => datetime::time(args, ctx),
             Func::DateDif => datetime::datedif(args, ctx),
+            Func::DateValue => datetime::datevalue(args, ctx),
+            Func::YearFrac => datetime::yearfrac(args, ctx),
+            Func::WorkdayIntl => datetime::workday_intl(args, ctx),
+            Func::NetworkdaysIntl => datetime::networkdays_intl(args, ctx),
+            Func::Address => lookups::address(args, ctx),
+            Func::Hyperlink => lookups::hyperlink(args, ctx),
+            Func::Fv => financial::fv(args, ctx),
+            Func::NormDist => stats::norm_dist(args, ctx),
             Func::If => logical::if_(args, ctx),
             Func::IfError => logical::iferror(args, ctx),
             Func::IfNa => logical::ifna(args, ctx),
@@ -663,6 +688,14 @@ mod tests {
             (Func::Second, "SECOND"),
             (Func::Time, "TIME"),
             (Func::DateDif, "DATEDIF"),
+            (Func::DateValue, "DATEVALUE"),
+            (Func::YearFrac, "YEARFRAC"),
+            (Func::WorkdayIntl, "WORKDAY.INTL"),
+            (Func::NetworkdaysIntl, "NETWORKDAYS.INTL"),
+            (Func::Address, "ADDRESS"),
+            (Func::Hyperlink, "HYPERLINK"),
+            (Func::Fv, "FV"),
+            (Func::NormDist, "NORM.DIST"),
             (Func::If, "IF"),
             (Func::IfError, "IFERROR"),
             (Func::IfNa, "IFNA"),
@@ -710,6 +743,7 @@ mod tests {
             ("VAR.P", Func::VarP),
             ("RANK.EQ", Func::Rank),
             ("CONCAT", Func::Concat),
+            ("NORMDIST", Func::NormDist),
         ];
         for &(name, func) in aliases {
             assert_eq!(resolve(name), Some(func), "{name}");

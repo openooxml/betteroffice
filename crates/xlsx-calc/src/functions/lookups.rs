@@ -636,3 +636,114 @@ pub(crate) fn transpose(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         value => value,
     }
 }
+
+/// ADDRESS(row, column, [abs], [a1], [sheet]): a reference written as text.
+/// `abs` 1..=4 runs `$A$1`, `A$1`, `$A1`, `A1`; `a1` false switches to R1C1.
+pub(crate) fn address(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 5 {
+        return err(ErrorValue::Value);
+    }
+    let (row, col) = match (nth_int(args, ctx, 0), nth_int(args, ctx, 1)) {
+        (Ok(r), Ok(c)) => (r, c),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let kind = match args.get(2) {
+        Some(arg) if !super::omitted(arg) => match nth_int(args, ctx, 2) {
+            Ok(k) => k,
+            Err(e) => return err(e),
+        },
+        _ => 1,
+    };
+    if !(1..=4).contains(&kind) {
+        return err(ErrorValue::Value);
+    }
+    let a1_style = match args.get(3) {
+        Some(arg) if !super::omitted(arg) => match crate::eval::to_bool(&evaluate(&args[3], ctx)) {
+            Ok(b) => b,
+            Err(e) => return err(e),
+        },
+        _ => true,
+    };
+    let sheet = match args.get(4) {
+        Some(arg) if !super::omitted(arg) => match crate::eval::to_text(&evaluate(&args[4], ctx)) {
+            Ok(s) => Some(s),
+            Err(e) => return err(e),
+        },
+        _ => None,
+    };
+    let absolute_row = kind == 1 || kind == 2;
+    let absolute_col = kind == 1 || kind == 3;
+    let body = if a1_style {
+        if row < 1
+            || col < 1
+            || row > i64::from(xlsx_model::MAX_ROWS)
+            || col > i64::from(xlsx_model::MAX_COLS)
+        {
+            return err(ErrorValue::Value);
+        }
+        format!(
+            "{}{}{}{}",
+            if absolute_col { "$" } else { "" },
+            xlsx_model::addr::col_to_letters(col as u32 - 1),
+            if absolute_row { "$" } else { "" },
+            row
+        )
+    } else {
+        format!(
+            "{}{}",
+            r1c1_part('R', row, absolute_row),
+            r1c1_part('C', col, absolute_col)
+        )
+    };
+    match sheet {
+        Some(name) => crate::eval::text(format!("{}!{}", quoted_sheet(&name), body)),
+        None => crate::eval::text(body),
+    }
+}
+
+fn r1c1_part(letter: char, index: i64, absolute: bool) -> String {
+    if absolute {
+        format!("{letter}{index}")
+    } else if index == 0 {
+        letter.to_string()
+    } else {
+        format!("{letter}[{index}]")
+    }
+}
+
+/// a sheet name as it appears in a reference: quoted when anything but
+/// letters, digits and underscores appears, or when it starts with a digit.
+fn quoted_sheet(name: &str) -> String {
+    let plain = !name.is_empty()
+        && !name.starts_with(|ch: char| ch.is_ascii_digit())
+        && name
+            .chars()
+            .all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '.');
+    if plain {
+        name.to_string()
+    } else {
+        format!("'{}'", name.replace('\'', "''"))
+    }
+}
+
+/// HYPERLINK(location, [friendly]): the cell shows the friendly name when one
+/// is given, otherwise the location itself. a location that is an error still
+/// wins, so a broken jump target shows the error rather than the caption.
+pub(crate) fn hyperlink(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.is_empty() || args.len() > 2 {
+        return err(ErrorValue::Value);
+    }
+    let location = evaluate(&args[0], ctx);
+    if let CellValue::Error { value } = location {
+        return err(value);
+    }
+    let shown = match args.get(1).filter(|arg| !super::omitted(arg)) {
+        Some(arg) => evaluate(arg, ctx),
+        None => location,
+    };
+    match shown {
+        CellValue::Error { value } => err(value),
+        CellValue::Empty => crate::eval::text(""),
+        value => value,
+    }
+}
