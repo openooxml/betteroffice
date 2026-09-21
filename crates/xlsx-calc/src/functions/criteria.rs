@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, evaluate, parse_num};
+use crate::eval::{Area, EvalContext, as_area, evaluate, parse_num, used_height, used_width};
 use crate::parser::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,17 +215,69 @@ pub(crate) fn collect_pairs(
     if specs.is_empty() || !specs.len().is_multiple_of(2) {
         return None;
     }
-    let mut pairs = Vec::new();
-    let mut dims: Option<(usize, usize)> = None;
+    let mut areas = Vec::new();
     for chunk in specs.chunks(2) {
-        let area = as_area(&chunk[0], ctx)?;
-        match dims {
-            Some(d) if d != (area.rows, area.cols) => return None,
-            _ => dims = Some((area.rows, area.cols)),
-        }
-        pairs.push((area, criterion_from_arg(&chunk[1], ctx)));
+        areas.push(as_area(&chunk[0], ctx)?);
     }
-    Some(pairs)
+    bound_together(&mut areas, ctx);
+    let dims = (areas[0].rows, areas[0].cols);
+    if areas.iter().any(|area| (area.rows, area.cols) != dims) {
+        return None;
+    }
+    Some(
+        areas
+            .into_iter()
+            .zip(specs.chunks(2))
+            .map(|(area, chunk)| (area, criterion_from_arg(&chunk[1], ctx)))
+            .collect(),
+    )
+}
+
+/// cut whole-column and whole-row criteria to the data they cover, giving
+/// every one of them the same extent so aligned ranges stay aligned.
+pub(crate) fn bound_together(areas: &mut [Area], ctx: &EvalContext<'_>) {
+    let full_height = |area: &Area| area.rows >= xlsx_model::MAX_ROWS as usize;
+    let full_width = |area: &Area| area.cols >= xlsx_model::MAX_COLS as usize;
+    let rows = areas
+        .iter()
+        .filter(|area| full_height(area))
+        .map(|area| used_height(area, ctx))
+        .max();
+    let cols = areas
+        .iter()
+        .filter(|area| full_width(area))
+        .map(|area| used_width(area, ctx))
+        .max();
+    for area in areas {
+        if let Some(rows) = rows
+            && full_height(area)
+        {
+            area.rows = rows;
+        }
+        if let Some(cols) = cols
+            && full_width(area)
+        {
+            area.cols = cols;
+        }
+    }
+}
+
+/// the values a `...IF`/`...IFS` aggregates, cut to the criteria rectangle: a
+/// whole-column range simply takes the criteria shape.
+pub(crate) fn aligned_area(
+    expr: &Expr,
+    ctx: &EvalContext<'_>,
+    rows: usize,
+    cols: usize,
+) -> Option<Area> {
+    let mut area = as_area(expr, ctx)?;
+    if area.rows >= xlsx_model::MAX_ROWS as usize {
+        area.rows = rows;
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize {
+        area.cols = cols;
+    }
+    (area.rows == rows && area.cols == cols).then_some(area)
 }
 
 /// flat row-major indices where every criterion matches its aligned cell.

@@ -804,6 +804,21 @@ fn index_answers_once_per_array_index() {
     );
 }
 
+/// a whole-column criteria range costs the rows the sheet uses, so one
+/// `COUNTIFS` per key of a spilled block stays inside the evaluation budget.
+#[test]
+fn whole_column_criteria_cost_the_used_rows() {
+    let workbook = fixture();
+    assert_eq!(
+        values(r#"COUNTIFS(A:A,_xlfn.UNIQUE(A1:A4),B:B,">1")"#, &workbook),
+        vec![n(1.0), n(1.0), n(1.0)]
+    );
+    assert_eq!(
+        values(r#"SUMIFS(B:B,A:A,_xlfn.UNIQUE(A1:A4))"#, &workbook),
+        vec![n(3.0), n(3.0), n(4.0)]
+    );
+}
+
 /// `XLOOKUP` over a two-dimensional result answers with the whole row its
 /// lookup vector picks, and accepts a vector the formula computed.
 #[test]

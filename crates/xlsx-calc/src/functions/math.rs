@@ -3,7 +3,7 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num, to_number};
+use crate::eval::{Area, EvalContext, as_area, bound_area, err, evaluate, num, to_number};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -32,20 +32,17 @@ pub(crate) fn sumif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let crit_area = match as_area(&args[0], ctx) {
-        Some(a) => a,
+        Some(a) => bound_area(a, ctx),
         None => return err(ErrorValue::Value),
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
-    let sum_area = if args.len() == 3 {
-        match as_area(&args[2], ctx) {
+    let values = if args.len() == 3 { &args[2] } else { &args[0] };
+    let sum_area = match criteria::aligned_area(values, ctx, crit_area.rows, crit_area.cols) {
+        Some(a) => a,
+        None => match as_area(values, ctx) {
             Some(a) => a,
             None => return err(ErrorValue::Value),
-        }
-    } else {
-        match as_area(&args[0], ctx) {
-            Some(a) => a,
-            None => return err(ErrorValue::Value),
-        }
+        },
     };
     let pairs = [(crit_area, criterion)];
     sum_matching(&pairs, &sum_area, ctx)
@@ -56,15 +53,15 @@ pub(crate) fn sumifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    let sum_area = match as_area(&args[0], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
-    };
     match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) if pairs[0].0.rows == sum_area.rows && pairs[0].0.cols == sum_area.cols => {
-            sum_matching(&pairs, &sum_area, ctx)
+        Some(pairs) => {
+            let (rows, cols) = (pairs[0].0.rows, pairs[0].0.cols);
+            match criteria::aligned_area(&args[0], ctx, rows, cols) {
+                Some(sum_area) => sum_matching(&pairs, &sum_area, ctx),
+                None => err(ErrorValue::Value),
+            }
         }
-        _ => err(ErrorValue::Value),
+        None => err(ErrorValue::Value),
     }
 }
 

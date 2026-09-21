@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, err, evaluate, num};
+use crate::eval::{Area, EvalContext, as_area, bound_area, err, evaluate, num};
 use crate::parser::Expr;
 
 use super::criteria::{self, Criterion};
@@ -593,7 +593,7 @@ pub(crate) fn countif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let area = match as_area(&args[0], ctx) {
-        Some(a) => a,
+        Some(a) => bound_area(a, ctx),
         None => return err(ErrorValue::Value),
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
@@ -620,13 +620,16 @@ pub(crate) fn averageif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         return err(ErrorValue::Value);
     }
     let crit_area = match as_area(&args[0], ctx) {
-        Some(a) => a,
+        Some(a) => bound_area(a, ctx),
         None => return err(ErrorValue::Value),
     };
     let value_spec = if args.len() == 3 { &args[2] } else { &args[0] };
-    let value_area = match as_area(value_spec, ctx) {
+    let value_area = match criteria::aligned_area(value_spec, ctx, crit_area.rows, crit_area.cols) {
         Some(a) => a,
-        None => return err(ErrorValue::Value),
+        None => match as_area(value_spec, ctx) {
+            Some(a) => a,
+            None => return err(ErrorValue::Value),
+        },
     };
     let criterion = criteria::criterion_from_arg(&args[1], ctx);
     average_of(&[(crit_area, criterion)], &value_area, ctx)
@@ -637,15 +640,15 @@ pub(crate) fn averageifs(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    let value_area = match as_area(&args[0], ctx) {
-        Some(a) => a,
-        None => return err(ErrorValue::Value),
-    };
     match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) if pairs[0].0.rows == value_area.rows && pairs[0].0.cols == value_area.cols => {
-            average_of(&pairs, &value_area, ctx)
+        Some(pairs) => {
+            let (rows, cols) = (pairs[0].0.rows, pairs[0].0.cols);
+            match criteria::aligned_area(&args[0], ctx, rows, cols) {
+                Some(value_area) => average_of(&pairs, &value_area, ctx),
+                None => err(ErrorValue::Value),
+            }
         }
-        _ => err(ErrorValue::Value),
+        None => err(ErrorValue::Value),
     }
 }
 
@@ -663,15 +666,13 @@ fn extreme_ifs(args: &[Expr], ctx: &EvalContext<'_>, largest: bool) -> CellValue
     if args.len() < 3 {
         return err(ErrorValue::Value);
     }
-    let value_area = match as_area(&args[0], ctx) {
-        Some(area) => area,
+    let pairs = match criteria::collect_pairs(&args[1..], ctx) {
+        Some(pairs) => pairs,
         None => return err(ErrorValue::Value),
     };
-    let pairs = match criteria::collect_pairs(&args[1..], ctx) {
-        Some(pairs) if pairs[0].0.rows == value_area.rows && pairs[0].0.cols == value_area.cols => {
-            pairs
-        }
-        _ => return err(ErrorValue::Value),
+    let value_area = match criteria::aligned_area(&args[0], ctx, pairs[0].0.rows, pairs[0].0.cols) {
+        Some(area) => area,
+        None => return err(ErrorValue::Value),
     };
     let nums = match matching_numbers(&pairs, &value_area, ctx) {
         Ok(nums) => nums,

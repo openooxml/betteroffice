@@ -729,6 +729,30 @@ pub(crate) fn format_number(n: f64) -> String {
     format!("{n}")
 }
 
+/// a reference cut to the extent the sheet uses, so a whole-column or
+/// whole-row argument costs the authored data rather than a million blanks.
+pub(crate) fn bound_area(mut area: Area, ctx: &EvalContext<'_>) -> Area {
+    if area.rows >= xlsx_model::MAX_ROWS as usize {
+        area.rows = used_height(&area, ctx);
+    }
+    if area.cols >= xlsx_model::MAX_COLS as usize {
+        area.cols = used_width(&area, ctx);
+    }
+    area
+}
+
+pub(crate) fn used_height(area: &Area, ctx: &EvalContext<'_>) -> usize {
+    (ctx.provider.used_rows(area.sheet) as usize)
+        .saturating_sub(area.start.row as usize)
+        .max(1)
+}
+
+pub(crate) fn used_width(area: &Area, ctx: &EvalContext<'_>) -> usize {
+    (ctx.provider.used_cols(area.sheet) as usize)
+        .saturating_sub(area.start.col as usize)
+        .max(1)
+}
+
 /// a resolved rectangular reference: absolute top-left plus dimensions on a
 /// known sheet, for positional access by function modules.
 pub(crate) struct Area {
