@@ -1200,3 +1200,19 @@ fn timevalue_reads_a_written_clock() {
     approx("TIMEVALUE(\"25:00\")", 0.041666666666666664);
     approx("TIMEVALUE(\"12:30\" & \" \" & \"PM\")", 0.5208333333333334);
 }
+
+/// DAYS counts whole days either way round, and reads a written date.
+#[test]
+fn days_between_two_dates() {
+    check(&[
+        ("DAYS(DATE(2020,3,1), DATE(2020,2,1))", n(29.0)),
+        ("DAYS(DATE(2020,2,1), DATE(2020,3,1))", n(-29.0)),
+        ("DAYS(43831, 43831)", n(0.0)),
+        ("DAYS(\"3/1/2021\", \"2/1/2021\")", n(28.0)),
+        ("DAYS(43831.9, 43830.1)", n(1.0)),
+        ("DAYS(\"hello\", 1)", e(ErrorValue::Value)),
+        ("DAYS(-1, 1)", e(ErrorValue::Num)),
+        ("DAYS(1)", e(ErrorValue::Value)),
+        ("DAYS(1/0, 1)", e(ErrorValue::Div0)),
+    ]);
+}

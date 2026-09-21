@@ -463,6 +463,34 @@ pub(crate) fn datevalue(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// DAYS(end, start): whole days from one date to the other, negative when
+/// they run backwards. either end may be written as text.
+pub(crate) fn days(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() != 2 {
+        return err(ErrorValue::Value);
+    }
+    match (serial_argument(args, ctx, 0), serial_argument(args, ctx, 1)) {
+        (Ok(end), Ok(start)) => num((end - start) as f64),
+        (Err(e), _) | (_, Err(e)) => err(e),
+    }
+}
+
+/// one date argument as a serial: a number truncated, or text read the way
+/// DATEVALUE reads it.
+fn serial_argument(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<i64, ErrorValue> {
+    match evaluate(&args[index], ctx) {
+        CellValue::Error { value } => Err(value),
+        CellValue::Text { value } => parse_date_text(&value, ctx).ok_or(ErrorValue::Value),
+        other => {
+            let serial = crate::eval::to_number(&other)?.trunc();
+            if serial < 0.0 {
+                return Err(ErrorValue::Num);
+            }
+            Ok(serial as i64)
+        }
+    }
+}
+
 /// parse the date part of a textual timestamp to a serial, `None` when it is
 /// not a date this locale (US order) recognises.
 fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
