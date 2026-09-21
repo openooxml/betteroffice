@@ -23,7 +23,7 @@ pub struct TextSearchMatch {
     pub text: String,
 }
 
-/// Literal query; case-insensitive matching equates characters that share an uppercase form.
+/// Literal query with Unicode simple case-insensitive matching.
 struct Needle {
     folded: String,
     case_sensitive: bool,
@@ -66,6 +66,13 @@ impl Needle {
 }
 
 fn fold_char(ch: char) -> char {
+    match ch {
+        '\u{0131}' => return ch,
+        '\u{1FD3}' => return '\u{0390}',
+        '\u{1FE3}' => return '\u{03B0}',
+        '\u{FB05}' => return '\u{FB06}',
+        _ => {}
+    }
     let mut upper = ch.to_uppercase();
     if let (Some(single), None) = (upper.next(), upper.next()) {
         let mut lower = single.to_lowercase();

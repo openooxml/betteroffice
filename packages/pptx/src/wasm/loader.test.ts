@@ -128,6 +128,38 @@ test('text search returns stable slide and story locations without mutating the 
   }
 });
 
+test('Unicode text search preserves simple-folding matches and UTF-16 offsets', async () => {
+  const text = (await readFile(resolve(root,
+    'crates/pptx-edit/tests/fixtures/unicode-search.txt'), 'utf8')).trimEnd();
+  const source = openPresentation(fixture, { clientId: 9291 });
+  try {
+    const slide = source.snapshot().slides[0];
+    const receipt = source.addTextBox(slide.id, {
+      name: 'Unicode search', text,
+      rect: { x: 100000, y: 100000, width: 2000000, height: 500000 }, style: {},
+    });
+    const cases: Array<[string, string[]]> = [
+      ['i', ['I', 'i']], ['I', ['I', 'i']], ['ı', ['ı']], ['İ', ['İ']],
+      ['ΐ', ['ΐ', 'ΐ']], ['ΐ', ['ΐ', 'ΐ']],
+      ['ΰ', ['ΰ', 'ΰ']], ['ΰ', ['ΰ', 'ΰ']],
+      ['ﬅ', ['ﬅ', 'ﬆ']], ['ﬆ', ['ﬅ', 'ﬆ']],
+    ];
+    for (const [query, expected] of cases) {
+      const matches = source.searchText(query).filter((match) => match.shapeId === receipt.shapeId);
+      expect(matches.map((match) => match.text)).toEqual(expected);
+      for (const match of matches) {
+        expect(match.start).toBe(text.indexOf(match.text));
+        expect(match.end).toBe(match.start + match.text.length);
+      }
+      expect(source.searchText(query, { caseSensitive: true })
+        .filter((match) => match.shapeId === receipt.shapeId).map((match) => match.text))
+        .toEqual([query]);
+    }
+  } finally {
+    source.dispose();
+  }
+});
+
 test('inline proposal diffs reflow and paint marked text without changing hit tests or saved text', async () => {
   const source = openPresentation(fixture, { clientId: 9203, fonts: [{ family: 'Liberation Sans', bytes: fontBytes }] });
   try {
