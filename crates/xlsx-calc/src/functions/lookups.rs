@@ -176,6 +176,11 @@ pub(crate) fn xmatch(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         },
         None => 1,
     };
+    // wildcard mode 2 is not implemented, so it is refused rather than
+    // silently answered as an exact match
+    if !(-1..=1).contains(&mode) || !matches!(search, -2 | -1 | 1 | 2) {
+        return err(ErrorValue::Value);
+    }
     let values = match area.values_ref(ctx) {
         Ok(values) => values,
         Err(error) => return err(error),
@@ -336,10 +341,11 @@ pub(crate) fn indirect_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area
     if args.is_empty() || args.len() > 2 {
         return Err(ErrorValue::Value);
     }
-    if let Some(style) = args.get(1)
-        && !crate::eval::to_bool(&evaluate(style, ctx)).unwrap_or(true)
-    {
-        return Err(ErrorValue::Ref);
+    if let Some(style) = args.get(1) {
+        // a bad a1 argument is the caller's error, not a silent A1 default
+        if !crate::eval::to_bool(&evaluate(style, ctx))? {
+            return Err(ErrorValue::Ref);
+        }
     }
     let text = match evaluate(&args[0], ctx) {
         CellValue::Text { value } => value,

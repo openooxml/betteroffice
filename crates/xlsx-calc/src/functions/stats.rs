@@ -278,21 +278,21 @@ pub(crate) fn aggregate(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
-/// re-run an aggregate over only the cells that are not errors.
-fn aggregate_ignoring_errors(code: i64, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+/// the numeric cells of an argument list, skipping errors, as a literal list
+/// the scalar aggregates can be re-run over.
+fn numeric_literals(args: &[Expr], ctx: &EvalContext<'_>) -> Vec<f64> {
     let mut nums = Vec::new();
     for arg in args {
         match as_area(arg, ctx) {
-            Some(area) => match area.values_ref(ctx) {
-                Ok(values) => {
+            Some(area) => {
+                if let Ok(values) = area.values_ref(ctx) {
                     for value in values {
                         if let CellValue::Number { value } = value.as_ref() {
                             nums.push(*value);
                         }
                     }
                 }
-                Err(_) => continue,
-            },
+            }
             None => {
                 if let CellValue::Number { value } = evaluate(arg, ctx) {
                     nums.push(value);
@@ -300,18 +300,98 @@ fn aggregate_ignoring_errors(code: i64, args: &[Expr], ctx: &EvalContext<'_>) ->
             }
         }
     }
+    nums
+}
+
+/// re-run an aggregate over only the cells that are not errors. every code
+/// `AGGREGATE` accepts is handled here, so an error in the input cannot turn a
+/// supported code into `#VALUE!`.
+fn aggregate_ignoring_errors(code: i64, args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    let take = match code {
+        14..=17 => args.len().saturating_sub(1),
+        _ => args.len(),
+    };
+    let mut nums = numeric_literals(&args[..take], ctx);
     if nums.is_empty() {
         return err(ErrorValue::Div0);
     }
     let n = nums.len() as f64;
+    let mean = nums.iter().sum::<f64>() / n;
+    let squares = nums.iter().map(|v| (v - mean).powi(2)).sum::<f64>();
+    let variance = |lost: f64| -> CellValue {
+        if n - lost <= 0.0 {
+            return err(ErrorValue::Div0);
+        }
+        finite(squares / (n - lost))
+    };
+    let deviation = |lost: f64| -> CellValue {
+        if n - lost <= 0.0 {
+            return err(ErrorValue::Div0);
+        }
+        finite((squares / (n - lost)).sqrt())
+    };
+    // 14-17 take a rank or quantile as their final argument
+    let k = match code {
+        14..=17 => match nth_number(args, ctx, args.len() - 1) {
+            Ok(k) => k,
+            Err(e) => return err(e),
+        },
+        _ => 0.0,
+    };
+    nums.sort_by(f64::total_cmp);
     match code {
-        1 => num(nums.iter().sum::<f64>() / n),
+        1 => num(mean),
         2 | 3 => num(n),
-        4 => num(nums.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
-        5 => num(nums.iter().copied().fold(f64::INFINITY, f64::min)),
+        4 => num(nums[nums.len() - 1]),
+        5 => num(nums[0]),
         6 => num(nums.iter().product()),
+        7 => deviation(1.0),
+        8 => deviation(0.0),
         9 => num(nums.iter().sum()),
+        10 => variance(1.0),
+        11 => variance(0.0),
+        12 => num(if nums.len() % 2 == 1 {
+            nums[nums.len() / 2]
+        } else {
+            (nums[nums.len() / 2 - 1] + nums[nums.len() / 2]) / 2.0
+        }),
+        13 => mode_of(&nums),
+        14 => nth_from_end(&nums, k, true),
+        15 => nth_from_end(&nums, k, false),
+        16 | 17 => match percentile_inc(&nums, if code == 16 { k } else { k.trunc() / 4.0 }) {
+            Ok(v) => finite(v),
+            Err(e) => err(e),
+        },
         _ => err(ErrorValue::Value),
+    }
+}
+
+/// LARGE/SMALL over an already-sorted list.
+fn nth_from_end(sorted: &[f64], k: f64, largest: bool) -> CellValue {
+    let k = k.trunc();
+    if k < 1.0 || k > sorted.len() as f64 {
+        return err(ErrorValue::Num);
+    }
+    let index = k as usize - 1;
+    num(if largest {
+        sorted[sorted.len() - 1 - index]
+    } else {
+        sorted[index]
+    })
+}
+
+/// the most frequent value, or `#N/A` when every value occurs once.
+fn mode_of(nums: &[f64]) -> CellValue {
+    let mut best: Option<(f64, usize)> = None;
+    for value in nums {
+        let count = nums.iter().filter(|other| *other == value).count();
+        if count > 1 && best.is_none_or(|(_, seen)| count > seen) {
+            best = Some((*value, count));
+        }
+    }
+    match best {
+        Some((value, _)) => num(value),
+        None => err(ErrorValue::NA),
     }
 }
 

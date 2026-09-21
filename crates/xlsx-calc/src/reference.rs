@@ -124,8 +124,11 @@ pub(crate) fn table_rect(
             TableBand::Data => table.data_rows(),
             TableBand::Totals => table.totals_range(),
             TableBand::ThisRow => {
+                // excel restricts `#This Row` to the data body, so a formula
+                // sitting in the header or totals row is #VALUE!
                 let row = cell.ok_or(ErrorValue::Value)?.row;
-                if !(table.range.start.row..=table.range.end.row).contains(&row) {
+                let (first, last) = table.data_rows().ok_or(ErrorValue::Value)?;
+                if !(first..=last).contains(&row) {
                     return Err(ErrorValue::Value);
                 }
                 Some((row, row))

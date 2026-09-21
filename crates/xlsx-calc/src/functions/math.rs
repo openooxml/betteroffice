@@ -303,6 +303,31 @@ pub(crate) fn int(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     unary(args, ctx, f64::floor)
 }
 
+/// every cell of the arguments as a number, refusing anything that is not one.
+fn strict_numbers(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Vec<f64>, ErrorValue> {
+    let mut nums = Vec::new();
+    for arg in args {
+        match as_area(arg, ctx) {
+            Some(area) => {
+                for value in area.values_ref(ctx)? {
+                    match value.as_ref() {
+                        CellValue::Number { value } => nums.push(*value),
+                        CellValue::Error { value } => return Err(*value),
+                        CellValue::Empty => {}
+                        _ => return Err(ErrorValue::Value),
+                    }
+                }
+            }
+            None => match evaluate(arg, ctx) {
+                CellValue::Number { value } => nums.push(value),
+                CellValue::Error { value } => return Err(value),
+                _ => return Err(ErrorValue::Value),
+            },
+        }
+    }
+    Ok(nums)
+}
+
 /// QUOTIENT(numerator, denominator): the integer part of the division,
 /// truncated toward zero.
 pub(crate) fn quotient(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
@@ -329,7 +354,9 @@ pub(crate) fn seriessum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         (Ok(x), Ok(n), Ok(m)) => (x, n, m),
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
     };
-    let coefficients = match collect_numbers(&args[3..], ctx) {
+    // a non-numeric coefficient is #VALUE!, not a term to skip: dropping one
+    // would shift every later power
+    let coefficients = match strict_numbers(&args[3..], ctx) {
         Ok(c) => c,
         Err(e) => return err(e),
     };
