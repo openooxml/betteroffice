@@ -5447,7 +5447,7 @@ mod tests {
 
     #[test]
     fn gradient_stops_reach_the_display_list_in_position_order() {
-        use ooxml_drawingml::{ColorValue, GradientFill, GradientStop as ModelStop};
+        use ooxml_drawingml::{ColorValue, GradientStop as ModelStop};
 
         let stop = |position, rgb: &str, alpha| ModelStop {
             position,
