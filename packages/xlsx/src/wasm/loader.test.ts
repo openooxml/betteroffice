@@ -83,6 +83,34 @@ describe('wasm loader', () => {
     }
   });
 
+  it('preserves a cleared cell and its undo history when applying a snapshot', () => {
+    for (const legacy of [false, true]) {
+      const handle = openWorkbook(sampleBytes(), { collaborative: true, clientId: 5023 });
+      try {
+        const original = handle.cell(0, 0, 0).input;
+        expect(original).not.toBe('');
+        const update = legacy
+          ? new Uint8Array(readFileSync(resolve(
+            import.meta.dir,
+            '../../../../crates/betteroffice-xlsx/tests/fixtures/workbook-npm-0.2.1.update.bin'
+          )))
+          : handle.encodeStateAsUpdate();
+        handle.editCell(0, 0, 0, '');
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        if (legacy) {
+          expect(() => handle.applyUpdate(update)).toThrow();
+        } else {
+          handle.applyUpdate(update);
+        }
+        expect(handle.cell(0, 0, 0).input).toBe('');
+        handle.undo();
+        expect(handle.cell(0, 0, 0).input).toBe(original);
+      } finally {
+        handle.dispose();
+      }
+    }
+  });
+
   it('opens the hand-built fixture and reads sheet info', () => {
     const handle = openWorkbook(sampleBytes());
     try {

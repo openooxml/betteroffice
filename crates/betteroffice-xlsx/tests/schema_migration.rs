@@ -201,6 +201,42 @@ fn an_edited_replica_does_not_adopt_a_legacy_snapshot() {
     );
 }
 
+#[test]
+fn a_cleared_cell_prevents_snapshot_replacement() {
+    for legacy in [false, true] {
+        let mut workbook =
+            Workbook::open_collaborative_recalculated(SAMPLE, 5_022, CalculationOptions::default())
+                .unwrap();
+        let original = a1(&workbook);
+        assert_ne!(original, CellValue::Empty);
+        let snapshot = if legacy {
+            SAMPLE_V5.to_vec()
+        } else {
+            workbook.encode_state_as_update_v1()
+        };
+        workbook
+            .edit_cell(
+                SheetId(0),
+                CellRef::parse_a1("A1").unwrap(),
+                "",
+                CalculationOptions::default(),
+            )
+            .unwrap();
+        assert_eq!(a1(&workbook), CellValue::Empty);
+        assert!(workbook.can_undo());
+        let result = workbook.apply_update_v1(&snapshot, CalculationOptions::default());
+        if legacy {
+            assert!(result.is_err());
+        } else {
+            result.unwrap();
+        }
+        assert_eq!(a1(&workbook), CellValue::Empty);
+        assert!(workbook.can_undo());
+        workbook.undo(CalculationOptions::default()).unwrap();
+        assert_eq!(a1(&workbook), original);
+    }
+}
+
 /// Adoption is gated on the base fingerprint, so a snapshot of some other
 /// workbook is never taken as this one's state. (Merging one is a separate,
 /// older problem: it lands a partial contamination either way.)

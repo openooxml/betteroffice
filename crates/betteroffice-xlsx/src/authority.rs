@@ -605,11 +605,13 @@ impl WorkbookAuthority {
 
     /// True while the replica still holds nothing but its own bootstrap.
     fn is_pristine(&self) -> bool {
-        let state_vector = self.doc.transact().state_vector();
+        let txn = self.doc.transact();
+        let state_vector = txn.state_vector();
         state_vector.len() == 1
             && state_vector
                 .iter()
                 .all(|(client, _)| client.get() == self.base.bootstrap_client_id)
+            && txn.snapshot().delete_set.is_empty()
     }
 
     /// True when the document stands on its own rather than being the tail of
