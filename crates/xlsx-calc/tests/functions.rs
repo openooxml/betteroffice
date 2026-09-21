@@ -1033,3 +1033,19 @@ fn range_operator_refuses_two_sheets() {
     );
     assert_eq!(value("SUM(Sheet1!A1:INDEX(Sheet1!A1:A9,2))"), n(7.0));
 }
+
+/// INDEX and OFFSET resolve references inside array formulas too, so an
+/// index scalar evaluation cannot read is retried elementwise. B1:B5 holds
+/// fruit names of length 5, 6, 5, 6, 5.
+#[test]
+fn reference_indexes_fall_back_to_array_evaluation() {
+    check(&[
+        ("LEN(B1:B5)", e(ErrorValue::Value)),
+        ("INDEX(A1:A5,MATCH(6,LEN(B1:B5),0))", n(20.0)),
+        ("OFFSET(A1,MATCH(6,LEN(B1:B5),0),0)", n(30.0)),
+        ("SUM(A1:INDEX(A1:A5,MATCH(6,LEN(B1:B5),0)))", n(30.0)),
+        // a reference index keeps its scalar answer rather than its first cell
+        ("INDEX(A1:A5,C1:C3)", e(ErrorValue::Value)),
+        ("INDEX(A1:A5,1/0)", e(ErrorValue::Div0)),
+    ]);
+}
