@@ -153,8 +153,11 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         16 => 6,
         _ => return err(ErrorValue::Num),
     };
-    let Some((year, _, _)) = serial_to_ymd(serial) else {
-        return err(ErrorValue::Num);
+    // excel's serial 0 is the phantom day before 1900-01-01, and is week 0
+    let year = match serial_to_ymd(serial) {
+        Some((year, _, _)) => year,
+        None if serial == 0 => 1900,
+        None => return err(ErrorValue::Num),
     };
     let jan1 = date_to_serial(year, 1, 1);
     if jan1 < 0 {
@@ -162,7 +165,7 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
     // serial 1 is a sunday, so `(serial - 1) % 7` is the offset from sunday
     let offset = ((jan1 - 1).rem_euclid(7) - start).rem_euclid(7);
-    num(((serial - jan1 + offset) / 7 + 1) as f64)
+    num(((serial - jan1 + offset).div_euclid(7) + 1) as f64)
 }
 
 /// ISOWEEKNUM(serial): ISO 8601 — weeks start monday, week 1 holds the first
