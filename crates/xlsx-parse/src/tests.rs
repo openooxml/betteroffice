@@ -77,6 +77,91 @@ fn cell_at(wb: &Workbook, a1: &str) -> Cell {
     wb.sheets[0].cell(addr).cloned().unwrap_or_default()
 }
 
+/// One sheet plus a table part reached through the worksheet relationships.
+fn package_with_table(table: &str) -> Vec<(String, Vec<u8>)> {
+    let mut parts = package("<sheetData/>", &[], false);
+    parts.push((
+        "xl/worksheets/_rels/sheet1.xml.rels".to_string(),
+        br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>"#.to_vec(),
+    ));
+    parts.push((
+        "xl/tables/table1.xml".to_string(),
+        table.as_bytes().to_vec(),
+    ));
+    parts
+}
+
+#[test]
+fn reads_a_table_part_through_the_worksheet_relationships() {
+    let table = r#"<table id="1" name="Sales" displayName="Sales" ref="B2:D12" totalsRowCount="1"><tableColumns count="3"><tableColumn id="1" name="Region"/><tableColumn id="2" name="Extra_x000a_Cost"/><tableColumn id="3" name="_x005F_x0041_"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+
+    assert_eq!(wb.tables.len(), 1);
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.name, "Sales");
+    assert_eq!(parsed.sheet, SheetId(0));
+    assert_eq!(parsed.range.to_a1(), "B2:D12");
+    assert_eq!(parsed.header_rows, 1);
+    assert_eq!(parsed.totals_rows, 1);
+    assert_eq!(parsed.columns, ["Region", "Extra\nCost", "_x0041_"]);
+    assert_eq!(parsed.data_rows(), Some((2, 10)));
+    assert_eq!(parsed.header_range(), Some((1, 1)));
+    assert_eq!(parsed.totals_range(), Some((11, 11)));
+    assert_eq!(
+        wb.table("sALES").map(|table| table.name.as_str()),
+        Some("Sales")
+    );
+}
+
+#[test]
+fn a_table_part_without_a_usable_ref_or_name_is_skipped() {
+    for table in [
+        r#"<table id="1" displayName="Sales"><tableColumns/></table>"#,
+        r#"<table id="1" displayName="Sales" ref="not-a-range"><tableColumns/></table>"#,
+        r#"<table id="1" ref="A1:B2"><tableColumns/></table>"#,
+    ] {
+        let wb = parse_workbook(&package_with_table(table)).unwrap();
+        assert!(wb.tables.is_empty(), "{table}");
+    }
+}
+
+#[test]
+fn table_bands_are_clamped_to_the_rows_the_ref_spans() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:A2" headerRowCount="9" totalsRowCount="9"><tableColumns><tableColumn id="1" name="Only"/></tableColumns></table>"#;
+    let wb = parse_workbook(&package_with_table(table)).unwrap();
+    let parsed = &wb.tables[0];
+    assert_eq!(parsed.header_rows, 2);
+    assert_eq!(parsed.totals_rows, 0);
+    assert_eq!(parsed.data_rows(), None);
+}
+
+#[test]
+fn a_table_column_flood_is_refused() {
+    let columns: String = (0..=crate::MAX_TABLE_COLUMNS)
+        .map(|index| format!(r#"<tableColumn id="{index}" name="c{index}"/>"#))
+        .collect();
+    let table = format!(
+        r#"<table id="1" displayName="Sales" ref="A1:B2"><tableColumns>{columns}</tableColumns></table>"#
+    );
+    assert!(matches!(
+        parse_workbook(&package_with_table(&table)),
+        Err(ParseError::Malformed(_))
+    ));
+}
+
+#[test]
+fn a_table_survives_the_round_trip_untouched() {
+    let table = r#"<table id="1" displayName="Sales" ref="A1:B3"><tableColumns><tableColumn id="1" name="Region"/><tableColumn id="2" name="Amount"/></tableColumns></table>"#;
+    let parts = package_with_table(table);
+    let parsed = parse_workbook_with_package(&parts).unwrap();
+    let saved = serialize_workbook_with_package(&parsed.workbook, &parsed.package).unwrap();
+    let table_part = saved
+        .iter()
+        .find(|(path, _)| path == "xl/tables/table1.xml")
+        .expect("table part is preserved");
+    assert_eq!(table_part.1.as_slice(), table.as_bytes());
+}
+
 #[test]
 fn parses_shared_string_number_formula_bool_error() {
     let body = r#"

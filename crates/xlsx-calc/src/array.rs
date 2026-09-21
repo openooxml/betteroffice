@@ -213,6 +213,10 @@ pub fn evaluate_array(expr: &Expr, ctx: &EvalContext<'_>) -> Value {
             Some(area) => area_values(&area, ctx),
             None => Value::error(ErrorValue::Ref),
         },
+        Expr::TableRef { table, spec } => match crate::eval::table_area(table, spec, ctx) {
+            Ok(area) => area_values(&area, ctx),
+            Err(error) => Value::error(error),
+        },
         Expr::Name { scope, name } => match crate::eval::bound(scope, name, ctx) {
             // a bound block costs what re-reading the range it came from would,
             // so a callback body cannot copy one for free once per iteration.
@@ -1899,7 +1903,7 @@ fn let_(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
 fn reference_of(expr: &Expr) -> Option<Expr> {
     matches!(
         expr,
-        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. }
+        Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::TableRef { .. }
     )
     .then(|| expr.clone())
 }

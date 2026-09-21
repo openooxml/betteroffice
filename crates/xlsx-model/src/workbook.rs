@@ -41,6 +41,56 @@ pub struct DefinedName {
     pub hidden: bool,
 }
 
+/// One `xl/tables/tableN.xml` definition: the rectangle a structured reference
+/// resolves against, with the header and totals bands split out.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Table {
+    pub name: String,
+    pub sheet: SheetId,
+    pub range: CellRange,
+    pub header_rows: u32,
+    pub totals_rows: u32,
+    pub columns: Vec<String>,
+}
+
+impl Table {
+    /// Inclusive row band holding data, `None` when the table has no data rows.
+    pub fn data_rows(&self) -> Option<(RowId, RowId)> {
+        let top = self.range.start.row.checked_add(self.header_rows)?;
+        let bottom = self.range.end.row.checked_sub(self.totals_rows)?;
+        (top <= bottom).then_some((top, bottom))
+    }
+
+    /// Inclusive header band, `None` when the table has no header row.
+    pub fn header_range(&self) -> Option<(RowId, RowId)> {
+        if self.header_rows == 0 {
+            return None;
+        }
+        let bottom = self.range.start.row.checked_add(self.header_rows - 1)?;
+        Some((self.range.start.row, bottom.min(self.range.end.row)))
+    }
+
+    /// Inclusive totals band, `None` when the table has no totals row.
+    pub fn totals_range(&self) -> Option<(RowId, RowId)> {
+        if self.totals_rows == 0 {
+            return None;
+        }
+        let top = self.range.end.row.checked_sub(self.totals_rows - 1)?;
+        Some((top, self.range.end.row))
+    }
+
+    /// 0-based index of `column` within the table, matched case-insensitively.
+    pub fn column_index(&self, column: &str) -> Option<u32> {
+        let index = self
+            .columns
+            .iter()
+            .position(|name| name.eq_ignore_ascii_case(column))?;
+        let index = u32::try_from(index).ok()?;
+        let col = self.range.start.col.checked_add(index)?;
+        (col <= self.range.end.col).then_some(index)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Hyperlink {
     pub range: CellRange,
@@ -276,6 +326,8 @@ pub struct Workbook {
     pub shared_strings: Vec<String>,
     /// parsed style tables + theme; a cell's `style` indexes `styles.cell_xfs`.
     pub styles: Stylesheet,
+    /// table parts, in package order; structured references resolve through them.
+    pub tables: Vec<Table>,
 }
 
 impl Workbook {
@@ -294,6 +346,12 @@ impl Workbook {
             .enumerate()
             .find(|(_, sheet)| sheet.name.to_lowercase() == name)
             .map(|(i, s)| (SheetId(i as u32), s))
+    }
+
+    pub fn table(&self, name: &str) -> Option<&Table> {
+        self.tables
+            .iter()
+            .find(|table| table.name.eq_ignore_ascii_case(name))
     }
 
     pub fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
@@ -320,6 +378,11 @@ pub trait CellProvider {
     fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str>;
     fn sheet_id(&self, name: &str) -> Option<SheetId>;
     fn defined_name(&self, _sheet: SheetId, _name: &str) -> Option<&DefinedName> {
+        None
+    }
+
+    /// the table a structured reference names, matched case-insensitively.
+    fn table(&self, _name: &str) -> Option<&Table> {
         None
     }
 
@@ -357,6 +420,10 @@ impl CellProvider for Workbook {
 
     fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
         self.defined_name(sheet, name)
+    }
+
+    fn table(&self, name: &str) -> Option<&Table> {
+        self.table(name)
     }
 
     fn used_rows(&self, sheet: SheetId) -> RowId {

@@ -10,8 +10,10 @@ use std::sync::{Arc, Mutex};
 
 use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
 
+use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
 use crate::parser::{BinaryOp, Expr, UnaryOp, parse_formula};
+use crate::reference::table_rect;
 
 pub const MAX_EVALUATION_CELL_VISITS: u64 = 1_100_000;
 pub const MAX_RECALCULATION_CELL_VISITS: u64 = 10_000_000;
@@ -362,6 +364,14 @@ pub fn evaluate(expr: &Expr, ctx: &EvalContext<'_>) -> CellValue {
         Expr::Ref { sheet, cell } => resolve_ref(sheet, *cell, ctx),
         // no implicit intersection: a bare range in scalar context is #VALUE!
         Expr::Range { .. } | Expr::ColumnRange { .. } => err(ErrorValue::Value),
+        Expr::TableRef { table, spec } => match table_area(table, spec, ctx) {
+            Ok(area) if area.rows == 1 && area.cols == 1 => match area.get(ctx, 0, 0) {
+                Ok(value) => value,
+                Err(error) => err(error),
+            },
+            Ok(_) => err(ErrorValue::Value),
+            Err(error) => err(error),
+        },
         Expr::Name { scope, name } => match bound(scope, name, ctx) {
             Some(binding) => binding.scalar(),
             None => evaluate_defined_name(scope, name, ctx),
@@ -797,6 +807,9 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDIRECT") => {
             crate::functions::lookups::indirect_area(args, ctx).ok()
         }
+        Expr::FuncCall { name, args, .. } if name.eq_ignore_ascii_case("INDEX") => {
+            crate::functions::lookups::index_area(args, ctx).ok()
+        }
         Expr::Ref { sheet, cell } => Some(Area {
             sheet: resolve_sheet(sheet, ctx)?,
             start: *cell,
@@ -815,6 +828,7 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
             rows: xlsx_model::addr::MAX_ROWS as usize,
             cols: (range.end - range.start + 1) as usize,
         }),
+        Expr::TableRef { table, spec } => table_area(table, spec, ctx).ok(),
         Expr::Name { scope, name } => {
             if let Some(binding) = bound(scope, name, ctx) {
                 return binding.reference().and_then(|expr| as_area(expr, ctx));
@@ -825,6 +839,23 @@ pub(crate) fn as_area(arg: &Expr, ctx: &EvalContext<'_>) -> Option<Area> {
         }
         _ => None,
     }
+}
+
+/// the rectangle a structured reference designates, on the sheet its table
+/// lives on. an unknown table name is #REF!.
+pub(crate) fn table_area(
+    table: &str,
+    spec: &TableSpec,
+    ctx: &EvalContext<'_>,
+) -> Result<Area, ErrorValue> {
+    let definition = ctx.provider.table(table).ok_or(ErrorValue::Ref)?;
+    let rect = table_rect(definition, spec, ctx.cell)?;
+    Ok(Area {
+        sheet: definition.sheet,
+        start: rect.start,
+        rows: (rect.end.row - rect.start.row + 1) as usize,
+        cols: (rect.end.col - rect.start.col + 1) as usize,
+    })
 }
 
 /// the value a stored cell surfaces as, with invalid stored values mapped to

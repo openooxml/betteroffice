@@ -7,7 +7,7 @@ use quick_xml::events::Event;
 use xlsx_model::addr::{MAX_COLS, MAX_ROWS};
 use xlsx_model::{
     Cell, CellRange, CellRef, CellValue, DateSystem, DefinedName, ErrorValue, FreezePane,
-    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Workbook,
+    Hyperlink, Sheet, SheetFormat, SheetId, Stylesheet, Table, Workbook,
 };
 
 use crate::formula::SharedFormulas;
@@ -15,7 +15,10 @@ use crate::styles::parse_stylesheet;
 use crate::xml::{
     attr, collect_text, find_part, local_name, next_event, reader, resolve_part_path,
 };
-use crate::{MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, ParseError};
+use crate::{
+    MAX_CELLS, MAX_DEFINED_NAMES, MAX_HYPERLINKS, MAX_SHARED_STRINGS, MAX_TABLE_COLUMNS,
+    MAX_TABLES, ParseError,
+};
 
 /// excel's row-height ceiling in points.
 const MAX_ROW_HEIGHT_PT: f64 = 409.5;
@@ -78,6 +81,7 @@ pub(crate) fn parse_workbook_indexed(
     let mut shared_string_cells = Vec::with_capacity(meta.sheets.len());
     let mut legacy_dimensions = Vec::with_capacity(meta.sheets.len());
     let mut declined_parts = Vec::new();
+    let mut tables = Vec::new();
     for (idx, entry) in meta.sheets.iter().enumerate() {
         let relationship = entry.rid.as_deref().and_then(|rid| rels.get(rid));
         if relationship.is_some_and(|relationship| !relationship.is_worksheet()) {
@@ -110,6 +114,7 @@ pub(crate) fn parse_workbook_indexed(
             &mut legacy,
         )?;
         sheet.charts = crate::chart::parse_sheet_charts(parts, &path, &mut declined_parts)?;
+        collect_tables(parts, &path, &sheet_rels, SheetId(idx as u32), &mut tables)?;
         sheets.push(sheet);
         shared_string_cells.push(indices);
         legacy_dimensions.push(legacy);
@@ -122,6 +127,7 @@ pub(crate) fn parse_workbook_indexed(
             defined_names: meta.defined_names,
             shared_strings,
             styles,
+            tables,
         },
         active_sheet: meta.active_sheet,
         shared_string_cells,
@@ -257,6 +263,13 @@ struct Relationship {
 }
 
 impl Relationship {
+    fn is_table(&self) -> bool {
+        self.kind
+            .as_deref()
+            .and_then(|kind| kind.rsplit('/').next())
+            .is_some_and(|kind| kind == "table")
+    }
+
     fn is_worksheet(&self) -> bool {
         self.kind
             .as_deref()
@@ -294,6 +307,126 @@ fn parse_rels(data: &[u8]) -> Result<BTreeMap<String, Relationship>, ParseError>
         }
     }
     Ok(map)
+}
+
+/// Read every `table` relationship of one worksheet into the model. A part that
+/// is absent or lacks a usable `ref`/name is skipped: it stays preserved on the
+/// package either way, and a structured reference to it reports `#REF!`.
+fn collect_tables(
+    parts: &[(String, Vec<u8>)],
+    worksheet_path: &str,
+    sheet_rels: &BTreeMap<String, Relationship>,
+    sheet: SheetId,
+    out: &mut Vec<Table>,
+) -> Result<(), ParseError> {
+    let base = worksheet_path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    for relationship in sheet_rels.values() {
+        if relationship.external || !relationship.is_table() {
+            continue;
+        }
+        let path = resolve_part_path(base, &relationship.target);
+        let Some(bytes) = find_part(parts, &path) else {
+            continue;
+        };
+        if let Some(table) = parse_table(bytes, sheet)? {
+            if out.len() >= MAX_TABLES {
+                return Err(ParseError::Malformed("table count exceeded cap".into()));
+            }
+            out.push(table);
+        }
+    }
+    Ok(())
+}
+
+/// One `xl/tables/tableN.xml` part. `headerRowCount` defaults to 1 and
+/// `totalsRowCount` to 0, both clamped to the rows the `ref` actually spans.
+fn parse_table(data: &[u8], sheet: SheetId) -> Result<Option<Table>, ParseError> {
+    let mut reader = reader(data);
+    let mut buf = Vec::new();
+    let mut depth = 0;
+    let mut table: Option<Table> = None;
+    loop {
+        match next_event(&mut reader, &mut buf, &mut depth)? {
+            Event::Start(e) if local_name(&e) == b"table" && table.is_none() => {
+                let Some(reference) = attr(&e, b"ref")? else {
+                    return Ok(None);
+                };
+                let Ok(range) = CellRange::parse_a1(&reference) else {
+                    return Ok(None);
+                };
+                let Some(name) = attr(&e, b"displayName")?.or(attr(&e, b"name")?) else {
+                    return Ok(None);
+                };
+                let rows = range.end.row - range.start.row + 1;
+                let header_rows = row_count_attr(&e, b"headerRowCount", 1)?.min(rows);
+                let totals_rows = row_count_attr(&e, b"totalsRowCount", 0)?.min(rows - header_rows);
+                table = Some(Table {
+                    name: unescape_name(&name),
+                    sheet,
+                    range,
+                    header_rows,
+                    totals_rows,
+                    columns: Vec::new(),
+                });
+            }
+            Event::Start(e) if local_name(&e) == b"tableColumn" => {
+                if let Some(table) = table.as_mut() {
+                    if table.columns.len() >= MAX_TABLE_COLUMNS {
+                        return Err(ParseError::Malformed(
+                            "table column count exceeded cap".into(),
+                        ));
+                    }
+                    let name = attr(&e, b"name")?.unwrap_or_default();
+                    table.columns.push(unescape_name(&name));
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(table)
+}
+
+fn row_count_attr(
+    e: &quick_xml::events::BytesStart,
+    name: &[u8],
+    default: u32,
+) -> Result<u32, ParseError> {
+    Ok(attr(e, name)?
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(default))
+}
+
+/// Decode the `_xHHHH_` escapes excel writes for characters a name cannot hold
+/// literally; `_x005F_` is its own escape for a leading underscore.
+fn unescape_name(source: &str) -> String {
+    if !source.contains("_x") && !source.contains("_X") {
+        return source.to_string();
+    }
+    let bytes = source.as_bytes();
+    let mut out = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let escape = bytes.get(index) == Some(&b'_')
+            && matches!(bytes.get(index + 1), Some(b'x' | b'X'))
+            && bytes.get(index + 6) == Some(&b'_')
+            && bytes[index + 2..index + 6]
+                .iter()
+                .all(u8::is_ascii_hexdigit);
+        if escape {
+            let code = u32::from_str_radix(&source[index + 2..index + 6], 16).unwrap_or(0);
+            if let Some(decoded) = char::from_u32(code) {
+                out.push(decoded);
+                index += 7;
+                continue;
+            }
+        }
+        let rest = &source[index..];
+        let c = rest.chars().next().unwrap_or('\u{0}');
+        out.push(c);
+        index += c.len_utf8();
+    }
+    out
 }
 
 /// pick the worksheet part path: the relationship target, else the

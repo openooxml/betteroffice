@@ -5,8 +5,8 @@ use std::fmt;
 
 use xlsx_model::{CellRange, CellRef, ErrorValue};
 
-use crate::ColumnRange;
-use crate::reference::column;
+use crate::reference::{MAX_TABLE_SPEC_ITEMS, column};
+use crate::{ColumnRange, TableBand, TableSpec};
 
 pub const MAX_TOKENS: usize = 10_000;
 pub const MAX_FORMULA_BYTES: usize = 32_768;
@@ -78,6 +78,11 @@ pub enum TokKind {
     ColumnRange {
         sheet: Option<String>,
         range: ColumnRange,
+    },
+    /// `Table[...]`: a structured reference to a table's rows and columns.
+    TableRef {
+        table: String,
+        spec: TableSpec,
     },
     Plus,
     Minus,
@@ -333,6 +338,10 @@ impl Lexer<'_> {
             return self.lex_reference(Some(word), start);
         }
 
+        if self.peek() == Some('[') {
+            return self.lex_table_ref(word, start);
+        }
+
         if word.eq_ignore_ascii_case("TRUE") {
             return Ok(TokKind::Bool(true));
         }
@@ -356,6 +365,69 @@ impl Lexer<'_> {
             Ok(cell) => Ok(TokKind::Ref { sheet: None, cell }),
             Err(_) => Ok(TokKind::Ident(word)),
         }
+    }
+
+    /// `Table[...]`: either one bare item (`Table[Col]`, `Table[#Headers]`,
+    /// `Table[@Col]`) or a bracketed list (`Table[[#This Row],[Col]]`).
+    fn lex_table_ref(&mut self, table: String, start: usize) -> Result<TokKind, ParseError> {
+        self.bump();
+        let mut spec = TableSpec::default();
+        self.skip_ws();
+        if self.peek() == Some(']') {
+            self.bump();
+            return Ok(TokKind::TableRef { table, spec });
+        }
+        if self.peek() != Some('[') {
+            let item = self.read_table_item(start)?;
+            add_table_item(&mut spec, &item, start)?;
+            return Ok(TokKind::TableRef { table, spec });
+        }
+        let mut items = 0;
+        loop {
+            self.skip_ws();
+            match self.peek() {
+                Some('[') => {
+                    self.bump();
+                    items += 1;
+                    if items > MAX_TABLE_SPEC_ITEMS {
+                        return Err(ParseError::new(
+                            start,
+                            "table reference item count exceeded cap",
+                        ));
+                    }
+                    let item = self.read_table_item(start)?;
+                    add_table_item(&mut spec, &item, start)?;
+                }
+                Some(',' | ':') => {
+                    self.bump();
+                }
+                Some(']') => {
+                    self.bump();
+                    break;
+                }
+                _ => return Err(ParseError::new(start, "malformed table reference")),
+            }
+        }
+        Ok(TokKind::TableRef { table, spec })
+    }
+
+    /// read up to and including the item's closing `]`; `'` escapes the next
+    /// character, which is how excel writes `[`, `]`, `#`, `@` and `'` in a
+    /// column name.
+    fn read_table_item(&mut self, start: usize) -> Result<String, ParseError> {
+        let mut out = String::new();
+        loop {
+            match self.bump() {
+                None => return Err(ParseError::new(start, "unterminated table reference")),
+                Some(']') => break,
+                Some('\'') => match self.bump() {
+                    None => return Err(ParseError::new(start, "unterminated table reference")),
+                    Some(escaped) => out.push(escaped),
+                },
+                Some(c) => out.push(c),
+            }
+        }
+        Ok(out)
     }
 
     /// parse the reference part after a resolved sheet qualifier.
@@ -417,6 +489,36 @@ impl Lexer<'_> {
             .map_err(|error| ParseError::new(start, format!("invalid column range: {error}")))?;
         Ok(TokKind::ColumnRange { sheet, range })
     }
+}
+
+/// classify one bracket item as a band keyword, an `@` shorthand, or a column
+/// name, and fold it into `spec`.
+fn add_table_item(spec: &mut TableSpec, item: &str, start: usize) -> Result<(), ParseError> {
+    let mut item = item.trim();
+    if item.is_empty() {
+        return Ok(());
+    }
+    if let Some(rest) = item.strip_prefix('@') {
+        spec.bands.push(TableBand::ThisRow);
+        item = rest.trim();
+        if item.is_empty() {
+            return Ok(());
+        }
+    }
+    if item.starts_with('#') {
+        let band = TableBand::parse(item)
+            .ok_or_else(|| ParseError::new(start, "unknown table band selector"))?;
+        spec.bands.push(band);
+        return Ok(());
+    }
+    if spec.first_column.is_none() {
+        spec.first_column = Some(item.to_string());
+    } else if spec.last_column.is_none() {
+        spec.last_column = Some(item.to_string());
+    } else {
+        return Err(ParseError::new(start, "too many table columns"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -544,6 +646,13 @@ mod tests {
                 name: "LocalRate".into(),
             }]
         );
+    }
+
+    #[test]
+    fn rejects_excessive_table_reference_items() {
+        let items = "[#All],".repeat(MAX_TABLE_SPEC_ITEMS + 1);
+        let error = lex(&format!("Sales[{items}[Amount]]")).unwrap_err();
+        assert!(error.message.contains("item count"));
     }
 
     #[test]
