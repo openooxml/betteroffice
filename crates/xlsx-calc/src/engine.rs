@@ -16,7 +16,7 @@ use crate::eval::{EvalContext, EvaluationBudget, MAX_RECALCULATION_CELL_VISITS, 
 use crate::graph::DepGraph;
 
 /// the outcome of a recalc: cells whose displayed value changed, and cells
-/// forced to `0` by cycle participation.
+/// refused for taking part in a cycle.
 pub struct RecalcResult {
     pub changed: Vec<(SheetId, CellRef)>,
     pub cycle_cells: Vec<(SheetId, CellRef)>,
@@ -146,7 +146,12 @@ fn run_recalc(
             &mut limited_cells,
         );
         for u in &circular {
-            if write_if_changed(wb, *u, CellValue::Number { value: 0.0 }) {
+            // excel declines to evaluate a circular cell and caches the empty
+            // string for it, whatever the grid shows
+            let refused = CellValue::Text {
+                value: String::new(),
+            };
+            if write_if_changed(wb, *u, refused) {
                 changed.push((u.0, cell_of(*u)));
             }
             cycle_cells.push((u.0, cell_of(*u)));
@@ -602,6 +607,13 @@ mod tests {
         CellValue::Number { value: v }
     }
 
+    /// what a cell caught in a cycle caches.
+    fn refused() -> CellValue {
+        CellValue::Text {
+            value: String::new(),
+        }
+    }
+
     /// set a literal number cell.
     fn put_num(wb: &mut Workbook, sheet: SheetId, cell: &str, v: f64) {
         wb.sheet_mut(sheet).unwrap().set_cell(
@@ -1002,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn cycle_zeros_cells_and_recovers_when_broken() {
+    fn a_cycle_refuses_its_cells_and_recovers_when_broken() {
         let (mut wb, s) = one_sheet();
         put_formula(&mut wb, s, "A1", "B1+1");
         put_formula(&mut wb, s, "B1", "A1+1");
@@ -1010,8 +1022,8 @@ mod tests {
         let mut cyc: Vec<String> = r.cycle_cells.iter().map(|(_, c)| c.to_a1()).collect();
         cyc.sort();
         assert_eq!(cyc, vec!["A1", "B1"]);
-        assert_eq!(value(&wb, s, "A1"), num(0.0));
-        assert_eq!(value(&wb, s, "B1"), num(0.0));
+        assert_eq!(value(&wb, s, "A1"), refused());
+        assert_eq!(value(&wb, s, "B1"), refused());
 
         put_formula(&mut wb, s, "B1", "5");
         graph.set_formula(s, a1("B1"), Some("5"));
@@ -1054,7 +1066,7 @@ mod tests {
         cyc.sort();
         assert_eq!(cyc, vec!["D1", "D2"]);
         assert_eq!(value(&wb, s, "B3"), num(4.0));
-        assert_eq!(value(&wb, s, "D1"), num(0.0));
+        assert_eq!(value(&wb, s, "D1"), refused());
     }
 
     /// a settled cell feeds the ones that read it, however deep the chain,
@@ -1088,7 +1100,7 @@ mod tests {
         put_formula(&mut wb, s, "A1", "A1+1");
         let (_, r) = rebuild_and_recalc_all(&mut wb, None);
         assert_eq!(r.cycle_cells, vec![(s, a1("A1"))]);
-        assert_eq!(value(&wb, s, "A1"), num(0.0));
+        assert_eq!(value(&wb, s, "A1"), refused());
     }
 
     #[test]
