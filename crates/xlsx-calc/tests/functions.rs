@@ -234,7 +234,7 @@ fn math_functions() {
         // NPV discounts from the end of period one
         ("NPV(0.1,100)", n(100.0 / 1.1)),
         ("NPV(0,10,20,30)", n(60.0)),
-        ("NPV(-1,10)", e(ErrorValue::Div0)),
+        ("NPV(-1,10)", e(ErrorValue::Num)),
         ("NPV(0.1)", e(ErrorValue::Value)),
         // a date function reads text where a date is wanted
         ("MONTH(\"2024-03-05\")", n(3.0)),
@@ -1152,4 +1152,51 @@ fn reference_indexes_fall_back_to_array_evaluation() {
         ("INDEX(A1:A5,C1:C3)", e(ErrorValue::Value)),
         ("INDEX(A1:A5,1/0)", e(ErrorValue::Div0)),
     ]);
+}
+
+/// the annuity family, over both payment timings and the zero-rate shortcut.
+#[test]
+fn annuity_functions() {
+    check(&[
+        ("PMT(0, 10, 1000)", n(-100.0)),
+        ("PMT(0, 10, 1000, 500)", n(-150.0)),
+        ("PMT(0.05, 0, 1000)", e(ErrorValue::Num)),
+        ("PMT(0.05, 10)", e(ErrorValue::Value)),
+        ("PV(0, 10, -100)", n(1000.0)),
+        ("NPER(0, -100, 1000)", n(10.0)),
+        ("NPER(0, 0, 1000)", e(ErrorValue::Num)),
+        ("NPV(-1, 100)", e(ErrorValue::Num)),
+        ("NPV(0.05)", e(ErrorValue::Value)),
+        ("PMT(1/0, 1, 1)", e(ErrorValue::Div0)),
+    ]);
+    approx("PMT(0.04/12, 12, 5000)", -425.7495209777896);
+    approx("PMT(0.05, 10, 1000, 0, 1)", -123.337690443292);
+    approx("PV(0.05, 10, -100)", 772.1734929184817);
+    approx("NPER(0.05, -100, 1000)", 14.206699082890461);
+    approx("NPV(0.05, 100, 200, 300)", 535.795270489148);
+    approx("NPV(0.05, {100,200,300})", 535.795270489148);
+    // a loan pays itself off: the payment FV discounts back to the principal
+    approx("FV(0.04/12, 12, PMT(0.04/12, 12, 5000), 5000)", 0.0);
+}
+
+/// TIMEVALUE reads a written time, drops the date in front of it, and keeps
+/// only the fraction of a day.
+#[test]
+fn timevalue_reads_a_written_clock() {
+    check(&[
+        ("TIMEVALUE(\"2:24 AM\")", n(0.1)),
+        ("TIMEVALUE(\"12:00 PM\")", n(0.5)),
+        ("TIMEVALUE(\"12:00 AM\")", n(0.0)),
+        ("TIMEVALUE(\"hello\")", e(ErrorValue::Value)),
+        ("TIMEVALUE(\"1/1/2020\")", e(ErrorValue::Value)),
+        ("TIMEVALUE(\"13:00 PM\")", e(ErrorValue::Value)),
+        ("TIMEVALUE(0.5)", e(ErrorValue::Value)),
+        ("TIMEVALUE(\"2:24 AM\", 1)", e(ErrorValue::Value)),
+        ("TIMEVALUE(1/0)", e(ErrorValue::Div0)),
+    ]);
+    approx("TIMEVALUE(\"0:15\")", 0.010416666666666666);
+    approx("TIMEVALUE(\"12:30:45\")", 0.5213541666666667);
+    approx("TIMEVALUE(\"22-Aug-2011 6:35 AM\")", 0.2743055555555556);
+    approx("TIMEVALUE(\"25:00\")", 0.041666666666666664);
+    approx("TIMEVALUE(\"12:30\" & \" \" & \"PM\")", 0.5208333333333334);
 }

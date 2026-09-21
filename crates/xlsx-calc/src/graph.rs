@@ -267,7 +267,7 @@ impl DepGraph {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         self.add_references(owner.sheet, expr, &mut out, &mut seen);
-        self.add_defined_name_references(owner.sheet, expr, &mut out, &mut seen);
+        self.add_defined_name_references(owner, expr, &mut out, &mut seen);
         self.add_table_references(owner, expr, &mut out, &mut seen);
         out
     }
@@ -333,13 +333,13 @@ impl DepGraph {
 
     fn add_defined_name_references(
         &self,
-        owner: SheetId,
+        node: NodeKey,
         expr: &Expr,
         out: &mut Vec<(SheetId, CellRange)>,
         seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
     ) {
         let mut pending = Vec::new();
-        push_defined_name_uses(owner, expr, &mut pending);
+        push_defined_name_uses(node.sheet, expr, &mut pending);
         let mut expanded = HashSet::new();
         while let Some((owner, scope, name)) = pending.pop() {
             let Some((lookup_sheet, defined)) = self.resolve_defined_name(owner, &scope, &name)
@@ -361,6 +361,8 @@ impl DepGraph {
             };
             let definition_sheet = defined.local_sheet.unwrap_or(lookup_sheet);
             self.add_references(definition_sheet, &expression, out, seen);
+            // a name's body reads structured references of its own
+            self.add_table_references(node, &expression, out, seen);
             push_defined_name_uses(definition_sheet, &expression, &mut pending);
         }
     }
@@ -422,6 +424,10 @@ fn push_table_uses<'a>(expr: &'a Expr, uses: &mut Vec<(&'a str, &'a TableSpec)>)
         match expression {
             Expr::TableRef { table, spec } => uses.push((table.as_str(), spec)),
             Expr::ArrayLiteral { values, .. } => expressions.extend(values),
+            Expr::RangeJoin { start, end } => {
+                expressions.push(end);
+                expressions.push(start);
+            }
             Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
             Expr::Binary { lhs, rhs, .. } => {
                 expressions.push(rhs);

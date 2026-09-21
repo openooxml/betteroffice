@@ -731,7 +731,7 @@ pub(crate) fn parse_num(s: &str) -> Option<f64> {
 
 /// a text time — `"0:15"`, `"12:30:45"`, either with a meridiem — as the
 /// fraction of a day excel coerces it to.
-fn parse_clock(s: &str) -> Option<f64> {
+pub(crate) fn parse_clock(s: &str) -> Option<f64> {
     let (body, pm) = match s.to_ascii_uppercase() {
         upper if upper.ends_with("AM") => (s[..s.len() - 2].trim_end(), Some(false)),
         upper if upper.ends_with("PM") => (s[..s.len() - 2].trim_end(), Some(true)),
