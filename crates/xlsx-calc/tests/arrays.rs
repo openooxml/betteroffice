@@ -1476,3 +1476,19 @@ fn sort_follows_excels_collation() {
         vec![t("[P_1]"), t("[P_10]"), t("[P_2]"), t("Callie")]
     );
 }
+
+/// an array primary needs the fallback's shape, because a longer fallback pads
+/// it and that padding is caught — but what the fallback spends getting there
+/// must not discard an answer that never used it.
+#[test]
+fn an_unused_fallback_does_not_discard_the_answer() {
+    let workbook = fixture();
+    assert_eq!(
+        values("IFERROR(B1:B2,1/0)", &workbook),
+        vec![n(3.0), n(1.0)]
+    );
+    assert_eq!(
+        values("IFERROR(B1:B2,_xlfn.SEQUENCE(4))", &workbook),
+        vec![n(3.0), n(1.0), n(3.0), n(4.0)]
+    );
+}

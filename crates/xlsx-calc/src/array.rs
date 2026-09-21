@@ -1492,7 +1492,10 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
         ctx.handle_budget_errors_since(budget);
         ctx.handle_unsupported_since(unsupported);
     }
+    // an array primary still needs the fallback's shape, because a longer
+    // fallback pads the primary and that padding is caught in turn
     let checkpoint = ctx.unsupported_checkpoint();
+    let spent = ctx.budget_error_checkpoint();
     let other = evaluate_array(&args[1], ctx);
     // both sides answer elementwise, so a block shorter than its fallback
     // pads with `#N/A` and that padding is caught in turn
@@ -1500,8 +1503,10 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     let (other_rows, other_cols) = other.dims();
     let (rows, cols) = (rows.max(other_rows), cols.max(other_cols));
     if !caught_any && (rows, cols) == value.dims() {
-        // the fallback never reached the result, so neither did its gaps
+        // the fallback never reached the result, so neither its gaps nor what
+        // it spent getting there may discard the answer
         ctx.handle_unsupported_since(checkpoint);
+        ctx.handle_budget_errors_since(spent);
         return value;
     }
     let Ok(count) = output_cells(rows, cols) else {

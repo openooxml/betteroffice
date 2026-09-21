@@ -984,6 +984,11 @@ fn workday_core(
         }
     }
     while remaining > 0 {
+        // holidays rule out the whole-week shortcut, so the walk is what a
+        // workbook can make long; it is charged like any other traversal
+        if !ctx.consume_cells(1) {
+            return err(ErrorValue::Num);
+        }
         current += step;
         if !(0..=MAX_SERIAL).contains(&current) {
             return err(ErrorValue::Num);
