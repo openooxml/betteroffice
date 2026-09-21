@@ -803,7 +803,7 @@ fn rewrite_defined_name(
 
 /// error literals, which name no cell and so survive any structural edit.
 const ERROR_LITERALS: &[&str] = &[
-    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#SPILL!",
+    "#DIV/0!", "#N/A", "#NAME?", "#NULL!", "#NUM!", "#REF!", "#VALUE!", "#SPILL!", "#CALC!",
 ];
 
 /// The names a workbook defines, lowercased, as Excel matches them without

@@ -3187,6 +3187,7 @@ fn error_from_str(value: &str) -> Result<ErrorValue, String> {
         "#REF!" => Ok(ErrorValue::Ref),
         "#VALUE!" => Ok(ErrorValue::Value),
         "#SPILL!" => Ok(ErrorValue::Spill),
+        "#CALC!" => Ok(ErrorValue::Calc),
         _ => Err(format!("unsupported cell error {value}")),
     }
 }

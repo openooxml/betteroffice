@@ -849,6 +849,7 @@ fn error_from_str(s: &str) -> Option<ErrorValue> {
         "#REF!" => ErrorValue::Ref,
         "#VALUE!" => ErrorValue::Value,
         "#SPILL!" => ErrorValue::Spill,
+        "#CALC!" => ErrorValue::Calc,
         _ => return None,
     })
 }
