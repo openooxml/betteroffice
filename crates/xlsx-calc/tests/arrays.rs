@@ -72,6 +72,23 @@ fn values(formula: &str, workbook: &Workbook) -> Vec<CellValue> {
     arrayed(formula, workbook).2
 }
 
+/// Excel has no blank inside a block, so a blank cell `IF` selects arrives as
+/// zero — which `COUNT` then counts — while a cell holding "" stays text.
+#[test]
+fn a_blank_cell_if_selects_lands_in_the_block_as_zero() {
+    let mut workbook = fixture();
+    let sheet = &mut workbook.sheets[0];
+    put(sheet, "C1", n(1.0));
+    put(sheet, "C3", t(""));
+    put(sheet, "C4", n(4.0));
+    assert_eq!(
+        values("IF(B1:B4>0,C1:C4)", &workbook),
+        vec![n(1.0), n(0.0), t(""), n(4.0)]
+    );
+    assert_eq!(values("COUNT(IF(B1:B4>0,C1:C4))", &workbook), vec![n(3.0)]);
+    assert_eq!(values("SUM(IF(B1:B4>9,C1:C4))", &workbook), vec![n(0.0)]);
+}
+
 #[test]
 fn filter_keeps_the_rows_its_condition_selects() {
     let workbook = fixture();
