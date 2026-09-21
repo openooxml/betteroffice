@@ -351,16 +351,17 @@ impl Lexer<'_> {
             return self.lex_table_ref(word, start);
         }
 
+        // a name followed by `(` is a function even when ref-shaped (e.g. LOG10)
+        // or a literal spelling (`TRUE()`)
+        if self.peek() == Some('(') {
+            return Ok(TokKind::Ident(word));
+        }
+
         if word.eq_ignore_ascii_case("TRUE") {
             return Ok(TokKind::Bool(true));
         }
         if word.eq_ignore_ascii_case("FALSE") {
             return Ok(TokKind::Bool(false));
-        }
-
-        // a name followed by `(` is a function even when ref-shaped (e.g. LOG10)
-        if self.peek() == Some('(') {
-            return Ok(TokKind::Ident(word));
         }
 
         if let Some(kind) = self.try_range_token(&None, &word) {

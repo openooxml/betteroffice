@@ -99,7 +99,7 @@ fn an_approximate_lookup_reads_past_an_out_of_order_header() {
             match (at.col, at.row) {
                 (0, 0) => CellValue::Text { value: "ID".into() },
                 (0, row) if row <= 4 => CellValue::Number { value: row as f64 },
-                (1, row) if row >= 1 && row <= 4 => CellValue::Number {
+                (1, row) if (1..=4).contains(&row) => CellValue::Number {
                     value: row as f64 * 10.0,
                 },
                 _ => CellValue::Empty,

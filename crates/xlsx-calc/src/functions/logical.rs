@@ -114,6 +114,15 @@ pub(crate) fn xor(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     fold_bools(args, ctx, false, |a, b| a ^ b)
 }
 
+/// TRUE()/FALSE(): the literal spelled as a call.
+pub(crate) fn constant(args: &[Expr], value: bool) -> CellValue {
+    if args.is_empty() {
+        boolean(value)
+    } else {
+        err(ErrorValue::Value)
+    }
+}
+
 pub(crate) fn not(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);

@@ -96,6 +96,60 @@ fn match_accepts_a_computed_block() {
     ]);
 }
 
+#[test]
+fn the_range_operator_spans_computed_endpoints() {
+    check(&[
+        ("SUM(A1:INDEX(A1:A5,3))", n(60.0)),
+        ("SUM(INDEX(A1:A5,2):INDEX(A1:A5,4))", n(90.0)),
+        ("COUNT(A1:OFFSET(A1,2,0))", n(3.0)),
+        ("MIN(A1:INDEX(A1:A5,MATCH(99,A1:A5,0)))", e(ErrorValue::NA)),
+    ]);
+    assert!(parse_formula("A1:\"x\"").is_err());
+    assert!(parse_formula("SUM(A1:INDEX(A1:A5,3))").is_ok());
+}
+
+#[test]
+fn sumproduct_reads_computed_arguments_as_blocks() {
+    check(&[
+        ("SUMPRODUCT(--(B1:B5=\"apple\"))", n(3.0)),
+        ("SUMPRODUCT(--(B1:B5=\"apple\"),A1:A5)", n(90.0)),
+        ("SUMPRODUCT((B1:B5=\"apple\")*A1:A5)", n(90.0)),
+        ("SUMPRODUCT(A1:A5,C1:C5)", n(550.0)),
+        (
+            "SUMPRODUCT(--(B1:B5=\"apple\"),A1:A4)",
+            e(ErrorValue::Value),
+        ),
+    ]);
+}
+
+#[test]
+fn time_text_coerces_to_a_fraction_of_a_day() {
+    approx("MROUND(0.37612268519,\"0:15\")", 0.375);
+    approx("\"1:30\"*24", 1.5);
+    approx("\"0:15\"+0", 0.010_416_666_666_666_666);
+    approx("\"9:00 PM\"+0", 0.875);
+    approx("\"12:00 AM\"+0", 0.0);
+    approx("\"36:00\"+0", 1.5);
+    approx("\"1:02:03\"+0", 0.043_090_277_777_777_78);
+    check(&[
+        ("\"1:60\"+0", e(ErrorValue::Value)),
+        ("\"13:00 PM\"+0", e(ErrorValue::Value)),
+        ("\"x:00\"+0", e(ErrorValue::Value)),
+    ]);
+}
+
+#[test]
+fn boolean_literals_also_spell_as_calls() {
+    check(&[
+        ("TRUE()", b(true)),
+        ("FALSE()", b(false)),
+        ("TRUE", b(true)),
+        ("NOT(FALSE())", b(true)),
+        ("MATCH(TRUE(),{FALSE,TRUE},0)", n(2.0)),
+        ("TRUE(1)", e(ErrorValue::Value)),
+    ]);
+}
+
 /// like `eval` but with an injected clock (2020-01-01 12:00) for TODAY/NOW.
 fn eval_now(src: &str) -> CellValue {
     let wb = fixture();
