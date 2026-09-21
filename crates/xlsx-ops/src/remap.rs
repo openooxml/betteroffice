@@ -94,6 +94,9 @@ pub(crate) fn remap_formulas(wb: &mut Workbook, op: &Op) -> Result<Vec<Op>, OpEr
                 parsed_order.push_back(src.as_str());
                 expr
             };
+            if contains_table_reference(&expr) {
+                return Err(OpError::FormulaNotRewritable { sheet: owner, cell });
+            }
             let mut changed = false;
             let new_expr = transform(&expr, op, &matches, &mut changed);
             if changed {
@@ -756,7 +759,7 @@ fn rewrite_defined_name(
         // Whole-column names still need the token rewriter's ambiguity checks.
         let Some(expr) = parse_formula(component)
             .ok()
-            .filter(|expr| !contains_column_range(expr))
+            .filter(|expr| !contains_column_range(expr) && !contains_table_reference(expr))
         else {
             match rewrite_reference_tokens(component, op, matches_target, global, names) {
                 DefinedNameRewrite::Unchanged => {
@@ -1266,6 +1269,21 @@ fn contains_unqualified_reference(expr: &Expr) -> bool {
             contains_unqualified_reference(lhs) || contains_unqualified_reference(rhs)
         }
         Expr::FuncCall { args, .. } => args.iter().any(contains_unqualified_reference),
+        _ => false,
+    }
+}
+
+/// A structural edit moves a table's rectangle, and the table part is not
+/// remapped, so a formula reading one is left for the caller to refuse rather
+/// than silently stranded on the pre-edit geometry.
+fn contains_table_reference(expr: &Expr) -> bool {
+    match expr {
+        Expr::TableRef { .. } => true,
+        Expr::Unary { expr, .. } | Expr::Percent(expr) => contains_table_reference(expr),
+        Expr::Binary { lhs, rhs, .. } => {
+            contains_table_reference(lhs) || contains_table_reference(rhs)
+        }
+        Expr::FuncCall { args, .. } => args.iter().any(contains_table_reference),
         _ => false,
     }
 }

@@ -440,7 +440,15 @@ impl SheetPatch<'_> {
             self.plan,
         );
         let mut writer = Writer::new(std::mem::take(out));
-        write_cell(&mut writer, at, cell, self.sst_index, retained).map_err(xml_err)?;
+        write_cell(
+            &mut writer,
+            at,
+            cell,
+            self.sst_index,
+            retained,
+            self.sheet.array_formula(at),
+        )
+        .map_err(xml_err)?;
         *out = writer.into_inner();
         Ok(())
     }

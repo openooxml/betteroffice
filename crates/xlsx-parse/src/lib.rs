@@ -84,6 +84,12 @@ pub const MAX_DEFINED_NAMES: usize = 65_536;
 /// upper bound on hyperlinks in one worksheet.
 pub const MAX_HYPERLINKS: usize = 65_536;
 
+/// upper bound on table parts read from one package.
+pub const MAX_TABLES: usize = 65_536;
+
+/// upper bound on columns read from one table part.
+pub const MAX_TABLE_COLUMNS: usize = xlsx_model::MAX_COLS as usize;
+
 /// upper bound on entries in any single style pool (fonts, fills, borders,
 /// cellXfs, numFmts).
 pub const MAX_STYLE_ENTRIES: usize = 65_536;

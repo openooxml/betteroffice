@@ -5,10 +5,10 @@ use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
-    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyleFlags,
-    Theme, ThemeFormatScheme, normalize_table_column_widths, preset_geometry_to_path,
-    resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex, resolve_theme_font_ref,
-    style_fill, style_outline,
+    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
+    TableStyleFlags, Theme, ThemeFormatScheme, normalize_table_column_widths,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
+    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
@@ -22,7 +22,7 @@ use pptx_parse::{
     CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
     Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
-    TextOverflow, effective_color_map,
+    TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1042,14 +1042,30 @@ impl<'a> LayoutBuilder<'a> {
         let Some(crop) = source_rect(crop) else {
             return true;
         };
+        let masked = mask.path.is_some();
         let clip = mask
             .path
             .clone()
             .unwrap_or_else(|| geometry_path("rect", &BTreeMap::new(), 1.0));
         for mut op in drawing.ops.iter().cloned() {
             place_in_source_rect(&mut op.path, crop);
+            // one clip per primitive, so a picture mask and the metafile's own
+            // clip cannot both be carried: draw under the mask only where the
+            // metafile clip would remove nothing, and drop the op otherwise
+            // rather than paint what either region hides.
+            let op_clip = match (op.clip, masked) {
+                (Some(rect), false) => match metafile_clip_path(rect, crop) {
+                    Some(path) => path,
+                    None => continue,
+                },
+                (Some(rect), true) => match clipped_away(&op.path, rect, crop) {
+                    true => continue,
+                    false => clip.clone(),
+                },
+                (None, _) => clip.clone(),
+            };
             self.primitives.push(Primitive::Shape {
-                clip: Some(clip.clone()),
+                clip: Some(op_clip),
                 even_odd: op.even_odd,
                 object_id,
                 shape_id: None,
@@ -1286,6 +1302,13 @@ impl<'a> LayoutBuilder<'a> {
             last_column: table.properties.last_col,
             band_row: table.properties.band_row,
         };
+        let package = self.package;
+        let table_style = table.properties.style_id.as_deref().and_then(|id| {
+            package
+                .table_styles
+                .style(Some(id))
+                .or_else(|| builtin_table_style(id))
+        });
         let mut heights: Vec<f32> = table.rows.iter().map(|row| emu_to_px(row.height)).collect();
         let mut spans = Vec::new();
         let mut plans = Vec::new();
@@ -1312,27 +1335,24 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                     ),
                 };
-                let style_id = table.properties.style_id.as_deref();
                 let position = TableCellPosition {
                     row: row_index,
                     column,
                     row_count,
                     column_count,
                 };
-                let mut style = self
-                    .package
-                    .table_styles
-                    .resolve_cell(style_id, flags, position);
+                let resolve = |position| {
+                    table_style
+                        .map(|style: &TableStyle| style.resolve_cell(flags, position))
+                        .unwrap_or_default()
+                };
+                let mut style = resolve(position);
                 if span > 1 || row_span > 1 {
-                    let far = self.package.table_styles.resolve_cell(
-                        style_id,
-                        flags,
-                        TableCellPosition {
-                            row: row_index + row_span - 1,
-                            column: column + span - 1,
-                            ..position
-                        },
-                    );
+                    let far = resolve(TableCellPosition {
+                        row: row_index + row_span - 1,
+                        column: column + span - 1,
+                        ..position
+                    });
                     style.right = far.right;
                     style.bottom = far.bottom;
                 }
@@ -1913,6 +1933,19 @@ impl BodyCascade<'_> {
         })
     }
 
+    /// `a:endParaRPr`: what PowerPoint sizes a paragraph by when it carries no
+    /// runs of its own.
+    fn end_run_properties(&self, index: usize) -> Option<&RunProperties> {
+        [self.primary, self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .find_map(|body| {
+                body.paragraphs
+                    .get(index)
+                    .and_then(|paragraph| paragraph.end_properties.as_ref())
+            })
+    }
+
     fn paragraph_properties(&self, index: usize, level: u32) -> ParagraphProperties {
         let mut properties = self
             .master_slide
@@ -2069,6 +2102,10 @@ struct ResolvedParagraph {
     space_after: Option<LineSpacing>,
     line_space_reduction: f32,
     indent_px: f32,
+    /// `a:tabLst` stops in pixels from the text area's left edge, ascending.
+    tab_stops: Vec<f32>,
+    /// Pitch of the implicit stops past the last declared one.
+    default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
     runs: Vec<ResolvedRun>,
@@ -2158,15 +2195,14 @@ fn resolve_content(
             push_cased_runs(&mut runs, &run.text, start, language, style);
         }
         if runs.is_empty() {
+            let end_style = cascade
+                .end_run_properties(index)
+                .map(|end| style_from_properties(end, theme))
+                .unwrap_or_default();
             runs.push(ResolvedRun {
                 text: String::new(),
                 start: story_offset,
-                style: resolve_style(
-                    renderer,
-                    theme,
-                    &TextStyle::default(),
-                    properties.default_run.as_ref(),
-                )?,
+                style: resolve_style(renderer, theme, &end_style, properties.default_run.as_ref())?,
             });
         }
         let alignment = paragraph
@@ -2186,6 +2222,12 @@ fn resolve_content(
             space_after: properties.space_after,
             line_space_reduction,
             indent_px: emu_to_px(properties.indent.unwrap_or_default()),
+            tab_stops: resolve_tab_stops(
+                properties.tab_stops.as_deref(),
+                properties.margin_left.unwrap_or_default(),
+                properties.indent.unwrap_or_default(),
+            ),
+            default_tab_px: resolve_default_tab(properties.default_tab_size),
             bullet_style: marker
                 .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
@@ -2787,6 +2829,81 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
     }
 }
 
+/// `a:pPr/@defTabSz` when the cascade declares none: one inch.
+const DEFAULT_TAB_EMU: i64 = 914_400;
+
+/// Pitch of the implicit tab stops, in pixels.
+fn resolve_default_tab(size: Option<i64>) -> f32 {
+    let pitch = emu_to_px(size.unwrap_or(DEFAULT_TAB_EMU));
+    if pitch.is_finite() && pitch >= 1.0 {
+        pitch
+    } else {
+        emu_to_px(DEFAULT_TAB_EMU)
+    }
+}
+
+/// Declared stops in pixels, ascending, plus the implicit stop a hanging indent
+/// puts at the paragraph's left margin — the one a leading tab lands on.
+fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Vec<f32> {
+    let mut resolved = stops
+        .unwrap_or_default()
+        .iter()
+        .map(|position| emu_to_px(*position))
+        .filter(|position| position.is_finite() && *position > 0.0)
+        .collect::<Vec<_>>();
+    if indent < 0 {
+        let hanging = emu_to_px(margin_left);
+        if hanging.is_finite() && hanging > 0.0 {
+            resolved.push(hanging);
+        }
+    }
+    resolved.sort_by(f32::total_cmp);
+    resolved.dedup();
+    resolved
+}
+
+/// How far left of the margin PowerPoint starts the paragraph's first line. A
+/// marker owns that space here, so only an unmarked hanging indent has any, and
+/// only the first tab of the first line is measured against it.
+fn hanging_space(paragraph: &ResolvedParagraph) -> f32 {
+    if paragraph.marker.is_some() || !paragraph.indent_px.is_finite() {
+        return 0.0;
+    }
+    (-paragraph.indent_px).clamp(0.0, paragraph.margin_left_px.max(0.0))
+}
+
+/// A stop the pen already sits on does not hold the tab.
+const TAB_EPSILON_PX: f32 = 0.01;
+
+/// Width one tab takes. The stop is chosen from `offset` — where PowerPoint's
+/// pen would be — and the width is measured from `pen`, where ours is; the two
+/// differ only for the tab that stands in a hanging indent. The first declared
+/// stop past `offset` wins, otherwise the next multiple of the default pitch,
+/// and a tab never moves backwards or reaches past the line.
+fn tab_advance(offset: f32, pen: f32, stops: &[f32], default_px: f32, limit: f32) -> f32 {
+    let limit = if limit.is_finite() {
+        limit.max(0.0)
+    } else {
+        0.0
+    };
+    if !offset.is_finite() || !pen.is_finite() {
+        return 0.0;
+    }
+    let next = stops
+        .iter()
+        .copied()
+        .find(|stop| *stop > offset + TAB_EPSILON_PX)
+        .unwrap_or_else(|| {
+            let steps = (offset / default_px).floor() + 1.0;
+            if steps.is_finite() {
+                steps * default_px
+            } else {
+                offset + default_px
+            }
+        });
+    (next - pen).clamp(0.0, limit)
+}
+
 fn layout_paragraph(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
@@ -2796,7 +2913,7 @@ fn layout_paragraph(
     scale: f32,
     stacked: bool,
 ) -> Result<Vec<PositionedTextLine>, RenderError> {
-    let clusters = shape_paragraph(fonts, paragraph, scale)?;
+    let mut clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
         let style = &paragraph.runs[0].style;
         let line_box = spaced_line_box(
@@ -2827,7 +2944,14 @@ fn layout_paragraph(
             .map(|index| (index, index + 1))
             .collect()
     } else {
-        wrap_clusters(&clusters, width)
+        wrap_clusters(
+            &mut clusters,
+            width,
+            paragraph.margin_left_px.max(0.0),
+            hanging_space(paragraph),
+            &paragraph.tab_stops,
+            paragraph.default_tab_px,
+        )
     };
     let line_count = ranges.len();
     let mut output = Vec::with_capacity(line_count);
@@ -2941,6 +3065,8 @@ fn prepend_bullet(
         space_after: None,
         line_space_reduction: 0.0,
         indent_px: 0.0,
+        tab_stops: Vec::new(),
+        default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
         runs: vec![ResolvedRun {
@@ -2983,6 +3109,8 @@ struct ShapedCluster {
     glyphs: Vec<ClusterGlyph>,
     break_after: bool,
     mandatory: bool,
+    /// A `U+0009` cluster, whose width the tab stops decide per line.
+    tab: bool,
 }
 
 struct ClusterGlyph {
@@ -3013,7 +3141,7 @@ fn shape_paragraph(
     for (run_index, run) in paragraph.runs.iter().enumerate() {
         let mut segment_start = 0_usize;
         for (byte_index, character) in run.text.char_indices() {
-            if character != '\n' {
+            if character != '\n' && character != '\t' {
                 continue;
             }
             add_shaped_segment(
@@ -3030,8 +3158,9 @@ fn shape_paragraph(
                 &mut clusters,
             )?;
             let start = run.start + utf16_len(&run.text[..byte_index]);
+            let hard = character == '\n';
             clusters.push(ShapedCluster {
-                text: "\n".to_owned(),
+                text: character.to_string(),
                 start,
                 end: start + 1,
                 width: 0.0,
@@ -3040,7 +3169,8 @@ fn shape_paragraph(
                 style: run.style.clone(),
                 glyphs: Vec::new(),
                 break_after: true,
-                mandatory: true,
+                mandatory: hard,
+                tab: !hard,
             });
             segment_start = byte_index + character.len_utf8();
         }
@@ -3146,6 +3276,7 @@ fn add_shaped_segment(
             glyphs,
             break_after: breaks.contains_key(&global_end),
             mandatory: breaks.get(&global_end).copied().unwrap_or(false),
+            tab: false,
         });
     }
     Ok(())
@@ -3164,15 +3295,38 @@ fn trailing_tracking(clusters: &[ShapedCluster]) -> f32 {
         .map_or(0.0, |cluster| cluster.tracking)
 }
 
-fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> {
+/// Greedy line fill. Tab clusters take their width here, from the pen's offset
+/// in the text area, so the wrap and the painted line agree on where a tab
+/// lands: the greedy walk reaches a cluster in its final line's position last.
+fn wrap_clusters(
+    clusters: &mut [ShapedCluster],
+    width: f32,
+    left_offset: f32,
+    hanging: f32,
+    stops: &[f32],
+    default_tab_px: f32,
+) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut start = 0;
+    let mut line_index = 0;
     while start < clusters.len() {
         let mut cursor = start;
         let mut line_width = 0.0;
+        let mut tabs_taken = 0_usize;
         let mut last_break = None;
         let mut end = clusters.len();
         while cursor < clusters.len() {
+            if clusters[cursor].tab {
+                let pen = left_offset + line_width;
+                let measured = if line_index == 0 && tabs_taken == 0 {
+                    pen - hanging
+                } else {
+                    pen
+                };
+                clusters[cursor].width =
+                    tab_advance(measured, pen, stops, default_tab_px, width - line_width);
+                tabs_taken += 1;
+            }
             let cluster = &clusters[cursor];
             if cluster.text != "\n"
                 && line_width + cluster.width - cluster.tracking > width
@@ -3201,6 +3355,7 @@ fn wrap_clusters(clusters: &[ShapedCluster], width: f32) -> Vec<(usize, usize)> 
         }
         ranges.push((start, end));
         start = end;
+        line_index += 1;
     }
     ranges
 }
@@ -3763,6 +3918,63 @@ fn source_rect(crop: Option<&PictureCrop>) -> Option<(f64, f64, f64, f64)> {
     Some((-left / width, -top / height, 1.0 / width, 1.0 / height))
 }
 
+/// Maps a metafile clip rectangle into the picture box, or `None` when the clip
+/// leaves nothing of the box visible.
+/// whether a metafile clip would hide any of `path`, in the normalised space
+/// `metafile_clip_path` works in.
+fn clipped_away(path: &[GeometryPathCommand], clip: [f64; 4], rect: (f64, f64, f64, f64)) -> bool {
+    let Some(bounds) = metafile_clip_path(clip, rect) else {
+        return true;
+    };
+    let (mut left, mut top, mut right, mut bottom) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for command in &bounds {
+        if let GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } = command {
+            left = left.min(*x);
+            top = top.min(*y);
+            right = right.max(*x);
+            bottom = bottom.max(*y);
+        }
+    }
+    let outside = |x: &f64, y: &f64| *x < left || *x > right || *y < top || *y > bottom;
+    path.iter().any(|command| match command {
+        GeometryPathCommand::Move { x, y } | GeometryPathCommand::Line { x, y } => outside(x, y),
+        GeometryPathCommand::Quad { cpx, cpy, x, y } => outside(cpx, cpy) || outside(x, y),
+        GeometryPathCommand::Cubic {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+            x,
+            y,
+        } => outside(cp1x, cp1y) || outside(cp2x, cp2y) || outside(x, y),
+        GeometryPathCommand::Close => false,
+    })
+}
+
+fn metafile_clip_path(
+    clip: [f64; 4],
+    rect: (f64, f64, f64, f64),
+) -> Option<Vec<GeometryPathCommand>> {
+    let (x0, y0, w, h) = rect;
+    let left = (x0 + clip[0] * w).max(0.0);
+    let top = (y0 + clip[1] * h).max(0.0);
+    let right = (x0 + clip[2] * w).min(1.0);
+    let bottom = (y0 + clip[3] * h).min(1.0);
+    if !(left < right && top < bottom) {
+        return None;
+    }
+    Some(vec![
+        GeometryPathCommand::Move { x: left, y: top },
+        GeometryPathCommand::Line { x: right, y: top },
+        GeometryPathCommand::Line {
+            x: right,
+            y: bottom,
+        },
+        GeometryPathCommand::Line { x: left, y: bottom },
+        GeometryPathCommand::Close,
+    ])
+}
+
 /// Maps a path measured in the metafile's frame into the picture box.
 fn place_in_source_rect(path: &mut [GeometryPathCommand], rect: (f64, f64, f64, f64)) {
     if rect == (0.0, 0.0, 1.0, 1.0) {
@@ -3870,6 +4082,12 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     }
     if source.bullet_size.is_some() {
         target.bullet_size.clone_from(&source.bullet_size);
+    }
+    if source.default_tab_size.is_some() {
+        target.default_tab_size = source.default_tab_size;
+    }
+    if source.tab_stops.is_some() {
+        target.tab_stops.clone_from(&source.tab_stops);
     }
     if let Some(source) = &source.default_run {
         let target = target
@@ -4994,6 +5212,134 @@ mod tests {
         renderer
     }
 
+    fn tabbed(
+        renderer: &SlideRenderer,
+        text: &str,
+        stops: Vec<f32>,
+        default_px: f32,
+    ) -> ResolvedParagraph {
+        let mut paragraph = paragraph(renderer, "l", text);
+        paragraph.tab_stops = stops;
+        paragraph.default_tab_px = default_px;
+        paragraph
+    }
+
+    fn glyph_positions(lines: &[PositionedTextLine]) -> Vec<f32> {
+        lines
+            .iter()
+            .flat_map(|line| line.runs.iter())
+            .flat_map(|run| run.glyphs.iter())
+            .map(|glyph| glyph.x)
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_advances_to_the_next_default_stop_without_painting_a_glyph() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert_eq!(positions.len(), 2, "the tab paints nothing");
+        assert!(positions[0].abs() < 0.01, "{positions:?}");
+        assert!((positions[1] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_declared_stop_wins_over_the_default_pitch() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", vec![40.0, 300.0], 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 40.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn the_left_margin_offsets_the_stop_a_tab_reaches() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "A\tB", vec![40.0, 200.0], 96.0);
+        paragraph.margin_left_px = 50.0;
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 50.0, 0.0, 950.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[1] - 200.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_tab_never_reaches_past_the_line() {
+        let renderer = renderer();
+        let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 40.0, 1.0, false).unwrap();
+        for line in &lines {
+            assert!(line.width <= 40.01, "{}", line.width);
+        }
+    }
+
+    #[test]
+    fn a_leading_tab_in_a_hanging_indent_lands_on_the_margin_the_line_already_starts_at() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn only_the_first_tab_of_a_hanging_paragraph_measures_from_the_hanging_position() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem\tNote", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 400.0, 1.0, false).unwrap();
+        let positions = glyph_positions(&lines);
+        assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
+        assert!((positions[4] - 96.0).abs() < 0.01, "{positions:?}");
+    }
+
+    #[test]
+    fn a_marker_leaves_no_hanging_space_for_a_tab_to_take() {
+        let renderer = renderer();
+        let mut paragraph = tabbed(&renderer, "\tItem", Vec::new(), 96.0);
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        paragraph.marker = Some("\u{2022}".to_owned());
+        paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+        let text = lines[0]
+            .runs
+            .iter()
+            .find(|run| run.text.contains("Item"))
+            .unwrap();
+        assert!(
+            (text.glyphs[0].x - 96.0).abs() < 0.01,
+            "{}",
+            text.glyphs[0].x
+        );
+    }
+
+    #[test]
+    fn tab_advance_bounds_a_hostile_pitch_and_offset() {
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(96.0, 96.0, &[], 96.0, 1_000.0), 96.0);
+        assert_eq!(tab_advance(1.0, 1.0, &[40.0], 96.0, 1_000.0), 39.0);
+        assert_eq!(tab_advance(10.0, 40.0, &[30.0], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(f32::NAN, 0.0, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, f32::NAN, &[], 96.0, 1_000.0), 0.0);
+        assert_eq!(tab_advance(0.0, 0.0, &[], 96.0, f32::NAN), 0.0);
+        assert!((0.0..=10.0).contains(&tab_advance(f32::MAX, f32::MAX, &[], 96.0, 10.0)));
+        assert_eq!(resolve_default_tab(Some(0)), 96.0);
+        assert_eq!(resolve_default_tab(Some(-914_400)), 96.0);
+    }
+
     fn justify(widths: &[(f32, bool, bool)]) -> Vec<JustifyCluster> {
         widths
             .iter()
@@ -5018,6 +5364,8 @@ mod tests {
             space_after: None,
             line_space_reduction: 0.0,
             indent_px: 0.0,
+            tab_stops: Vec::new(),
+            default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
             runs: vec![ResolvedRun {
@@ -5103,13 +5451,13 @@ mod tests {
     #[test]
     fn justified_layout_stretches_non_last_lines_only() {
         let renderer = renderer();
-        let text = "alpha beta \t  gamma delta";
+        let text = "alpha beta    gamma delta";
         let justified = paragraph(&renderer, "just", text);
         let clusters = shape_paragraph(&renderer.fonts, &justified, 1.0).unwrap();
         let second_break = clusters
             .iter()
             .enumerate()
-            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta \t  "))
+            .find(|(_, cluster)| cluster.end == utf16_len("alpha beta    "))
             .map(|(index, _)| index + 1)
             .unwrap();
         let prefix_width = clusters[..second_break]
@@ -5282,6 +5630,8 @@ mod tests {
                 space_after: None,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: [style.clone(), changed.clone(), style.clone()]
@@ -5358,6 +5708,8 @@ mod tests {
                 space_after: None,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: parts
@@ -5420,6 +5772,8 @@ mod tests {
                 line_spacing: None,
                 line_space_reduction: 0.0,
                 indent_px: 0.0,
+                tab_stops: Vec::new(),
+                default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
                 runs: vec![ResolvedRun {
@@ -7673,6 +8027,32 @@ mod tests {
         bytes
     }
 
+    /// `triangle_emf` with the left-top quarter of the frame selected as the
+    /// clip path before the fill.
+    fn clipped_triangle_emf() -> Vec<u8> {
+        let mut bytes = triangle_emf();
+        let record = |kind: u32, body: Vec<u8>| {
+            let mut out = kind.to_le_bytes().to_vec();
+            out.extend_from_slice(&((8 + body.len()) as u32).to_le_bytes());
+            out.extend(body);
+            out
+        };
+        let i32s =
+            |values: &[i32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let mut polyline = i32s(&[0, 0, 0, 0, 4]);
+        for (x, y) in [(0i16, 0i16), (0, 50), (50, 50), (50, 0)] {
+            polyline.extend_from_slice(&x.to_le_bytes());
+            polyline.extend_from_slice(&y.to_le_bytes());
+        }
+        let mut clip = record(59, Vec::new());
+        clip.extend(record(27, i32s(&[0, 0])));
+        clip.extend(record(89, polyline));
+        clip.extend(record(60, Vec::new()));
+        clip.extend(record(67, i32s(&[5])));
+        bytes.splice(88..88, clip);
+        bytes
+    }
+
     /// The demo deck with one extra master picture pointing at `media`.
     fn deck_with_master_picture(media: Vec<u8>) -> (PptxPackage, DeckSnapshot) {
         deck_with_cropped_master_picture(media, PictureCrop::default())
@@ -7886,6 +8266,34 @@ mod tests {
         assert_eq!(
             path[1],
             ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 }
+        );
+    }
+
+    #[test]
+    fn a_metafile_clip_narrows_the_shape_clip_to_the_clipped_region() {
+        let (package, snapshot) = deck_with_master_picture(clipped_triangle_emf());
+        let primitives = renderer()
+            .layout_slide(&package, &snapshot, 0)
+            .unwrap()
+            .display_list
+            .primitives;
+
+        let clip = primitives
+            .iter()
+            .find_map(|primitive| match primitive {
+                Primitive::Shape { name, clip, .. } if name == "Logo" => clip.clone(),
+                _ => None,
+            })
+            .expect("the clipped metafile paints");
+        assert_eq!(
+            clip,
+            vec![
+                ooxml_drawingml::GeometryPathCommand::Move { x: 0.0, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.0 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.5, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Line { x: 0.0, y: 0.5 },
+                ooxml_drawingml::GeometryPathCommand::Close,
+            ]
         );
     }
 
