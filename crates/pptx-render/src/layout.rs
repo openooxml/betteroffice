@@ -6,10 +6,9 @@ use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
     TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
-    TableStyleFlags,
-    Theme, ThemeFormatScheme, normalize_table_column_widths, preset_geometry_to_path,
-    resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex, resolve_theme_font_ref,
-    style_fill, style_outline,
+    TableStyleFlags, Theme, ThemeFormatScheme, normalize_table_column_widths,
+    preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
+    resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,

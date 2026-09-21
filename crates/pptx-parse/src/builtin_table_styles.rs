@@ -55,7 +55,11 @@ mod tests {
 
         assert_eq!(header.text.bold, Some(true));
         assert!(style.band1_row.as_ref().is_some_and(|band| {
-            band.cell.fill != style.whole_table.as_ref().and_then(|part| part.cell.fill.clone())
+            band.cell.fill
+                != style
+                    .whole_table
+                    .as_ref()
+                    .and_then(|part| part.cell.fill.clone())
         }));
     }
 }
