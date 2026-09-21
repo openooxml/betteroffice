@@ -1,7 +1,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 
-use regex::RegexBuilder;
 use serde::Serialize;
 use yrs::{Any, Map, ReadTxn, Transact};
 
@@ -28,6 +27,74 @@ impl fmt::Display for TextSearchError {
 }
 
 impl std::error::Error for TextSearchError {}
+
+/// Literal query; case-insensitive matching equates characters that share an uppercase form.
+struct Needle {
+    folded: String,
+    case_sensitive: bool,
+}
+
+impl Needle {
+    fn new(query: &str, case_sensitive: bool) -> Self {
+        let folded = if case_sensitive {
+            query.to_owned()
+        } else {
+            query.chars().map(fold_char).collect()
+        };
+        Self {
+            folded,
+            case_sensitive,
+        }
+    }
+
+    /// Non-overlapping byte ranges of `text` equal to the query.
+    fn find_all(&self, text: &str) -> Vec<(usize, usize)> {
+        if self.case_sensitive {
+            return text
+                .match_indices(self.folded.as_str())
+                .map(|(start, found)| (start, start + found.len()))
+                .collect();
+        }
+        let mut folded = String::with_capacity(text.len());
+        let mut origins = Vec::with_capacity(text.len() + 1);
+        for (offset, ch) in text.char_indices() {
+            origins.push((folded.len(), offset));
+            folded.push(fold_char(ch));
+        }
+        origins.push((folded.len(), text.len()));
+        folded
+            .match_indices(self.folded.as_str())
+            .map(|(start, found)| {
+                (
+                    original_offset(&origins, start),
+                    original_offset(&origins, start + found.len()),
+                )
+            })
+            .collect()
+    }
+}
+
+fn fold_char(ch: char) -> char {
+    let mut upper = ch.to_uppercase();
+    if let (Some(single), None) = (upper.next(), upper.next()) {
+        let mut lower = single.to_lowercase();
+        if let (Some(single), None) = (lower.next(), lower.next()) {
+            return single;
+        }
+    }
+    let mut lower = ch.to_lowercase();
+    match (lower.next(), lower.next()) {
+        (Some(single), None) => single,
+        _ => ch,
+    }
+}
+
+fn original_offset(origins: &[(usize, usize)], folded: usize) -> usize {
+    match origins.binary_search_by_key(&folded, |&(at, _)| at) {
+        Ok(index) => origins[index].1,
+        Err(index) => origins[index.min(origins.len() - 1)].1,
+    }
+}
 
 enum SearchPart {
     Text { offset: u32, text: String },
@@ -75,10 +142,7 @@ impl EditingDoc {
         if query.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
-        let pattern = RegexBuilder::new(&regex::escape(query))
-            .case_insensitive(!case_sensitive)
-            .build()
-            .map_err(|error| TextSearchError(error.to_string()))?;
+        let needle = Needle::new(query, case_sensitive);
         let txn = self.yrs_doc().transact();
         let Some(stories) = txn.get_map(crate::STORIES) else {
             return Ok(Vec::new());
@@ -153,20 +217,21 @@ impl EditingDoc {
                 } => {
                     let mut byte_offset = 0;
                     let mut position = offset;
-                    for found in pattern.find_iter(&text) {
-                        position += text[byte_offset..found.start()].encode_utf16().count() as u32;
-                        let end = position + found.as_str().encode_utf16().count() as u32;
+                    for (from, to) in needle.find_all(&text) {
+                        position += text[byte_offset..from].encode_utf16().count() as u32;
+                        let found = &text[from..to];
+                        let end = position + found.encode_utf16().count() as u32;
                         matches.push(TextSearchMatch {
                             story: story.clone(),
                             para_id: para_id.clone(),
                             start: position,
                             end,
-                            text: found.as_str().to_owned(),
+                            text: found.to_owned(),
                         });
                         if matches.len() == limit {
                             return Ok(matches);
                         }
-                        byte_offset = found.end();
+                        byte_offset = to;
                         position = end;
                     }
                 }
@@ -253,5 +318,15 @@ mod tests {
             matches[..3]
         );
         assert_eq!(matches[matches.len() - 2].start, 0);
+    }
+
+    #[test]
+    fn needle_equates_shared_uppercase_forms_and_keeps_byte_ranges() {
+        let text = "\u{212A}elvin k STRASSE ẞ ß AAA";
+        assert_eq!(Needle::new("k", false).find_all(text), [(0, 3), (9, 10)]);
+        assert_eq!(Needle::new("k", true).find_all(text), [(9, 10)]);
+        assert_eq!(Needle::new("ß", false).find_all(text), [(19, 22), (23, 25)]);
+        assert_eq!(Needle::new("ss", false).find_all(text), [(15, 17)]);
+        assert_eq!(Needle::new("aa", false).find_all(text), [(26, 28)]);
     }
 }
