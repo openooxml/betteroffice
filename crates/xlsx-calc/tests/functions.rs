@@ -83,6 +83,34 @@ fn an_unknown_name_in_a_reference_argument_is_a_name_error() {
     ]);
 }
 
+/// Excel's lotus-style leading `+` passes its operand through, so `+A1` on a
+/// text cell is that text and `+J1&+K1` joins them; only negation wants a
+/// number.
+#[test]
+fn a_leading_plus_passes_its_operand_through() {
+    check(&[
+        ("+B1", t("apple")),
+        ("+B1&+B2", t("applebanana")),
+        ("+A1", n(10.0)),
+        ("+A1+1", n(11.0)),
+        ("-B1", e(ErrorValue::Value)),
+        ("-A1", n(-10.0)),
+    ]);
+}
+
+/// Text that spells a date reads as its serial wherever a number is wanted,
+/// not only inside the date functions.
+#[test]
+fn date_text_coerces_wherever_a_number_is_wanted() {
+    check(&[
+        ("CONVERT(\"1/8/2020\",\"in\",\"m\")", n(43_838.0 * 0.0254)),
+        ("ABS(\"1/8/2020\")", n(43_838.0)),
+        ("CONVERT(\"not a date\",\"in\",\"m\")", e(ErrorValue::Value)),
+    ]);
+    assert_eq!(eval_now("MONTH(\"Nov\"&1)"), n(11.0));
+    assert_eq!(eval_now("DAY(\"Nov\"&1)"), n(1.0));
+}
+
 #[test]
 fn vlookup_accepts_whole_columns() {
     for columns in [

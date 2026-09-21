@@ -736,7 +736,20 @@ pub(crate) fn nth_number(
     ctx: &EvalContext<'_>,
     i: usize,
 ) -> Result<f64, ErrorValue> {
-    to_number(&evaluate(&args[i], ctx))
+    coerce_number(&evaluate(&args[i], ctx), ctx)
+}
+
+/// an argument as a number, reading text that spells a date as its serial the
+/// way excel does anywhere a number is wanted.
+pub(crate) fn coerce_number(value: &CellValue, ctx: &EvalContext<'_>) -> Result<f64, ErrorValue> {
+    match (to_number(value), value) {
+        (Err(ErrorValue::Value), CellValue::Text { value }) => {
+            datetime::parse_date_text(value, ctx)
+                .map(|serial| serial as f64)
+                .ok_or(ErrorValue::Value)
+        }
+        (result, _) => result,
+    }
 }
 
 /// evaluate one argument, coerce to a number, truncate toward zero.
