@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { expect, test } from 'bun:test';
+import { CHANNELS, ENGINE_TIMEOUT, HELPER_TIMEOUT, PARALLELISM, SHARD_SIZE } from './roundtrip.mjs';
 
 const workflow = Bun.YAML.parse(
   await readFile(
@@ -132,4 +133,14 @@ test('native parse/edit/save probes run independently and gate the final report'
   expect(probe.steps.some((step: any) => step.run?.includes('install-libreoffice.sh'))).toBe(true);
   expect(publish.if).toContain("needs.roundtrip.result == 'success'");
   expect(publish.steps.find((step: any) => step.run?.includes('merge.mjs')).env.QUALITY_REQUIRE_ROUNDTRIP).toBe('true');
+});
+
+test('a shard of the slowest possible samples still finishes inside the job timeout', () => {
+  const probe = workflow.jobs.roundtrip;
+  const worstSeconds =
+    Math.ceil(SHARD_SIZE / PARALLELISM) *
+    (CHANNELS.length * (ENGINE_TIMEOUT + HELPER_TIMEOUT) + HELPER_TIMEOUT);
+  expect(worstSeconds).toBe(44 * 60);
+  expect(probe['timeout-minutes']).toBeGreaterThan(worstSeconds / 60);
+  expect(worstSeconds).toBeLessThan(probe['timeout-minutes'] * 60 * 0.75);
 });
