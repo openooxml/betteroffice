@@ -413,6 +413,9 @@ impl Parser<'_> {
 /// call that may resolve to one, or the `#REF!` excel leaves behind when a
 /// deletion takes an end away.
 fn reference_operand(expr: &Expr) -> bool {
+    if let Expr::Name { name, .. } = expr {
+        return !address_shaped(name);
+    }
     matches!(
         expr,
         Expr::Ref { .. }
@@ -423,6 +426,17 @@ fn reference_operand(expr: &Expr) -> bool {
             | Expr::RangeJoin { .. }
             | Expr::Error(_)
     )
+}
+
+/// a name excel would read as part of an address instead — a bare column
+/// like `A`, or a row number — is not an end for `:`. that is what keeps
+/// `A:B1` and `XFE:XFF` the parse errors they have always been, while a
+/// name a formula really binds, like a `LAMBDA` parameter, is an end.
+fn address_shaped(name: &str) -> bool {
+    let bare = name.trim_matches('$');
+    bare.is_empty()
+        || bare.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || bare.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// left/right binding powers for infix operators; `None` for non-operators.
@@ -593,6 +607,10 @@ mod tests {
             parse("INDEX(A1,1):INDEX(A1,2)"),
             Expr::RangeJoin { .. }
         ));
+        // a name a formula really binds is an end; one excel would read as
+        // part of an address is not
+        assert!(matches!(parse("A1:_xlpm.c"), Expr::RangeJoin { .. }));
+        assert!(matches!(parse("_xlpm.c:_xlpm.d"), Expr::RangeJoin { .. }));
         for src in ["A1:", ":A1", "A1:1", "A1:\"x\"", "A1:Name", "Name:A1"] {
             assert!(parse_formula(src).is_err(), "should reject {src:?}");
         }
