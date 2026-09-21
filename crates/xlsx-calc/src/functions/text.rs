@@ -156,7 +156,7 @@ fn not_found(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 
 /// an argument the call actually supplies; `f(a,b,,,,c)` leaves the skipped
 /// ones as blanks, which mean "use the default", not "use zero".
-fn given<'a>(args: &'a [Expr], index: usize) -> Option<&'a Expr> {
+fn given(args: &[Expr], index: usize) -> Option<&Expr> {
     args.get(index)
         .filter(|arg| !crate::functions::omitted(arg))
 }
