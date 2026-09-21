@@ -1350,3 +1350,55 @@ fn count_reads_a_computed_block_and_skips_its_errors() {
     );
     assert_eq!(values("SUM({1;2})", &workbook), vec![n(3.0)]);
 }
+
+/// a callback over a range gets each cell as a reference, not just as a
+/// value, so `OFFSET(c,,1)` and `A1:c` mean something inside one. the
+/// fixture is names in A1:A4 and numbers in B1:B4.
+#[test]
+fn a_callback_argument_keeps_the_cell_it_came_from() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "_xlfn.MAP(A1:A4,_xlfn.LAMBDA(_xlpm.c,OFFSET(_xlpm.c,,1)))",
+            &workbook
+        ),
+        vec![n(3.0), n(1.0), n(4.0), n(2.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.MAP(B1:B4,_xlfn.LAMBDA(_xlpm.c,ROW(_xlpm.c)))",
+            &workbook
+        ),
+        vec![n(1.0), n(2.0), n(3.0), n(4.0)]
+    );
+    assert_eq!(
+        values(
+            "_xlfn.REDUCE(0,B1:B4,_xlfn.LAMBDA(_xlpm.a,_xlpm.x,_xlpm.a+ROW(_xlpm.x)))",
+            &workbook
+        ),
+        vec![n(10.0)]
+    );
+    // the range operator reaches the bound cell as an end
+    assert_eq!(
+        values(
+            "_xlfn.MAP(B1:B4,_xlfn.LAMBDA(_xlpm.c,COLUMNS(A1:_xlpm.c)))",
+            &workbook
+        ),
+        vec![n(2.0), n(2.0), n(2.0), n(2.0)]
+    );
+    // a computed argument is a value and nothing more
+    assert_eq!(
+        values(
+            "_xlfn.MAP({1;2},_xlfn.LAMBDA(_xlpm.c,ROW(_xlpm.c)))",
+            &workbook
+        ),
+        vec![
+            CellValue::Error {
+                value: ErrorValue::Value
+            },
+            CellValue::Error {
+                value: ErrorValue::Value
+            }
+        ]
+    );
+}
