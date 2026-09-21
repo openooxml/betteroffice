@@ -711,10 +711,44 @@ pub(crate) fn to_bool(v: &CellValue) -> Result<bool, ErrorValue> {
 }
 
 pub(crate) fn parse_num(s: &str) -> Option<f64> {
-    s.trim()
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite())
+    let s = s.trim();
+    if let Ok(value) = s.parse::<f64>() {
+        return value.is_finite().then_some(value);
+    }
+    if let Some(rest) = s.strip_suffix('%') {
+        return parse_num(rest).map(|value| value / 100.0);
+    }
+    parse_clock(s)
+}
+
+/// a text time — `"0:15"`, `"12:30:45"`, either with a meridiem — as the
+/// fraction of a day excel coerces it to.
+fn parse_clock(s: &str) -> Option<f64> {
+    let (body, pm) = match s.to_ascii_uppercase() {
+        upper if upper.ends_with("AM") => (s[..s.len() - 2].trim_end(), Some(false)),
+        upper if upper.ends_with("PM") => (s[..s.len() - 2].trim_end(), Some(true)),
+        _ => (s, None),
+    };
+    let mut parts = body.split(':');
+    let hour: f64 = parts.next()?.trim().parse().ok()?;
+    let minute: f64 = parts.next()?.trim().parse().ok()?;
+    let second: f64 = match parts.next() {
+        Some(text) => text.trim().parse().ok()?,
+        None => 0.0,
+    };
+    if parts.next().is_some() || !(0.0..60.0).contains(&minute) || !(0.0..60.0).contains(&second) {
+        return None;
+    }
+    if hour < 0.0 || hour.fract() != 0.0 || minute.fract() != 0.0 {
+        return None;
+    }
+    let hour = match pm {
+        Some(_) if !(1.0..=12.0).contains(&hour) => return None,
+        Some(true) if hour < 12.0 => hour + 12.0,
+        Some(false) if hour == 12.0 => 0.0,
+        _ => hour,
+    };
+    Some((hour * 3600.0 + minute * 60.0 + second) / 86400.0)
 }
 
 /// excel "general" number formatting, good enough for text coercion: integers
@@ -922,6 +956,27 @@ fn provider_error(value: &CellValue) -> Option<ErrorValue> {
 
 #[cfg(test)]
 mod tests {
+
+    /// excel coerces a text time or percentage to a number, so `"0:15"+0` and
+    /// `MROUND(x,"0:15")` work on the strings a schedule is written with.
+    #[test]
+    fn text_coercion_reads_a_clock_and_a_percentage() {
+        assert_eq!(parse_num("12"), Some(12.0));
+        assert_eq!(parse_num(" 1.5 "), Some(1.5));
+        assert_eq!(parse_num("50%"), Some(0.5));
+        assert_eq!(parse_num("0:15"), Some(0.25 / 24.0));
+        assert_eq!(parse_num("12:00"), Some(0.5));
+        assert_eq!(
+            parse_num("12:30:45"),
+            Some((12.0 * 3600.0 + 30.0 * 60.0 + 45.0) / 86400.0)
+        );
+        assert_eq!(parse_num("1:30 PM"), Some(13.5 / 24.0));
+        assert_eq!(parse_num("12:00 AM"), Some(0.0));
+        assert_eq!(parse_num("abc"), None);
+        assert_eq!(parse_num("1:60"), None);
+        assert_eq!(parse_num("1:2:3:4"), None);
+        assert_eq!(parse_num("13:00 PM"), None);
+    }
     use super::*;
     use crate::parse_formula;
     use xlsx_model::{Cell, DefinedName, Sheet, Workbook};
