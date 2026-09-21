@@ -5,7 +5,8 @@ use ooxml_drawingml::chart::{PlotRect, PlotTextAlign};
 use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
-    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyleFlags,
+    TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
+    TableStyleFlags,
     Theme, ThemeFormatScheme, normalize_table_column_widths, preset_geometry_to_path,
     resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex, resolve_theme_font_ref,
     style_fill, style_outline,
@@ -22,7 +23,7 @@ use pptx_parse::{
     CustomGeometryPath, GraphicFrameData, LineSpacing, MediaPart, ParagraphProperties, Picture,
     PictureCrop, PictureFill, Placeholder, PptxPackage, RunProperties, ShapeNode, ShapeTransform,
     Slide, SlideLayout, SlideMaster, Table, TableCell, TextAutofit, TextBody, TextCaps,
-    TextOverflow, effective_color_map,
+    TextOverflow, builtin_table_style, effective_color_map,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1287,6 +1288,13 @@ impl<'a> LayoutBuilder<'a> {
             last_column: table.properties.last_col,
             band_row: table.properties.band_row,
         };
+        let package = self.package;
+        let table_style = table.properties.style_id.as_deref().and_then(|id| {
+            package
+                .table_styles
+                .style(Some(id))
+                .or_else(|| builtin_table_style(id))
+        });
         let mut heights: Vec<f32> = table.rows.iter().map(|row| emu_to_px(row.height)).collect();
         let mut spans = Vec::new();
         let mut plans = Vec::new();
@@ -1313,27 +1321,24 @@ impl<'a> LayoutBuilder<'a> {
                         self.slide_number,
                     ),
                 };
-                let style_id = table.properties.style_id.as_deref();
                 let position = TableCellPosition {
                     row: row_index,
                     column,
                     row_count,
                     column_count,
                 };
-                let mut style = self
-                    .package
-                    .table_styles
-                    .resolve_cell(style_id, flags, position);
+                let resolve = |position| {
+                    table_style
+                        .map(|style: &TableStyle| style.resolve_cell(flags, position))
+                        .unwrap_or_default()
+                };
+                let mut style = resolve(position);
                 if span > 1 || row_span > 1 {
-                    let far = self.package.table_styles.resolve_cell(
-                        style_id,
-                        flags,
-                        TableCellPosition {
-                            row: row_index + row_span - 1,
-                            column: column + span - 1,
-                            ..position
-                        },
-                    );
+                    let far = resolve(TableCellPosition {
+                        row: row_index + row_span - 1,
+                        column: column + span - 1,
+                        ..position
+                    });
                     style.right = far.right;
                     style.bottom = far.bottom;
                 }
