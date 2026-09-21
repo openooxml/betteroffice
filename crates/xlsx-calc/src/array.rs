@@ -1465,36 +1465,47 @@ fn fallback(args: &[Expr], ctx: &EvalContext<'_>, caught: fn(&CellValue) -> bool
     let budget = ctx.budget_error_checkpoint();
     let unsupported = ctx.unsupported_checkpoint();
     let value = evaluate_array(&args[0], ctx);
-    let needs_fallback = match &value {
+    let caught_any = match &value {
         Value::Scalar(value) => caught(value),
         Value::Array(array) => array.values.iter().any(caught),
         Value::Lambda(_) => false,
     };
-    if !needs_fallback {
+    // a single value needs the fallback only when it is itself caught, so the
+    // usual `IFERROR(VLOOKUP(..),"")` still leaves the fallback unevaluated
+    if !caught_any && !matches!(value, Value::Array(_)) {
         return value;
     }
-    ctx.handle_budget_errors_since(budget);
-    ctx.handle_unsupported_since(unsupported);
-    let other = evaluate_array(&args[1], ctx);
-    match value {
-        Value::Array(array) => {
-            let (rows, cols) = (array.rows, array.cols);
-            let cells = array
-                .values
-                .iter()
-                .enumerate()
-                .map(|(position, value)| {
-                    if caught(value) {
-                        other.broadcast(position / cols, position % cols)
-                    } else {
-                        value.clone()
-                    }
-                })
-                .collect();
-            block(ctx, rows, cols, cells)
-        }
-        _ => other,
+    if caught_any {
+        ctx.handle_budget_errors_since(budget);
+        ctx.handle_unsupported_since(unsupported);
     }
+    let checkpoint = ctx.unsupported_checkpoint();
+    let other = evaluate_array(&args[1], ctx);
+    // both sides answer elementwise, so a block shorter than its fallback
+    // pads with `#N/A` and that padding is caught in turn
+    let (rows, cols) = value.dims();
+    let (other_rows, other_cols) = other.dims();
+    let (rows, cols) = (rows.max(other_rows), cols.max(other_cols));
+    if !caught_any && (rows, cols) == value.dims() {
+        // the fallback never reached the result, so neither did its gaps
+        ctx.handle_unsupported_since(checkpoint);
+        return value;
+    }
+    let Ok(count) = output_cells(rows, cols) else {
+        return Value::error(ErrorValue::Num);
+    };
+    let mut cells = Vec::with_capacity(count);
+    for row in 0..rows {
+        for col in 0..cols {
+            let at = value.broadcast(row, col);
+            cells.push(if caught(&at) {
+                other.broadcast(row, col)
+            } else {
+                at
+            });
+        }
+    }
+    block(ctx, rows, cols, cells)
 }
 
 /// aggregates over a computed block; with no block the scalar builtin answers,
@@ -2308,9 +2319,12 @@ fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Ok(scalar("TEXTJOIN", args, ctx));
         };
         let separator = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
-        let ignore_empty = optional_bool(args, ctx, 1, false)?;
+        // excel reads an omitted `ignore_empty` as TRUE, not as the FALSE a
+        // blank usually coerces to
+        let ignore_empty = optional_bool(args, ctx, 1, true)?;
         let mut out = String::new();
         let mut chars = 0usize;
+        let mut first = true;
         for value in values {
             let empty = match &value {
                 CellValue::Empty => true,
@@ -2320,7 +2334,9 @@ fn textjoin(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             if ignore_empty && empty {
                 continue;
             }
-            if !out.is_empty() && !append_text(&mut out, &separator, &mut chars) {
+            // a separator goes between every pair, so a run of kept blanks
+            // still shows as delimiters
+            if !std::mem::take(&mut first) && !append_text(&mut out, &separator, &mut chars) {
                 return Err(ErrorValue::Value);
             }
             if !append_text(&mut out, &to_text(&value)?, &mut chars) {
@@ -2666,6 +2682,11 @@ fn textsplit(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let source = to_text(&evaluate_array(&args[0], ctx).into_scalar())?;
+        // excel has no empty array, so splitting nothing is an error rather
+        // than one blank cell
+        if source.is_empty() {
+            return Err(ErrorValue::NA);
+        }
         let columns = delimiters(args, ctx, 1)?;
         let rows = delimiters(args, ctx, 2)?;
         let ignore_empty = optional_bool(args, ctx, 3, false)?;

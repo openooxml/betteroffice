@@ -777,6 +777,58 @@ fn index_returns_a_whole_axis() {
 }
 
 /// `INDEX(block, {3;1})` answers once per index, over the rectangle the row
+/// `IFERROR` is elementwise over both sides, so a block shorter than its
+/// fallback pads with `#N/A` and that padding is caught in turn.
+#[test]
+fn iferror_broadcasts_against_its_fallback() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("IFERROR({1,2},{0,0,0,0})", &workbook),
+        (1, 4, vec![n(1.0), n(2.0), n(0.0), n(0.0)])
+    );
+    assert_eq!(
+        arrayed("_xlfn.IFNA({1;2},{9,9})", &workbook),
+        (2, 2, vec![n(1.0), n(1.0), n(2.0), n(2.0)])
+    );
+    assert_eq!(values("IFERROR(1/0,7)", &workbook), vec![n(7.0)]);
+}
+
+/// `TEXTJOIN` reads an omitted `ignore_empty` as TRUE; spelled FALSE it keeps
+/// the blanks, and a separator still goes between every pair.
+#[test]
+fn textjoin_drops_blanks_unless_told_otherwise() {
+    let workbook = fixture();
+    assert_eq!(
+        values(r#"_xlfn.TEXTJOIN("/",,{"a";"";"b"})"#, &workbook),
+        vec![t("a/b")]
+    );
+    assert_eq!(
+        values(r#"_xlfn.TEXTJOIN("/",FALSE,{"a";"";"b"})"#, &workbook),
+        vec![t("a//b")]
+    );
+    assert_eq!(
+        values(r#"_xlfn.TEXTJOIN("/",FALSE,{"";"";""})"#, &workbook),
+        vec![t("//")]
+    );
+}
+
+/// excel has no empty array, so splitting an empty string is an error rather
+/// than one blank cell.
+#[test]
+fn textsplit_of_nothing_is_not_found() {
+    let workbook = fixture();
+    assert_eq!(
+        values(r#"_xlfn.TEXTSPLIT("","/")"#, &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::NA
+        }]
+    );
+    assert_eq!(
+        values(r#"IFERROR(_xlfn.TEXTSPLIT("","/"),0)"#, &workbook),
+        vec![n(0.0)]
+    );
+}
+
 /// `MATCH` answers once per key, so `ISERROR(MATCH(range, seen, 0))` is a
 /// mask over the range rather than one verdict for all of it.
 #[test]
