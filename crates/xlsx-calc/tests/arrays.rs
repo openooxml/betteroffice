@@ -861,3 +861,106 @@ fn rank_ranks_every_value_it_is_given() {
         (4, 1, vec![n(2.0), n(4.0), n(1.0), n(3.0)])
     );
 }
+
+/// `TREND` evaluates the line `LINEST` fits: a perfect `y = 10x` fit predicts
+/// exactly, in the shape of `new_x`, and falls back to the known predictors.
+#[test]
+fn trend_predicts_along_the_fitted_line() {
+    let workbook = fixture();
+    let close = |formula: &str, want: &[f64]| {
+        let got = values(formula, &workbook);
+        assert_eq!(got.len(), want.len(), "{formula}: {got:?}");
+        for (value, want) in got.iter().zip(want) {
+            assert!(
+                matches!(value, CellValue::Number { value } if (value - want).abs() < 1e-9),
+                "{formula}: {value:?} != {want}"
+            );
+        }
+    };
+    close("TREND({10;20;30;40;50},{1;2;3;4;5},{6;7})", &[60.0, 70.0]);
+    close("TREND({10,20,30,40,50},{1,2,3,4,5},6)", &[60.0]);
+    close(
+        "TREND({10;20;30;40;50},{1;2;3;4;5})",
+        &[10.0, 20.0, 30.0, 40.0, 50.0],
+    );
+    close("TREND({10;20;30;40;50})", &[10.0, 20.0, 30.0, 40.0, 50.0]);
+    close(
+        "TREND({13;12;23;22;33;32;43},{1,2;2,1;3,4;4,3;5,6;6,5;7,8},{1,2;2,1})",
+        &[13.0, 12.0],
+    );
+    assert_eq!(
+        arrayed("TREND({10;20;30;40;50},{1;2;3;4;5},{6;7})", &workbook).0,
+        2
+    );
+    assert_eq!(
+        values("TREND({1;2},{1,2;3,4})", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Num
+        }]
+    );
+    assert_eq!(
+        values("TREND({10;20;30},{1;2})", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Ref
+        }]
+    );
+    assert_eq!(
+        values("TREND()", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Value
+        }]
+    );
+}
+
+/// `FREQUENCY` answers a column one taller than its bins, counts each value
+/// in the first interval that holds it, and ignores everything non-numeric.
+#[test]
+fn frequency_bins_values_into_one_column() {
+    let workbook = fixture();
+    assert_eq!(
+        arrayed("FREQUENCY({1;2;3;4;5},{2;4})", &workbook),
+        (3, 1, vec![n(2.0), n(2.0), n(1.0)])
+    );
+    assert_eq!(
+        arrayed("FREQUENCY({1;2;3;4;5},{4;2})", &workbook),
+        (3, 1, vec![n(2.0), n(2.0), n(1.0)])
+    );
+    assert_eq!(
+        arrayed("FREQUENCY({1,\"x\",TRUE,3},{2})", &workbook),
+        (2, 1, vec![n(1.0), n(1.0)])
+    );
+    assert_eq!(
+        arrayed("FREQUENCY({1;2;3},{3;3})", &workbook),
+        (3, 1, vec![n(3.0), n(0.0), n(0.0)])
+    );
+    assert_eq!(
+        values("FREQUENCY({1;2;3},{9})", &workbook),
+        vec![n(3.0), n(0.0)]
+    );
+    assert_eq!(
+        values("FREQUENCY({1;2;3},{1/0})", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Div0
+        }]
+    );
+    assert_eq!(
+        values("FREQUENCY({1;2;3})", &workbook),
+        vec![CellValue::Error {
+            value: ErrorValue::Value
+        }]
+    );
+}
+
+/// the longest-run idiom: `FREQUENCY` over the row numbers of the matching
+/// rows, binned by the row numbers of the rest, and the widest gap wins.
+#[test]
+fn frequency_measures_the_longest_run() {
+    let workbook = fixture();
+    assert_eq!(
+        values(
+            "MAX(FREQUENCY(IF(A1:A4=\"apple\",ROW(A1:A4)),IF(A1:A4<>\"apple\",ROW(A1:A4))))",
+            &workbook
+        ),
+        vec![n(1.0)]
+    );
+}
