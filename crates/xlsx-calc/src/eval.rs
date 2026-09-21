@@ -664,7 +664,7 @@ pub(crate) fn cmp_values(a: &CellValue, b: &CellValue) -> std::cmp::Ordering {
     }
 }
 
-fn cmp_text(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn cmp_text(a: &str, b: &str) -> std::cmp::Ordering {
     a.to_lowercase()
         .chars()
         .map(collation_key)

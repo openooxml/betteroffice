@@ -850,6 +850,41 @@ fn an_empty_filter_is_a_calculation_error() {
     );
 }
 
+/// `FREQUENCY` answers against the bins as given, not against a sorted copy:
+/// a repeated bin takes its whole count at its first appearance. That is what
+/// makes `FREQUENCY(a,a)` mark the distinct values of `a` in place.
+#[test]
+fn frequency_keeps_the_order_of_the_bins_it_was_given() {
+    let workbook = fixture();
+    assert_eq!(
+        values("FREQUENCY({1;5;3;5},{5;1;5})", &workbook),
+        vec![n(3.0), n(1.0), n(0.0), n(0.0)]
+    );
+    // the distinct-value idiom: nonzero exactly at each first occurrence
+    assert_eq!(
+        values("FREQUENCY({7;7;4;8;4},{7;7;4;8;4})", &workbook),
+        vec![n(2.0), n(0.0), n(2.0), n(1.0), n(0.0), n(0.0)]
+    );
+    // sorted bins are unaffected
+    assert_eq!(
+        values("FREQUENCY({1;3;5;7},{2;4;6})", &workbook),
+        vec![n(1.0), n(1.0), n(1.0), n(1.0)]
+    );
+}
+
+/// an ordered `MATCH` reads its data as sorted and stops where it crosses
+/// the key, so a computed block answers the same as the reference the scalar
+/// path takes.
+#[test]
+fn an_ordered_match_stops_where_the_data_crosses_the_key() {
+    let workbook = fixture();
+    assert_eq!(values("MATCH(25,{10;30;20},1)", &workbook), vec![n(1.0)]);
+    assert_eq!(values("MATCH(25,{10;20;30},1)", &workbook), vec![n(2.0)]);
+    assert_eq!(values("MATCH(25,{30;20;10},-1)", &workbook), vec![n(1.0)]);
+    // an exact match still scans past a miss
+    assert_eq!(values("MATCH(20,{10;30;20},0)", &workbook), vec![n(3.0)]);
+}
+
 /// `MATCH` answers once per key, so `ISERROR(MATCH(range, seen, 0))` is a
 /// mask over the range rather than one verdict for all of it.
 #[test]

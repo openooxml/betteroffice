@@ -3,7 +3,9 @@
 
 use xlsx_model::{CellValue, ErrorValue};
 
-use crate::eval::{Area, EvalContext, as_area, evaluate, parse_num, used_height, used_width};
+use crate::eval::{
+    Area, EvalContext, as_area, cmp_text, evaluate, parse_num, used_height, used_width,
+};
 use crate::parser::Expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,9 +104,9 @@ impl Criterion {
             // numeric cells never satisfy a text inequality in excel, and an
             // empty string counts as blank rather than as the smallest text
             match v {
-                CellValue::Text { value } if !value.is_empty() => {
-                    Some(value.to_lowercase().cmp(&self.text))
-                }
+                // the same collation the comparison operators and SORT use,
+                // so `COUNTIF(r,"<x")` agrees with `=cell<"x"`
+                CellValue::Text { value } if !value.is_empty() => Some(cmp_text(value, &self.text)),
                 CellValue::Text { .. } | CellValue::Empty if self.text.is_empty() => {
                     Some(Ordering::Equal)
                 }
@@ -326,6 +328,8 @@ pub(crate) fn matching_indices(
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
+
     use super::*;
 
     fn num(v: f64) -> CellValue {
@@ -407,6 +411,31 @@ mod tests {
         assert!(!less.matches(&txt("")));
         assert!(!less.matches(&CellValue::Empty));
         assert!(!less.matches(&num(1.0)));
+    }
+
+    /// the criteria comparison is the collation the operators and SORT use,
+    /// so `COUNTIF(r,"<x")` cannot disagree with `=r<"x"` about the same pair.
+    #[test]
+    fn ordering_criteria_use_the_same_collation_as_comparison() {
+        use crate::eval::cmp_values;
+        for (criterion, cell) in [
+            ("<[person_10]", "[Person_1]"),
+            ("<a1", "a_"),
+            (">a_", "a1"),
+            ("<m", "abc"),
+        ] {
+            let rest = criterion.trim_start_matches(['<', '>', '=']);
+            let ordered = cmp_values(&txt(cell), &txt(rest));
+            let wanted = match &criterion[..1] {
+                "<" => ordered == Ordering::Less,
+                _ => ordered == Ordering::Greater,
+            };
+            assert!(wanted, "the operator itself disagrees for {criterion}");
+            assert!(
+                Criterion::parse(criterion).matches(&txt(cell)),
+                "{criterion} against {cell:?}"
+            );
+        }
     }
 
     #[test]

@@ -1670,6 +1670,12 @@ fn match_position(data: &Array, target: &CellValue, kind: f64) -> Option<usize> 
             _ => ordering != std::cmp::Ordering::Less,
         };
         if !hit {
+            // an ordered search reads the data as sorted and ends where it
+            // crosses the key, as the scalar path over a reference does; only
+            // an exact match keeps looking past a miss
+            if kind != 0.0 {
+                break;
+            }
             continue;
         }
         best = Some(position + 1);
@@ -2092,18 +2098,27 @@ fn frequency(args: &[Expr], ctx: &EvalContext<'_>) -> Value {
             return Err(ErrorValue::Value);
         }
         let data = numbers_in(&argument(args, ctx, 0)?)?;
-        let mut bins = numbers_in(&argument(args, ctx, 1)?)?;
-        bins.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let bins = numbers_in(&argument(args, ctx, 1)?)?;
+        // counting needs the bins in order, but the answer is positioned
+        // against the bins as given: a repeated bin takes its whole count at
+        // its first appearance, which is what makes FREQUENCY(a,a) mark the
+        // distinct values of `a` in place
+        let mut order: Vec<usize> = (0..bins.len()).collect();
+        order.sort_by(|a, b| {
+            bins[*a]
+                .partial_cmp(&bins[*b])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let sorted: Vec<f64> = order.iter().map(|index| bins[*index]).collect();
         let mut counts = vec![0.0; bins.len() + 1];
         for value in data {
-            counts[bins.partition_point(|bin| *bin < value)] += 1.0;
+            counts[sorted.partition_point(|bin| *bin < value)] += 1.0;
         }
-        Ok(block(
-            ctx,
-            counts.len(),
-            1,
-            counts.into_iter().map(num).collect(),
-        ))
+        let mut out = vec![num(counts[bins.len()]); bins.len() + 1];
+        for (rank, index) in order.into_iter().enumerate() {
+            out[index] = num(counts[rank]);
+        }
+        Ok(block(ctx, out.len(), 1, out))
     })())
 }
 
