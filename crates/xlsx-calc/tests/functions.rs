@@ -225,6 +225,11 @@ fn math_functions() {
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
+        // a date function reads text where a date is wanted
+        ("MONTH(\"2024-03-05\")", n(3.0)),
+        ("YEAR(\"2024-03-05\")", n(2024.0)),
+        ("DAY(\"March 5, 2024\")", n(5.0)),
+        ("MONTH(\"not a date\")", e(ErrorValue::Value)),
         // the plain workday pair is the .INTL one with a fixed weekend
         ("NETWORKDAYS(45292,45303)", n(10.0)),
         ("NETWORKDAYS(45303,45292)", n(-10.0)),

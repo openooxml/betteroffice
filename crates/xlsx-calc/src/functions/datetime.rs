@@ -127,7 +127,7 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match nth_number(args, ctx, 0) {
+    let serial = match serial_arg(args, ctx, 0) {
         Ok(n) => n.floor() as i64,
         Err(e) => return err(e),
     };
@@ -171,7 +171,7 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 /// ISOWEEKNUM(serial): ISO 8601 — weeks start monday, week 1 holds the first
 /// thursday of the year.
 pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
-    match nth_number(args, ctx, 0) {
+    match serial_arg(args, ctx, 0) {
         Ok(_) if args.len() != 1 => err(ErrorValue::Value),
         Ok(n) => iso_week(n.floor() as i64),
         Err(e) => err(e),
@@ -200,7 +200,7 @@ pub(crate) fn weekday(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.is_empty() || args.len() > 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match nth_number(args, ctx, 0) {
+    let serial = match serial_arg(args, ctx, 0) {
         Ok(n) => n.floor() as i64,
         Err(e) => return err(e),
     };
@@ -362,11 +362,26 @@ fn complete_months(y1: i64, m1: i64, d1: i64, y2: i64, m2: i64, d2: i64) -> i64 
     months
 }
 
+/// a date argument as a serial: excel reads text where a date is wanted, which
+/// is what the `MONTH(monthname&1)` trick relies on.
+fn serial_arg(args: &[Expr], ctx: &EvalContext<'_>, index: usize) -> Result<f64, ErrorValue> {
+    match nth_number(args, ctx, index) {
+        Ok(value) => Ok(value),
+        Err(error) => match args.get(index).map(|arg| evaluate(arg, ctx)) {
+            Some(CellValue::Text { value }) => match parse_date_text(&value, ctx) {
+                Some(serial) => Ok(serial as f64),
+                None => Err(error),
+            },
+            _ => Err(error),
+        },
+    }
+}
+
 fn ymd_part(args: &[Expr], ctx: &EvalContext<'_>, pick: fn((i64, i64, i64)) -> i64) -> CellValue {
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    let serial = match nth_number(args, ctx, 0) {
+    let serial = match serial_arg(args, ctx, 0) {
         Ok(n) => n.floor() as i64,
         Err(e) => return err(e),
     };
@@ -384,7 +399,7 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
     if args.len() != 2 {
         return err(ErrorValue::Value);
     }
-    let serial = match nth_number(args, ctx, 0) {
+    let serial = match serial_arg(args, ctx, 0) {
         Ok(n) => n.floor() as i64,
         Err(e) => return err(e),
     };
@@ -416,7 +431,7 @@ fn time_part(args: &[Expr], ctx: &EvalContext<'_>, pick: fn(i64) -> i64) -> Cell
     if args.len() != 1 {
         return err(ErrorValue::Value);
     }
-    let serial = match nth_number(args, ctx, 0) {
+    let serial = match serial_arg(args, ctx, 0) {
         Ok(n) => n,
         Err(e) => return err(e),
     };
@@ -487,6 +502,15 @@ fn date_fields(raw: &str) -> Option<Vec<String>> {
         }
         for ch in chunk.chars() {
             if ch.is_alphanumeric() {
+                // a letter meeting a digit starts a new field, so the
+                // `MONTH(monthname&1)` trick reads "Nov1" as two
+                if current
+                    .chars()
+                    .last()
+                    .is_some_and(|last| last.is_ascii_digit() != ch.is_ascii_digit())
+                {
+                    fields.push(std::mem::take(&mut current));
+                }
                 current.push(ch);
             } else if matches!(ch, '/' | '-' | ',' | '.') {
                 if !current.is_empty() {
