@@ -28,7 +28,11 @@ pub fn positional_argument(name: &str, index: usize, arg: &Expr) -> bool {
     positional
         && matches!(
             arg,
-            Expr::Ref { .. } | Expr::Range { .. } | Expr::ColumnRange { .. } | Expr::Name { .. }
+            Expr::Ref { .. }
+                | Expr::Range { .. }
+                | Expr::ColumnRange { .. }
+                | Expr::TableRef { .. }
+                | Expr::Name { .. }
         )
 }
 
@@ -79,7 +83,12 @@ fn walk(
                 push_unique(out, seen, sheet, range);
             }
         }
-        Expr::Number(_) | Expr::Text(_) | Expr::Bool(_) | Expr::Error(_) | Expr::Name { .. } => {}
+        Expr::Number(_)
+        | Expr::Text(_)
+        | Expr::Bool(_)
+        | Expr::Error(_)
+        | Expr::TableRef { .. }
+        | Expr::Name { .. } => {}
     }
 }
 

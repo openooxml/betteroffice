@@ -256,6 +256,64 @@ pub(crate) fn index(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     }
 }
 
+/// `INDEX` used where a reference is expected: a zero or omitted index keeps
+/// the whole row or column as a reference instead of collapsing it to a value.
+pub(crate) fn index_area(args: &[Expr], ctx: &EvalContext<'_>) -> Result<Area, ErrorValue> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(ErrorValue::Value);
+    }
+    let area = as_area(&args[0], ctx).ok_or(ErrorValue::Value)?;
+    let first = axis_index(args, ctx, 1)?;
+    let second = match args.len() {
+        3 => Some(axis_index(args, ctx, 2)?),
+        _ => None,
+    };
+    let (row, col) = match second {
+        Some(col) => (first, col),
+        None if area.rows == 1 && area.cols > 1 => (0, first),
+        None => (first, 0),
+    };
+    if row > area.rows || col > area.cols {
+        return Err(ErrorValue::Ref);
+    }
+    let (start_row, rows) = match row {
+        0 => (area.start.row, area.rows),
+        row => (
+            area.start
+                .row
+                .checked_add(row as u32 - 1)
+                .ok_or(ErrorValue::Ref)?,
+            1,
+        ),
+    };
+    let (start_col, cols) = match col {
+        0 => (area.start.col, area.cols),
+        col => (
+            area.start
+                .col
+                .checked_add(col as u32 - 1)
+                .ok_or(ErrorValue::Ref)?,
+            1,
+        ),
+    };
+    Ok(Area {
+        sheet: area.sheet,
+        start: CellRef::new(start_row, start_col),
+        rows,
+        cols,
+    })
+}
+
+/// one `INDEX` index as a 0-based-or-whole-axis count: a gap reads as 0, and a
+/// negative index is #VALUE!.
+fn axis_index(args: &[Expr], ctx: &EvalContext<'_>, at: usize) -> Result<usize, ErrorValue> {
+    if args.get(at).is_some_and(crate::functions::omitted) {
+        return Ok(0);
+    }
+    let value = crate::functions::nth_int(args, ctx, at)?;
+    usize::try_from(value).map_err(|_| ErrorValue::Value)
+}
+
 /// OFFSET(reference, rows, cols, [height], [width]): a negative size extends
 /// back from the shifted corner; a zero size or a rectangle off the sheet is
 /// #REF!, and a multi-cell result in scalar context is #VALUE!.

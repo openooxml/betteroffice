@@ -4,11 +4,13 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Workbook};
+use xlsx_model::{CellRange, CellRef, ColId, DefinedName, RowId, SheetId, Table, Workbook};
 
+use crate::TableSpec;
 use crate::deps::{offset_target, positional_argument, references};
 use crate::eval::{ParseCache, parse_cached};
 use crate::parser::Expr;
+use crate::reference::table_rect;
 
 /// a formula cell, normalized so `$`-anchoring never splits a node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -43,6 +45,8 @@ pub struct DepGraph {
     names: HashMap<String, SheetId>,
     defined_names: Vec<DefinedName>,
     defined_name_indices: HashMap<(Option<SheetId>, String), usize>,
+    /// table definitions keyed by lowercased name, snapshot at build time.
+    tables: HashMap<String, Table>,
     /// forward edges: formula node -> the cells/ranges it reads (sheets resolved).
     deps: HashMap<NodeKey, NodeEntry>,
     /// reverse index by sheet: `(range, dependent)` pairs read into that sheet.
@@ -82,10 +86,16 @@ impl DepGraph {
                 .entry((defined.local_sheet, defined.name.to_ascii_lowercase()))
                 .or_insert(index);
         }
+        let tables = wb
+            .tables
+            .iter()
+            .map(|table| (table.name.to_lowercase(), table.clone()))
+            .collect();
         let mut g = DepGraph {
             names,
             defined_names,
             defined_name_indices,
+            tables,
             deps: HashMap::new(),
             by_sheet: HashMap::new(),
             volatile: HashSet::new(),
@@ -225,7 +235,7 @@ impl DepGraph {
         let Some(expr) = parse_cached(&self.asts, src) else {
             return;
         };
-        let edges = self.resolve_edges(key.sheet, &expr);
+        let edges = self.resolve_edges(key, &expr);
         for (sid, range) in &edges {
             self.by_sheet.entry(*sid).or_default().push((*range, key));
         }
@@ -253,12 +263,44 @@ impl DepGraph {
 
     /// resolve refs to concrete sheet ids; unqualified refs bind to the owning
     /// sheet, unknown sheet names drop the edge.
-    fn resolve_edges(&self, owner: SheetId, expr: &Expr) -> Vec<(SheetId, CellRange)> {
+    fn resolve_edges(&self, owner: NodeKey, expr: &Expr) -> Vec<(SheetId, CellRange)> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
-        self.add_references(owner, expr, &mut out, &mut seen);
-        self.add_defined_name_references(owner, expr, &mut out, &mut seen);
+        self.add_references(owner.sheet, expr, &mut out, &mut seen);
+        self.add_defined_name_references(owner.sheet, expr, &mut out, &mut seen);
+        self.add_table_references(owner, expr, &mut out, &mut seen);
         out
+    }
+
+    /// edges for the structured references a formula reads, resolved against
+    /// the workbook's tables; `#This Row` binds to the owning cell's row.
+    fn add_table_references(
+        &self,
+        owner: NodeKey,
+        expr: &Expr,
+        out: &mut Vec<(SheetId, CellRange)>,
+        seen: &mut HashSet<(SheetId, u32, u32, u32, u32)>,
+    ) {
+        let mut uses = Vec::new();
+        push_table_uses(expr, &mut uses);
+        for (name, spec) in uses {
+            let Some(table) = self.tables.get(&name.to_lowercase()) else {
+                continue;
+            };
+            let Ok(range) = table_rect(table, spec, Some(owner.cell())) else {
+                continue;
+            };
+            let key = (
+                table.sheet,
+                range.start.row,
+                range.start.col,
+                range.end.row,
+                range.end.col,
+            );
+            if seen.insert(key) {
+                out.push((table.sheet, range));
+            }
+        }
     }
 
     fn add_references(
@@ -374,6 +416,29 @@ impl DepGraph {
     }
 }
 
+fn push_table_uses<'a>(expr: &'a Expr, uses: &mut Vec<(&'a str, &'a TableSpec)>) {
+    let mut expressions = vec![expr];
+    while let Some(expression) = expressions.pop() {
+        match expression {
+            Expr::TableRef { table, spec } => uses.push((table.as_str(), spec)),
+            Expr::ArrayLiteral { values, .. } => expressions.extend(values),
+            Expr::Unary { expr, .. } | Expr::Percent(expr) => expressions.push(expr),
+            Expr::Binary { lhs, rhs, .. } => {
+                expressions.push(rhs);
+                expressions.push(lhs);
+            }
+            Expr::FuncCall { name, args, .. } => expressions.extend(
+                args.iter()
+                    .enumerate()
+                    .rev()
+                    .filter(|(index, arg)| !positional_argument(name, *index, arg))
+                    .map(|(_, arg)| arg),
+            ),
+            _ => {}
+        }
+    }
+}
+
 type DefinedNameUse = (SheetId, Option<String>, String);
 
 fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<DefinedNameUse>) {
@@ -402,6 +467,7 @@ fn push_defined_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Defined
             | Expr::Error(_)
             | Expr::Ref { .. }
             | Expr::Range { .. }
+            | Expr::TableRef { .. }
             | Expr::ColumnRange { .. } => {}
         }
     }
@@ -436,6 +502,7 @@ fn push_volatile_name_uses(owner: SheetId, expr: &Expr, pending: &mut Vec<Define
             | Expr::Error(_)
             | Expr::Ref { .. }
             | Expr::Range { .. }
+            | Expr::TableRef { .. }
             | Expr::ColumnRange { .. } => {}
         }
     }

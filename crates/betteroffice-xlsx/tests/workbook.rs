@@ -783,6 +783,85 @@ fn overlapping_merge_parts() -> Vec<(String, Vec<u8>)> {
     ]
 }
 
+fn table_package() -> Vec<u8> {
+    let workbook =
+        r#"<workbook><sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>"#;
+    let rels = r#"<Relationships><Relationship Id="rId1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    let worksheet = r#"<worksheet><sheetData><row r="1"><c r="A1" t="inlineStr"><is><t>Amount</t></is></c></row><row r="2"><c r="A2"><v>2</v></c></row><row r="3"><c r="A3"><v>3</v></c></row><row r="5"><c r="C5"><f>SUM(Sales[Amount])</f></c></row></sheetData></worksheet>"#;
+    let sheet_rels = r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/table" Target="/xl/tables/table1.xml"/></Relationships>"#;
+    let table = r#"<table id="1" displayName="Sales" ref="A1:A3"><tableColumns count="1"><tableColumn id="1" name="Amount"/></tableColumns></table>"#;
+    ooxml_opc::rezip_parts(&[
+        ("xl/workbook.xml".to_string(), workbook.as_bytes().to_vec()),
+        (
+            "xl/_rels/workbook.xml.rels".to_string(),
+            rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml".to_string(),
+            worksheet.as_bytes().to_vec(),
+        ),
+        (
+            "xl/worksheets/_rels/sheet1.xml.rels".to_string(),
+            sheet_rels.as_bytes().to_vec(),
+        ),
+        (
+            "xl/tables/table1.xml".to_string(),
+            table.as_bytes().to_vec(),
+        ),
+    ])
+    .unwrap()
+}
+
+/// The live model is the shared-state projection, so a table only reaches the
+/// evaluator if the projection carries it.
+#[test]
+fn structured_references_survive_the_shared_state_projection() {
+    let bytes = table_package();
+    for workbook in [
+        Workbook::open_recalculated(&bytes, CalculationOptions::default()).unwrap(),
+        Workbook::open_collaborative_recalculated(&bytes, 7, CalculationOptions::default())
+            .unwrap(),
+    ] {
+        assert_eq!(
+            workbook.model().tables.len(),
+            1,
+            "the projection dropped the table"
+        );
+        assert_eq!(
+            workbook
+                .model()
+                .sheet(SheetId(0))
+                .unwrap()
+                .cell(cell("C5"))
+                .unwrap()
+                .value,
+            CellValue::Number { value: 5.0 }
+        );
+    }
+}
+
+/// A structural edit moves the table's rectangle, which no save rewrites yet,
+/// so the edit is refused rather than stranding the reference.
+#[test]
+fn a_row_insert_is_refused_while_a_formula_reads_a_table() {
+    let mut workbook = Workbook::open(&table_package()).unwrap();
+    let error = workbook
+        .apply_ops(
+            vec![Op::InsertRows {
+                sheet: SheetId(0),
+                at: 0,
+                count: 1,
+            }],
+            CalculationOptions::default(),
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Operation(_)), "{error:?}");
+    assert_eq!(
+        workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
+        CellValue::Number { value: 2.0 }
+    );
+}
+
 #[test]
 fn open_and_recalculation_are_explicit() {
     let cached = Workbook::open(&sample_xlsx()).unwrap();

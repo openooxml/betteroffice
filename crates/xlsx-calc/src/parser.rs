@@ -3,8 +3,8 @@
 
 use xlsx_model::{CellRange, CellRef, CellValue, ErrorValue};
 
-use crate::ColumnRange;
 use crate::lexer::{ParseError, TokKind, Token, lex};
+use crate::{ColumnRange, TableSpec};
 
 /// maximum expression nesting depth before we bail with a `ParseError`.
 pub const MAX_DEPTH: usize = 100;
@@ -40,6 +40,12 @@ pub enum Expr {
     ColumnRange {
         sheet: Option<String>,
         range: ColumnRange,
+    },
+    /// `Table[Col]`: a structured reference, resolved against the workbook's
+    /// table parts at evaluation time.
+    TableRef {
+        table: String,
+        spec: TableSpec,
     },
     Name {
         scope: Option<String>,
@@ -247,6 +253,9 @@ impl Parser<'_> {
             TokKind::Range { sheet, range } => Ok(ParsedExpr::leaf(Expr::Range { sheet, range })),
             TokKind::ColumnRange { sheet, range } => {
                 Ok(ParsedExpr::leaf(Expr::ColumnRange { sheet, range }))
+            }
+            TokKind::TableRef { table, spec } => {
+                Ok(ParsedExpr::leaf(Expr::TableRef { table, spec }))
             }
             TokKind::LParen => {
                 let inner = self.expr_bp(0, depth + 1)?;

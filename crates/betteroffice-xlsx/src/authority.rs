@@ -7,7 +7,8 @@ use sha2::{Digest, Sha256};
 use xlsx_model::{
     AnchorEditAs, AnchorExtent, AnchorPos, Cell, CellFormat, CellRange, CellRef, CellValue,
     ChartAnchor, ChartRef, DateSystem, DefinedName, ErrorValue, FreezePane, Hyperlink, MAX_COLS,
-    MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Workbook as WorkbookModel,
+    MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
+    Workbook as WorkbookModel,
 };
 use xlsx_ops::Op;
 use yrs::block::{
@@ -104,6 +105,8 @@ struct WorkbookBase {
     hidden_dimensions: Vec<HiddenDimensions>,
     shared_strings: Vec<String>,
     styles: Stylesheet,
+    /// table parts; read-only reference data, not shared state.
+    tables: Vec<Table>,
 }
 
 impl WorkbookBase {
@@ -204,6 +207,7 @@ impl WorkbookBase {
             hidden_dimensions: hidden_dimensions(model, legacy_dimensions),
             shared_strings: model.shared_strings.clone(),
             styles: model.styles.clone(),
+            tables: model.tables.clone(),
         })
     }
 
@@ -220,6 +224,7 @@ impl WorkbookBase {
             defined_names: self.defined_names.clone(),
             shared_strings: self.shared_strings.clone(),
             styles: self.styles.clone(),
+            tables: self.tables.clone(),
         }
     }
 }

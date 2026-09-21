@@ -1,6 +1,7 @@
 //! ast -> formula text; printing a parsed formula and re-parsing it yields an
 //! equivalent ast.
 
+use crate::TableSpec;
 use crate::parser::{BinaryOp, Expr, UnaryOp};
 use xlsx_model::CellRef;
 
@@ -87,6 +88,7 @@ impl Expr {
             Expr::ColumnRange { sheet, range } => {
                 format!("{}{}", sheet_prefix(sheet), range.to_a1())
             }
+            Expr::TableRef { table, spec } => format!("{table}{}", table_spec(spec)),
             Expr::Name { scope, name } => format!("{}{name}", sheet_prefix(scope)),
             Expr::Unary { op, expr } => {
                 // 6 > every binary bp: unary minus binds tighter than all binary ops
@@ -109,6 +111,38 @@ impl Expr {
             }
         }
     }
+}
+
+/// print the bracket body in the always-bracketed form, which re-parses to the
+/// same spec whatever the source used.
+fn table_spec(spec: &TableSpec) -> String {
+    let mut items: Vec<String> = spec
+        .bands
+        .iter()
+        .map(|band| format!("[{}]", band.keyword()))
+        .collect();
+    let columns: Vec<String> = spec
+        .first_column
+        .iter()
+        .chain(spec.last_column.iter())
+        .map(|name| format!("[{}]", escape_table_name(name)))
+        .collect();
+    let span = columns.join(":");
+    if !span.is_empty() {
+        items.push(span);
+    }
+    format!("[{}]", items.join(","))
+}
+
+fn escape_table_name(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if matches!(c, '\'' | '[' | ']' | '#' | '@') {
+            out.push('\'');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// print a spliced value the way the same literal would be written.
