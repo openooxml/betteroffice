@@ -571,6 +571,7 @@ fn lifted_positions(name: &str) -> Option<&'static [usize]> {
         "HLOOKUP" | "VLOOKUP" | "XLOOKUP" => &[0],
         "MATCH" | "RANK" | "RANK.AVG" | "RANK.EQ" | "XMATCH" => &[0],
         "LARGE" | "SMALL" => &[1],
+        "PERCENTILE" | "PERCENTILE.INC" | "QUARTILE" | "QUARTILE.INC" => &[1],
         _ => return None,
     })
 }

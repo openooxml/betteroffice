@@ -764,15 +764,36 @@ pub(crate) fn networkdays_intl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValu
     if args.len() < 2 || args.len() > 4 {
         return err(ErrorValue::Value);
     }
-    let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
-        (Err(e), _) | (_, Err(e)) => return err(e),
-    };
     let weekend = match weekend_arg(args, ctx, 2) {
         Ok(w) => w,
         Err(e) => return err(e),
     };
-    let holidays = match holidays_arg(args, ctx, 3) {
+    networkdays_core(args, ctx, weekend, 3)
+}
+
+/// NETWORKDAYS(start, end, [holidays]): the saturday/sunday weekend spelled
+/// out, so the plain form is the `.INTL` one with its weekend fixed.
+pub(crate) fn networkdays(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    match default_weekend() {
+        Ok(weekend) => networkdays_core(args, ctx, weekend, 2),
+        Err(e) => err(e),
+    }
+}
+
+fn networkdays_core(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    weekend: Weekend,
+    holidays_index: usize,
+) -> CellValue {
+    let (start, end) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(a), Ok(b)) => (a.floor() as i64, b.floor() as i64),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let holidays = match holidays_arg(args, ctx, holidays_index) {
         Ok(h) => h,
         Err(e) => return err(e),
     };
@@ -819,15 +840,40 @@ pub(crate) fn workday_intl(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if args.len() < 2 || args.len() > 4 {
         return err(ErrorValue::Value);
     }
-    let (start, days) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
-        (Ok(a), Ok(b)) => (a.floor() as i64, b.trunc() as i64),
-        (Err(e), _) | (_, Err(e)) => return err(e),
-    };
     let weekend = match weekend_arg(args, ctx, 2) {
         Ok(w) => w,
         Err(e) => return err(e),
     };
-    let holidays = match holidays_arg(args, ctx, 3) {
+    workday_core(args, ctx, weekend, 3)
+}
+
+/// WORKDAY(start, days, [holidays]): the `.INTL` form with the weekend fixed
+/// to saturday and sunday.
+pub(crate) fn workday(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
+    if args.len() < 2 || args.len() > 3 {
+        return err(ErrorValue::Value);
+    }
+    match default_weekend() {
+        Ok(weekend) => workday_core(args, ctx, weekend, 2),
+        Err(e) => err(e),
+    }
+}
+
+fn default_weekend() -> Result<Weekend, ErrorValue> {
+    weekend_of(&CellValue::Number { value: 1.0 })
+}
+
+fn workday_core(
+    args: &[Expr],
+    ctx: &EvalContext<'_>,
+    weekend: Weekend,
+    holidays_index: usize,
+) -> CellValue {
+    let (start, days) = match (nth_number(args, ctx, 0), nth_number(args, ctx, 1)) {
+        (Ok(a), Ok(b)) => (a.floor() as i64, b.trunc() as i64),
+        (Err(e), _) | (_, Err(e)) => return err(e),
+    };
+    let holidays = match holidays_arg(args, ctx, holidays_index) {
         Ok(h) => h,
         Err(e) => return err(e),
     };

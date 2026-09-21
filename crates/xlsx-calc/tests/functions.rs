@@ -225,6 +225,12 @@ fn math_functions() {
         ("WEEKNUM(46023, 21)", n(1.0)),
         ("WEEKNUM(44196, 21)", n(53.0)),
         ("WEEKNUM(46023)", n(1.0)),
+        // the plain workday pair is the .INTL one with a fixed weekend
+        ("NETWORKDAYS(45292,45303)", n(10.0)),
+        ("NETWORKDAYS(45303,45292)", n(-10.0)),
+        ("WORKDAY(45292,5)", n(45299.0)),
+        ("WORKDAY(45292,-1)", n(45289.0)),
+        ("NETWORKDAYS(45292)", e(ErrorValue::Value)),
         // week 1 holds jan 1, so the count depends on which weekday that is:
         // 2005-01-01 is a saturday, 2023-01-01 a sunday, 2024-01-01 a monday
         ("WEEKNUM(38580)", n(34.0)),
