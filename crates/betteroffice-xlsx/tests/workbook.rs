@@ -2309,7 +2309,16 @@ fn rename_invalidates_pending_proposals() {
 #[test]
 fn reports_recalculation_limits_without_overwriting_cached_values() {
     let mut model = WorkbookModel::default();
-    model.sheets.push(Sheet::new("Data"));
+    let mut data = Sheet::new("Data");
+    // a cell in the far corner gives Data the extent the limit is there for
+    data.set_cell(
+        cell("XFD1048576"),
+        Cell {
+            value: CellValue::Number { value: 1.0 },
+            ..Cell::default()
+        },
+    );
+    model.sheets.push(data);
     let mut formulas = Sheet::new("Formulas");
     formulas.set_cell(
         cell("A1"),
