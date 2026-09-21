@@ -1,11 +1,14 @@
 //! recalc driver: given edited cells, re-evaluate exactly the formulas that
 //! could have changed, in dependency order, and report what moved.
 
+use std::borrow::Cow;
+use std::cell::Cell as Flag;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 use xlsx_model::{
-    Cell, CellProvider, CellRange, CellRef, CellValue, ColId, ErrorValue, RowId, SheetId, Workbook,
+    Cell, CellProvider, CellRange, CellRef, CellValue, ColId, DefinedName, ErrorValue, RowId,
+    SheetId, Table, Workbook,
 };
 
 use crate::array::{Spill, evaluate_spill, spill_at};
@@ -95,6 +98,10 @@ fn collect_recompute(graph: &DepGraph, seeds: &[(SheetId, CellRef)]) -> HashSet<
 /// workbook can loop here.
 const MAX_SPILL_ROUNDS: usize = 4;
 
+/// cells one deferred pass will try to settle. a larger apparent cycle keeps
+/// the range graph's answer rather than paying a quadratic scan for it.
+const MAX_DEFERRED_CYCLE_CELLS: usize = 4096;
+
 /// topologically order `recompute` and evaluate it, writing changed values into
 /// `wb`. cells caught in a cycle are zeroed and reported separately.
 fn run_recalc(
@@ -129,7 +136,16 @@ fn run_recalc(
                 None => {}
             }
         }
-        for u in &cycle {
+        let circular = settle_deferred(
+            wb,
+            &cycle,
+            graph,
+            now_serial,
+            &budget,
+            &mut changed,
+            &mut limited_cells,
+        );
+        for u in &circular {
             if write_if_changed(wb, *u, CellValue::Number { value: 0.0 }) {
                 changed.push((u.0, cell_of(*u)));
             }
@@ -267,7 +283,133 @@ enum NodeValue {
 
 /// evaluate one formula node; `None` keeps the cached value, because the cell
 /// has no formula, it no longer parses, or an engine gap reached the result.
+/// the range graph makes every cell of a range a precedent, so a table whose
+/// column reads its own earlier rows through `INDEX(range, k)` looks circular
+/// even though no cell reads itself. settle what the reads really allow: a
+/// cell whose evaluation touches nothing still unsettled was never in a
+/// cycle. what is left over is.
+fn settle_deferred(
+    wb: &mut Workbook,
+    cycle: &[Key],
+    graph: &DepGraph,
+    now_serial: Option<f64>,
+    budget: &Rc<EvaluationBudget>,
+    changed: &mut Vec<(SheetId, CellRef)>,
+    limited_cells: &mut Vec<(SheetId, CellRef)>,
+) -> Vec<Key> {
+    if cycle.is_empty() || cycle.len() > MAX_DEFERRED_CYCLE_CELLS {
+        return cycle.to_vec();
+    }
+    let mut unsettled: HashSet<Key> = cycle.iter().copied().collect();
+    for _ in 0..cycle.len() {
+        let mut settled_any = false;
+        for u in cycle {
+            if !unsettled.contains(u) {
+                continue;
+            }
+            let log = ReadLog {
+                inner: wb,
+                watch: &unsettled,
+                touched: Flag::new(false),
+            };
+            let (value, limited) =
+                eval_node_with(&log, wb, *u, now_serial, Rc::clone(budget), graph);
+            // a spill rewrites a rectangle, which the ordered pass owns
+            if log.touched.get() || matches!(value, Some(NodeValue::Spill(_))) {
+                continue;
+            }
+            unsettled.remove(u);
+            settled_any = true;
+            if limited {
+                limited_cells.push((u.0, cell_of(*u)));
+            }
+            if let Some(NodeValue::Scalar(value)) = value
+                && write_if_changed(wb, *u, value)
+            {
+                changed.push((u.0, cell_of(*u)));
+            }
+        }
+        if !settled_any {
+            break;
+        }
+    }
+    cycle
+        .iter()
+        .copied()
+        .filter(|u| unsettled.contains(u))
+        .collect()
+}
+
+/// a provider that notes whether a formula read any of the cells still
+/// waiting to settle, without recording the rest.
+struct ReadLog<'a> {
+    inner: &'a Workbook,
+    watch: &'a HashSet<Key>,
+    touched: Flag<bool>,
+}
+
+impl ReadLog<'_> {
+    fn note(&self, sheet: SheetId, at: CellRef) {
+        if self.watch.contains(&key(sheet, at)) {
+            self.touched.set(true);
+        }
+    }
+}
+
+impl CellProvider for ReadLog<'_> {
+    fn value(&self, sheet: SheetId, at: CellRef) -> CellValue {
+        self.note(sheet, at);
+        self.inner.value(sheet, at)
+    }
+
+    fn value_cow(&self, sheet: SheetId, at: CellRef) -> Cow<'_, CellValue> {
+        self.note(sheet, at);
+        self.inner.value_cow(sheet, at)
+    }
+
+    fn formula(&self, sheet: SheetId, at: CellRef) -> Option<&str> {
+        self.inner.formula(sheet, at)
+    }
+
+    fn sheet_id(&self, name: &str) -> Option<SheetId> {
+        self.inner.sheet_id(name)
+    }
+
+    fn defined_name(&self, sheet: SheetId, name: &str) -> Option<&DefinedName> {
+        self.inner.defined_name(sheet, name)
+    }
+
+    fn table(&self, name: &str) -> Option<&Table> {
+        self.inner.table(name)
+    }
+
+    fn used_rows(&self, sheet: SheetId) -> RowId {
+        self.inner.used_rows(sheet)
+    }
+
+    fn used_cols(&self, sheet: SheetId) -> ColId {
+        self.inner.used_cols(sheet)
+    }
+
+    fn spill_range(&self, sheet: SheetId, at: CellRef) -> Option<CellRange> {
+        self.inner.spill_range(sheet, at)
+    }
+}
+
 fn eval_node(
+    wb: &Workbook,
+    u: Key,
+    now_serial: Option<f64>,
+    budget: Rc<EvaluationBudget>,
+    graph: &DepGraph,
+) -> (Option<NodeValue>, bool) {
+    eval_node_with(wb, wb, u, now_serial, budget, graph)
+}
+
+/// evaluate one node, reading cells through `provider` while `wb` supplies the
+/// formula's own shape.
+fn eval_node_with(
+    provider: &dyn CellProvider,
     wb: &Workbook,
     u: Key,
     now_serial: Option<f64>,
@@ -279,7 +421,7 @@ fn eval_node(
     };
     let cell = cell_of(u);
     let authored = wb.sheet(u.0).and_then(|sheet| sheet.array_formula(cell));
-    let mut ctx = EvalContext::with_budget(wb, u.0, budget);
+    let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
     ctx.parse_cache = Some(graph.asts());
@@ -877,6 +1019,67 @@ mod tests {
         assert!(r.cycle_cells.is_empty());
         assert_eq!(value(&wb, s, "B1"), num(5.0));
         assert_eq!(value(&wb, s, "A1"), num(6.0));
+    }
+
+    /// the range graph makes `INDEX(range, k)` a precedent of every cell of
+    /// `range`, so a column reading its own earlier rows looks circular. what
+    /// the cells actually read says otherwise.
+    #[test]
+    fn a_range_wide_precedent_is_not_a_cycle_when_the_reads_are_not() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 5.0);
+        put_formula(&mut wb, s, "B1", "A1");
+        put_formula(&mut wb, s, "B2", "INDEX(B1:B3,1)+1");
+        put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "B1"), num(5.0));
+        assert_eq!(value(&wb, s, "B2"), num(6.0));
+        assert_eq!(value(&wb, s, "B3"), num(7.0));
+    }
+
+    /// settling the cells whose reads allow it leaves the ones whose reads do
+    /// not, so a real cycle beside a false one is still reported.
+    #[test]
+    fn a_real_cycle_beside_a_false_one_is_still_reported() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 2.0);
+        put_formula(&mut wb, s, "B1", "A1");
+        put_formula(&mut wb, s, "B2", "INDEX(B1:B3,1)+1");
+        put_formula(&mut wb, s, "B3", "INDEX(B1:B3,2)+1");
+        put_formula(&mut wb, s, "D1", "D2+1");
+        put_formula(&mut wb, s, "D2", "D1+1");
+        let (_, r) = rebuild_and_recalc_all(&mut wb, None);
+        let mut cyc: Vec<String> = r.cycle_cells.iter().map(|(_, c)| c.to_a1()).collect();
+        cyc.sort();
+        assert_eq!(cyc, vec!["D1", "D2"]);
+        assert_eq!(value(&wb, s, "B3"), num(4.0));
+        assert_eq!(value(&wb, s, "D1"), num(0.0));
+    }
+
+    /// a settled cell feeds the ones that read it, however deep the chain,
+    /// and an edit still propagates through it afterwards.
+    #[test]
+    fn settling_walks_a_chain_and_survives_a_later_edit() {
+        let (mut wb, s) = one_sheet();
+        put_num(&mut wb, s, "A1", 1.0);
+        put_formula(&mut wb, s, "B1", "A1");
+        for row in 2..=8 {
+            put_formula(
+                &mut wb,
+                s,
+                &format!("B{row}"),
+                &format!("INDEX(B1:B8,{})+1", row - 1),
+            );
+        }
+        let (mut graph, r) = rebuild_and_recalc_all(&mut wb, None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "B8"), num(8.0));
+
+        put_num(&mut wb, s, "A1", 10.0);
+        let r = recalc_after(&mut wb, &mut graph, &[(s, a1("A1"))], None);
+        assert!(r.cycle_cells.is_empty());
+        assert_eq!(value(&wb, s, "B8"), num(17.0));
     }
 
     #[test]
