@@ -165,13 +165,13 @@ fn indexed_palette_colors_reach_rendering_selection_sync_and_save() {
         assert!(
             list.commands
                 .iter()
-                .any(|cmd| matches!(cmd, DrawCmd::FillRect { color, .. } if color == "#5e88b1"))
+                .any(|cmd| matches!(cmd, DrawCmd::FillRect { color, .. } if &**color == "#5e88b1"))
         );
-        assert!(list.commands.iter().any(|cmd| matches!(cmd, DrawCmd::Text { text, color, .. } if text == "2" && color == "#99cc00")));
+        assert!(list.commands.iter().any(|cmd| matches!(cmd, DrawCmd::Text { text, color, .. } if &**text == "2" && &**color == "#99cc00")));
         assert!(
             list.commands
                 .iter()
-                .any(|cmd| matches!(cmd, DrawCmd::Line { color, .. } if color == "#123456"))
+                .any(|cmd| matches!(cmd, DrawCmd::Line { color, .. } if &**color == "#123456"))
         );
         assert_eq!(workbook.model().styles.cell_format(style), format);
     }
@@ -1311,7 +1311,7 @@ fn hyperlinks_survive_the_facade_and_reach_the_display_list() {
             color,
             underline: true,
             ..
-        } if text == "Website" && color == "#0563c1"
+        } if &**text == "Website" && &**color == "#0563c1"
     )));
     let (x, y) = workbook
         .cell_scroll_position(SheetId(0), cell("D4"))
@@ -1558,7 +1558,7 @@ fn edits_recalculate_render_and_round_trip() {
         display
             .commands
             .iter()
-            .any(|command| { matches!(command, DrawCmd::Text { text, .. } if text == "25") })
+            .any(|command| { matches!(command, DrawCmd::Text { text, .. } if &**text == "25") })
     );
 
     #[cfg(feature = "raster")]
@@ -1764,7 +1764,7 @@ fn pending_proposals_ghost_into_display_lists() {
                     color,
                     strike,
                     ..
-                } => Some((text.clone(), color.clone(), *strike)),
+                } => Some((text.to_string(), color.to_string(), *strike)),
                 _ => None,
             })
             .collect()
@@ -1774,17 +1774,17 @@ fn pending_proposals_ghost_into_display_lists() {
     assert!(
         ghosted
             .iter()
-            .any(|(text, color, strike)| text == "10" && color == "#c62828" && *strike)
+            .any(|(text, color, strike)| &**text == "10" && &**color == "#c62828" && *strike)
     );
     assert!(
         ghosted
             .iter()
-            .any(|(text, color, strike)| text == "30" && color == "#2e7d32" && !*strike)
+            .any(|(text, color, strike)| &**text == "30" && &**color == "#2e7d32" && !*strike)
     );
     assert!(
         !ghosted
             .iter()
-            .any(|(text, color, _)| text == "10" && color == "#000000")
+            .any(|(text, color, _)| &**text == "10" && &**color == "#000000")
     );
 
     workbook
@@ -1794,9 +1794,9 @@ fn pending_proposals_ghost_into_display_lists() {
     assert!(
         committed
             .iter()
-            .any(|(text, color, strike)| text == "30" && color == "#000000" && !*strike)
+            .any(|(text, color, strike)| &**text == "30" && &**color == "#000000" && !*strike)
     );
-    assert!(!committed.iter().any(|(_, color, _)| color == "#c62828"));
+    assert!(!committed.iter().any(|(_, color, _)| &**color == "#c62828"));
 }
 
 #[test]
@@ -1892,8 +1892,8 @@ fn formula_proposals_keep_the_old_computed_display_value() {
                 color,
                 strike,
                 ..
-            } if color == "#c62828" || color == "#2e7d32" => {
-                Some((text.as_str(), color.as_str(), *strike))
+            } if &**color == "#c62828" || &**color == "#2e7d32" => {
+                Some((&**text, &**color, *strike))
             }
             _ => None,
         })
@@ -1941,8 +1941,8 @@ fn proposal_ghosts_include_recalculated_formula_dependents() {
                 color,
                 strike,
                 ..
-            } if color == "#c62828" || color == "#2e7d32" => {
-                Some((text.as_str(), color.as_str(), *strike))
+            } if &**color == "#c62828" || &**color == "#2e7d32" => {
+                Some((&**text, &**color, *strike))
             }
             _ => None,
         })
