@@ -163,6 +163,7 @@ export type {
   PanelConfig,
   RenderedDomContext,
   PositionCoordinates,
+  PointPosition,
 } from './plugin-api/types';
 
 // ============================================================================

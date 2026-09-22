@@ -8,9 +8,9 @@
  * @public
  */
 
-import type { RenderedDomContext, PositionCoordinates } from './types';
+import type { RenderedDomContext, PositionCoordinates, PointPosition } from './types';
 import type { DisplayListQueries, DisplayListRect } from '../layout/render/displayListQueries';
-import { resolveDisplayPageClientRect } from '../layout/render/canvasPointer';
+import { resolveCanvasPoint, resolveDisplayPageClientRect } from '../layout/render/canvasPointer';
 
 /** One data-doc-* bearing run span in the a11y mirror, with parsed positions. */
 interface MirrorSpanEntry {
@@ -209,6 +209,24 @@ export class RenderedDomContextImpl implements RenderedDomContext {
     }
 
     return null;
+  }
+
+  getPositionAtPoint(clientX: number, clientY: number): PointPosition | null {
+    if (!this.queries || !Number.isFinite(clientX) || !Number.isFinite(clientY)) return null;
+    const point = resolveCanvasPoint(this.pagesContainer, this.queries, clientX, clientY);
+    const hit = point?.hit;
+    if (!point || !hit || hit.pos === null || hit.target !== 'text') return null;
+    if ((hit.region === 'header' || hit.region === 'footer') && !hit.rId) return null;
+    if ((hit.region === 'footnote' || hit.region === 'endnote') && hit.noteId === undefined) {
+      return null;
+    }
+    return {
+      position: hit.pos,
+      pageIndex: point.pageIndex,
+      region: hit.region,
+      ...(hit.rId === undefined ? {} : { rId: hit.rId }),
+      ...(hit.noteId === undefined ? {} : { noteId: hit.noteId }),
+    };
   }
 
   /**

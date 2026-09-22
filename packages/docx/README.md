@@ -68,3 +68,18 @@ Package builds, demo startup, and CI run this step automatically.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx/CHANGELOG.md) · Apache-2.0.
+
+### External drop positions
+
+`RenderedDomContext.getPositionAtPoint(clientX, clientY)` queries the same canvas
+hit testing used for the caret. Pass viewport coordinates, such as a drop event's
+`clientX` and `clientY`. Page scroll and CSS zoom are resolved from the live page
+geometry. The query never changes selection or focus.
+
+The result contains `position`, `pageIndex`, and `region`. Header/footer hits also
+carry `rId`; footnote/endnote hits carry `noteId`. Positions are local to that
+region's display stream. Map them to Yrs using the corresponding story projection.
+
+Text runs and their editable content boxes are accepted. Page margins, images,
+page gaps, points outside pages, and queries without ready canvas geometry return
+`null`. The accessibility mirror backend does not support this query.
