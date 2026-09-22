@@ -773,7 +773,7 @@ impl<'a> LayoutBuilder<'a> {
             Some(self.render_text_box(
                 shape.source_id,
                 &stable_id,
-                rect,
+                geometry_text_rect(original, rect),
                 transform,
                 space,
                 content,
@@ -928,7 +928,7 @@ impl<'a> LayoutBuilder<'a> {
             Some(self.render_text_box(
                 base.id,
                 stable_id,
-                rect,
+                geometry_text_rect(Some(shape), rect),
                 transform,
                 space,
                 content,
@@ -4814,6 +4814,50 @@ fn image_dpi(bytes: &[u8]) -> Option<f32> {
     None
 }
 
+/// The rectangle a preset holds its text in. Most presets use the whole frame,
+/// but a rounded box and an ellipse inset theirs so the text clears the curve —
+/// the `a:rect` each preset declares, for the two the corpus writes text into.
+fn geometry_text_rect(shape: Option<&ShapeNode>, rect: PxRect) -> PxRect {
+    let Some(ShapeNode::Shape(shape)) = shape else {
+        return rect;
+    };
+    let Some((inset_x, inset_y)) = preset_text_inset(
+        &shape.geometry,
+        shape.adjust_values.get("adj").copied(),
+        rect.w,
+        rect.h,
+    ) else {
+        return rect;
+    };
+    PxRect {
+        x: rect.x + inset_x,
+        y: rect.y + inset_y,
+        w: (rect.w - inset_x * 2.0).max(1.0),
+        h: (rect.h - inset_y * 2.0).max(1.0),
+    }
+}
+
+fn preset_text_inset(
+    geometry: &str,
+    adjust: Option<f64>,
+    width: f32,
+    height: f32,
+) -> Option<(f32, f32)> {
+    const DIAGONAL: f32 = std::f32::consts::FRAC_1_SQRT_2;
+    match geometry {
+        "roundRect" | "round1Rect" | "round2SameRect" | "round2DiagRect" => {
+            let adjust = adjust.unwrap_or(16_667.0).clamp(0.0, 50_000.0) as f32 / 100_000.0;
+            let inset = width.min(height) * adjust * (1.0 - DIAGONAL);
+            Some((inset, inset))
+        }
+        "ellipse" => Some((
+            width * (1.0 - DIAGONAL) / 2.0,
+            height * (1.0 - DIAGONAL) / 2.0,
+        )),
+        _ => None,
+    }
+}
+
 fn parse_align(value: Option<&str>) -> TextAlign {
     match value {
         Some("ctr") => TextAlign::Center,
@@ -5517,6 +5561,23 @@ mod tests {
         png.extend([0, 0, 0, 0]);
         assert_eq!(image_dpi(&png).map(|dpi| dpi.round()), Some(72.0));
         assert_eq!(image_dpi(b"not an image"), None);
+    }
+
+    #[test]
+    fn a_rounded_box_and_an_ellipse_hold_their_text_inside_the_curve() {
+        let frame = PxRect {
+            x: 10.0,
+            y: 20.0,
+            w: 400.0,
+            h: 200.0,
+        };
+        assert_eq!(preset_text_inset("rect", None, frame.w, frame.h), None);
+        let (x, y) = preset_text_inset("roundRect", None, frame.w, frame.h).unwrap();
+        assert!((x - 9.76).abs() < 0.05, "{x}");
+        assert!((x - y).abs() < 1e-3);
+        let (x, y) = preset_text_inset("ellipse", None, frame.w, frame.h).unwrap();
+        assert!((x - 58.58).abs() < 0.05, "{x}");
+        assert!((y - 29.29).abs() < 0.05, "{y}");
     }
 
     #[test]
