@@ -307,6 +307,8 @@ pub struct PlotAxisTitles<'a> {
 pub struct PlotLegend<'a> {
     pub position: Option<&'a str>,
     pub visible: Option<bool>,
+    /// `c:overlay`: the legend sits on the plot instead of taking a band of it.
+    pub overlay: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -519,10 +521,12 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                 PlotLegend {
                     position: None,
                     visible: Some(false),
+                    overlay: false,
                 },
                 |legend| PlotLegend {
                     position: legend.position.as_deref(),
                     visible: Some(legend.visible),
+                    overlay: legend.overlay,
                 },
             )),
             value_axis: space
@@ -962,12 +966,15 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         legend_style,
         ops,
     );
+    // A legend `c:overlay` puts on the plot takes no band of its own: the plot
+    // keeps the whole frame and the legend is drawn over it.
+    let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
     let legend_w = match &legend {
-        Some(band) if !band.horizontal => LEGEND_COL_W,
+        Some(band) if !band.horizontal && legend_reserves => LEGEND_COL_W,
         _ => 8.0,
     };
     let legend_h = match &legend {
-        Some(band) if band.horizontal => band.h,
+        Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
     };
     let gutter = if has_transposed_family(chart) {
@@ -6351,6 +6358,7 @@ mod tests {
             title: Some("Revenue"),
             series: names.iter().map(|name| series(name, data)).collect(),
             legend: Some(PlotLegend {
+                overlay: false,
                 position,
                 visible: Some(true),
             }),
@@ -6427,6 +6435,29 @@ mod tests {
             "a bottom legend must return the column's width: {} vs {}",
             widest(Some("bottom")),
             widest(Some("right"))
+        );
+    }
+
+    #[test]
+    fn an_overlaid_legend_takes_no_band_from_the_plot() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let widest = |overlay| {
+            let mut chart = legend_chart(Some("right"), &names, &data);
+            chart.legend.as_mut().expect("legend").overlay = overlay;
+            plot_chart(&chart, rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        assert!(
+            widest(true) > widest(false) + 90.0,
+            "an overlaid legend must leave the plot its width: {} vs {}",
+            widest(true),
+            widest(false)
         );
     }
 

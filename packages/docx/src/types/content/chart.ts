@@ -137,6 +137,8 @@ export interface ChartPlotGroup {
 export interface ChartLegend {
   position?: 'left' | 'right' | 'top' | 'bottom';
   visible?: boolean;
+  /** `c:overlay`: the legend sits on the plot instead of taking a band of it. */
+  overlay?: boolean;
   /** `c:txPr` on the legend; unset fields inherit from the chart. */
   text?: ChartTextProperties;
 }

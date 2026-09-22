@@ -79,6 +79,9 @@ pub struct ChartLegend {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
     pub visible: bool,
+    /// `c:overlay`: the legend sits on the plot instead of taking a band of it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub overlay: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
 }

@@ -151,6 +151,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
 /// `c:plotArea/c:layout/c:manualLayout`, read only when it places the inner
 /// plot from the frame edges — the mode PowerPoint writes and the one this
 /// layout can honour without re-deriving the axis gutters.
+/// A `c:plotArea/c:layout/c:manualLayout` in edge mode naming the inner plot.
 fn parse_plot_layout<E: ChartXml>(plot_area: &E) -> Option<ChartManualLayout> {
     let manual = child(child(plot_area, "layout")?, "manualLayout")?;
     if val_attr(child(manual, "layoutTarget")) != Some("inner") {
@@ -644,6 +645,7 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
     Some(ChartLegend {
         position: position.map(str::to_owned),
         visible: true,
+        overlay: val_attr(child(legend, "overlay")) == Some("1"),
         text: parse_text_properties(child(legend, "txPr")),
     })
 }

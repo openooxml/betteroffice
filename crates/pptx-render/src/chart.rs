@@ -370,6 +370,7 @@ mod tests {
             legend: Some(ChartLegend {
                 position: Some("right".to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             }),
             series: groups
@@ -593,6 +594,7 @@ mod tests {
             space.legend = Some(ChartLegend {
                 position: Some(position.to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             });
             assert!(
@@ -610,6 +612,7 @@ mod tests {
         hidden.legend = Some(ChartLegend {
             position: None,
             visible: false,
+            overlay: false,
             text: None,
         });
         assert!(!texts(&plot(&hidden)).contains(&"North".to_owned()));

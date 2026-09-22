@@ -2334,6 +2334,8 @@ struct ChartLegendIn {
     #[serde(default)]
     visible: Option<bool>,
     #[serde(default)]
+    overlay: bool,
+    #[serde(default)]
     text: Option<ChartTextIn>,
 }
 
@@ -8191,6 +8193,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
         legend: chart.legend.as_ref().map(|legend| PlotLegend {
             position: legend.position.as_deref(),
             visible: legend.visible,
+            overlay: legend.overlay,
         }),
         value_axis: chart
             .axes
