@@ -20,8 +20,6 @@ import {
 import { cn } from "../../lib/cn";
 import { buildTotalsEdits } from "./demoAgent";
 
-// The editor is browser-only (canvas + wasm); keep it out of SSR, matching the
-// docx/pptx/vsdx demo clients.
 const XlsxEditor = dynamic(
   () => import("@betteroffice/xlsx-react").then((m) => m.XlsxEditor),
   { ssr: false }
