@@ -26,7 +26,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: wasm
+          shared-key: e2e
+          workspaces: |
+            . -> target
+            bindings -> target
 
       - uses: ./.github/actions/wasm-toolchain
 
@@ -47,6 +50,16 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - uses: astral-sh/setup-uv@v6
+
+      - name: Build the Python bindings for the cross-SDK scenarios
+        env:
+          BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
+          CARGO_TARGET_DIR: ${{ github.workspace }}/bindings/target
+        run: |
+          pipx install maturin
+          bun scripts/e2e/python-env.ts
+
       - name: Restore the pinned corpus documents
         uses: actions/cache@v4
         with:
@@ -56,6 +69,7 @@ jobs:
       - name: Run the scenarios
         env:
           QUALITY_ASSET_CACHE: ${{ runner.temp }}/e2e-assets
+          BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
           BETTEROFFICE_E2E_OUTPUT: ${{ runner.temp }}/e2e-results
         run: bun run test:e2e
 
