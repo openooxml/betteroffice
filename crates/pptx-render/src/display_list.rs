@@ -61,6 +61,9 @@ pub enum ImageEffect {
         threshold: f32,
     },
     Grayscale,
+    Alpha {
+        amount: f32,
+    },
     Luminance {
         brightness: f32,
         contrast: f32,

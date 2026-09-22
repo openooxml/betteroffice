@@ -354,6 +354,7 @@ export interface ShapePrimitive extends PrimitiveBase {
 export type ImageEffect =
   | { kind: 'biLevel'; threshold: number }
   | { kind: 'grayscale' }
+  | { kind: 'alpha'; amount: number }
   | { kind: 'luminance'; brightness: number; contrast: number }
   | { kind: 'duotone'; shadow: string; highlight: string }
   | { kind: 'colorChange'; from: string; to: string; useAlpha?: boolean };

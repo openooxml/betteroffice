@@ -32,6 +32,11 @@ const server = await createServer({
     __QUALITY_FONT_BASE__: JSON.stringify(
       fontAssets ? `/@fs${resolve(fontAssets)}/` : null
     ),
+    __QUALITY_FONT_BASE_CJK__: JSON.stringify(
+      fontAssets
+        ? `/@fs${resolve(process.env.QUALITY_FONT_ASSETS_CJK ?? 'packages/fonts-cjk/assets')}/`
+        : null
+    ),
   },
   plugins: format === 'docx' ? [] : [qualityRendererPlugin(format)],
   cacheDir: resolve(

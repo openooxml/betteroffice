@@ -266,6 +266,9 @@ fn parse_blip_effects(blip: Option<&XmlElement>) -> Vec<BlipEffect> {
                 threshold: percentage_attribute(child, "thresh").unwrap_or(0.5),
             }),
             "grayscl" => Some(BlipEffect::Grayscale),
+            "alphaModFix" => Some(BlipEffect::Alpha {
+                amount: percentage_attribute(child, "amt").unwrap_or(1.0),
+            }),
             "lum" => Some(BlipEffect::Luminance {
                 brightness: fixed_percentage_attribute(child, "bright").unwrap_or(0.0),
                 contrast: fixed_percentage_attribute(child, "contrast").unwrap_or(0.0),
@@ -1847,7 +1850,7 @@ mod tests {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
         let root = parse_xml(
-            br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange><a:duotone><a:schemeClr val="bg2"><a:shade val="45000"/></a:schemeClr><a:prstClr val="white"/></a:duotone><a:biLevel thresh="25000"/><a:extLst/></a:blip><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
+            br#"<p:sld><p:cSld><p:spTree><p:pic><p:nvPicPr><p:cNvPr id="7" name="Logo"/></p:nvPicPr><p:blipFill><a:blip r:embed="rId3"><a:clrChange><a:clrFrom><a:srgbClr val="FFFFFF"/></a:clrFrom><a:clrTo><a:srgbClr val="FFFFFF"><a:alpha val="0"/></a:srgbClr></a:clrTo></a:clrChange><a:duotone><a:schemeClr val="bg2"><a:shade val="45000"/></a:schemeClr><a:prstClr val="white"/></a:duotone><a:biLevel thresh="25000"/><a:alphaModFix amt="20000"/><a:extLst/></a:blip><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr></p:pic></p:spTree></p:cSld></p:sld>"#,
             "ppt/slides/slide1.xml",
             &mut budget,
         )
@@ -1891,6 +1894,7 @@ mod tests {
                     }),
                 },
                 BlipEffect::BiLevel { threshold: 0.25 },
+                BlipEffect::Alpha { amount: 0.2 },
             ]
         );
     }

@@ -753,6 +753,13 @@ export function applyImageEffects(data: Uint8ClampedArray, effects: ImageEffect[
         }
         break;
       }
+      case 'alpha': {
+        const amount = Math.min(Math.max(effect.amount, 0), 1);
+        for (let index = 3; index < data.length; index += 4) {
+          data[index] = Math.round(data[index] * amount);
+        }
+        break;
+      }
       case 'grayscale': {
         for (let index = 0; index < data.length; index += 4) {
           const value = Math.round(luma(data, index));

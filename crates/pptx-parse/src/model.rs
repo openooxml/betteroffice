@@ -418,6 +418,8 @@ pub enum BlipEffect {
     BiLevel { threshold: f64 },
     /// `a:grayscl`.
     Grayscale,
+    /// `a:alphaModFix`: the whole bitmap drawn at `amount` opacity.
+    Alpha { amount: f64 },
     /// `a:lum`: brightness and contrast, each a fraction in `-1.0..=1.0`.
     Luminance { brightness: f64, contrast: f64 },
     /// `a:duotone`: luminance interpolates between the two colours.

@@ -1,4 +1,5 @@
 declare const __QUALITY_FONT_BASE__: string | null;
+declare const __QUALITY_FONT_BASE_CJK__: string | null;
 
 import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
@@ -23,7 +24,14 @@ async function fontsFor(bytes: Uint8Array) {
   }
   if (families.size > 32) throw new Error('Too many font families for this capture');
   const provider = createFontProvider(
-    typeof __QUALITY_FONT_BASE__ === 'string' ? { baseUrl: __QUALITY_FONT_BASE__ } : {}
+    typeof __QUALITY_FONT_BASE__ === 'string'
+      ? {
+          baseUrl: __QUALITY_FONT_BASE__,
+          ...(typeof __QUALITY_FONT_BASE_CJK__ === 'string'
+            ? { cjkBaseUrl: __QUALITY_FONT_BASE_CJK__ }
+            : {}),
+        }
+      : {}
   );
   const faces = [];
   for (const family of families) {

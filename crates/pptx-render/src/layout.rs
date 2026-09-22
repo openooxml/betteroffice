@@ -4227,6 +4227,9 @@ fn image_effects(effects: &[BlipEffect], theme: &Theme) -> Vec<ImageEffect> {
                 threshold: (*threshold as f32).clamp(0.0, 1.0),
             }),
             BlipEffect::Grayscale => Some(ImageEffect::Grayscale),
+            BlipEffect::Alpha { amount } => Some(ImageEffect::Alpha {
+                amount: *amount as f32,
+            }),
             BlipEffect::Luminance {
                 brightness,
                 contrast,
