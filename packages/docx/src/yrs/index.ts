@@ -1865,9 +1865,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
 }
 
 /**
- * Creates a yrs editing replica. The first call dynamically imports and
- * initializes the embedded docx-edit wasm (~440KB base64) — callers must
- * load it lazily so non-editor consumers avoid the wasm startup cost.
+ * Creates a yrs editing replica. The first call dynamically imports the edit
+ * loader and preloads the external docx-edit wasm asset — callers must load
+ * it lazily so non-editor consumers avoid the wasm startup cost.
  */
 export async function createYrsSession(options?: CreateYrsSessionOptions): Promise<YrsSession> {
   const clientId = options?.clientId ?? randomClientId();

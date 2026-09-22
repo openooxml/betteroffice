@@ -37,8 +37,7 @@ export async function writeDocumentWithRust(
   selective?: RustSelectiveSave,
   determinism?: RustSaveDeterminism
 ): Promise<RustSaveResult> {
-  await preloadOpcWasm();
-  await preloadParseWasm();
+  await Promise.all([preloadOpcWasm(), preloadParseWasm()]);
   const fixed =
     determinism ??
     ({
