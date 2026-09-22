@@ -4,7 +4,10 @@ import { expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { initWasm, openPresentation } from '../../../packages/pptx/src/wasm/loader';
+import {
+  initWasm,
+  openPresentation,
+} from '../../../packages/pptx/src/wasm/loader';
 import type { PresentationHandle } from '../../../packages/pptx/src/wasm/loader';
 import type {
   DeckSnapshot,
@@ -19,11 +22,22 @@ import type {
   TextBoxPrimitive,
 } from '../../../packages/pptx/src/types';
 import type { PinnedSample } from '../corpus';
-import type { ActorRecorder, ScenarioRecorder, StageProfile, Timer } from '../harness';
+import type {
+  ActorRecorder,
+  ScenarioRecorder,
+  StageProfile,
+  Timer,
+} from '../harness';
 import type { Scenario } from '../suite';
 
-const WASM = resolve(import.meta.dir, '../../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm');
-const FONT = resolve(import.meta.dir, '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf');
+const WASM = resolve(
+  import.meta.dir,
+  '../../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm'
+);
+const FONT = resolve(
+  import.meta.dir,
+  '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+);
 export const FONT_FAMILY = 'Liberation Sans';
 
 export interface PptxCtx {
@@ -45,7 +59,11 @@ export function setup(): Promise<void> {
   return initWasm(new Uint8Array(readFileSync(WASM)));
 }
 
-export function context(sample: PinnedSample, bytes: Uint8Array, recorder: ScenarioRecorder): PptxCtx {
+export function context(
+  sample: PinnedSample,
+  bytes: Uint8Array,
+  recorder: ScenarioRecorder
+): PptxCtx {
   const handles: PresentationHandle[] = [];
   return {
     sample,
@@ -68,19 +86,36 @@ export function context(sample: PinnedSample, bytes: Uint8Array, recorder: Scena
 }
 
 export function layoutStages(profile: LayoutProfile): StageProfile {
-  return { scope: profile.scopeMs, layout: profile.layoutMs, serialize: profile.serializeMs };
+  return {
+    scope: profile.scopeMs,
+    layout: profile.layoutMs,
+    serialize: profile.serializeMs,
+  };
 }
 
 export function editStages(profile: EditProfile): StageProfile {
-  return { parse: profile.parseMs, apply: profile.applyMs, serialize: profile.serializeMs };
+  return {
+    parse: profile.parseMs,
+    apply: profile.applyMs,
+    serialize: profile.serializeMs,
+  };
 }
 
 export function historyStages(profile: HistoryProfile): StageProfile {
-  return { undo: profile.undoMs, snapshot: profile.snapshotMs, serialize: profile.serializeMs };
+  return {
+    undo: profile.undoMs,
+    snapshot: profile.snapshotMs,
+    serialize: profile.serializeMs,
+  };
 }
 
 /** Records a `*Profiled` edit as one op and hands back its receipt. */
-export function profiled<T, P>(timer: Timer, op: string, run: () => Profiled<T, P>, stages: (profile: P) => StageProfile): T {
+export function profiled<T, P>(
+  timer: Timer,
+  op: string,
+  run: () => Profiled<T, P>,
+  stages: (profile: P) => StageProfile
+): T {
   let profile: P | undefined;
   return timer.op(
     op,
@@ -93,7 +128,12 @@ export function profiled<T, P>(timer: Timer, op: string, run: () => Profiled<T, 
   );
 }
 
-export function profiledLayout(handle: PresentationHandle, timer: Timer, op: string, slideIndex: number): SlideDisplayList {
+export function profiledLayout(
+  handle: PresentationHandle,
+  timer: Timer,
+  op: string,
+  slideIndex: number
+): SlideDisplayList {
   let profile: LayoutProfile | undefined;
   return timer.op(
     op,
@@ -110,18 +150,28 @@ export function profiledLayout(handle: PresentationHandle, timer: Timer, op: str
 export function firstStory(shapes: ShapeSnapshot[]): StorySnapshot {
   for (const shape of shapes) {
     if (shape.hidden) continue;
-    const story = shape.textStories.find((story) => story.paragraphs.some((paragraph) => paragraph.runs.length > 0));
+    const story = shape.textStories.find((story) =>
+      story.paragraphs.some((paragraph) => paragraph.runs.length > 0)
+    );
     if (story) return story;
   }
   throw new Error('slide has no text story');
 }
 
 export function storyText(story: StorySnapshot): string {
-  return story.paragraphs.flatMap((paragraph) => paragraph.runs.map((run) => run.text)).join('');
+  return story.paragraphs
+    .flatMap((paragraph) => paragraph.runs.map((run) => run.text))
+    .join('');
 }
 
-export function textBoxOf(layout: SlideDisplayList, storyId: string): TextBoxPrimitive {
-  const box = layout.primitives.find((primitive): primitive is TextBoxPrimitive => primitive.kind === 'textBox' && primitive.storyId === storyId);
+export function textBoxOf(
+  layout: SlideDisplayList,
+  storyId: string
+): TextBoxPrimitive {
+  const box = layout.primitives.find(
+    (primitive): primitive is TextBoxPrimitive =>
+      primitive.kind === 'textBox' && primitive.storyId === storyId
+  );
   expect(box, `text box for ${storyId}`).toBeDefined();
   return box!;
 }
@@ -172,18 +222,25 @@ export function exchange(peers: Replica[], op = 'applyUpdate'): number {
       bytes += update.byteLength;
       for (const to of peers) {
         if (to === from) continue;
-        to.timer.op(op, () => to.handle.applyUpdate(update), undefined, { from: from.name, bytes: update.byteLength });
+        to.timer.op(op, () => to.handle.applyUpdate(update), undefined, {
+          from: from.name,
+          bytes: update.byteLength,
+        });
       }
     }
   }
   return bytes;
 }
 
-/** Slide ids, shape ids and every story's text: the convergence fingerprint. */
+/** Canonical complete deck snapshot. */
 export function fingerprint(deck: DeckSnapshot): string {
-  return deck.slides
-    .map((slide) => `${slide.id}[${slide.shapes.map((shape) => `${shape.id}:${shape.textStories.map(storyText).join('/')}`).join(',')}]`)
-    .join('|');
+  return JSON.stringify(deck, (_key, value) =>
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(
+          Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+        )
+      : value
+  );
 }
 
 export function shapeText(shape: ShapeSnapshot): string {
@@ -197,5 +254,7 @@ export function firstParagraphText(story: StorySnapshot): string {
 
 /** Paragraph texts joined the way the python binding reports a story. */
 export function storyLines(story: StorySnapshot): string {
-  return story.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')).join('\n');
+  return story.paragraphs
+    .map((paragraph) => paragraph.runs.map((run) => run.text).join(''))
+    .join('\n');
 }

@@ -1,6 +1,14 @@
 import { expect } from 'bun:test';
+import type { Layout } from '../../../packages/docx/src/layout/pagination';
+import { assertLayoutParity, layoutProjection } from '../assertions';
 
-import { STORY, displayFrame, regionLayout, save, typingTarget } from './context';
+import {
+  STORY,
+  displayFrame,
+  regionLayout,
+  save,
+  typingTarget,
+} from './context';
 import type { DocxScenario } from './context';
 import { PythonWorker, pythonMissing, toBase64 } from '../python';
 
@@ -16,12 +24,13 @@ def run(state, input, timed):
         layout = document.layout(json.loads(input['kernel']))
     with timed('displayList'):
         display = layout.display_list
-    return {'pages': layout.pages, 'primitives': display.primitives, 'pageSize': layout.to_dict()['pageSize']}
+    return {'pages': layout.pages, 'primitives': display.primitives, 'layout': layout.to_dict()}
 `;
 
 export const pythonLayoutParity: DocxScenario = {
   name: 'python-layout-parity',
-  description: 'The web engine measures the document and hands its retained kernel to the python binding, which paginates the same measured arena; both SDKs must report the same page count and page size, before and after an edit that reflows the text.',
+  description:
+    'The web engine measures the document and hands its retained kernel to the python binding, which paginates the same measured arena; both SDKs must report matching page dimensions and fragment geometry, before and after an edit that reflows the text.',
   participants: ['web', 'python'],
   requires: pythonMissing,
   async run({ recorder, open }) {
@@ -32,10 +41,23 @@ export const pythonLayoutParity: DocxScenario = {
     try {
       await worker.start();
       const compare = async (label: string, bytes: Uint8Array) => {
-        const laid = regionLayout(editor, recorder, `layoutDocumentWithRegions:${label}`);
-        const revision = recorder.op(`residentWorkerProbe:${label}`, () => session.residentWorkerProbe()!.layoutRevision);
-        const kernel = recorder.op(`retainedKernelInputs:${label}`, () => session.retainedKernelInputsJson(revision));
-        const mirrored = await worker.call<{ pages: number; primitives: number; pageSize: { w: number; h: number } }>(
+        const laid = regionLayout(
+          editor,
+          recorder,
+          `layoutDocumentWithRegions:${label}`
+        );
+        const revision = recorder.op(
+          `residentWorkerProbe:${label}`,
+          () => session.residentWorkerProbe()!.layoutRevision
+        );
+        const kernel = recorder.op(`retainedKernelInputs:${label}`, () =>
+          session.retainedKernelInputsJson(revision)
+        );
+        const mirrored = await worker.call<{
+          pages: number;
+          primitives: number;
+          layout: Layout;
+        }>(
           `python:paginate:${label}`,
           PAGINATE,
           { bytes: toBase64(bytes), kernel },
@@ -43,26 +65,48 @@ export const pythonLayoutParity: DocxScenario = {
         );
         expect(mirrored.pages).toBe(laid.layout.pages.length);
         expect(mirrored.primitives).toBeGreaterThan(0);
-        expect(mirrored.pageSize.w).toBeGreaterThan(0);
-        return { pages: laid.layout.pages.length, primitives: mirrored.primitives, pageSize: mirrored.pageSize };
+        assertLayoutParity(laid.layout, mirrored.layout);
+        return {
+          pages: laid.layout.pages.length,
+          projection: layoutProjection(laid.layout),
+          pageSize: mirrored.layout.pageSize,
+        };
       };
 
       const before = await compare('initial', await save(editor, recorder));
       expect(before.pages).toBeGreaterThan(0);
-      const frame = displayFrame(session, recorder, 'displayListFrame:initial', null);
+      const frame = displayFrame(
+        session,
+        recorder,
+        'displayListFrame:initial',
+        null
+      );
       expect(frame.pages.length).toBe(before.pages);
 
-      const target = typingTarget(session, session.paragraphs(STORY), session.paragraphSpans(STORY));
+      const target = typingTarget(
+        session,
+        session.paragraphs(STORY),
+        session.paragraphSpans(STORY)
+      );
       for (let index = 0; index < 12; index += 1) {
-        recorder.op('insertText:parity', () => session.insertText({ story: STORY, paraId: target.paraId, offset: target.end }, PHRASE));
+        recorder.op('insertText:parity', () =>
+          session.insertText(
+            { story: STORY, paraId: target.paraId, offset: target.end },
+            PHRASE
+          )
+        );
       }
       const handed = await save(editor, recorder);
       const after = await compare('afterEdits', handed);
       expect(after.pages).toBeGreaterThanOrEqual(before.pages);
       expect(after.pageSize).toEqual(before.pageSize);
-      expect(displayFrame(session, recorder, 'displayListFrame:afterEdits', frame).pages.length).toBe(after.pages);
+      expect(after.projection).not.toEqual(before.projection);
+      expect(
+        displayFrame(session, recorder, 'displayListFrame:afterEdits', frame)
+          .pages.length
+      ).toBe(after.pages);
     } finally {
-      worker.close();
+      await worker.close();
     }
   },
 };

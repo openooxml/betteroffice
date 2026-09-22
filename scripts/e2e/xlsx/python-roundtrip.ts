@@ -41,7 +41,8 @@ def run(state, input, timed):
 
 export const pythonRoundtrip: XlsxScenario = {
   name: 'python-roundtrip',
-  description: 'The web core edits and saves a workbook, the Python binding reopens those bytes, reads the formula and its value back, writes its own inputs, recalculates and saves, and the web core reopens the result.',
+  description:
+    'The web core edits and saves a workbook, the Python binding reopens those bytes, reads the formula and its value back, writes its own inputs, recalculates and saves, and the web core reopens the result.',
   participants: ['web', 'python'],
   requires: pythonMissing,
   async run({ recorder, open }) {
@@ -51,19 +52,42 @@ export const pythonRoundtrip: XlsxScenario = {
     const right = handle.cell(SHEET, ROW + 1, 1).a1;
     const total = handle.cell(SHEET, ROW + 1, 2).a1;
 
-    expect(profiledEdit(handle, recorder, 'editCell:label', ROW, 0, 'handoff').applied).toBe(true);
-    expect(recorder.op('editCells:operands', () => handle.editCells(SHEET, [
-      { row: ROW + 1, col: 0, input: '6' },
-      { row: ROW + 1, col: 1, input: '7' },
-    ])).applied).toBe(true);
-    expect(profiledEdit(handle, recorder, 'editCell:total', ROW + 1, 2, `=${left}*${right}`).applied).toBe(true);
-    expect(displayedText(handle, recorder, 'searchText:total', '42', ROW + 1, 2)).toContain('42');
+    expect(
+      profiledEdit(handle, recorder, 'editCell:label', ROW, 0, 'handoff')
+        .applied
+    ).toBe(true);
+    expect(
+      recorder.op('editCells:operands', () =>
+        handle.editCells(SHEET, [
+          { row: ROW + 1, col: 0, input: '6' },
+          { row: ROW + 1, col: 1, input: '7' },
+        ])
+      ).applied
+    ).toBe(true);
+    expect(
+      profiledEdit(
+        handle,
+        recorder,
+        'editCell:total',
+        ROW + 1,
+        2,
+        `=${left}*${right}`
+      ).applied
+    ).toBe(true);
+    expect(
+      displayedText(handle, recorder, 'searchText:total', '42', ROW + 1, 2)
+    ).toContain('42');
     const handed = recorder.op('save', () => handle.save());
 
     const worker = new PythonWorker(recorder);
     try {
       await worker.start();
-      const opened = await worker.call<{ sheets: string[]; label: string; formula: string; computed: number }>(
+      const opened = await worker.call<{
+        sheets: string[];
+        label: string;
+        formula: string;
+        computed: number;
+      }>(
         'python:open',
         OPEN,
         { bytes: toBase64(handed), label, formula: total },
@@ -74,11 +98,19 @@ export const pythonRoundtrip: XlsxScenario = {
       expect(opened.formula).toBe(`${left}*${right}`);
       expect(opened.computed).toBe(42);
 
-      const edited = await worker.call<{ changed: number; eager: number; computed: number; bytes: string }>(
-        'python:editAndSave',
-        EDIT,
-        { edits: [[left, '9'], [right, '8'], [label, 'python wrote this']], probe: total }
-      );
+      const edited = await worker.call<{
+        changed: number;
+        eager: number;
+        computed: number;
+        bytes: string;
+      }>('python:editAndSave', EDIT, {
+        edits: [
+          [left, '9'],
+          [right, '8'],
+          [label, 'python wrote this'],
+        ],
+        probe: total,
+      });
       expect(edited.eager).toBe(72);
       expect(edited.changed).toBe(0);
       expect(edited.computed).toBe(72);
@@ -87,9 +119,18 @@ export const pythonRoundtrip: XlsxScenario = {
       const reopened = recorder.op('reopen:pythonBytes', () => open(returned));
       expect(reopened.cell(SHEET, ROW, 0).input).toBe('python wrote this');
       expect(reopened.cell(SHEET, ROW + 1, 2).input).toBe(`=${left}*${right}`);
-      expect(displayedText(reopened, recorder, 'searchText:pythonTotal', '72', ROW + 1, 2)).toContain('72');
+      expect(
+        displayedText(
+          reopened,
+          recorder,
+          'searchText:pythonTotal',
+          '72',
+          ROW + 1,
+          2
+        )
+      ).toContain('72');
     } finally {
-      worker.close();
+      await worker.close();
     }
   },
 };

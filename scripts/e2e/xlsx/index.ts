@@ -8,7 +8,7 @@ import { saveLoadCycles } from './save-load-cycles';
 import { structuralStorm } from './structural-storm';
 import { threeEditorsMesh } from './three-editors-mesh';
 import { twoEditorsConverge } from './two-editors-converge';
-import { typingLatency } from './typing-latency';
+import { incrementalCommits } from './incremental-commits';
 import { viewportScrollRender } from './viewport-scroll-render';
 import type { XlsxScenario } from './context';
 
@@ -17,7 +17,7 @@ export const scenarios: XlsxScenario[] = [
   formulaChainCascade,
   bulkPasteAndFormats,
   structuralStorm,
-  typingLatency,
+  incrementalCommits,
   viewportScrollRender,
   twoEditorsConverge,
   threeEditorsMesh,

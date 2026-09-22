@@ -1,13 +1,7 @@
-/**
- * Drives the Python bindings from a scenario: a long-lived interpreter runs
- * one script per call, keeps state between calls, and every call is recorded
- * as an op with the round trip as e2e latency and Python's own stage timings
- * as the internal breakdown.
- */
-
 import { resolve } from 'node:path';
 
 import type { Detail, ScenarioRecorder, StageProfile } from './harness';
+import { errorText } from './harness';
 import { pythonWithBindings } from './python-env';
 
 const WORKER = resolve(import.meta.dir, 'python', 'worker.py');
@@ -37,49 +31,118 @@ export class PythonWorker {
   private nextId = 1;
   private readonly spawnedAt: number;
 
-  constructor(private readonly recorder: ScenarioRecorder, readonly actor = 'python') {
+  constructor(
+    private readonly recorder: ScenarioRecorder,
+    readonly actor = 'python'
+  ) {
     const ready = pythonWithBindings();
     if ('missing' in ready) throw new Error(ready.missing);
     this.spawnedAt = performance.now();
-    this.process = Bun.spawn([ready.python, '-u', WORKER], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' }) as Worker;
+    this.process = Bun.spawn([ready.python, '-u', WORKER], {
+      stdin: 'pipe',
+      stdout: 'pipe',
+      stderr: 'inherit',
+    }) as Worker;
     this.reader = this.process.stdout.getReader();
   }
 
   /** Waits for the interpreter; recorded as `python:start` from spawn to first reply. */
   async start(): Promise<void> {
-    await this.exchange('def run(state, input, timed):\n    return "ready"\n', {});
-    this.recorder.record({ op: 'python:start', actor: this.actor, e2eMs: performance.now() - this.spawnedAt });
+    try {
+      const response = await this.exchange(
+        'def run(state, input, timed):\n    return "ready"\n',
+        {}
+      );
+      if (!response.ok)
+        throw new Error(response.error ?? 'Python worker startup failed');
+      this.recorder.record({
+        op: 'python:start',
+        actor: this.actor,
+        e2eMs: performance.now() - this.spawnedAt,
+      });
+    } catch (error) {
+      this.recorder.record({
+        op: 'python:start',
+        actor: this.actor,
+        e2eMs: performance.now() - this.spawnedAt,
+        error: errorText(error),
+      });
+      throw error;
+    }
   }
 
   /** Runs `script` (defining `run(state, input, timed)`) and records it as `op`. */
-  async call<T>(op: string, script: string, input: unknown = {}, detail?: Detail): Promise<T> {
+  async call<T>(
+    op: string,
+    script: string,
+    input: unknown = {},
+    detail?: Detail
+  ): Promise<T> {
     const started = performance.now();
-    const response = await this.exchange(script, input);
-    const e2eMs = performance.now() - started;
-    if (!response.ok) throw new Error(`${op} failed in Python:\n${response.error}`);
-    this.recorder.record({ op, actor: this.actor, e2eMs, internal: response.timings, detail });
-    return response.result as T;
+    let response: Response | undefined;
+    try {
+      response = await this.exchange(script, input);
+      if (!response.ok)
+        throw new Error(op + ' failed in Python:\n' + response.error);
+      this.recorder.record({
+        op,
+        actor: this.actor,
+        e2eMs: performance.now() - started,
+        internal: response.timings,
+        detail,
+      });
+      return response.result as T;
+    } catch (error) {
+      this.recorder.record({
+        op,
+        actor: this.actor,
+        e2eMs: performance.now() - started,
+        internal: response?.timings,
+        detail,
+        error: errorText(error),
+      });
+      throw error;
+    }
   }
 
-  close(): void {
-    try {
-      this.process.stdin.end();
-    } catch {}
+  async close(): Promise<void> {
     this.process.kill();
+    await this.process.exited;
+    await this.reader.cancel().catch(() => undefined);
   }
 
   private async exchange(script: string, input: unknown): Promise<Response> {
     const id = this.nextId++;
     this.process.stdin.write(JSON.stringify({ id, script, input }) + '\n');
     this.process.stdin.flush();
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.readResponse(id),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            this.process.kill();
+            reject(
+              new Error('Python worker did not respond within 60 seconds')
+            );
+          }, 60_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private async readResponse(id: number): Promise<Response> {
     for (;;) {
       const newline = this.buffer.indexOf('\n');
       if (newline >= 0) {
         const line = this.buffer.slice(0, newline);
         this.buffer = this.buffer.slice(newline + 1);
         const response = JSON.parse(line) as Response;
-        if (response.id === id) return response;
-        continue;
+        if (response.id !== id)
+          throw new Error('Python response id does not match request');
+        return response;
       }
       const { value, done } = await this.reader.read();
       if (done) throw new Error('the Python worker exited');

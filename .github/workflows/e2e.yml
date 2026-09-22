@@ -9,16 +9,34 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   scenarios:
-    name: Corpus scenarios
+    name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: corpus
+            name: Corpus scenarios
+          - suite: browser
+            name: Browser editors
+    env:
+      BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
+      QUALITY_ASSET_CACHE: ${{ runner.temp }}/e2e-assets
+      BETTEROFFICE_E2E_OUTPUT: ${{ runner.temp }}/e2e-results
+      BETTEROFFICE_BROWSER_OUTPUT: ${{ runner.temp }}/browser-results
     steps:
       - uses: actions/checkout@v7
 
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.14"
+          bun-version: '1.3.14'
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -26,14 +44,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: e2e
+          shared-key: e2e-${{ matrix.suite }}
           workspaces: |
             . -> target
             bindings -> target
 
       - uses: ./.github/actions/wasm-toolchain
 
-      # Reads `wasm-opt --version`, so it has to follow the toolchain step.
       - name: Fingerprint the wasm inputs
         id: wasm
         run: echo "key=$(bun scripts/wasm-cache-key.ts)" >> "$GITHUB_OUTPUT"
@@ -50,34 +67,58 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      - uses: astral-sh/setup-uv@v6
+      - name: Check the harness contracts
+        if: matrix.suite == 'corpus'
+        run: |
+          bun run typecheck:e2e
+          bun run test:e2e:harness
 
-      - name: Build the Python bindings for the cross-SDK scenarios
+      - uses: astral-sh/setup-uv@v6
+        if: matrix.suite == 'corpus'
+        with:
+          version: '0.11.8'
+
+      - name: Build the Python bindings
+        if: matrix.suite == 'corpus'
         env:
-          BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
           CARGO_TARGET_DIR: ${{ github.workspace }}/bindings/target
         run: |
-          pipx install maturin
+          uv tool install maturin==1.14.1
           bun scripts/e2e/python-env.ts
 
       - name: Restore the pinned corpus documents
+        if: matrix.suite == 'corpus'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/e2e-assets
           key: e2e-assets-${{ hashFiles('scripts/e2e/corpus.ts') }}
 
-      - name: Run the scenarios
-        env:
-          QUALITY_ASSET_CACHE: ${{ runner.temp }}/e2e-assets
-          BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
-          BETTEROFFICE_E2E_OUTPUT: ${{ runner.temp }}/e2e-results
+      - name: Run the corpus scenarios
+        if: matrix.suite == 'corpus'
         run: bun run test:e2e
 
-      - name: Upload the per-operation timings
-        if: always()
+      - name: Install headless Chromium
+        if: matrix.suite == 'browser'
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run the production editors in Chromium
+        if: matrix.suite == 'browser'
+        run: bun run test:e2e:browser
+
+      - name: Upload corpus results
+        if: always() && matrix.suite == 'corpus'
         uses: actions/upload-artifact@v4
         with:
           name: e2e-timings
           path: ${{ runner.temp }}/e2e-results
-          if-no-files-found: error
-          retention-days: 30
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload browser report and failure traces
+        if: always() && matrix.suite == 'browser'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-browser
+          path: ${{ runner.temp }}/browser-results
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,6 +1,4 @@
-"""Long-lived interpreter for the cross-SDK scenarios: one JSON request per
-line carrying a script that defines `run(state, input, timed)`; `state`
-persists across calls and `timed(stage)` collects stage durations in ms."""
+"""Execute timed requests in a persistent Python interpreter."""
 
 import base64
 import json
@@ -42,6 +40,6 @@ for line in sys.stdin:
         result = scope["run"](state, request["input"], timed)
         response = {"id": request["id"], "ok": True, "result": result, "timings": timed.ms}
     except Exception:
-        response = {"id": request["id"], "ok": False, "error": traceback.format_exc()}
+        response = {"id": request["id"], "ok": False, "error": traceback.format_exc(), "timings": timed.ms}
     sys.stdout.write(json.dumps(response) + "\n")
     sys.stdout.flush()

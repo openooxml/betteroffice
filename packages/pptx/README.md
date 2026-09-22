@@ -168,3 +168,12 @@ Package builds copy the binary into `dist/generated`.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/pptx/CHANGELOG.md) · Apache-2.0.
+
+### Operation profiles
+
+`layoutSlideProfiled` returns `{ layout, profile }` with scope, layout, and
+serialization durations in milliseconds. Profiled mutation methods such as
+`insertTextProfiled` and `addTextBoxProfiled` return `{ receipt, profile }`;
+`undoProfiled` reports undo, snapshot, and serialization timings. These methods
+share the normal operations and add stage timing. See the
+[corpus and browser tests](../../scripts/e2e/README.md) for usage and timing limits.

@@ -7280,7 +7280,6 @@ fn profiled_mutations_time_each_stage_once() {
     );
     assert_eq!(profile, each_stage_once);
 
-    // an unchanged input returns before any stage is entered
     let (result, profile) = workbook
         .edit_cell_profiled(
             SheetId(0),

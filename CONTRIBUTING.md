@@ -43,8 +43,13 @@ bun run test
 bun run rust:check
 
 # End-to-end scenarios on pinned corpus documents, every operation timed
-# (needs the network; `test:e2e:record` refreshes scripts/e2e/results)
+# Requires the pinned corpus and locally built Python bindings.
+bun scripts/e2e/python-env.ts
 bun run test:e2e
+
+# Headless Chromium: real DOCX, XLSX, and PPTX editor interactions.
+bunx playwright install chromium
+bun run test:e2e:browser
 ```
 
 ## Contributor License Agreement

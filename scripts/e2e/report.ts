@@ -1,108 +1,141 @@
-/**
- * Reads recorded or exported e2e runs and prints them for people or programs:
- * `bun scripts/e2e/report.ts [dir]` renders markdown, `--json` flattens every
- * op into one row, `--diff <before> <after>` lists what got slower or faster.
- */
-
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import type { RecordedRun, ScenarioRun } from './harness';
-import { regressions } from './harness';
+import {
+  actorStats,
+  baselineDir,
+  parseRecordedRun,
+  regressions,
+} from './harness';
+import type { RecordedRun } from './harness';
 
-const RESULTS = path.resolve(import.meta.dir, 'results');
-
-export interface OpRow {
-  format: string;
-  scenario: string;
-  sample: string;
-  participants: string;
-  op: string;
-  count: number;
-  meanMs: number;
-  p50Ms: number;
-  p95Ms: number;
-  maxMs: number;
-  stagesMs?: Record<string, number>;
-}
-
-export function readRuns(dir = RESULTS): RecordedRun[] {
-  if (!fs.existsSync(dir)) return [];
-  return fs
+export function readRuns(dir = baselineDir()): RecordedRun[] {
+  if (!fs.existsSync(dir))
+    throw new Error('results directory does not exist: ' + dir);
+  const files = fs
     .readdirSync(dir)
     .filter((name) => name.endsWith('.json'))
-    .sort()
-    .map((name) => JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')) as RecordedRun)
-    .filter((run) => run.schemaVersion === 2);
+    .sort();
+  if (!files.length) throw new Error('no results in ' + dir);
+  const runs = files.map((name) => {
+    try {
+      return parseRecordedRun(
+        JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'))
+      );
+    } catch (error) {
+      throw new Error(path.join(dir, name) + ': ' + String(error));
+    }
+  });
+  if (new Set(runs.map((run) => run.format)).size !== runs.length)
+    throw new Error('duplicate format in ' + dir);
+  return runs;
 }
 
-export function rows(runs: RecordedRun[]): OpRow[] {
-  const out: OpRow[] = [];
-  for (const run of runs) {
-    for (const scenario of run.scenarios) {
-      if (scenario.status !== 'passed') continue;
-      for (const [op, stats] of Object.entries(scenario.summary.byOp)) {
-        out.push({
-          format: scenario.format,
+export function rows(runs: RecordedRun[]) {
+  return runs.flatMap((run) =>
+    run.scenarios.flatMap((scenario) =>
+      [...actorStats(scenario).values()].map(
+        ({ actor, op, stats, errors }) => ({
+          format: run.format,
           scenario: scenario.scenario,
           sample: scenario.sample,
-          participants: scenario.participants.join('+'),
+          status: scenario.status,
+          actor,
           op,
-          count: stats.count,
-          meanMs: stats.meanMs,
-          p50Ms: stats.p50Ms,
-          p95Ms: stats.p95Ms,
-          maxMs: stats.maxMs,
-          stagesMs: stats.stagesMs,
-        });
-      }
-    }
-  }
-  return out;
+          errors,
+          ...stats,
+        })
+      )
+    )
+  );
 }
 
-function slowestOp(run: ScenarioRun): string {
-  const entries = Object.entries(run.summary.byOp);
-  if (entries.length === 0) return '';
-  const [op, stats] = entries.reduce((best, entry) => (entry[1].p50Ms > best[1].p50Ms ? entry : best));
-  return `${op} (${stats.p50Ms.toFixed(1)} ms)`;
-}
+const cell = (value: unknown) =>
+  String(value).replaceAll('|', '\\|').replaceAll('\n', ' ');
 
 export function markdown(runs: RecordedRun[]): string {
   const lines: string[] = [];
   for (const run of runs) {
-    const format = run.scenarios[0]?.format ?? '?';
-    lines.push(`## ${format} (${run.commit.slice(0, 8)}, ${run.recordedAt}, ${run.environment.cpu} x${run.environment.cpus}, bun ${run.environment.bun})`, '');
-    lines.push('| scenario | sample | participants | status | ops | load ms | total ms | slowest op (p50) |', '| --- | --- | --- | --- | ---: | ---: | ---: | --- |');
-    for (const scenario of run.scenarios) {
+    lines.push(
+      '## ' +
+        run.format +
+        ' (' +
+        run.commit.slice(0, 8) +
+        ', ' +
+        cell(run.environment.cpu) +
+        ', Bun ' +
+        run.environment.bun +
+        ')',
+      ''
+    );
+    lines.push(
+      '| scenario | sample | status | operations | reason |',
+      '| --- | --- | --- | ---: | --- |'
+    );
+    for (const scenario of run.scenarios)
       lines.push(
-        `| ${scenario.scenario} | ${scenario.sample} | ${scenario.participants.join('+')} | ${scenario.status}${scenario.reason ? `: ${scenario.reason}` : ''} | ${scenario.summary.opCount} | ${scenario.loadMs.toFixed(1)} | ${scenario.summary.totalMs.toFixed(1)} | ${slowestOp(scenario)} |`
+        '| ' +
+          [
+            scenario.scenario,
+            scenario.sample,
+            scenario.status,
+            scenario.ops.length,
+            scenario.reason ?? '',
+          ]
+            .map(cell)
+            .join(' | ') +
+          ' |'
       );
-    }
     lines.push('');
   }
-  const slowest = rows(runs)
-    .sort((a, b) => b.p50Ms - a.p50Ms)
-    .slice(0, 15);
-  lines.push('## Slowest operations across formats (p50)', '', '| format | scenario | sample | op | n | p50 ms | p95 ms | stages (mean ms) |', '| --- | --- | --- | --- | ---: | ---: | ---: | --- |');
-  for (const row of slowest) {
-    const stages = row.stagesMs ? Object.entries(row.stagesMs).map(([k, v]) => `${k} ${v.toFixed(1)}`).join(', ') : '';
-    lines.push(`| ${row.format} | ${row.scenario} | ${row.sample} | ${row.op} | ${row.count} | ${row.p50Ms.toFixed(2)} | ${row.p95Ms.toFixed(2)} | ${stages} |`);
-  }
-  lines.push('');
-  return lines.join('\n');
+  lines.push(
+    '## Operations by actor',
+    '',
+    '| format | scenario | sample | actor | operation | n | p50 ms | p95 ms |',
+    '| --- | --- | --- | --- | --- | ---: | ---: | ---: |'
+  );
+  for (const row of rows(runs))
+    lines.push(
+      '| ' +
+        [
+          row.format,
+          row.scenario,
+          row.sample,
+          row.actor,
+          row.op,
+          row.count,
+          row.p50Ms.toFixed(2),
+          row.p95Ms.toFixed(2),
+        ]
+          .map(cell)
+          .join(' | ') +
+        ' |'
+    );
+  return lines.join('\n') + '\n';
 }
 
-/** Ops whose median moved by more than the harness thresholds, both ways. */
-export function diff(before: RecordedRun[], after: RecordedRun[]): { slower: string[]; faster: string[] } {
+export function diff(
+  before: RecordedRun[],
+  after: RecordedRun[]
+): { slower: string[]; faster: string[] } {
+  const formats = (runs: RecordedRun[]) =>
+    runs
+      .map((run) => run.format)
+      .sort()
+      .join(',');
+  if (!before.length || !after.length || formats(before) !== formats(after))
+    throw new Error('missing or mismatched result formats');
+  if (
+    new Set(before.map((run) => run.format)).size !== before.length ||
+    new Set(after.map((run) => run.format)).size !== after.length
+  )
+    throw new Error('duplicate result formats');
   const slower: string[] = [];
   const faster: string[] = [];
   for (const previous of before) {
-    const format = previous.scenarios[0]?.format;
-    const current = after.find((run) => run.scenarios[0]?.format === format);
-    if (!current) continue;
-    slower.push(...regressions(previous, current.scenarios));
-    faster.push(...regressions(current, previous.scenarios).filter((line) => !line.endsWith('missing from the current run')));
+    const current = after.find((run) => run.format === previous.format)!;
+    slower.push(...regressions(previous, current));
+    faster.push(...regressions(current, previous));
   }
   return { slower, faster };
 }
@@ -110,13 +143,27 @@ export function diff(before: RecordedRun[], after: RecordedRun[]): { slower: str
 if (import.meta.main) {
   const args = process.argv.slice(2);
   if (args[0] === '--diff') {
+    if (args.length !== 3)
+      throw new Error('usage: report.ts --diff <before> <after>');
     const { slower, faster } = diff(readRuns(args[1]), readRuns(args[2]));
-    console.log(`slower (${slower.length}):\n  ${slower.join('\n  ') || 'none'}`);
-    console.log(`faster (${faster.length}):\n  ${faster.join('\n  ') || 'none'}`);
-    process.exit(slower.length > 0 ? 1 : 0);
+    console.log(
+      'slower (' + slower.length + '):\n  ' + (slower.join('\n  ') || 'none')
+    );
+    console.log(
+      'faster (' + faster.length + '):\n  ' + (faster.join('\n  ') || 'none')
+    );
+    process.exitCode = slower.length > 0 ? 1 : 0;
+  } else {
+    if (
+      args.some((arg) => arg.startsWith('--') && arg !== '--json') ||
+      args.filter((arg) => arg !== '--json').length > 1
+    )
+      throw new Error('usage: report.ts [dir] [--json]');
+    const runs = readRuns(args.find((arg) => arg !== '--json'));
+    console.log(
+      args.includes('--json')
+        ? JSON.stringify(rows(runs), null, 2)
+        : markdown(runs)
+    );
   }
-  const json = args.includes('--json');
-  const dir = args.find((arg) => !arg.startsWith('--'));
-  const runs = readRuns(dir);
-  console.log(json ? JSON.stringify(rows(runs), null, 2) : markdown(runs));
 }

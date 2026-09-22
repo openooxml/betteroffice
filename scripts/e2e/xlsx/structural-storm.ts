@@ -9,7 +9,8 @@ const ANCHOR = 'STORM-ANCHOR';
 
 export const structuralStorm: XlsxScenario = {
   name: 'structural-storm',
-  description: 'Twenty interleaved row inserts and deletes around a formula-bearing block, tracked through a moving anchor, then the whole storm undone and redone against fingerprints of every cell input.',
+  description:
+    'Twenty interleaved row inserts and deletes around a formula-bearing block, tracked through a moving anchor, then the whole storm undone and redone against fingerprints of every cell input.',
   participants: ['web'],
   run({ recorder, open }) {
     const handle = recorder.load(() => open());
@@ -18,12 +19,21 @@ export const structuralStorm: XlsxScenario = {
     for (let row = 0; row < ROWS; row += 1) {
       seed.push({ row: TOP + row, col: 0, input: String(row + 1) });
       seed.push({ row: TOP + row, col: 1, input: `=${a1(TOP + row, 0)}*2` });
-      seed.push({ row: TOP + row, col: 2, input: `=SUM(${a1(TOP, 0)}:${a1(TOP + row, 0)})` });
+      seed.push({
+        row: TOP + row,
+        col: 2,
+        input: `=SUM(${a1(TOP, 0)}:${a1(TOP + row, 0)})`,
+      });
     }
-    expect(recorder.op('editCells:seedRegion', () => handle.editCells(SHEET, seed)).applied).toBe(true);
+    expect(
+      recorder.op('editCells:seedRegion', () => handle.editCells(SHEET, seed))
+        .applied
+    ).toBe(true);
 
     const anchorRow = () => {
-      const found = recorder.op('searchText:anchor', () => handle.searchText(ANCHOR));
+      const found = recorder.op('searchText:anchor', () =>
+        handle.searchText(ANCHOR)
+      );
       expect(found.length).toBe(1);
       return found[0].row;
     };
@@ -41,7 +51,10 @@ export const structuralStorm: XlsxScenario = {
     let applied = 0;
     for (let index = 0; index < 4; index += 1) {
       for (const op of round(anchorRow())) {
-        expect(profiledOps(handle, recorder, `applyOps:${String(op.type)}`, [op]).applied).toBe(true);
+        expect(
+          profiledOps(handle, recorder, `applyOps:${String(op.type)}`, [op])
+            .applied
+        ).toBe(true);
         applied += 1;
       }
     }
@@ -57,7 +70,10 @@ export const structuralStorm: XlsxScenario = {
     expect(formulas.length).toBeGreaterThan(ROWS);
     expect(formulas.some((cell) => cell.input.includes('#REF!'))).toBe(false);
 
-    expect(recorder.op('historyState:afterStorm', () => handle.historyState()).undoDepth).toBeGreaterThanOrEqual(20);
+    expect(
+      recorder.op('historyState:afterStorm', () => handle.historyState())
+        .undoDepth
+    ).toBeGreaterThanOrEqual(20);
     for (let step = 0; step < 20; step += 1) {
       expect(recorder.op('undo:storm', () => handle.undo()).applied).toBe(true);
     }
@@ -67,6 +83,9 @@ export const structuralStorm: XlsxScenario = {
       expect(recorder.op('redo:storm', () => handle.redo()).applied).toBe(true);
     }
     expect(fingerprint(handle, region(TOP))).toBe(after);
-    expect(recorder.op('historyState:afterRedo', () => handle.historyState()).redoDepth).toBe(0);
+    expect(
+      recorder.op('historyState:afterRedo', () => handle.historyState())
+        .redoDepth
+    ).toBe(0);
   },
 };

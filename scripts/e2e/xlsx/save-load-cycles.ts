@@ -8,7 +8,8 @@ const CYCLES = 10;
 
 export const saveLoadCycles: XlsxScenario = {
   name: 'save-load-cycles',
-  description: 'Ten rounds of edit, save and reopen on the same workbook, checking that nothing drifts and that neither the byte count nor the save and open latency grows with the round.',
+  description:
+    'Ten rounds of edit, save and reopen on the same workbook, checking cell-input persistence, sheet names, and bounded file growth while recording save/open timings.',
   participants: ['web'],
   run({ recorder, open }) {
     let handle = recorder.load(() => open());
@@ -18,13 +19,34 @@ export const saveLoadCycles: XlsxScenario = {
     let previousBytes = 0;
 
     for (let cycle = 0; cycle < CYCLES; cycle += 1) {
-      expect(profiledEdit(handle, recorder, 'editCell:cycle', ROW + cycle, 0, `cycle ${cycle}`).applied).toBe(true);
-      expect(profiledEdit(handle, recorder, 'editCell:cycleFormula', ROW + cycle, 1, `=LEN(${a1(ROW + cycle, 0)})`).applied).toBe(true);
+      expect(
+        profiledEdit(
+          handle,
+          recorder,
+          'editCell:cycle',
+          ROW + cycle,
+          0,
+          `cycle ${cycle}`
+        ).applied
+      ).toBe(true);
+      expect(
+        profiledEdit(
+          handle,
+          recorder,
+          'editCell:cycleFormula',
+          ROW + cycle,
+          1,
+          `=LEN(${a1(ROW + cycle, 0)})`
+        ).applied
+      ).toBe(true);
       const expected = fingerprint(handle, region);
 
       const saved = recorder.op('save:cycle', () => handle.save());
       expect(saved.byteLength).toBeGreaterThan(0);
-      if (previousBytes > 0) expect(Math.abs(saved.byteLength - previousBytes)).toBeLessThan(previousBytes * 0.25);
+      if (previousBytes > 0)
+        expect(Math.abs(saved.byteLength - previousBytes)).toBeLessThan(
+          previousBytes * 0.25
+        );
       previousBytes = saved.byteLength;
 
       handle = recorder.op('reopen:cycle', () => open(saved));
@@ -32,7 +54,12 @@ export const saveLoadCycles: XlsxScenario = {
       expect(handle.sheetInfo().sheetNames).toEqual(names);
     }
 
-    expect(handle.cell(SHEET, ROW + CYCLES - 1, 0).input).toBe(`cycle ${CYCLES - 1}`);
-    expect(recorder.op('searchText:allCycles', () => handle.searchText('cycle ')).length).toBeGreaterThanOrEqual(CYCLES);
+    expect(handle.cell(SHEET, ROW + CYCLES - 1, 0).input).toBe(
+      `cycle ${CYCLES - 1}`
+    );
+    expect(
+      recorder.op('searchText:allCycles', () => handle.searchText('cycle '))
+        .length
+    ).toBeGreaterThanOrEqual(CYCLES);
   },
 };

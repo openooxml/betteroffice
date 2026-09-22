@@ -15,10 +15,18 @@ import type {
 } from '../../../packages/xlsx/src/wasm/loader';
 import type { DisplayList } from '../../../packages/xlsx/src/display-list/types';
 import type { PinnedSample } from '../corpus';
-import type { ActorRecorder, ScenarioRecorder, StageProfile, Timer } from '../harness';
+import type {
+  ActorRecorder,
+  ScenarioRecorder,
+  StageProfile,
+  Timer,
+} from '../harness';
 import type { Scenario } from '../suite';
 
-const WASM = resolve(import.meta.dir, '../../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
+const WASM = resolve(
+  import.meta.dir,
+  '../../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm'
+);
 export const VIEWPORT: Viewport = { x: 0, y: 0, width: 1280, height: 800 };
 export const SHEET = 0;
 
@@ -37,7 +45,11 @@ export function setup(): Promise<void> {
   return initWasm(new Uint8Array(readFileSync(WASM)));
 }
 
-export function context(sample: PinnedSample, bytes: Uint8Array, recorder: ScenarioRecorder): XlsxCtx {
+export function context(
+  sample: PinnedSample,
+  bytes: Uint8Array,
+  recorder: ScenarioRecorder
+): XlsxCtx {
   const handles: WorkbookHandle[] = [];
   return {
     sample,
@@ -59,14 +71,27 @@ export function context(sample: PinnedSample, bytes: Uint8Array, recorder: Scena
 }
 
 export function editStages(profile: EditProfile): StageProfile {
-  return { validate: profile.validateMs, apply: profile.applyMs, recalc: profile.recalcMs, result: profile.resultMs };
+  return {
+    validate: profile.validateMs,
+    apply: profile.applyMs,
+    recalc: profile.recalcMs,
+    result: profile.resultMs,
+  };
 }
 
 export function displayStages(profile: DisplayListProfile): StageProfile {
   return { build: profile.buildMs, encode: profile.encodeMs };
 }
 
-export function profiledEdit(handle: WorkbookHandle, timer: Timer, op: string, row: number, col: number, input: string, sheet = SHEET): ProfiledEditResult {
+export function profiledEdit(
+  handle: WorkbookHandle,
+  timer: Timer,
+  op: string,
+  row: number,
+  col: number,
+  input: string,
+  sheet = SHEET
+): ProfiledEditResult {
   let profile: EditProfile | undefined;
   return timer.op(
     op,
@@ -79,7 +104,12 @@ export function profiledEdit(handle: WorkbookHandle, timer: Timer, op: string, r
   );
 }
 
-export function profiledOps(handle: WorkbookHandle, timer: Timer, op: string, ops: unknown[]): ProfiledEditResult {
+export function profiledOps(
+  handle: WorkbookHandle,
+  timer: Timer,
+  op: string,
+  ops: unknown[]
+): ProfiledEditResult {
   let profile: EditProfile | undefined;
   return timer.op(
     op,
@@ -92,7 +122,12 @@ export function profiledOps(handle: WorkbookHandle, timer: Timer, op: string, op
   );
 }
 
-export function profiledDisplayList(handle: WorkbookHandle, timer: Timer, op: string, viewport = VIEWPORT): DisplayList {
+export function profiledDisplayList(
+  handle: WorkbookHandle,
+  timer: Timer,
+  op: string,
+  viewport = VIEWPORT
+): DisplayList {
   let profile: DisplayListProfile | undefined;
   return timer.op(
     op,
@@ -106,9 +141,19 @@ export function profiledDisplayList(handle: WorkbookHandle, timer: Timer, op: st
 }
 
 /** The formatted text the sheet shows at `row`/`col`, found through text search. */
-export function displayedText(handle: WorkbookHandle, timer: Timer, op: string, query: string, row: number, col: number, sheet = SHEET): string {
+export function displayedText(
+  handle: WorkbookHandle,
+  timer: Timer,
+  op: string,
+  query: string,
+  row: number,
+  col: number,
+  sheet = SHEET
+): string {
   const matches = timer.op(op, () => handle.searchText(query));
-  const match = matches.find((m) => m.sheet === sheet && m.row === row && m.col === col);
+  const match = matches.find(
+    (m) => m.sheet === sheet && m.row === row && m.col === col
+  );
   expect(match, `${query} at row ${row} col ${col}`).toBeDefined();
   return match!.text;
 }
@@ -124,7 +169,9 @@ export interface Replica {
 export function replicas(ctx: XlsxCtx, names: string[]): Replica[] {
   return names.map((name, index) => {
     const timer = ctx.recorder.as(name);
-    const handle = timer.load(() => ctx.open(ctx.bytes, { collaborative: true, clientId: index + 1 }));
+    const handle = timer.load(() =>
+      ctx.open(ctx.bytes, { collaborative: true, clientId: index + 1 })
+    );
     const outbox: Uint8Array[] = [];
     handle.onUpdate((update, origin) => {
       if (origin === 'local') outbox.push(update);
@@ -142,7 +189,12 @@ export function exchange(peers: Replica[], op = 'applyUpdate'): number {
       bytes += update.byteLength;
       for (const to of peers) {
         if (to === from) continue;
-        const applied = to.timer.op(op, () => to.handle.applyUpdate(update), undefined, { from: from.name, bytes: update.byteLength });
+        const applied = to.timer.op(
+          op,
+          () => to.handle.applyUpdate(update),
+          undefined,
+          { from: from.name, bytes: update.byteLength }
+        );
         expect(applied.applied).toBe(true);
       }
     }
@@ -150,13 +202,18 @@ export function exchange(peers: Replica[], op = 'applyUpdate'): number {
   return bytes;
 }
 
-/** Every cell input in `range`, as the convergence fingerprint of a replica. */
-export function fingerprint(handle: WorkbookHandle, range: string, sheet = SHEET): string {
-  return handle
-    .rangeCells(sheet, range)
-    .flat()
-    .map((cell) => `${cell.a1}=${cell.input}`)
-    .join('|');
+/** Inputs, formatting, and rendered values in the selected range. */
+export function fingerprint(
+  handle: WorkbookHandle,
+  range: string,
+  sheet = SHEET
+): string {
+  const cells = handle.rangeCells(sheet, range).flat();
+  return JSON.stringify({
+    cells,
+    formatting: cells.map((cell) => handle.selectionFormatting(sheet, cell.a1)),
+    display: handle.printDisplayList(sheet, range, PRINT_METRICS, false),
+  });
 }
 
 export const PRINT_METRICS = {
