@@ -2819,7 +2819,9 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .fold(0.0_f32, f32::max);
             value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
         }
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An autofit font scale shrinks the text, never a spacing written in
+        // points: PowerPoint keeps `a:spcBef`/`a:spcAft` at their stated size.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         None => 0.0,
     };
     if height.is_finite() {
@@ -2920,7 +2922,6 @@ fn layout_paragraph(
             style_line_box(fonts, style, scale)?,
             paragraph,
             points_to_px(style.font_size_pt * scale),
-            scale,
         );
         return Ok(vec![PositionedTextLine {
             x,
@@ -2997,7 +2998,7 @@ fn layout_paragraph(
         };
         let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
         let line_box = shifted_line_box(
-            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale), scale),
+            spaced_line_box(natural, paragraph, line_font_size_px(slice, scale)),
             extents,
         );
         let mut caret_stops = vec![CaretStop {
@@ -3606,7 +3607,6 @@ fn spaced_line_box(
     content: ooxml_text::LineBox,
     paragraph: &ResolvedParagraph,
     size_px: f32,
-    scale: f32,
 ) -> ooxml_text::LineBox {
     if content.height() <= 0.0 {
         return content;
@@ -3614,7 +3614,9 @@ fn spaced_line_box(
     let reduction = paragraph.line_space_reduction;
     let single = SINGLE_LINE_PITCH_EM * size_px;
     let target = match paragraph.line_spacing {
-        Some(LineSpacing::Points { value }) => points_to_px(value as f32 * scale),
+        // An exact line spacing is a measurement, not a font size, so the
+        // autofit scale leaves it alone.
+        Some(LineSpacing::Points { value }) => points_to_px(value as f32),
         Some(LineSpacing::Percent { value }) => (value as f32 - reduction).max(0.0) * single,
         None => (1.0 - reduction) * single,
     };

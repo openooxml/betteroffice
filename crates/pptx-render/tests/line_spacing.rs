@@ -26,7 +26,7 @@ fn lines(list: &SurfaceDisplayList, id: u32) -> &[PositionedTextLine] {
 }
 
 #[test]
-fn exact_spacing_preserves_the_first_baseline_and_scales_with_autofit() {
+fn exact_spacing_preserves_the_first_baseline_and_survives_autofit() {
     let session = DeckSession::open(DECK, 3141).unwrap();
     let renderer = renderer();
     let snapshot = session.snapshot().unwrap();
@@ -73,7 +73,7 @@ fn exact_spacing_preserves_the_first_baseline_and_scales_with_autofit() {
         .unwrap()
         .display_list;
     let scaled = lines(&scaled, 4);
-    assert!((scaled[1].baseline - scaled[0].baseline - 48.0).abs() < 0.001);
+    assert!((scaled[1].baseline - scaled[0].baseline - 96.0).abs() < 0.001);
     assert!(
         (scaled[0].baseline - scaled[0].y - (natural[0].baseline - natural[0].y) * 0.5).abs()
             < 0.001
