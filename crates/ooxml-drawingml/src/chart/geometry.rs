@@ -2079,7 +2079,7 @@ fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
 
 #[cfg(test)]
 fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
-    let plot = PlotArea {
+    let _plot = PlotArea {
         x: 0.0,
         y: 0.0,
         w: 200.0,

@@ -1263,6 +1263,9 @@ fn effects_fingerprint(effects: &[pptx_render::ImageEffect]) -> u64 {
                 threshold.to_bits().hash(&mut hasher);
             }
             pptx_render::ImageEffect::Grayscale => {}
+            pptx_render::ImageEffect::Alpha { amount } => {
+                amount.to_bits().hash(&mut hasher);
+            }
             pptx_render::ImageEffect::Luminance {
                 brightness,
                 contrast,
@@ -1405,6 +1408,7 @@ mod tests {
             let h = if kind == "line" { 0.0 } else { 80.0 };
             list.primitives.push(if kind == "image" {
                 Primitive::Image {
+                    tile: None,
                     geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
@@ -2036,6 +2040,7 @@ mod tests {
         let images = AssetMap::from([("mark", bytes.as_slice())]);
         let mut list = empty_list(300.0, 200.0);
         list.primitives.push(Primitive::Image {
+            tile: None,
             geometry_fallback: false,
             object_id: 1,
             shape_id: None,
@@ -2088,6 +2093,7 @@ mod tests {
 
     fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {
         Primitive::Image {
+            tile: None,
             geometry_fallback: false,
             object_id: 1,
             shape_id: None,
@@ -2329,6 +2335,7 @@ mod tests {
         for flip_h in [false, true] {
             for parent_clip in [false, true] {
                 let image = Primitive::Image {
+                    tile: None,
                     geometry_fallback: false,
                     object_id: 1,
                     shape_id: None,
@@ -2421,6 +2428,7 @@ mod tests {
         for asset_id in [None, Some("ppt/media/image1.png")] {
             let mut list = empty_list(100.0, 100.0);
             list.primitives.push(Primitive::Image {
+                tile: None,
                 geometry_fallback: false,
                 object_id: 1,
                 shape_id: None,

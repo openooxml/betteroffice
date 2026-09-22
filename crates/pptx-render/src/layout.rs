@@ -773,9 +773,10 @@ impl<'a> LayoutBuilder<'a> {
             Some(self.render_text_box(
                 shape.source_id,
                 &stable_id,
-                geometry_text_rect(original, rect),
+                rect,
                 transform,
                 space,
+                geometry_text_inset(original, rect),
                 content,
                 body_cascade,
             )?)
@@ -928,9 +929,10 @@ impl<'a> LayoutBuilder<'a> {
             Some(self.render_text_box(
                 base.id,
                 stable_id,
-                geometry_text_rect(Some(shape), rect),
+                rect,
                 transform,
                 space,
+                geometry_text_inset(Some(shape), rect),
                 content,
                 BodyCascade {
                     primary: Some(body),
@@ -1471,6 +1473,7 @@ impl<'a> LayoutBuilder<'a> {
                 plan.rect(&columns, &rows),
                 Transform::default(),
                 space,
+                (0.0, 0.0),
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
@@ -1557,6 +1560,7 @@ impl<'a> LayoutBuilder<'a> {
         rect: PxRect,
         transform: Transform,
         space: Space,
+        preset_inset: (f32, f32),
         content: TextContent,
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
@@ -1571,11 +1575,12 @@ impl<'a> LayoutBuilder<'a> {
         let top = cascade.inset_top().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let bottom = cascade.inset_bottom().unwrap_or(DEFAULT_INSET_VERTICAL_EMU);
         let [left, top, right, bottom] = flow.layout_insets([left, top, right, bottom]);
+        let (preset_x, preset_y) = preset_inset;
         let content_rect = PxRect {
-            x: text_rect.x + emu_to_px(left),
-            y: text_rect.y + emu_to_px(top),
-            w: (text_rect.w - emu_to_px(left + right)).max(1.0),
-            h: (text_rect.h - emu_to_px(top + bottom)).max(1.0),
+            x: text_rect.x + emu_to_px(left) + preset_x,
+            y: text_rect.y + emu_to_px(top) + preset_y,
+            w: (text_rect.w - emu_to_px(left + right) - preset_x * 2.0).max(1.0),
+            h: (text_rect.h - emu_to_px(top + bottom) - preset_y * 2.0).max(1.0),
         };
         let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
@@ -4817,24 +4822,17 @@ fn image_dpi(bytes: &[u8]) -> Option<f32> {
 /// The rectangle a preset holds its text in. Most presets use the whole frame,
 /// but a rounded box and an ellipse inset theirs so the text clears the curve —
 /// the `a:rect` each preset declares, for the two the corpus writes text into.
-fn geometry_text_rect(shape: Option<&ShapeNode>, rect: PxRect) -> PxRect {
+fn geometry_text_inset(shape: Option<&ShapeNode>, rect: PxRect) -> (f32, f32) {
     let Some(ShapeNode::Shape(shape)) = shape else {
-        return rect;
+        return (0.0, 0.0);
     };
-    let Some((inset_x, inset_y)) = preset_text_inset(
+    preset_text_inset(
         &shape.geometry,
         shape.adjust_values.get("adj").copied(),
         rect.w,
         rect.h,
-    ) else {
-        return rect;
-    };
-    PxRect {
-        x: rect.x + inset_x,
-        y: rect.y + inset_y,
-        w: (rect.w - inset_x * 2.0).max(1.0),
-        h: (rect.h - inset_y * 2.0).max(1.0),
-    }
+    )
+    .unwrap_or((0.0, 0.0))
 }
 
 fn preset_text_inset(
