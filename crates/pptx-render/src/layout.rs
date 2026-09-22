@@ -6,7 +6,7 @@ use ooxml_drawingml::{
     ColorValue, GeometryPathCommand, GradientFill, LineEnd, ResolvedCellStyle, ShapeEffects,
     ShapeFill, ShapeOutline, ShapeStyle, StyleReference, TableCellBorder,
     TableCellBorders as StyleCellBorders, TableCellPosition, TableCellStyle, TableStyle,
-    TableStyleFlags, Theme, ThemeFormatScheme, normalize_table_column_widths,
+    TableStyleFlags, Theme, ThemeFormatScheme, get_theme_color, normalize_table_column_widths,
     preset_geometry_to_path, resolve_color_value_to_hex_with_theme,
     resolve_color_value_to_rgba_hex, resolve_theme_font_ref, style_fill, style_outline,
 };
@@ -2982,7 +2982,7 @@ fn layout_paragraph(
     let mut line_y = y;
     for (line_index, (start, end)) in ranges.into_iter().enumerate() {
         let slice = &clusters[start..end];
-        let natural_width = line_advance(slice);
+        let natural_width = line_advance(aligned_slice(slice));
         let stretchable = paragraph.justify
             && line_index + 1 < line_count
             && !slice.last().is_some_and(|cluster| cluster.mandatory);
@@ -3311,6 +3311,17 @@ fn add_shaped_segment(
         });
     }
     Ok(())
+}
+
+/// The part of a line that centring and right alignment measure: a space at
+/// the end of a wrapped line hangs past the margin, so PowerPoint does not
+/// count it when it places the line.
+fn aligned_slice<'a>(clusters: &'a [ShapedCluster]) -> &'a [ShapedCluster] {
+    let end = clusters
+        .iter()
+        .rposition(|cluster| !cluster.text.chars().all(char::is_whitespace))
+        .map_or(0, |index| index + 1);
+    &clusters[..end]
 }
 
 /// Measures a line without its trailing tracking gap.
@@ -4185,14 +4196,21 @@ fn merge_run_properties(target: &mut RunProperties, source: &RunProperties) {
     }
 }
 
+/// A run that carries an `a:hlinkClick` is drawn in the theme's `hlink` colour
+/// and underlined, over whatever the placeholder would otherwise give it.
 fn style_from_properties(properties: &RunProperties, theme: &Theme) -> TextStyle {
+    let linked = properties.hyperlink_relationship_id.is_some();
     TextStyle {
         bold: properties.bold,
         italic: properties.italic,
         font_size_pt: properties.font_size_pt,
-        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme)),
+        color: resolve_color_value_to_hex_with_theme(properties.color.as_ref(), Some(theme))
+            .or_else(|| linked.then(|| format!("#{}", get_theme_color(Some(theme), "hlink")))),
         font_family: properties.font_family.clone(),
-        underline: properties.underline.clone(),
+        underline: properties
+            .underline
+            .clone()
+            .or_else(|| linked.then(|| "sng".to_owned())),
         spacing_pt: properties.spacing_pt,
         baseline_pct: properties.baseline_pct,
         caps: properties.caps,

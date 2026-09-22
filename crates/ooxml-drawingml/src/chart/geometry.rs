@@ -2078,11 +2078,11 @@ fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
         h: 156.0,
         gutter: AXIS_GUTTER,
     };
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     (scale.min, scale.max)
 }
 
-fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
+fn value_scale(family: PlotFamily<'_>) -> ValueScale {
     let stacking = family.stacking();
     let (mut min, mut max) = match stacking {
         Stacking::Percent => percent_range(family),
@@ -2248,7 +2248,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
     plot: PlotArea,
 ) {
     let transposed = family.transposed();
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
     let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
@@ -2703,7 +2703,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
     }
     let horizontal = family.transposed();
     emit_axes(ops, family, plot);
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, if horizontal { plot.h } else { plot.w });
     let category_style = &family.category_text();
     let spans = &mut Vec::with_capacity(family.series.len());
@@ -2829,7 +2829,7 @@ fn emit_line<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let stacking = family.stacking();
     emit_category_labels(ops, family, plot, cat_count);
     let spans = &mut Vec::with_capacity(family.series.len());
@@ -2890,7 +2890,7 @@ fn emit_area<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let stacking = family.stacking();
     emit_category_labels(ops, family, plot, cat_count);
     let vertices = cat_count.min(MAX_PLOT_POLYGON_POINTS);
@@ -3066,7 +3066,7 @@ fn emit_scatter<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let y_scale = value_scale(family, plot);
+    let y_scale = value_scale(family);
     let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let (lines, markers) = scatter_parts(family.group.and_then(|group| group.scatter_style));
@@ -3123,7 +3123,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let y_scale = value_scale(family, plot);
+    let y_scale = value_scale(family);
     let x_scale = scatter_x_scale(family, plot);
     emit_scatter_x_labels(ops, family, plot, x_scale);
     let group = family.group;
@@ -3199,7 +3199,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
     if cat_count == 0 || family.series.is_empty() {
         return;
     }
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let spokes = cat_count.min(MAX_PLOT_POLYGON_POINTS);
     let radius = (width.min(height) * 0.34).max(6.0);
     let (cx, cy) = (x + width * 0.38, y + height * 0.5);
@@ -3332,7 +3332,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
         return;
     }
     emit_axes(ops, family, plot);
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let bands = bar_bands(family, cat_count, plot.w);
     let hi_lo = family.group.is_none_or(|group| group.hi_low_lines) || open.is_none();
     let up_down = open.is_some() && family.group.is_none_or(|group| group.up_down_bars);
@@ -3463,7 +3463,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
         CHART_AXIS_COLOR,
         1.0,
     );
-    let scale = value_scale(family, plot);
+    let scale = value_scale(family);
     let columns = cat_count.min(MAX_PLOT_SURFACE_CELLS / rows.max(1));
     let cell_w = plot.w / columns.max(1) as f64;
     let cell_h = plot.h / rows as f64;
