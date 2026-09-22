@@ -12,7 +12,7 @@ is an end-to-end test and a per-operation performance profile at once.
 ```bash
 bun run test:e2e            # build the wasm bundles, run, print the per-op summary
 bun run test:e2e:record     # ... and write scripts/e2e/results/<format>.json
-bun run test:e2e:compare    # ... and fail when a median regresses 25% and 2 ms+
+bun run test:e2e:compare    # ... and fail when a median regresses 25% and 10 ms+
 bun scripts/e2e/python-env.ts   # once: venv with the Python bindings for the cross-SDK scenarios
 bun scripts/e2e/report.ts [dir] [--json] | --diff <before> <after>
 ```

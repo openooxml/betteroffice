@@ -72,7 +72,12 @@ export interface RecordedRun {
   scenarios: ScenarioRun[];
 }
 
-const REGRESSION = { percent: 25, minimumMs: 2 };
+/**
+ * A regression needs a 25% slower median and a real absolute move. One-shot
+ * operations carry single-sample noise, so they need 10ms; an operation the
+ * scenario repeats has a stable median and only needs 2ms.
+ */
+const REGRESSION = { percent: 25, minimumMs: 10, repeatedMinimumMs: 2, repeats: 5 };
 
 /** Each format keeps its own recorded run so the suites stay independent. */
 export function resultsPath(format: Format): string {
@@ -241,7 +246,8 @@ export function regressions(previous: RecordedRun, current: ScenarioRun[]): stri
       }
       const delta = after.p50Ms - before.p50Ms;
       const percent = before.p50Ms === 0 ? Infinity : (delta / before.p50Ms) * 100;
-      if (delta > REGRESSION.minimumMs && percent > REGRESSION.percent) {
+      const floor = before.count >= REGRESSION.repeats ? REGRESSION.repeatedMinimumMs : REGRESSION.minimumMs;
+      if (delta > floor && percent > REGRESSION.percent) {
         failures.push(`${id}: p50 ${before.p50Ms.toFixed(2)}ms -> ${after.p50Ms.toFixed(2)}ms (+${percent.toFixed(0)}%)`);
       }
     }
