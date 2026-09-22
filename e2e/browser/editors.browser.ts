@@ -34,11 +34,28 @@ async function save(page: Page, format: Format, info: TestInfo, label: string) {
   const file = info.outputPath(label + '.' + format);
   await download.saveAs(file);
   const zip = await JSZip.loadAsync(await readFile(file));
-  const parts = Object.values(zip.files).filter(
-    (part) => !part.dir && part.name.endsWith('.xml')
-  );
+  const parts = Object.values(zip.files)
+    .filter((part) => !part.dir && part.name.endsWith('.xml'))
+    .sort((a, b) => a.name.localeCompare(b.name));
   const xml = await Promise.all(parts.map((part) => part.async('string')));
-  const text = xml.map((value) => value.replace(/<[^>]*>/g, '')).join('\n');
+  const text = await page.evaluate(
+    (parts) =>
+      parts
+        .map((xml) => {
+          const document = new DOMParser().parseFromString(
+            xml,
+            'application/xml'
+          );
+          if (document.querySelector('parsererror'))
+            throw new Error('Invalid saved XML');
+          return Array.from(document.getElementsByTagNameNS('*', 't'))
+            .map((node) => node.textContent ?? '')
+            .join('');
+        })
+        .filter(Boolean)
+        .join('\n'),
+    xml
+  );
   return { file, text };
 }
 
@@ -118,14 +135,16 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+z');
       else await page.getByTestId(format + '-undo').click();
-      expect((await save(page, format, info, 'undone')).text).not.toContain(
-        marker
-      );
+      const undoneText =
+        format === 'pptx'
+          ? edited.text.replace(marker, marker.slice(0, -1))
+          : original.text;
+      expect((await save(page, format, info, 'undone')).text).toBe(undoneText);
       if (format === 'docx')
         await page.getByTestId('yrs-input').press('ControlOrMeta+Shift+z');
       else await page.getByTestId(format + '-redo').click();
       const redone = await save(page, format, info, 'redone');
-      expect(redone.text).toContain(marker);
+      expect(redone.text).toBe(edited.text);
 
       await open(page, format, redone.file);
       if (format === 'docx')
@@ -136,8 +155,8 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
         await expect(
           page.getByRole('gridcell').filter({ hasText: marker })
         ).toHaveCount(1);
-      expect((await save(page, format, info, 'reopened')).text).toContain(
-        marker
+      expect((await save(page, format, info, 'reopened')).text).toBe(
+        redone.text
       );
 
       await page
@@ -150,9 +169,9 @@ for (const format of ['docx', 'xlsx', 'pptx'] as const) {
         });
       await expect(page.locator('.notice')).toBeVisible();
       await expect(page.locator('.editor-stage canvas').first()).toBeVisible();
-      expect(
-        (await save(page, format, info, 'after-failed-open')).text
-      ).toContain(marker);
+      expect((await save(page, format, info, 'after-failed-open')).text).toBe(
+        redone.text
+      );
       await info.attach('editor-after-reopen', {
         body: await page.screenshot(),
         contentType: 'image/png',
