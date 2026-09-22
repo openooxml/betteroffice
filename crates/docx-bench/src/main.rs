@@ -15,9 +15,15 @@ fn keystroke_loop(bytes: &[u8]) -> Result<f64, Box<dyn std::error::Error>> {
     let document = EditingDoc::new(1);
     docx_edit::seed_from_docx(&document, bytes)?;
     let ctx = EditCtx::local("bench", "");
+    let at = document
+        .paragraphs("body")?
+        .first()
+        .map(|p| p.text.chars().count() as u32)
+        .unwrap_or(0)
+        .min(6);
     let t = Instant::now();
     for _ in 0..KEYS {
-        document.insert_text(&ctx, Position::new("body", 6), "x", FormatPolicy::Plain)?;
+        document.insert_text(&ctx, Position::new("body", at), "x", FormatPolicy::Plain)?;
         black_box(document.story_segments("body")?);
         black_box(document.encode_state_as_update_v1());
     }
