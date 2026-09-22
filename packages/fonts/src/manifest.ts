@@ -216,6 +216,22 @@ export const WORD_FAMILY_ALIASES: Record<string, string> = {
   times: 'times new roman',
   courier: 'courier new',
 
+  // Metric-compatible clones of the core families. A deck that asks for one
+  // was laid out against those metrics, so it resolves to the same face rather
+  // than through the last-resort pick (#797).
+  arimo: 'arial',
+  'liberation sans': 'arial',
+  'nimbus sans': 'arial',
+  'helvetica neue': 'arial',
+  carlito: 'calibri',
+  tinos: 'times new roman',
+  'liberation serif': 'times new roman',
+  'nimbus roman': 'times new roman',
+  cousine: 'courier new',
+  'liberation mono': 'courier new',
+  'nimbus mono ps': 'courier new',
+  caladea: 'cambria',
+
   // Simplified Chinese — sans
   simhei: 'microsoft yahei',
   dengxian: 'microsoft yahei',
@@ -362,14 +378,21 @@ function looksSerif(family: string): boolean {
   );
 }
 
-/** Choose a related family, then a serif or sans fallback. */
+/**
+ * Choose a related family, then a serif or sans fallback.
+ *
+ * The sans fallback is Calibri because that is what Office substitutes for a
+ * family it cannot find: a deck asking for Google Sans, Inter or Questrial is
+ * drawn in Calibri, which is ~7% narrower than Arial, so falling back to Arial
+ * rewraps every line the document wrote against those metrics. A weight in the
+ * name is deliberately not read — Office substitutes `Archivo Black` with a
+ * regular face too, and matching that is what keeps the line breaks (#797).
+ */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
 ): BundledFontFace {
-  const base = family.trim().toLowerCase() === 'calibri light'
-    ? 'Calibri'
-    : looksSerif(family) ? 'Times New Roman' : 'Arial';
+  const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
   return resolveMetricCompatFace(base, bold, italic)!;
 }

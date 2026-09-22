@@ -30,12 +30,24 @@ describe('resolution', () => {
   });
 
   test('last resort always returns a face, serif-aware', () => {
-    expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Liberation Sans');
+    expect(resolveLastResortFace('Totally Unknown', false, false).family).toBe('Carlito');
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
-    expect(resolveLastResortFace('Unknown', true, true).file).toBe('LiberationSans-BoldItalic.ttf');
+    expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
+  });
+
+  test('a weight in the name is not read as a request for a bold face', () => {
+    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Inter SemiBold', false, false).file).toBe('Carlito-Regular.ttf');
+  });
+
+  test('metric-compatible clones resolve to the family they clone', () => {
+    expect(resolveMetricCompatFamily('Arimo')).toBe('Liberation Sans');
+    expect(resolveMetricCompatFamily('Tinos')).toBe('Liberation Serif');
+    expect(resolveMetricCompatFamily('Carlito')).toBe('Carlito');
+    expect(resolveMetricCompatFamily('Caladea')).toBe('Caladea');
   });
 
   test('script fallbacks prefer the sans face of the bucket', () => {
