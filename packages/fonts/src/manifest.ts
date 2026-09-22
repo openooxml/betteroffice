@@ -105,6 +105,45 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     [319508, 307996, 281536, 284068],
   ),
 
+  // Families the office-quality references are actually drawn with. The Google
+  // families are the same font PowerPoint used, so their lines break where the
+  // deck wrote them; Gelasio is Georgia's metric-compatible clone and Comic
+  // Relief is Comic Sans MS's (#797).
+  ...familyFaces('Gelasio', 'Georgia', 'Gelasio', [107588, 107864, 107904, 107932]),
+  ...familyFaces('Inter', 'Inter', 'Inter', [341396, 343104, 344784, 346628]),
+  ...familyFaces('Roboto', 'Roboto', 'Roboto', [157584, 158316, 163212, 164100]),
+  ...familyFaces(
+    'Source Sans 3',
+    'Source Sans Pro',
+    'SourceSans3',
+    [379576, 379468, 240444, 240384],
+  ),
+  ...familyFaces('DM Sans', 'DM Sans', 'DMSans', [56856, 56784, 61472, 61324]),
+  ...familyFaces('Open Sans', 'Open Sans', 'OpenSans', [130484, 130504, 136020, 135700]),
+  ...familyFaces(
+    'Montserrat',
+    'Montserrat',
+    'Montserrat',
+    [374500, 374640, 384612, 384792],
+  ),
+  // Comic Relief ships no italics, so those fall back through the chain.
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 400,
+    style: 'normal',
+    file: 'ComicRelief-Regular.ttf',
+    byteLength: 80324,
+  },
+  {
+    family: 'Comic Relief',
+    metricCompatWith: 'Comic Sans MS',
+    weight: 700,
+    style: 'normal',
+    file: 'ComicRelief-Bold.ttf',
+    byteLength: 94684,
+  },
+
   // RTL script fallbacks. No metricCompatWith: Hebrew/Arabic documents mostly
   // name Latin families (Arial, Times New Roman, ...) whose mapping stays with
   // the Liberation faces; these faces ride the per-script fallback chain.
