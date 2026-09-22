@@ -124,6 +124,22 @@ fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> 
     if found { levels } else { Vec::new() }
 }
 
+/// The shapes of a `ppt/diagrams/drawing#.xml`. Its `dsp:spTree` carries the
+/// same elements a slide's does, in the same coordinates as the graphic frame
+/// that names it, so it parses and draws like a group.
+pub(crate) fn parse_diagram_drawing(
+    root: &XmlElement,
+    relationships: &[Relationship],
+    part: &str,
+    budget: &mut ParseBudget<'_>,
+    elements: ShapeElements,
+) -> Result<Vec<ShapeNode>, PptxError> {
+    let Some(tree) = root.descendants_named("spTree").first().copied() else {
+        return Ok(Vec::new());
+    };
+    parse_shape_children(tree, relationships, part, budget, elements)
+}
+
 fn parse_shape_children(
     parent: &XmlElement,
     relationships: &[Relationship],
@@ -323,7 +339,14 @@ fn parse_graphic_frame(
             .filter(|(key, _)| key.starts_with("r:"))
             .map(|(_, value)| value.clone())
             .collect();
-        GraphicFrameData::Diagram { relationship_ids }
+        let data_id = ids
+            .attribute("r:dm")
+            .or_else(|| ids.attribute_local("dm"))
+            .unwrap_or_default();
+        GraphicFrameData::Diagram {
+            drawing_part_path: diagram_drawing_target(relationships, data_id),
+            relationship_ids,
+        }
     } else {
         let uri = data.and_then(|value| value.attribute("uri"));
         let picture = data
@@ -1454,6 +1477,26 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
     }
 }
 
+/// The `ppt/diagrams/drawing#.xml` beside the data part a SmartArt frame names.
+/// A slide can hold several diagrams and the drawing is not referenced from the
+/// frame at all, so the two are paired by the number Office gives both parts.
+fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Option<String> {
+    let data = relationship_target(relationships, data_id)?;
+    let stem = data
+        .rsplit_once('/')
+        .map_or(data.as_str(), |(_, name)| name)
+        .trim_start_matches("data")
+        .to_owned();
+    relationships
+        .iter()
+        .filter(|relationship| relationship.has_type("/diagramDrawing"))
+        .find_map(|relationship| {
+            let target = relationship.resolved_target.clone()?;
+            let name = target.rsplit_once('/').map_or(target.as_str(), |(_, name)| name);
+            name.trim_start_matches("drawing").eq(&stem).then_some(target)
+        })
+}
+
 fn relationship_target(relationships: &[Relationship], id: &str) -> Option<String> {
     relationships
         .iter()
@@ -1846,6 +1889,52 @@ mod tests {
             assert_eq!(spacing(&format!("spc=\"{value}\"")), None);
         }
         assert_eq!(spacing(r#"sz="1800""#), None);
+    }
+
+    #[test]
+    fn a_smart_art_frame_finds_the_drawing_beside_its_data_part() {
+        let relationship = |id: &str, kind: &str, target: &str| Relationship {
+            id: id.to_owned(),
+            relationship_type: format!("http://example/{kind}"),
+            target: format!("../diagrams/{target}"),
+            target_mode: crate::TargetMode::Internal,
+            resolved_target: Some(format!("ppt/diagrams/{target}")),
+        };
+        let relationships = [
+            relationship("rId3", "diagramData", "data4.xml"),
+            relationship("rId8", "diagramData", "data9.xml"),
+            relationship("rId7", "diagramDrawing", "drawing4.xml"),
+            relationship("rId9", "diagramDrawing", "drawing9.xml"),
+        ];
+        let limits = ParseLimits::default();
+        let mut budget = ParseBudget::new(&limits);
+        let root = parse_xml(
+            br#"<p:sld><p:cSld><p:spTree><p:graphicFrame><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds r:dm="rId8" r:lo="rId4" r:qs="rId5" r:cs="rId6"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree></p:cSld></p:sld>"#,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+        )
+        .unwrap();
+        let data = common_slide_data(
+            &root,
+            &relationships,
+            "ppt/slides/slide1.xml",
+            &mut budget,
+            ShapeElements::WithConnectors,
+        )
+        .unwrap();
+        let ShapeNode::GraphicFrame(frame) = &data.shapes[0] else {
+            panic!("expected a graphic frame");
+        };
+        let GraphicFrameData::Diagram {
+            drawing_part_path, ..
+        } = &frame.data
+        else {
+            panic!("expected a diagram");
+        };
+        assert_eq!(
+            drawing_part_path.as_deref(),
+            Some("ppt/diagrams/drawing9.xml")
+        );
     }
 
     #[test]

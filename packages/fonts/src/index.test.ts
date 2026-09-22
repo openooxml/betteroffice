@@ -38,6 +38,13 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
+  test('a family with no clone takes the bundled face closest in width', () => {
+    expect(resolveLastResortFace('Verdana', false, false).file).toBe('Montserrat-Regular.ttf');
+    expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf');
+    expect(resolveLastResortFace('Trebuchet MS', false, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Gill Sans MT', false, false).file).toBe('Carlito-Regular.ttf');
+  });
+
   test('a trailing light weight on a known family outranks the bold flag', () => {
     expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
     expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf');

@@ -418,6 +418,19 @@ function looksSerif(family: string): boolean {
 }
 
 /**
+ * A family no clone matches, paired with the bundled face whose advance widths
+ * come closest: Montserrat is within 0.3% of Verdana over a sentence of
+ * mixed-case text, where Calibri is 24% too narrow, and it keeps the line
+ * breaks the deck was written against. Measured the same way, Trebuchet MS,
+ * Tahoma, Century Gothic, Tw Cen MT and Lucida Grande all scored worse on the
+ * corpus than plain Calibri does, so they are deliberately left out — a closer
+ * advance is not worth a letterform that far off (#797).
+ */
+const WIDTH_MATCHED_SUBSTITUTES: Record<string, string> = {
+  verdana: 'Montserrat',
+};
+
+/**
  * `Calibri Light` and `Inter Light` are families of their own on the machine
  * that drew the reference: a Regular and an Italic, no bold member, so a run
  * marked bold is still drawn at the family's own weight. Only a face lighter
@@ -464,6 +477,11 @@ export function resolveLastResortFace(
 ): BundledFontFace {
   const light = lightVariantOf(family, italic);
   if (light) return light;
+  const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
+  if (matched) {
+    const face = resolveMetricCompatFace(matched, bold, italic);
+    if (face) return face;
+  }
   const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
   return resolveMetricCompatFace(base, bold, italic)!;
 }

@@ -513,10 +513,18 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
         Self {
             chart_type: &space.chart_type,
             title: space.title.as_deref(),
-            legend: space.legend.as_ref().map(|legend| PlotLegend {
-                position: legend.position.as_deref(),
-                visible: Some(legend.visible),
-            }),
+            // A chart draws a legend only where it carries a `c:legend`;
+            // without one PowerPoint gives the plot the whole frame.
+            legend: Some(space.legend.as_ref().map_or(
+                PlotLegend {
+                    position: None,
+                    visible: Some(false),
+                },
+                |legend| PlotLegend {
+                    position: legend.position.as_deref(),
+                    visible: Some(legend.visible),
+                },
+            )),
             value_axis: space
                 .axes
                 .as_ref()
@@ -2430,6 +2438,8 @@ fn point_label(
     percent_total: f64,
 ) -> Option<String> {
     let point = series.point(index);
+    // A cell the sheet left blank is not plotted and takes no label.
+    series.data_value(index)?;
     let spec_for_runs = point_label_spec(series, index);
     if let Some(runs) = point.and_then(|point| point.label_runs) {
         let number_format = spec_for_runs.and_then(|spec| spec.number_format);

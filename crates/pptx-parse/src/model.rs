@@ -46,6 +46,9 @@ pub struct PptxPackage {
     /// Absent from packages serialized before charts were parsed.
     #[serde(default)]
     pub charts: Vec<ChartPart>,
+    /// The drawing PowerPoint saves beside each SmartArt graphic.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagram_drawings: Vec<DiagramDrawing>,
     pub media: Vec<MediaPart>,
     /// Absent from packages serialized before table styles were parsed.
     #[serde(default, skip_serializing_if = "TableStyleList::is_empty")]
@@ -484,12 +487,25 @@ pub enum GraphicFrameData {
     },
     Diagram {
         relationship_ids: Vec<String>,
+        /// `ppt/diagrams/drawing#.xml`, the shapes PowerPoint saves beside a
+        /// SmartArt graphic so a reader that cannot lay the diagram out can
+        /// still draw it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        drawing_part_path: Option<String>,
     },
     Unknown {
         uri: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         picture: Option<Box<Picture>>,
     },
+}
+
+/// One `ppt/diagrams/drawing#.xml`: the shapes a SmartArt graphic resolves to.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagramDrawing {
+    pub part_path: String,
+    pub shapes: Vec<ShapeNode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

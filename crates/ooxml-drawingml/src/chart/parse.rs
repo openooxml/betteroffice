@@ -305,6 +305,30 @@ fn parse_index(raw: Option<&str>) -> Option<f64> {
 
 /// Reads at most the remaining point budget from `elements`, charging every
 /// child it examines so malformed ones cost as much as parsed ones.
+/// Places cache points at their `c:pt/@idx`. A cache is sparse — the sheet's
+/// empty cells simply have no `c:pt` — so reading them in document order slid
+/// every later category up against the wrong value.
+fn place_points<T: Clone>(entries: Vec<(usize, T)>, blank: &T) -> Vec<T> {
+    let Some(last) = entries.iter().map(|(index, _)| *index).max() else {
+        return Vec::new();
+    };
+    let mut placed = vec![blank.clone(); (last + 1).min(MAX_POINTS)];
+    for (index, value) in entries {
+        if let Some(slot) = placed.get_mut(index) {
+            *slot = value;
+        }
+    }
+    placed
+}
+
+/// `c:pt/@idx`, falling back to the point's position when the deck omits it.
+fn point_index_attr<E: ChartXml>(point: &E, position: usize) -> usize {
+    point
+        .attribute(None, "idx")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(position)
+}
+
 fn take_points<'a, E: ChartXml + 'a, T>(
     elements: impl Iterator<Item = &'a E>,
     budget: &mut Budget,
@@ -334,15 +358,18 @@ fn parse_string_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> V
     else {
         return Vec::new();
     };
-    take_points(children(cache, "pt"), budget, |point| {
-        Some(
-            child(point, "v")
-                .map(E::descendant_text)
-                .unwrap_or_default()
-                .trim()
-                .to_owned(),
-        )
-    })
+    let mut next = 0;
+    let entries = take_points(children(cache, "pt"), budget, |point| {
+        let text = child(point, "v")
+            .map(E::descendant_text)
+            .unwrap_or_default()
+            .trim()
+            .to_owned();
+        let index = point_index_attr(point, next);
+        next = index + 1;
+        Some((index, text))
+    });
+    place_points(entries, &String::new())
 }
 
 fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<f64> {
@@ -353,10 +380,15 @@ fn parse_num_cache<E: ChartXml>(parent: Option<&E>, budget: &mut Budget) -> Vec<
     else {
         return Vec::new();
     };
-    take_points(children(cache, "pt"), budget, |point| {
+    let mut next = 0;
+    let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")?.descendant_text();
-        parse_number(Some(text.trim()))
-    })
+        let value = parse_number(Some(text.trim()))?;
+        let index = point_index_attr(point, next);
+        next = index + 1;
+        Some((index, value))
+    });
+    place_points(entries, &f64::NAN)
 }
 
 fn parse_num_cache_with_strings<E: ChartXml>(
@@ -370,20 +402,24 @@ fn parse_num_cache_with_strings<E: ChartXml>(
     else {
         return (Vec::new(), Vec::new());
     };
+    let mut next = 0;
     let entries = take_points(children(cache, "pt"), budget, |point| {
         let text = child(point, "v")
             .map(E::descendant_text)
             .unwrap_or_default()
             .trim()
             .to_owned();
-        let number = parse_number(Some(&text));
-        Some((text, number))
+        let number = parse_number(Some(&text)).unwrap_or(f64::NAN);
+        let index = point_index_attr(point, next);
+        next = index + 1;
+        Some((index, (text, number)))
     });
-    let mut strings = Vec::with_capacity(entries.len());
-    let mut numbers = Vec::with_capacity(entries.len());
-    for (string, number) in entries {
+    let placed = place_points(entries, &(String::new(), f64::NAN));
+    let mut strings = Vec::with_capacity(placed.len());
+    let mut numbers = Vec::with_capacity(placed.len());
+    for (string, number) in placed {
         strings.push(string);
-        numbers.extend(number);
+        numbers.push(number);
     }
     (strings, numbers)
 }
@@ -1115,6 +1151,22 @@ mod tests {
         let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].index, None);
         assert_eq!(red_wedges(&space), 2);
+    }
+
+    #[test]
+    fn a_cache_places_its_points_at_the_index_they_name() {
+        let cache = Node::el(
+            "c:numCache",
+            vec![
+                Node::el("c:pt", vec![Node::text("c:v", "7")]).attr("idx", "1"),
+                Node::el("c:pt", vec![Node::text("c:v", "9")]).attr("idx", "3"),
+            ],
+        );
+        let mut budget = Budget::new();
+        let values = parse_num_cache(Some(&cache), &mut budget);
+        assert_eq!(values.len(), 4);
+        assert!(values[0].is_nan() && values[2].is_nan());
+        assert_eq!([values[1], values[3]], [7.0, 9.0]);
     }
 
     #[test]

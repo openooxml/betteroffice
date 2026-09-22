@@ -7,7 +7,7 @@ use crate::comments::{
     Comment, CommentAuthor, CommentFlavor, authors_part, parse_comment_authors, parse_comments,
     slide_comment_parts,
 };
-use crate::drawing::{common_slide_data, parse_text_styles};
+use crate::drawing::{common_slide_data, parse_diagram_drawing, parse_text_styles};
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
 use crate::table_style::parse_table_styles;
@@ -222,6 +222,9 @@ fn parse_package(
         limits,
     );
 
+    let diagram_drawings =
+        parse_diagram_drawings(&parts, &slides, &relationships, limits, shape_elements);
+
     let deck_comments = parse_package_comments(
         &parts,
         &presentation,
@@ -251,6 +254,7 @@ fn parse_package(
         masters,
         themes,
         charts,
+        diagram_drawings,
         media,
         table_styles,
         comment_authors: deck_comments.authors,
@@ -623,6 +627,61 @@ fn read_chart_root(
     let root = parse_xml(bytes, part_path, &mut budget).ok();
     *remaining_events = remaining_events.saturating_sub(budget.xml_events_spent());
     root
+}
+
+/// Parses every `ppt/diagrams/drawing#.xml` a slide points at, once each.
+fn parse_diagram_drawings(
+    parts: &HashMap<&str, &[u8]>,
+    slides: &[Slide],
+    relationships: &BTreeMap<String, Vec<Relationship>>,
+    limits: &ParseLimits,
+    elements: ShapeElements,
+) -> Vec<DiagramDrawing> {
+    let mut wanted: Vec<String> = Vec::new();
+    for slide in slides {
+        collect_diagram_drawings(&slide.shapes, &mut wanted);
+    }
+    wanted.sort();
+    wanted.dedup();
+    let mut drawings = Vec::new();
+    for part_path in wanted {
+        let Some(bytes) = parts.get(part_path.as_str()) else {
+            continue;
+        };
+        let mut budget = ParseBudget::new(limits);
+        let Ok(root) = parse_xml(bytes, &part_path, &mut budget) else {
+            continue;
+        };
+        let part_relationships = relationships
+            .get(&part_path)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        if let Ok(shapes) =
+            parse_diagram_drawing(&root, part_relationships, &part_path, &mut budget, elements)
+            && !shapes.is_empty()
+        {
+            drawings.push(DiagramDrawing { part_path, shapes });
+        }
+    }
+    drawings
+}
+
+fn collect_diagram_drawings(shapes: &[ShapeNode], output: &mut Vec<String>) {
+    for shape in shapes {
+        match shape {
+            ShapeNode::GraphicFrame(frame) => {
+                if let GraphicFrameData::Diagram {
+                    drawing_part_path: Some(path),
+                    ..
+                } = &frame.data
+                {
+                    output.push(path.clone());
+                }
+            }
+            ShapeNode::Group(group) => collect_diagram_drawings(&group.children, output),
+            ShapeNode::Shape(_) | ShapeNode::Picture(_) => {}
+        }
+    }
 }
 
 /// `(referencing part, relationship id)` for every chart in `shapes`, groups

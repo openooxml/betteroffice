@@ -61,7 +61,8 @@ export interface ChartDataLabels {
 export interface ChartSeries {
   name?: string;
   categories: string[];
-  values: number[];
+  /** A blank cell in the sheet travels as `null` and is not plotted. */
+  values: (number | null)[];
   color?: string;
   index?: number;
   order?: number;
@@ -73,9 +74,9 @@ export interface ChartSeries {
   marker?: { symbol?: string; size?: number; color?: string };
   smooth?: boolean;
   /** `c:xVal` of a scatter or bubble series. */
-  xValues?: number[];
+  xValues?: (number | null)[];
   /** `c:bubbleSize` of a bubble series. */
-  bubbleSizes?: number[];
+  bubbleSizes?: (number | null)[];
   dataLabels?: ChartDataLabels;
 }
 

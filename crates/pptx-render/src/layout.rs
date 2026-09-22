@@ -1255,6 +1255,29 @@ impl<'a> LayoutBuilder<'a> {
         if let Some(GraphicFrameData::Table(table)) = graphic {
             return self.render_table(object_id, shape_id, name, rect, transform, table, stories);
         }
+        if let Some(GraphicFrameData::Diagram {
+            drawing_part_path: Some(part_path),
+            ..
+        }) = graphic
+            && let Some(drawing) = self
+                .package
+                .diagram_drawings
+                .iter()
+                .find(|drawing| drawing.part_path == *part_path)
+        {
+            // The drawing's shapes are written in the frame's own coordinates,
+            // at the slide's scale, so they only need the frame's origin.
+            let space = Space {
+                origin_x: rect.x,
+                origin_y: rect.y,
+                scale_x: frame_space.scale_x,
+                scale_y: frame_space.scale_y,
+            };
+            for (index, shape) in drawing.shapes.iter().enumerate() {
+                self.render_parsed_shape(shape, &format!("{shape_id}:{index}"), space)?;
+            }
+            return Ok(());
+        }
         self.primitives.push(Primitive::Placeholder {
             object_id,
             shape_id: Some(shape_id.to_owned()),
