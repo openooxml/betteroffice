@@ -15,7 +15,7 @@ import type {
 } from '../../../packages/xlsx/src/wasm/loader';
 import type { DisplayList } from '../../../packages/xlsx/src/display-list/types';
 import type { PinnedSample } from '../corpus';
-import type { ScenarioRecorder, StageProfile, Timer } from '../harness';
+import type { ActorRecorder, ScenarioRecorder, StageProfile, Timer } from '../harness';
 import type { Scenario } from '../suite';
 
 const WASM = resolve(import.meta.dir, '../../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm');
@@ -112,3 +112,59 @@ export function displayedText(handle: WorkbookHandle, timer: Timer, op: string, 
   expect(match, `${query} at row ${row} col ${col}`).toBeDefined();
   return match!.text;
 }
+
+/** One collaborative replica with the update bytes its own edits produced. */
+export interface Replica {
+  name: string;
+  handle: WorkbookHandle;
+  timer: ActorRecorder;
+  outbox: Uint8Array[];
+}
+
+export function replicas(ctx: XlsxCtx, names: string[]): Replica[] {
+  return names.map((name, index) => {
+    const timer = ctx.recorder.as(name);
+    const handle = timer.load(() => ctx.open(ctx.bytes, { collaborative: true, clientId: index + 1 }));
+    const outbox: Uint8Array[] = [];
+    handle.onUpdate((update, origin) => {
+      if (origin === 'local') outbox.push(update);
+    });
+    return { name, handle, timer, outbox };
+  });
+}
+
+/** Delivers every pending update to every other replica, one recorded op each. */
+export function exchange(peers: Replica[], op = 'applyUpdate'): number {
+  let bytes = 0;
+  for (const from of peers) {
+    const pending = from.outbox.splice(0);
+    for (const update of pending) {
+      bytes += update.byteLength;
+      for (const to of peers) {
+        if (to === from) continue;
+        const applied = to.timer.op(op, () => to.handle.applyUpdate(update), undefined, { from: from.name, bytes: update.byteLength });
+        expect(applied.applied).toBe(true);
+      }
+    }
+  }
+  return bytes;
+}
+
+/** Every cell input in `range`, as the convergence fingerprint of a replica. */
+export function fingerprint(handle: WorkbookHandle, range: string, sheet = SHEET): string {
+  return handle
+    .rangeCells(sheet, range)
+    .flat()
+    .map((cell) => `${cell.a1}=${cell.input}`)
+    .join('|');
+}
+
+export const PRINT_METRICS = {
+  dpi: 96,
+  maxDigitWidth: 7,
+  defaultRowHeightPt: 15,
+  fontSizePt: 11,
+  fontFamily: 'Calibri',
+  fontAscent: 0.9,
+  fontDescent: 0.2,
+};
