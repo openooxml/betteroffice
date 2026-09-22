@@ -45,7 +45,33 @@ results/<format>.json        recorded baseline (schemaVersion 2)
 A scenario is `{ name, description, participants, samples?, requires?, run(ctx) }`.
 Inside `run`, every engine call goes through `recorder.op(name, fn, stages?)`
 (or `recorder.as('web:a').op(...)` for multi-editor runs, `PythonWorker.call`
-for Python); `recorder.load(fn)` opens the document.
+for Python); `recorder.load(fn)` opens the document. Each scenario runs against
+every pinned sample of its format.
+
+## Scenarios
+
+| xlsx | docx | pptx |
+| --- | --- | --- |
+| editing-session | editing-session | editing-session |
+| formula-chain-cascade | typing-burst | typing-burst |
+| bulk-paste-and-formats | pagination-pressure | deck-build-from-scratch |
+| structural-storm | tables-deep | slide-reorder-and-delete |
+| typing-latency | formatting-and-styles | formatting-sweep |
+| viewport-scroll-render | search-and-replace-sweep | shapes-and-pictures |
+| two-editors-converge | two-editors-converge | comments-thread |
+| three-editors-mesh-with-undo | three-editors-suggesting | two-editors-converge |
+| proposals-review | comments-and-anchors | three-editors-mesh-with-undo |
+| python-roundtrip | python-roundtrip | proposals-review |
+| python-web-live-collab | python-layout-parity | python-roundtrip |
+| save-load-cycles | save-load-cycles | python-web-live-collab |
+| | | layout-all-slides |
+
+Multi-editor scenarios open two or three replicas of the same document, stamp
+every operation with the replica that issued it, and exchange Yrs updates until
+the replicas' fingerprints match. Cross-SDK scenarios drive the Python bindings
+from the same run: for xlsx and pptx a web replica and a Python replica trade
+updates live; for docx the web engine measures and hands its retained kernel to
+the Python paginator, which must report the same page count.
 
 ## Results schema
 
