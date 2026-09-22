@@ -1191,6 +1191,9 @@ pub(crate) fn parse_text_body(
             .and_then(|value| value.attribute("spcFirstLastPara"))
             .map(parse_bool),
         autofit: body_properties.and_then(parse_text_autofit),
+        wrap: body_properties
+            .and_then(|value| value.attribute("wrap"))
+            .map(|value| value != "none"),
         vertical_overflow: parse_text_overflow(body_properties, "vertOverflow"),
         horizontal_overflow: parse_text_overflow(body_properties, "horzOverflow"),
         inset_left: numeric_attribute(body_properties, "lIns"),

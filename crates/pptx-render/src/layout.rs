@@ -1479,7 +1479,7 @@ impl<'a> LayoutBuilder<'a> {
             w: (width - emu_to_px(left + right)).max(1.0),
             h: 0.0,
         };
-        let text = self.layout_text(&resolved, rect, 1.0, false)?;
+        let text = self.layout_text(&resolved, rect, 1.0, false, true)?;
         Ok(text.total_height + emu_to_px(top + bottom))
     }
 
@@ -1534,7 +1534,8 @@ impl<'a> LayoutBuilder<'a> {
         };
         let scale = autofit_font_scale(cascade.autofit());
         let stacked = flow == TextFlow::Stacked;
-        let mut laid_out = self.layout_text(&resolved, content_rect, scale, stacked)?;
+        let mut laid_out =
+            self.layout_text(&resolved, content_rect, scale, stacked, cascade.wraps())?;
         self.line_count += laid_out.lines.len();
         if self.line_count > MAX_TEXT_LINES {
             return Err(RenderError::ResourceLimit(format!(
@@ -1617,8 +1618,9 @@ impl<'a> LayoutBuilder<'a> {
         rect: PxRect,
         scale: f32,
         stacked: bool,
+        wraps: bool,
     ) -> Result<LayoutText, RenderError> {
-        let key = text_layout_key(content, rect, scale, stacked);
+        let key = text_layout_key(content, rect, scale, stacked, wraps);
         if let Some(text) = self
             .renderer
             .text_layouts
@@ -1628,7 +1630,7 @@ impl<'a> LayoutBuilder<'a> {
         {
             return Ok(text);
         }
-        let laid_out = layout_content(&self.renderer.fonts, content, rect, scale, stacked)?;
+        let laid_out = layout_content(&self.renderer.fonts, content, rect, scale, stacked, wraps)?;
         if let Ok(mut cache) = self.renderer.text_layouts.lock() {
             cache.insert(key, &laid_out);
         }
@@ -1907,6 +1909,12 @@ impl BodyCascade<'_> {
             body.space_first_last_para
         })
         .unwrap_or(false)
+    }
+
+    /// `a:bodyPr/@wrap="none"`: every paragraph is one line, however far it
+    /// runs past the shape.
+    fn wraps(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| body.wrap).unwrap_or(true)
     }
 
     fn autofit(&self) -> Option<&TextAutofit> {
@@ -2679,7 +2687,13 @@ fn text_layout_bytes(lines: &[PositionedTextLine]) -> usize {
 }
 
 /// Encodes every argument `layout_content` reads.
-fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked: bool) -> Vec<u8> {
+fn text_layout_key(
+    content: &ResolvedContent,
+    rect: PxRect,
+    scale: f32,
+    stacked: bool,
+    wraps: bool,
+) -> Vec<u8> {
     let text_len: usize = content
         .paragraphs
         .iter()
@@ -2692,6 +2706,7 @@ fn text_layout_key(content: &ResolvedContent, rect: PxRect, scale: f32, stacked:
     key_f32(&mut key, rect.w);
     key_f32(&mut key, scale);
     key.push(u8::from(stacked));
+    key.push(u8::from(wraps));
     key_u32(&mut key, content.paragraphs.len() as u32);
     for paragraph in &content.paragraphs {
         key.push(match paragraph.align {
@@ -2786,6 +2801,7 @@ fn layout_content(
     rect: PxRect,
     scale: f32,
     stacked: bool,
+    wraps: bool,
 ) -> Result<LayoutText, RenderError> {
     let mut lines = Vec::new();
     let mut y = rect.y;
@@ -2810,6 +2826,7 @@ fn layout_content(
             paragraph_width,
             scale,
             stacked,
+            wraps,
         )?;
         if let Some(last) = paragraph_lines.last() {
             y = last.y + last.height;
@@ -2896,6 +2913,10 @@ fn first_line_indent(paragraph: &ResolvedParagraph) -> f32 {
         .max(-paragraph.margin_left_px.max(0.0))
 }
 
+/// The width a `wrap="none"` body lays its lines against: wide enough that no
+/// paragraph in a slide-sized shape reaches it, so each one stays on one line.
+const NO_WRAP_WIDTH_PX: f32 = 1.0e6;
+
 /// A stop the pen already sits on does not hold the tab.
 const TAB_EPSILON_PX: f32 = 0.01;
 
@@ -2936,6 +2957,7 @@ fn layout_paragraph(
     width: f32,
     scale: f32,
     stacked: bool,
+    wraps: bool,
 ) -> Result<Vec<PositionedTextLine>, RenderError> {
     let mut clusters = shape_paragraph(fonts, paragraph, scale)?;
     if clusters.is_empty() {
@@ -2970,7 +2992,7 @@ fn layout_paragraph(
     } else {
         wrap_clusters(
             &mut clusters,
-            width,
+            if wraps { width } else { NO_WRAP_WIDTH_PX },
             paragraph.margin_left_px.max(0.0),
             first_line_indent(paragraph),
             &paragraph.tab_stops,
@@ -5316,10 +5338,25 @@ mod tests {
         paragraph.margin_left_px = 30.0;
         paragraph.indent_px = -30.0;
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 120.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 120.0, 1.0, false, true).unwrap();
         assert!((lines[0].x - 0.0).abs() < 0.01, "{:?}", lines[0].x);
         assert!((lines[1].x - 30.0).abs() < 0.01, "{:?}", lines[1].x);
         assert!(lines[0].width > lines[1].width, "the first line is wider");
+    }
+
+    #[test]
+    fn a_body_that_does_not_wrap_keeps_its_paragraph_on_one_line() {
+        let renderer = renderer();
+        let paragraph = paragraph(&renderer, "l", "one two three four five six seven eight");
+        let wrapped =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 120.0, 1.0, false, true)
+                .unwrap();
+        let flat =
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 120.0, 1.0, false, false)
+                .unwrap();
+        assert!(wrapped.len() > 1, "{}", wrapped.len());
+        assert_eq!(flat.len(), 1);
+        assert!(flat[0].width > 120.0, "the line runs past the shape");
     }
 
     #[test]
@@ -5327,7 +5364,7 @@ mod tests {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false, true).unwrap();
         let positions = glyph_positions(&lines);
         assert_eq!(positions.len(), 2, "the tab paints nothing");
         assert!(positions[0].abs() < 0.01, "{positions:?}");
@@ -5339,7 +5376,7 @@ mod tests {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", vec![40.0, 300.0], 96.0);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false, true).unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[1] - 40.0).abs() < 0.01, "{positions:?}");
     }
@@ -5350,7 +5387,7 @@ mod tests {
         let mut paragraph = tabbed(&renderer, "A\tB", vec![40.0, 200.0], 96.0);
         paragraph.margin_left_px = 50.0;
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 50.0, 0.0, 950.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 50.0, 0.0, 950.0, 1.0, false, true).unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[1] - 200.0).abs() < 0.01, "{positions:?}");
     }
@@ -5360,7 +5397,7 @@ mod tests {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 40.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 40.0, 1.0, false, true).unwrap();
         for line in &lines {
             assert!(line.width <= 40.01, "{}", line.width);
         }
@@ -5374,7 +5411,7 @@ mod tests {
         paragraph.indent_px = -30.0;
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false, true).unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
     }
@@ -5387,7 +5424,7 @@ mod tests {
         paragraph.indent_px = -30.0;
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 400.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 400.0, 1.0, false, true).unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
         assert!((positions[4] - 96.0).abs() < 0.01, "{positions:?}");
@@ -5402,7 +5439,7 @@ mod tests {
         paragraph.marker = Some("\u{2022}".to_owned());
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false, true).unwrap();
         let text = lines[0]
             .runs
             .iter()
@@ -5560,7 +5597,7 @@ mod tests {
             .count();
         let width = prefix_width + clusters[second_break].width / 2.0;
         let lines =
-            layout_paragraph(&renderer.fonts, &justified, 20.0, 30.0, width, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &justified, 20.0, 30.0, width, 1.0, false, true).unwrap();
         let natural = layout_paragraph(
             &renderer.fonts,
             &paragraph(&renderer, "justLow", text),
@@ -5569,6 +5606,7 @@ mod tests {
             width,
             1.0,
             false,
+            true,
         )
         .unwrap();
 
@@ -5742,6 +5780,7 @@ mod tests {
                     10_000.0,
                     scale,
                     false,
+                    true,
                 )
                 .unwrap();
                 assert_eq!(lines.len(), 1);
@@ -5819,7 +5858,7 @@ mod tests {
         let joined = paragraph(&["alpha beta gamma delta"]);
         for width in [100.0, 10_000.0] {
             let render = |paragraph| {
-                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0, false).unwrap()
+                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0, false, true).unwrap()
             };
             assert_eq!(render(&split), render(&joined));
         }
@@ -5871,7 +5910,7 @@ mod tests {
                     style: style.clone(),
                 }],
             };
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, true)
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, true, true)
                 .unwrap()
                 .iter()
                 .map(|line| {
@@ -7110,6 +7149,7 @@ mod tests {
                 text: Some(TextBody {
                     vertical_overflow: None,
                     horizontal_overflow: None,
+                    wrap: None,
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
                     compat_line_spacing: None,
@@ -7589,7 +7629,7 @@ mod tests {
         second.style.spacing_pt = 6.0;
         paragraph.runs.push(second);
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false, true).unwrap();
         assert_eq!(lines[0].runs.len(), 2);
         assert_eq!(lines[0].runs[0].letter_spacing_px, 0.0);
         assert_eq!(lines[0].runs[1].letter_spacing_px, 8.0);
@@ -7626,7 +7666,7 @@ mod tests {
         let mut paragraph = paragraph(&renderer, "just", "AA BB CC AA BB CC");
         paragraph.runs[0].style.spacing_pt = 6.0;
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 160.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 160.0, 1.0, false, true).unwrap();
         assert!(lines.len() > 1);
         assert!((lines[0].width - 160.0).abs() < 0.001, "{}", lines[0].width);
     }
@@ -7637,7 +7677,7 @@ mod tests {
         let mut paragraph = paragraph(&renderer, "ctr", "AA\nAA");
         paragraph.runs[0].style.spacing_pt = 6.0;
         let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false).unwrap();
+            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false, true).unwrap();
         assert_eq!(lines.len(), 2);
         assert!((lines[0].width - lines[1].width).abs() < 0.001);
         assert!((lines[0].x - lines[1].x).abs() < 0.001);
@@ -7649,6 +7689,7 @@ mod tests {
             lines[1].width + 0.001,
             1.0,
             false,
+            true,
         )
         .unwrap();
         assert_eq!(tight.len(), 2);

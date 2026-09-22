@@ -686,6 +686,10 @@ pub struct TextBody {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub space_first_last_para: Option<bool>,
     pub autofit: Option<TextAutofit>,
+    /// `a:bodyPr/@wrap`: `false` for `none`, which lays every paragraph on one
+    /// line and lets it run past the shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrap: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_overflow: Option<TextOverflow>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
