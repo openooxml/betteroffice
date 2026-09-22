@@ -117,7 +117,8 @@ impl PlotSink for ChartSink<'_> {
             color: "#000000",
             align: PlotTextAlign::Start,
         }) {
-            Ok(Primitive::TextBox { lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+            Ok(Primitive::TextBox {
+                text_shadow: None, lines, .. }) => lines.first().map(|line| f64::from(line.width)),
             Ok(_) => None,
             Err(error) => {
                 self.error = Some(error);
@@ -432,6 +433,7 @@ mod tests {
     fn plot(space: &ChartSpace) -> Primitive {
         chart_primitive(frame("Chart 1"), space, "", 100_000, &mut |text| {
             Ok(Primitive::TextBox {
+                text_shadow: None,
                 object_id: text.object_id,
                 shape_id: None,
                 story_id: None,

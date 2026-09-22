@@ -30,7 +30,8 @@ use thiserror::Error;
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
-    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
+    CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
+    Paint,
     PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, StrokeEnd,
     SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
@@ -330,6 +331,9 @@ impl SlideRenderer {
         if let Some(picture) = background_picture
             && let Some(asset_id) = picture.media_part_path.clone()
         {
+            let background_dpi = builder
+                .media_part(&asset_id)
+                .and_then(|part| image_dpi(&part.bytes));
             builder.primitives.push(Primitive::Image {
                 geometry_fallback: false,
                 object_id: 0,
@@ -342,6 +346,7 @@ impl SlideRenderer {
                 asset_id: Some(asset_id),
                 effects: Vec::new(),
                 crop: picture_fill_crop(picture),
+                tile: picture_fill_tile(picture, background_dpi),
                 path: None,
                 stroke: None,
                 shadow: None,
@@ -770,6 +775,7 @@ impl<'a> LayoutBuilder<'a> {
                 &stable_id,
                 rect,
                 transform,
+                space,
                 content,
                 body_cascade,
             )?)
@@ -924,6 +930,7 @@ impl<'a> LayoutBuilder<'a> {
                 stable_id,
                 rect,
                 transform,
+                space,
                 content,
                 BodyCascade {
                     primary: Some(body),
@@ -1010,6 +1017,7 @@ impl<'a> LayoutBuilder<'a> {
             asset_id: media_part_path.map(str::to_owned),
             effects: image_effects(effects, self.theme),
             crop: crop.map(image_crop).unwrap_or_default(),
+            tile: None,
             path: mask.path,
             geometry_fallback: mask.geometry_fallback,
             stroke: outline,
@@ -1142,7 +1150,11 @@ impl<'a> LayoutBuilder<'a> {
                     self.charge_shape()?;
                 }
                 let picture = picture.filter(|_| has_fill);
-                self.primitives.push(picture_filled(primitive, picture));
+                let dpi = picture
+                    .and_then(|fill| fill.media_part_path.as_deref())
+                    .and_then(|path| self.media_part(path))
+                    .and_then(|part| image_dpi(&part.bytes));
+                self.primitives.push(picture_filled(primitive, picture, dpi));
             }
             return Ok(());
         }
@@ -1171,7 +1183,11 @@ impl<'a> LayoutBuilder<'a> {
                 }
             }
             let picture = picture.filter(|_| !custom.no_fill);
-            self.primitives.push(picture_filled(primitive, picture));
+            let dpi = picture
+                .and_then(|fill| fill.media_part_path.as_deref())
+                .and_then(|path| self.media_part(path))
+                .and_then(|part| image_dpi(&part.bytes));
+            self.primitives.push(picture_filled(primitive, picture, dpi));
         }
         Ok(())
     }
@@ -1253,7 +1269,9 @@ impl<'a> LayoutBuilder<'a> {
             return Ok(());
         }
         if let Some(GraphicFrameData::Table(table)) = graphic {
-            return self.render_table(object_id, shape_id, name, rect, transform, table, stories);
+            return self.render_table(
+                object_id, shape_id, name, rect, transform, frame_space, table, stories,
+            );
         }
         if let Some(GraphicFrameData::Diagram {
             drawing_part_path: Some(part_path),
@@ -1302,6 +1320,7 @@ impl<'a> LayoutBuilder<'a> {
         name: &str,
         rect: PxRect,
         transform: Transform,
+        space: Space,
         table: &Table,
         stories: &[StorySnapshot],
     ) -> Result<(), RenderError> {
@@ -1451,6 +1470,7 @@ impl<'a> LayoutBuilder<'a> {
                 shape_id,
                 plan.rect(&columns, &rows),
                 Transform::default(),
+                space,
                 plan.content.clone(),
                 cell_cascade(plan.text, &plan.inherited),
             )?;
@@ -1529,12 +1549,14 @@ impl<'a> LayoutBuilder<'a> {
             .map(|part| &part.chart)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render_text_box(
         &mut self,
         object_id: u32,
         shape_id: &str,
         rect: PxRect,
         transform: Transform,
+        space: Space,
         content: TextContent,
         cascade: BodyCascade<'_>,
     ) -> Result<TextHit, RenderError> {
@@ -1609,9 +1631,21 @@ impl<'a> LayoutBuilder<'a> {
             })
             .collect();
         let overflow = laid_out.total_height > content_rect.h && !cascade.clips_overflow();
+        let text_shadow = cascade.text_shadow().and_then(|effects| {
+            shadow(
+                effects,
+                self.theme,
+                space,
+                text_rect,
+                text_transform.rotation_deg,
+                text_transform.flip_h,
+                text_transform.flip_v,
+            )
+        });
         let story_id = content.story_id;
         let lines = laid_out.lines;
         self.primitives.push(Primitive::TextBox {
+            text_shadow,
             object_id,
             shape_id: Some(shape_id.to_owned()),
             story_id: Some(story_id.clone()),
@@ -1900,6 +1934,16 @@ struct BodyCascade<'a> {
 }
 
 impl BodyCascade<'_> {
+    /// The shadow the body's text is drawn with. PowerPoint keeps one per run;
+    /// the first any level declares stands for the whole box, because a body
+    /// that shadows one run shadows them all.
+    fn text_shadow(&self) -> Option<&ShapeEffects> {
+        [self.primary, self.layout, self.master]
+            .into_iter()
+            .flatten()
+            .find_map(body_text_effects)
+    }
+
     fn clips_overflow(&self) -> bool {
         let vertical = cascade_value(self.primary, self.layout, self.master, |body| {
             body.vertical_overflow
@@ -2589,6 +2633,7 @@ fn chart_text_primitive(
     };
     let width = run.width;
     Ok(Primitive::TextBox {
+        text_shadow: None,
         object_id: text.object_id,
         shape_id: Some(shape_id.to_owned()),
         story_id: None,
@@ -3406,7 +3451,6 @@ fn wrap_clusters(
         let left_offset = left_offset + indent;
         let mut cursor = start;
         let mut line_width = 0.0;
-        let mut tabs_taken = 0_usize;
         let mut last_break = None;
         let mut end = clusters.len();
         while cursor < clusters.len() {
@@ -3414,7 +3458,6 @@ fn wrap_clusters(
                 let pen = left_offset + line_width;
                 clusters[cursor].width =
                     tab_advance(pen, pen, stops, default_tab_px, width - line_width);
-                tabs_taken += 1;
             }
             let cluster = &clusters[cursor];
             // A space that lands at the end of a line hangs past the edge
@@ -4142,6 +4185,26 @@ fn node_group_transform(node: &ShapeNode) -> Option<&ShapeTransform> {
     }
 }
 
+/// The first `a:effectLst` any of a body's runs or level defaults declares.
+fn body_text_effects(body: &TextBody) -> Option<&ShapeEffects> {
+    let paragraph_runs = body.paragraphs.iter().flat_map(|paragraph| {
+        paragraph
+            .runs
+            .iter()
+            .map(|run| &run.properties)
+            .chain(paragraph.properties.default_run.as_ref())
+    });
+    let level_defaults = body
+        .list_style
+        .iter()
+        .chain(body.default_list_style.as_deref())
+        .filter_map(|properties| properties.default_run.as_ref());
+    paragraph_runs
+        .chain(level_defaults)
+        .find_map(|properties| properties.effects.as_ref())
+        .filter(|effects| effects.outer_shadow.is_some())
+}
+
 fn master_style<'a>(
     master: &'a SlideMaster,
     placeholder: Option<&Placeholder>,
@@ -4589,7 +4652,7 @@ fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> 
 }
 
 /// Redraws a picture-filled shape as an image masked by the shape's own outline.
-fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primitive {
+fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>, dpi: Option<f32>) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
     };
@@ -4620,6 +4683,7 @@ fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>) -> Primit
             asset_id: picture.media_part_path.clone(),
             effects: Vec::new(),
             crop: picture_fill_crop(picture),
+            tile: picture_fill_tile(picture, dpi),
             path: (geometry != "rect").then_some(path),
             geometry_fallback,
             stroke,
@@ -4692,6 +4756,62 @@ fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
         Some(GraphicFrameData::Diagram { .. }) => Some("Diagram".to_owned()),
         Some(GraphicFrameData::Unknown { .. }) | None => None,
     }
+}
+
+/// A tile repeats at the picture's own printed size, which is its pixels over
+/// its own resolution — PowerPoint reads the density the file declares, so a
+/// 75 dpi bitmap tiles 28% larger than the 96 dpi the canvas assumes.
+fn picture_fill_tile(picture: &PictureFill, dpi: Option<f32>) -> Option<ImageTile> {
+    let density = dpi.filter(|value| value.is_finite() && *value > 1.0).map_or(1.0, |value| 96.0 / value);
+    picture.tile.map(|tile| ImageTile {
+        scale_x: tile.scale_x as f32 * density,
+        scale_y: tile.scale_y as f32 * density,
+    })
+}
+
+/// The resolution a PNG or JPEG declares, in dots per inch. `None` where the
+/// file names none, which reads as the 96 dpi a canvas assumes.
+fn image_dpi(bytes: &[u8]) -> Option<f32> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        let mut offset = 8;
+        while offset + 8 <= bytes.len() {
+            let length = u32::from_be_bytes(bytes[offset..offset + 4].try_into().ok()?) as usize;
+            let kind = &bytes[offset + 4..offset + 8];
+            if kind == b"pHYs" && length >= 9 && offset + 8 + 9 <= bytes.len() {
+                let body = &bytes[offset + 8..offset + 17];
+                if body[8] != 1 {
+                    return None;
+                }
+                let per_metre = u32::from_be_bytes(body[0..4].try_into().ok()?);
+                return (per_metre > 0).then(|| per_metre as f32 * 0.0254);
+            }
+            offset = offset.checked_add(length)?.checked_add(12)?;
+        }
+        return None;
+    }
+    if !bytes.starts_with(&[0xFF, 0xD8]) {
+        return None;
+    }
+    let mut offset = 2;
+    while offset + 4 <= bytes.len() {
+        if bytes[offset] != 0xFF {
+            return None;
+        }
+        let marker = bytes[offset + 1];
+        let length = u16::from_be_bytes(bytes[offset + 2..offset + 4].try_into().ok()?) as usize;
+        if marker == 0xE0 && length >= 14 && offset + 2 + length <= bytes.len() {
+            let body = &bytes[offset + 4..offset + 2 + length];
+            let units = body[7];
+            let x = u16::from_be_bytes(body[8..10].try_into().ok()?);
+            return match (units, x) {
+                (1, density) if density > 0 => Some(f32::from(density)),
+                (2, density) if density > 0 => Some(f32::from(density) * 2.54),
+                _ => None,
+            };
+        }
+        offset = offset.checked_add(2)?.checked_add(length)?;
+    }
+    None
 }
 
 fn parse_align(value: Option<&str>) -> TextAlign {
@@ -5380,6 +5500,23 @@ mod tests {
         assert!(wrapped.len() > 1, "{}", wrapped.len());
         assert_eq!(flat.len(), 1);
         assert!(flat[0].width > 120.0, "the line runs past the shape");
+    }
+
+    #[test]
+    fn a_bitmap_reports_the_resolution_it_declares() {
+        let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        jpeg.extend(b"JFIF\0");
+        jpeg.extend([0x01, 0x02, 0x01, 0x00, 0x4B, 0x00, 0x4B, 0x00, 0x00]);
+        assert_eq!(image_dpi(&jpeg), Some(75.0));
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(9_u32.to_be_bytes());
+        png.extend(b"pHYs");
+        png.extend(2835_u32.to_be_bytes());
+        png.extend(2835_u32.to_be_bytes());
+        png.push(1);
+        png.extend([0, 0, 0, 0]);
+        assert_eq!(image_dpi(&png).map(|dpi| dpi.round()), Some(72.0));
+        assert_eq!(image_dpi(b"not an image"), None);
     }
 
     #[test]
@@ -6588,6 +6725,7 @@ mod tests {
         let picture = PictureFill {
             relationship_id: None,
             media_part_path: Some("ppt/media/image1.png".to_owned()),
+            tile: None,
             crop: PictureCrop::default(),
             fill_rect: PictureCrop {
                 top: -6_000,

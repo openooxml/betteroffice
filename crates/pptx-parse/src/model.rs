@@ -349,7 +349,7 @@ pub struct Shape {
 }
 
 /// An `a:blipFill` on a shape: the image, and the box it stretches into.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PictureFill {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -361,6 +361,19 @@ pub struct PictureFill {
     /// `a:stretch/a:fillRect` insets, in thousandths of a percent of the box.
     #[serde(default, skip_serializing_if = "PictureCrop::is_whole")]
     pub fill_rect: PictureCrop,
+    /// `a:tile`: the picture repeats at its own size instead of stretching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tile: Option<PictureTile>,
+}
+
+/// `a:blipFill/a:tile`. The offset, alignment and flip it can also carry are
+/// not read: every tile in the corpus starts at the top left, unflipped.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PictureTile {
+    /// `@sx` and `@sy` as a fraction, 1.0 for the picture's own size.
+    pub scale_x: f64,
+    pub scale_y: f64,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -895,6 +908,9 @@ pub struct RunProperties {
     pub color: Option<ColorValue>,
     pub language: Option<String>,
     pub hyperlink_relationship_id: Option<String>,
+    /// `a:rPr/a:effectLst`: the shadow PowerPoint draws behind the glyphs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<ShapeEffects>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

@@ -888,12 +888,12 @@ fn parse_picture_fill(element: &XmlElement, relationships: &[Relationship]) -> O
     picture_fill_element(fill, relationships)
 }
 
-/// Resolves one stretched `a:blipFill`, wherever it is declared.
+/// Resolves one `a:blipFill`, stretched or tiled, wherever it is declared.
 pub(crate) fn picture_fill_element(
     fill: &XmlElement,
     relationships: &[Relationship],
 ) -> Option<PictureFill> {
-    if fill.local_name() != "blipFill" || fill.child("tile").is_some() {
+    if fill.local_name() != "blipFill" {
         return None;
     }
     let relationship_id = fill
@@ -911,6 +911,10 @@ pub(crate) fn picture_fill_element(
             fill.child("stretch")
                 .and_then(|value| value.child("fillRect")),
         ),
+        tile: fill.child("tile").map(|tile| PictureTile {
+            scale_x: tile_scale(tile, "sx"),
+            scale_y: tile_scale(tile, "sy"),
+        }),
     })
 }
 
@@ -1474,6 +1478,7 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
                     .or_else(|| value.attribute_local("id"))
             })
             .map(str::to_owned),
+        effects: parse_effects(element),
     }
 }
 
@@ -1495,6 +1500,16 @@ fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Opti
             let name = target.rsplit_once('/').map_or(target.as_str(), |(_, name)| name);
             name.trim_start_matches("drawing").eq(&stem).then_some(target)
         })
+}
+
+/// `a:tile/@sx` as a fraction; an absent or unusable one leaves the picture at
+/// its own size.
+fn tile_scale(tile: &XmlElement, name: &str) -> f64 {
+    tile.attribute(name)
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .map(|value| value / 100_000.0)
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 100.0)
+        .unwrap_or(1.0)
 }
 
 fn relationship_target(relationships: &[Relationship], id: &str) -> Option<String> {
@@ -1621,7 +1636,14 @@ mod tests {
         let ShapeNode::Shape(tiled) = &data.shapes[1] else {
             panic!("expected a shape");
         };
-        assert!(tiled.picture_fill.is_none());
+        let tiled = tiled.picture_fill.as_ref().expect("a tile resolves too");
+        assert_eq!(
+            tiled.tile,
+            Some(PictureTile {
+                scale_x: 1.0,
+                scale_y: 1.0
+            })
+        );
 
         let ShapeNode::Shape(solid) = &data.shapes[2] else {
             panic!("expected a shape");

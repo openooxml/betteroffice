@@ -392,6 +392,10 @@ function drawCropped(
   source: CanvasImageSource,
   image: ImagePrimitive
 ): void {
+  if (image.tile) {
+    drawTiled(ctx, source, image, image.tile);
+    return;
+  }
   const crop = image.crop;
   const left = clampCrop(crop?.left);
   const top = clampCrop(crop?.top);
@@ -422,6 +426,29 @@ function drawCropped(
     ctx.drawImage(source, image.x, image.y, image.w, image.h);
   }
   if (masked) ctx.restore();
+}
+
+/** Repeats the source from the box's top left, at its own size times the scale. */
+function drawTiled(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  image: ImagePrimitive,
+  tile: { scaleX: number; scaleY: number }
+): void {
+  const width = sourceWidth(source);
+  const height = sourceHeight(source);
+  if (width <= 0 || height <= 0) return;
+  const pattern = ctx.createPattern(source, 'repeat');
+  if (!pattern) return;
+  ctx.save();
+  buildImageOutline(ctx, image);
+  ctx.clip();
+  pattern.setTransform(
+    new DOMMatrix().translateSelf(image.x, image.y).scaleSelf(tile.scaleX, tile.scaleY)
+  );
+  ctx.fillStyle = pattern;
+  ctx.fillRect(image.x, image.y, image.w, image.h);
+  ctx.restore();
 }
 
 /** The picture's own outline when it has one, else its frame. */
@@ -829,9 +856,20 @@ function paintTextBox(
   ctx.textBaseline = 'alphabetic';
   const changes = textChanges.filter((change) => change.storyId === textBox.storyId);
   paintTextChanges(ctx, textBox, changes, false);
+  const shadow = textBox.textShadow;
+  if (shadow) {
+    ctx.save();
+    // The canvas blurs by a radius of about twice the Gaussian sigma, and a
+    // shape's shadow halves the authored radius for the same reason.
+    ctx.shadowColor = shadow.color;
+    ctx.shadowBlur = Math.max(shadow.blur ?? 0, 0);
+    ctx.shadowOffsetX = shadow.dx ?? 0;
+    ctx.shadowOffsetY = shadow.dy ?? 0;
+  }
   for (const line of textBox.lines) {
     for (const run of line.runs) paintTextRun(ctx, run, line.baseline);
   }
+  if (shadow) ctx.restore();
   paintTextChanges(ctx, textBox, changes, true);
 }
 
