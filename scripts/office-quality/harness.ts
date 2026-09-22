@@ -1,3 +1,5 @@
+declare const __QUALITY_FONT_BASE__: string | null;
+
 import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
 import { normalFontIndex } from './xlsx-styles';
@@ -20,7 +22,9 @@ async function fontsFor(bytes: Uint8Array) {
     }
   }
   if (families.size > 32) throw new Error('Too many font families for this capture');
-  const provider = createFontProvider();
+  const provider = createFontProvider(
+    typeof __QUALITY_FONT_BASE__ === 'string' ? { baseUrl: __QUALITY_FONT_BASE__ } : {}
+  );
   const faces = [];
   for (const family of families) {
     for (const [bold, italic] of [
