@@ -1,7 +1,7 @@
 //! date and time functions on excel 1900-system serials, including the
 //! deliberate 1900 leap-year bug (serial 60 = phantom 1900-02-29).
 
-use xlsx_model::{CellValue, ErrorValue};
+use xlsx_model::{CellValue, DateSystem, ErrorValue};
 
 use crate::eval::{EvalContext, err, evaluate, num, to_text};
 use crate::parser::Expr;
@@ -12,6 +12,9 @@ use super::{nth_int, nth_number, omitted};
 const PHANTOM: i64 = 60;
 /// serial = unix day count + 25568 below the phantom day (serial 1 = 1900-01-01).
 const SERIAL_OFFSET: i64 = 25_568;
+/// days from the 1900 epoch to the 1904 one: 1904-01-01 is serial 1462 in the
+/// 1900 system and serial 0 in the 1904 system.
+const V1904_SHIFT: i64 = 1462;
 
 // howard hinnant's civil-date algorithms
 /// days since 1970-01-01 for a proleptic gregorian date.
@@ -46,7 +49,14 @@ fn unix_to_serial(unix: i64) -> i64 {
 
 /// (year, month, day) for a serial. serial 60 is the phantom 1900-02-29;
 /// serial < 1 has no calendar date here (returns None).
-fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
+///
+/// The 1904 system has no phantom day and its serial 0 is 1904-01-01, which
+/// the 1900 system calls serial 1462 — so it is an exact shift of this one.
+fn serial_to_ymd(serial: i64, ds: DateSystem) -> Option<(i64, i64, i64)> {
+    let serial = match ds {
+        DateSystem::V1900 => serial,
+        DateSystem::V1904 => serial.checked_add(V1904_SHIFT)?,
+    };
     if serial < 0 {
         return None;
     }
@@ -64,15 +74,22 @@ fn serial_to_ymd(serial: i64) -> Option<(i64, i64, i64)> {
 
 /// serial for a (year, month, day) under excel's DATE rules: months and day
 /// overflow roll over, phantom 1900-02-29 maps to serial 60.
-fn date_to_serial(year: i64, month: i64, day: i64) -> i64 {
+///
+/// The result is shifted back for the 1904 system, where serial 0 is
+/// 1904-01-01 rather than the 1900 system's serial 1462 for that date.
+fn date_to_serial(year: i64, month: i64, day: i64, ds: DateSystem) -> i64 {
     if year == 1900 && month == 2 && day == 29 {
-        return PHANTOM;
+        return if ds == DateSystem::V1900 { PHANTOM } else { PHANTOM - V1904_SHIFT };
     }
     let mut y = year;
     let mut m = month;
     y += (m - 1).div_euclid(12);
     m = (m - 1).rem_euclid(12) + 1;
-    unix_to_serial(days_from_civil(y, m, 1) + (day - 1))
+    let serial = unix_to_serial(days_from_civil(y, m, 1) + (day - 1));
+    match ds {
+        DateSystem::V1900 => serial,
+        DateSystem::V1904 => serial - V1904_SHIFT,
+    }
 }
 
 fn days_in_month(year: i64, month: i64) -> i64 {
@@ -103,7 +120,7 @@ pub(crate) fn date(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => return err(e),
     };
     let y = if (0..1900).contains(&y) { y + 1900 } else { y };
-    let serial = date_to_serial(y, m, d);
+    let serial = date_to_serial(y, m, d, ctx.date_system);
     if serial < 0 {
         err(ErrorValue::Num)
     } else {
@@ -145,7 +162,7 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         1
     };
     if kind == 21 {
-        return iso_week(serial);
+        return iso_week(serial, ctx.date_system);
     }
     // the weekday index the week starts on, as an offset from sunday
     let start = match kind {
@@ -159,12 +176,12 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         _ => return err(ErrorValue::Num),
     };
     // excel's serial 0 is the phantom day before 1900-01-01, and is week 0
-    let year = match serial_to_ymd(serial) {
+    let year = match serial_to_ymd(serial, ctx.date_system) {
         Some((year, _, _)) => year,
         None if serial == 0 => 1900,
         None => return err(ErrorValue::Num),
     };
-    let jan1 = date_to_serial(year, 1, 1);
+    let jan1 = date_to_serial(year, 1, 1, ctx.date_system);
     if jan1 < 0 {
         return err(ErrorValue::Num);
     }
@@ -178,23 +195,23 @@ pub(crate) fn weeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
 pub(crate) fn isoweeknum(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     match serial_arg(args, ctx, 0) {
         Ok(_) if args.len() != 1 => err(ErrorValue::Value),
-        Ok(n) => iso_week(n.floor() as i64),
+        Ok(n) => iso_week(n.floor() as i64, ctx.date_system),
         Err(e) => err(e),
     }
 }
 
-fn iso_week(serial: i64) -> CellValue {
-    if serial_to_ymd(serial).is_none() {
+fn iso_week(serial: i64, ds: DateSystem) -> CellValue {
+    if serial_to_ymd(serial, ds).is_none() {
         return err(ErrorValue::Num);
     }
     // monday=0 .. sunday=6; serial 1 is a sunday, so shift by 1
     let weekday = (serial - 1).rem_euclid(7);
     let monday = (weekday + 6) % 7;
     let thursday = serial - monday + 3;
-    let Some((iso_year, _, _)) = serial_to_ymd(thursday) else {
+    let Some((iso_year, _, _)) = serial_to_ymd(thursday, ds) else {
         return err(ErrorValue::Num);
     };
-    let jan1 = date_to_serial(iso_year, 1, 1);
+    let jan1 = date_to_serial(iso_year, 1, 1, ds);
     if jan1 < 0 {
         return err(ErrorValue::Num);
     }
@@ -321,7 +338,7 @@ pub(crate) fn datedif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     if s2 < s1 {
         return err(ErrorValue::Num);
     }
-    let (a, b) = match (serial_to_ymd(s1), serial_to_ymd(s2)) {
+    let (a, b) = match (serial_to_ymd(s1, ctx.date_system), serial_to_ymd(s2, ctx.date_system)) {
         (Some(a), Some(b)) => (a, b),
         _ => return err(ErrorValue::Num),
     };
@@ -348,9 +365,9 @@ pub(crate) fn datedif(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
         }
         "YD" => {
             let anchor = if (m1, d1) <= (m2, d2) {
-                date_to_serial(y2, m1, d1)
+                date_to_serial(y2, m1, d1, ctx.date_system)
             } else {
-                date_to_serial(y2 - 1, m1, d1)
+                date_to_serial(y2 - 1, m1, d1, ctx.date_system)
             };
             (s2 - anchor) as f64
         }
@@ -390,11 +407,13 @@ fn ymd_part(args: &[Expr], ctx: &EvalContext<'_>, pick: fn((i64, i64, i64)) -> i
         Ok(n) => n.floor() as i64,
         Err(e) => return err(e),
     };
-    // serial 0 is excel's 1900-01-00: day 0, month 1, year 1900
-    if serial == 0 {
+    // serial 0 is excel's 1900-01-00: day 0, month 1, year 1900. the 1904
+    // system has no such cell — its serial 0 is the real date 1904-01-01, so
+    // fall through to serial_to_ymd for it.
+    if serial == 0 && ctx.date_system == DateSystem::V1900 {
         return num(pick((1900, 1, 0)) as f64);
     }
-    match serial_to_ymd(serial) {
+    match serial_to_ymd(serial, ctx.date_system) {
         Some(ymd) => num(pick(ymd) as f64),
         None => err(ErrorValue::Num),
     }
@@ -412,7 +431,7 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
         Ok(n) => n,
         Err(e) => return err(e),
     };
-    let (y, m, d) = match serial_to_ymd(serial) {
+    let (y, m, d) = match serial_to_ymd(serial, ctx.date_system) {
         Some(v) => v,
         None => return err(ErrorValue::Num),
     };
@@ -424,7 +443,7 @@ fn shifted_month(args: &[Expr], ctx: &EvalContext<'_>, end_of_month: bool) -> Ce
     } else {
         d.min(days_in_month(ty, tm))
     };
-    let serial = date_to_serial(ty, tm, target_day);
+    let serial = date_to_serial(ty, tm, target_day, ctx.date_system);
     if serial < 0 {
         err(ErrorValue::Num)
     } else {
@@ -514,7 +533,7 @@ pub(crate) fn parse_date_text(raw: &str, ctx: &EvalContext<'_>) -> Option<i64> {
     if d < 1 || d > days_in_month(y, m) {
         return None;
     }
-    Some(date_to_serial(y, m, d))
+    Some(date_to_serial(y, m, d, ctx.date_system))
 }
 
 /// the date words and numbers of a timestamp: time-of-day chunks, meridiem
@@ -643,7 +662,7 @@ fn month_name(field: &str) -> Option<i64> {
 
 fn current_year(ctx: &EvalContext<'_>) -> Option<i64> {
     let serial = ctx.now_serial?.floor() as i64;
-    serial_to_ymd(serial).map(|(y, _, _)| y)
+    serial_to_ymd(serial, ctx.date_system).map(|(y, _, _)| y)
 }
 
 /// TIMEVALUE(text): the fraction of a day a written time stands for. a date
@@ -702,29 +721,29 @@ pub(crate) fn yearfrac(args: &[Expr], ctx: &EvalContext<'_>) -> CellValue {
     } else {
         (end, start)
     };
-    match year_fraction(lo, hi, basis) {
+    match year_fraction(lo, hi, basis, ctx.date_system) {
         Some(value) => num(value),
         None => err(ErrorValue::Num),
     }
 }
 
-fn year_fraction(lo: i64, hi: i64, basis: i64) -> Option<f64> {
+fn year_fraction(lo: i64, hi: i64, basis: i64, ds: DateSystem) -> Option<f64> {
     let actual = (hi - lo) as f64;
     match basis {
-        0 => Some(days_30_360(lo, hi, false)? / 360.0),
-        1 => Some(actual / actual_denominator(lo, hi)?),
+        0 => Some(days_30_360(lo, hi, false, ds)? / 360.0),
+        1 => Some(actual / actual_denominator(lo, hi, ds)?),
         2 => Some(actual / 360.0),
         3 => Some(actual / 365.0),
-        4 => Some(days_30_360(lo, hi, true)? / 360.0),
+        4 => Some(days_30_360(lo, hi, true, ds)? / 360.0),
         _ => None,
     }
 }
 
 /// day count on a 30/360 calendar; `european` clamps both days to 30, the US
 /// rule instead folds the 31st and the end of february onto the 30th.
-fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
-    let (y1, m1, mut d1) = serial_to_ymd(lo.max(1))?;
-    let (y2, m2, mut d2) = serial_to_ymd(hi.max(1))?;
+fn days_30_360(lo: i64, hi: i64, european: bool, ds: DateSystem) -> Option<f64> {
+    let (y1, m1, mut d1) = serial_to_ymd(lo.max(1), ds)?;
+    let (y2, m2, mut d2) = serial_to_ymd(hi.max(1), ds)?;
     if european {
         d1 = d1.min(30);
         d2 = d2.min(30);
@@ -748,9 +767,9 @@ fn days_30_360(lo: i64, hi: i64, european: bool) -> Option<f64> {
 /// the denominator basis 1 divides by: the length of the single year a short
 /// span sits in, or the average year length across the years a long span
 /// touches.
-fn actual_denominator(lo: i64, hi: i64) -> Option<f64> {
-    let (y1, m1, d1) = serial_to_ymd(lo.max(1))?;
-    let (y2, m2, d2) = serial_to_ymd(hi.max(1))?;
+fn actual_denominator(lo: i64, hi: i64, ds: DateSystem) -> Option<f64> {
+    let (y1, m1, d1) = serial_to_ymd(lo.max(1), ds)?;
+    let (y2, m2, d2) = serial_to_ymd(hi.max(1), ds)?;
     let within_a_year = y1 == y2 || (y1 + 1 == y2 && (m1, d1) >= (m2, d2));
     if !within_a_year {
         let years = (y2 - y1 + 1) as f64;
@@ -760,7 +779,7 @@ fn actual_denominator(lo: i64, hi: i64) -> Option<f64> {
     if y1 == y2 && is_leap(y1) {
         return Some(366.0);
     }
-    let leap_day = |y: i64| is_leap(y).then(|| date_to_serial(y, 2, 29));
+    let leap_day = |y: i64| is_leap(y).then(|| date_to_serial(y, 2, 29, ds));
     let covered = [y1, y2]
         .into_iter()
         .filter_map(leap_day)

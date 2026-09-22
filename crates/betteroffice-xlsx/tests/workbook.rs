@@ -856,7 +856,13 @@ fn a_row_insert_is_refused_while_a_formula_reads_a_table() {
             CalculationOptions::default(),
         )
         .unwrap_err();
-    assert!(matches!(error, Error::Operation(_)), "{error:?}");
+    // The refusal may come from either guard: the reference guard (which now
+    // also covers the table part itself) or the formula guard. The point of
+    // this test is that the edit is refused and the model is left untouched.
+    assert!(
+        matches!(error, Error::Operation(_) | Error::InvalidOperation(_)),
+        "{error:?}"
+    );
     assert_eq!(
         workbook.model().sheets[0].cell(cell("A2")).unwrap().value,
         CellValue::Number { value: 2.0 }

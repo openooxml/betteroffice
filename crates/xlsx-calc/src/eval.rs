@@ -8,7 +8,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use xlsx_model::{CellProvider, CellRef, CellValue, ErrorValue, SheetId};
+use xlsx_model::{CellProvider, CellRef, CellValue, DateSystem, ErrorValue, SheetId};
 
 use crate::TableSpec;
 use crate::array::{Binding, evaluate_array};
@@ -65,6 +65,10 @@ pub struct EvalContext<'a> {
     /// a process-local counter. set before the first draw; later writes are
     /// ignored because the stream has already started.
     pub rand_seed: Option<u64>,
+    /// the workbook's date system, so date/time functions and `TEXT` format
+    /// serials against the epoch the workbook actually uses. Defaults to
+    /// `V1900`; a 1904 workbook must set this or dates come out 1462 days off.
+    pub date_system: DateSystem,
     random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
     exhausted: Rc<Cell<bool>>,
@@ -87,6 +91,7 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
+            date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -108,6 +113,7 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: Some(now_serial),
             rand_seed: None,
+            date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -133,6 +139,7 @@ impl<'a> EvalContext<'a> {
             cell: None,
             now_serial: None,
             rand_seed: None,
+            date_system: DateSystem::V1900,
             random_state: Rc::new(Cell::new(None)),
             remaining_cell_visits: Rc::new(Cell::new(MAX_EVALUATION_CELL_VISITS)),
             exhausted: Rc::new(Cell::new(false)),
@@ -154,6 +161,7 @@ impl<'a> EvalContext<'a> {
             cell: self.cell,
             now_serial: self.now_serial,
             rand_seed: self.rand_seed,
+            date_system: self.date_system,
             random_state: Rc::clone(&self.random_state),
             remaining_cell_visits: Rc::clone(&self.remaining_cell_visits),
             exhausted: Rc::clone(&self.exhausted),
