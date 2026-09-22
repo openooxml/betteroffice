@@ -46,7 +46,7 @@ export const proposalsReview: PptxScenario = {
     expect(firstParagraphText(recorder.op('story:accepted', () => handle.story(story.id)))).toBe('Proposed headline');
     expect(recorder.op('rejectProposal', () => handle.rejectProposal(recolour.id))).toBe(true);
     expect(recorder.op('listProposals:afterReview', () => handle.listProposals())).toEqual([]);
-    expect(recorder.op('snapshot:afterReview', () => handle.snapshot()).slides[SLIDE].shapes.find((shape) => shape.id === target.id)?.fillColor).toBe(target.fillColor);
+    expect(recorder.op('snapshot:afterReview', () => handle.snapshot()).slides[SLIDE].shapes.find((shape) => shape.id === target.id)?.resolvedFillColor).toBe(target.resolvedFillColor);
 
     profiledLayout(handle, recorder, 'layoutSlide:afterReview', SLIDE);
     const saved = recorder.op('save', () => handle.save());

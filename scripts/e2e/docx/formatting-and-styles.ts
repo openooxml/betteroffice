@@ -35,7 +35,7 @@ export const formattingAndStyles: DocxScenario = {
     expect(formatted.color).toBe('CC2244');
 
     await Bun.sleep(UNDO_STEP_GAP_MS);
-    recorder.op('setHyperlink', () => session.setHyperlink(range, { url: LINK }));
+    recorder.op('setHyperlink', () => session.setHyperlink(range, { href: LINK }));
     expect(linkedText(recorder.op('storySegments:linked', () => session.storySegments(STORY)))).toContain(WORD);
 
     await Bun.sleep(UNDO_STEP_GAP_MS);

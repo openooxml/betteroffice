@@ -1,6 +1,7 @@
 import { expect } from 'bun:test';
 
 import { SHEET, displayedText, profiledDisplayList } from './context';
+import type { CellInputEdit } from '../../../packages/xlsx/src/wasm/loader';
 import type { XlsxScenario } from './context';
 
 const TOP = 400;
@@ -14,7 +15,7 @@ export const bulkPasteAndFormats: XlsxScenario = {
   run({ recorder, open }) {
     const handle = recorder.load(() => open());
     const a1 = (row: number, col: number) => handle.cell(SHEET, row, col).a1;
-    const edits = [];
+    const edits: CellInputEdit[] = [];
     for (let row = 0; row < ROWS; row += 1) {
       for (let col = 0; col < COLS; col += 1) {
         edits.push({ row: TOP + row, col, input: String(row * COLS + col) });

@@ -61,9 +61,9 @@ export interface RegionLayout {
 
 let fontBytes: Uint8Array;
 
-export function setup(): Promise<unknown> {
+export async function setup(): Promise<void> {
   fontBytes = new Uint8Array(readFileSync(FONT));
-  return Promise.all([preloadEditWasm(new Uint8Array(readFileSync(WASM))), preloadOpcWasm(), preloadParseWasm()]);
+  await Promise.all([preloadEditWasm(new Uint8Array(readFileSync(WASM))), preloadOpcWasm(), preloadParseWasm()]);
 }
 
 export function context(sample: PinnedSample, bytes: Uint8Array, recorder: ScenarioRecorder): DocxCtx {

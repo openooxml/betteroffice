@@ -27,8 +27,10 @@ interface Response {
   error?: string;
 }
 
+type Worker = Bun.Subprocess<'pipe', 'pipe', 'inherit'>;
+
 export class PythonWorker {
-  private readonly process: ReturnType<typeof Bun.spawn<{ stdin: 'pipe'; stdout: 'pipe'; stderr: 'inherit' }>>;
+  private readonly process: Worker;
   private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
   private readonly decoder = new TextDecoder();
   private buffer = '';
@@ -39,7 +41,7 @@ export class PythonWorker {
     const ready = pythonWithBindings();
     if ('missing' in ready) throw new Error(ready.missing);
     this.spawnedAt = performance.now();
-    this.process = Bun.spawn([ready.python, '-u', WORKER], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' });
+    this.process = Bun.spawn([ready.python, '-u', WORKER], { stdin: 'pipe', stdout: 'pipe', stderr: 'inherit' }) as Worker;
     this.reader = this.process.stdout.getReader();
   }
 
