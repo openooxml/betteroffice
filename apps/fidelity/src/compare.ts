@@ -12,6 +12,7 @@ import {
   reportUrl,
   score,
 } from './report';
+import { sameOrigin } from './origin';
 
 const find = <T extends HTMLElement>(id: string): T => window.document.getElementById(id) as T;
 
@@ -96,6 +97,7 @@ function drawStrip(): void {
         page = entry.page;
         drawStrip();
         drawStage();
+        remember();
       });
       return button;
     })
@@ -182,12 +184,23 @@ function layout(): void {
   sheet.style.height = `${Math.round(height * scale)}px`;
 }
 
-function select(sample: Sample): void {
+function remember(): void {
+  if (!current) return;
+  const url = new URL(window.location.href);
+  url.searchParams.set('doc', current.id);
+  url.searchParams.set('page', String(page));
+  window.history.replaceState(null, '', url);
+}
+
+function select(sample: Sample, requested?: number): void {
   current = sample;
-  page = sample.pages[0]?.page ?? 1;
+  page = sample.pages.some((entry) => entry.page === requested)
+    ? requested!
+    : (sample.pages[0]?.page ?? 1);
   markCurrent();
   drawStrip();
   drawStage();
+  remember();
 }
 
 function step(delta: number): void {
@@ -198,6 +211,7 @@ function step(delta: number): void {
   page = next.page;
   drawStrip();
   drawStage();
+  remember();
 }
 
 function toggle(group: HTMLElement, attribute: string, value: string): void {
@@ -216,8 +230,12 @@ function start(loaded: Report, manifest: Latest | null): void {
   aside.hidden = false;
   main.hidden = false;
   drawList();
-  const first = rank(loaded.documents)[0];
-  if (first) select(first);
+  const params = new URL(window.location.href).searchParams;
+  const wanted = loaded.documents.find((sample) => sample.id === params.get('doc'));
+  const first = wanted ?? rank(loaded.documents)[0];
+  if (!first) return;
+  select(first, Number(params.get('page')) || undefined);
+  buttons.get(first.id)?.scrollIntoView({ block: 'center' });
 }
 
 async function json(url: string): Promise<unknown> {
@@ -227,7 +245,7 @@ async function json(url: string): Promise<unknown> {
 }
 
 async function boot(): Promise<void> {
-  const override = new URL(window.location.href).searchParams.get('report');
+  const override = sameOrigin(new URL(window.location.href).searchParams.get('report'), window.location.href);
   if (override) {
     start(parseReport(await json(override)), null);
     return;

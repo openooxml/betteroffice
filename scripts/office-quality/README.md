@@ -103,8 +103,9 @@ written last, so it never points at an incomplete upload. Every published SHA is
 
 Missing format reports or incomplete render artifacts prevent publication. An R2 upload failure
 also stops the final job before the README update. [`apps/fidelity`](../../apps/fidelity)
-serves those renders next to the public Office references, so a page can be compared by swiping or
-by a difference blend. It reads scores only from `report.json` and never derives its own.
+serves [benchmarks.betteroffice.dev](https://benchmarks.betteroffice.dev): an overview that charts
+`report.json` with the README's aggregation rules, and a viewer that shows those renders next to
+the public Office references, so a page can be compared by swiping or by a difference blend.
 
 ## Office references
 

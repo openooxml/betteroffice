@@ -8,7 +8,9 @@
     "noUncheckedIndexedAccess": true,
     "noEmit": true,
     "skipLibCheck": true,
+    "allowJs": true,
     "types": ["bun"]
   },
-  "include": ["src/app.ts", "src/report.ts", "src/report.test.ts"]
+  "include": ["src/**/*.ts"],
+  "exclude": ["src/worker.ts", "src/worker.test.ts"]
 }
