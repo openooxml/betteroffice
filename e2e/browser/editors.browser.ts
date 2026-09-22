@@ -4,7 +4,7 @@ import { resolve } from 'node:path';
 import JSZip from 'jszip';
 
 type Format = 'docx' | 'xlsx' | 'pptx';
-const root = resolve(import.meta.dirname, '../../..');
+const root = resolve(import.meta.dirname, '../..');
 const marker = 'BrowserE2Eprobe';
 
 async function open(page: Page, format: Format, file?: string) {

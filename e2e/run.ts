@@ -7,7 +7,7 @@ import type { RecordedRun } from './harness';
 import { diff, readRuns } from './report';
 
 export const FORMATS = ['docx', 'xlsx', 'pptx'] as const;
-const ROOT = path.resolve(import.meta.dir, '../..');
+const ROOT = path.resolve(import.meta.dir, '..');
 
 export function promoteBaseline(
   runs: RecordedRun[],

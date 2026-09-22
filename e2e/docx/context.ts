@@ -4,26 +4,26 @@ import { expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { repackDocx } from '../../../packages/docx/src/docx/rezip';
-import { buildResidentRegionLayoutRequest } from '../../../packages/docx/src/editor/computeLayout';
+import { repackDocx } from '../../packages/docx/src/docx/rezip';
+import { buildResidentRegionLayoutRequest } from '../../packages/docx/src/editor/computeLayout';
 import type {
   ResidentFontRequirement,
   ResidentMeasurementConfig,
-} from '../../../packages/docx/src/layout/measure';
-import type { Layout } from '../../../packages/docx/src/layout/pagination';
+} from '../../packages/docx/src/layout/measure';
+import type { Layout } from '../../packages/docx/src/layout/pagination';
 import {
   applyFrameDeltaOwned,
   decodeFrameDelta,
-} from '../../../packages/docx/src/layout/render/frameDelta';
-import type { RetainedFrame } from '../../../packages/docx/src/layout/render/frameDelta';
-import type { Document } from '../../../packages/docx/src/types/document';
-import { preloadEditWasm } from '../../../packages/docx/src/wasm/edit';
-import { preloadOpcWasm } from '../../../packages/docx/src/wasm/opc';
-import { preloadParseWasm } from '../../../packages/docx/src/wasm/parse';
+} from '../../packages/docx/src/layout/render/frameDelta';
+import type { RetainedFrame } from '../../packages/docx/src/layout/render/frameDelta';
+import type { Document } from '../../packages/docx/src/types/document';
+import { preloadEditWasm } from '../../packages/docx/src/wasm/edit';
+import { preloadOpcWasm } from '../../packages/docx/src/wasm/opc';
+import { preloadParseWasm } from '../../packages/docx/src/wasm/parse';
 import {
   createYrsSession,
   yrsToDocument,
-} from '../../../packages/docx/src/yrs';
+} from '../../packages/docx/src/yrs';
 import type {
   YrsEngineApplyProfile,
   YrsParagraph,
@@ -31,7 +31,7 @@ import type {
   YrsSession,
   YrsStoryRange,
   YrsTextMatch,
-} from '../../../packages/docx/src/yrs';
+} from '../../packages/docx/src/yrs';
 import type { PinnedSample } from '../corpus';
 import type {
   ActorRecorder,
@@ -43,11 +43,11 @@ import type { Scenario } from '../suite';
 
 const WASM = resolve(
   import.meta.dir,
-  '../../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'
+  '../../packages/docx/src/wasm/generated/edit/docx_edit_bg.wasm'
 );
 const FONT = resolve(
   import.meta.dir,
-  '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  '../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
 export const STORY = 'body';
 export const PAGE_GAP = 24;

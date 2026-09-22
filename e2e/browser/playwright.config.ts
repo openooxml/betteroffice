@@ -1,7 +1,7 @@
 import { defineConfig } from 'playwright/test';
 import { resolve } from 'node:path';
 
-const root = resolve(import.meta.dirname, '../../..');
+const root = resolve(import.meta.dirname, '../..');
 const output =
   process.env.BETTEROFFICE_BROWSER_OUTPUT ??
   resolve(root, '.source/e2e/browser');

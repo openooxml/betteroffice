@@ -176,4 +176,4 @@ serialization durations in milliseconds. Profiled mutation methods such as
 `insertTextProfiled` and `addTextBoxProfiled` return `{ receipt, profile }`;
 `undoProfiled` reports undo, snapshot, and serialization timings. These methods
 share the normal operations and add stage timing. See the
-[corpus and browser tests](../../scripts/e2e/README.md) for usage and timing limits.
+[corpus and browser tests](../../e2e/README.md) for usage and timing limits.

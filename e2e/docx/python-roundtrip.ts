@@ -1,7 +1,7 @@
 import { expect } from 'bun:test';
 
 import { STORY, paragraphText, save } from './context';
-import type { YrsParagraph } from '../../../packages/docx/src/yrs';
+import type { YrsParagraph } from '../../packages/docx/src/yrs';
 import type { DocxScenario } from './context';
 import { PythonWorker, fromBase64, pythonMissing, toBase64 } from '../python';
 

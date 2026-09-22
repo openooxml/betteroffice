@@ -1,6 +1,6 @@
 import { expect } from 'bun:test';
 
-import { isProposalsAvailable } from '../../../packages/pptx/src/wasm/loader';
+import { isProposalsAvailable } from '../../packages/pptx/src/wasm/loader';
 import { firstParagraphText, firstStory, profiledLayout } from './context';
 import type { PptxScenario } from './context';
 

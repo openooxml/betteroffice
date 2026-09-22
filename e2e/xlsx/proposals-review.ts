@@ -1,6 +1,6 @@
 import { expect } from 'bun:test';
 
-import { isProposalsAvailable } from '../../../packages/xlsx/src/wasm/loader';
+import { isProposalsAvailable } from '../../packages/xlsx/src/wasm/loader';
 import { SHEET, displayedText } from './context';
 import type { XlsxScenario } from './context';
 

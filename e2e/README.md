@@ -23,19 +23,19 @@ credentials, or desktop window is required.
 Playwright manages server startup and shutdown. Tests run with one worker and no
 retries. Failure screenshots, traces, reports, and saved files go under
 `.source/e2e/browser` (`BETTEROFFICE_BROWSER_OUTPUT` overrides). After a build,
-`bunx playwright test --config scripts/e2e/browser/playwright.config.ts` reruns
+`bunx playwright test --config e2e/browser/playwright.config.ts` reruns
 just the browser tests.
 
 This covers browser editing and persistence for all three formats. Browser
 collaboration transport/reconnect, additional browsers, and visual fidelity
 across the full corpus remain separate coverage areas. The existing
-[visual-quality tooling](../office-quality/README.md) covers rendering comparisons.
+[visual-quality tooling](../scripts/office-quality/README.md) covers rendering comparisons.
 
 ## Corpus scenarios
 
 ```bash
 uv tool install maturin==1.14.1
-bun scripts/e2e/python-env.ts
+bun e2e/python-env.ts
 bun run test:e2e
 bun run test:e2e:harness
 bun run typecheck:e2e
@@ -72,9 +72,9 @@ reported skips. Such a run cannot record or compare baselines. Ordinary
 BETTEROFFICE_E2E_OUTPUT=/tmp/current-e2e bun run test:e2e
 bun run test:e2e:record
 bun run test:e2e:compare
-bun scripts/e2e/report.ts /tmp/current-e2e
-bun scripts/e2e/report.ts /tmp/current-e2e --json
-bun scripts/e2e/report.ts --diff /tmp/before-e2e /tmp/current-e2e
+bun e2e/report.ts /tmp/current-e2e
+bun e2e/report.ts /tmp/current-e2e --json
+bun e2e/report.ts --diff /tmp/before-e2e /tmp/current-e2e
 ```
 
 Baselines live in ignored `.source/e2e/baseline`; set

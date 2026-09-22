@@ -7,8 +7,8 @@ import { resolve } from 'node:path';
 import {
   initWasm,
   openPresentation,
-} from '../../../packages/pptx/src/wasm/loader';
-import type { PresentationHandle } from '../../../packages/pptx/src/wasm/loader';
+} from '../../packages/pptx/src/wasm/loader';
+import type { PresentationHandle } from '../../packages/pptx/src/wasm/loader';
 import type {
   DeckSnapshot,
   EditProfile,
@@ -20,7 +20,7 @@ import type {
   SlideDisplayList,
   StorySnapshot,
   TextBoxPrimitive,
-} from '../../../packages/pptx/src/types';
+} from '../../packages/pptx/src/types';
 import type { PinnedSample } from '../corpus';
 import type {
   ActorRecorder,
@@ -32,11 +32,11 @@ import type { Scenario } from '../suite';
 
 const WASM = resolve(
   import.meta.dir,
-  '../../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm'
+  '../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm'
 );
 const FONT = resolve(
   import.meta.dir,
-  '../../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
+  '../../crates/ooxml-text/tests/fonts/LiberationSans-Regular.ttf'
 );
 export const FONT_FAMILY = 'Liberation Sans';
 

@@ -4,9 +4,9 @@ import * as path from 'node:path';
 import {
   fetchAsset,
   resolveAssetCacheDir,
-} from '../office-quality/asset-cache.mjs';
-import { download } from '../office-quality/download.mjs';
-import { CORPUS_ORIGIN } from '../office-quality/samples.mjs';
+} from '../scripts/office-quality/asset-cache.mjs';
+import { download } from '../scripts/office-quality/download.mjs';
+import { CORPUS_ORIGIN } from '../scripts/office-quality/samples.mjs';
 
 export type Format = 'docx' | 'xlsx' | 'pptx';
 

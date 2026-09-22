@@ -4,7 +4,7 @@ import { expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-import { initWasm, openWorkbook } from '../../../packages/xlsx/src/wasm/loader';
+import { initWasm, openWorkbook } from '../../packages/xlsx/src/wasm/loader';
 import type {
   DisplayListProfile,
   EditProfile,
@@ -12,8 +12,8 @@ import type {
   ProfiledEditResult,
   Viewport,
   WorkbookHandle,
-} from '../../../packages/xlsx/src/wasm/loader';
-import type { DisplayList } from '../../../packages/xlsx/src/display-list/types';
+} from '../../packages/xlsx/src/wasm/loader';
+import type { DisplayList } from '../../packages/xlsx/src/display-list/types';
 import type { PinnedSample } from '../corpus';
 import type {
   ActorRecorder,
@@ -25,7 +25,7 @@ import type { Scenario } from '../suite';
 
 const WASM = resolve(
   import.meta.dir,
-  '../../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm'
+  '../../packages/xlsx/src/wasm/generated/xlsx_wasm_bg.wasm'
 );
 export const VIEWPORT: Viewport = { x: 0, y: 0, width: 1280, height: 800 };
 export const SHEET = 0;

@@ -2,7 +2,7 @@ import { expect } from 'bun:test';
 
 import { PNG_BASE64, profiledLayout } from './context';
 import type { PptxScenario } from './context';
-import type { SlideDisplayList } from '../../../packages/pptx/src/types';
+import type { SlideDisplayList } from '../../packages/pptx/src/types';
 
 const SLIDE = 0;
 const RECT = { x: 457_200, y: 457_200, width: 1_828_800, height: 1_371_600 };

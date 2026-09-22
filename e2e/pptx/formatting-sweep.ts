@@ -8,7 +8,7 @@ import {
   textBoxOf,
 } from './context';
 import type { PptxScenario } from './context';
-import type { SlideDisplayList } from '../../../packages/pptx/src/types';
+import type { SlideDisplayList } from '../../packages/pptx/src/types';
 
 const SLIDE = 0;
 

@@ -1,7 +1,7 @@
 import { expect } from 'bun:test';
 
 import { SHEET, displayedText, profiledDisplayList } from './context';
-import type { CellInputEdit } from '../../../packages/xlsx/src/wasm/loader';
+import type { CellInputEdit } from '../../packages/xlsx/src/wasm/loader';
 import type { XlsxScenario } from './context';
 
 const TOP = 400;

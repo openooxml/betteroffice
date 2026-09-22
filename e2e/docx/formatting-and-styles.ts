@@ -10,7 +10,7 @@ import {
   typingTarget,
 } from './context';
 import type { DocxScenario } from './context';
-import type { YrsStorySegment } from '../../../packages/docx/src/yrs';
+import type { YrsStorySegment } from '../../packages/docx/src/yrs';
 
 const WORD = 'Meridian';
 const LINK = 'https://openooxml.dev';

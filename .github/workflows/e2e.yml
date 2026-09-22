@@ -26,13 +26,16 @@ jobs:
             name: Corpus scenarios
           - suite: browser
             name: Browser editors
-    env:
-      BETTEROFFICE_E2E_VENV: ${{ runner.temp }}/e2e-venv
-      QUALITY_ASSET_CACHE: ${{ runner.temp }}/e2e-assets
-      BETTEROFFICE_E2E_OUTPUT: ${{ runner.temp }}/e2e-results
-      BETTEROFFICE_BROWSER_OUTPUT: ${{ runner.temp }}/browser-results
     steps:
       - uses: actions/checkout@v7
+
+      - name: Configure test paths
+        run: |
+          printf '%s\n' \
+            "BETTEROFFICE_E2E_VENV=$RUNNER_TEMP/e2e-venv" \
+            "QUALITY_ASSET_CACHE=$RUNNER_TEMP/e2e-assets" \
+            "BETTEROFFICE_E2E_OUTPUT=$RUNNER_TEMP/e2e-results" \
+            "BETTEROFFICE_BROWSER_OUTPUT=$RUNNER_TEMP/browser-results" >> "$GITHUB_ENV"
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -84,14 +87,14 @@ jobs:
           CARGO_TARGET_DIR: ${{ github.workspace }}/bindings/target
         run: |
           uv tool install maturin==1.14.1
-          bun scripts/e2e/python-env.ts
+          bun e2e/python-env.ts
 
       - name: Restore the pinned corpus documents
         if: matrix.suite == 'corpus'
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/e2e-assets
-          key: e2e-assets-${{ hashFiles('scripts/e2e/corpus.ts') }}
+          key: e2e-assets-${{ hashFiles('e2e/corpus.ts') }}
 
       - name: Run the corpus scenarios
         if: matrix.suite == 'corpus'

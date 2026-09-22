@@ -147,7 +147,7 @@ bun run rust:check   # fmt + clippy + tests for the engines
 ```
 
 Run `bun run test:e2e:browser` for headless browser tests of all three editors.
-The [E2E guide](scripts/e2e/README.md) also covers pinned corpus scenarios,
+The [E2E guide](e2e/README.md) also covers pinned corpus scenarios,
 cross-SDK checks, and operation profiles.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.

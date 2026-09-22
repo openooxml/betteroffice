@@ -302,7 +302,7 @@ export function summarize(ops: OpTiming[]): ScenarioRun['summary'] {
 export function baselineDir(): string {
   return (
     process.env.BETTEROFFICE_E2E_BASELINE ??
-    path.resolve(import.meta.dir, '../../.source/e2e/baseline')
+    path.resolve(import.meta.dir, '../.source/e2e/baseline')
   );
 }
 

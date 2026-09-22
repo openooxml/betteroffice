@@ -1,6 +1,6 @@
 import { expect } from 'bun:test';
-import type { Layout } from '../../packages/docx/src/layout/pagination';
-import type { WorkbookHandle } from '../../packages/xlsx/src/wasm/loader';
+import type { Layout } from '../packages/docx/src/layout/pagination';
+import type { WorkbookHandle } from '../packages/xlsx/src/wasm/loader';
 
 export function assertWorkbookMirror(
   handle: Pick<WorkbookHandle, 'cell' | 'searchText'>,

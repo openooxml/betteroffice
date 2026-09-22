@@ -1,5 +1,5 @@
 import { expect } from 'bun:test';
-import type { Layout } from '../../../packages/docx/src/layout/pagination';
+import type { Layout } from '../../packages/docx/src/layout/pagination';
 import { assertLayoutParity, layoutProjection } from '../assertions';
 
 import {

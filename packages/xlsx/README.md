@@ -135,4 +135,4 @@ operations as their unprofiled counterparts and return engine stage durations
 in milliseconds. Edit results include `profile` (validate, apply, recalc, result);
 display results contain `{ displayList, profile }` (build, encode). The normal
 entry points do not read profiling clocks. See the
-[corpus and browser tests](../../scripts/e2e/README.md) for usage and timing limits.
+[corpus and browser tests](../../e2e/README.md) for usage and timing limits.

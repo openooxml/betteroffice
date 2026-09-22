@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import type { Layout } from '../../packages/docx/src/layout/pagination';
+import type { Layout } from '../packages/docx/src/layout/pagination';
 import { assertLayoutParity, assertWorkbookMirror } from './assertions';
 
 const layout = (): Layout =>

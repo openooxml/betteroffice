@@ -14,7 +14,7 @@ import {
   typingTarget,
 } from './context';
 import type { DocxScenario } from './context';
-import { yrsToDocument } from '../../../packages/docx/src/yrs';
+import { yrsToDocument } from '../../packages/docx/src/yrs';
 
 const WORD = 'Zephyr';
 const PHRASE = 'quartz lantern drifts over the harbor';

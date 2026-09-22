@@ -10,7 +10,7 @@ const DEFAULT_VENV = path.join(
   'betteroffice',
   'e2e-venv'
 );
-const ROOT = path.resolve(import.meta.dir, '../..');
+const ROOT = path.resolve(import.meta.dir, '..');
 
 let sourceHash: string | undefined;
 
@@ -70,7 +70,7 @@ export function pythonWithBindings(): { python: string } | { missing: string } {
   const python = venvPython();
   if (!fs.existsSync(python))
     return {
-      missing: `no interpreter at ${python}; run bun scripts/e2e/python-env.ts`,
+      missing: `no interpreter at ${python}; run bun e2e/python-env.ts`,
     };
   const stamp = path.join(venvDir(), 'betteroffice-source.sha256');
   if (
@@ -79,7 +79,7 @@ export function pythonWithBindings(): { python: string } | { missing: string } {
   )
     return {
       missing:
-        'Python bindings do not match this checkout; run bun scripts/e2e/python-env.ts',
+        'Python bindings do not match this checkout; run bun e2e/python-env.ts',
     };
   const probe = Bun.spawnSync([
     python,

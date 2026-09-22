@@ -11,12 +11,12 @@ import {
   typingTarget,
 } from './context';
 import type { DocxScenario } from './context';
-import type { YrsEngineApplyProfile } from '../../../packages/docx/src/yrs';
+import type { YrsEngineApplyProfile } from '../../packages/docx/src/yrs';
 import {
   applyFrameDeltaOwned,
   decodeFrameDelta,
-} from '../../../packages/docx/src/layout/render/frameDelta';
-import type { RetainedFrame } from '../../../packages/docx/src/layout/render/frameDelta';
+} from '../../packages/docx/src/layout/render/frameDelta';
+import type { RetainedFrame } from '../../packages/docx/src/layout/render/frameDelta';
 
 const BURST = 'The quick brown fox jumps over the lazy dog, twice';
 const SECOND = 'and again on the next line';
