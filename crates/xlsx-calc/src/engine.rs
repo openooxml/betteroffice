@@ -424,8 +424,6 @@ fn eval_node_with(
     let mut ctx = EvalContext::with_budget(provider, u.0, budget);
     ctx.cell = Some(cell);
     ctx.now_serial = now_serial;
-    // The workbook's epoch, so TEXT and the date/time functions format
-    // serials the same way the grid does.
     ctx.date_system = wb.date_system;
     ctx.parse_cache = Some(graph.asts());
     let value = match authored {

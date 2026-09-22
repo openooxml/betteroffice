@@ -176,17 +176,7 @@ pub(crate) fn unpatchable_references(
 /// vetoes more, and reading it this loosely is what stops a decoy attribute
 /// from hiding a real part behind a reader that takes the first match.
 fn package_bears_references(parts: &[(String, Vec<u8>)]) -> bool {
-    // `xl/tables/` belongs with the others: a table part names a rectangle on a
-    // sheet (`<table ref="B2:D12">`), no save rewrites that ref, and no
-    // structural op remaps it. Omitting it meant a table no formula reads was
-    // unguarded — a row insert inside its range was allowed, the cells shifted,
-    // and the saved part kept the stale `ref` while the save reported success.
-    const DIRECTORIES: [&str; 4] = [
-        "xl/pivottables/",
-        "xl/pivotcache/",
-        "xl/charts/",
-        "xl/tables/",
-    ];
+    const DIRECTORIES: [&str; 3] = ["xl/pivottables/", "xl/pivotcache/", "xl/charts/"];
     if parts.iter().any(|(path, _)| {
         let key = part_key(path);
         DIRECTORIES.iter().any(|prefix| key.starts_with(prefix))

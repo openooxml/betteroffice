@@ -65,9 +65,6 @@ pub struct EvalContext<'a> {
     /// a process-local counter. set before the first draw; later writes are
     /// ignored because the stream has already started.
     pub rand_seed: Option<u64>,
-    /// the workbook's date system, so date/time functions and `TEXT` format
-    /// serials against the epoch the workbook actually uses. Defaults to
-    /// `V1900`; a 1904 workbook must set this or dates come out 1462 days off.
     pub date_system: DateSystem,
     random_state: Rc<Cell<Option<u64>>>,
     remaining_cell_visits: Rc<Cell<u64>>,
