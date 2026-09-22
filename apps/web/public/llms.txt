@@ -24,6 +24,8 @@ DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope
 
 The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF and EMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
 
+The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
+
 There is no Vue package. React and framework-free JavaScript are the supported entry points.
 
 ## VSDX source preview
@@ -39,6 +41,8 @@ DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format 
 - [betteroffice-pptx](https://crates.io/crates/betteroffice-pptx): typed native API for opening, editing, collaborating, and rendering PPTX presentations.
 - [betteroffice-xlsx-calc](https://crates.io/crates/betteroffice-xlsx-calc): the standalone formula engine — lexer, parser, dependency graph, and evaluator, written spec-first from ECMA-376.
 - [betteroffice-opc](https://crates.io/crates/betteroffice-opc): the OPC container reader/writer with zip-bomb and path-traversal limits, shared by all four formats.
+
+The native XLSX facade also offers `Workbook::apply_edits_profiled` for edit stage timings; see the [Rust guide](https://docs.betteroffice.dev/docs/rust).
 
 The per-layer crates expose individual pipeline stages:
 

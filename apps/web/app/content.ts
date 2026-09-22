@@ -90,7 +90,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/xlsx",
-    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine.",
+    desc: "Framework-free spreadsheet core — parsing, calculation and rendering on the Rust engine, with opt-in operation timings.",
   },
   {
     name: "@betteroffice/xlsx-react",
@@ -98,7 +98,7 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with opt-in operation timings.",
   },
   {
     name: "@betteroffice/pptx-react",

@@ -132,6 +132,7 @@ For scoring, timing, coverage, and limitations, see the [benchmark methodology](
 - `crates/` — the Rust engines
 - `packages/` — the TypeScript editor packages
 - `bindings/` — the Python bindings
+- `e2e/` — browser tests, corpus scenarios, and the shared test harness
 - `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
 - `apps/demo` — editor playground
 - `apps/docs` — documentation
@@ -148,7 +149,8 @@ bun run rust:check   # fmt + clippy + tests for the engines
 
 Run `bun run test:e2e:browser` for headless browser tests of all three editors.
 The [E2E guide](e2e/README.md) also covers pinned corpus scenarios,
-cross-SDK checks, and operation profiles.
+cross-SDK checks, and operation profiles. The XLSX and PPTX JavaScript cores expose
+opt-in operation timings; the native XLSX facade also reports edit stage timings.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
 
