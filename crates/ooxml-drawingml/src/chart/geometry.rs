@@ -2584,7 +2584,22 @@ fn push_point_label<S: PlotSink + ?Sized>(
         .map(|labels| labels.text)
         .unwrap_or_default();
     push_legend_key(ops, series, series_index, index, x, baseline_y);
-    push_text(ops, &text, x, baseline_y, width, &family.scoped(scope));
+    // A `c:tx` label carries its own line breaks, and PowerPoint stacks the
+    // lines on the point rather than running them together.
+    let style = family.scoped(scope);
+    let lines: Vec<&str> = text.split('\n').collect();
+    let step = style.font.size_px * 1.2;
+    let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
+    for (line, text) in lines.iter().enumerate() {
+        push_text(
+            ops,
+            text.trim(),
+            x,
+            top + step * line as f64,
+            width,
+            &style,
+        );
+    }
 }
 
 /// Where `c:dLblPos` puts a bar label, as a fraction of the bar's own span
@@ -3701,9 +3716,11 @@ fn emit_pie<S: PlotSink + ?Sized>(
     if total <= 0.0 {
         return;
     }
-    let r = (width.min(height) * 0.34).max(10.0);
-    let cx = x + width * 0.38;
-    let cy = y + height * 0.46;
+    // The plot rect already excludes the legend and the title, so the pie is
+    // centred in what is left and drawn as large as the labels allow.
+    let r = (width.min(height) * 0.45).max(10.0);
+    let cx = x + width / 2.0;
+    let cy = y + height / 2.0;
     let group = family.group;
     let inner_r = if family.chart_type == "doughnut" {
         r * group
