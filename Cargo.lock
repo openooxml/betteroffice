@@ -90,6 +90,7 @@ name = "betteroffice-docx-bench"
 version = "0.2.0"
 dependencies = [
  "betteroffice-docx",
+ "betteroffice-docx-edit",
 ]
 
 [[package]]

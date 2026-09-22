@@ -8,3 +8,4 @@ readme = "README.md"
 
 [dependencies]
 betteroffice-docx.workspace = true
+docx-edit.workspace = true
