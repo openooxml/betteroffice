@@ -46,7 +46,7 @@ opt-level = "s"
 lto = true
 
 [profile.release.package.betteroffice-docx-layout]
-opt-level = 3
+opt-level = "s"
 
 [profile.release.package.betteroffice-docx-parse]
 opt-level = 3
@@ -58,7 +58,7 @@ opt-level = 3
 opt-level = 3
 
 [profile.release.package.betteroffice-ooxml-text]
-opt-level = 3
+opt-level = "s"
 
 [profile.release.package.yrs]
 opt-level = 3
