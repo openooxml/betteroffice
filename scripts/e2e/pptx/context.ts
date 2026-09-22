@@ -7,6 +7,7 @@ import { resolve } from 'node:path';
 import { initWasm, openPresentation } from '../../../packages/pptx/src/wasm/loader';
 import type { PresentationHandle } from '../../../packages/pptx/src/wasm/loader';
 import type {
+  DeckSnapshot,
   EditProfile,
   HistoryProfile,
   LayoutProfile,
@@ -18,7 +19,7 @@ import type {
   TextBoxPrimitive,
 } from '../../../packages/pptx/src/types';
 import type { PinnedSample } from '../corpus';
-import type { ScenarioRecorder, StageProfile, Timer } from '../harness';
+import type { ActorRecorder, ScenarioRecorder, StageProfile, Timer } from '../harness';
 import type { Scenario } from '../suite';
 
 const WASM = resolve(import.meta.dir, '../../../packages/pptx/src/wasm/generated/pptx_wasm_bg.wasm');
@@ -31,7 +32,7 @@ export interface PptxCtx {
   recorder: ScenarioRecorder;
   fonts: PptxFontFace[];
   /** Opens a handle that is disposed with the scenario. */
-  open(bytes?: Uint8Array): PresentationHandle;
+  open(bytes?: Uint8Array, clientId?: number): PresentationHandle;
   dispose(): void;
 }
 
@@ -51,8 +52,8 @@ export function context(sample: PinnedSample, bytes: Uint8Array, recorder: Scena
     bytes,
     recorder,
     fonts,
-    open(source = bytes) {
-      const handle = openPresentation(source, { fonts });
+    open(source = bytes, clientId?: number) {
+      const handle = openPresentation(source, { fonts, clientId });
       handles.push(handle);
       return handle;
     },
@@ -136,4 +137,65 @@ export function runCount(layout: SlideDisplayList): number {
     for (const line of primitive.lines) runs += line.runs.length;
   }
   return runs;
+}
+
+/** An 8x8 PNG, small enough to embed and still a real decodable image. */
+export const PNG_BASE64 =
+  'iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAbElEQVR4nA3JQQEAMAgDMZzgpE7qhMf5wAlO6mbLN1VFFypcTLHFFSmqmm7UuJlmm2vSP0QLCYsRK05EP0wbGZsxa87EP4YeNHiYYYcbMj+WXrR4mWWXW7I/jj50+JhjjztyP0IHBYcJGy4kPDtbVkGLfGO6AAAAAElFTkSuQmCC';
+
+/** One collaborative replica with the update bytes its own edits produced. */
+export interface Replica {
+  name: string;
+  handle: PresentationHandle;
+  timer: ActorRecorder;
+  outbox: Uint8Array[];
+}
+
+export function replicas(ctx: PptxCtx, names: string[]): Replica[] {
+  return names.map((name, index) => {
+    const timer = ctx.recorder.as(name);
+    const handle = timer.load(() => ctx.open(ctx.bytes, index + 1));
+    const outbox: Uint8Array[] = [];
+    handle.onUpdate((update, origin) => {
+      if (origin === 'local') outbox.push(update);
+    });
+    return { name, handle, timer, outbox };
+  });
+}
+
+/** Delivers every pending update to every other replica, one recorded op each. */
+export function exchange(peers: Replica[], op = 'applyUpdate'): number {
+  let bytes = 0;
+  for (const from of peers) {
+    const pending = from.outbox.splice(0);
+    for (const update of pending) {
+      bytes += update.byteLength;
+      for (const to of peers) {
+        if (to === from) continue;
+        to.timer.op(op, () => to.handle.applyUpdate(update), undefined, { from: from.name, bytes: update.byteLength });
+      }
+    }
+  }
+  return bytes;
+}
+
+/** Slide ids, shape ids and every story's text: the convergence fingerprint. */
+export function fingerprint(deck: DeckSnapshot): string {
+  return deck.slides
+    .map((slide) => `${slide.id}[${slide.shapes.map((shape) => `${shape.id}:${shape.textStories.map(storyText).join('/')}`).join(',')}]`)
+    .join('|');
+}
+
+export function shapeText(shape: ShapeSnapshot): string {
+  return shape.textStories.map(storyText).join('');
+}
+
+/** The first paragraph's text; text ranges may not cross paragraph boundaries. */
+export function firstParagraphText(story: StorySnapshot): string {
+  return story.paragraphs[0].runs.map((run) => run.text).join('');
+}
+
+/** Paragraph texts joined the way the python binding reports a story. */
+export function storyLines(story: StorySnapshot): string {
+  return story.paragraphs.map((paragraph) => paragraph.runs.map((run) => run.text).join('')).join('\n');
 }
