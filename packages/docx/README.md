@@ -68,3 +68,23 @@ Package builds, demo startup, and CI run this step automatically.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx/CHANGELOG.md) · Apache-2.0.
+
+### Reanchor an existing comment
+
+`session.setCommentRanges(commentId, ranges)` replaces only the sticky anchors of
+an existing comment. The id, author, date, body, reply relationship and resolution
+state remain intact. Ranges use the same paragraph locations as `addComment`;
+one range may span paragraphs, and separate ranges may address different stories.
+
+Every range must be non-empty, ordered, and within existing paragraphs. An empty
+list, unknown comment/story/paragraph, or invalid offset throws before any content
+changes. The host must find the surviving text and supply its new range; the API
+does not infer text matches after replacement.
+
+Reanchoring joins the current local undo capture, so an immediate replacement and
+reanchor can undo together. Comment edits participate in the session's history;
+undoing comment changes conservatively invalidates all stories for saved anchors.
+
+The undo manager also retains comment item boundaries so anchors inside replaced
+text survive repeated undo/redo with Yrs 0.27. This adds local history bookkeeping
+for comments and a snapshot traversal when undo/redo needs those boundaries.

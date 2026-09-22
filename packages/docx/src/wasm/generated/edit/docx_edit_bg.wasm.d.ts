@@ -88,6 +88,7 @@ export const editsession_set_cell_selection: (a: number, b: number, c: number) =
 export const editsession_set_cell_shading: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_cell_text_format: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_set_column_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
 export const editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];

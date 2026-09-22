@@ -155,6 +155,41 @@ fn loc_index(doc: &EditingDoc, story: &str, para_id: &str, offset: u32) -> Resul
     Ok(span.start + offset)
 }
 
+fn comment_ranges(doc: &EditingDoc, ranges_json: &str) -> Result<Vec<StoryRange>, JsValue> {
+    let value: Value = serde_json::from_str(ranges_json).map_err(js_err)?;
+    let entries = value
+        .as_array()
+        .ok_or_else(|| js_err("expected an array of comment ranges"))?;
+    let mut ranges = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let get_str = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .ok_or_else(|| js_err(format!("a comment range requires a string {key:?}")))
+        };
+        let get_offset = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_u64)
+                .ok_or_else(|| js_err(format!("a comment range requires a non-negative {key:?}")))
+                .and_then(|offset| {
+                    u32::try_from(offset).map_err(|_| js_err("comment offset exceeds u32"))
+                })
+        };
+        let story = get_str("story")?;
+        let start = loc_index(
+            doc,
+            story,
+            get_str("startPara")?,
+            get_offset("startOffset")?,
+        )?;
+        let end = loc_index(doc, story, get_str("endPara")?, get_offset("endOffset")?)?;
+        ranges.push(StoryRange::new(story, start, end));
+    }
+    Ok(ranges)
+}
+
 /// Transient story-global index -> public paragraph-keyed location. Sticky
 /// awareness positions resolve to story indices; the JS facade never exposes
 /// that internal coordinate system.
@@ -2947,42 +2982,7 @@ impl EditSession {
         date: &str,
         body_json: &str,
     ) -> Result<String, JsValue> {
-        let value: Value = serde_json::from_str(ranges_json).map_err(js_err)?;
-        let entries = value
-            .as_array()
-            .ok_or_else(|| js_err("add_comment expects an array of ranges"))?;
-        let mut ranges = Vec::with_capacity(entries.len());
-        for entry in entries {
-            let get_str = |key: &str| {
-                entry
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| js_err(format!("a comment range requires a string {key:?}")))
-            };
-            let get_offset = |key: &str| {
-                entry
-                    .get(key)
-                    .and_then(Value::as_u64)
-                    .ok_or_else(|| {
-                        js_err(format!("a comment range requires a non-negative {key:?}"))
-                    })
-                    .map(|offset| offset as u32)
-            };
-            let story = get_str("story")?;
-            let start = loc_index(
-                self.engine.doc(),
-                story,
-                get_str("startPara")?,
-                get_offset("startOffset")?,
-            )?;
-            let end = loc_index(
-                self.engine.doc(),
-                story,
-                get_str("endPara")?,
-                get_offset("endOffset")?,
-            )?;
-            ranges.push(StoryRange::new(story, start, end));
-        }
+        let ranges = comment_ranges(self.engine.doc(), ranges_json)?;
         let body = Any::from_json(body_json).map_err(js_err)?;
         let comment_id = self
             .engine
@@ -2990,6 +2990,15 @@ impl EditSession {
             .add_comment(&ranges, author, date, body)
             .map_err(js_err)?;
         Ok(json!({ "commentId": comment_id }).to_string())
+    }
+
+    /// Reanchors an existing comment without changing its metadata.
+    pub fn set_comment_ranges(&self, comment_id: &str, ranges_json: &str) -> Result<(), JsValue> {
+        let ranges = comment_ranges(self.engine.doc(), ranges_json)?;
+        self.engine
+            .doc()
+            .set_comment_ranges(comment_id, &ranges)
+            .map_err(js_err)
     }
 
     /// Accepts tracked changes: pending insertions become plain content,

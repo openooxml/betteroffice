@@ -11,9 +11,12 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use yrs::sync::time::Clock;
-use yrs::{Map, Origin, Out, ReadTxn, Subscription, Transact};
+use yrs::types::DeepObservable;
+use yrs::{
+    Doc, IdSet, IndexedSequence, Map, Origin, Out, ReadTxn, Snapshot, Subscription, Text, Transact,
+};
 
-use crate::{EditingDoc, STORIES};
+use crate::{COMMENTS, EditingDoc, STORIES};
 
 /// Undo capture window.
 pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
@@ -26,6 +29,9 @@ pub struct DocUndoManager {
     inner: yrs::undo::UndoManager<()>,
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
+    doc: Doc,
+    anchor_boundaries: Arc<Mutex<[IdSet; 2]>>,
+    _anchors: Subscription,
 }
 
 /// System clock on native targets. `wasm32-unknown-unknown` has no ambient clock, so the fallback
@@ -70,14 +76,24 @@ impl DocUndoManager {
         let mut inner = yrs::undo::UndoManager::with_options(options);
         let root = stories_root(&doc.yrs_doc().transact());
         inner.expand_scope(doc.yrs_doc(), &root);
+        let comments = doc
+            .yrs_doc()
+            .transact()
+            .get_map(COMMENTS)
+            .expect("comments root is declared");
+        inner.expand_scope(doc.yrs_doc(), &comments);
+        let anchor_root = comments.clone();
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
         let popped = {
             let changed_stories = Arc::clone(&changed_stories);
             inner.observe_item_popped(move |txn, event| {
+                let comments_changed = event.has_changed(&comments);
                 let mut changed: Vec<String> = stories_root(txn)
                     .iter(txn)
                     .filter_map(|(story, value)| match value {
-                        Out::YText(text) if event.has_changed(&text) => Some(story.to_owned()),
+                        Out::YText(text) if comments_changed || event.has_changed(&text) => {
+                            Some(story.to_owned())
+                        }
                         _ => None,
                     })
                     .collect();
@@ -85,7 +101,18 @@ impl DocUndoManager {
                 *lock(&changed_stories) = changed;
             })
         };
+        let anchor_boundaries = Arc::new(Mutex::new([IdSet::new(), IdSet::new()]));
+        remember_comment_boundaries(&doc.doc.transact(), &anchor_boundaries);
+        let anchors = {
+            let boundaries = Arc::clone(&anchor_boundaries);
+            anchor_root.observe_deep(move |txn, _| {
+                remember_comment_boundaries(txn, &boundaries);
+            })
+        };
         Self {
+            doc: doc.doc.clone(),
+            anchor_boundaries,
+            _anchors: anchors,
             inner,
             changed_stories,
             _popped: popped,
@@ -94,12 +121,75 @@ impl DocUndoManager {
 
     pub fn undo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
-        self.inner.undo_blocking()
+        let applied = self.inner.undo_blocking();
+        if applied {
+            self.restore_comment_boundaries();
+        }
+        applied
     }
 
     pub fn redo(&mut self) -> bool {
         lock(&self.changed_stories).clear();
-        self.inner.redo_blocking()
+        let applied = self.inner.redo_blocking();
+        if applied {
+            self.restore_comment_boundaries();
+        }
+        applied
+    }
+
+    fn restore_comment_boundaries(&self) {
+        let boundaries = self.anchor_boundaries.lock().unwrap().clone();
+        if boundaries.iter().all(IdSet::is_empty) {
+            return;
+        }
+        let mut txn = self.doc.transact_mut();
+        let Some(Out::YText(text)) = stories_root(&txn)
+            .iter(&txn)
+            .map(|(_, value)| value)
+            .find(|value| matches!(value, Out::YText(_)))
+        else {
+            return;
+        };
+        // Yrs 0.27 drops intra-item offsets while following redone links. Snapshot
+        // splitting preserves those offsets without authoring document changes.
+        for deleted in boundaries {
+            if deleted.is_empty() {
+                continue;
+            }
+            let snapshot = Snapshot::new(Default::default(), deleted);
+            text.diff_range(&mut txn, Some(&snapshot), None, |_| ());
+        }
+        let Some(comments) = txn.get_map(COMMENTS) else {
+            return;
+        };
+        let mut boundaries = self.anchor_boundaries.lock().unwrap();
+        for (_, value) in comments.iter(&txn) {
+            let Out::YMap(comment) = value else {
+                continue;
+            };
+            let Some(Out::Any(yrs::Any::Array(anchors))) = comment.get(&txn, "anchors") else {
+                continue;
+            };
+            for value in anchors.iter() {
+                let Ok(anchor) = crate::decode_anchor(value) else {
+                    continue;
+                };
+                let Ok(story) = crate::story_ref(&txn, &anchor.story) else {
+                    continue;
+                };
+                for sticky in [anchor.start, anchor.end] {
+                    let Some(offset) = sticky.get_offset(&txn) else {
+                        continue;
+                    };
+                    let Some(current) = story.sticky_index(&txn, offset.index, sticky.assoc) else {
+                        continue;
+                    };
+                    if let Some(id) = current.id() {
+                        boundaries[id.clock as usize % 2].insert(*id, 1);
+                    }
+                }
+            }
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -133,6 +223,34 @@ impl DocUndoManager {
     /// Clears both stacks (file-load reset).
     pub fn clear(&mut self) {
         self.inner.clear_all();
+        *self.anchor_boundaries.lock().unwrap() = [IdSet::new(), IdSet::new()];
+        remember_comment_boundaries(&self.doc.transact(), &self.anchor_boundaries);
+    }
+}
+
+fn remember_comment_boundaries(txn: &impl ReadTxn, boundaries: &Mutex<[IdSet; 2]>) {
+    let Some(comments) = txn.get_map(COMMENTS) else {
+        return;
+    };
+    let mut boundaries = boundaries.lock().unwrap();
+    for (_, value) in comments.iter(txn) {
+        let Out::YMap(comment) = value else {
+            continue;
+        };
+        let Some(Out::Any(yrs::Any::Array(anchors))) = comment.get(txn, "anchors") else {
+            continue;
+        };
+        for value in anchors.iter() {
+            let Ok(anchor) = crate::decode_anchor(value) else {
+                continue;
+            };
+            for sticky in [anchor.start, anchor.end] {
+                if let Some(id) = sticky.id() {
+                    // Separate adjacent ids so IdSet cannot merge away a boundary.
+                    boundaries[id.clock as usize % 2].insert(*id, 1);
+                }
+            }
+        }
     }
 }
 

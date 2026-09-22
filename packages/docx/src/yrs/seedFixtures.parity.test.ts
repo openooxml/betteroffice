@@ -3,6 +3,8 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 import { parseDocx } from '../docx';
+import { repackDocx } from '../docx/rezip';
+import { readDocxContainer } from '../docx/zipContainer';
 import { rezipPartsToArrayBuffer, toBytes, type PartsMap } from '../docx/rezip/parts';
 import type { Document } from '../types/document';
 import { preloadEditWasm } from '../wasm/edit';
@@ -188,6 +190,65 @@ const fixtures = readdirSync(FIXTURE_ROOT, { withFileTypes: true })
 // Yrs formatting marker counts make seeded state vectors nondeterministic.
 describe('DOCX seeding across document features', () => {
   beforeAll(() => preloadEditWasm(new Uint8Array(readFileSync(WASM))));
+
+  it('exports reanchored comments with metadata intact through three undo/redo cycles', async () => {
+    const bytes = buildFixtureDocx('comments');
+    const session = await createYrsSession({ clientId: 80005 });
+    try {
+      const { document } = session.seedFromDocx(bytes);
+      const originalComments = document.package.document.comments;
+      const exportedComments = (await parseDocx(
+        await repackDocx(yrsToDocument(session, document)), { preloadFonts: false }
+      )).package.document.comments;
+      const paragraph = session.paragraphs('body')[0];
+      const before = session.resolveComment('1');
+      session.beginUndoCapture();
+      session.replaceRange({
+        story: 'body',
+        start: { paraId: paragraph.paraId, offset: 0 },
+        end: { paraId: paragraph.paraId, offset: paragraph.text.length },
+      }, 'Achado preservado. Conclusão nova.');
+      session.setCommentRanges('1', [{
+        story: 'body',
+        start: { paraId: paragraph.paraId, offset: 0 },
+        end: { paraId: paragraph.paraId, offset: 17 },
+      }]);
+      const after = [{ story: 'body', start: 0, end: 17 }];
+      const verifyExport = async () => {
+        expect(session.resolveComment('1')).toEqual(after);
+        const saved = yrsToDocument(session, document);
+        expect(saved.package.document.comments).toEqual(originalComments);
+        const exported = await repackDocx(saved);
+        const parts = readDocxContainer(exported);
+        const xml = parts.text('word/document.xml') ?? '';
+        const start = xml.indexOf('<w:commentRangeStart w:id="1"');
+        const end = xml.indexOf('<w:commentRangeEnd w:id="1"');
+        expect(start).toBeGreaterThan(-1);
+        expect(end).toBeGreaterThan(start);
+        const highlighted = [...xml.slice(start, end).matchAll(/<w:t(?: [^>]*)?>(.*?)<\/w:t>/g)]
+          .map((match) => match[1]).join('');
+        expect(highlighted).toBe('Achado preservado');
+        const reopened = await createYrsSession({ clientId: 80006 });
+        try {
+          const reopenedDoc = reopened.seedFromDocx(new Uint8Array(exported)).document;
+          expect(reopenedDoc.package.document.comments).toEqual(exportedComments);
+          expect(reopened.resolveComment('1')).toEqual(after);
+        } finally {
+          reopened.destroy();
+        }
+      };
+      await verifyExport();
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        expect(session.undo()).toBe(true);
+        expect(session.paragraphs('body')[0].text).toBe(paragraph.text);
+        expect(session.resolveComment('1')).toEqual(before);
+        expect(session.redo()).toBe(true);
+        await verifyExport();
+      }
+    } finally {
+      session.destroy();
+    }
+  });
 
   for (const name of fixtures) {
     it(`preserves ${name} stories, comments, and save output`, async () => {
