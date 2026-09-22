@@ -547,7 +547,9 @@ fn strip_absolute_positions(value: &mut serde_json::Value) {
 fn measured_fingerprint(measured: &MeasuredBlock) -> Result<u64, String> {
     let mut value: serde_json::Value = serde_json::to_string(measured)
         .map_err(|error| format!("fingerprint measured block: {error}"))
-        .and_then(|s| serde_json::from_str(&s).map_err(|error| format!("fingerprint measured block: {error}")))?;
+        .and_then(|s| {
+            serde_json::from_str(&s).map_err(|error| format!("fingerprint measured block: {error}"))
+        })?;
     strip_absolute_positions(&mut value);
     serde_json::to_vec(&value)
         .map(|bytes| hash_bytes(&bytes))

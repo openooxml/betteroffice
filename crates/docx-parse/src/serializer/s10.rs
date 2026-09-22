@@ -178,25 +178,33 @@ fn parse_back(family: &str, xml: &str) -> Result<serde_json::Value, ParseError> 
     let value = match family {
         "border" => match fragment_child(xml)? {
             Some(element) => {
-                serde_json::to_string(&crate::borders::parse_border_spec(Some(&element))).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+                serde_json::to_string(&crate::borders::parse_border_spec(Some(&element)))
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
             }
-            None => serde_json::to_string(&Option::<BorderSpec>::None).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            None => serde_json::to_string(&Option::<BorderSpec>::None)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         },
         "conditionalFormat" => match fragment_child(xml)? {
-            Some(element) => {
-                serde_json::to_string(&crate::table::parse_conditional_format_style(Some(&element))).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
-            }
-            None => serde_json::to_string(&Option::<ConditionalFormatStyle>::None).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            Some(element) => serde_json::to_string(&crate::table::parse_conditional_format_style(
+                Some(&element),
+            ))
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            None => serde_json::to_string(&Option::<ConditionalFormatStyle>::None)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         },
         "tableGrid" => match fragment_child(xml)? {
-            Some(element) => serde_json::to_string(&crate::table::parse_table_grid(Some(&element))).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
-            None => serde_json::to_string(&Option::<Vec<f64>>::None).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            Some(element) => serde_json::to_string(&crate::table::parse_table_grid(Some(&element)))
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            None => serde_json::to_string(&Option::<Vec<f64>>::None)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         },
         "section" => match fragment_child(xml)? {
             Some(element) => {
-                serde_json::to_string(&crate::section::parse_section_properties(Some(&element))).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+                serde_json::to_string(&crate::section::parse_section_properties(Some(&element)))
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
             }
-            None => serde_json::to_string(&SectionProperties::default()).and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+            None => serde_json::to_string(&SectionProperties::default())
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         },
         "numbering" => {
             let limits = ParseLimits::default();
@@ -206,11 +214,13 @@ fn parse_back(family: &str, xml: &str) -> Result<serde_json::Value, ParseError> 
                 &mut ParseBudget::new(&limits),
             )?
             .definitions;
-            serde_json::to_string(&definitions).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+            serde_json::to_string(&definitions)
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         }
         "watermark" => {
             let document = parse_fragment(xml)?;
-            serde_json::to_string(&crate::vml::extract_watermark(document.root(), None, None)).and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+            serde_json::to_string(&crate::vml::extract_watermark(document.root(), None, None))
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
         }
         _ => unreachable!("all S10 families are matched above"),
     };

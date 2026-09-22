@@ -1731,7 +1731,9 @@ impl<'a> SelectiveParagraphIndex<'a> {
                     }
                     if let Some(text_body) = shape.text_body.as_ref() {
                         for value in &text_body.content {
-                            let block: BlockContent = serde_json::to_string(&(value.clone())).and_then(|s| serde_json::from_str(&s)).ok()?;
+                            let block: BlockContent = serde_json::to_string(&(value.clone()))
+                                .and_then(|s| serde_json::from_str(&s))
+                                .ok()?;
                             self.story(std::slice::from_ref(&block))?;
                         }
                     }

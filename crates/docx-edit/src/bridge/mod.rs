@@ -1085,7 +1085,9 @@ fn dark_cell_background(color: &str) -> bool {
 }
 
 fn any_json(value: &Any) -> Option<Value> {
-    let value: Value = serde_json::to_string(value).ok().and_then(|s| serde_json::from_str(&s).ok())?;
+    let value: Value = serde_json::to_string(value)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())?;
     (!value.is_null()).then_some(value)
 }
 
@@ -1187,7 +1189,9 @@ fn lower_image_values(
                     serde_json::json!(height as u64),
                 );
             }
-            serde_json::to_string(&value).ok().and_then(|s| serde_json::from_str::<ImageRunPosition>(&s).ok())
+            serde_json::to_string(&value)
+                .ok()
+                .and_then(|s| serde_json::from_str::<ImageRunPosition>(&s).ok())
         });
 
     ImageRun {
@@ -2778,7 +2782,9 @@ fn lower_run_formatting(attributes: Option<&Attrs>, env: &RenderEnv) -> RunForma
             _ => value,
         };
         if !is_nullish(effects) {
-            result.modern_effects = serde_json::to_string(effects).ok().and_then(|s| serde_json::from_str(&s).ok());
+            result.modern_effects = serde_json::to_string(effects)
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok());
         }
     }
 

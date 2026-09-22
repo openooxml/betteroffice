@@ -3518,7 +3518,10 @@ pub(crate) fn referenced_fonts(
 ) -> Result<Vec<String>, String> {
     let mut fonts = BTreeSet::new();
     collect_font_table_fonts(envelope, &mut fonts);
-    let parsed: Value = serde_json::to_string(&envelope.document).ok().and_then(|s| serde_json::from_str(&s).ok()).ok_or_else(|| "serialize document".to_owned())?;
+    let parsed: Value = serde_json::to_string(&envelope.document)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| "serialize document".to_owned())?;
     collect_fonts_from_value(&parsed, &mut fonts);
     Ok(fonts.into_iter().collect())
 }
@@ -3530,7 +3533,10 @@ pub(crate) fn seed_parsed_docx(
     envelope.document.package.media_entries.clear();
     let mut referenced_fonts = BTreeSet::new();
     collect_font_table_fonts(&envelope, &mut referenced_fonts);
-    let parsed: Value = serde_json::to_string(&envelope.document).ok().and_then(|s| serde_json::from_str(&s).ok()).ok_or_else(|| "serialize document".to_owned())?;
+    let parsed: Value = serde_json::to_string(&envelope.document)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| "serialize document".to_owned())?;
     collect_fonts_from_value(&parsed, &mut referenced_fonts);
     let source_json = if needs_source_json(&parsed) {
         let serialized =
@@ -4132,7 +4138,12 @@ mod tests {
                 .root()
                 .unwrap()
                 .clone();
-            serde_json::to_string(&docx_parse::parse_paragraph_properties(Some(&root), None).unwrap()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).unwrap()
+            serde_json::to_string(
+                &docx_parse::parse_paragraph_properties(Some(&root), None).unwrap(),
+            )
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .unwrap()
         }
         let style_ppr = ppr(r#"<w:pPr><w:ind w:left="1450" w:hanging="730"/></w:pPr>"#);
         assert_eq!(style_ppr["indentFirstLine"], json!(-730.0));
