@@ -1080,10 +1080,10 @@ impl EngineSession {
             .map(|measured| measured.block)
             .collect::<Vec<_>>();
         if let Some(body_story) = body_story {
-            let render_env: RenderEnv = serde_json::to_string(&render_env)
-                .ok()
-                .and_then(|s| serde_json::from_str(&s).ok())
-                .ok_or_else(|| "parse render environment".to_owned())?;
+            let render_env_json = serde_json::to_string(&render_env)
+                .map_err(|error| format!("serialize render environment: {error}"))?;
+            let render_env: RenderEnv = serde_json::from_str(&render_env_json)
+                .map_err(|error| format!("parse render environment: {error}"))?;
             let mut stories = BTreeSet::from([body_story]);
             for section_index in 0..regions.sections.len() {
                 let Some(refs) = effective_header_footer_refs(&regions, section_index) else {
@@ -1211,12 +1211,12 @@ impl EngineSession {
         let mut parsed_render_env = if render_env.is_null() {
             None
         } else {
-            Some(
-                serde_json::to_string(&render_env)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<RenderEnv>(&s).ok())
-                    .ok_or_else(|| "parse render environment".to_owned())?,
-            )
+            Some({
+                let json = serde_json::to_string(&render_env)
+                    .map_err(|error| format!("serialize render environment: {error}"))?;
+                serde_json::from_str::<RenderEnv>(&json)
+                    .map_err(|error| format!("parse render environment: {error}"))?
+            })
         };
         if regions.sections.len() <= 1
             && let Some(env) = &mut parsed_render_env
