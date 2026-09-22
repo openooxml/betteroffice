@@ -679,6 +679,10 @@ pub struct TextBody {
     /// Use a 1.2 em percentage pitch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat_line_spacing: Option<bool>,
+    /// `a:bodyPr/@spcFirstLastPara`: honour the first paragraph's space-before
+    /// and the last one's space-after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space_first_last_para: Option<bool>,
     pub autofit: Option<TextAutofit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vertical_overflow: Option<TextOverflow>,

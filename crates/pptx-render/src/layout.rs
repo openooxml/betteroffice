@@ -1902,6 +1902,13 @@ impl BodyCascade<'_> {
             .or_else(|| self.master.and_then(|body| body.vertical.as_deref()))
     }
 
+    fn space_first_last_para(&self) -> bool {
+        cascade_value(self.primary, self.layout, self.master, |body| {
+            body.space_first_last_para
+        })
+        .unwrap_or(false)
+    }
+
     fn autofit(&self) -> Option<&TextAutofit> {
         self.primary
             .and_then(|body| body.autofit.as_ref())
@@ -2089,6 +2096,8 @@ fn content_from_body(
 
 struct ResolvedContent {
     paragraphs: Vec<ResolvedParagraph>,
+    /// `a:bodyPr/@spcFirstLastPara`: the outer paragraphs keep their spacing.
+    space_first_last_para: bool,
 }
 
 struct ResolvedParagraph {
@@ -2237,7 +2246,10 @@ fn resolve_content(
         });
         story_offset = story_offset.saturating_add(1);
     }
-    Ok(ResolvedContent { paragraphs })
+    Ok(ResolvedContent {
+        paragraphs,
+        space_first_last_para: cascade.space_first_last_para(),
+    })
 }
 
 /// Cases one run for drawing. `a:rPr/@cap` is a display property: the stored
@@ -2782,6 +2794,8 @@ fn layout_content(
         if let Some(previous) = previous {
             y += spacing_px(previous.space_after, previous, scale)
                 + spacing_px(paragraph.space_before, paragraph, scale);
+        } else if content.space_first_last_para {
+            y += spacing_px(paragraph.space_before, paragraph, scale);
         }
         previous = Some(paragraph);
         let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
@@ -2801,6 +2815,11 @@ fn layout_content(
             y = last.y + last.height;
         }
         lines.append(&mut paragraph_lines);
+    }
+    if content.space_first_last_para
+        && let Some(last) = previous
+    {
+        y += spacing_px(last.space_after, last, scale);
     }
     Ok(LayoutText {
         total_height: (y - rect.y).max(0.0),
@@ -3356,6 +3375,16 @@ fn wrap_clusters(
         ranges.push((start, end));
         start = end;
         line_index += 1;
+    }
+    // A paragraph ending in `a:br` keeps the empty line the break opened, the
+    // way PowerPoint does; a centred or bottom-anchored body is half a line
+    // out without it (#797).
+    if clusters.last().is_some_and(|cluster| cluster.text == "\n")
+        && let Some(last) = ranges.last_mut()
+        && last.1 - last.0 > 1
+    {
+        last.1 -= 1;
+        ranges.push((clusters.len() - 1, clusters.len()));
     }
     ranges
 }
@@ -7024,6 +7053,7 @@ mod tests {
                     anchor: Some("ctr".to_owned()),
                     vertical: vertical.map(str::to_owned),
                     compat_line_spacing: None,
+                    space_first_last_para: None,
                     autofit: None,
                     inset_left: None,
                     inset_top: None,

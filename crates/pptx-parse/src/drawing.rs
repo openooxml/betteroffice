@@ -1184,6 +1184,9 @@ pub(crate) fn parse_text_body(
         compat_line_spacing: body_properties
             .and_then(|value| value.attribute("compatLnSpc"))
             .map(parse_bool),
+        space_first_last_para: body_properties
+            .and_then(|value| value.attribute("spcFirstLastPara"))
+            .map(parse_bool),
         autofit: body_properties.and_then(parse_text_autofit),
         vertical_overflow: parse_text_overflow(body_properties, "vertOverflow"),
         horizontal_overflow: parse_text_overflow(body_properties, "horzOverflow"),
