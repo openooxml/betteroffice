@@ -88,6 +88,9 @@ struct Brush {
 enum GdiObject {
     Pen(Pen),
     Brush(Brush),
+    /// An object this replay does not model. It holds its handle slot so the
+    /// records that select by index keep addressing the objects they meant.
+    Opaque,
 }
 
 type Xform = [f64; 6];
@@ -388,6 +391,7 @@ impl Player {
         match object {
             GdiObject::Pen(pen) => self.dc.pen = Some(pen),
             GdiObject::Brush(brush) => self.dc.brush = Some(brush),
+            GdiObject::Opaque => {}
         }
     }
 
@@ -929,8 +933,16 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Opti
         }
         76 => bitblt(player, bytes, body)?,
         118 => gradient_fill(player, bytes, body)?,
+        // 82 EXTCREATEFONTINDIRECTW and 84 EXTCREATEPEN take a handle this
+        // replay does not model; parking an opaque object keeps later
+        // selections addressing the right slots.
+        82 | 84 => {
+            let handle = u32_at(bytes, body)?;
+            player.store(handle as usize, GdiObject::Opaque);
+        }
         20 if u32_at(bytes, body)? == 13 => {}
-        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 58 | 69 | 70 | 98 => {}
+        // 30 SETMETARGN only sets state this replay never reads.
+        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 30 | 58 | 69 | 70 | 98 => {}
         _ => return None,
     }
     Some(())
@@ -1443,8 +1455,15 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -
             let (fill, stroke) = (player.brush_fill(), player.pen_stroke());
             player.emit(fill, stroke);
         }
+        // CREATEFONTINDIRECT and CREATEPALETTE consume the next handle slot,
+        // which WMF assigns by position, so they have to be stored rather than
+        // skipped even though this replay cannot draw with them.
+        0x00F7 | 0x02FB => wmf_store(player, GdiObject::Opaque),
         0x0103 if u16_at(bytes, body)? == 8 => {}
-        0x0102 | 0x0107 | 0x0108 | 0x0201 | 0x0209 | 0x020A => {}
+        // SETROP2, SETRELABS, SETTEXTALIGN and ESCAPE set state this replay
+        // never reads.
+        0x0102 | 0x0104 | 0x0105 | 0x0107 | 0x0108 | 0x012E | 0x0201 | 0x0209 | 0x020A
+        | 0x0626 => {}
         _ => return None,
     }
     Some(())
@@ -1997,7 +2016,10 @@ mod tests {
 
     #[test]
     fn unsupported_drawing_records_do_not_produce_partial_artwork() {
-        for kind in [30, 84] {
+        // 81 EXTTEXTOUTW draws ink this replay cannot carry, so the drawing is
+        // discarded rather than shown incomplete; 30 and 84 carry none, so the
+        // artwork around them survives (#796).
+        for (kind, drawn) in [(30u32, true), (84, true), (81, false)] {
             let bytes = emf(
                 vec![
                     record(43, &i32s(&[0, 0, 100, 100])),
@@ -2006,7 +2028,7 @@ mod tests {
                 [0, 0, 99, 99],
                 [100, 100],
             );
-            assert!(decode(&bytes).is_none(), "record {kind}");
+            assert_eq!(decode(&bytes).is_some(), drawn, "record {kind}");
         }
         for mode in 1..=8u16 {
             let mut bytes = vec![0u8; 18];
