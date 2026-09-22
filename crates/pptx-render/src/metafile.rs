@@ -933,16 +933,16 @@ fn emf_record(player: &mut Player, bytes: &[u8], kind: u32, body: usize) -> Opti
         }
         76 => bitblt(player, bytes, body)?,
         118 => gradient_fill(player, bytes, body)?,
-        // 82 EXTCREATEFONTINDIRECTW and 84 EXTCREATEPEN take a handle this
-        // replay does not model; parking an opaque object keeps later
-        // selections addressing the right slots.
-        82 | 84 => {
+        // 82 EXTCREATEFONTINDIRECTW takes a handle this replay does not model;
+        // parking an opaque object keeps later selections addressing the right
+        // slot. 84 is EXTTEXTOUTW, which draws, so it still declines.
+        82 => {
             let handle = u32_at(bytes, body)?;
             player.store(handle as usize, GdiObject::Opaque);
         }
         20 if u32_at(bytes, body)? == 13 => {}
-        // 30 SETMETARGN only sets state this replay never reads.
-        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 30 | 58 | 69 | 70 | 98 => {}
+        // 28 SETMETARGN only sets state this replay never reads.
+        1 | 13 | 16 | 18 | 21 | 22 | 24 | 25 | 28 | 58 | 69 | 70 | 98 => {}
         _ => return None,
     }
     Some(())
@@ -2016,10 +2016,11 @@ mod tests {
 
     #[test]
     fn unsupported_drawing_records_do_not_produce_partial_artwork() {
-        // 81 EXTTEXTOUTW draws ink this replay cannot carry, so the drawing is
-        // discarded rather than shown incomplete; 30 and 84 carry none, so the
-        // artwork around them survives (#796).
-        for (kind, drawn) in [(30u32, true), (84, true), (81, false)] {
+        // 84 EXTTEXTOUTW draws ink this replay cannot carry, so the drawing is
+        // discarded rather than shown incomplete; 28 SETMETARGN and 82
+        // EXTCREATEFONTINDIRECTW carry none, so the artwork around them
+        // survives (#796).
+        for (kind, drawn) in [(28u32, true), (82, true), (84, false)] {
             let bytes = emf(
                 vec![
                     record(43, &i32s(&[0, 0, 100, 100])),

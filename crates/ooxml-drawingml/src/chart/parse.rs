@@ -493,7 +493,10 @@ fn parse_series<E: ChartXml>(
                 category_formula: child_formula(category.or(x_value)),
                 value_formula: child_formula(value),
                 value_format: value
-                    .and_then(|element| first_deep(element, "numCache", 0))
+                    .and_then(|element| {
+                        first_deep(element, "numCache", 0)
+                            .or_else(|| first_deep(element, "numLit", 0))
+                    })
                     .and_then(|cache| child(cache, "formatCode"))
                     .map(|code| code.descendant_text())
                     .filter(|code| !code.is_empty()),
