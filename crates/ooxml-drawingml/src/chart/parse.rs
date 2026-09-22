@@ -2,7 +2,8 @@
 
 use super::model::{
     ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartManualLayout,
-    ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries, ChartSpace,
+    ChartLabelRun, ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries,
+    ChartSpace,
     ChartTextProperties,
 };
 
@@ -69,6 +70,11 @@ pub trait ChartXml: Sized {
     /// `#RRGGBB` for an `a:solidFill` element, resolved through the host's own
     /// theme and color modifiers.
     fn solid_fill_hex(&self) -> Option<String>;
+    /// `#RRGGBB` for a theme slot such as `accent1`. `None` where the host has
+    /// no theme, which falls the series palette back to Office's defaults.
+    fn theme_color_hex(&self, _slot: &str) -> Option<String> {
+        None
+    }
 }
 
 /// Parse a `c:chartSpace` root. `None` when it carries no recognized plot.
@@ -231,6 +237,33 @@ fn text_from_rich_text<E: ChartXml>(parent: Option<&E>) -> Option<String> {
     nonempty_trimmed(&text)
 }
 
+/// `c:tx` as the runs it is made of, once it holds an `a:fld`: PowerPoint
+/// recomputes a field from the point it labels and only caches the text it
+/// last drew, so `[VALUE]` in the file is a stale snapshot, not the label.
+fn label_runs<E: ChartXml>(parent: Option<&E>) -> Option<Vec<ChartLabelRun>> {
+    let rich = first_deep(parent?, "rich", 0)?;
+    let mut runs = Vec::new();
+    let mut fields = false;
+    for paragraph in children(rich, "p") {
+        if !runs.is_empty() {
+            runs.push(ChartLabelRun::Text("\n".to_owned()));
+        }
+        for node in paragraph.child_elements() {
+            match node.local_name() {
+                "fld" => {
+                    fields = true;
+                    runs.push(ChartLabelRun::Field(
+                        node.attribute(None, "type").unwrap_or_default().to_owned(),
+                    ));
+                }
+                "r" => runs.push(ChartLabelRun::Text(node.descendant_text())),
+                _ => {}
+            }
+        }
+    }
+    fields.then_some(runs)
+}
+
 fn parse_number(raw: Option<&str>) -> Option<f64> {
     let value = raw?.trim();
     if value.is_empty() {
@@ -359,11 +392,16 @@ fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
     text_from_rich_text(child(series, "tx"))
 }
 
+/// A series the deck gives no `c:spPr` is drawn in the theme's accents, cycled
+/// in order — the deck's own palette, not Office's current default one.
 fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
-    let parsed = child(series, "spPr")
+    child(series, "spPr")
         .and_then(|properties| first_deep(properties, "solidFill", 0))
-        .and_then(E::solid_fill_hex);
-    parsed.unwrap_or_else(|| DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned())
+        .and_then(E::solid_fill_hex)
+        .or_else(|| series.theme_color_hex(&format!("accent{}", index % 6 + 1)))
+        .unwrap_or_else(|| {
+            DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned()
+        })
 }
 
 fn parse_series<E: ChartXml>(
@@ -470,6 +508,7 @@ fn parse_data_labels<E: ChartXml>(
         Some(ChartPointLabel {
             index,
             text: text_from_rich_text(child(point, "tx")),
+            runs: label_runs(child(point, "tx")),
             labels: label_switches(point),
         })
     });

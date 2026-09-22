@@ -411,6 +411,8 @@ pub struct PlotPoint<'a> {
     /// Literal label text, which wins over anything [`PlotDataLabels`] would
     /// compose.
     pub label: Option<&'a str>,
+    /// The same `c:tx` split at its fields, when it holds any.
+    pub label_runs: Option<&'a [super::model::ChartLabelRun]>,
     /// `c:explosion`, a percentage of the pie radius.
     pub explosion: Option<f64>,
     /// This point's cascade-resolved `c:dLbl`.
@@ -818,6 +820,11 @@ fn merge_point_label<'a>(
             .and_then(|point| point.text.as_deref())
             .or_else(|| group_point.and_then(|point| point.text.as_deref()))
     });
+    let label_runs = resolved.and_then(|_| {
+        series_point
+            .and_then(|point| point.runs.as_deref())
+            .or_else(|| group_point.and_then(|point| point.runs.as_deref()))
+    });
     let labels = Some(resolved.unwrap_or_default());
     if let Some(slot) = points
         .iter()
@@ -825,12 +832,14 @@ fn merge_point_label<'a>(
         .filter(|slot| wildcard.is_none_or(|wildcard| *slot <= wildcard))
     {
         points[slot].label = label;
+        points[slot].label_runs = label_runs;
         points[slot].labels = labels;
         return;
     }
     let mut point = PlotPoint {
         index: Some(index),
         label,
+        label_runs,
         labels,
         ..PlotPoint::default()
     };
@@ -1825,12 +1834,14 @@ fn series_color(series: Option<&PlotSeries<'_>>, index: usize) -> String {
         .unwrap_or_else(|| CHART_SERIES_COLORS[index % CHART_SERIES_COLORS.len()].to_owned())
 }
 
+/// How many points the series plots. `c:dPt` and `c:dLbl` overrides are
+/// deliberately not counted: PowerPoint keeps an entry for a point the sheet
+/// no longer has, and counting those drew empty categories past the data.
 fn series_length(series: &PlotSeries<'_>) -> usize {
     series
         .categories
         .len()
         .max(series.values.len())
-        .max(series.points.len())
         .max(series.x_values.len())
         .max(series.bubble_sizes.len())
 }
@@ -2009,6 +2020,26 @@ fn nice_unit(rough: f64) -> f64 {
     }
 }
 
+/// Excel's automatic major unit, which PowerPoint inherits and which does not
+/// depend on how large the chart is drawn: the decade below the range, stepped
+/// up to 2 or 5 decades once it would otherwise draw ten or twenty gridlines.
+/// Measured against PowerPoint: a stacked column topping out at 60 is drawn
+/// 0..70 in tens, never 0..60 in fives (#797).
+fn excel_unit(range: f64) -> f64 {
+    if !(range > 0.0) || !range.is_finite() {
+        return 1.0;
+    }
+    let major = 10.0_f64.powf(range.log10().round() - 1.0);
+    let steps = range / major;
+    if steps >= 20.0 {
+        major * 5.0
+    } else if steps >= 10.0 {
+        major * 2.0
+    } else {
+        major
+    }
+}
+
 /// Major intervals to aim for along `extent` px: one label per 20px, clamped to `2..=12`.
 fn target_intervals(extent: f64) -> f64 {
     const LABEL_PITCH_PX: f64 = 20.0;
@@ -2081,13 +2112,23 @@ fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
         .axis
         .and_then(|axis| axis.log_base)
         .filter(|base| *base > 1.0 && base.is_finite() && min > 0.0);
-    let transposed = family.transposed();
-    let extent = if transposed { plot.w } else { plot.h };
+    // Excel pads an automatic bound by a twentieth of the data's own span
+    // before rounding it out, which is what lifts a chart whose tallest bar
+    // lands exactly on a gridline clear of the plot's top edge.
+    let padding = (max - min) * 0.05;
+    if log_base.is_none() {
+        if pinned_max.is_none() && max > 0.0 {
+            max += padding;
+        }
+        if pinned_min.is_none() && min < 0.0 {
+            min -= padding;
+        }
+    }
     let unit = family
         .axis
         .and_then(|axis| axis.major_unit)
         .filter(|unit| unit.is_finite() && *unit > 0.0)
-        .unwrap_or_else(|| nice_unit((max - min) / target_intervals(extent)));
+        .unwrap_or_else(|| excel_unit(max - min));
     if log_base.is_none() {
         if pinned_min.is_none() {
             min = round_to_unit(min, unit, false);
@@ -2096,6 +2137,7 @@ fn value_scale(family: PlotFamily<'_>, plot: PlotArea) -> ValueScale {
             max = round_to_unit(max, unit, true);
         }
     }
+
     ValueScale {
         min,
         max,
@@ -2388,10 +2430,24 @@ fn point_label(
     percent_total: f64,
 ) -> Option<String> {
     let point = series.point(index);
+    let spec_for_runs = point_label_spec(series, index);
+    if let Some(runs) = point.and_then(|point| point.label_runs) {
+        let number_format = spec_for_runs.and_then(|spec| spec.number_format);
+        return Some(
+            runs.iter()
+                .map(|run| match run {
+                    super::model::ChartLabelRun::Text(text) => text.clone(),
+                    super::model::ChartLabelRun::Field(field) => {
+                        label_field(field, family, series, index, percent_total, number_format)
+                    }
+                })
+                .collect(),
+        );
+    }
     if let Some(text) = point.and_then(|point| point.label) {
         return Some(text.to_owned());
     }
-    let spec = point_label_spec(series, index)?;
+    let spec = spec_for_runs?;
     if !spec.shows_anything() {
         return None;
     }
@@ -2424,6 +2480,38 @@ fn point_label(
         parts.push(format_number(series.bubble_size(index)));
     }
     (!parts.is_empty()).then(|| parts.join(separator))
+}
+
+/// What an `a:fld` inside a `c:tx` stands for, drawn from the point it labels.
+fn label_field(
+    field: &str,
+    family: PlotFamily<'_>,
+    series: &SeriesView<'_>,
+    index: usize,
+    percent_total: f64,
+    number_format: Option<&str>,
+) -> String {
+    let formatted = |value: f64| {
+        number_format
+            .and_then(|code| format_with_code(value, code))
+            .unwrap_or_else(|| format_number(value))
+    };
+    match field {
+        "SERIESNAME" => series.series.name.unwrap_or_default().to_owned(),
+        "CATEGORYNAME" => category_label(family.series, index),
+        "VALUE" => formatted(series.value(index)),
+        "PERCENTAGE" => {
+            let share = if percent_total > 0.0 {
+                series.value(index) / percent_total
+            } else {
+                0.0
+            };
+            number_format
+                .and_then(|code| format_with_code(share, code))
+                .unwrap_or_else(|| format_percent(share))
+        }
+        _ => String::new(),
+    }
 }
 
 fn point_label_spec<'a>(series: &SeriesView<'a>, index: usize) -> Option<PlotDataLabels<'a>> {
@@ -4098,11 +4186,12 @@ mod tests {
         assert!(matches!(&ops[0], PlotOp::Rect { fill, .. } if fill == CHART_BACKGROUND_COLOR));
         assert!(matches!(&ops[1], PlotOp::Text { text, font, .. }
             if text == "Revenue" && *font == chart_title_font()));
+        // 10 and 20 scale to Excel's 0..25 in fives: five gridlines, two axes.
         assert_eq!(
             ops.iter()
                 .filter(|op| matches!(op, PlotOp::Line { .. }))
                 .count(),
-            7
+            8
         );
         assert!(
             ops.iter()
@@ -4732,11 +4821,19 @@ mod tests {
             "area fills one region"
         );
         let surface = grouped("surface", group("surface", vec![series("North", &data)]));
+        let bands: Vec<String> = plot_chart(&surface, rect())
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { fill, .. } if fill != CHART_BACKGROUND_COLOR => Some(fill.clone()),
+                _ => None,
+            })
+            .collect();
         assert!(
-            plot_chart(&surface, rect())
-                .iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#9E480E")),
-            "a contour band takes its colour from the value ramp"
+            bands.len() > 1
+                && bands
+                    .iter()
+                    .all(|fill| CHART_SERIES_COLORS.contains(&fill.as_str())),
+            "a contour band takes its colour from the value ramp, got {bands:?}"
         );
     }
 
@@ -6423,6 +6520,7 @@ mod tests {
                 show_value: Some(true),
                 show_legend_key: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: Some("pinned".to_owned()),
                     labels: ChartDataLabels::default(),
@@ -6449,6 +6547,7 @@ mod tests {
                 show_value: Some(true),
                 show_category_name: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -6475,6 +6574,7 @@ mod tests {
             Some(ChartDataLabels {
                 show_value: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -6611,6 +6711,7 @@ mod tests {
             Some(ChartDataLabels {
                 show_value: Some(true),
                 points: Some(vec![ChartPointLabel {
+                    runs: None,
                     index: Some(1.0),
                     text: None,
                     labels: ChartDataLabels {
@@ -6646,6 +6747,7 @@ mod tests {
         point_restored.data_labels = Some(ChartDataLabels {
             delete: Some(true),
             points: Some(vec![ChartPointLabel {
+                    runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {
@@ -6697,6 +6799,7 @@ mod tests {
         shown.data_labels = Some(ChartDataLabels {
             show_value: Some(true),
             points: Some(vec![ChartPointLabel {
+                    runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {

@@ -31,10 +31,14 @@ export interface ChartTextProperties {
   spacingPt?: number;
 }
 
+/** A piece of a `c:tx` label: written text, or a field recomputed per point. */
+export type ChartLabelRun = { Text: string } | { Field: string };
+
 /** One `c:dLbl`: an index plus the switches it overrides. */
 export interface ChartPointLabel {
   index?: number;
   text?: string;
+  runs?: ChartLabelRun[];
   labels: ChartDataLabels;
 }
 

@@ -222,7 +222,20 @@ pub struct ChartPointLabel {
     /// Literal `c:tx` text, which replaces every composed field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `c:tx` split at its `a:fld` boundaries, when it has any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<ChartLabelRun>>,
     pub labels: ChartDataLabels,
+}
+
+/// A piece of a `c:tx` label: text the deck wrote, or a field PowerPoint
+/// recomputes from the point every time it draws.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ChartLabelRun {
+    Text(String),
+    /// `a:fld/@type`, e.g. `VALUE` or `CATEGORYNAME`.
+    Field(String),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

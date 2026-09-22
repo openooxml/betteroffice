@@ -34,13 +34,16 @@ describe('resolution', () => {
     expect(resolveLastResortFace('Garamond', false, false).family).toBe('Liberation Serif');
     expect(resolveLastResortFace('Unknown', true, true).file).toBe('Carlito-BoldItalic.ttf');
     expect(resolveLastResortFace('Calibri Light', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-BoldItalic.ttf');
+    expect(resolveLastResortFace(' CALIBRI LIGHT ', true, true).file).toBe('Carlito-Italic.ttf');
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
-  test('a weight in the name is not read as a request for a bold face', () => {
-    expect(resolveLastResortFace('Archivo Black', false, false).file).toBe('Carlito-Regular.ttf');
-    expect(resolveLastResortFace('Inter SemiBold', false, false).file).toBe('Carlito-Regular.ttf');
+  test('a trailing light weight on a known family outranks the bold flag', () => {
+    expect(resolveLastResortFace('Calibri Light', true, false).file).toBe('Carlito-Regular.ttf');
+    expect(resolveLastResortFace('Inter Light', true, false).file).toBe('Inter-Regular.ttf');
+    expect(resolveLastResortFace('Archivo Black', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Lato Light', true, false).file).toBe('Carlito-Bold.ttf');
+    expect(resolveLastResortFace('Blackadder ITC', true, false).file).toBe('Carlito-Bold.ttf');
   });
 
   test('metric-compatible clones resolve to the family they clone', () => {

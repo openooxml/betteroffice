@@ -12,7 +12,7 @@ use ooxml_drawingml::{
 };
 use ooxml_text::{
     CompatFlags, FontId, FontStore, ShapeFeature, WORD_SMALL_CAPS_ADVANCE_SCALE,
-    break_opportunities, shape, single_line_box, uppercase_for_language,
+    presentation_break_opportunities, shape, single_line_box, uppercase_for_language,
 };
 use pptx_edit::{
     DeckSnapshot, ShapeKind, ShapeSnapshot, SlideScope, SlideSnapshot, StorySnapshot, TextStyle,
@@ -3151,7 +3151,7 @@ fn shape_paragraph(
         .iter()
         .map(|run| run.text.as_str())
         .collect::<String>();
-    let breaks = break_opportunities(&full_text)
+    let breaks = presentation_break_opportunities(&full_text)
         .into_iter()
         .map(|value| (value.byte_index, value.mandatory))
         .collect::<HashMap<_, _>>();

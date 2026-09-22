@@ -418,6 +418,36 @@ function looksSerif(family: string): boolean {
 }
 
 /**
+ * `Calibri Light` and `Inter Light` are families of their own on the machine
+ * that drew the reference: a Regular and an Italic, no bold member, so a run
+ * marked bold is still drawn at the family's own weight. Only a face lighter
+ * than the family's Regular is worth reading — a heavier one measured worse
+ * than leaving the run alone, and a name we cannot place at all is Calibri,
+ * whatever weight it claims (#797).
+ */
+const LIGHTER_THAN_REGULAR = new Set([
+  'thin',
+  'hairline',
+  'extralight',
+  'ultralight',
+  'semilight',
+  'light',
+  'medium',
+]);
+
+function lightVariantOf(
+  family: string,
+  italic: boolean,
+): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2) return undefined;
+  if (!LIGHTER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), false, italic);
+}
+
+/**
  * Choose a related family, then a serif or sans fallback.
  *
  * The sans fallback is Calibri because that is what Office substitutes for a
@@ -432,6 +462,8 @@ export function resolveLastResortFace(
   bold: boolean,
   italic: boolean,
 ): BundledFontFace {
+  const light = lightVariantOf(family, italic);
+  if (light) return light;
   const base = looksSerif(family) ? 'Times New Roman' : 'Calibri';
   return resolveMetricCompatFace(base, bold, italic)!;
 }
