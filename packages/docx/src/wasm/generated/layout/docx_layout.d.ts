@@ -162,8 +162,8 @@ export interface InitOutput {
     readonly vertical_move_by_handle: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly vertical_move_json: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly clear_measure_fonts: () => void;
-    readonly install_panic_hook: () => void;
     readonly close_display_list: (a: number) => void;
+    readonly install_panic_hook: () => void;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;

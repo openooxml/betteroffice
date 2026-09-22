@@ -108,7 +108,6 @@ export interface InitOutput {
     readonly vsdxdocument_canRedo: (a: number) => number;
     readonly vsdxdocument_canUndo: (a: number) => number;
     readonly vsdxdocument_clearUpdateObservation: (a: number) => void;
-    readonly vsdxdocument_clientId: (a: number) => number;
     readonly vsdxdocument_deleteShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_deleteShapesJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_drainUpdateEvent: (a: number) => [number, number];
@@ -140,6 +139,7 @@ export interface InitOutput {
     readonly vsdxdocument_subtreeGlueJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly vsdxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly vsdxdocument_version: () => [number, number];
+    readonly vsdxdocument_clientId: (a: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
