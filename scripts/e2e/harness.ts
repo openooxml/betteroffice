@@ -99,6 +99,7 @@ export function measure<T>(
 /** What scenario helpers need from a recorder; both recorder kinds qualify. */
 export interface Timer {
   op<T>(name: string, run: () => T, internal?: () => StageProfile): T;
+  opAsync<T>(name: string, run: () => Promise<T>): Promise<T>;
 }
 
 /** Collects one scenario's operations, in order, on one sample. */
@@ -114,9 +115,24 @@ export class ScenarioRecorder {
     return value;
   }
 
+  /** Times an awaited operation the way `op` times a synchronous one. */
+  async opAsync<T>(name: string, run: () => Promise<T>, meta: { actor?: string; detail?: Detail } = {}): Promise<T> {
+    const started = performance.now();
+    const value = await run();
+    this.ops.push({ op: name, e2eMs: performance.now() - started, ...(meta.actor ? { actor: meta.actor } : {}), ...(meta.detail ? { detail: meta.detail } : {}) });
+    return value;
+  }
+
   /** An operation whose latency was measured elsewhere (async boundaries). */
   record(timing: OpTiming): void {
     this.ops.push(timing);
+  }
+
+  /** The awaited document open that starts the scenario; also kept as `loadMs`. */
+  async loadAsync<T>(run: () => Promise<T>, actor?: string): Promise<T> {
+    const value = await this.opAsync('open', run, { actor });
+    this.loadMs = this.ops[this.ops.length - 1].e2eMs;
+    return value;
   }
 
   /** The document open that starts the scenario; also kept as `loadMs`. */
@@ -149,6 +165,14 @@ export class ActorRecorder {
 
   load<T>(run: () => T): T {
     return this.recorder.load(run, this.actor);
+  }
+
+  opAsync<T>(name: string, run: () => Promise<T>, detail?: Detail): Promise<T> {
+    return this.recorder.opAsync(name, run, { actor: this.actor, detail });
+  }
+
+  loadAsync<T>(run: () => Promise<T>): Promise<T> {
+    return this.recorder.loadAsync(run, this.actor);
   }
 }
 
