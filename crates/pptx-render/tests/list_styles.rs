@@ -68,6 +68,9 @@ fn clear_bullets(body: &mut TextBody) {
         .chain(body.paragraphs.iter_mut().map(|p| &mut p.properties))
     {
         properties.bullet = Some(Bullet::None);
+        // The marker stands in the hanging indent, so a paragraph that loses
+        // it would start its first line there instead.
+        properties.indent = Some(0);
     }
 }
 
@@ -102,6 +105,7 @@ fn without_bullets(mut package: PptxPackage) -> PptxPackage {
             .chain(&mut master.text_styles.other)
         {
             properties.bullet = Some(Bullet::None);
+            properties.indent = Some(0);
         }
     }
     package

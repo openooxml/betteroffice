@@ -2862,6 +2862,8 @@ fn resolve_default_tab(size: Option<i64>) -> f32 {
 }
 
 /// Declared stops in pixels, ascending, plus the implicit stop a hanging indent
+
+/// Declared `a:tabLst` stops, plus the implicit stop a hanging indent
 /// puts at the paragraph's left margin — the one a leading tab lands on.
 fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Vec<f32> {
     let mut resolved = stops
@@ -2881,14 +2883,17 @@ fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Ve
     resolved
 }
 
-/// How far left of the margin PowerPoint starts the paragraph's first line. A
-/// marker owns that space here, so only an unmarked hanging indent has any, and
-/// only the first tab of the first line is measured against it.
-fn hanging_space(paragraph: &ResolvedParagraph) -> f32 {
+/// `a:pPr/@indent` as the first line's own offset from the paragraph's left
+/// margin. A marker takes the indent instead — it is drawn there and the text
+/// still starts at the margin — so only an unmarked paragraph moves, and never
+/// past the left edge of the text box.
+fn first_line_indent(paragraph: &ResolvedParagraph) -> f32 {
     if paragraph.marker.is_some() || !paragraph.indent_px.is_finite() {
         return 0.0;
     }
-    (-paragraph.indent_px).clamp(0.0, paragraph.margin_left_px.max(0.0))
+    paragraph
+        .indent_px
+        .max(-paragraph.margin_left_px.max(0.0))
 }
 
 /// A stop the pen already sits on does not hold the tab.
@@ -2967,7 +2972,7 @@ fn layout_paragraph(
             &mut clusters,
             width,
             paragraph.margin_left_px.max(0.0),
-            hanging_space(paragraph),
+            first_line_indent(paragraph),
             &paragraph.tab_stops,
             paragraph.default_tab_px,
         )
@@ -3009,10 +3014,17 @@ fn layout_paragraph(
             })
             .collect::<Vec<_>>();
         let line_width = advances.iter().sum::<f32>() - trailing_tracking(&slice[..visible]);
+        let indent = if line_index == 0 {
+            first_line_indent(paragraph)
+        } else {
+            0.0
+        };
+        let line_start = x + indent;
+        let line_room = width - indent;
         let line_x = match paragraph.align {
-            TextAlign::Center => x + ((width - natural_width) / 2.0).max(0.0),
-            TextAlign::Right => x + (width - natural_width).max(0.0),
-            TextAlign::Left | TextAlign::Justify => x,
+            TextAlign::Center => line_start + ((line_room - natural_width) / 2.0).max(0.0),
+            TextAlign::Right => line_start + (line_room - natural_width).max(0.0),
+            TextAlign::Left | TextAlign::Justify => line_start,
         };
         let (natural, extents) = clusters_line_box(fonts, slice, scale)?;
         let line_box = shifted_line_box(
@@ -3321,7 +3333,7 @@ fn wrap_clusters(
     clusters: &mut [ShapedCluster],
     width: f32,
     left_offset: f32,
-    hanging: f32,
+    first_line_indent: f32,
     stops: &[f32],
     default_tab_px: f32,
 ) -> Vec<(usize, usize)> {
@@ -3329,6 +3341,13 @@ fn wrap_clusters(
     let mut start = 0;
     let mut line_index = 0;
     while start < clusters.len() {
+        let indent = if line_index == 0 {
+            first_line_indent
+        } else {
+            0.0
+        };
+        let width = (width - indent).max(1.0);
+        let left_offset = left_offset + indent;
         let mut cursor = start;
         let mut line_width = 0.0;
         let mut tabs_taken = 0_usize;
@@ -3337,17 +3356,17 @@ fn wrap_clusters(
         while cursor < clusters.len() {
             if clusters[cursor].tab {
                 let pen = left_offset + line_width;
-                let measured = if line_index == 0 && tabs_taken == 0 {
-                    pen - hanging
-                } else {
-                    pen
-                };
                 clusters[cursor].width =
-                    tab_advance(measured, pen, stops, default_tab_px, width - line_width);
+                    tab_advance(pen, pen, stops, default_tab_px, width - line_width);
                 tabs_taken += 1;
             }
             let cluster = &clusters[cursor];
+            // A space that lands at the end of a line hangs past the edge
+            // instead of pushing the word before it down, which is what lets
+            // PowerPoint fit a word we were breaking one early (#797).
             if cluster.text != "\n"
+                && !cluster.tab
+                && !cluster.text.chars().all(char::is_whitespace)
                 && line_width + cluster.width - cluster.tracking > width
                 && cursor > start
             {
@@ -5270,6 +5289,19 @@ mod tests {
             .flat_map(|run| run.glyphs.iter())
             .map(|glyph| glyph.x)
             .collect()
+    }
+
+    #[test]
+    fn an_unmarked_hanging_indent_starts_its_first_line_at_the_indent() {
+        let renderer = renderer();
+        let mut paragraph = paragraph(&renderer, "l", "one two three four five six seven");
+        paragraph.margin_left_px = 30.0;
+        paragraph.indent_px = -30.0;
+        let lines =
+            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 120.0, 1.0, false).unwrap();
+        assert!((lines[0].x - 0.0).abs() < 0.01, "{:?}", lines[0].x);
+        assert!((lines[1].x - 30.0).abs() < 0.01, "{:?}", lines[1].x);
+        assert!(lines[0].width > lines[1].width, "the first line is wider");
     }
 
     #[test]
@@ -8862,3 +8894,4 @@ mod tests {
         assert!((end.length - 13.228_347).abs() < 1e-6);
     }
 }
+
