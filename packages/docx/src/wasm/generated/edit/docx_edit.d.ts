@@ -759,6 +759,10 @@ export class EditSession {
      */
     start_update_event_observation(): void;
     /**
+     * Closes the current undo capture without adding an empty step.
+     */
+    stop_undo_capture(): void;
+    /**
      * The story's `canonical-stream-v1` FNV-1a checksum (see
      * [`crate::canonical`]) as a DECIMAL STRING, because a u64 exceeds the
      * JavaScript safe-integer range. Two stories with the same authored
@@ -1145,6 +1149,7 @@ export interface InitOutput {
     readonly editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly editsession_start_update_event_observation: (a: number) => [number, number];
+    readonly editsession_stop_undo_capture: (a: number) => void;
     readonly editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_story_ids: (a: number) => [number, number];
     readonly editsession_story_len: (a: number, b: number, c: number) => [number, number, number];

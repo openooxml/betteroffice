@@ -100,6 +100,7 @@ export const editsession_set_update_observer: (a: number, b: any) => [number, nu
 export const editsession_split_cell: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_split_paragraph: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
 export const editsession_start_update_event_observation: (a: number) => [number, number];
+export const editsession_stop_undo_capture: (a: number) => void;
 export const editsession_story_checksum: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_story_ids: (a: number) => [number, number];
 export const editsession_story_len: (a: number, b: number, c: number) => [number, number, number];

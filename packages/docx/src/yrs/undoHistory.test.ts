@@ -60,6 +60,58 @@ describe('session undo history', () => {
     }
   });
 
+  it('separates host actions while retaining sticky anchors through undo and redo', async () => {
+    const session = await createYrsSession({ clientId: 53008 });
+    try {
+      const { paraId } = session.createStory('body', 'Antes … depois');
+      const at = (offset: number): YrsLoc => ({ story: 'body', paraId, offset });
+      const marker = session.encodeStickyPosition(at(6));
+      session.beginUndoCapture();
+      session.insertText(at(0), 'Prefixo ');
+      session.stopUndoCapture();
+      session.deleteRange({ story: 'body', start: at(14), end: at(15) });
+      expect(text(session, 'body')).toBe('Prefixo Antes  depois');
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        expect(session.undo()).toBe(true);
+        expect(text(session, 'body')).toBe('Prefixo Antes … depois');
+        expect(session.resolveStickyPosition(marker)).toEqual(at(14));
+        expect(session.historyStories()).toEqual(['body']);
+        expect(session.redo()).toBe(true);
+        expect(text(session, 'body')).toBe('Prefixo Antes  depois');
+      }
+      expect(session.undo()).toBe(true);
+      expect(session.undo()).toBe(true);
+      expect(text(session, 'body')).toBe('Antes … depois');
+      expect(session.undo()).toBe(false);
+    } finally {
+      session.destroy();
+    }
+  });
+
+  it('does not create empty steps or clear redo when capture is stopped repeatedly', async () => {
+    const session = await createYrsSession({ clientId: 53009 });
+    try {
+      session.stopUndoCapture();
+      session.createStory('body', 'body');
+      session.beginUndoCapture();
+      session.stopUndoCapture();
+      session.stopUndoCapture();
+      expect(session.canUndo()).toBe(false);
+      session.insertText(endOf(session, 'body'), '!');
+      session.stopUndoCapture();
+      session.stopUndoCapture();
+      expect(session.undo()).toBe(true);
+      expect(text(session, 'body')).toBe('body');
+      expect(session.undo()).toBe(false);
+      session.stopUndoCapture();
+      expect(session.canRedo()).toBe(true);
+      expect(session.redo()).toBe(true);
+      expect(text(session, 'body')).toBe('body!');
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('groups keystrokes inside the capture window into one step', async () => {
     const session = await createYrsSession({ clientId: 53006 });
     try {

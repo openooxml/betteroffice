@@ -1855,6 +1855,11 @@ impl EditSession {
         self.undo.track(self.engine.doc());
     }
 
+    /// Closes the current undo capture without adding an empty step.
+    pub fn stop_undo_capture(&self) {
+        self.undo.add_undo_barrier();
+    }
+
     /// Notes the story a direct operation is about to edit; a different story
     /// than the previous edit or caret closes the current undo step.
     pub fn select_story(&self, story: &str) {

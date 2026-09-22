@@ -68,3 +68,22 @@ Package builds, demo startup, and CI run this step automatically.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx/CHANGELOG.md) · Apache-2.0.
+
+### Separate host undo actions
+
+Call `session.stopUndoCapture()` between independent programmatic actions to keep
+them in separate undo steps, even within the 500 ms typing capture window. It
+closes the current capture without disabling history, adding an empty step, or
+clearing redo. Repeated calls and calls before `beginUndoCapture()` are safe.
+
+```ts
+session.stopUndoCapture();
+session.insertText(location, 'Prefixo ');
+session.stopUndoCapture();
+session.deleteRange(markerRange);
+session.stopUndoCapture();
+```
+
+Place boundaries before and after a host action to isolate it from surrounding
+typing. Normal typing retains its existing coalescence behavior; this API does not
+make asynchronous edits or edits across stories one atomic transaction.
