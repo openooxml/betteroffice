@@ -18,7 +18,7 @@ fn keystroke_loop(bytes: &[u8]) -> Result<f64, Box<dyn std::error::Error>> {
     let at = document
         .paragraphs("body")?
         .first()
-        .map(|p| p.text.chars().count() as u32)
+        .map(|p| p.text.encode_utf16().count() as u32)
         .unwrap_or(0)
         .min(6);
     let t = Instant::now();
