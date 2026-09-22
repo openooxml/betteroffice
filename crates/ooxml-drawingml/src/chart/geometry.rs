@@ -273,6 +273,8 @@ pub struct PlotChart<'a> {
     pub axes: Vec<PlotAxis<'a>>,
     /// `c:chartSpace/c:spPr`: the chart's own ground.
     pub fill: Option<PlotFill<'a>>,
+    /// `c:plotArea/c:layout/c:manualLayout`, as fractions of the frame.
+    pub plot_layout: Option<PlotRect>,
 }
 
 /// The paint of a `c:spPr`.
@@ -582,6 +584,12 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                 ),
             },
             fill: space.fill.as_ref().map(plot_fill_from_model),
+            plot_layout: space.plot_layout.map(|layout| PlotRect {
+                x: layout.x,
+                y: layout.y,
+                w: layout.w,
+                h: layout.h,
+            }),
         }
     }
 }
@@ -645,7 +653,15 @@ fn plot_series_from_model<'a>(
     series: &'a super::model::ChartSeries,
     group_labels: Option<&'a super::model::ChartDataLabels>,
 ) -> PlotSeries<'a> {
-    let labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
+    let mut labels = plot_labels_from_model(None, series.data_labels.as_ref(), None, group_labels);
+    // A label that names no format is source-linked, so it reads the one the
+    // values were cached with — that is what makes 0.86 read as 86% (#797).
+    let cached = series.value_format.as_deref();
+    if let Some(spec) = labels.as_mut()
+        && spec.number_format.is_none()
+    {
+        spec.number_format = cached;
+    }
     let mut points: Vec<PlotPoint<'a>> = series
         .points
         .iter()
@@ -664,6 +680,13 @@ fn plot_series_from_model<'a>(
         })
         .collect();
     merge_point_labels(&mut points, group_labels, series.data_labels.as_ref());
+    for point in &mut points {
+        if let Some(spec) = point.labels.as_mut()
+            && spec.number_format.is_none()
+        {
+            spec.number_format = cached;
+        }
+    }
     PlotSeries {
         name: series.name.as_deref(),
         categories: &series.categories,
@@ -958,12 +981,23 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     };
     let region_y = y + title_h + band_top;
     let region_h = height - title_h - legend_h;
-    let plot = PlotArea {
-        x: plot_x,
-        y: region_y + axis_header,
-        w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
-        h: (height - title_h - 34.0 - legend_h - axis_header).max(24.0),
-        gutter,
+    let plot = match chart.plot_layout {
+        // The deck placed the inner plot itself; honouring it is what keeps
+        // manually sized charts where PowerPoint draws them (#797).
+        Some(manual) => PlotArea {
+            x: x + manual.x * width,
+            y: y + manual.y * height,
+            w: (manual.w * width).max(24.0),
+            h: (manual.h * height).max(24.0),
+            gutter,
+        },
+        None => PlotArea {
+            x: plot_x,
+            y: region_y + axis_header,
+            w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
+            h: (height - title_h - 34.0 - legend_h - axis_header).max(24.0),
+            gutter,
+        },
     };
 
     if chart.plot_groups.is_empty() {

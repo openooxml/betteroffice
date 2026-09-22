@@ -1462,8 +1462,8 @@ fn wmf_record(player: &mut Player, bytes: &[u8], function: usize, body: usize) -
         0x0103 if u16_at(bytes, body)? == 8 => {}
         // SETROP2, SETRELABS, SETTEXTALIGN and ESCAPE set state this replay
         // never reads.
-        0x0102 | 0x0104 | 0x0105 | 0x0107 | 0x0108 | 0x012E | 0x0201 | 0x0209 | 0x020A
-        | 0x0626 => {}
+        0x0102 | 0x0104 | 0x0105 | 0x0107 | 0x0108 | 0x012E | 0x0201 | 0x0209 | 0x020A | 0x0626 => {
+        }
         _ => return None,
     }
     Some(())

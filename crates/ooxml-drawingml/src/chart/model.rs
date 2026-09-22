@@ -24,6 +24,19 @@ pub struct ChartSpace {
     /// `c:chartSpace/c:spPr`: the chart's own background paint.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<ChartFill>,
+    /// `c:plotArea/c:layout/c:manualLayout`, when it places the inner plot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_layout: Option<ChartManualLayout>,
+}
+
+/// A `c:manualLayout` that places a chart part as fractions of the frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChartManualLayout {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
 }
 
 /// The fill of a `c:spPr`. Absent means the host paints its own default.
@@ -123,6 +136,10 @@ pub struct ChartSeries {
     pub category_formula: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub value_formula: Option<String>,
+    /// `c:val/c:numRef/c:numCache/c:formatCode`: the format the values were
+    /// cached with, which source-linked data labels read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_format: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub axis_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]

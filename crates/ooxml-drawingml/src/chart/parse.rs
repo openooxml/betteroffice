@@ -1,8 +1,9 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
 use super::model::{
-    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartMarker,
-    ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries, ChartSpace, ChartTextProperties,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartManualLayout,
+    ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries, ChartSpace,
+    ChartTextProperties,
 };
 
 pub const DEFAULT_SERIES_COLORS: [&str; 8] = [
@@ -81,6 +82,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
     if chart_elements.is_empty() {
         return None;
     }
+    let plot_layout = parse_plot_layout(plot_area);
     let budget = &mut Budget::new();
     let plot_groups = chart_elements
         .into_iter()
@@ -106,6 +108,7 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
             order: None,
             category_formula: None,
             value_formula: None,
+            value_format: None,
             axis_ids: None,
             points: None,
             grouping: None,
@@ -136,7 +139,31 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
         text: parse_text_properties(child(chart_space, "txPr")),
         title_text: title.and_then(parse_title_text),
         fill: parse_fill(child(chart_space, "spPr")),
+        plot_layout,
     })
+}
+
+/// `c:plotArea/c:layout/c:manualLayout`, read only when it places the inner
+/// plot from the frame edges — the mode PowerPoint writes and the one this
+/// layout can honour without re-deriving the axis gutters.
+fn parse_plot_layout<E: ChartXml>(plot_area: &E) -> Option<ChartManualLayout> {
+    let manual = child(child(plot_area, "layout")?, "manualLayout")?;
+    if val_attr(child(manual, "layoutTarget")) != Some("inner") {
+        return None;
+    }
+    for mode in ["xMode", "yMode"] {
+        if val_attr(child(manual, mode)) != Some("edge") {
+            return None;
+        }
+    }
+    let read = |name: &str| {
+        val_attr(child(manual, name))
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|value| value.is_finite())
+    };
+    let (x, y, w, h) = (read("x")?, read("y")?, read("w")?, read("h")?);
+    (w > 0.0 && h > 0.0 && (0.0..=1.0).contains(&x) && (0.0..=1.0).contains(&y))
+        .then_some(ChartManualLayout { x, y, w, h })
 }
 
 fn child<'a, E: ChartXml>(parent: &'a E, local: &str) -> Option<&'a E> {
@@ -391,6 +418,11 @@ fn parse_series<E: ChartXml>(
                 order: parse_index(val_attr(child(series, "order"))),
                 category_formula: child_formula(category.or(x_value)),
                 value_formula: child_formula(value),
+                value_format: value
+                    .and_then(|element| first_deep(element, "numCache", 0))
+                    .and_then(|cache| child(cache, "formatCode"))
+                    .map(|code| code.descendant_text())
+                    .filter(|code| !code.is_empty()),
                 axis_ids: (!axis_ids.is_empty()).then(|| axis_ids.to_vec()),
                 points: (!points.is_empty()).then_some(points),
                 grouping: grouping.map(str::to_owned),

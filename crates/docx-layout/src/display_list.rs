@@ -8251,6 +8251,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
             ),
         },
         fill: None,
+        plot_layout: None,
     }
 }
 
