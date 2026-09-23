@@ -929,3 +929,28 @@ fn moving_a_legacy_comment_patches_exported_master_coordinates() {
     assert!(session.redo());
     assert_eq!(session.comments().unwrap(), expected);
 }
+
+#[test]
+fn adding_a_missing_comment_position_preserves_marker_order() {
+    let mut original = parts(MODERN);
+    let xml = String::from_utf8(original[FIRST_PART].clone()).unwrap();
+    original.insert(
+        FIRST_PART.to_owned(),
+        xml.replacen("<p188:pos x=\"12345\" y=\"-6789\"/>", "", 1)
+            .into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&original.into_iter().collect::<Vec<_>>()).unwrap();
+    let session = DeckSession::open(&source, 9908).unwrap();
+    let root = first_root(&session);
+    session
+        .set_comment_position(&EditCtx::local("host"), &root.id, 914_400, 914_400)
+        .unwrap();
+    let saved = session.save().unwrap();
+    let xml = String::from_utf8(parts(&saved)[FIRST_PART].clone()).unwrap();
+    let marker = xml.find("</pc:sldMkLst>").unwrap();
+    let position = xml.find("<p188:pos").unwrap();
+    let replies = xml.find("<p188:replyLst>").unwrap();
+    assert!(marker < position && position < replies);
+    let reopened = DeckSession::open(&saved, 9909).unwrap();
+    assert_eq!(reopened.comments().unwrap(), session.comments().unwrap());
+}

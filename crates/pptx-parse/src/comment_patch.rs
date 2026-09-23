@@ -236,8 +236,17 @@ fn patch_list(
                     .with_attribute("x", x.to_string())
                     .with_attribute("y", y.to_string());
                 let bytes = serialize_xml_fragment(&position);
-                if let Some(first) = child_span.children.first() {
-                    source.replace(first.range.start..first.range.start, bytes);
+                if let Some((_, following)) = element
+                    .child_elements()
+                    .zip(&child_span.children)
+                    .find(|(child, _)| {
+                        matches!(
+                            child.local_name(),
+                            "replyLst" | "txBody" | "text" | "extLst"
+                        )
+                    })
+                {
+                    source.replace(following.range.start..following.range.start, bytes);
                 } else {
                     source.append(element, child_span, bytes);
                 }
