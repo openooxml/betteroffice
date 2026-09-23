@@ -3410,7 +3410,7 @@ fn add_shaped_segment(
 /// The part of a line that centring and right alignment measure: a space at
 /// the end of a wrapped line hangs past the margin, so PowerPoint does not
 /// count it when it places the line.
-fn aligned_slice<'a>(clusters: &'a [ShapedCluster]) -> &'a [ShapedCluster] {
+fn aligned_slice(clusters: &[ShapedCluster]) -> &[ShapedCluster] {
     let end = clusters
         .iter()
         .rposition(|cluster| !cluster.text.chars().all(char::is_whitespace))
@@ -4787,7 +4787,7 @@ fn image_dpi(bytes: &[u8]) -> Option<f32> {
                     return None;
                 }
                 let per_metre = u32::from_be_bytes(body[0..4].try_into().ok()?);
-                return (per_metre > 0).then(|| per_metre as f32 * 0.0254);
+                return (per_metre > 0).then_some(per_metre as f32 * 0.0254);
             }
             offset = offset.checked_add(length)?.checked_add(12)?;
         }
