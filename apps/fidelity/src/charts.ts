@@ -240,8 +240,7 @@ export function beeswarm(
     const dots = s('g', { class: `dots ${entry.cls}${entry.hollow ? ' hollow' : ''}` });
     for (const dot of swarms[index]!) {
       const cyDot = cy + dot.y;
-      const delay = Math.round(((dot.x - left) / (right - left)) * 700);
-      dots.append(s('circle', { cx: dot.x.toFixed(1), cy: cyDot.toFixed(1), r: radius, class: 'dot', style: `--d:${delay}ms` }));
+      dots.append(s('circle', { cx: dot.x.toFixed(1), cy: cyDot.toFixed(1), r: radius, class: 'dot' }));
       const list = positions.get(dot.id) ?? [];
       if (!list.length) positions.set(dot.id, list);
       list.push({ cx: dot.x, cy: cyDot, cls: entry.cls, key: entry.key });
@@ -364,7 +363,7 @@ export function cdf(
     const median = list[Math.ceil(n / 2) - 1]!;
     svg.append(
       s('path', { d: area, class: `area ${entry.cls}` }),
-      s('path', { d, class: `line draw ${entry.cls}`, pathLength: 1 }),
+      s('path', { d, class: `line ${entry.cls}` }),
       s('circle', { cx: x(median), cy: y(0.5), r: 3.5, class: `median ${entry.cls}` })
     );
   });
@@ -435,7 +434,7 @@ export function spectrum(rows: SpectrumRow[], width: number, options: { cls: str
   rows.forEach((row, index) => {
     const top = margin.top + index * rowHeight;
     const cy = top + (narrow ? 26 : rowHeight / 2);
-    const group = s('g', { class: 'op', style: `--d:${index * 45}ms` });
+    const group = s('g', { class: 'op' });
     group.append(s('rect', { x: 0, y: top, width, height: rowHeight, class: 'hit' }));
     group.append(
       s(
@@ -483,8 +482,8 @@ export interface WaffleCell {
 /** One square per item; hovering an item lights the same item in sibling waffles. */
 export function waffle(cells: WaffleCell[], columns: number, onPick: (id: string) => void): HTMLElement {
   const grid = h('div', { class: 'waffle', style: `--columns:${columns}` });
-  cells.forEach((cell, index) => {
-    grid.append(h('i', { class: `cell s-${cell.state}`, 'data-id': cell.id, style: `--d:${index * 6}ms` }));
+  cells.forEach((cell) => {
+    grid.append(h('i', { class: `cell s-${cell.state}`, 'data-id': cell.id }));
   });
   const byId = new Map(cells.map((cell) => [cell.id, cell]));
   grid.addEventListener('pointermove', (event) => {

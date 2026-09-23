@@ -54,8 +54,6 @@ const change = (to: number, from: number) => Number(to.toFixed(4)) - Number(from
 const columns = (count: number, aspect = 1.6) => Math.max(6, Math.ceil(Math.sqrt(count * aspect)));
 const median = (values: number[]) => percentile([...values].sort((left, right) => left - right), 50);
 const ratio = (part: number, whole: number) => (whole > 0 ? part / whole : 0);
-const listed = (names: string[]) =>
-  names.length > 1 ? `${names.slice(0, -1).join(', ')} and ${names.at(-1)}` : (names[0] ?? '');
 
 /** Overrides may only name this origin, so a shared link cannot pass off someone else's numbers. */
 const local = (name: string) => sameOrigin(params.get(name), window.location.href);
@@ -102,8 +100,7 @@ function legend(entries: EngineView[]): HTMLElement {
 }
 
 function count(value: number, digits: number, suffix = ''): HTMLElement {
-  const text = value.toFixed(digits);
-  return h('span', { class: 'count', 'data-to': text, 'data-digits': digits, 'data-suffix': suffix }, `${text}${suffix}`);
+  return h('span', {}, `${value.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}${suffix}`);
 }
 
 interface KpiBar {
@@ -113,11 +110,11 @@ interface KpiBar {
   share: number;
 }
 
-function kpi(tag: string, tagCls: string, label: string, value: HTMLElement, bars: KpiBar[], foot: string) {
+function kpi(label: string, value: HTMLElement, bars: KpiBar[], note?: string) {
   return h(
     'article',
     { class: 'kpi' },
-    h('div', { class: 'kpi-head' }, h('span', { class: `tag ${tagCls}` }, tag), h('span', {}, label)),
+    h('div', { class: 'kpi-label' }, label),
     h('div', { class: 'kpi-value' }, value),
     h(
       'div',
@@ -132,7 +129,7 @@ function kpi(tag: string, tagCls: string, label: string, value: HTMLElement, bar
         )
       )
     ),
-    h('p', { class: 'kpi-foot' }, foot)
+    note ? h('p', { class: 'kpi-note' }, note) : null
   );
 }
 
@@ -148,8 +145,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     const engine = views(summary, 'docx');
     tiles.push(
       kpi(
-        'DOCX',
-        'f-docx',
         'Page counts match Word',
         withUnit(count(percentage(pages.exact, pages.paged, pages.exact === pages.paged ? 0 : 1)!, pages.exact === pages.paged ? 0 : 1), '%'),
         SHOWN.filter((key) => docx.fidelity[key]?.paged).map((key) => ({
@@ -158,7 +153,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
           text: `${docx.fidelity[key]!.exact}/${docx.fidelity[key]!.paged}`,
           share: docx.fidelity[key]!.exact / docx.fidelity[key]!.paged,
         })),
-        `${pages.exact} of ${pages.paged} documents render as many pages as Word does.`
       )
     );
   }
@@ -168,8 +162,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     const ours = calc.engines[OURS];
     tiles.push(
       kpi(
-        'XLSX',
-        'f-xlsx',
         'Formulas match Excel',
         withUnit(count(percentage(ours.correct, ours.total, 2)!, 2), '%'),
         SHOWN.map((key) => ({
@@ -178,7 +170,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
           text: headlineText(calc.engines[key].correct, calc.engines[key].total),
           share: calc.engines[key].correct / Math.max(1, calc.engines[key].total),
         })),
-        `${thousands(ours.correct)} of ${thousands(ours.total)} formula results match Excel after a full recalculation.`
       )
     );
   }
@@ -189,8 +180,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     const slowest = Math.max(...SHOWN.map((key) => render.engines[key].meanMs ?? 0));
     tiles.push(
       kpi(
-        'PPTX',
-        'f-pptx',
         ratio >= 1 ? 'Faster slides than LibreOffice' : 'Slower slides than LibreOffice',
         withUnit(count(ratio >= 1 ? ratio : 1 / ratio, 1), '×'),
         SHOWN.map((key) => ({
@@ -199,16 +188,14 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
           text: msText(render.engines[key].meanMs),
           share: (render.engines[key].meanMs ?? 0) / slowest,
         })),
-        `Native CLI, first slide at 96 DPI, process start included. Mean over the ${render.common} decks every engine rendered.`
+        'Mean first-slide render, native CLI'
       )
     );
   }
   if (latency?.ops) {
     tiles.push(
       kpi(
-        'E2E',
-        'f-e2e',
-        'Calls inside one 60 Hz frame',
+        'Calls within one 60 Hz frame',
         withUnit(count(percentage(latency.withinFrame, latency.ops, 1)!, 1), '%'),
         FORMATS.filter((format) => latency.formats[format]?.ops).map((format) => {
           const entry = latency.formats[format]!;
@@ -219,7 +206,7 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
             share: entry.withinFrame / entry.ops,
           };
         }),
-        `${thousands(latency.withinFrame)} of ${thousands(latency.ops)} timed SDK calls across ${latency.cases} end-to-end cases on main (${short(latency.commit)}) took 16.7 ms or less.`
+        `End-to-end suite on main at ${short(latency.commit)}`
       )
     );
   } else {
@@ -228,8 +215,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     if (total)
       tiles.push(
         kpi(
-          'ALL',
-          'f-e2e',
           'Documents opened',
           withUnit(count(percentage(parsed, total, 2)!, 2), '%'),
           FORMATS.filter((format) => summary.formats[format].parsing).map((format) => {
@@ -241,7 +226,6 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
               share: entry.parsed / Math.max(1, entry.total),
             };
           }),
-          `${thousands(parsed)} of ${thousands(total)} corpus files open in the native API.`
         )
       );
   }
@@ -378,7 +362,7 @@ function scoreboard(summary: Summary): HTMLElement {
       h(
         'a',
         { class: 'board-group', href: `#${format}` },
-        h('span', { class: `tag f-${format}` }, format.toUpperCase()),
+        h('span', { class: 'format-label' }, format.toUpperCase()),
         h('span', {}, TITLES[format]),
         h('small', {}, `${plural(entry.documents, NOUNS[format])} · release v${entry.version}`)
       )
@@ -470,10 +454,10 @@ function similarity(summary: Summary, entry: FormatSummary): HTMLElement {
   const other = entry.fidelity.libreoffice?.mean ?? null;
   const caption =
     entry.format === 'xlsx'
-      ? 'Each dot is one workbook, scored over its recorded print ranges against Excel; BetterOffice renders with its browser renderer at 150 DPI. Hover to trace a workbook across engines, click to open its pages.'
-      : `Each dot is one ${NOUNS[entry.format][0]}’s page-penalized SSIM against ${OFFICE[entry.format]}; BetterOffice renders with its browser renderer at 150 DPI. Hover to trace it across engines, click to open its pages.`;
+      ? 'SSIM over the recorded print ranges against Excel, one dot per workbook. Click a dot to open its pages.'
+      : `Page-penalized SSIM against ${OFFICE[entry.format]}, one dot per ${NOUNS[entry.format][0]}. Click a dot to open its pages.`;
   return panel(
-    `Visual similarity, ${NOUNS[entry.format][0]} by ${NOUNS[entry.format][0]}`,
+    'Visual similarity',
     caption,
     mean === null
       ? null
@@ -542,8 +526,8 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
   }
   const ours = entry.fidelity[OURS]!;
   return panel(
-    'Page count against Word',
-    'One square per document, smallest first, in the same position for every engine.',
+    'Page count',
+    'Rendered page count against Word, one square per document, shortest first.',
     stat(`${ours.exact}/${ours.paged}`, `exact in v${entry.version}`, ours.exact >= (entry.fidelity.libreoffice?.exact ?? 0) ? 'up' : 'down'),
     h(
       'div',
@@ -595,8 +579,8 @@ function renderTimes(summary: Summary, entry: FormatSummary): HTMLElement | null
   const ratio = speedup(render.engines[OURS].meanMs, render.engines.libreoffice.meanMs);
   const unit = entry.format === 'pptx' ? 'slide' : 'page';
   return panel(
-    `First-${unit} render time`,
-    `The native CLI’s Rust rasterizer, not the browser renderer scored above: first ${unit} at 96 DPI, process start included, over the ${render.common} ${NOUNS[entry.format][1]} every engine rendered.`,
+    `${unit === 'slide' ? 'Slide' : 'Page'} render time`,
+    `Native CLI, first ${unit} at 96 DPI, over the ${render.common} ${NOUNS[entry.format][1]} every engine rendered.`,
     ratio ? stat(`${(ratio >= 1 ? ratio : 1 / ratio).toFixed(1)}×`, `${ratio >= 1 ? 'faster' : 'slower'} than LibreOffice`, ratio >= 1 ? 'up' : 'down') : null,
     lines(
       SHOWN.map((key) => ({
@@ -667,8 +651,8 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
   }
   const ours = calc.engines[OURS];
   return panel(
-    'Formula results against Excel',
-    `Formula caches are cleared, each workbook is recalculated from scratch, and every result cell is compared with Excel. One square per workbook with an Excel reference, largest first.`,
+    'Formula accuracy',
+    'Result cells matching Excel after a full recalculation, one square per workbook, largest first.',
     stat(
       headlineText(ours.correct, ours.total),
       `${thousands(ours.correct)} of ${thousands(ours.total)} match`,
@@ -703,7 +687,7 @@ function recalcTimes(summary: Summary, entry: FormatSummary): HTMLElement | null
   const ratio = speedup(calc.engines[OURS].meanMs, calc.engines.libreoffice.meanMs);
   return panel(
     'Recalculation time',
-    `Import, full recalculation and export by the native CLI, process start included, over the ${calc.common} workbooks every engine recalculates perfectly.`,
+    `Native CLI, over the ${calc.common} workbooks every engine recalculates perfectly.`,
     ratio ? stat(`${(ratio >= 1 ? ratio : 1 / ratio).toFixed(1)}×`, `${ratio >= 1 ? 'faster' : 'slower'} than LibreOffice`, ratio >= 1 ? 'up' : 'down') : null,
     lines(
       SHOWN.map((key) => ({
@@ -748,8 +732,8 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
     h('div', { class: 'movers-column' }, h('h4', {}, title), h('ol', {}, ...rows.map(item)));
   const note = failed.length ? `${plural(failed.length, NOUNS[entry.format])} did not score in ${version}.` : '';
   return panel(
-    'Where to look',
-    `Each row opens the page viewer. The bar runs from LibreOffice’s score to ${version}’s.`,
+    'Notable documents',
+    'Largest leads over LibreOffice and lowest scores. Each row opens the page viewer.',
     null,
     h(
       'div',
@@ -792,9 +776,8 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
     h(
       'header',
       { class: 'section-head' },
-      h('span', { class: `tag big f-${format}` }, format.toUpperCase()),
       h('h2', {}, TITLES[format]),
-      h('p', { class: 'meta' }, `${plural(entry.documents, NOUNS[format])} · reference ${office}`),
+      h('p', { class: 'meta' }, `${format.toUpperCase()} · ${plural(entry.documents, NOUNS[format])} · reference ${office}`),
       legend(SHOWN.filter((key) => entry.fidelity[key] || entry.render || entry.calculation).map((key) => engine[key]))
     ),
     panels
@@ -805,12 +788,13 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
   const head = h(
     'header',
     { class: 'section-head' },
-    h('span', { class: 'tag big f-e2e' }, 'E2E'),
     h('h2', {}, 'Editing latency'),
     h(
       'p',
       { class: 'meta' },
-      'The end-to-end suite drives the WASM SDK in Bun and the Python bindings through scripted editing sessions on pinned documents, including concurrent editors and Python ↔ web collaboration. Every SDK call is timed.'
+      latency?.ops
+        ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}, in WASM and Python.`
+        : 'SDK calls timed by the end-to-end suite on main, in WASM and Python.'
     )
   );
   if (!latency?.ops)
@@ -830,8 +814,6 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
     'div',
     { class: 'kpis compact' },
     kpi(
-      'CASES',
-      'f-e2e',
       'Scenarios passed',
       h('span', {}, count(latency.passed, 0), h('span', { class: 'unit' }, ` / ${latency.cases}`)),
       present.map((format) => ({
@@ -840,11 +822,9 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         text: `${latency.formats[format]!.passed}/${latency.formats[format]!.cases.length}`,
         share: latency.formats[format]!.passed / Math.max(1, latency.formats[format]!.cases.length),
       })),
-      `${plural(latency.multiEditor, ['case', 'cases'])} with several editors, ${latency.crossSdk} across Python and WASM.`
+      `${plural(latency.multiEditor, ['case', 'cases'])} with several editors, ${latency.crossSdk} across Python and WASM`
     ),
     kpi(
-      'CALLS',
-      'f-e2e',
       'Timed SDK calls',
       count(latency.ops, 0),
       present.map((format) => ({
@@ -853,11 +833,8 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         text: thousands(latency.formats[format]!.ops),
         share: ratio(latency.formats[format]!.ops, Math.max(...present.map((key) => latency.formats[key]!.ops))),
       })),
-      'Every open, edit, layout, sync, undo and save the scenarios make.'
     ),
     kpi(
-      'MEDIAN',
-      'f-e2e',
       'Median call',
       h('span', {}, count(latency.p50, latency.p50 < 10 ? 2 : 0), h('span', { class: 'unit' }, ' ms')),
       present.map((format) => ({
@@ -866,11 +843,9 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         text: duration(latency.formats[format]!.p50),
         share: ratio(latency.formats[format]!.p50, Math.max(...present.map((key) => latency.formats[key]!.p50))),
       })),
-      `Across all ${thousands(latency.ops)} calls. Each bar is one format’s median.`
+      `Across all ${thousands(latency.ops)} calls`
     ),
     kpi(
-      'P95',
-      'f-e2e',
       '95th percentile call',
       h('span', {}, count(latency.p95, latency.p95 < 10 ? 1 : 0), h('span', { class: 'unit' }, ' ms')),
       present.map((format) => ({
@@ -879,7 +854,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         text: duration(latency.formats[format]!.p95),
         share: ratio(latency.formats[format]!.p95, Math.max(...present.map((key) => latency.formats[key]!.p95))),
       })),
-      `Across all ${thousands(latency.ops)} calls. Each bar is one format’s 95th percentile.`
+      `Across all ${thousands(latency.ops)} calls`
     )
   );
 
@@ -926,7 +901,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         'div',
         {},
         h('h3', {}, 'Latency by operation'),
-        h('p', {}, 'The dot is the median call, the bar runs to the 95th percentile. Operations are grouped by verb, most frequent first, sorted by median.')
+        h('p', {}, 'Median call and 95th percentile per operation, grouped by verb.')
       ),
       switcher
     ),
@@ -934,8 +909,8 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
   );
 
   const all = panel(
-    'Every timed call',
-    'Share of SDK calls finished within a given time, per format.',
+    'Call latency',
+    'Share of SDK calls finished within a given time.',
     stat(headlineText(latency.withinFrame, latency.ops, 1), 'inside one 60 Hz frame', 'up'),
     lines(
       present.map((format) => ({ cls: `f-${format}`, label: format.toUpperCase(), values: latency.formats[format]!.values })),
@@ -951,7 +926,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
       h(
         'div',
         { class: 'case-row' },
-        h('span', { class: `tag f-${format}` }, format.toUpperCase()),
+        h('span', { class: `format-label f-${format}` }, format.toUpperCase()),
         waffle(
           entry.cases.map((item) => ({
             id: `${format}:${item.scenario}/${item.sample}`,
@@ -976,8 +951,8 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
   }
   const machine = latency.environment;
   const scenarios = panel(
-    'Every case',
-    'One square per scenario and document. Hover for what it does.',
+    'Scenarios',
+    'One square per scenario and document. Hover for details.',
     stat(`${latency.passed}/${latency.cases}`, 'passed', latency.passed === latency.cases ? 'up' : 'down'),
     h(
       'div',
@@ -1019,7 +994,7 @@ function methodSection(
   return h(
     'section',
     { class: 'section', id: 'method' },
-    h('header', { class: 'section-head' }, h('h2', {}, 'How it’s measured')),
+    h('header', { class: 'section-head' }, h('h2', {}, 'Method')),
     h(
       'div',
       { class: 'cards' },
@@ -1059,53 +1034,24 @@ async function endToEnd(): Promise<Latency | null> {
   }
 }
 
-const motion = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+const THEME = 'betteroffice-benchmarks-theme';
 
-function animate(root: Element): void {
-  for (const node of root.querySelectorAll<HTMLElement>('.count')) {
-    const to = Number(node.dataset.to);
-    const digits = Number(node.dataset.digits ?? 0);
-    const suffix = node.dataset.suffix ?? '';
-    const final = `${to.toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}${suffix}`;
-    if (!motion || !Number.isFinite(to)) {
-      node.textContent = final;
-      continue;
-    }
-    const started = performance.now();
-    const frame = (now: number) => {
-      const progress = Math.min(1, (now - started) / 1100);
-      const eased = progress === 1 ? 1 : 1 - 2 ** (-10 * progress);
-      node.textContent =
-        progress === 1
-          ? final
-          : `${(to * eased).toLocaleString('en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })}${suffix}`;
-      if (progress < 1) requestAnimationFrame(frame);
-    };
-    requestAnimationFrame(frame);
-  }
+function applyTheme(theme: 'light' | 'dark'): void {
+  document.documentElement.dataset.theme = theme;
+  find('theme').setAttribute('aria-label', theme === 'light' ? 'Switch to dark mode' : 'Switch to light mode');
 }
 
-function show(root: Element): void {
-  root.classList.add('in');
-  animate(root);
-  window.setTimeout(() => root.classList.add('settled'), 1900);
-}
+find('theme').addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  applyTheme(next);
+  try {
+    localStorage.setItem(THEME, next);
+  } catch {}
+});
+applyTheme(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark');
 
-const observer = new IntersectionObserver(
-  (entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      show(entry.target);
-      observer.unobserve(entry.target);
-    }
-  },
-  { threshold: 0.08 }
-);
-
-function reveal(root: Element): void {
-  if (motion) observer.observe(root);
-  else show(root);
-}
+const day = (iso: string) =>
+  new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 function fail(message: string): void {
   find('kpis').replaceChildren(
@@ -1116,7 +1062,6 @@ function fail(message: string): void {
       h('a', { href: `${REPO}#benchmarks` }, 'Read the generated tables on GitHub ↗')
     )
   );
-  find('run-label').textContent = 'Unavailable';
 }
 
 async function boot(): Promise<void> {
@@ -1133,52 +1078,34 @@ async function boot(): Promise<void> {
     const present = FORMATS.filter((format) => summary.formats[format].documents > 0);
     const total = present.reduce((sum, format) => sum + summary.formats[format].documents, 0);
     const releases = present.map((format) => `${format.toUpperCase()} ${summary.versions[format]}`).join(' · ');
-    find('eyebrow').replaceChildren(
-      h('i', { class: 'pulse' }),
-      local('report') ? 'Loaded report · ' : 'Latest release · ',
-      h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases),
-      publishedAt ? ` · measured ${when(publishedAt)}` : ''
-    );
-    const timed = present.some(
-      (format) => summary.formats[format].render?.common || summary.formats[format].calculation?.common
-    );
-    const checks = [
-      'each page is scored against the Office original',
-      ...(summary.formats.xlsx.calculation?.workbooks ? ['each formula result is checked against Excel'] : []),
-      ...(timed ? ['the native engines are timed on the same runner'] : []),
+    find('lede').textContent = `${thousands(total)} real documents, scored page by page against Microsoft Office${
+      summary.libreoffice ? ' and compared with LibreOffice' : ''
+    }.`;
+    const facts: [string, Node | string][] = [
+      ['Release', h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
+      ...(summary.libreoffice ? ([['Baseline', `LibreOffice ${summary.libreoffice}`]] as [string, string][]) : []),
+      ['Updated', local('report') ? 'Loaded report' : publishedAt ? day(publishedAt) : '—'],
+      ['Method', h('a', { href: METHOD }, 'How it’s measured')],
     ];
-    find('lede').replaceChildren(
-      h('b', {}, `${thousands(total)} real documents`),
-      ` with reference pages exported from Microsoft ${listed(present.map((format) => OFFICE[format]))}. Each run renders them in the latest BetterOffice release${summary.libreoffice ? ` and in LibreOffice ${summary.libreoffice}` : ''}: ${listed(checks)}.`
-    );
-    const run = find('run');
-    run.setAttribute('href', `${REPO}/actions/workflows/visual-fidelity.yml`);
-    find('run-label').textContent = publishedAt
-      ? `measured ${new Date(publishedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
-      : 'benchmarks';
+    find('facts').replaceChildren(...facts.map(([term, value]) => h('div', {}, h('dt', {}, term), h('dd', {}, value))));
     for (const format of FORMATS)
       if (!present.includes(format))
         document.querySelector(`nav a[href="#${format}"]`)?.setAttribute('hidden', '');
     find('kpis').replaceChildren(...heroKpis(summary, latency));
-    reveal(find('hero'));
     const board = find('scoreboard');
     board.hidden = false;
     board.append(scoreboard(summary));
-    reveal(board);
     const formats = find('formats');
     for (const format of present) {
       const section = formatSection(summary, format);
       formats.append(section);
-      reveal(section);
     }
   }
   const published = !local('e2e');
   const latencyNode = latencySection(latency, published);
   find('latency').replaceWith(latencyNode);
-  reveal(latencyNode);
   const method = methodSection(loaded?.summary ?? null, loaded?.href ?? null, latency, published);
   find('method').replaceWith(method);
-  reveal(method);
   document.body.classList.add('ready');
 }
 
