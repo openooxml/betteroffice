@@ -932,6 +932,8 @@ describe('PptxEditor host controls', () => {
       expect(() => api!.save()).toThrow('flushPendingInput');
       await act(async () => { reader.dispatchEvent(new Event('error')); });
       await expect(flush).rejects.toThrow();
+      await api!.flushPendingInput();
+      expect(api!.save().byteLength).toBeGreaterThan(0);
     } finally { read.mockRestore(); }
   });
 });

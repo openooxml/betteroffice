@@ -350,7 +350,6 @@ function PptxEditorContent({
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
   const pendingInputRef = useRef(new Set<Promise<void>>());
-  const inputErrorRef = useRef<unknown>(null);
   const pendingSaveRef = useRef<Promise<void> | null>(null);
   const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
   const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
@@ -359,7 +358,6 @@ function PptxEditorContent({
       await Promise.all([...pendingInputRef.current]);
       if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
     }
-    if (inputErrorRef.current) throw inputErrorRef.current;
     if (pointerGestureRef.current || resizeRef.current) {
       throw new Error('Finish the pointer gesture before flushing input');
     }
@@ -664,7 +662,6 @@ function PptxEditorContent({
     recentClickRef.current = null;
     setError(null);
     pendingInputRef.current = new Set();
-    inputErrorRef.current = null;
     pendingSaveRef.current = null;
     imageCacheRef.current.clear();
     if (!file) return;
@@ -708,7 +705,6 @@ function PptxEditorContent({
               if (pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
                 throw new Error('Await flushPendingInput before saving pending input');
               }
-              if (inputErrorRef.current) throw inputErrorRef.current;
               return opened.save();
             },
             selectText,
@@ -1138,7 +1134,6 @@ function PptxEditorContent({
       if (next) stageRef.current?.focus();
     } catch (value) {
       if (handleRef.current === handle && imageInsertAllowedRef.current) {
-        inputErrorRef.current = value;
         reportError(value);
       }
       throw value;

@@ -62,8 +62,8 @@ Flush rejects stale document handles, failed input, and unfinished pointer
 gestures. Finish or cancel the gesture before retrying.
 
 PPTX keyboard and notes edits are synchronous; flushing also waits for accepted
-image imports. Reported asynchronous input failures continue to reject flushing
-until the document is reopened.
+image imports. A failed import rejects a flush waiting for it and is reported
+through `onError`; it does not block later saves of the existing presentation.
 
 `api.getPositionAtPoint(clientX, clientY)` returns a shape or text hit with
 `slide` (1-based), `slideId`, and `shapeId`; text hits include `storyId` and the
