@@ -3623,9 +3623,14 @@ fn spaced_line_box(
     if !target.is_finite() || target < 0.0 {
         return content;
     }
+    // PowerPoint splits the room a line box does not fill evenly above and
+    // below it, so a paragraph whose spacing asks for more than its face
+    // measures starts that much lower.
     if target >= content.height() {
+        let slack = (target - content.ascent - content.descent) / 2.0;
         return ooxml_text::LineBox {
-            leading: target - content.ascent - content.descent,
+            ascent: content.ascent + slack,
+            leading: slack,
             ..content
         };
     }
@@ -7485,8 +7490,11 @@ mod tests {
         let pitch = lines[1].y - lines[0].y;
         assert!((pitch - 1.5 * 1.2 * points_to_px(size_pt)).abs() < 0.05);
 
+        // The room the spacing adds is split above and below the line, so a
+        // looser paragraph starts lower by half of what it added.
         let (single, _) = wrapped_text_box(8_016, None, None, 1_524_000, true);
-        assert!((lines[0].baseline - single[0].baseline).abs() < 0.001);
+        let added = (lines[0].height - single[0].height) / 2.0;
+        assert!((lines[0].baseline - single[0].baseline - added).abs() < 0.001);
     }
 
     #[test]
