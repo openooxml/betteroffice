@@ -6,7 +6,7 @@
 //! built from explicit `Options` around an injectable [`Clock`]: native code reads the system
 //! clock and the wasm host injects `Date.now`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
@@ -21,11 +21,69 @@ pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 /// Target undo depth; yrs exposes no stack-trim API.
 pub const UNDO_DEPTH: usize = 100;
 
+/// Policy for grouping tracked local transactions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UndoCaptureMode {
+    #[default]
+    Auto,
+    PerEdit,
+    Manual,
+}
+
+struct CaptureClock {
+    source: Arc<dyn Clock>,
+    state: Mutex<CaptureClockState>,
+}
+
+struct CaptureClockState {
+    mode: UndoCaptureMode,
+    ticks: u64,
+    last_source: u64,
+}
+
+impl CaptureClock {
+    fn new(source: Arc<dyn Clock>) -> Self {
+        Self {
+            state: Mutex::new(CaptureClockState {
+                mode: UndoCaptureMode::Auto,
+                ticks: 1,
+                last_source: source.now(),
+            }),
+            source,
+        }
+    }
+
+    fn mode(&self) -> UndoCaptureMode {
+        self.state.lock().unwrap().mode
+    }
+
+    fn set_mode(&self, mode: UndoCaptureMode) {
+        self.state.lock().unwrap().mode = mode;
+    }
+}
+
+impl Clock for CaptureClock {
+    fn now(&self) -> u64 {
+        let mut state = self.state.lock().unwrap();
+        let now = self.source.now();
+        // Yrs has no runtime timeout setter; its clock controls capture policy.
+        let elapsed = match state.mode {
+            UndoCaptureMode::Auto => now.saturating_sub(state.last_source),
+            UndoCaptureMode::PerEdit => UNDO_CAPTURE_TIMEOUT_MS,
+            UndoCaptureMode::Manual => 0,
+        };
+        state.last_source = now;
+        state.ticks = state.ticks.saturating_add(elapsed);
+        state.ticks
+    }
+}
+
 /// The contract-shaped undo surface over yrs [`yrs::undo::UndoManager`].
 pub struct DocUndoManager {
     inner: yrs::undo::UndoManager<()>,
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
+    clock: Arc<CaptureClock>,
 }
 
 /// System clock on native targets. `wasm32-unknown-unknown` has no ambient clock, so the fallback
@@ -59,11 +117,12 @@ impl DocUndoManager {
     /// Tracks the local client id only, so agent, remote and system transactions (string
     /// origins) never enter the history; groups edits within [`UNDO_CAPTURE_TIMEOUT_MS`].
     fn new(doc: &EditingDoc, clock: Arc<dyn Clock>) -> Self {
+        let clock = Arc::new(CaptureClock::new(clock));
         let options = yrs::undo::Options {
             capture_timeout_millis: UNDO_CAPTURE_TIMEOUT_MS,
             tracked_origins: HashSet::from([Origin::from(doc.client_id())]),
             capture_transaction: None,
-            timestamp: clock,
+            timestamp: clock.clone(),
             init_undo_stack: Vec::new(),
             init_redo_stack: Vec::new(),
         };
@@ -86,9 +145,22 @@ impl DocUndoManager {
             })
         };
         Self {
+            clock,
             inner,
             changed_stories,
             _popped: popped,
+        }
+    }
+
+    pub fn capture_mode(&self) -> UndoCaptureMode {
+        self.clock.mode()
+    }
+
+    /// Changes capture policy and closes the current group, retaining history.
+    pub fn set_capture_mode(&mut self, mode: UndoCaptureMode) {
+        if self.capture_mode() != mode {
+            self.add_undo_barrier();
+            self.clock.set_mode(mode);
         }
     }
 
@@ -155,6 +227,7 @@ pub struct UndoSession {
     clock: Arc<dyn Clock>,
     manager: RefCell<Option<DocUndoManager>>,
     story: RefCell<Option<String>>,
+    mode: Cell<UndoCaptureMode>,
 }
 
 impl Default for UndoSession {
@@ -174,6 +247,7 @@ impl UndoSession {
             clock,
             manager: RefCell::new(None),
             story: RefCell::new(None),
+            mode: Cell::new(UndoCaptureMode::Auto),
         }
     }
 
@@ -181,18 +255,33 @@ impl UndoSession {
     pub fn track(&self, doc: &EditingDoc) {
         let mut manager = self.manager.borrow_mut();
         if manager.is_none() {
-            *manager = Some(DocUndoManager::new(doc, Arc::clone(&self.clock)));
+            let mut next = DocUndoManager::new(doc, Arc::clone(&self.clock));
+            next.set_capture_mode(self.mode.get());
+            *manager = Some(next);
         }
     }
 
-    /// Records the story holding the caret; moving to another story closes the capture group,
-    /// so each undo step stays within one story.
+    /// Story switches close capture unless manual grouping is selected.
     pub fn select_story(&self, story: &str) {
         if self.story.borrow().as_deref() == Some(story) {
             return;
         }
         *self.story.borrow_mut() = Some(story.to_owned());
-        self.add_undo_barrier();
+        if self.mode.get() != UndoCaptureMode::Manual {
+            self.add_undo_barrier();
+        }
+    }
+
+    pub fn capture_mode(&self) -> UndoCaptureMode {
+        self.mode.get()
+    }
+
+    /// Sets capture policy before or during tracking without clearing history.
+    pub fn set_capture_mode(&self, mode: UndoCaptureMode) {
+        self.mode.set(mode);
+        if let Some(manager) = self.manager.borrow_mut().as_mut() {
+            manager.set_capture_mode(mode);
+        }
     }
 
     pub fn undo(&self) -> bool {
@@ -344,6 +433,98 @@ mod tests {
         assert_eq!(text(&doc, HEADER), "header");
         assert_eq!(text(&doc, BODY), "body!");
         assert_eq!(undo.changed_stories(), [HEADER]);
+    }
+
+    #[test]
+    fn per_edit_capture_ignores_the_wall_clock() {
+        let doc = seed();
+        let (undo, _now) = stepped_session();
+        undo.set_capture_mode(UndoCaptureMode::PerEdit);
+        undo.track(&doc);
+        append(&doc, BODY, "a");
+        append(&doc, BODY, "b");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "bodya");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+        assert!(!undo.undo());
+    }
+
+    #[test]
+    fn manual_capture_spans_time_and_stories_until_a_boundary() {
+        let doc = seed();
+        let (undo, now) = stepped_session();
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        undo.track(&doc);
+        undo.select_story(BODY);
+        append(&doc, BODY, "a");
+        now.fetch_add(86_400_000, Ordering::Relaxed);
+        undo.select_story(HEADER);
+        append(&doc, HEADER, "b");
+        undo.add_undo_barrier();
+        append(&doc, BODY, "c");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "bodya");
+        assert_eq!(text(&doc, HEADER), "headerb");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+        assert_eq!(text(&doc, HEADER), "header");
+        assert_eq!(undo.changed_stories(), [BODY, HEADER]);
+        assert!(!undo.undo());
+        assert!(undo.redo());
+        assert_eq!(text(&doc, BODY), "bodya");
+        assert_eq!(text(&doc, HEADER), "headerb");
+    }
+
+    #[test]
+    fn manual_capture_excludes_remote_transactions() {
+        let doc = seed();
+        let peer = EditingDoc::new(200);
+        peer.apply_update_v1(&doc.encode_state_as_update_v1())
+            .unwrap();
+        let (undo, now) = stepped_session();
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        undo.track(&doc);
+        append(&doc, BODY, "a");
+        append(&peer, HEADER, "remote");
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        now.fetch_add(600, Ordering::Relaxed);
+        append(&doc, BODY, "b");
+        assert!(undo.undo());
+        assert_eq!(text(&doc, BODY), "body");
+        assert_eq!(text(&doc, HEADER), "headerremote");
+        assert!(!undo.undo());
+    }
+
+    #[test]
+    fn switching_modes_and_repeating_a_mode_preserve_history() {
+        let doc = seed();
+        let (undo, now) = stepped_session();
+        undo.track(&doc);
+        append(&doc, BODY, "a");
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        append(&doc, BODY, "b");
+        now.fetch_add(600, Ordering::Relaxed);
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        append(&doc, BODY, "c");
+        undo.set_capture_mode(UndoCaptureMode::PerEdit);
+        append(&doc, BODY, "d");
+        append(&doc, BODY, "e");
+        undo.set_capture_mode(UndoCaptureMode::Auto);
+        append(&doc, BODY, "f");
+        append(&doc, BODY, "g");
+        for expected in ["bodyabcde", "bodyabcd", "bodyabc", "bodya", "body"] {
+            assert!(undo.undo());
+            assert_eq!(text(&doc, BODY), expected);
+        }
+        assert!(!undo.undo());
+        undo.set_capture_mode(UndoCaptureMode::Manual);
+        assert!(undo.can_redo());
+        for expected in ["bodya", "bodyabc", "bodyabcd", "bodyabcde", "bodyabcdefg"] {
+            assert!(undo.redo());
+            assert_eq!(text(&doc, BODY), expected);
+        }
     }
 
     #[test]

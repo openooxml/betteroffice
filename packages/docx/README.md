@@ -69,21 +69,34 @@ Package builds, demo startup, and CI run this step automatically.
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx/CHANGELOG.md) · Apache-2.0.
 
-### Separate host undo actions
+### Undo capture modes and boundaries
 
-Call `session.stopUndoCapture()` between independent programmatic actions to keep
-them in separate undo steps, even within the 500 ms typing capture window. It
-closes the current capture without disabling history, adding an empty step, or
-clearing redo. Repeated calls and calls before `beginUndoCapture()` are safe.
+`session.setUndoCaptureMode(mode)` selects how tracked local transactions are
+combined into undo steps. `session.undoCaptureMode()` returns the current mode.
+
+| Mode | Grouping |
+| --- | --- |
+| `auto` (default) | Edits within 500 ms coalesce; switching stories closes the group. |
+| `per-edit` | Each committed local transaction gets its own undo step. A multi-operation transaction remains one step. |
+| `manual` | Edits coalesce across pauses and stories until an explicit boundary. |
+
+`session.addUndoBoundary()` closes the current group in any mode. Changing modes
+also closes the group; setting the same mode again does not. Both operations
+preserve undo/redo history and are safe before capture starts. Repeated boundaries
+create no empty undo steps. Remote transactions remain outside local undo history.
 
 ```ts
-session.stopUndoCapture();
-session.insertText(location, 'Prefixo ');
-session.stopUndoCapture();
+session.setUndoCaptureMode('manual');
+session.insertText(firstLocation, 'Prefixo ');
+session.insertText(secondLocation, 'Suffix');
+session.addUndoBoundary();
 session.deleteRange(markerRange);
-session.stopUndoCapture();
+session.addUndoBoundary();
+session.setUndoCaptureMode('auto');
 ```
 
-Place boundaries before and after a host action to isolate it from surrounding
-typing. Normal typing retains its existing coalescence behavior; this API does not
-make asynchronous edits or edits across stories one atomic transaction.
+The two insertions undo together; marker deletion is a separate step. Boundaries
+are also available in automatic mode when a host action needs to be isolated from
+surrounding typing. Undo/redo close capture as usual. Manual mode controls history
+grouping; it does not defer updates, flush pending input, or provide atomic execution.
+The host must close manual groups so later unrelated edits do not join them.
