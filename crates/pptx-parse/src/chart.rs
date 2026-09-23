@@ -1,7 +1,9 @@
 //! PPTX packaging around the shared DrawingML chart part.
 
 use ooxml_drawingml::chart::{ChartSpace, ChartXml, parse_chart_space};
-use ooxml_drawingml::{Theme, get_theme_color, resolve_color_value_to_hex_with_theme};
+use ooxml_drawingml::{
+    Theme, get_theme_color, resolve_color_value_to_hex_with_theme, resolve_color_value_to_rgba_hex,
+};
 
 use crate::drawing::parse_color_container;
 use crate::xml::XmlElement;
@@ -62,10 +64,19 @@ impl ChartXml for ChartElement<'_> {
     }
 
     fn solid_fill_hex(&self) -> Option<String> {
-        resolve_color_value_to_hex_with_theme(
-            parse_color_container(self.element).as_ref(),
-            Some(self.theme),
-        )
+        // A series fill carries `a:alpha` as often as not — a stack of one
+        // colour at falling opacities is how a deck bands its bars. An opaque
+        // fill stays six digits, which is what every other consumer reads.
+        let color = parse_color_container(self.element);
+        let translucent = color
+            .as_ref()
+            .and_then(|color| color.alpha)
+            .is_some_and(|alpha| alpha.is_finite() && alpha < 1.0);
+        if translucent {
+            resolve_color_value_to_rgba_hex(color.as_ref(), Some(self.theme))
+        } else {
+            resolve_color_value_to_hex_with_theme(color.as_ref(), Some(self.theme))
+        }
     }
 
     fn theme_color_hex(&self, slot: &str) -> Option<String> {

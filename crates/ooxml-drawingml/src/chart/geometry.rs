@@ -2583,6 +2583,7 @@ fn push_point_label<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     percent_total: f64,
+    align: PlotTextAlign,
 ) {
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
@@ -2598,7 +2599,15 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let step = style.font.size_px * 1.2;
     let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
     for (line, text) in lines.iter().enumerate() {
-        push_text(ops, text.trim(), x, top + step * line as f64, width, &style);
+        push_text_aligned(
+            ops,
+            text.trim(),
+            x,
+            top + step * line as f64,
+            width,
+            &style,
+            align,
+        );
     }
 }
 
@@ -2791,6 +2800,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y + bands.bar,
                     48.0,
                     total,
+                    PlotTextAlign::Start,
                 );
             } else {
                 let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
@@ -2806,6 +2816,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 let (fraction, offset) = bar_label_anchor(
                     point_label_spec(series, cat_idx).and_then(|labels| labels.position),
                 );
+                // PowerPoint centres a column's label on the bar it labels.
                 push_point_label(
                     ops,
                     family,
@@ -2816,6 +2827,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y0 + (y1 - y0) * fraction - offset,
                     bands.bar.max(32.0),
                     total,
+                    PlotTextAlign::Center,
                 );
             }
         }
@@ -2914,6 +2926,7 @@ fn emit_line<S: PlotSink + ?Sized>(
                 y - size,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -2991,6 +3004,7 @@ fn emit_area<S: PlotSink + ?Sized>(
                 *y - 3.0,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3147,6 +3161,7 @@ fn emit_scatter<S: PlotSink + ?Sized>(
                 y - 4.0,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -3221,6 +3236,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
                 y,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3333,6 +3349,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
                 *y - 4.0,
                 48.0,
                 category_total(family, index),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3800,6 +3817,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             oy + reach * middle.sin(),
             48.0,
             total,
+            PlotTextAlign::Start,
         );
         angle += sweep;
     }
@@ -4007,9 +4025,9 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         return Some(format_number(value));
     }
     let section = &strip_modifiers(section)?;
-    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?'])
+    if section.contains(['y', 'd', 'h', 's', 'E', 'e'])
         || section.contains("m/")
-        || !section.contains(['0', '#'])
+        || !section.contains(['0', '#', '?'])
     {
         return None;
     }
@@ -4027,7 +4045,14 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     let scaled = if percent { value * 100.0 } else { value };
     let factor = 10_f64.powi(digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
-    let mut body = format!("{rounded:.digits$}");
+    // `#` and `?` are placeholders a digit fills only where it is significant,
+    // so a zero with neither a `0` nor a decimal writes no figure at all —
+    // which is how an accounting format draws its dash and nothing else.
+    let mut body = if rounded == 0.0 && !section.contains('0') {
+        String::new()
+    } else {
+        format!("{rounded:.digits$}")
+    };
     if section.contains(',') {
         body = group_thousands(&body);
     }
@@ -6307,6 +6332,10 @@ mod tests {
         assert_eq!(format_with_code(7.0, "General").as_deref(), Some("7"));
         assert_eq!(format_with_code(7.0, "0 \"kg\"").as_deref(), Some("7 kg"));
         assert_eq!(format_with_code(7.0, "yyyy-mm-dd"), None);
+        let ledger = "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"??_);_(@_)";
+        assert_eq!(format_with_code(800.0, ledger).as_deref(), Some("$800"));
+        assert_eq!(format_with_code(0.0, ledger).as_deref(), Some("$-"));
+        assert_eq!(format_with_code(-40.0, ledger).as_deref(), Some("$(40)"));
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
         assert_eq!(format_percent(0.5), "50%");
     }
