@@ -362,12 +362,31 @@ function looksSerif(family: string): boolean {
   );
 }
 
+const HEAVIER_THAN_REGULAR = new Set([
+  'black',
+  'heavy',
+  'extrabold',
+  'ultrabold',
+  'extrablack',
+  'ultra',
+]);
+
+function heavyVariantOf(family: string, italic: boolean): BundledFontFace | undefined {
+  const words = family.trim().split(/[\s-]+/);
+  if (words.length < 2 || !HEAVIER_THAN_REGULAR.has(words[words.length - 1].toLowerCase())) {
+    return undefined;
+  }
+  return resolveMetricCompatFace(words.slice(0, -1).join(' '), true, italic);
+}
+
 /** Choose a related family, then a serif or sans fallback. */
 export function resolveLastResortFace(
   family: string,
   bold: boolean,
   italic: boolean,
 ): BundledFontFace {
+  const heavy = heavyVariantOf(family, italic);
+  if (heavy) return heavy;
   const base = family.trim().toLowerCase() === 'calibri light'
     ? 'Calibri'
     : looksSerif(family) ? 'Times New Roman' : 'Arial';
