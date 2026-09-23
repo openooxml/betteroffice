@@ -2209,7 +2209,14 @@ fn resolve_content(
             .alignment
             .as_deref()
             .or(properties.alignment.as_deref());
-        let marker = resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering)
+        // A blank paragraph between list items is spacing, not an item:
+        // PowerPoint neither marks it nor counts it towards the next number.
+        let marker = paragraph
+            .runs
+            .iter()
+            .any(|run| !run.text.is_empty())
+            .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
+            .flatten()
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
