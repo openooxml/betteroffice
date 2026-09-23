@@ -1,4 +1,5 @@
 import {
+  SWATCH,
   type SwarmSeries,
   beeswarm,
   cdf,
@@ -55,6 +56,14 @@ const columns = (count: number, aspect = 1.6) => Math.max(6, Math.ceil(Math.sqrt
 const median = (values: number[]) => percentile([...values].sort((left, right) => left - right), 50);
 const ratio = (part: number, whole: number) => (whole > 0 ? part / whole : 0);
 
+const SECTION = 'pt-18 md:pt-24';
+const PANELS = 'grid grid-cols-1 gap-3.5 md:grid-cols-2';
+const STRIP = 'grid grid-cols-1 gap-px overflow-hidden rounded-panel border border-line bg-line md:grid-cols-2 lg:grid-cols-4';
+const BOX = 'min-w-0 rounded-panel border border-line bg-panel p-4 md:p-5.5';
+const WAFFLES = 'grid grid-cols-2 gap-3.5 md:gap-7';
+const MONO = 'font-mono leading-[normal]';
+const LINK = 'underline decoration-line-2 underline-offset-3 hover:decoration-fg';
+
 /** Overrides may only name this origin, so a shared link cannot pass off someone else's numbers. */
 const local = (name: string) => sameOrigin(params.get(name), window.location.href);
 
@@ -91,11 +100,21 @@ function views(summary: Summary, format: Format): Record<Engine, EngineView> {
   };
 }
 
+function legendItem(cls: string, label: string, sub: string): HTMLElement {
+  return h(
+    'li',
+    { class: 'flex items-center gap-[7px]' },
+    h('i', { class: `${SWATCH} ${cls}` }),
+    label,
+    h('span', { class: `${MONO} text-[11px] text-dim` }, sub)
+  );
+}
+
 function legend(entries: EngineView[]): HTMLElement {
   return h(
     'ul',
-    { class: 'legend' },
-    ...entries.map((entry) => h('li', {}, h('i', { class: `swatch ${entry.cls}` }), `${entry.label} `, h('span', {}, entry.sub)))
+    { class: 'mt-4 flex flex-wrap gap-x-[22px] gap-y-1.5 text-[13px]' },
+    ...entries.map((entry) => legendItem(entry.cls, entry.label, entry.sub))
   );
 }
 
@@ -110,31 +129,62 @@ interface KpiBar {
   share: number;
 }
 
-function kpi(label: string, value: HTMLElement, bars: KpiBar[], note?: string) {
+/** A rounded bar filled to a 0–1 share; `null` draws the empty track. */
+function track(share: number | null, size: string, fill = 'bg-series'): HTMLElement {
   return h(
-    'article',
-    { class: 'kpi' },
-    h('div', { class: 'kpi-label' }, label),
-    h('div', { class: 'kpi-value' }, value),
-    h(
-      'div',
-      { class: 'kpi-bars' },
-      ...bars.map((bar) =>
-        h(
-          'div',
-          { class: `kbar ${bar.cls}` },
-          h('span', {}, bar.label),
-          h('i', {}, h('i', { style: `--w:${(Math.max(0, Math.min(1, bar.share)) * 100).toFixed(2)}%` })),
-          h('b', {}, bar.text)
-        )
-      )
-    ),
-    note ? h('p', { class: 'kpi-note' }, note) : null
+    'i',
+    { class: `block overflow-hidden rounded-full bg-track ${size}` },
+    share === null
+      ? null
+      : h('i', {
+          class: `block h-full w-(--w) rounded-[inherit] ${fill}`,
+          style: `--w:${(Math.max(0, Math.min(1, share)) * 100).toFixed(2)}%`,
+        })
   );
 }
 
-function withUnit(node: HTMLElement, unit: string): HTMLElement {
-  return h('span', {}, node, h('span', { class: 'unit' }, unit));
+function kpi(
+  label: string,
+  value: HTMLElement,
+  bars: KpiBar[],
+  { note, compact = false }: { note?: string; compact?: boolean } = {}
+) {
+  return h(
+    'article',
+    { class: 'min-w-0 bg-solid px-6 pt-5.5 pb-5' },
+    h('div', { class: 'text-[13px] text-ink' }, label),
+    h(
+      'div',
+      {
+        class: `mt-2.5 mb-4.5 leading-none font-semibold tracking-[-0.045em] whitespace-nowrap tabular-nums ${
+          compact ? 'text-[34px]' : 'text-[38px] md:text-[44px]'
+        }`,
+      },
+      value
+    ),
+    h(
+      'div',
+      { class: 'grid gap-1.25' },
+      ...bars.map((bar) =>
+        h(
+          'div',
+          { class: `grid grid-cols-[78px_minmax(0,1fr)_66px] items-center gap-2.5 ${MONO} text-[11px] text-dim ${bar.cls}` },
+          h('span', { class: 'truncate' }, bar.label),
+          track(bar.share, 'h-1.5'),
+          h('b', { class: `text-right font-medium ${bar.cls === 'c-ours' ? 'text-fg' : 'text-ink'}` }, bar.text)
+        )
+      )
+    ),
+    note ? h('p', { class: 'mt-3.5 text-[12px] text-dim' }, note) : null
+  );
+}
+
+function unit(text: string): HTMLElement {
+  return h('span', { class: 'ml-0.5 text-[0.5em] font-medium tracking-normal text-dim' }, text);
+}
+
+function withUnit(node: HTMLElement, suffix: string): HTMLElement {
+  return h('span', {}, node, unit(suffix));
 }
 
 function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
@@ -188,7 +238,7 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
           text: msText(render.engines[key].meanMs),
           share: (render.engines[key].meanMs ?? 0) / slowest,
         })),
-        'Mean first-slide render, native CLI'
+        { note: 'Mean first-slide render, native CLI' }
       )
     );
   }
@@ -206,7 +256,7 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
             share: entry.withinFrame / entry.ops,
           };
         }),
-        `End-to-end suite on main at ${short(latency.commit)}`
+        { note: `End-to-end suite on main at ${short(latency.commit)}` }
       )
     );
   } else {
@@ -241,6 +291,8 @@ interface Metric {
   label: string;
   hint: string;
   better: 'high' | 'low';
+  /** The value of a full bar; rows without one fill to their largest value. */
+  full?: number;
   cells: Record<Engine, Cell | null>;
 }
 
@@ -260,6 +312,7 @@ function metrics(summary: Summary, format: Format): Metric[] {
         label: 'Exact page counts',
         hint: 'documents with Word’s page count',
         better: 'high',
+        full: 1,
         cells: fidelity((engine) => {
           const value = entry.fidelity[engine]!;
           return value.paged ? { value: value.exact / value.paged, text: `${value.exact}/${value.paged}` } : null;
@@ -280,6 +333,7 @@ function metrics(summary: Summary, format: Format): Metric[] {
       label: 'Visual similarity',
       hint: `mean SSIM against ${OFFICE[format]}`,
       better: 'high',
+      full: 1,
       cells: fidelity((engine) => {
         const mean = entry.fidelity[engine]!.mean;
         return mean === null ? null : { value: mean, text: ssimText(mean) };
@@ -289,6 +343,7 @@ function metrics(summary: Summary, format: Format): Metric[] {
       label: 'Scored / total',
       hint: `${NOUNS[format][1]} with a score`,
       better: 'high',
+      full: 1,
       cells: fidelity((engine) => {
         const value = entry.fidelity[engine]!;
         return { value: value.scored / Math.max(1, value.total), text: `${value.scored}/${value.total}` };
@@ -312,6 +367,7 @@ function metrics(summary: Summary, format: Format): Metric[] {
         label: 'Recalc accuracy',
         hint: 'formula results matching Excel',
         better: 'high',
+        full: 1,
         cells: byEngine((engine) => {
           const { correct, total } = calc.engines[engine];
           return total ? { value: correct / total, text: percentText(correct, total) } : null;
@@ -333,6 +389,7 @@ function metrics(summary: Summary, format: Format): Metric[] {
       label: 'Parse success',
       hint: `${NOUNS[format][1]} opened`,
       better: 'high',
+      full: 1,
       cells: byEngine((engine) => {
         const { parsed, total } = entry.parsing![engine];
         return total ? { value: parsed / total, text: percentText(parsed, total) } : null;
@@ -341,9 +398,13 @@ function metrics(summary: Summary, format: Format): Metric[] {
   return rows;
 }
 
-/** One row per metric, the engines' bars stacked on a shared scale so they compare at a glance. */
+function formatLabel(format: Format, color = 'text-dim'): HTMLElement {
+  return h('span', { class: `${MONO} text-[11px] font-medium tracking-[0.06em] ${color}` }, format.toUpperCase());
+}
+
+/** One row per metric, the engines' bars stacked on one scale so they compare at a glance. */
 function scoreboard(summary: Summary): HTMLElement {
-  const board = h('div', { class: 'board' });
+  const board = h('div', { class: 'overflow-clip rounded-panel border border-line bg-panel' });
   for (const format of FORMATS) {
     const entry = summary.formats[format];
     if (!entry.documents) continue;
@@ -351,36 +412,56 @@ function scoreboard(summary: Summary): HTMLElement {
     board.append(
       h(
         'a',
-        { class: 'board-group', href: `#${format}` },
-        h('span', { class: 'format-label' }, format.toUpperCase()),
+        {
+          class:
+            'flex flex-wrap items-baseline gap-x-2.5 gap-y-1 border-line px-5 pt-5.5 pb-2.5 text-[14px] font-semibold not-first:border-t',
+          href: `#${format}`,
+        },
+        formatLabel(format),
         h('span', {}, TITLES[format]),
-        h('small', {}, `${plural(entry.documents, NOUNS[format])} · release v${entry.version}`)
+        h('small', { class: 'text-[12.5px] font-normal text-dim' }, `${plural(entry.documents, NOUNS[format])} · release v${entry.version}`)
       )
     );
     for (const metric of metrics(summary, format)) {
       const present = SHOWN.map((key) => metric.cells[key]?.value).filter((value): value is number => value !== undefined);
       const best = metric.better === 'high' ? Math.max(...present) : Math.min(...present);
       const tie = present.every((value) => value === best);
-      const max = Math.max(...present);
-      const share = (value: number) => (max > 0 ? value / max : 0);
+      const full = metric.full ?? Math.max(...present);
+      const share = (value: number) => (full > 0 ? value / full : 0);
       board.append(
         h(
           'div',
-          { class: 'board-row' },
-          h('div', { class: 'metric' }, metric.label, h('small', {}, metric.hint)),
+          {
+            class:
+              'grid grid-cols-1 items-center border-t border-line hover:bg-hover md:grid-cols-[minmax(220px,1fr)_minmax(0,2fr)]',
+          },
           h(
             'div',
-            { class: 'pair' },
+            { class: 'grid gap-px px-3.5 pt-3.5 text-[13.5px] md:px-5 md:py-3.5' },
+            metric.label,
+            h('small', { class: 'text-[12px] text-dim' }, metric.hint)
+          ),
+          h(
+            'div',
+            { class: 'grid gap-[7px] px-3.5 pt-2.5 pb-3.5 md:px-5 md:py-3.5' },
             ...SHOWN.map((key) => {
               const cell = metric.cells[key];
               const view = engine[key];
               const top = !!cell && present.length > 1 && !tie && cell.value === best;
+              const tone = !cell ? 'text-faint' : top ? 'text-fg' : 'text-ink';
               return h(
                 'div',
-                { class: `line ${view.cls}${top ? ' best' : ''}${cell ? '' : ' empty'}` },
-                h('span', { class: 'engine' }, view.label),
-                h('i', { class: 'track' }, cell ? h('i', { style: `--w:${(share(cell.value) * 100).toFixed(2)}%` }) : null),
-                h('b', {}, cell ? cell.text : '—')
+                {
+                  class: `grid grid-cols-[84px_minmax(0,1fr)_84px] items-center gap-2.5 md:grid-cols-[96px_minmax(0,1fr)_104px] md:gap-3.5 ${view.cls}`,
+                },
+                h('span', { class: `text-[12.5px] ${top ? 'text-fg' : 'text-ink'}` }, view.label),
+                track(cell ? share(cell.value) : null, 'h-2', top ? 'bg-series' : 'bg-series opacity-55'),
+                h(
+                  'b',
+                  { class: `text-right ${MONO} text-[13.5px] font-medium tabular-nums ${tone}` },
+                  top ? h('i', { class: 'mr-2 inline-block size-1.5 rounded-full bg-series align-[2px]' }) : null,
+                  cell ? cell.text : '—'
+                )
               );
             })
           )
@@ -397,21 +478,90 @@ function labelled<T extends Element>(node: T, label: string): T {
   return node;
 }
 
-function panel(title: string, caption: string, stat: HTMLElement | null, body: HTMLElement, wide = false) {
+function head(title: string, meta?: string, ...extra: HTMLElement[]): HTMLElement {
   return h(
-    'figure',
-    { class: `panel${wide ? ' wide' : ''}` },
-    h('figcaption', {}, h('div', {}, h('h3', {}, title), h('p', {}, caption)), stat),
-    body
+    'header',
+    { class: 'mb-6' },
+    h('h2', { class: 'text-[24px] leading-[1.15] font-semibold tracking-[-0.03em] md:text-[28px]' }, title),
+    meta ? h('p', { class: 'mt-2 max-w-[760px] text-[14px] text-ink' }, meta) : null,
+    ...extra
   );
 }
 
-function stat(value: string, note: string, cls = ''): HTMLElement {
-  return h('div', { class: `figure-stat ${cls}` }, h('b', {}, value), h('span', {}, note));
+function caption(title: string, text: string, aside: HTMLElement | null): HTMLElement {
+  return h(
+    'figcaption',
+    { class: 'mb-4.5 flex flex-col items-start justify-between gap-2.5 md:flex-row md:gap-6' },
+    h(
+      'div',
+      {},
+      h('h3', { class: 'text-[15px] font-semibold tracking-[-0.01em]' }, title),
+      h('p', { class: 'mt-1 max-w-[640px] text-[13px] text-dim' }, text)
+    ),
+    aside
+  );
+}
+
+function panel(title: string, text: string, stat: HTMLElement | null, body: HTMLElement, wide = false) {
+  return h('figure', { class: `${BOX}${wide ? ' col-span-full' : ''}` }, caption(title, text, stat), body);
+}
+
+function empty(message: string, href: string, label: string): HTMLElement {
+  return h(
+    'div',
+    { class: `grid justify-items-start gap-2 text-ink ${BOX}` },
+    h('p', {}, message),
+    h('a', { class: 'text-[13px] underline', href }, label)
+  );
+}
+
+function stat(value: string, note: string, trend: '' | 'up' | 'down' = ''): HTMLElement {
+  const tone = trend === 'up' ? 'text-bo' : trend === 'down' ? 'text-bad' : 'text-dim';
+  return h(
+    'div',
+    { class: 'flex-none md:text-right' },
+    h('b', { class: 'block text-[28px] leading-[1.1] font-semibold tracking-[-0.04em] tabular-nums' }, value),
+    h('span', { class: `text-[12px] ${tone}` }, note)
+  );
+}
+
+function waffleBlock(view: EngineView, grid: HTMLElement, value: string, label: string, sub: string): HTMLElement {
+  return h(
+    'div',
+    { class: view.cls },
+    h(
+      'div',
+      {
+        class:
+          'mb-2.5 flex flex-col items-start gap-0.5 overflow-hidden text-[12.5px] whitespace-nowrap md:flex-row md:items-center md:gap-[7px]',
+      },
+      h('i', { class: `${SWATCH} ${view.cls} max-md:hidden` }),
+      view.label,
+      h('span', { class: `${MONO} text-[10.5px] text-dim` }, view.sub)
+    ),
+    grid,
+    h(
+      'div',
+      { class: 'mt-3 flex items-baseline gap-[7px]' },
+      h('b', { class: 'text-[21px] font-semibold tracking-[-0.03em] tabular-nums' }, value),
+      h('span', { class: `${MONO} text-[11px] text-dim` }, label)
+    ),
+    h('div', { class: `mt-0.5 truncate ${MONO} text-[11px] text-dim` }, sub)
+  );
+}
+
+function stateKey(entries: [state: string, label: string][]): HTMLElement {
+  return h(
+    'ul',
+    { class: `mt-4.5 flex flex-wrap gap-x-4 gap-y-2 ${MONO} text-[11px] text-dim` },
+    ...entries.map(([state, label]) =>
+      h('li', { class: 'flex items-center gap-1.5' }, h('i', { class: `cell s-${state} w-2.5` }), label)
+    )
+  );
 }
 
 function chart(build: (width: number) => Element, label: string): HTMLElement {
-  const container = h('div', { class: 'plot' });
+  const container = h('div', { class: 'min-w-0' });
   queueMicrotask(() =>
     mount(container, (width) => {
       const node = build(width);
@@ -480,7 +630,7 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
   const rows = [...entry.rows].sort(
     (left, right) => (left.referencePages ?? 0) - (right.referencePages ?? 0) || left.id.localeCompare(right.id)
   );
-  const blocks = h('div', { class: 'waffles' });
+  const blocks = h('div', { class: WAFFLES });
   for (const key of SHOWN) {
     const fidelity = entry.fidelity[key];
     if (!fidelity?.paged) continue;
@@ -507,13 +657,15 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
       };
     });
     blocks.append(
-      h(
-        'div',
-        { class: `waffle-block ${engine[key].cls}` },
-        h('div', { class: 'waffle-label' }, h('i', { class: `swatch ${engine[key].cls}` }), engine[key].label, h('span', {}, engine[key].sub)),
-        labelled(waffle(cells, columns(rows.length), open), `${engine[key].label} ${engine[key].sub}: ${fidelity.exact} of ${fidelity.paged} page counts exact`),
-        h('div', { class: 'waffle-stat' }, h('b', {}, `${fidelity.exact}/${fidelity.paged}`), h('span', {}, 'exact')),
-        h('div', { class: 'waffle-sub' }, `${plural(fidelity.pageError, ['page', 'pages'])} off`)
+      waffleBlock(
+        engine[key],
+        labelled(
+          waffle(cells, columns(rows.length), open),
+          `${engine[key].label} ${engine[key].sub}: ${fidelity.exact} of ${fidelity.paged} page counts exact`
+        ),
+        `${fidelity.exact}/${fidelity.paged}`,
+        'exact',
+        `${plural(fidelity.pageError, ['page', 'pages'])} off`
       )
     );
   }
@@ -526,14 +678,12 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
       'div',
       {},
       blocks,
-      h(
-        'ul',
-        { class: 'key' },
-        h('li', {}, h('i', { class: 'cell s-exact' }), 'exact'),
-        h('li', {}, h('i', { class: 'cell s-near' }), 'one page off'),
-        h('li', {}, h('i', { class: 'cell s-far' }), 'two or more off'),
-        h('li', {}, h('i', { class: 'cell s-none' }), 'no score')
-      )
+      stateKey([
+        ['exact', 'exact'],
+        ['near', 'one page off'],
+        ['far', 'two or more off'],
+        ['none', 'no score'],
+      ])
     )
   );
 }
@@ -550,10 +700,8 @@ function lines(series: Line[], options: { noun: string; frame?: number; height?:
     {},
     h(
       'ul',
-      { class: 'legend chart-legend' },
-      ...series.map((entry) =>
-        h('li', {}, h('i', { class: `swatch ${entry.cls}` }), entry.label, h('span', {}, `median ${duration(median(entry.values))}`))
-      )
+      { class: 'mb-3.5 flex flex-wrap gap-x-[18px] gap-y-1.5 text-[13px]' },
+      ...series.map((entry) => legendItem(entry.cls, entry.label, `median ${duration(median(entry.values))}`))
     ),
     chart(
       (width) => cdf(series, width, options),
@@ -595,20 +743,26 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
     .sort((left, right) => right.recalc[OURS]!.total - left.recalc[OURS]!.total || left.id.localeCompare(right.id));
   const bars = h(
     'div',
-    { class: 'accuracy' },
+    { class: 'mb-6.5 grid gap-3' },
     ...SHOWN.map((key) => {
       const { correct, total } = calc.engines[key];
       return h(
         'div',
-        { class: `abar ${engine[key].cls}` },
-        h('span', {}, engine[key].label, h('small', {}, engine[key].sub)),
-        h('i', { class: 'track' }, h('i', { style: `--w:${((100 * correct) / Math.max(1, total)).toFixed(3)}%` })),
-        h('b', {}, percentText(correct, total)),
-        h('small', { class: 'abar-count' }, `${thousands(correct)} / ${thousands(total)}`)
+        {
+          class: `grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1.5 text-[13px] md:grid-cols-[190px_minmax(0,1fr)_76px_128px] md:gap-4 ${engine[key].cls}`,
+        },
+        h('span', {}, engine[key].label, h('small', { class: `ml-[7px] ${MONO} text-[10.5px] text-dim` }, engine[key].sub)),
+        track(correct / Math.max(1, total), 'order-3 col-span-full h-2.5 md:order-none md:col-auto', 'bg-linear-to-r from-series/35 to-series'),
+        h('b', { class: `text-right ${MONO} text-[14px] font-semibold` }, percentText(correct, total)),
+        h(
+          'small',
+          { class: `ml-[7px] hidden text-right ${MONO} text-[10.5px] text-dim md:block` },
+          `${thousands(correct)} / ${thousands(total)}`
+        )
       );
     })
   );
-  const blocks = h('div', { class: 'waffles' });
+  const blocks = h('div', { class: WAFFLES });
   for (const key of SHOWN) {
     const cells = rows.map((row) => {
       const result = row.recalc[key]!;
@@ -632,13 +786,15 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
       };
     });
     blocks.append(
-      h(
-        'div',
-        { class: `waffle-block ${engine[key].cls}` },
-        h('div', { class: 'waffle-label' }, h('i', { class: `swatch ${engine[key].cls}` }), engine[key].label, h('span', {}, engine[key].sub)),
-        labelled(waffle(cells, columns(rows.length, 3.2), open), `${engine[key].label} ${engine[key].sub}: ${calc.engines[key].perfect} of ${rows.length} workbooks recalculate perfectly`),
-        h('div', { class: 'waffle-stat' }, h('b', {}, String(calc.engines[key].perfect)), h('span', {}, 'perfect')),
-        h('div', { class: 'waffle-sub' }, `of ${plural(rows.length, NOUNS.xlsx)}`)
+      waffleBlock(
+        engine[key],
+        labelled(
+          waffle(cells, columns(rows.length, 3.2), open),
+          `${engine[key].label} ${engine[key].sub}: ${calc.engines[key].perfect} of ${rows.length} workbooks recalculate perfectly`
+        ),
+        String(calc.engines[key].perfect),
+        'perfect',
+        `of ${plural(rows.length, NOUNS.xlsx)}`
       )
     );
   }
@@ -656,15 +812,13 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
       {},
       bars,
       blocks,
-      h(
-        'ul',
-        { class: 'key' },
-        h('li', {}, h('i', { class: 'cell s-exact' }), 'all match'),
-        h('li', {}, h('i', { class: 'cell s-high' }), '≥ 99%'),
-        h('li', {}, h('i', { class: 'cell s-near' }), '≥ 90%'),
-        h('li', {}, h('i', { class: 'cell s-far' }), 'below 90%'),
-        h('li', {}, h('i', { class: 'cell s-none' }), 'failed')
-      )
+      stateKey([
+        ['exact', 'all match'],
+        ['high', '≥ 99%'],
+        ['near', '≥ 90%'],
+        ['far', 'below 90%'],
+        ['none', 'failed'],
+      ])
     ),
     true
   );
@@ -708,21 +862,28 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
   const failed = entry.rows.filter((row) => row.ssim[OURS] === null);
   const item = (row: (typeof scored)[number]) => {
     const delta = row.ssim.libreoffice === null ? null : change(row.ssim[OURS]!, row.ssim.libreoffice);
+    const bell = dumbbell(row.ssim.libreoffice, row.ssim[OURS]!, low, high);
+    bell.classList.add('max-md:hidden');
+    const tone = delta === null ? 'text-dim' : delta >= 0 ? 'text-bo' : 'text-bad';
     return h(
       'li',
       {},
       h(
         'a',
-        { href: compareHref(row.id), class: 'mover' },
-        h('span', { class: 'mover-id' }, row.id),
-        dumbbell(row.ssim.libreoffice, row.ssim[OURS]!, low, high),
-        h('b', {}, ssimText(row.ssim[OURS])),
-        h('span', { class: `delta ${delta === null ? 'new' : delta >= 0 ? 'up' : 'down'}` }, delta === null ? 'no LO score' : signed(delta))
+        {
+          href: compareHref(row.id),
+          class:
+            '-mx-2.5 grid grid-cols-[minmax(0,1fr)_58px_76px] items-center gap-3 rounded-[9px] px-2.5 py-2 text-[13px] hover:bg-hover md:grid-cols-[minmax(0,1fr)_84px_58px_76px]',
+        },
+        h('span', { class: `truncate ${MONO} text-[12.5px]` }, row.id),
+        bell,
+        h('b', { class: `text-right ${MONO} text-[12.5px] font-medium` }, ssimText(row.ssim[OURS])),
+        h('span', { class: `text-right ${MONO} text-[11.5px] ${tone}` }, delta === null ? 'no LO score' : signed(delta))
       )
     );
   };
   const column = (title: string, rows: typeof scored) =>
-    h('div', { class: 'movers-column' }, h('h4', {}, title), h('ol', {}, ...rows.map(item)));
+    h('div', {}, h('h4', { class: 'mb-2 text-[12.5px] font-medium text-dim' }, title), h('ol', {}, ...rows.map(item)));
   const note = failed.length ? `${plural(failed.length, NOUNS[entry.format])} did not score in ${version}.` : '';
   return panel(
     'Notable documents',
@@ -731,13 +892,20 @@ function movers(entry: FormatSummary, wide: boolean): HTMLElement {
     h(
       'div',
       {},
-      h('div', { class: 'movers' }, column('Largest leads over LibreOffice', leads), column(`Lowest in ${version}`, lowest)),
+      h(
+        'div',
+        { class: wide ? 'grid grid-cols-1 gap-5 md:grid-cols-2 md:gap-8' : 'grid grid-cols-1 gap-[22px]' },
+        column('Largest leads over LibreOffice', leads),
+        column(`Lowest in ${version}`, lowest)
+      ),
       note
         ? h(
             'p',
-            { class: 'movers-note' },
+            { class: 'mt-4 text-[12.5px] text-dim' },
             note,
-            ...failed.slice(0, 6).flatMap((row) => [' ', h('a', { href: compareHref(row.id) }, row.id)])
+            ...failed
+              .slice(0, 6)
+              .flatMap((row) => [' ', h('a', { class: 'font-mono text-ink underline', href: compareHref(row.id) }, row.id)])
           )
         : null
     ),
@@ -753,7 +921,7 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
   const office = reference
     ? `${reference.engine} ${versions.length > 1 ? `${versions[0]}–${versions.at(-1)}` : (versions[0] ?? '')}`.trim()
     : `Microsoft ${OFFICE[format]}`;
-  const panels = h('div', { class: 'panels' }, similarity(summary, entry));
+  const panels = h('div', { class: PANELS }, similarity(summary, entry));
   if (format === 'docx') panels.append(pagination(summary, entry));
   const render = renderTimes(summary, entry);
   if (render) panels.append(render);
@@ -761,16 +929,14 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
   if (accuracy) panels.append(accuracy);
   const recalc = recalcTimes(summary, entry);
   if (recalc) panels.append(recalc);
-  const halves = [...panels.children].filter((node) => !node.classList.contains('wide')).length;
+  const halves = [...panels.children].filter((node) => !node.classList.contains('col-span-full')).length;
   panels.append(movers(entry, halves % 2 === 0));
   return h(
     'section',
-    { class: 'section format', id: format },
-    h(
-      'header',
-      { class: 'section-head' },
-      h('h2', {}, TITLES[format]),
-      h('p', { class: 'meta' }, `${format.toUpperCase()} · ${plural(entry.documents, NOUNS[format])} · reference ${office}`),
+    { class: SECTION, id: format },
+    head(
+      TITLES[format],
+      `${format.toUpperCase()} · ${plural(entry.documents, NOUNS[format])} · reference ${office}`,
       legend(SHOWN.filter((key) => entry.fidelity[key] || entry.render || entry.calculation).map((key) => engine[key]))
     ),
     panels
@@ -778,44 +944,40 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
 }
 
 function latencySection(latency: Latency | null, published: boolean): HTMLElement {
-  const head = h(
-    'header',
-    { class: 'section-head' },
-    h('h2', {}, 'Editing latency'),
-    h(
-      'p',
-      { class: 'meta' },
-      latency?.ops
-        ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}, in WASM and Python.`
-        : 'SDK calls timed by the end-to-end suite on main, in WASM and Python.'
-    )
+  const header = head(
+    'Editing latency',
+    latency?.ops
+      ? `SDK calls timed by the end-to-end suite on main at ${short(latency.commit)}, in WASM and Python.`
+      : 'SDK calls timed by the end-to-end suite on main, in WASM and Python.'
   );
   if (!latency?.ops)
     return h(
       'section',
-      { class: 'section', id: 'latency' },
-      head,
-      h(
-        'div',
-        { class: 'panel empty' },
-        h('p', {}, 'Editing latency appears here once a green end-to-end run on main publishes its timings.'),
-        h('a', { href: `${REPO}/actions/workflows/e2e.yml` }, 'End-to-end workflow ↗')
+      { class: SECTION, id: 'latency' },
+      header,
+      empty(
+        'Editing latency appears here once a green end-to-end run on main publishes its timings.',
+        `${REPO}/actions/workflows/e2e.yml`,
+        'End-to-end workflow ↗'
       )
     );
   const present = FORMATS.filter((format) => latency.formats[format]);
   const tiles = h(
     'div',
-    { class: 'kpis compact' },
+    { class: `mb-4 ${STRIP}` },
     kpi(
       'Scenarios passed',
-      h('span', {}, count(latency.passed, 0), h('span', { class: 'unit' }, ` / ${latency.cases}`)),
+      h('span', {}, count(latency.passed, 0), unit(` / ${latency.cases}`)),
       present.map((format) => ({
         cls: `f-${format}`,
         label: format.toUpperCase(),
         text: `${latency.formats[format]!.passed}/${latency.formats[format]!.cases.length}`,
         share: latency.formats[format]!.passed / Math.max(1, latency.formats[format]!.cases.length),
       })),
-      `${plural(latency.multiEditor, ['case', 'cases'])} with several editors, ${latency.crossSdk} across Python and WASM`
+      {
+        note: `${plural(latency.multiEditor, ['case', 'cases'])} with several editors, ${latency.crossSdk} across Python and WASM`,
+        compact: true,
+      }
     ),
     kpi(
       'Timed SDK calls',
@@ -826,35 +988,39 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
         text: thousands(latency.formats[format]!.ops),
         share: ratio(latency.formats[format]!.ops, Math.max(...present.map((key) => latency.formats[key]!.ops))),
       })),
+      { compact: true }
     ),
     kpi(
       'Median call',
-      h('span', {}, count(latency.p50, latency.p50 < 10 ? 2 : 0), h('span', { class: 'unit' }, ' ms')),
+      h('span', {}, count(latency.p50, latency.p50 < 10 ? 2 : 0), unit(' ms')),
       present.map((format) => ({
         cls: `f-${format}`,
         label: format.toUpperCase(),
         text: duration(latency.formats[format]!.p50),
         share: ratio(latency.formats[format]!.p50, Math.max(...present.map((key) => latency.formats[key]!.p50))),
       })),
-      `Across all ${thousands(latency.ops)} calls`
+      { note: `Across all ${thousands(latency.ops)} calls`, compact: true }
     ),
     kpi(
       '95th percentile call',
-      h('span', {}, count(latency.p95, latency.p95 < 10 ? 1 : 0), h('span', { class: 'unit' }, ' ms')),
+      h('span', {}, count(latency.p95, latency.p95 < 10 ? 1 : 0), unit(' ms')),
       present.map((format) => ({
         cls: `f-${format}`,
         label: format.toUpperCase(),
         text: duration(latency.formats[format]!.p95),
         share: ratio(latency.formats[format]!.p95, Math.max(...present.map((key) => latency.formats[key]!.p95))),
       })),
-      `Across all ${thousands(latency.ops)} calls`
+      { note: `Across all ${thousands(latency.ops)} calls`, compact: true }
     )
   );
 
   let selected: Format = present[0]!;
   let release: (() => void) | null = null;
-  const switcher = h('div', { class: 'segmented', role: 'tablist' });
-  const plot = h('div', { class: 'plot' });
+  const switcher = h('div', {
+    class: 'inline-flex flex-none rounded-[9px] border border-line bg-hover p-0.75',
+    role: 'tablist',
+  });
+  const plot = h('div', { class: 'min-w-0' });
   const draw = () => {
     for (const button of switcher.querySelectorAll('button'))
       button.setAttribute('aria-selected', String(button.dataset.format === selected));
@@ -875,7 +1041,16 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
     });
   };
   for (const format of present) {
-    const button = h('button', { type: 'button', role: 'tab', 'data-format': format, class: `f-${format}` }, format.toUpperCase());
+    const button = h(
+      'button',
+      {
+        type: 'button',
+        role: 'tab',
+        'data-format': format,
+        class: `cursor-pointer rounded-md px-3 py-1.25 font-sans text-[12px] leading-[normal] font-medium text-dim hover:text-fg aria-selected:bg-solid aria-selected:text-fg aria-selected:shadow-[0_0_0_1px_var(--line-2)] f-${format}`,
+      },
+      format.toUpperCase()
+    );
     button.addEventListener('click', () => {
       selected = format;
       draw();
@@ -886,18 +1061,8 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
 
   const operations = h(
     'figure',
-    { class: 'panel wide' },
-    h(
-      'figcaption',
-      {},
-      h(
-        'div',
-        {},
-        h('h3', {}, 'Latency by operation'),
-        h('p', {}, 'Median call and 95th percentile per operation, grouped by verb.')
-      ),
-      switcher
-    ),
+    { class: `${BOX} col-span-full` },
+    caption('Latency by operation', 'Median call and 95th percentile per operation, grouped by verb.', switcher),
     plot
   );
 
@@ -911,15 +1076,18 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
     )
   );
 
-  const cases = h('div', { class: 'cases' });
+  const cases = h('div', { class: 'grid gap-3.5' });
   for (const format of present) {
     const entry = latency.formats[format]!;
     const byKey = new Map(entry.cases.map((item) => [`${item.scenario}/${item.sample}`, item]));
     cases.append(
       h(
         'div',
-        { class: 'case-row' },
-        h('span', { class: `format-label f-${format}` }, format.toUpperCase()),
+        {
+          class:
+            'grid grid-cols-[44px_minmax(0,1fr)_52px] items-center gap-3.5 [&_.waffle]:grid-cols-[repeat(auto-fill,16px)]',
+        },
+        formatLabel(format, `text-series f-${format}`),
         waffle(
           entry.cases.map((item) => ({
             id: `${format}:${item.scenario}/${item.sample}`,
@@ -938,7 +1106,7 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
           Math.min(entry.cases.length, 13),
           () => undefined
         ),
-        h('b', {}, `${entry.passed}/${entry.cases.length}`)
+        h('b', { class: `text-right ${MONO} text-[12px] font-medium text-ink` }, `${entry.passed}/${entry.cases.length}`)
       )
     );
   }
@@ -953,16 +1121,16 @@ function latencySection(latency: Latency | null, published: boolean): HTMLElemen
       cases,
       h(
         'p',
-        { class: 'fine' },
+        { class: 'mt-5 text-[12px] leading-[1.6] text-dim' },
         `Recorded ${when(latency.recordedAt)} at `,
-        h('a', { href: `${REPO}/commit/${latency.commit}` }, short(latency.commit)),
+        h('a', { class: 'font-mono text-ink underline', href: `${REPO}/commit/${latency.commit}` }, short(latency.commit)),
         machine ? ` on ${published ? 'a GitHub-hosted runner, ' : ''}${machine.cpu}, ${machine.cpus} vCPU. ` : '. ',
         'These are observations from one run, not controlled benchmark trials.'
       )
     )
   );
 
-  return h('section', { class: 'section', id: 'latency' }, head, tiles, h('div', { class: 'panels' }, operations, all, scenarios));
+  return h('section', { class: SECTION, id: 'latency' }, header, tiles, h('div', { class: PANELS }, operations, all, scenarios));
 }
 
 function methodSection(
@@ -976,7 +1144,13 @@ function methodSection(
     ? [...new Set(FORMATS.flatMap((format) => summary.formats[format].reference?.versions ?? []))].sort(compareVersions)
     : [];
   const office = versions.length ? ` ${versions[0]}${versions.length > 1 ? `–${versions.at(-1)}` : ''}` : '';
-  const card = (title: string, body: string) => h('article', { class: 'card' }, h('h3', {}, title), h('p', {}, body));
+  const card = (title: string, body: string) =>
+    h(
+      'article',
+      {},
+      h('h3', { class: 'mb-1.5 text-[13.5px] font-semibold' }, title),
+      h('p', { class: 'text-[13px] leading-[1.6] text-dim' }, body)
+    );
   const links: [string, string][] = [
     ['Benchmark methodology', METHOD],
     ['Benchmarks workflow', `${REPO}/actions/workflows/visual-fidelity.yml`],
@@ -986,18 +1160,22 @@ function methodSection(
   if (latency) links.push(['Raw e2e results', e2eUrl(latency.commit, FORMATS.find((format) => latency.formats[format])!)]);
   return h(
     'section',
-    { class: 'section', id: 'method' },
-    h('header', { class: 'section-head' }, h('h2', {}, 'Method')),
+    { class: SECTION, id: 'method' },
+    head('Method'),
     h(
       'div',
-      { class: 'cards' },
+      { class: 'grid grid-cols-1 gap-7 border-t border-line pt-6 md:grid-cols-3 lg:grid-cols-5' },
       card('Ground truth', `Microsoft Word, PowerPoint and Excel${office} on macOS exported every reference page to PDF, rasterized at 150 DPI. The corpus and its references are public.`),
       card('Visual similarity', 'Mean page-penalized grayscale SSIM at 150 DPI, without resampling or alignment, of the BetterOffice browser renderer. Missing or extra pages lower the score. Failed renders get no score, so read coverage next to the mean.'),
       card('Speed', `Native command-line builds time the whole job in five fresh processes after a warmup: start, import, fonts, layout, rasterize and write. They measure the Rust rasterizer at 96 DPI, not the browser renderer scored for similarity. LibreOffice ${lo} runs its prebuilt CLI with an isolated profile. Means cover the documents every engine handled.`),
       card('Formulas', 'Caches are cleared and each workbook is recalculated from scratch. Numbers match within 1e-9, or 1e-12 relative; text, booleans and errors must match exactly. Missing results count as wrong.'),
       card('Latency', `The end-to-end suite times every SDK call from invocation to result ${published ? 'on a GitHub-hosted runner' : 'on the machine that recorded it'}. Repeated calls see different document state, so these are observations, not benchmark trials.`)
     ),
-    h('ul', { class: 'links' }, ...links.map(([label, href]) => h('li', {}, h('a', { href }, `${label} ↗`))))
+    h(
+      'ul',
+      { class: 'mt-7 flex flex-wrap gap-x-6 gap-y-2.5' },
+      ...links.map(([label, href]) => h('li', {}, h('a', { class: 'text-[13px] text-ink hover:text-fg', href }, `${label} ↗`)))
+    )
   );
 }
 
@@ -1047,14 +1225,13 @@ const day = (iso: string) =>
   new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
 
 function fail(message: string): void {
-  find('kpis').replaceChildren(
-    h(
-      'div',
-      { class: 'panel empty' },
-      h('p', {}, `The latest benchmark run could not be loaded: ${message}.`),
-      h('a', { href: `${REPO}#benchmarks` }, 'Read the generated tables on GitHub ↗')
-    )
+  const notice = empty(
+    `The latest benchmark run could not be loaded: ${message}.`,
+    `${REPO}#benchmarks`,
+    'Read the generated tables on GitHub ↗'
   );
+  notice.classList.add('col-span-full');
+  find('kpis').replaceChildren(notice);
 }
 
 async function boot(): Promise<void> {
@@ -1090,13 +1267,17 @@ async function boot(): Promise<void> {
       `Microsoft Office ${span(officeVersions)}`.trim()
     );
     const facts: [string, Node | string][] = [
-      ['Release', h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
+      ['Release', h('a', { class: LINK, href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
       ...(references.length ? ([['Reference', office]] as [string, Node][]) : []),
       ...(summary.libreoffice ? ([['Baseline', `LibreOffice ${summary.libreoffice}`]] as [string, string][]) : []),
       ['Updated', local('report') ? 'Loaded report' : publishedAt ? day(publishedAt) : '—'],
-      ['Method', h('a', { href: METHOD }, 'How it’s measured')],
+      ['Method', h('a', { class: LINK, href: METHOD }, 'How it’s measured')],
     ];
-    find('facts').replaceChildren(...facts.map(([term, value]) => h('div', {}, h('dt', {}, term), h('dd', {}, value))));
+    find('facts').replaceChildren(
+      ...facts.map(([term, value]) =>
+        h('div', { class: 'grid gap-0.5' }, h('dt', { class: 'text-[12px] text-dim' }, term), h('dd', { class: 'text-[13.5px]' }, value))
+      )
+    );
     for (const format of FORMATS)
       if (!present.includes(format))
         document.querySelector(`nav a[href="#${format}"]`)?.setAttribute('hidden', '');

@@ -7,6 +7,9 @@ and the latest green [end-to-end](../../e2e/README.md) run on `main`.
 bun run dev:fidelity
 ```
 
+Styling is Tailwind CSS v4, as in `apps/web`: `src/styles.css` holds the theme tokens and the chart
+styles, and `bun run build` compiles it into `dist/` next to the bundled scripts.
+
 - `/` is the overview: headline numbers, the README tables drawn to scale, per-document SSIM,
   DOCX page agreement, render and recalculation times, formula accuracy, and SDK call latency.
 - `/compare` is the page viewer: pick a document, then compare Microsoft Office's page against ours

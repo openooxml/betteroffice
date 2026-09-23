@@ -11,6 +11,6 @@
     "allowJs": true,
     "types": ["bun"]
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "styles.ts"],
   "exclude": ["src/worker.ts", "src/worker.test.ts"]
 }

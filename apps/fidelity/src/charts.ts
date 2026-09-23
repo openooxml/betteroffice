@@ -71,6 +71,9 @@ const ceilStep = (value: number) => {
 const tick = (ms: number): string =>
   ms >= 1000 ? `${round(ms / 1000)} s` : ms >= 1 ? `${round(ms)} ms` : `${round(ms * 1000)} µs`;
 
+/** The series-coloured dot of legends and tooltips. */
+export const SWATCH = 'inline-block size-2 flex-none rounded-full bg-series';
+
 let tipNode: HTMLElement | null = null;
 
 export function tip(content: Node | null, x = 0, y = 0): void {
@@ -94,11 +97,17 @@ export function tipCard(title: string, rows: [cls: string, label: string, value:
   return h(
     'div',
     {},
-    h('div', { class: 'tip-title' }, title),
+    h('div', { class: 'mb-1.5 font-mono text-[12px] leading-[normal] font-semibold wrap-anywhere' }, title),
     ...rows.map(([cls, label, value]) =>
-      h('div', { class: 'tip-row' }, h('i', { class: `swatch ${cls}` }), h('span', {}, label), h('b', {}, value))
+      h(
+        'div',
+        { class: 'grid grid-cols-[8px_minmax(0,1fr)_auto] items-center gap-[9px] leading-[1.75] text-ink' },
+        h('i', { class: `${SWATCH} ${cls}` }),
+        h('span', {}, label),
+        h('b', { class: 'font-mono text-[12px] leading-[normal] font-medium text-fg' }, value)
+      )
     ),
-    foot ? h('div', { class: 'tip-foot' }, foot) : null
+    foot ? h('div', { class: 'mt-[7px] border-t border-line pt-[7px] text-[11.5px] leading-[1.45] text-dim' }, foot) : null
   );
 }
 
@@ -488,7 +497,7 @@ export function waffle(cells: WaffleCell[], columns: number, onPick: (id: string
   const byId = new Map(cells.map((cell) => [cell.id, cell]));
   grid.addEventListener('pointermove', (event) => {
     const target = (event.target as HTMLElement).closest<HTMLElement>('.cell');
-    const panel = grid.closest('.panel') ?? grid;
+    const panel = grid.closest('figure') ?? grid;
     for (const lit of panel.querySelectorAll('.cell.lit')) lit.classList.remove('lit');
     if (!target?.dataset.id) return tip(null);
     for (const same of panel.querySelectorAll(`.cell[data-id="${CSS.escape(target.dataset.id)}"]`))
@@ -496,7 +505,7 @@ export function waffle(cells: WaffleCell[], columns: number, onPick: (id: string
     tip(byId.get(target.dataset.id)!.describe(), event.clientX, event.clientY);
   });
   grid.addEventListener('pointerleave', () => {
-    for (const lit of (grid.closest('.panel') ?? grid).querySelectorAll('.cell.lit')) lit.classList.remove('lit');
+    for (const lit of (grid.closest('figure') ?? grid).querySelectorAll('.cell.lit')) lit.classList.remove('lit');
     tip(null);
   });
   grid.addEventListener('click', (event) => {
