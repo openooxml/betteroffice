@@ -58,6 +58,35 @@ Without `onSave`, the save button downloads the edited bytes.
 Props: `file`, `fileName`, `onSave`, `onReady` (a handle for host/agent-driven
 edits), `collaboration`, `i18n`, and `className`.
 
+## Host editing controls
+
+`onSaveRequest` runs for toolbar and Ctrl/Cmd+S saves before serialization.
+Return `true` to continue built-in saving; `false` or `void` handles or cancels
+it. Promises are awaited and concurrent requests are coalesced. `onSave` still
+receives the resulting bytes when built-in saving continues. A request waiting
+on a replaced or closed document is discarded.
+
+The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
+Await it before inspecting or mutating the core from a host workflow, then call
+`api.save()` for explicit serialization without re-entering `onSaveRequest`.
+`save()` remains synchronous and rejects while asynchronous input is pending.
+Flush rejects stale document handles, failed input, and unfinished pointer
+gestures. Finish or cancel the gesture before retrying.
+
+XLSX flushing commits cell/formula drafts and chart nudges, waits for IME
+composition to finish, and waits for accepted asynchronous clipboard edits.
+Reported asynchronous input failures continue to reject flushing until the
+workbook is reopened.
+
+`api.getPositionAtPoint(clientX, clientY)` returns `{ sheet, row, col }`, all
+zero-based, from the painted grid. It respects scrolling and zoom without
+changing focus or selection. Chart overlays, headers, outside points, stale
+handles, and unavailable geometry return `null`.
+
+For grouped host edits, use the core's existing `editCells(sheet, edits)` or
+`applyOps(ops)` batch APIs. Each successful batch is one undo step. XLSX does
+not currently expose editable comments, so it has no comment reanchoring API.
+
 ## What works today
 
 - Cell editing with formula recalculation of dependents on every edit

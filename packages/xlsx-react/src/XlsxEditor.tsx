@@ -70,12 +70,16 @@ import {
 } from './presence/Presence';
 import { ProposalsPanel } from './proposals/ProposalsPanel';
 
-/**
- * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
- * workbook handle plus a `refreshProposals` to re-read the pending list after an
- * external caller (e.g. a demo agent) stages proposals on the same handle.
- */
+export interface XlsxPointPosition {
+  sheet: number;
+  row: number;
+  col: number;
+}
+
 export interface XlsxEditorApi {
+  flushPendingInput: () => Promise<void>;
+  /** Client coordinates; sheet, row and column are zero-based. */
+  getPositionAtPoint: (clientX: number, clientY: number) => XlsxPointPosition | null;
   clearSelection: () => void;
   focus: () => void;
   handle: WorkbookHandle;
@@ -106,6 +110,8 @@ export interface XlsxEditorProps {
   fileName?: string;
   /** Receive saved bytes instead of triggering a browser download. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Return true for built-in saving; false or void handles/cancels the request. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Called after a user edit changes the workbook. */
   onChange?: () => void;
   /** Open a network-ready Yrs replica and repaint when peer updates arrive. */
@@ -379,6 +385,7 @@ function XlsxEditorContent({
   file,
   fileName,
   onSave,
+  onSaveRequest,
   onChange,
   collaboration,
   onReady,
@@ -396,11 +403,60 @@ function XlsxEditorContent({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const handleRef = useRef<WorkbookHandle | null>(null);
   const frameRef = useRef<DisplayList | null>(null);
+  const pendingInputRef = useRef(new Set<Promise<void>>());
+  const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const inputErrorRef = useRef<unknown>(null);
+  const compositionRef = useRef<Promise<void> | null>(null);
+  const endCompositionRef = useRef<(() => void) | null>(null);
+  const hostPointRef = useRef<(x: number, y: number) => XlsxPointPosition | null>(() => null);
+  const compositionStart = () => {
+    if (!compositionRef.current) {
+      compositionRef.current = new Promise<void>((resolve) => { endCompositionRef.current = resolve; });
+    }
+  };
+  const compositionEnd = () => {
+    const finish = endCompositionRef.current;
+    queueMicrotask(() => {
+      if (endCompositionRef.current === finish) {
+        compositionRef.current = null;
+        endCompositionRef.current = null;
+      }
+      finish?.();
+    });
+  };
+  const runPendingInput = (operation: () => Promise<void>) => {
+    const handle = handleRef.current;
+    const pending = pendingInputRef.current;
+    const task = operation();
+    pending.add(task);
+    void task.catch((error: unknown) => {
+      if (handleRef.current === handle) {
+        inputErrorRef.current = error;
+        setError(error instanceof Error ? error.message : String(error));
+      }
+    }).finally(() => pending.delete(task));
+  };
+  const flushPendingInput = useCallback(async (opened: WorkbookHandle) => {
+    const assertOpen = () => {
+      if (handleRef.current !== opened) throw new Error('Workbook is no longer open');
+    };
+    assertOpen();
+    while (compositionRef.current || pendingInputRef.current.size) {
+      await Promise.all([compositionRef.current, ...pendingInputRef.current]);
+      assertOpen();
+    }
+    if (inputErrorRef.current) throw inputErrorRef.current;
+    if (chartDragRef.current || draggingRef.current) {
+      throw new Error('Finish the pointer gesture before flushing input');
+    }
+    if (!settlePendingEditsRef.current()) throw new Error('Could not commit pending workbook edits');
+    assertOpen();
+  }, []);
   // the exact frame on screen, stored with the zoom it was painted at. scroll
   // repaints are rAF-coalesced and a mutation republishes the frame, so hit
   // testing reads this snapshot rather than the live scroll offset or the
   // current model — either would answer for pixels that are not on screen.
-  const paintedRef = useRef<{ frame: DisplayList; zoom: number } | null>(null);
+  const paintedRef = useRef<{ frame: DisplayList; zoom: number; sheet: number; handle: WorkbookHandle | null } | null>(null);
   const rafRef = useRef<number | null>(null);
   const editorInputRef = useRef<HTMLInputElement>(null);
   const draggingRef = useRef(false);
@@ -600,6 +656,13 @@ function XlsxEditorContent({
     setRenderError(null);
     paintSourceRef.current = null;
     pendingSheetViewRef.current = false;
+    pendingInputRef.current = new Set();
+    pendingSaveRef.current = null;
+    inputErrorRef.current = null;
+    endCompositionRef.current?.();
+    endCompositionRef.current = null;
+    compositionRef.current = null;
+    paintedRef.current = null;
     if (!file) {
       handleRef.current = null;
       setSheetInfo(null);
@@ -656,7 +719,14 @@ function XlsxEditorContent({
             handle,
             refreshProposals,
             focus: () => scrollRef.current?.focus(),
+            flushPendingInput: () => flushPendingInput(handle!),
+            getPositionAtPoint: (x, y) => handleRef.current === handle ? hostPointRef.current(x, y) : null,
             save: () => {
+              if (!handle || handleRef.current !== handle) throw new Error('Workbook is no longer open');
+              if (compositionRef.current || pendingInputRef.current.size || chartDragRef.current || draggingRef.current) {
+                throw new Error('Await flushPendingInput before saving pending input');
+              }
+              if (inputErrorRef.current) throw inputErrorRef.current;
               if (!settlePendingEditsRef.current()) {
                 throw new Error('Could not commit pending workbook edits');
               }
@@ -687,6 +757,9 @@ function XlsxEditorContent({
     );
     return () => {
       disposed = true;
+      endCompositionRef.current?.();
+      endCompositionRef.current = null;
+      compositionRef.current = null;
       runReadyCleanup();
       unsubscribeUpdates();
       handle?.dispose();
@@ -799,7 +872,7 @@ function XlsxEditorContent({
     }
     paintDisplayList(ctx, dl, dpr * zoom);
     frameRef.current = dl;
-    paintedRef.current = { frame: dl, zoom };
+    paintedRef.current = { frame: dl, zoom, sheet: activeSheet, handle };
     setRenderError(null);
     setVisibleMergedRanges(nextMergedRanges);
     setFrame(dl);
@@ -920,7 +993,9 @@ function XlsxEditorContent({
   settlePendingEditsRef.current = () => {
     const handle = handleRef.current;
     if (!handle) return false;
+    if (compositionRef.current) return false;
     flushNudgeRef.current();
+    if (inputErrorRef.current) return false;
     chartDragRef.current = null;
     setChartDragOffset(null);
     setDragging(false);
@@ -928,6 +1003,9 @@ function XlsxEditorContent({
     if (!draft || readOnlyRef.current) return true;
     try {
       const result = handle.editCell(draft.sheet, draft.row, draft.col, draft.value);
+      if (!result.applied && handle.cell(draft.sheet, draft.row, draft.col).input !== draft.value) {
+        throw new Error('Pending workbook edit was rejected');
+      }
       pendingDraftRef.current = null;
       suppressBlurRef.current = true;
       editorInputRef.current?.blur();
@@ -1020,6 +1098,7 @@ function XlsxEditorContent({
       try {
         applyResult(handle.moveChart(activeSheet, id, dx, dy));
       } catch (e) {
+        inputErrorRef.current = e;
         setError(e instanceof Error ? e.message : String(e));
       }
     },
@@ -1130,7 +1209,7 @@ function XlsxEditorContent({
   const commitEditor = useCallback(
     (move?: Direction) => {
       const handle = handleRef.current;
-      if (!handle || !editing || readOnly) return;
+      if (!handle || !editing || readOnly || compositionRef.current) return;
       suppressBlurRef.current = true;
       const { row, col, value } = editing;
       try {
@@ -1185,19 +1264,16 @@ function XlsxEditorContent({
   }, [selection, activeSheet]);
 
   const cutSelection = useCallback(async () => {
+    const handle = handleRef.current;
     await copySelection();
+    if (handleRef.current !== handle || readOnlyRef.current) return;
     clearCells();
   }, [copySelection, clearCells]);
 
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;
     if (!handle || !selection || readOnly) return;
-    let text: string;
-    try {
-      text = await navigator.clipboard.readText();
-    } catch {
-      return;
-    }
+    const text = await navigator.clipboard.readText();
     if (readOnlyRef.current || handleRef.current !== handle) return;
     const grid = fromTsv(text);
     if (grid.length === 0) return;
@@ -1208,12 +1284,7 @@ function XlsxEditorContent({
       width = Math.max(width, rowArr.length);
       rowArr.forEach((input, dc) => edits.push({ row: r.top + dr, col: r.left + dc, input }));
     });
-    try {
-      applyResult(handle.editCells(activeSheet, edits));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-      return;
-    }
+    applyResult(handle.editCells(activeSheet, edits));
     setSelection({
       anchor: { row: r.top, col: r.left },
       focus: { row: r.top + grid.length - 1, col: r.left + width - 1 },
@@ -1479,18 +1550,40 @@ function XlsxEditorContent({
     [refreshProposals, readOnly]
   );
 
-  const save = useCallback(() => {
+  const save = useCallback((): Promise<void> => {
+    if (pendingSaveRef.current) return pendingSaveRef.current;
     const handle = handleRef.current;
-    if (!handle) return;
-    if (!settlePendingEditsRef.current()) return;
-    try {
+    if (!handle) return Promise.resolve();
+    const pending = Promise.resolve().then(async () => {
+      if (onSaveRequest && await onSaveRequest() !== true) return;
+      if (handleRef.current !== handle) return;
+      await flushPendingInput(handle);
+      if (handleRef.current !== handle) return;
       const bytes = handle.save();
       if (onSave) onSave(bytes);
       else downloadBytes(bytes, fileName ?? 'workbook.xlsx', XLSX_MIME);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }, [onSave, fileName]);
+    }).catch((e: unknown) => {
+      if (handleRef.current === handle) setError(e instanceof Error ? e.message : String(e));
+    }).finally(() => {
+      if (pendingSaveRef.current === pending) pendingSaveRef.current = null;
+    });
+    pendingSaveRef.current = pending;
+    return pending;
+  }, [onSaveRequest, onSave, fileName, flushPendingInput]);
+
+  hostPointRef.current = (clientX, clientY) => {
+    const canvas = canvasRef.current;
+    const painted = paintedRef.current;
+    if (!canvas || !painted?.frame.grid || !painted.handle || painted.handle !== handleRef.current) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY) || rect.width <= 0 || rect.height <= 0 ||
+        clientX < rect.left || clientY < rect.top || clientX >= rect.right || clientY >= rect.bottom) return null;
+    const x = (clientX - rect.left) * painted.frame.width / rect.width;
+    const y = (clientY - rect.top) * painted.frame.height / rect.height;
+    if (chartRegionAtPoint(painted.frame.charts, x, y)) return null;
+    const cell = cellAtPoint(painted.frame.grid, x, y);
+    return cell ? { ...cell, sheet: painted.sheet } : null;
+  };
 
   // render the current scroll window to png via the raster backend and download
   // it — the same display list the canvas paints, rasterized in the core.
@@ -1515,7 +1608,7 @@ function XlsxEditorContent({
   const commitFormula = useCallback(
     (move?: Direction) => {
       const handle = handleRef.current;
-      if (!handle || !selection || formulaDraft == null || readOnly) return;
+      if (!handle || !selection || formulaDraft == null || readOnly || compositionRef.current) return;
       const { row, col } = selection.focus;
       try {
         applyResult(handle.editCell(activeSheet, row, col, formulaDraft));
@@ -1574,12 +1667,12 @@ function XlsxEditorContent({
           return;
         }
         if (lower === 'v') {
-          void pasteSelection();
+          runPendingInput(pasteSelection);
           e.preventDefault();
           return;
         }
         if (lower === 'x') {
-          void cutSelection();
+          runPendingInput(cutSelection);
           e.preventDefault();
           return;
         }
@@ -1897,6 +1990,13 @@ function XlsxEditorContent({
   return (
     <div
       className={className}
+      onKeyDownCapture={(event) => {
+        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) void save();
+        }
+      }}
       role="application"
       aria-label={t('editor.appLabel')}
       style={{
@@ -1985,8 +2085,15 @@ function XlsxEditorContent({
                 placeholder={t('toolbar.formulaPlaceholder')}
                 aria-label={t('toolbar.formulaPlaceholder')}
                 disabled={!sheetInfo}
-                onChange={(e) => setFormulaDraft(e.target.value)}
+                onCompositionStart={compositionStart}
+                onCompositionEnd={compositionEnd}
+                onChange={(e) => {
+                  if (readOnlyRef.current) return;
+                  if (selection) pendingDraftRef.current = { sheet: activeSheet, ...selection.focus, value: e.target.value };
+                  setFormulaDraft(e.target.value);
+                }}
                 onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing || compositionRef.current) return;
                   if (e.key === 'Enter') {
                     commitFormula(e.shiftKey ? 'up' : 'down');
                     focusContainer();
@@ -2149,11 +2256,15 @@ function XlsxEditorContent({
                 ref={editorInputRef}
                 data-testid="xlsx-cell-editor"
                 value={editing.value}
-                onChange={(e) =>
-                  setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev))
-                }
+                onCompositionStart={compositionStart}
+                onCompositionEnd={compositionEnd}
+                onChange={(e) => {
+                  pendingDraftRef.current = { sheet: activeSheet, ...editing, value: e.target.value };
+                  setEditing((prev) => (prev ? { ...prev, value: e.target.value } : prev));
+                }}
                 onKeyDown={(e) => {
                   e.stopPropagation();
+                  if (e.nativeEvent.isComposing || compositionRef.current) return;
                   if (e.key === 'Enter') {
                     commitEditor(e.shiftKey ? 'up' : 'down');
                     e.preventDefault();

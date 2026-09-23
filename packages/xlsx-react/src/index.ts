@@ -7,6 +7,7 @@ export { XlsxEditor } from './XlsxEditor';
 export type {
   XlsxEditorProps,
   XlsxEditorApi,
+  XlsxPointPosition,
   XlsxEditorCollaborationOptions,
 } from './XlsxEditor';
 export { EditorToolbar } from './components/EditorToolbar';
