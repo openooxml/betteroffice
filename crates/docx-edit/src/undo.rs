@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use yrs::sync::time::Clock;
 use yrs::types::DeepObservable;
@@ -24,14 +24,27 @@ pub const UNDO_CAPTURE_TIMEOUT_MS: u64 = 500;
 /// Target undo depth; yrs exposes no stack-trim API.
 pub const UNDO_DEPTH: usize = 100;
 
+type AnchorBoundaries = [IdSet; 2];
+
+#[derive(Default)]
+struct AnchorHistory(Arc<Mutex<AnchorBoundaries>>);
+
+#[derive(Default)]
+struct AnchorState {
+    current: AnchorBoundaries,
+    pending: AnchorBoundaries,
+    latest: Weak<Mutex<AnchorBoundaries>>,
+}
+
 /// The contract-shaped undo surface over yrs [`yrs::undo::UndoManager`].
 pub struct DocUndoManager {
-    inner: yrs::undo::UndoManager<()>,
+    inner: yrs::undo::UndoManager<AnchorHistory>,
     changed_stories: Arc<Mutex<Vec<String>>>,
     _popped: Subscription,
     doc: Doc,
-    anchor_boundaries: Arc<Mutex<[IdSet; 2]>>,
+    anchor_state: Arc<Mutex<AnchorState>>,
     _anchors: Subscription,
+    _history: [Subscription; 2],
 }
 
 /// System clock on native targets. `wasm32-unknown-unknown` has no ambient clock, so the fallback
@@ -73,7 +86,7 @@ impl DocUndoManager {
             init_undo_stack: Vec::new(),
             init_redo_stack: Vec::new(),
         };
-        let mut inner = yrs::undo::UndoManager::with_options(options);
+        let mut inner = yrs::undo::UndoManager::<AnchorHistory>::with_options(options);
         let root = stories_root(&doc.yrs_doc().transact());
         inner.expand_scope(doc.yrs_doc(), &root);
         let comments = doc
@@ -83,10 +96,18 @@ impl DocUndoManager {
             .expect("comments root is declared");
         inner.expand_scope(doc.yrs_doc(), &comments);
         let anchor_root = comments.clone();
+        let anchor_state = Arc::new(Mutex::new(AnchorState {
+            current: comment_boundaries(&doc.doc.transact()),
+            ..AnchorState::default()
+        }));
         let changed_stories = Arc::new(Mutex::new(Vec::new()));
         let popped = {
             let changed_stories = Arc::clone(&changed_stories);
+            let state = Arc::clone(&anchor_state);
             inner.observe_item_popped(move |txn, event| {
+                if let Some(latest) = state.lock().unwrap().latest.upgrade() {
+                    merge_boundaries(&mut latest.lock().unwrap(), &event.meta().0.lock().unwrap());
+                }
                 let comments_changed = event.has_changed(&comments);
                 let mut changed: Vec<String> = stories_root(txn)
                     .iter(txn)
@@ -101,18 +122,32 @@ impl DocUndoManager {
                 *lock(&changed_stories) = changed;
             })
         };
-        let anchor_boundaries = Arc::new(Mutex::new([IdSet::new(), IdSet::new()]));
-        remember_comment_boundaries(&doc.doc.transact(), &anchor_boundaries);
         let anchors = {
-            let boundaries = Arc::clone(&anchor_boundaries);
+            let state = Arc::clone(&anchor_state);
             anchor_root.observe_deep(move |txn, _| {
-                remember_comment_boundaries(txn, &boundaries);
+                let next = comment_boundaries(txn);
+                let mut state = state.lock().unwrap();
+                state.pending = std::mem::replace(&mut state.current, next.clone());
+                merge_boundaries(&mut state.pending, &next);
+            })
+        };
+        let added = {
+            let state = Arc::clone(&anchor_state);
+            inner.observe_item_added(move |txn, event| {
+                remember_history_boundaries(txn, event, &state);
+            })
+        };
+        let updated = {
+            let state = Arc::clone(&anchor_state);
+            inner.observe_item_updated(move |txn, event| {
+                remember_history_boundaries(txn, event, &state);
             })
         };
         Self {
             doc: doc.doc.clone(),
-            anchor_boundaries,
+            anchor_state,
             _anchors: anchors,
+            _history: [added, updated],
             inner,
             changed_stories,
             _popped: popped,
@@ -138,7 +173,15 @@ impl DocUndoManager {
     }
 
     fn restore_comment_boundaries(&self) {
-        let boundaries = self.anchor_boundaries.lock().unwrap().clone();
+        let mut boundaries = self.anchor_state.lock().unwrap().current.clone();
+        for item in self
+            .inner
+            .undo_stack()
+            .iter()
+            .chain(self.inner.redo_stack())
+        {
+            merge_boundaries(&mut boundaries, &item.meta().0.lock().unwrap());
+        }
         if boundaries.iter().all(IdSet::is_empty) {
             return;
         }
@@ -162,7 +205,7 @@ impl DocUndoManager {
         let Some(comments) = txn.get_map(COMMENTS) else {
             return;
         };
-        let mut boundaries = self.anchor_boundaries.lock().unwrap();
+        let mut boundaries = comment_boundaries(&txn);
         for (_, value) in comments.iter(&txn) {
             let Out::YMap(comment) = value else {
                 continue;
@@ -190,6 +233,11 @@ impl DocUndoManager {
                 }
             }
         }
+        let mut state = self.anchor_state.lock().unwrap();
+        if let Some(latest) = state.latest.upgrade() {
+            merge_boundaries(&mut latest.lock().unwrap(), &boundaries);
+        }
+        state.current = boundaries;
     }
 
     pub fn can_undo(&self) -> bool {
@@ -223,16 +271,39 @@ impl DocUndoManager {
     /// Clears both stacks (file-load reset).
     pub fn clear(&mut self) {
         self.inner.clear_all();
-        *self.anchor_boundaries.lock().unwrap() = [IdSet::new(), IdSet::new()];
-        remember_comment_boundaries(&self.doc.transact(), &self.anchor_boundaries);
+        *self.anchor_state.lock().unwrap() = AnchorState {
+            current: comment_boundaries(&self.doc.transact()),
+            ..AnchorState::default()
+        };
     }
 }
 
-fn remember_comment_boundaries(txn: &impl ReadTxn, boundaries: &Mutex<[IdSet; 2]>) {
+fn merge_boundaries(target: &mut AnchorBoundaries, source: &AnchorBoundaries) {
+    for (target, source) in target.iter_mut().zip(source) {
+        target.merge_with(source.clone());
+    }
+}
+
+fn remember_history_boundaries(
+    txn: &impl ReadTxn,
+    event: &mut yrs::undo::Event<AnchorHistory>,
+    state: &Mutex<AnchorState>,
+) {
+    let mut state = state.lock().unwrap();
+    let mut boundaries = event.meta().0.lock().unwrap();
+    merge_boundaries(&mut boundaries, &state.current);
+    merge_boundaries(&mut boundaries, &state.pending);
+    state.current = comment_boundaries(txn);
+    merge_boundaries(&mut boundaries, &state.current);
+    state.pending = Default::default();
+    state.latest = Arc::downgrade(&event.meta().0);
+}
+
+fn comment_boundaries(txn: &impl ReadTxn) -> AnchorBoundaries {
+    let mut boundaries = AnchorBoundaries::default();
     let Some(comments) = txn.get_map(COMMENTS) else {
-        return;
+        return boundaries;
     };
-    let mut boundaries = boundaries.lock().unwrap();
     for (_, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
             continue;
@@ -252,6 +323,7 @@ fn remember_comment_boundaries(txn: &impl ReadTxn, boundaries: &Mutex<[IdSet; 2]
             }
         }
     }
+    boundaries
 }
 
 fn stories_root(txn: &impl ReadTxn) -> yrs::MapRef {
@@ -362,7 +434,57 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
-    use crate::{EditCtx, FormatPolicy, Position};
+    use crate::{EditCtx, FormatPolicy, Position, StoryRange};
+
+    #[test]
+    fn discarded_history_releases_its_anchor_boundaries() {
+        let doc = seed();
+        let id = doc
+            .add_comment(&[StoryRange::new(BODY, 0, 1)], "Ada", "", yrs::Any::Null)
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges(&id, &[StoryRange::new(BODY, 2, 3)])
+            .unwrap();
+        assert!(undo.undo());
+        let discarded = Arc::downgrade(&undo.inner.redo_stack()[0].meta().0);
+        append(&doc, BODY, "!");
+        assert!(!undo.can_redo());
+        assert!(discarded.upgrade().is_none());
+        let cleared = Arc::downgrade(&undo.inner.undo_stack()[0].meta().0);
+        undo.clear();
+        assert!(cleared.upgrade().is_none());
+    }
+
+    #[test]
+    fn remote_reanchoring_keeps_only_current_and_pending_boundaries() {
+        let peer = EditingDoc::new(200);
+        peer.create_story(BODY, &"a".repeat(128), "Normal", "left")
+            .unwrap();
+        let id = peer
+            .add_comment(&[StoryRange::new(BODY, 0, 1)], "Ada", "", yrs::Any::Null)
+            .unwrap();
+        let doc = EditingDoc::new(201);
+        doc.apply_update_v1(&peer.encode_state_as_update_v1())
+            .unwrap();
+        let undo = doc.undo_manager();
+        for start in 1..100 {
+            peer.set_comment_ranges(&id, &[StoryRange::new(BODY, start, start + 1)])
+                .unwrap();
+            doc.apply_update_v1(&peer.encode_state_as_update_v1())
+                .unwrap();
+        }
+        assert_eq!(undo.undo_depth(), 0);
+        let state = undo.anchor_state.lock().unwrap();
+        let count = |sets: &AnchorBoundaries| -> u32 {
+            sets.iter()
+                .flat_map(|set| set.iter())
+                .flat_map(|(_, ranges)| ranges.iter())
+                .map(|range| range.end - range.start)
+                .sum()
+        };
+        assert!(count(&state.current) <= 2);
+        assert!(count(&state.pending) <= 4);
+    }
 
     const BODY: &str = "body";
     const HEADER: &str = "header:rId7";

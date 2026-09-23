@@ -26,6 +26,8 @@
 - **Agent editing with human review.** Review attributed agent edits through
   tracked changes, inline diffs, and before-and-after previews. Accept or
   reject changes directly in the editor.
+  DOCX hosts can reanchor existing comments while preserving identity, review
+  metadata, undo/redo, and exported ranges.
 
 - **Real-time collaboration.** People and agents edit the same file together,
   with live cursors and selections. Concurrent changes merge automatically,

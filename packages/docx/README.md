@@ -89,6 +89,7 @@ Reanchoring joins the current local undo capture, so an immediate replacement an
 reanchor can undo together. Comment edits participate in the session's history;
 undoing comment changes conservatively invalidates all stories for saved anchors.
 
-The undo manager also retains comment item boundaries so anchors inside replaced
-text survive repeated undo/redo with Yrs 0.27. This adds local history bookkeeping
-for comments and a snapshot traversal when undo/redo needs those boundaries.
+The undo manager retains comment item boundaries with their undo/redo entries so
+anchors inside replaced text survive repeated history traversal with Yrs 0.27.
+Discarding history releases its bookkeeping; undo/redo traverses a local snapshot
+when those boundaries need restoration.
