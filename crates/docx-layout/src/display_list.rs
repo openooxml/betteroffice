@@ -8460,6 +8460,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 font,
                 color,
                 align: _,
+                rotation_deg: _,
             } => prims.push(Primitive::Text(TextRunPrimitive {
                 text,
                 x: px(x),

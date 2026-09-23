@@ -214,6 +214,9 @@ pub enum PlotOp {
         font: PlotFont,
         color: String,
         align: PlotTextAlign,
+        /// Clockwise turn about the text box's own centre. `0.0` for all but a
+        /// value-axis title, which PowerPoint stands on its side.
+        rotation_deg: f64,
     },
     Line {
         x1: f64,
@@ -1619,6 +1622,20 @@ fn push_text_aligned<S: PlotSink + ?Sized>(
     style: &ResolvedText,
     align: PlotTextAlign,
 ) {
+    push_text_turned(ops, text, x, baseline_y, width, style, align, 0.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_turned<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    text: &str,
+    x: f64,
+    baseline_y: f64,
+    width: f64,
+    style: &ResolvedText,
+    align: PlotTextAlign,
+    rotation_deg: f64,
+) {
     if text.is_empty() || width <= 0.0 || ops.exhausted() {
         return;
     }
@@ -1630,6 +1647,7 @@ fn push_text_aligned<S: PlotSink + ?Sized>(
         font: style.font.clone(),
         color: style.color.clone(),
         align,
+        rotation_deg,
     });
 }
 
@@ -2379,14 +2397,31 @@ fn emit_axes<S: PlotSink + ?Sized>(
         (left_of_plot(plot), below_plot(plot))
     };
     if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
-        push_text(
-            ops,
-            title,
-            value_title.0,
-            value_title.1,
-            value_title.2,
-            tick_style,
-        );
+        if transposed {
+            push_text(
+                ops,
+                title,
+                value_title.0,
+                value_title.1,
+                value_title.2,
+                tick_style,
+            );
+        } else {
+            // PowerPoint stands a value-axis title on its side, centred on the
+            // axis it names, outside the tick labels.
+            // The sink hangs the box from the baseline, so the baseline sits
+            // half an ascent below the centre the title turns about.
+            push_text_turned(
+                ops,
+                title,
+                plot.x - plot.gutter / 2.0 - plot.h / 2.0,
+                plot.y + plot.h / 2.0 + tick_style.font.size_px * 0.34,
+                plot.h,
+                tick_style,
+                PlotTextAlign::Center,
+                -90.0,
+            );
+        }
     }
     if let Some(title) = family
         .axis_titles

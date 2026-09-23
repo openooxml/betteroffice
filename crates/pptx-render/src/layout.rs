@@ -2680,7 +2680,10 @@ fn chart_text_primitive(
             caret_stops: Vec::new(),
         }],
         overflow: false,
-        transform: Transform::default(),
+        transform: Transform {
+            rotation_deg: safe_geometry(text.rotation_deg as f32),
+            ..Transform::default()
+        },
     })
 }
 
