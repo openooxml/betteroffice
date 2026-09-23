@@ -1824,6 +1824,15 @@ fn wrap_legend_label<S: PlotSink + ?Sized>(
             .rfind(char::is_whitespace)
             .map(|index| index + remaining[index..].chars().next().unwrap().len_utf8())
             .unwrap_or(end);
+        // A band too narrow for even one character still has to take one, or
+        // the remainder never shrinks and the wrap never ends.
+        let split = match split {
+            0 => remaining.chars().next().map_or(0, char::len_utf8),
+            split => split,
+        };
+        if split == 0 {
+            break;
+        }
         lines.push(remaining[..split].to_owned());
         remaining = remaining[split..].to_owned();
     }
@@ -6559,6 +6568,22 @@ mod tests {
             widest(true),
             widest(false)
         );
+    }
+
+    #[test]
+    fn a_legend_narrower_than_one_glyph_still_finishes_its_wrap() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["Northern region"];
+        let mut ops = Vec::new();
+        let mut emitter = Emitter {
+            sink: &mut ops,
+            remaining: MAX_PLOT_OPS,
+        };
+        let style = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        let lines = wrap_legend_label("Northern region", 0.5, &style, &mut emitter);
+        assert!(lines.len() <= "Northern region".len());
+        assert_eq!(lines.concat(), "Northern region");
+        let _ = (data, names);
     }
 
     #[test]
