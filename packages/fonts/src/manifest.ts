@@ -126,6 +126,58 @@ export const BUNDLED_FONTS: BundledFontFace[] = [
     'Montserrat',
     [374500, 374640, 384612, 384792],
   ),
+  ...familyFaces('Poppins', 'Poppins', 'Poppins', [28468, 28108, 30772, 30388]),
+  // Faces the references use that ship no italic, or none at all: the missing
+  // ones fall back through the chain.
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 400,
+    style: 'normal',
+    file: 'Oswald-Regular.ttf',
+    byteLength: 78404,
+  },
+  {
+    family: 'Oswald',
+    metricCompatWith: 'Oswald',
+    weight: 700,
+    style: 'normal',
+    file: 'Oswald-Bold.ttf',
+    byteLength: 78736,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 400,
+    style: 'normal',
+    file: 'Heebo-Regular.ttf',
+    byteLength: 42368,
+  },
+  {
+    family: 'Heebo',
+    metricCompatWith: 'Heebo',
+    weight: 700,
+    style: 'normal',
+    file: 'Heebo-Bold.ttf',
+    byteLength: 42732,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'normal',
+    file: 'DMSerifDisplay-Regular.ttf',
+    byteLength: 70440,
+  },
+  {
+    family: 'DM Serif Display',
+    metricCompatWith: 'DM Serif Display',
+    weight: 400,
+    style: 'italic',
+    file: 'DMSerifDisplay-Italic.ttf',
+    byteLength: 68560,
+  },
+
   // Comic Relief ships no italics, so those fall back through the chain.
   {
     family: 'Comic Relief',
@@ -399,6 +451,17 @@ export function resolveScriptFallbackFace(
 function looksSerif(family: string): boolean {
   const lower = family.toLowerCase();
   return (
+    lower.includes('antiqua') ||
+    lower.includes('bookman') ||
+    lower.includes('calisto') ||
+    lower.includes('schoolbook') ||
+    lower.includes('goudy') ||
+    lower.includes('perpetua') ||
+    lower.includes('rockwell') ||
+    lower.includes('caslon') ||
+    lower.includes('constantia') ||
+    lower.includes('didot') ||
+    lower.includes('baskerville') ||
     lower.includes('times') ||
     lower.includes('georgia') ||
     lower.includes('garamond') ||
@@ -461,6 +524,26 @@ function lightVariantOf(
 }
 
 /**
+ * Whether a family name reads as a typewriter face. A monospaced document was
+ * laid out against a fixed pitch, so a proportional substitute rewraps every
+ * line of it; Courier New's clone keeps the pitch even where the shapes differ.
+ */
+function looksMono(family: string): boolean {
+  const lower = family.toLowerCase();
+  return (
+    lower.includes('consolas') ||
+    lower.includes('monaco') ||
+    lower.includes('menlo') ||
+    lower.includes('console') ||
+    lower.includes('andale') ||
+    lower.includes('inconsolata') ||
+    lower.includes('cascadia') ||
+    lower.includes('typewriter') ||
+    /(^|[\s-])mono([\s-]|$)/.test(lower)
+  );
+}
+
+/**
  * Choose a related family, then a serif or sans fallback.
  *
  * The sans fallback is Calibri because that is what Office substitutes for a
@@ -477,6 +560,9 @@ export function resolveLastResortFace(
 ): BundledFontFace {
   const light = lightVariantOf(family, italic);
   if (light) return light;
+  if (looksMono(family)) {
+    return resolveMetricCompatFace('Courier New', bold, italic)!;
+  }
   const matched = WIDTH_MATCHED_SUBSTITUTES[family.trim().toLowerCase()];
   if (matched) {
     const face = resolveMetricCompatFace(matched, bold, italic);

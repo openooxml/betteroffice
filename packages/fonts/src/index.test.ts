@@ -38,6 +38,25 @@ describe('resolution', () => {
     expect(resolveMetricCompatFamily('Calibri Light')).toBeUndefined();
   });
 
+  test('a typewriter or old-style name lands on a face of its own kind', () => {
+    expect(resolveLastResortFace('Consolas', false, false).file).toBe('LiberationMono-Regular.ttf');
+    expect(resolveLastResortFace('Lucida Console', false, false).file).toBe(
+      'LiberationMono-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Book Antiqua', false, false).file).toBe(
+      'LiberationSerif-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Bookman Old Style', true, false).file).toBe(
+      'LiberationSerif-Bold.ttf'
+    );
+    expect(resolveLastResortFace('Calisto MT', false, false).file).toBe(
+      'LiberationSerif-Regular.ttf'
+    );
+    expect(resolveLastResortFace('Monotype Corsiva', false, false).file).toBe(
+      'Carlito-Regular.ttf'
+    );
+  });
+
   test('a family with no clone takes the bundled face closest in width', () => {
     expect(resolveLastResortFace('Verdana', false, false).file).toBe('Montserrat-Regular.ttf');
     expect(resolveLastResortFace('Verdana', true, false).file).toBe('Montserrat-Bold.ttf');
