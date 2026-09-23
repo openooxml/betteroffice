@@ -28,7 +28,7 @@ interface RefApiInputs {
   applyYrsFormattingRef: React.MutableRefObject<(action: FormattingAction) => boolean>;
   applyYrsCommandRef: React.MutableRefObject<(command: YrsEditorCommand) => boolean>;
   getYrsPositionProjectionRef: React.MutableRefObject<() => YrsPositionProjection | null>;
-  displayPositionToYrsLocRef: React.MutableRefObject<(position: number) => YrsLoc | null>;
+  displayPositionToYrsLocRef: React.MutableRefObject<PagedEditorRef['displayPositionToYrsLoc']>;
 }
 
 function storyOffsetToLoc(session: YrsSession, story: string, offset: number): YrsLoc | null {
@@ -199,7 +199,7 @@ export interface UsePagedEditorRefApiOptions {
   applyYrsFormatting: (action: FormattingAction) => boolean;
   applyYrsCommand: (command: YrsEditorCommand) => boolean;
   getYrsPositionProjection: () => YrsPositionProjection | null;
-  displayPositionToYrsLoc: (position: number) => YrsLoc | null;
+  displayPositionToYrsLoc: PagedEditorRef['displayPositionToYrsLoc'];
 }
 
 export function usePagedEditorRefApi(opts: UsePagedEditorRefApiOptions): void {

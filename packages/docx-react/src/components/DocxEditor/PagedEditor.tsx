@@ -75,7 +75,7 @@ import {
 } from '@betteroffice/docx/yrs';
 import { createStyleResolver } from '@betteroffice/docx/styles';
 import { resolveImageLayoutAttrs } from '@betteroffice/docx/docx';
-import type { RenderedDomContext } from '../../plugin-api/types';
+import type { PointPosition, RenderedDomContext } from '../../plugin-api/types';
 import { EMPTY_ANCHOR_POSITIONS } from './commentFactories';
 import {
   DEFAULT_PAGE_WIDTH,
@@ -127,6 +127,7 @@ import {
 } from './yrsCommands';
 import {
   createYrsPositionProjection,
+  projectYrsDisplayPosition,
   type YrsPositionProjection,
 } from './internals/yrsPositionProjection';
 import { partEditStory, type NoteEdit, type PartEdit } from './partEdit';
@@ -364,8 +365,8 @@ export interface PagedEditorRef {
   selectAll(): void;
   /** Get the current display-position selection. */
   getSelectionRange(): { from: number; to: number } | null;
-  /** Resolve a display position into the authoritative Yrs location. */
-  displayPositionToYrsLoc(position: number): YrsLoc | null;
+  /** Resolve a body position or region-aware hit into an authoritative Yrs location. */
+  displayPositionToYrsLoc(position: number | PointPosition): YrsLoc | null;
   /** Live authoritative yrs session. */
   getYrsSession(): YrsSession | null;
   /** Paragraph-local stored inline formatting for the current yrs caret. */
@@ -1668,7 +1669,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       applyYrsCommand,
       getYrsPositionProjection: () => getYrsPositionProjection('body'),
       displayPositionToYrsLoc: (position) => {
-        const target = getYrsPositionProjection('body')?.targetAt(position);
+        const target = projectYrsDisplayPosition(position, getYrsPositionProjection);
         return target ? yrsCore.displayPositionToLoc(target.displayPosition, target.story) : null;
       },
     });

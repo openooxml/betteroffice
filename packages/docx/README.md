@@ -78,7 +78,9 @@ geometry. The query never changes selection or focus.
 
 The result contains `position`, `pageIndex`, and `region`. Header/footer hits also
 carry `rId`; footnote/endnote hits carry `noteId`. Positions are local to that
-region's display stream. Map them to Yrs using the corresponding story projection.
+region's display stream. In React, pass the complete result to
+`editorRef.displayPositionToYrsLoc(hit)` to resolve its story and paragraph location,
+including positions inside tables. Passing a number to that method retains body mapping.
 
 Text runs and their editable content boxes are accepted. Page margins, images,
 page gaps, points outside pages, and queries without ready canvas geometry return
