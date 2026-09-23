@@ -201,7 +201,9 @@ function summarizeFormat(root: Json, format: Format): FormatSummary {
   if (format === 'xlsx' && object(root.xlsx_benchmark)) {
     const workbooks = documents.filter((row) => ENGINES.every((engine) => row.recalc[engine] !== null));
     const perfect = (result: Recalc | null) => !!result?.ok && result.correct === result.total;
-    const common = workbooks.filter((row) => ENGINES.every((engine) => perfect(row.recalc[engine])));
+    const common = workbooks.filter((row) =>
+      ENGINES.every((engine) => perfect(row.recalc[engine]) && row.recalc[engine]!.ms !== null)
+    );
     calculation = {
       workbooks: workbooks.length,
       common: common.length,
@@ -209,7 +211,7 @@ function summarizeFormat(root: Json, format: Format): FormatSummary {
         correct: workbooks.reduce((sum, row) => sum + row.recalc[engine]!.correct, 0),
         total: workbooks.reduce((sum, row) => sum + row.recalc[engine]!.total, 0),
         perfect: workbooks.filter((row) => perfect(row.recalc[engine])).length,
-        meanMs: mean(common.map((row) => row.recalc[engine]!.ms ?? 0)),
+        meanMs: mean(common.map((row) => row.recalc[engine]!.ms!)),
       })),
     };
   }

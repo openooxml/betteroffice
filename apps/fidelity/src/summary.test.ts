@@ -216,6 +216,17 @@ test('timing, recalculation and parsing match the benchmark helpers exactly', ()
   }
 });
 
+test('a perfect recalculation without valid timings stays out of the timing mean', () => {
+  const input = report();
+  input.samples.push(sample('xlsx', 'census', { ssim: [0.7, 0.7, 0.7], calc: { total: 10, correct: [10, 10, 10] } }));
+  const ledger = input.samples.find((row) => row.id === 'ledger') as { calculations: Record<Engine, Record<string, unknown>> };
+  delete ledger.calculations.published.elapsed_ms;
+  const calculation = summarize(input).formats.xlsx.calculation!;
+  expect(calculation.common).toBe(1);
+  for (const engine of ENGINES) expect(calculation.engines[engine].meanMs).toBeCloseTo(20, 9);
+  expect(calculation.engines.published.perfect).toBe(2);
+});
+
 test('rows keep per-document values and drop scores from another revision', () => {
   const summary = summarize(report());
   const letter = summary.formats.docx.rows.find((row) => row.id === 'letter')!;
