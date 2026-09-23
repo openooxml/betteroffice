@@ -81,6 +81,10 @@ list, unknown comment/story/paragraph, or invalid offset throws before any conte
 changes. The host must find the surviving text and supply its new range; the API
 does not infer text matches after replacement.
 
+If replacement removes all commented text, the host must explicitly choose a new
+non-empty range or handle the comment's removal. Rejected reanchoring leaves the
+comment unchanged and does not roll back a text replacement already performed.
+
 Reanchoring joins the current local undo capture, so an immediate replacement and
 reanchor can undo together. Comment edits participate in the session's history;
 undoing comment changes conservatively invalidates all stories for saved anchors.

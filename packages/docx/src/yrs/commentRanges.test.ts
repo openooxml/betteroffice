@@ -91,6 +91,34 @@ describe('setCommentRanges', () => {
     }
   });
 
+  it('rejects empty reanchoring after all commented text is removed and preserves undo', async () => {
+    const session = await createYrsSession({ clientId: 80007 });
+    try {
+      const original = 'Achado preservado. Conclusão antiga.';
+      const { paraId } = session.createStory('body', original);
+      const { commentId } = session.addComment(
+        [range('body', paraId, 0, 17)], 'Ada', '2026-09-22', []
+      );
+      const before = session.resolveComment(commentId);
+      session.beginUndoCapture();
+      session.replaceRange(range('body', paraId, 0, original.length), '');
+      const removed = session.encodeState();
+      for (const ranges of [[], [range('body', paraId, 0, 0)], [range('body', paraId, 0, 17)]]) {
+        expect(() => session.setCommentRanges(commentId, ranges)).toThrow();
+        expect(session.encodeState()).toEqual(removed);
+      }
+      expect(session.paragraphs('body')[0].text).toBe('');
+      expect(session.undo()).toBe(true);
+      expect(session.paragraphs('body')[0].text).toBe(original);
+      expect(session.resolveComment(commentId)).toEqual(before);
+      expect(session.undo()).toBe(false);
+      expect(session.redo()).toBe(true);
+      expect(session.paragraphs('body')[0].text).toBe('');
+    } finally {
+      session.destroy();
+    }
+  });
+
   it('replicates new anchors without making remote changes locally undoable', async () => {
     const source = await createYrsSession({ clientId: 80003 });
     const peer = await createYrsSession({ clientId: 80004 });
