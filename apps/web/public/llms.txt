@@ -11,7 +11,7 @@ For current versions, use the linked registries and [release notes](https://gith
 DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope, Apache-2.0. The `-react` packages are drop-in editor components; the unsuffixed packages are the framework-free cores for custom UIs and headless use.
 
 - [@betteroffice/docx](https://www.npmjs.com/package/@betteroffice/docx): framework-free DOCX core — OOXML parse/serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving round-trips against the original package, so untouched parts keep their source bytes.
-- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes.
+- [@betteroffice/docx-react](https://www.npmjs.com/package/@betteroffice/docx-react): the DOCX editor and viewer as a React component — toolbar, paginated canvas, comments, tracked changes. `onSaveRequest` delegates menu/shortcut saves before export; `flushPendingInput()` awaits accepted input and selection before host session access.
 - [@betteroffice/docx-i18n](https://www.npmjs.com/package/@betteroffice/docx-i18n): UI locale strings for the DOCX React editor.
 - [@betteroffice/fonts](https://www.npmjs.com/package/@betteroffice/fonts): bundled metric-compatible Latin fonts plus Hebrew and Arabic coverage faces for deterministic document measurement.
 - [@betteroffice/fonts-cjk](https://www.npmjs.com/package/@betteroffice/fonts-cjk): optional CJK coverage faces for Chinese, Japanese, and Korean documents.

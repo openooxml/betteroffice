@@ -41,6 +41,9 @@
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
 
+- **Host-controlled DOCX saving.** Intercept Save before export and await pending
+  editor input before reading, changing, or persisting the document.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 
