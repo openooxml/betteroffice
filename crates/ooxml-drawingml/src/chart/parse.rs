@@ -1,10 +1,9 @@
 //! `c:chartSpace` parsing, generic over the host's XML element type.
 
 use super::model::{
-    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLegend, ChartLine, ChartManualLayout,
-    ChartLabelRun, ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries,
-    ChartSpace,
-    ChartTextProperties,
+    ChartAxes, ChartAxis, ChartDataLabels, ChartFill, ChartLabelRun, ChartLegend, ChartLine,
+    ChartManualLayout, ChartMarker, ChartPlotGroup, ChartPoint, ChartPointLabel, ChartSeries,
+    ChartSpace, ChartTextProperties,
 };
 
 pub const DEFAULT_SERIES_COLORS: [&str; 8] = [
@@ -435,9 +434,7 @@ fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
         .and_then(|properties| first_deep(properties, "solidFill", 0))
         .and_then(E::solid_fill_hex)
         .or_else(|| series.theme_color_hex(&format!("accent{}", index % 6 + 1)))
-        .unwrap_or_else(|| {
-            DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned()
-        })
+        .unwrap_or_else(|| DEFAULT_SERIES_COLORS[index % DEFAULT_SERIES_COLORS.len()].to_owned())
 }
 
 fn parse_series<E: ChartXml>(

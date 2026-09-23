@@ -2591,14 +2591,7 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let step = style.font.size_px * 1.2;
     let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
     for (line, text) in lines.iter().enumerate() {
-        push_text(
-            ops,
-            text.trim(),
-            x,
-            top + step * line as f64,
-            width,
-            &style,
-        );
+        push_text(ops, text.trim(), x, top + step * line as f64, width, &style);
     }
 }
 
@@ -6774,7 +6767,7 @@ mod tests {
         point_restored.data_labels = Some(ChartDataLabels {
             delete: Some(true),
             points: Some(vec![ChartPointLabel {
-                    runs: None,
+                runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {
@@ -6826,7 +6819,7 @@ mod tests {
         shown.data_labels = Some(ChartDataLabels {
             show_value: Some(true),
             points: Some(vec![ChartPointLabel {
-                    runs: None,
+                runs: None,
                 index: Some(1.0),
                 text: None,
                 labels: ChartDataLabels {

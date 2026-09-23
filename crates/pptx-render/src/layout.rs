@@ -31,9 +31,8 @@ use crate::chart::{ChartFrame, ChartText, chart_primitive};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, ImageTile,
-    Paint,
-    PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke, StrokeEnd,
-    SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
+    Paint, PositionedGlyph, PositionedTextLine, PositionedTextRun, Primitive, Shadow, Stroke,
+    StrokeEnd, SurfaceDisplayList, TextAlign, TextAnchor, TextParagraph, TextRun, Transform,
 };
 
 const EMU_PER_CSS_PIXEL: f32 = 9_525.0;
@@ -1156,7 +1155,8 @@ impl<'a> LayoutBuilder<'a> {
                     .and_then(|fill| fill.media_part_path.as_deref())
                     .and_then(|path| self.media_part(path))
                     .and_then(|part| image_dpi(&part.bytes));
-                self.primitives.push(picture_filled(primitive, picture, dpi));
+                self.primitives
+                    .push(picture_filled(primitive, picture, dpi));
             }
             return Ok(());
         }
@@ -1189,7 +1189,8 @@ impl<'a> LayoutBuilder<'a> {
                 .and_then(|fill| fill.media_part_path.as_deref())
                 .and_then(|path| self.media_part(path))
                 .and_then(|part| image_dpi(&part.bytes));
-            self.primitives.push(picture_filled(primitive, picture, dpi));
+            self.primitives
+                .push(picture_filled(primitive, picture, dpi));
         }
         Ok(())
     }
@@ -1272,7 +1273,14 @@ impl<'a> LayoutBuilder<'a> {
         }
         if let Some(GraphicFrameData::Table(table)) = graphic {
             return self.render_table(
-                object_id, shape_id, name, rect, transform, frame_space, table, stories,
+                object_id,
+                shape_id,
+                name,
+                rect,
+                transform,
+                frame_space,
+                table,
+                stories,
             );
         }
         if let Some(GraphicFrameData::Diagram {
@@ -2979,9 +2987,7 @@ fn first_line_indent(paragraph: &ResolvedParagraph) -> f32 {
     if paragraph.marker.is_some() || !paragraph.indent_px.is_finite() {
         return 0.0;
     }
-    paragraph
-        .indent_px
-        .max(-paragraph.margin_left_px.max(0.0))
+    paragraph.indent_px.max(-paragraph.margin_left_px.max(0.0))
 }
 
 /// The width a `wrap="none"` body lays its lines against: wide enough that no
@@ -4656,7 +4662,11 @@ fn picture_fill<'a>(nodes: &[Option<&'a ShapeNode>]) -> Option<&'a PictureFill> 
 }
 
 /// Redraws a picture-filled shape as an image masked by the shape's own outline.
-fn picture_filled(primitive: Primitive, picture: Option<&PictureFill>, dpi: Option<f32>) -> Primitive {
+fn picture_filled(
+    primitive: Primitive,
+    picture: Option<&PictureFill>,
+    dpi: Option<f32>,
+) -> Primitive {
     let Some(picture) = picture else {
         return primitive;
     };
@@ -4766,7 +4776,9 @@ fn graphic_label(graphic: Option<&GraphicFrameData>) -> Option<String> {
 /// its own resolution — PowerPoint reads the density the file declares, so a
 /// 75 dpi bitmap tiles 28% larger than the 96 dpi the canvas assumes.
 fn picture_fill_tile(picture: &PictureFill, dpi: Option<f32>) -> Option<ImageTile> {
-    let density = dpi.filter(|value| value.is_finite() && *value > 1.0).map_or(1.0, |value| 96.0 / value);
+    let density = dpi
+        .filter(|value| value.is_finite() && *value > 1.0)
+        .map_or(1.0, |value| 96.0 / value);
     picture.tile.map(|tile| ImageTile {
         scale_x: tile.scale_x as f32 * density,
         scale_y: tile.scale_y as f32 * density,
@@ -5521,8 +5533,17 @@ mod tests {
         let mut paragraph = paragraph(&renderer, "l", "one two three four five six seven");
         paragraph.margin_left_px = 30.0;
         paragraph.indent_px = -30.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 120.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert!((lines[0].x - 0.0).abs() < 0.01, "{:?}", lines[0].x);
         assert!((lines[1].x - 30.0).abs() < 0.01, "{:?}", lines[1].x);
         assert!(lines[0].width > lines[1].width, "the first line is wider");
@@ -5532,12 +5553,28 @@ mod tests {
     fn a_body_that_does_not_wrap_keeps_its_paragraph_on_one_line() {
         let renderer = renderer();
         let paragraph = paragraph(&renderer, "l", "one two three four five six seven eight");
-        let wrapped =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 120.0, 1.0, false, true)
-                .unwrap();
-        let flat =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 120.0, 1.0, false, false)
-                .unwrap();
+        let wrapped = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
+        let flat = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            120.0,
+            1.0,
+            false,
+            false,
+        )
+        .unwrap();
         assert!(wrapped.len() > 1, "{}", wrapped.len());
         assert_eq!(flat.len(), 1);
         assert!(flat[0].width > 120.0, "the line runs past the shape");
@@ -5581,8 +5618,17 @@ mod tests {
     fn a_tab_advances_to_the_next_default_stop_without_painting_a_glyph() {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let positions = glyph_positions(&lines);
         assert_eq!(positions.len(), 2, "the tab paints nothing");
         assert!(positions[0].abs() < 0.01, "{positions:?}");
@@ -5593,8 +5639,17 @@ mod tests {
     fn a_declared_stop_wins_over_the_default_pitch() {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", vec![40.0, 300.0], 96.0);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1_000.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1_000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[1] - 40.0).abs() < 0.01, "{positions:?}");
     }
@@ -5604,8 +5659,17 @@ mod tests {
         let renderer = renderer();
         let mut paragraph = tabbed(&renderer, "A\tB", vec![40.0, 200.0], 96.0);
         paragraph.margin_left_px = 50.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 50.0, 0.0, 950.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            50.0,
+            0.0,
+            950.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[1] - 200.0).abs() < 0.01, "{positions:?}");
     }
@@ -5614,8 +5678,17 @@ mod tests {
     fn a_tab_never_reaches_past_the_line() {
         let renderer = renderer();
         let paragraph = tabbed(&renderer, "A\tB", Vec::new(), 96.0);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 40.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            40.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         for line in &lines {
             assert!(line.width <= 40.01, "{}", line.width);
         }
@@ -5628,8 +5701,17 @@ mod tests {
         paragraph.margin_left_px = 30.0;
         paragraph.indent_px = -30.0;
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            300.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
     }
@@ -5641,8 +5723,17 @@ mod tests {
         paragraph.margin_left_px = 30.0;
         paragraph.indent_px = -30.0;
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 400.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            400.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let positions = glyph_positions(&lines);
         assert!((positions[0] - 30.0).abs() < 0.01, "{positions:?}");
         assert!((positions[4] - 96.0).abs() < 0.01, "{positions:?}");
@@ -5656,8 +5747,17 @@ mod tests {
         paragraph.indent_px = -30.0;
         paragraph.marker = Some("\u{2022}".to_owned());
         paragraph.tab_stops = resolve_tab_stops(None, 285_750, -285_750);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 30.0, 0.0, 300.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            30.0,
+            0.0,
+            300.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let text = lines[0]
             .runs
             .iter()
@@ -5814,8 +5914,17 @@ mod tests {
             .take_while(|cluster| cluster_is_blank(cluster))
             .count();
         let width = prefix_width + clusters[second_break].width / 2.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &justified, 20.0, 30.0, width, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &justified,
+            20.0,
+            30.0,
+            width,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         let natural = layout_paragraph(
             &renderer.fonts,
             &paragraph(&renderer, "justLow", text),
@@ -6076,7 +6185,17 @@ mod tests {
         let joined = paragraph(&["alpha beta gamma delta"]);
         for width in [100.0, 10_000.0] {
             let render = |paragraph| {
-                layout_paragraph(&renderer.fonts, paragraph, 10.0, 20.0, width, 1.0, false, true).unwrap()
+                layout_paragraph(
+                    &renderer.fonts,
+                    paragraph,
+                    10.0,
+                    20.0,
+                    width,
+                    1.0,
+                    false,
+                    true,
+                )
+                .unwrap()
             };
             assert_eq!(render(&split), render(&joined));
         }
@@ -6128,16 +6247,25 @@ mod tests {
                     style: style.clone(),
                 }],
             };
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, true, true)
-                .unwrap()
-                .iter()
-                .map(|line| {
-                    line.runs
-                        .iter()
-                        .map(|run| run.text.clone())
-                        .collect::<String>()
-                })
-                .collect::<Vec<_>>()
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1000.0,
+                1.0,
+                true,
+                true,
+            )
+            .unwrap()
+            .iter()
+            .map(|line| {
+                line.runs
+                    .iter()
+                    .map(|run| run.text.clone())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
         };
 
         assert_eq!(stack("A\nB"), ["A", "B"]);
@@ -7847,8 +7975,17 @@ mod tests {
         };
         second.style.spacing_pt = 6.0;
         paragraph.runs.push(second);
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(lines[0].runs.len(), 2);
         assert_eq!(lines[0].runs[0].letter_spacing_px, 0.0);
         assert_eq!(lines[0].runs[1].letter_spacing_px, 8.0);
@@ -7884,8 +8021,17 @@ mod tests {
         let renderer = renderer();
         let mut paragraph = paragraph(&renderer, "just", "AA BB CC AA BB CC");
         paragraph.runs[0].style.spacing_pt = 6.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 160.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            160.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert!(lines.len() > 1);
         assert!((lines[0].width - 160.0).abs() < 0.001, "{}", lines[0].width);
     }
@@ -7895,8 +8041,17 @@ mod tests {
         let renderer = renderer();
         let mut paragraph = paragraph(&renderer, "ctr", "AA\nAA");
         paragraph.runs[0].style.spacing_pt = 6.0;
-        let lines =
-            layout_paragraph(&renderer.fonts, &paragraph, 0.0, 0.0, 1000.0, 1.0, false, true).unwrap();
+        let lines = layout_paragraph(
+            &renderer.fonts,
+            &paragraph,
+            0.0,
+            0.0,
+            1000.0,
+            1.0,
+            false,
+            true,
+        )
+        .unwrap();
         assert_eq!(lines.len(), 2);
         assert!((lines[0].width - lines[1].width).abs() < 0.001);
         assert!((lines[0].x - lines[1].x).abs() < 0.001);
@@ -9172,4 +9327,3 @@ mod tests {
         assert!((end.length - 13.228_347).abs() < 1e-6);
     }
 }
-

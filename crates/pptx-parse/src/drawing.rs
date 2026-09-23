@@ -1497,8 +1497,12 @@ fn diagram_drawing_target(relationships: &[Relationship], data_id: &str) -> Opti
         .filter(|relationship| relationship.has_type("/diagramDrawing"))
         .find_map(|relationship| {
             let target = relationship.resolved_target.clone()?;
-            let name = target.rsplit_once('/').map_or(target.as_str(), |(_, name)| name);
-            name.trim_start_matches("drawing").eq(&stem).then_some(target)
+            let name = target
+                .rsplit_once('/')
+                .map_or(target.as_str(), |(_, name)| name);
+            name.trim_start_matches("drawing")
+                .eq(&stem)
+                .then_some(target)
         })
 }
 

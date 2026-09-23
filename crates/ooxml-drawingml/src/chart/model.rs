@@ -134,9 +134,7 @@ mod blank_numbers {
             .serialize(serializer)
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Vec<f64>, D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f64>, D::Error> {
         Ok(Vec::<Option<f64>>::deserialize(deserializer)?
             .into_iter()
             .map(|value| value.unwrap_or(f64::NAN))
@@ -164,12 +162,14 @@ mod blank_numbers {
         pub fn deserialize<'de, D: Deserializer<'de>>(
             deserializer: D,
         ) -> Result<Option<Vec<f64>>, D::Error> {
-            Ok(Option::<Vec<Option<f64>>>::deserialize(deserializer)?.map(|values| {
-                values
-                    .into_iter()
-                    .map(|value| value.unwrap_or(f64::NAN))
-                    .collect()
-            }))
+            Ok(
+                Option::<Vec<Option<f64>>>::deserialize(deserializer)?.map(|values| {
+                    values
+                        .into_iter()
+                        .map(|value| value.unwrap_or(f64::NAN))
+                        .collect()
+                }),
+            )
         }
     }
 }

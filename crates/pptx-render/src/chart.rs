@@ -118,7 +118,10 @@ impl PlotSink for ChartSink<'_> {
             align: PlotTextAlign::Start,
         }) {
             Ok(Primitive::TextBox {
-                text_shadow: None, lines, .. }) => lines.first().map(|line| f64::from(line.width)),
+                text_shadow: None,
+                lines,
+                ..
+            }) => lines.first().map(|line| f64::from(line.width)),
             Ok(_) => None,
             Err(error) => {
                 self.error = Some(error);

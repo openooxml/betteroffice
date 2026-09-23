@@ -201,7 +201,6 @@ pub struct ImageTile {
     pub scale_y: f32,
 }
 
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
