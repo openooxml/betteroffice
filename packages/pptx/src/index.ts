@@ -37,6 +37,7 @@ export {
 export type {
   OpenPresentationOptions,
   PresentationHandle,
+  UndoCaptureMode,
   WasmInitInput,
 } from './wasm/loader';
 export type {

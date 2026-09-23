@@ -110,6 +110,14 @@ struct ReplyCommentArgs {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct CommentPositionArgs {
+    comment_id: String,
+    x_emu: i64,
+    y_emu: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CommentStatusArgs {
     comment_id: String,
     resolved: bool,
@@ -552,6 +560,16 @@ impl PptxDocument {
         )
     }
 
+    #[wasm_bindgen(js_name = setCommentPositionJson)]
+    pub fn set_comment_position_json(&self, args: &str) -> Result<String, JsValue> {
+        let args: CommentPositionArgs = parse_args(args)?;
+        json(
+            self.session
+                .set_comment_position(&local_context(), &args.comment_id, args.x_emu, args.y_emu)
+                .map_err(js_error)?,
+        )
+    }
+
     #[wasm_bindgen(js_name = setCommentStatusJson)]
     pub fn set_comment_status_json(&self, args: &str) -> Result<String, JsValue> {
         let args: CommentStatusArgs = parse_args(args)?;
@@ -804,6 +822,31 @@ impl PptxDocument {
                 )
                 .map_err(js_error)?,
         )
+    }
+
+    #[wasm_bindgen(js_name = undoCaptureMode)]
+    pub fn undo_capture_mode(&self) -> String {
+        match self.session.undo_capture_mode() {
+            crate::UndoCaptureMode::Auto => "auto",
+            crate::UndoCaptureMode::Manual => "manual",
+        }
+        .to_owned()
+    }
+
+    #[wasm_bindgen(js_name = setUndoCaptureMode)]
+    pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
+        let mode = match mode {
+            "auto" => crate::UndoCaptureMode::Auto,
+            "manual" => crate::UndoCaptureMode::Manual,
+            _ => return Err(js_error("undo capture mode must be auto or manual")),
+        };
+        self.session.set_undo_capture_mode(mode);
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = addUndoBoundary)]
+    pub fn add_undo_boundary(&self) {
+        self.session.add_undo_barrier();
     }
 
     #[wasm_bindgen(js_name = undoJson)]

@@ -11,6 +11,7 @@ export class PptxDocument {
     addShapeJson(args: string): string;
     addTextBoxJson(args: string): string;
     addTextBoxProfiledJson(args: string): string;
+    addUndoBoundary(): void;
     applyUpdateJson(update: Uint8Array): string;
     bringShapeForwardJson(args: string): string;
     bringShapeToFrontJson(args: string): string;
@@ -60,6 +61,7 @@ export class PptxDocument {
     sendShapeBackwardJson(args: string): string;
     sendShapeToBackJson(args: string): string;
     setCommentFlavorJson(args: string): string;
+    setCommentPositionJson(args: string): string;
     setCommentStatusJson(args: string): string;
     setParagraphAlignmentJson(args: string): string;
     setShapeAdjustJson(args: string): string;
@@ -67,9 +69,11 @@ export class PptxDocument {
     setShapeRectJson(args: string): string;
     setShapeStrokeJson(args: string): string;
     setSlideNotesJson(args: string): string;
+    setUndoCaptureMode(mode: string): void;
     snapshotJson(): string;
     startUpdateObservation(): void;
     storyJson(args: string): string;
+    undoCaptureMode(): string;
     undoJson(): string;
     /**
      * `undoJson` timed at its undo, snapshot and serialize boundaries, as
@@ -127,6 +131,7 @@ export interface InitOutput {
     readonly pptxdocument_addShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_addTextBoxProfiledJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_addUndoBoundary: (a: number) => void;
     readonly pptxdocument_applyUpdateJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeForwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -168,6 +173,7 @@ export interface InitOutput {
     readonly pptxdocument_sendShapeBackwardJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_sendShapeToBackJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentFlavorJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setCommentPositionJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setCommentStatusJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setParagraphAlignmentJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeAdjustJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -175,9 +181,11 @@ export interface InitOutput {
     readonly pptxdocument_setShapeRectJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setShapeStrokeJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_setSlideNotesJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_setUndoCaptureMode: (a: number, b: number, c: number) => [number, number];
     readonly pptxdocument_snapshotJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_startUpdateObservation: (a: number) => [number, number];
     readonly pptxdocument_storyJson: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly pptxdocument_undoCaptureMode: (a: number) => [number, number];
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];

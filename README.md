@@ -38,6 +38,9 @@
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
 
+- **Host-controlled PPTX editing.** PPTX hosts can intercept saving, flush accepted input, query slide content
+  under the pointer, group undo with explicit boundaries, and reposition comments.
+
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
 

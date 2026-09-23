@@ -177,3 +177,20 @@ serialization durations in milliseconds. Profiled mutation methods such as
 `undoProfiled` reports undo, snapshot, and serialization timings. These methods
 share the normal operations and add stage timing. See the
 [corpus and browser tests](../../e2e/README.md) for usage and timing limits.
+
+## Host undo and comment controls
+
+`handle.setUndoCaptureMode('manual')` groups tracked local edits across pauses
+and operation types until `handle.addUndoBoundary()`. The getter
+`handle.undoCaptureMode()` returns `'auto'` or `'manual'`. Changing modes closes
+the current group and preserves history; setting the same mode is a no-op.
+Auto preserves the existing policy (500 ms capture on native targets, separate
+transactions in the browser). Remote and agent origins remain outside local
+undo. These controls group history; they do not make edits atomic.
+
+`handle.setCommentPosition(commentId, { xEmu, yEmu })` moves an existing root
+comment on its current slide, preserving identity, author, text, replies, and
+resolution state through collaboration, undo/redo, and export. Coordinates must
+be safe integers in EMU. Replies share their root's position. Unknown IDs,
+reply IDs, and invalid coordinates fail before mutation. Legacy PowerPoint
+comments quantize exported positions to master units (1/576 inch).

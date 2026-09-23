@@ -59,6 +59,8 @@ export interface OpenPresentationOptions {
   initialUpdate?: Uint8Array;
 }
 
+export type UndoCaptureMode = 'auto' | 'manual';
+
 export interface PresentationHandle extends CollaborationReplica {
   isProposalsAvailable(): boolean;
   propose(agentId: string, note: string | null, edits: readonly ProposalEdit[]): Proposal;
@@ -150,6 +152,8 @@ export interface PresentationHandle extends CollaborationReplica {
   ): CommentReceipt;
   /** Resolves or reopens a modern comment. */
   setCommentStatus(commentId: string, resolved: boolean): CommentReceipt;
+  /** Moves a root comment on its slide; coordinates are safe integer EMU. */
+  setCommentPosition(commentId: string, position: { xEmu: number; yEmu: number }): CommentReceipt;
   removeComment(commentId: string): CommentReceipt;
   /** Only legal while the deck has no comments. */
   setCommentFlavor(flavor: CommentFlavor): CommentFlavor;
@@ -165,6 +169,9 @@ export interface PresentationHandle extends CollaborationReplica {
   setShapeRect(slideId: string, shapeId: string, rect: ShapeRect): TransformReceipt;
   canUndo(): boolean;
   canRedo(): boolean;
+  undoCaptureMode(): UndoCaptureMode;
+  setUndoCaptureMode(mode: UndoCaptureMode): void;
+  addUndoBoundary(): void;
   undo(): HistoryResult;
   /** `undo` with undo, snapshot and serialize time measured at the boundary. */
   undoProfiled(): Profiled<HistoryResult, HistoryProfile>;
@@ -509,6 +516,14 @@ export function openPresentation(
         true
       );
     },
+    setCommentPosition(commentId, position): CommentReceipt {
+      if (!Number.isSafeInteger(position.xEmu) || !Number.isSafeInteger(position.yEmu)) {
+        throw new Error('Comment coordinates must be safe integer EMU');
+      }
+      return jsonWasmCall(
+        () => doc.setCommentPositionJson(JSON.stringify({ commentId, ...position })), true
+      );
+    },
     setCommentStatus(commentId, resolved): CommentReceipt {
       return jsonWasmCall(
         () => doc.setCommentStatusJson(JSON.stringify({ commentId, resolved })),
@@ -616,6 +631,15 @@ export function openPresentation(
     },
     canRedo(): boolean {
       return wasmCall(() => doc.canRedo());
+    },
+    undoCaptureMode(): UndoCaptureMode {
+      return wasmCall(() => doc.undoCaptureMode()) as UndoCaptureMode;
+    },
+    setUndoCaptureMode(mode): void {
+      wasmCall(() => doc.setUndoCaptureMode(mode));
+    },
+    addUndoBoundary(): void {
+      wasmCall(() => doc.addUndoBoundary());
     },
     undo(): HistoryResult {
       return jsonWasmCall(() => doc.undoJson(), true);

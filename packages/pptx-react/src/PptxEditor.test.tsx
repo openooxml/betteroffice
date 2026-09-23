@@ -838,3 +838,100 @@ describe('PptxEditor speaker notes', () => {
     }
   }, 60_000);
 });
+
+describe('PptxEditor host controls', () => {
+  for (const decision of [true, false, undefined] as const) {
+    it(`awaits and coalesces save requests returning ${String(decision)}`, async () => {
+      let api: PptxEditorApi | undefined;
+      let calls = 0;
+      let release!: (value: boolean | void) => void;
+      const decisionPromise = new Promise<boolean | void>((resolve) => { release = resolve; });
+      const saved: Uint8Array[] = [];
+      const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }}
+        onSaveRequest={() => { calls++; return decisionPromise; }} onSave={(bytes) => saved.push(bytes)} />);
+      await waitFor(() => expect(api).toBeDefined());
+      if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
+      const serialize = spyOn(api!.handle, 'save');
+      try {
+        fireEvent.click(view.getByTestId('pptx-save'));
+        fireEvent.click(view.getByTestId('pptx-save'));
+        await waitFor(() => expect(calls).toBe(1));
+        expect(serialize).not.toHaveBeenCalled();
+        await act(async () => { release(decision); });
+        expect(saved).toHaveLength(decision === true ? 1 : 0);
+        expect(serialize).toHaveBeenCalledTimes(decision === true ? 1 : 0);
+      } finally { serialize.mockRestore(); }
+    });
+  }
+
+  it('discards an awaiting save after replacement and rejects stale flush handles', async () => {
+    const opened: PptxEditorApi[] = [];
+    let release!: (value: boolean) => void;
+    let requests = 0;
+    const pending = new Promise<boolean>((resolve) => { release = resolve; });
+    const saved: Uint8Array[] = [];
+    const props = { fonts: [{ family: 'Liberation Sans', bytes: fontBytes }], onReady: (ready: PptxEditorApi) => { opened.push(ready); },
+      onSaveRequest: () => { requests++; return pending; }, onSave: (bytes: Uint8Array) => { saved.push(bytes); } };
+    const view = render(<PptxEditor {...props} file={fixture} />);
+    await waitFor(() => expect(opened).toHaveLength(1));
+    if (!view.queryByTestId('pptx-save')) fireEvent.click(view.getByTestId('pptx-toolbar-more'));
+    fireEvent.click(view.getByTestId('pptx-save'));
+    await waitFor(() => expect(requests).toBe(1));
+    view.rerender(<PptxEditor {...props} file={fixture.slice()} />);
+    await waitFor(() => expect(opened).toHaveLength(2));
+    await act(async () => { release(true); });
+    expect(saved).toHaveLength(0);
+    await expect(opened[0].flushPendingInput()).rejects.toThrow('no longer open');
+    expect(() => opened[0].save()).toThrow('no longer open');
+    expect(opened[0].getPositionAtPoint(1, 1)).toBeNull();
+  });
+
+  it('resolves scaled client points on the current slide without selecting or focusing', async () => {
+    let api: PptxEditorApi | undefined;
+    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]}
+      onReady={(ready) => { api = ready; }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    const canvas = view.getByTestId('pptx-slide-canvas');
+    for (const slide of [1, 2]) {
+      await act(async () => { api!.goToSlide(slide); });
+      const frame = api!.handle.layoutSlide(slide - 1);
+      canvas.getBoundingClientRect = () => new DOMRect(40, 60, frame.width * 0.75, frame.height * 0.75);
+      let point: { x: number; y: number } | undefined;
+      for (let y = 0; y < frame.height && !point; y += 8) {
+        for (let x = 0; x < frame.width; x += 8) {
+          if (api!.handle.hitTest(x, y)?.kind === 'text') { point = { x, y }; break; }
+        }
+      }
+      expect(point).toBeDefined();
+      const snapshot = api!.handle.snapshot();
+      const focused = document.activeElement;
+      expect(api!.getPositionAtPoint(40 + point!.x * 0.75, 60 + point!.y * 0.75)).toEqual({
+        ...api!.handle.hitTest(point!.x, point!.y)!, slide, slideId: snapshot.slides[slide - 1].id,
+      });
+      expect(api!.getPositionAtPoint(NaN, 70)).toBeNull();
+      expect(api!.getPositionAtPoint(39, 70)).toBeNull();
+      expect(api!.handle.snapshot()).toEqual(snapshot);
+      expect(document.activeElement).toBe(focused);
+    }
+    await api!.flushPendingInput();
+  });
+
+  it('waits for accepted image input and propagates its failure', async () => {
+    let api: PptxEditorApi | undefined;
+    const view = render(<PptxEditor file={fixture} fonts={[{ family: 'Liberation Sans', bytes: fontBytes }]} onReady={(ready) => { api = ready; }} />);
+    await waitFor(() => expect(api).toBeDefined());
+    let reader!: FileReader;
+    const read = spyOn(FileReader.prototype, 'readAsDataURL').mockImplementation(function (this: FileReader) { reader = this; });
+    try {
+      fireEvent.change(view.getByTestId('pptx-insert-image-input'), { target: { files: [new File(['png'], 'image.png', { type: 'image/png' })] } });
+      let finished = false;
+      const flush = api!.flushPendingInput().finally(() => { finished = true; });
+      void flush.catch(() => {});
+      await Promise.resolve();
+      expect(finished).toBe(false);
+      expect(() => api!.save()).toThrow('flushPendingInput');
+      await act(async () => { reader.dispatchEvent(new Event('error')); });
+      await expect(flush).rejects.toThrow();
+    } finally { read.mockRestore(); }
+  });
+});
