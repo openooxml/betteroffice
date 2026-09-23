@@ -2951,8 +2951,6 @@ fn resolve_default_tab(size: Option<i64>) -> f32 {
     }
 }
 
-/// Declared stops in pixels, ascending, plus the implicit stop a hanging indent
-
 /// Declared `a:tabLst` stops, plus the implicit stop a hanging indent
 /// puts at the paragraph's left margin — the one a leading tab lands on.
 fn resolve_tab_stops(stops: Option<&[i64]>, margin_left: i64, indent: i64) -> Vec<f32> {
@@ -3022,6 +3020,7 @@ fn tab_advance(offset: f32, pen: f32, stops: &[f32], default_px: f32, limit: f32
     (next - pen).clamp(0.0, limit)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_paragraph(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
