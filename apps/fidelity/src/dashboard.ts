@@ -1087,7 +1087,7 @@ async function boot(): Promise<void> {
           ...(macos.length ? [`macOS ${span(macos)}`] : []),
         ].join(' · '),
       },
-      `Microsoft Office${macos.length ? ' for Mac' : ''} ${span(officeVersions)}`.trim()
+      `Microsoft Office ${span(officeVersions)}`.trim()
     );
     const facts: [string, Node | string][] = [
       ['Release', h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases)],

@@ -1,8 +1,7 @@
 # Benchmarks site
 
-[benchmarks.betteroffice.dev](https://benchmarks.betteroffice.dev) charts the latest
-[Benchmarks](../../scripts/office-quality/README.md) run and the latest green
-[end-to-end](../../e2e/README.md) run on `main`.
+The benchmarks site charts the latest [Benchmarks](../../scripts/office-quality/README.md) run
+and the latest green [end-to-end](../../e2e/README.md) run on `main`.
 
 ```sh
 bun run dev:fidelity
@@ -22,4 +21,4 @@ pass their paths as `?report=` (and `?e2e=` for a directory of `docx.json`, `ppt
 `xlsx.json`), or open a `report.json` in the page viewer's file picker. Overrides that point at
 another origin are ignored, so a shared link always shows the published numbers.
 
-`fidelity.betteroffice.dev` permanently redirects here; its root lands on `/compare`.
+The old `fidelity` host redirects permanently to this site; its root lands on `/compare`.
