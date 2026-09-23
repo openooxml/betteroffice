@@ -1606,7 +1606,7 @@ impl<'a> LayoutBuilder<'a> {
                     .map(|run| TextRun {
                         text: run.text.clone(),
                         font_family: run.style.family.clone(),
-                        font_size_pt: run.style.font_size_pt * scale,
+                        font_size_pt: autofit_size_pt(run.style.font_size_pt, scale),
                         bold: run.style.bold,
                         italic: run.style.italic,
                         underline: run.style.underline,
@@ -2921,7 +2921,7 @@ fn spacing_px(spacing: Option<LineSpacing>, paragraph: &ResolvedParagraph, scale
                 .iter()
                 .map(|run| run.style.font_size_pt)
                 .fold(0.0_f32, f32::max);
-            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(size_pt * scale)
+            value as f32 * SINGLE_LINE_PITCH_EM * points_to_px(autofit_size_pt(size_pt, scale))
         }
         // An autofit font scale shrinks the text, never a spacing written in
         // points: PowerPoint keeps `a:spcBef`/`a:spcAft` at their stated size.
@@ -3025,7 +3025,7 @@ fn layout_paragraph(
         let line_box = spaced_line_box(
             style_line_box(fonts, style, scale)?,
             paragraph,
-            points_to_px(style.font_size_pt * scale),
+            points_to_px(autofit_size_pt(style.font_size_pt, scale)),
         );
         return Ok(vec![PositionedTextLine {
             x,
@@ -3325,7 +3325,7 @@ fn add_shaped_segment(
     if text.is_empty() {
         return Ok(());
     }
-    let size_px = points_to_px(run.style.font_size_pt * scale);
+    let size_px = points_to_px(autofit_size_pt(run.style.font_size_pt, scale));
     let tracking = points_to_px(run.style.spacing_pt * scale);
     let shaped = shape(
         fonts,
@@ -3491,7 +3491,8 @@ fn positioned_runs(
                 && run.letter_spacing_px == cluster.tracking
                 && run.baseline_offset_px == baseline_offset_px
                 && run.font_family == cluster.style.family
-                && run.font_size_px == points_to_px(cluster.style.font_size_pt * scale)
+                && run.font_size_px
+                    == points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale))
                 && run.bold == cluster.style.bold
                 && run.italic == cluster.style.italic
                 && run.underline == cluster.style.underline
@@ -3509,7 +3510,7 @@ fn positioned_runs(
                 width: 0.0,
                 font_id: cluster.style.face.id.to_u32(),
                 font_family: cluster.style.family.clone(),
-                font_size_px: points_to_px(cluster.style.font_size_pt * scale),
+                font_size_px: points_to_px(autofit_size_pt(cluster.style.font_size_pt, scale)),
                 bold: cluster.style.bold,
                 italic: cluster.style.italic,
                 underline: cluster.style.underline,
@@ -3671,7 +3672,7 @@ fn style_line_box(
     style: &ResolvedStyle,
     scale: f32,
 ) -> Result<ooxml_text::LineBox, RenderError> {
-    let size_px = points_to_px(style.line_font_size_pt * scale);
+    let size_px = points_to_px(autofit_size_pt(style.line_font_size_pt, scale));
     if let Some(named) = style.face.line {
         return Ok(family_line_box(named, size_px));
     }
@@ -3685,8 +3686,16 @@ fn style_line_box(
 fn line_font_size_px(clusters: &[ShapedCluster], scale: f32) -> f32 {
     clusters
         .iter()
-        .map(|cluster| points_to_px(cluster.style.line_font_size_pt * scale))
+        .map(|cluster| points_to_px(autofit_size_pt(cluster.style.line_font_size_pt, scale)))
         .fold(0.0_f32, f32::max)
+}
+
+/// Round normal-autofit sizes to whole points, preserving authored sizes otherwise.
+fn autofit_size_pt(size_pt: f32, scale: f32) -> f32 {
+    if scale >= 1.0 {
+        return size_pt;
+    }
+    (size_pt * scale).round().max(1.0)
 }
 
 /// `a:normAutofit/@fontScale`, applied verbatim: PowerPoint stores the scale it
@@ -5788,7 +5797,7 @@ mod tests {
                     assert_eq!(actual.font_family, expected.style.family);
                     assert_eq!(
                         actual.font_size_px,
-                        points_to_px(expected.style.font_size_pt * scale)
+                        points_to_px(autofit_size_pt(expected.style.font_size_pt, scale))
                     );
                 }
             }
@@ -7823,7 +7832,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_autofit_applies_the_stored_font_scale_without_refitting() {
+    fn normal_autofit_steps_the_type_down_by_its_stored_scale() {
         let mut package = pptx_parse::parse_pptx(FIXTURE).unwrap();
         let session = DeckSession::open(FIXTURE, 8_003).unwrap();
         let initial = session.snapshot().unwrap();
@@ -7909,7 +7918,9 @@ mod tests {
             font_scale: Some(0.5),
             line_space_reduction: None,
         });
-        assert!((font_size(&package) - natural * 0.5).abs() < 0.001);
+        // The scale lands the type on a whole point, as PowerPoint's own
+        // shrink-to-fit does.
+        assert!((font_size(&package) - (natural * 0.5).round()).abs() < 0.001);
     }
 
     #[test]
