@@ -2034,7 +2034,7 @@ fn nice_unit(rough: f64) -> f64 {
 /// Measured against PowerPoint: a stacked column topping out at 60 is drawn
 /// 0..70 in tens, never 0..60 in fives (#797).
 fn excel_unit(range: f64) -> f64 {
-    if !(range > 0.0) || !range.is_finite() {
+    if !range.is_finite() || range <= 0.0 {
         return 1.0;
     }
     let major = 10.0_f64.powf(range.log10().round() - 1.0);
