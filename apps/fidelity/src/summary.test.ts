@@ -226,7 +226,7 @@ test('rows keep per-document values and drop scores from another revision', () =
   expect(letter.parsed).toEqual({ commit: true, published: true, libreoffice: false });
   const form = summary.formats.docx.rows.find((row) => row.id === 'form')!;
   expect(form.renderMs.libreoffice).toBeNull();
-  expect(summary.formats.docx.reference).toEqual({ engine: 'Microsoft Word', versions: ['16.112.3'] });
+  expect(summary.formats.docx.reference).toEqual({ engine: 'Microsoft Word', versions: ['16.112.3'], os: [] });
   expect(summary.formats.xlsx.rows.find((row) => row.id === 'model')!.recalc.libreoffice).toEqual({
     ok: false,
     correct: 0,

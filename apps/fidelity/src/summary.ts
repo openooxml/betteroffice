@@ -48,7 +48,7 @@ export interface FormatSummary {
   format: Format;
   version: string;
   documents: number;
-  reference: { engine: string; versions: string[] } | null;
+  reference: { engine: string; versions: string[]; os: string[] } | null;
   fidelity: Partial<Record<Engine, Fidelity>>;
   render: { common: number; engines: Record<Engine, Timing> } | null;
   calculation: { workbooks: number; common: number; engines: Record<Engine, Calculation> } | null;
@@ -120,20 +120,28 @@ function recalc(value: unknown): Recalc | null {
   return { ok: result.status === 'ok', correct, total, ms: trials(result) };
 }
 
-function referenceEngine(rows: Json[], revision: string): FormatSummary['reference'] {
+/** The Office app, versions and macOS versions that exported the reference pages. */
+function referenceEngine(rows: Json[]): FormatSummary['reference'] {
   const engines = new Map<string, number>();
   const versions = new Set<string>();
+  const os = new Set<string>();
   for (const row of rows) {
-    const reference = object(comparison(row, 'commit', revision)?.reference);
-    const engine = text(reference?.engine);
-    if (!engine) continue;
+    const references = list(row.comparisons)
+      .filter((entry) => entry.status !== 'failed')
+      .map((entry) => object(entry.reference))
+      .filter((reference): reference is Json => !!text(reference?.engine));
+    const reference = references[0];
+    if (!reference) continue;
+    const engine = text(reference.engine)!;
     engines.set(engine, (engines.get(engine) ?? 0) + 1);
-    const version = text(reference?.version);
+    const version = text(reference.version);
     if (version) versions.add(version);
+    const system = text(reference.os);
+    if (system) os.add(system);
   }
   const engine = [...engines].sort((left, right) => right[1] - left[1])[0]?.[0];
   if (!engine) return null;
-  return { engine, versions: [...versions].sort(compareVersions) };
+  return { engine, versions: [...versions].sort(compareVersions), os: [...os].sort(compareVersions) };
 }
 
 export function compareVersions(left: string, right: string): number {
@@ -217,7 +225,7 @@ function summarizeFormat(root: Json, format: Format): FormatSummary {
     format,
     version,
     documents: documents.length,
-    reference: referenceEngine(rows, commit),
+    reference: referenceEngine(rows),
     fidelity: {
       commit: fidelity(rows, 'commit', commit),
       published: fidelity(rows, 'published', version),

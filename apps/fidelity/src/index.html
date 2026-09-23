@@ -212,7 +212,7 @@
         text-wrap: balance;
       }
       .lede {
-        max-width: 720px;
+        max-width: 780px;
         margin: 16px 0 0;
         font-size: 16.5px;
         color: var(--ink);
@@ -396,44 +396,17 @@
         border: 1px solid var(--line);
         border-radius: var(--radius);
       }
-      .board-head,
-      .board-row {
-        display: grid;
-        grid-template-columns: minmax(220px, 1.3fr) repeat(2, minmax(0, 1fr));
-      }
-      .board-head {
-        position: sticky;
-        top: var(--header);
-        z-index: 5;
-        background: color-mix(in srgb, var(--solid) 92%, transparent);
-        backdrop-filter: blur(12px);
-        -webkit-backdrop-filter: blur(12px);
-        border-bottom: 1px solid var(--line);
-      }
-      .board-head span {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 14px 20px;
-        font-size: 13px;
-        font-weight: 600;
-      }
-      .board-head small {
-        font-size: 12px;
-        font-weight: 400;
-        color: var(--dim);
-      }
       .board-group {
         display: flex;
         flex-wrap: wrap;
         align-items: baseline;
         gap: 4px 10px;
-        padding: 22px 20px 8px;
+        padding: 22px 20px 10px;
         font-size: 14px;
         font-weight: 600;
         text-decoration: none;
       }
-      .board-group:not(:nth-child(2)) {
+      .board-group:not(:first-child) {
         border-top: 1px solid var(--line);
       }
       .board-group small {
@@ -447,6 +420,9 @@
         color: var(--dim);
       }
       .board-row {
+        display: grid;
+        grid-template-columns: minmax(220px, 1fr) minmax(0, 2fr);
+        align-items: center;
         border-top: 1px solid var(--line);
       }
       .board-row:hover {
@@ -455,50 +431,58 @@
       .metric {
         display: grid;
         gap: 1px;
-        padding: 13px 20px;
+        padding: 14px 20px;
         font-size: 13.5px;
       }
       .metric small {
         font-size: 12px;
         color: var(--dim);
       }
-      .score {
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        gap: 8px;
-        min-width: 0;
-        padding: 13px 20px;
+      .pair {
+        display: grid;
+        gap: 7px;
+        padding: 14px 20px;
       }
-      .score b {
-        font: 500 14px var(--mono);
-        font-variant-numeric: tabular-nums;
+      .line {
+        display: grid;
+        grid-template-columns: 96px minmax(0, 1fr) 104px;
+        align-items: center;
+        gap: 14px;
+      }
+      .line .engine {
+        font-size: 12.5px;
         color: var(--ink);
       }
-      .score .track {
-        height: 4px;
+      .line .track {
+        height: 8px;
       }
-      .score .track > i {
-        opacity: 0.5;
+      .line .track > i {
+        opacity: 0.55;
       }
-      .score.best b {
+      .line.best .track > i {
+        opacity: 1;
+      }
+      .line b {
+        font: 500 13.5px var(--mono);
+        font-variant-numeric: tabular-nums;
+        text-align: right;
+        color: var(--ink);
+      }
+      .line.best b,
+      .line.best .engine {
         color: var(--fg);
       }
-      .score.best b::after {
+      .line.best b::before {
         content: '';
         display: inline-block;
         width: 6px;
         height: 6px;
-        margin-left: 9px;
+        margin-right: 8px;
         vertical-align: 2px;
         background: var(--c);
         border-radius: 50%;
       }
-      .score.best .track > i {
-        opacity: 1;
-      }
-      .score.empty {
-        font-family: var(--mono);
+      .line.empty b {
         color: var(--faint);
       }
 
@@ -1129,29 +1113,18 @@
         .figure-stat {
           text-align: left;
         }
-        .board-head {
-          display: none;
-        }
         .board-row {
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: minmax(0, 1fr);
         }
         .metric {
-          grid-column: 1 / -1;
-          padding: 14px 14px 2px;
+          padding: 14px 14px 0;
         }
-        .score {
-          padding: 8px 14px 12px;
+        .pair {
+          padding: 10px 14px 14px;
         }
-        .score::before {
-          content: attr(data-engine);
-          overflow: hidden;
-          font: 10.5px var(--mono);
-          white-space: nowrap;
-          text-overflow: ellipsis;
-          color: var(--dim);
-        }
-        .score b {
-          font-size: 13px;
+        .line {
+          grid-template-columns: 84px minmax(0, 1fr) 84px;
+          gap: 10px;
         }
         .waffles {
           gap: 14px;
@@ -1235,7 +1208,7 @@
 
     <main>
       <section class="hero" id="hero">
-        <h1>How close BetterOffice gets to Microsoft Office</h1>
+        <h1>BetterOffice Benchmarks</h1>
         <p class="lede" id="lede">Real documents, scored page by page against Microsoft Office and compared with LibreOffice.</p>
         <dl class="facts" id="facts"></dl>
         <div class="kpis" id="kpis"><p class="loading">Loading the latest run…</p></div>
@@ -1244,7 +1217,7 @@
       <section class="section" id="scoreboard" hidden>
         <header class="section-head">
           <h2>Scoreboard</h2>
-          <p class="meta">The latest release against LibreOffice. Bars are relative to the best engine in each row.</p>
+          <p class="meta">The latest release against LibreOffice. Both bars in a row share one scale, and the dot marks the better result.</p>
         </header>
       </section>
 

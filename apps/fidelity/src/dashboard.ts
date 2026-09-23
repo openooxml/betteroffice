@@ -341,23 +341,13 @@ function metrics(summary: Summary, format: Format): Metric[] {
   return rows;
 }
 
+/** One row per metric, the engines' bars stacked on a shared scale so they compare at a glance. */
 function scoreboard(summary: Summary): HTMLElement {
-  const lo = summary.libreoffice ?? '';
-  const board = h(
-    'div',
-    { class: 'board', role: 'table' },
-    h(
-      'div',
-      { class: 'board-head', role: 'row' },
-      h('span', { role: 'columnheader' }),
-      h('span', { role: 'columnheader', class: 'c-ours' }, h('i', { class: 'swatch c-ours' }), 'BetterOffice', h('small', {}, 'latest release')),
-      h('span', { role: 'columnheader', class: 'c-libreoffice' }, h('i', { class: 'swatch c-libreoffice' }), 'LibreOffice', h('small', {}, lo))
-    )
-  );
-  const engine = (format: Format) => views(summary, format);
+  const board = h('div', { class: 'board' });
   for (const format of FORMATS) {
     const entry = summary.formats[format];
     if (!entry.documents) continue;
+    const engine = views(summary, format);
     board.append(
       h(
         'a',
@@ -371,26 +361,29 @@ function scoreboard(summary: Summary): HTMLElement {
       const present = SHOWN.map((key) => metric.cells[key]?.value).filter((value): value is number => value !== undefined);
       const best = metric.better === 'high' ? Math.max(...present) : Math.min(...present);
       const tie = present.every((value) => value === best);
-      const share = (value: number) =>
-        metric.better === 'high' ? (best > 0 ? value / best : 0) : value === best ? 1 : best > 0 ? best / value : 0;
+      const max = Math.max(...present);
+      const share = (value: number) => (max > 0 ? value / max : 0);
       board.append(
         h(
           'div',
-          { class: 'board-row', role: 'row' },
-          h('span', { class: 'metric', role: 'rowheader' }, metric.label, h('small', {}, metric.hint)),
-          ...SHOWN.map((key) => {
-            const cell = metric.cells[key];
-            const view = engine(format)[key];
-            const tag = key === 'libreoffice' ? view.label : view.sub;
-            if (!cell) return h('span', { class: `score ${view.cls} empty`, role: 'cell', 'data-engine': tag }, '—');
-            const top = present.length > 1 && !tie && cell.value === best;
-            return h(
-              'span',
-              { class: `score ${view.cls}${top ? ' best' : ''}`, role: 'cell', 'data-engine': tag },
-              h('b', {}, cell.text),
-              h('i', { class: 'track' }, h('i', { style: `--w:${(share(cell.value) * 100).toFixed(2)}%` }))
-            );
-          })
+          { class: 'board-row' },
+          h('div', { class: 'metric' }, metric.label, h('small', {}, metric.hint)),
+          h(
+            'div',
+            { class: 'pair' },
+            ...SHOWN.map((key) => {
+              const cell = metric.cells[key];
+              const view = engine[key];
+              const top = !!cell && present.length > 1 && !tie && cell.value === best;
+              return h(
+                'div',
+                { class: `line ${view.cls}${top ? ' best' : ''}${cell ? '' : ' empty'}` },
+                h('span', { class: 'engine' }, view.label),
+                h('i', { class: 'track' }, cell ? h('i', { style: `--w:${(share(cell.value) * 100).toFixed(2)}%` }) : null),
+                h('b', {}, cell ? cell.text : '—')
+              );
+            })
+          )
         )
       );
     }
@@ -1081,8 +1074,24 @@ async function boot(): Promise<void> {
     find('lede').textContent = `${thousands(total)} real documents, scored page by page against Microsoft Office${
       summary.libreoffice ? ' and compared with LibreOffice' : ''
     }.`;
+    const span = (versions: string[]) =>
+      versions.length > 1 ? `${versions[0]}–${versions.at(-1)}` : (versions[0] ?? '');
+    const references = present.map((format) => summary.formats[format].reference).filter((entry) => entry !== null);
+    const officeVersions = [...new Set(references.flatMap((entry) => entry.versions))].sort(compareVersions);
+    const macos = [...new Set(references.flatMap((entry) => entry.os))].sort(compareVersions);
+    const office = h(
+      'span',
+      {
+        title: [
+          ...references.map((entry) => `${entry.engine.replace('Microsoft ', '')} ${span(entry.versions)}`),
+          ...(macos.length ? [`macOS ${span(macos)}`] : []),
+        ].join(' · '),
+      },
+      `Microsoft Office${macos.length ? ' for Mac' : ''} ${span(officeVersions)}`.trim()
+    );
     const facts: [string, Node | string][] = [
       ['Release', h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases)],
+      ...(references.length ? ([['Reference', office]] as [string, Node][]) : []),
       ...(summary.libreoffice ? ([['Baseline', `LibreOffice ${summary.libreoffice}`]] as [string, string][]) : []),
       ['Updated', local('report') ? 'Loaded report' : publishedAt ? day(publishedAt) : '—'],
       ['Method', h('a', { href: METHOD }, 'How it’s measured')],
