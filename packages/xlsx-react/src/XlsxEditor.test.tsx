@@ -1213,3 +1213,38 @@ describe('XlsxEditor host controls', () => {
     expect(document.activeElement).toBe(focused);
   });
 });
+
+describe('clipboard access failure recovery', () => {
+  for (const unavailable of [false, true]) {
+    it(`keeps saving available when clipboard reads are ${unavailable ? 'unavailable' : 'denied'}`, async () => {
+      const read = navigator.clipboard.readText;
+      navigator.clipboard.readText = unavailable ? undefined as unknown as typeof read
+        : () => Promise.reject(new Error('Clipboard access denied'));
+      try {
+        let api: XlsxEditorApi | undefined;
+        const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+        await waitFor(() => expect(api).toBeDefined());
+        fireEvent.change(view.getByTestId('xlsx-formula-input'), { target: { value: 'Keep my edits' } });
+        fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'v', ctrlKey: true });
+        let bytes!: Uint8Array;
+        await act(async () => { await api!.flushPendingInput(); bytes = api!.save(); });
+        const reopened = openWorkbook(bytes);
+        try { expect(reopened.cell(0, 0, 0).input).toBe('Keep my edits'); } finally { reopened.dispose(); }
+      } finally { navigator.clipboard.readText = read; }
+    });
+  }
+
+  it('keeps the original cell when a cut cannot write to the clipboard', async () => {
+    const write = navigator.clipboard.writeText;
+    navigator.clipboard.writeText = () => Promise.reject(new Error('Clipboard access denied'));
+    try {
+      let api: XlsxEditorApi | undefined;
+      const view = render(<XlsxEditor file={plain.bytes.slice()} onReady={(ready) => { api = ready; }} />);
+      await waitFor(() => expect(api).toBeDefined());
+      const before = api!.handle.cell(0, 0, 0).input;
+      fireEvent.keyDown(view.getByTestId('xlsx-scroll'), { key: 'x', ctrlKey: true });
+      await act(async () => { await api!.flushPendingInput(); });
+      expect(api!.handle.cell(0, 0, 0).input).toBe(before);
+    } finally { navigator.clipboard.writeText = write; }
+  });
+});

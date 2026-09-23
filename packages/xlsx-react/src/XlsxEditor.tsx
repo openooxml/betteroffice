@@ -1248,7 +1248,7 @@ function XlsxEditorContent({
 
   const copySelection = useCallback(async () => {
     const handle = handleRef.current;
-    if (!handle || !selection) return;
+    if (!handle || !selection) return false;
     const r = normalizeRange(selection);
     try {
       const from = handle.cell(activeSheet, r.top, r.left).a1;
@@ -1258,14 +1258,15 @@ function XlsxEditorContent({
         cells.map((row) => row.map((c) => ({ input: c.input, isFormula: c.isFormula })))
       );
       await navigator.clipboard.writeText(tsv);
+      return true;
     } catch {
-      // clipboard denied or read failed — nothing to paste, leave state as-is.
+      return false;
     }
   }, [selection, activeSheet]);
 
   const cutSelection = useCallback(async () => {
     const handle = handleRef.current;
-    await copySelection();
+    if (!await copySelection()) return;
     if (handleRef.current !== handle || readOnlyRef.current) return;
     clearCells();
   }, [copySelection, clearCells]);
@@ -1273,7 +1274,12 @@ function XlsxEditorContent({
   const pasteSelection = useCallback(async () => {
     const handle = handleRef.current;
     if (!handle || !selection || readOnly) return;
-    const text = await navigator.clipboard.readText();
+    let text: string;
+    try {
+      text = await navigator.clipboard.readText();
+    } catch {
+      return;
+    }
     if (readOnlyRef.current || handleRef.current !== handle) return;
     const grid = fromTsv(text);
     if (grid.length === 0) return;
