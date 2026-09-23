@@ -40,6 +40,10 @@ const NOUNS: Record<Format, [string, string]> = {
   xlsx: ['workbook', 'workbooks'],
 };
 
+/** The page compares the latest release with LibreOffice; per-commit scores stay in the README. */
+const OURS: Engine = 'published';
+const SHOWN: Engine[] = [OURS, 'libreoffice'];
+
 const params = new URL(window.location.href).searchParams;
 const find = (id: string) => document.getElementById(id) as HTMLElement;
 const plural = (count: number, [one, many]: [string, string]) => `${count.toLocaleString('en-US')} ${count === 1 ? one : many}`;
@@ -47,7 +51,7 @@ const thousands = (value: number) => value.toLocaleString('en-US');
 const signed = (value: number, digits = 4) => `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(digits)}`;
 const short = (sha: string) => sha.slice(0, 8);
 const change = (to: number, from: number) => Number(to.toFixed(4)) - Number(from.toFixed(4));
-const columns = (count: number) => Math.max(6, Math.ceil(Math.sqrt(count * 1.6)));
+const columns = (count: number, aspect = 1.6) => Math.max(6, Math.ceil(Math.sqrt(count * aspect)));
 const median = (values: number[]) => percentile([...values].sort((left, right) => left - right), 50);
 const ratio = (part: number, whole: number) => (whole > 0 ? part / whole : 0);
 const listed = (names: string[]) =>
@@ -84,7 +88,7 @@ interface EngineView {
 function views(summary: Summary, format: Format): Record<Engine, EngineView> {
   return {
     commit: { label: 'BetterOffice', sub: short(summary.commit), cls: 'c-commit' },
-    published: { label: 'BetterOffice', sub: `v${summary.versions[format]}`, cls: 'c-published' },
+    published: { label: 'BetterOffice', sub: `v${summary.versions[format]}`, cls: 'c-ours' },
     libreoffice: { label: 'LibreOffice', sub: summary.libreoffice ?? '', cls: 'c-libreoffice' },
   };
 }
@@ -139,7 +143,7 @@ function withUnit(node: HTMLElement, unit: string): HTMLElement {
 function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
   const tiles: HTMLElement[] = [];
   const docx = summary.formats.docx;
-  const pages = docx.fidelity.commit;
+  const pages = docx.fidelity[OURS];
   if (pages?.paged) {
     const engine = views(summary, 'docx');
     tiles.push(
@@ -148,7 +152,7 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
         'f-docx',
         'Page counts match Word',
         withUnit(count(percentage(pages.exact, pages.paged, pages.exact === pages.paged ? 0 : 1)!, pages.exact === pages.paged ? 0 : 1), '%'),
-        ENGINES.filter((key) => docx.fidelity[key]?.paged).map((key) => ({
+        SHOWN.filter((key) => docx.fidelity[key]?.paged).map((key) => ({
           cls: engine[key].cls,
           label: key === 'libreoffice' ? 'LibreOffice' : engine[key].sub,
           text: `${docx.fidelity[key]!.exact}/${docx.fidelity[key]!.paged}`,
@@ -159,16 +163,16 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     );
   }
   const calc = summary.formats.xlsx.calculation;
-  if (calc?.engines.commit.total) {
+  if (calc?.engines[OURS].total) {
     const engine = views(summary, 'xlsx');
-    const ours = calc.engines.commit;
+    const ours = calc.engines[OURS];
     tiles.push(
       kpi(
         'XLSX',
         'f-xlsx',
         'Formulas match Excel',
         withUnit(count(percentage(ours.correct, ours.total, 2)!, 2), '%'),
-        ENGINES.map((key) => ({
+        SHOWN.map((key) => ({
           cls: engine[key].cls,
           label: key === 'libreoffice' ? 'LibreOffice' : engine[key].sub,
           text: headlineText(calc.engines[key].correct, calc.engines[key].total),
@@ -179,17 +183,17 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
     );
   }
   const render = summary.formats.pptx.render;
-  const ratio = speedup(render?.engines.commit.meanMs ?? null, render?.engines.libreoffice.meanMs ?? null);
+  const ratio = speedup(render?.engines[OURS].meanMs ?? null, render?.engines.libreoffice.meanMs ?? null);
   if (render && ratio) {
     const engine = views(summary, 'pptx');
-    const slowest = Math.max(...ENGINES.map((key) => render.engines[key].meanMs ?? 0));
+    const slowest = Math.max(...SHOWN.map((key) => render.engines[key].meanMs ?? 0));
     tiles.push(
       kpi(
         'PPTX',
         'f-pptx',
         ratio >= 1 ? 'Faster slides than LibreOffice' : 'Slower slides than LibreOffice',
         withUnit(count(ratio >= 1 ? ratio : 1 / ratio, 1), '×'),
-        ENGINES.map((key) => ({
+        SHOWN.map((key) => ({
           cls: engine[key].cls,
           label: key === 'libreoffice' ? 'LibreOffice' : engine[key].sub,
           text: msText(render.engines[key].meanMs),
@@ -215,12 +219,12 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
             share: entry.withinFrame / entry.ops,
           };
         }),
-        `${thousands(latency.withinFrame)} of ${thousands(latency.ops)} timed SDK calls across ${latency.cases} end-to-end cases at ${short(latency.commit)} took 16.7 ms or less.`
+        `${thousands(latency.withinFrame)} of ${thousands(latency.ops)} timed SDK calls across ${latency.cases} end-to-end cases on main (${short(latency.commit)}) took 16.7 ms or less.`
       )
     );
   } else {
-    const parsed = FORMATS.reduce((sum, format) => sum + (summary.formats[format].parsing?.commit.parsed ?? 0), 0);
-    const total = FORMATS.reduce((sum, format) => sum + (summary.formats[format].parsing?.commit.total ?? 0), 0);
+    const parsed = FORMATS.reduce((sum, format) => sum + (summary.formats[format].parsing?.[OURS].parsed ?? 0), 0);
+    const total = FORMATS.reduce((sum, format) => sum + (summary.formats[format].parsing?.[OURS].total ?? 0), 0);
     if (total)
       tiles.push(
         kpi(
@@ -229,7 +233,7 @@ function heroKpis(summary: Summary, latency: Latency | null): HTMLElement[] {
           'Documents opened',
           withUnit(count(percentage(parsed, total, 2)!, 2), '%'),
           FORMATS.filter((format) => summary.formats[format].parsing).map((format) => {
-            const entry = summary.formats[format].parsing!.commit;
+            const entry = summary.formats[format].parsing![OURS];
             return {
               cls: `f-${format}`,
               label: format.toUpperCase(),
@@ -362,8 +366,7 @@ function scoreboard(summary: Summary): HTMLElement {
       'div',
       { class: 'board-head', role: 'row' },
       h('span', { role: 'columnheader' }),
-      h('span', { role: 'columnheader', class: 'c-commit' }, h('i', { class: 'swatch c-commit' }), 'BetterOffice', h('small', {}, short(summary.commit))),
-      h('span', { role: 'columnheader', class: 'c-published' }, h('i', { class: 'swatch c-published' }), 'BetterOffice', h('small', {}, 'latest release')),
+      h('span', { role: 'columnheader', class: 'c-ours' }, h('i', { class: 'swatch c-ours' }), 'BetterOffice', h('small', {}, 'latest release')),
       h('span', { role: 'columnheader', class: 'c-libreoffice' }, h('i', { class: 'swatch c-libreoffice' }), 'LibreOffice', h('small', {}, lo))
     )
   );
@@ -381,7 +384,7 @@ function scoreboard(summary: Summary): HTMLElement {
       )
     );
     for (const metric of metrics(summary, format)) {
-      const present = ENGINES.map((key) => metric.cells[key]?.value).filter((value): value is number => value !== undefined);
+      const present = SHOWN.map((key) => metric.cells[key]?.value).filter((value): value is number => value !== undefined);
       const best = metric.better === 'high' ? Math.max(...present) : Math.min(...present);
       const tie = present.every((value) => value === best);
       const share = (value: number) =>
@@ -391,7 +394,7 @@ function scoreboard(summary: Summary): HTMLElement {
           'div',
           { class: 'board-row', role: 'row' },
           h('span', { class: 'metric', role: 'rowheader' }, metric.label, h('small', {}, metric.hint)),
-          ...ENGINES.map((key) => {
+          ...SHOWN.map((key) => {
             const cell = metric.cells[key];
             const view = engine(format)[key];
             const tag = key === 'libreoffice' ? view.label : view.sub;
@@ -444,19 +447,18 @@ function chart(build: (width: number) => Element, label: string): HTMLElement {
 
 function similarity(summary: Summary, entry: FormatSummary): HTMLElement {
   const engine = views(summary, entry.format);
-  const series: SwarmSeries[] = ENGINES.filter((key) => entry.fidelity[key]).map((key) => ({
+  const series: SwarmSeries[] = SHOWN.filter((key) => entry.fidelity[key]).map((key) => ({
     key,
     cls: engine[key].cls,
     label: engine[key].label,
     sub: engine[key].sub,
-    hollow: key === 'published',
   }));
   const byId = new Map(entry.rows.map((row) => [row.id, row]));
   const describe = (id: string) => {
     const row = byId.get(id)!;
     const delta =
-      row.ssim.commit !== null && row.ssim.published !== null
-        ? `${signed(change(row.ssim.commit, row.ssim.published))} since v${entry.version} · `
+      row.ssim[OURS] !== null && row.ssim.libreoffice !== null
+        ? `${signed(change(row.ssim[OURS], row.ssim.libreoffice))} vs LibreOffice · `
         : '';
     return tipCard(
       id,
@@ -464,8 +466,8 @@ function similarity(summary: Summary, entry: FormatSummary): HTMLElement {
       `${delta}click to compare pages`
     );
   };
-  const mean = entry.fidelity.commit?.mean ?? null;
-  const release = entry.fidelity.published?.mean ?? null;
+  const mean = entry.fidelity[OURS]?.mean ?? null;
+  const other = entry.fidelity.libreoffice?.mean ?? null;
   const caption =
     entry.format === 'xlsx'
       ? 'Each dot is one workbook, scored over its recorded print ranges against Excel; BetterOffice renders with its browser renderer at 150 DPI. Hover to trace a workbook across engines, click to open its pages.'
@@ -477,8 +479,8 @@ function similarity(summary: Summary, entry: FormatSummary): HTMLElement {
       ? null
       : stat(
           ssimText(mean),
-          release === null ? `mean at ${short(summary.commit)}` : `${signed(change(mean, release))} since v${entry.version}`,
-          release === null || change(mean, release) >= 0 ? 'up' : 'down'
+          other === null ? `mean of v${entry.version}` : `${signed(change(mean, other))} vs LibreOffice`,
+          other === null || change(mean, other) >= 0 ? 'up' : 'down'
         ),
     chart(
       (width) =>
@@ -502,7 +504,7 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
     (left, right) => (left.referencePages ?? 0) - (right.referencePages ?? 0) || left.id.localeCompare(right.id)
   );
   const blocks = h('div', { class: 'waffles' });
-  for (const key of ENGINES) {
+  for (const key of SHOWN) {
     const fidelity = entry.fidelity[key];
     if (!fidelity?.paged) continue;
     const cells = rows.map((row) => {
@@ -538,11 +540,11 @@ function pagination(summary: Summary, entry: FormatSummary): HTMLElement {
       )
     );
   }
-  const commit = entry.fidelity.commit!;
+  const ours = entry.fidelity[OURS]!;
   return panel(
     'Page count against Word',
     'One square per document, smallest first, in the same position for every engine.',
-    stat(`${commit.exact}/${commit.paged}`, `exact at ${short(summary.commit)}`, commit.exact === commit.paged ? 'up' : ''),
+    stat(`${ours.exact}/${ours.paged}`, `exact in v${entry.version}`, ours.exact >= (entry.fidelity.libreoffice?.exact ?? 0) ? 'up' : 'down'),
     h(
       'div',
       {},
@@ -590,14 +592,14 @@ function renderTimes(summary: Summary, entry: FormatSummary): HTMLElement | null
   if (!render?.common) return null;
   const engine = views(summary, entry.format);
   const common = entry.rows.filter((row) => ENGINES.every((key) => row.renderMs[key] !== null));
-  const ratio = speedup(render.engines.commit.meanMs, render.engines.libreoffice.meanMs);
+  const ratio = speedup(render.engines[OURS].meanMs, render.engines.libreoffice.meanMs);
   const unit = entry.format === 'pptx' ? 'slide' : 'page';
   return panel(
     `First-${unit} render time`,
     `The native CLI’s Rust rasterizer, not the browser renderer scored above: first ${unit} at 96 DPI, process start included, over the ${render.common} ${NOUNS[entry.format][1]} every engine rendered.`,
     ratio ? stat(`${(ratio >= 1 ? ratio : 1 / ratio).toFixed(1)}×`, `${ratio >= 1 ? 'faster' : 'slower'} than LibreOffice`, ratio >= 1 ? 'up' : 'down') : null,
     lines(
-      ENGINES.map((key) => ({
+      SHOWN.map((key) => ({
         cls: engine[key].cls,
         label: `${engine[key].label} ${engine[key].sub}`,
         values: common.map((row) => row.renderMs[key]!),
@@ -613,11 +615,11 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
   const engine = views(summary, entry.format);
   const rows = entry.rows
     .filter((row) => ENGINES.every((key) => row.recalc[key] !== null))
-    .sort((left, right) => right.recalc.commit!.total - left.recalc.commit!.total || left.id.localeCompare(right.id));
+    .sort((left, right) => right.recalc[OURS]!.total - left.recalc[OURS]!.total || left.id.localeCompare(right.id));
   const bars = h(
     'div',
     { class: 'accuracy' },
-    ...ENGINES.map((key) => {
+    ...SHOWN.map((key) => {
       const { correct, total } = calc.engines[key];
       return h(
         'div',
@@ -630,7 +632,7 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
     })
   );
   const blocks = h('div', { class: 'waffles' });
-  for (const key of ENGINES) {
+  for (const key of SHOWN) {
     const cells = rows.map((row) => {
       const result = row.recalc[key]!;
       const share = result.total ? result.correct / result.total : 0;
@@ -657,17 +659,21 @@ function formulas(summary: Summary, entry: FormatSummary): HTMLElement | null {
         'div',
         { class: `waffle-block ${engine[key].cls}` },
         h('div', { class: 'waffle-label' }, h('i', { class: `swatch ${engine[key].cls}` }), engine[key].label, h('span', {}, engine[key].sub)),
-        labelled(waffle(cells, columns(rows.length), open), `${engine[key].label} ${engine[key].sub}: ${calc.engines[key].perfect} of ${rows.length} workbooks recalculate perfectly`),
+        labelled(waffle(cells, columns(rows.length, 3.2), open), `${engine[key].label} ${engine[key].sub}: ${calc.engines[key].perfect} of ${rows.length} workbooks recalculate perfectly`),
         h('div', { class: 'waffle-stat' }, h('b', {}, String(calc.engines[key].perfect)), h('span', {}, 'perfect')),
         h('div', { class: 'waffle-sub' }, `of ${plural(rows.length, NOUNS.xlsx)}`)
       )
     );
   }
-  const ours = calc.engines.commit;
+  const ours = calc.engines[OURS];
   return panel(
     'Formula results against Excel',
     `Formula caches are cleared, each workbook is recalculated from scratch, and every result cell is compared with Excel. One square per workbook with an Excel reference, largest first.`,
-    stat(headlineText(ours.correct, ours.total), `${thousands(ours.correct)} of ${thousands(ours.total)} match`, 'up'),
+    stat(
+      headlineText(ours.correct, ours.total),
+      `${thousands(ours.correct)} of ${thousands(ours.total)} match`,
+      ours.correct >= calc.engines.libreoffice.correct ? 'up' : 'down'
+    ),
     h(
       'div',
       {},
@@ -694,13 +700,13 @@ function recalcTimes(summary: Summary, entry: FormatSummary): HTMLElement | null
   const common = entry.rows.filter((row) =>
     ENGINES.every((key) => row.recalc[key]?.ok && row.recalc[key]!.correct === row.recalc[key]!.total && row.recalc[key]!.ms !== null)
   );
-  const ratio = speedup(calc.engines.commit.meanMs, calc.engines.libreoffice.meanMs);
+  const ratio = speedup(calc.engines[OURS].meanMs, calc.engines.libreoffice.meanMs);
   return panel(
     'Recalculation time',
     `Import, full recalculation and export by the native CLI, process start included, over the ${calc.common} workbooks every engine recalculates perfectly.`,
     ratio ? stat(`${(ratio >= 1 ? ratio : 1 / ratio).toFixed(1)}×`, `${ratio >= 1 ? 'faster' : 'slower'} than LibreOffice`, ratio >= 1 ? 'up' : 'down') : null,
     lines(
-      ENGINES.map((key) => ({
+      SHOWN.map((key) => ({
         cls: engine[key].cls,
         label: `${engine[key].label} ${engine[key].sub}`,
         values: common.map((row) => row.recalc[key]!.ms!),
@@ -710,20 +716,21 @@ function recalcTimes(summary: Summary, entry: FormatSummary): HTMLElement | null
   );
 }
 
-function movers(entry: FormatSummary, wide: boolean, revision: string): HTMLElement {
-  const scored = entry.rows.filter((row) => row.ssim.commit !== null);
-  const values = scored.flatMap((row) => [row.ssim.commit!, row.ssim.published ?? row.ssim.commit!]);
+function movers(entry: FormatSummary, wide: boolean): HTMLElement {
+  const version = `v${entry.version}`;
+  const scored = entry.rows.filter((row) => row.ssim[OURS] !== null);
+  const values = scored.flatMap((row) => [row.ssim[OURS]!, row.ssim.libreoffice ?? row.ssim[OURS]!]);
   const low = Math.min(...values);
   const high = Math.max(...values);
-  const gains = scored
-    .filter((row) => row.ssim.published !== null && row.ssim.commit! > row.ssim.published)
-    .sort((left, right) => right.ssim.commit! - right.ssim.published! - (left.ssim.commit! - left.ssim.published!))
+  const lead = (row: (typeof scored)[number]) => row.ssim[OURS]! - (row.ssim.libreoffice ?? row.ssim[OURS]!);
+  const leads = scored
+    .filter((row) => row.ssim.libreoffice !== null && lead(row) > 0)
+    .sort((left, right) => lead(right) - lead(left))
     .slice(0, 5);
-  const lowest = [...scored].sort((left, right) => left.ssim.commit! - right.ssim.commit!).slice(0, 5);
-  const fresh = scored.filter((row) => row.ssim.published === null).length;
-  const failed = entry.rows.filter((row) => row.ssim.commit === null);
+  const lowest = [...scored].sort((left, right) => left.ssim[OURS]! - right.ssim[OURS]!).slice(0, 5);
+  const failed = entry.rows.filter((row) => row.ssim[OURS] === null);
   const item = (row: (typeof scored)[number]) => {
-    const delta = row.ssim.published === null ? null : change(row.ssim.commit!, row.ssim.published);
+    const delta = row.ssim.libreoffice === null ? null : change(row.ssim[OURS]!, row.ssim.libreoffice);
     return h(
       'li',
       {},
@@ -731,30 +738,28 @@ function movers(entry: FormatSummary, wide: boolean, revision: string): HTMLElem
         'a',
         { href: compareHref(row.id), class: 'mover' },
         h('span', { class: 'mover-id' }, row.id),
-        dumbbell(row.ssim.published, row.ssim.commit!, low, high),
-        h('b', {}, ssimText(row.ssim.commit)),
-        h('span', { class: `delta ${delta === null ? 'new' : delta >= 0 ? 'up' : 'down'}` }, delta === null ? 'new' : signed(delta))
+        dumbbell(row.ssim.libreoffice, row.ssim[OURS]!, low, high),
+        h('b', {}, ssimText(row.ssim[OURS])),
+        h('span', { class: `delta ${delta === null ? 'new' : delta >= 0 ? 'up' : 'down'}` }, delta === null ? 'no LO score' : signed(delta))
       )
     );
   };
   const column = (title: string, rows: typeof scored) =>
     h('div', { class: 'movers-column' }, h('h4', {}, title), h('ol', {}, ...rows.map(item)));
-  const notes: string[] = [];
-  if (fresh) notes.push(`${plural(fresh, NOUNS[entry.format])} score at ${revision} that did not score in v${entry.version}.`);
-  if (failed.length) notes.push(`${plural(failed.length, NOUNS[entry.format])} did not score at ${revision}.`);
+  const note = failed.length ? `${plural(failed.length, NOUNS[entry.format])} did not score in ${version}.` : '';
   return panel(
     'Where to look',
-    `Each row opens the page viewer. The bar runs from the release score to ${revision}.`,
+    `Each row opens the page viewer. The bar runs from LibreOffice’s score to ${version}’s.`,
     null,
     h(
       'div',
       {},
-      h('div', { class: 'movers' }, column(`Biggest gains since v${entry.version}`, gains), column(`Lowest at ${revision}`, lowest)),
-      notes.length
+      h('div', { class: 'movers' }, column('Largest leads over LibreOffice', leads), column(`Lowest in ${version}`, lowest)),
+      note
         ? h(
             'p',
             { class: 'movers-note' },
-            notes.join(' '),
+            note,
             ...failed.slice(0, 6).flatMap((row) => [' ', h('a', { href: compareHref(row.id) }, row.id)])
           )
         : null
@@ -780,7 +785,7 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
   const recalc = recalcTimes(summary, entry);
   if (recalc) panels.append(recalc);
   const halves = [...panels.children].filter((node) => !node.classList.contains('wide')).length;
-  panels.append(movers(entry, halves % 2 === 0, short(summary.commit)));
+  panels.append(movers(entry, halves % 2 === 0));
   return h(
     'section',
     { class: 'section format', id: format },
@@ -790,7 +795,7 @@ function formatSection(summary: Summary, format: Format): HTMLElement {
       h('span', { class: `tag big f-${format}` }, format.toUpperCase()),
       h('h2', {}, TITLES[format]),
       h('p', { class: 'meta' }, `${plural(entry.documents, NOUNS[format])} · reference ${office}`),
-      legend(ENGINES.filter((key) => entry.fidelity[key] || entry.render || entry.calculation).map((key) => engine[key]))
+      legend(SHOWN.filter((key) => entry.fidelity[key] || entry.render || entry.calculation).map((key) => engine[key]))
     ),
     panels
   );
@@ -1127,12 +1132,12 @@ async function boot(): Promise<void> {
     const { summary, publishedAt, href } = loaded;
     const present = FORMATS.filter((format) => summary.formats[format].documents > 0);
     const total = present.reduce((sum, format) => sum + summary.formats[format].documents, 0);
-    const commit = h('a', { href: `${REPO}/commit/${summary.commit}` }, short(summary.commit));
+    const releases = present.map((format) => `${format.toUpperCase()} ${summary.versions[format]}`).join(' · ');
     find('eyebrow').replaceChildren(
       h('i', { class: 'pulse' }),
-      local('report') ? 'Loaded report · ' : 'Latest run · ',
-      commit,
-      publishedAt ? ` · ${when(publishedAt)}` : ''
+      local('report') ? 'Loaded report · ' : 'Latest release · ',
+      h('a', { href: 'https://www.npmjs.com/org/betteroffice' }, releases),
+      publishedAt ? ` · measured ${when(publishedAt)}` : ''
     );
     const timed = present.some(
       (format) => summary.formats[format].render?.common || summary.formats[format].calculation?.common
@@ -1144,11 +1149,13 @@ async function boot(): Promise<void> {
     ];
     find('lede').replaceChildren(
       h('b', {}, `${thousands(total)} real documents`),
-      ` with reference pages exported from Microsoft ${listed(present.map((format) => OFFICE[format]))}. Each run renders them in BetterOffice${summary.libreoffice ? ` and LibreOffice ${summary.libreoffice}` : ''}: ${listed(checks)}.`
+      ` with reference pages exported from Microsoft ${listed(present.map((format) => OFFICE[format]))}. Each run renders them in the latest BetterOffice release${summary.libreoffice ? ` and in LibreOffice ${summary.libreoffice}` : ''}: ${listed(checks)}.`
     );
     const run = find('run');
-    run.setAttribute('href', `${REPO}/commit/${summary.commit}`);
-    find('run-label').textContent = `run ${short(summary.commit)}`;
+    run.setAttribute('href', `${REPO}/actions/workflows/visual-fidelity.yml`);
+    find('run-label').textContent = publishedAt
+      ? `measured ${new Date(publishedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      : 'benchmarks';
     for (const format of FORMATS)
       if (!present.includes(format))
         document.querySelector(`nav a[href="#${format}"]`)?.setAttribute('hidden', '');

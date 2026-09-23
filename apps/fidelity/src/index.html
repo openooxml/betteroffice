@@ -75,6 +75,7 @@
 
       .c-commit { --c: var(--bo); }
       .c-published { --c: var(--rel); }
+      .c-ours { --c: var(--bo); }
       .c-libreoffice { --c: var(--lo); }
       .f-docx { --c: var(--docx); }
       .f-pptx { --c: var(--pptx); }
@@ -475,7 +476,7 @@
       .board-head,
       .board-row {
         display: grid;
-        grid-template-columns: minmax(210px, 1.25fr) repeat(3, minmax(0, 1fr));
+        grid-template-columns: minmax(210px, 1.25fr) repeat(2, minmax(0, 1fr));
       }
       .board-head {
         position: sticky;
@@ -818,8 +819,8 @@
 
       .waffles {
         display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 20px;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 28px;
       }
       .waffle-label {
         display: flex;
@@ -1040,7 +1041,7 @@
       }
       .dumbbell .from {
         fill: var(--bg);
-        stroke: var(--rel);
+        stroke: var(--lo);
         stroke-width: 1.5;
       }
       .dumbbell .to {
@@ -1270,7 +1271,7 @@
           display: none;
         }
         .board-row {
-          grid-template-columns: repeat(3, minmax(0, 1fr));
+          grid-template-columns: repeat(2, minmax(0, 1fr));
         }
         .metric {
           grid-column: 1 / -1;
@@ -1397,8 +1398,9 @@
         <header class="section-head">
           <h2>Head to head</h2>
           <p class="meta">
-            The tables the README publishes, drawn to scale. Each bar compares an engine with the best
-            in its row, and the glowing dot marks the leader.
+            The latest release against LibreOffice, from the tables the README publishes, drawn to
+            scale. Each bar compares an engine with the best in its row, and the glowing dot marks the
+            leader.
           </p>
         </header>
       </section>
