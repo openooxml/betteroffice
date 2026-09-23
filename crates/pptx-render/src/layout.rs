@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::chart::{ChartFrame, ChartText, chart_primitive};
+use crate::family_metrics::{FamilyMetrics, family_advance, family_metrics};
 use crate::metafile::{MetafileDrawing, decode as decode_metafile, is_metafile};
 use crate::{
     CONTRACT_VERSION, CaretStop, GradientStop, GradientType, ImageCrop, ImageEffect, Paint,
@@ -79,6 +80,11 @@ pub enum RenderError {
 struct FontFace {
     id: FontId,
     family: String,
+    /// The named family's own advance widths, where this face stands in for a
+    /// family that does not already run at them.
+    widths: Option<&'static FamilyMetrics>,
+    /// The same family's `hhea` metrics, which decide where the line box sits.
+    line: Option<&'static FamilyMetrics>,
 }
 
 pub struct SlideRenderer {
@@ -135,9 +141,12 @@ impl SlideRenderer {
             .fonts
             .register(bytes.to_vec())
             .map_err(|error| RenderError::Font(error.to_string()))?;
+        let metrics = family_metrics(&normalize_family(family), bold, italic);
         let face = FontFace {
             id,
             family: family.to_owned(),
+            widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
+            line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
         };
         self.faces
             .insert((normalize_family(family), bold, italic), face.clone());
@@ -2450,6 +2459,86 @@ fn resolve_style(
     })
 }
 
+/// Characters the pitch of a family is measured over: the Latin alphabet in
+/// both cases, the digits, a space and the two commonest marks, unweighted.
+const ADVANCE_SAMPLE: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,";
+
+/// The mean advance of [`ADVANCE_SAMPLE`] in em for a registered face.
+fn face_advance_em(fonts: &FontStore, id: FontId) -> Option<f32> {
+    let units = f32::from(fonts.metrics(id).ok()?.units_per_em);
+    if units <= 0.0 {
+        return None;
+    }
+    let mut total = 0.0;
+    let mut counted = 0;
+    for character in ADVANCE_SAMPLE.chars() {
+        if let Ok(Some(advance)) = fonts.advance_width(id, character) {
+            total += advance;
+            counted += 1;
+        }
+    }
+    (counted > 0).then(|| total / counted as f32 / units)
+}
+
+/// Whether `id` already advances the way `metrics` does, which makes it the
+/// family itself rather than a stand-in and leaves its own kerning in charge.
+fn runs_at_own_widths(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Some(own) = face_advance_em(fonts, id) else {
+        return true;
+    };
+    let mut total = 0.0;
+    let mut counted = 0;
+    for character in ADVANCE_SAMPLE.chars() {
+        if let Some(advance) = family_advance(metrics, character) {
+            total += advance;
+            counted += 1;
+        }
+    }
+    let Some(wanted) = (counted > 0).then(|| total / counted as f32) else {
+        return true;
+    };
+    (wanted - own).abs() <= 0.002
+}
+
+/// Whether `id` already stacks its lines the way `metrics` does.
+fn sits_on_own_baseline(fonts: &FontStore, id: FontId, metrics: &FamilyMetrics) -> bool {
+    let Ok(own) = fonts.metrics(id) else {
+        return true;
+    };
+    let units = f32::from(own.units_per_em);
+    if units <= 0.0 {
+        return true;
+    }
+    let same =
+        |theirs: i32, ours: i16| (theirs as f32 / 1000.0 - f32::from(ours) / units).abs() <= 0.002;
+    same(metrics.ascent, own.hhea_ascender)
+        && same(metrics.descent, own.hhea_descender)
+        && same(metrics.line_gap, own.hhea_line_gap)
+}
+
+/// The line box the named family measures at `size_px`, in the shape
+/// [`single_line_box`] gives a registered face.
+fn family_line_box(metrics: &FamilyMetrics, size_px: f32) -> ooxml_text::LineBox {
+    let em = size_px / 1000.0;
+    ooxml_text::LineBox {
+        ascent: (metrics.ascent + metrics.line_gap).max(0) as f32 * em,
+        descent: (-metrics.descent).max(0) as f32 * em,
+        leading: 0.0,
+    }
+}
+
+/// How wide the family a run names draws `text`, when that family is one we
+/// have widths but no face for. `None` for anything the table cannot measure,
+/// which keeps the substitute's own advance.
+fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Option<f32> {
+    let metrics = style.face.widths?;
+    let mut total = 0.0;
+    for character in text.chars() {
+        total += family_advance(metrics, character)?;
+    }
+    Some(total * size_px)
+}
+
 /// Optional ligatures are off once glyphs are tracked apart.
 fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
     const OFF: [ShapeFeature; 2] = [
@@ -3271,13 +3360,18 @@ fn add_shaped_segment(
             });
             glyph_x += glyph.x_advance;
         }
+        let text_slice = &text[start_byte..end_byte];
+        // The glyphs keep the advances of the face that draws them, so a
+        // backend laying the run out itself still sees where each one ends and
+        // places the next cluster at the x this width put it.
+        let cluster_width = named_cluster_width(&run.style, text_slice, size_px).unwrap_or(glyph_x);
         let global_end = global_run_byte + run_byte_start + end_byte;
-        let tracking = tracking.max(-glyph_x);
+        let tracking = tracking.max(-cluster_width);
         output.push(ShapedCluster {
-            text: text[start_byte..end_byte].to_owned(),
+            text: text_slice.to_owned(),
             start: source_start,
             end: source_end,
-            width: glyph_x + tracking,
+            width: cluster_width + tracking,
             tracking,
             run_index,
             style: run.style.clone(),
@@ -3569,14 +3663,14 @@ fn style_line_box(
     style: &ResolvedStyle,
     scale: f32,
 ) -> Result<ooxml_text::LineBox, RenderError> {
+    let size_px = points_to_px(style.line_font_size_pt * scale);
+    if let Some(named) = style.face.line {
+        return Ok(family_line_box(named, size_px));
+    }
     let metrics = fonts
         .metrics(style.face.id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
-    Ok(single_line_box(
-        metrics,
-        points_to_px(style.line_font_size_pt * scale),
-        &CompatFlags::default(),
-    ))
+    Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
 
 /// Largest font size on this line.
@@ -8829,5 +8923,30 @@ mod tests {
         let end = line_end(Some(&end("oval", Some("sm"), Some("lg"))), 1.0).unwrap();
         assert!((end.width - 5.291_339).abs() < 1e-6);
         assert!((end.length - 13.228_347).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_family_we_cannot_ship_lends_its_own_metrics_to_the_substitute() {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Trebuchet MS", false, false, FONT)
+            .unwrap();
+        renderer.register_font("Arial", false, false, FONT).unwrap();
+        let substituted = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
+        let plain = renderer.resolve_face("Arial", false, false).unwrap();
+        assert!(plain.widths.is_none() && plain.line.is_none());
+
+        let metrics = substituted.widths.expect("trebuchet ms widths");
+        assert!((family_advance(metrics, 'M').unwrap() - 0.709).abs() < 1e-6);
+        assert!((family_advance(metrics, ' ').unwrap() - 0.301).abs() < 1e-6);
+        assert!((family_advance(metrics, '\u{2019}').unwrap() - 0.367).abs() < 1e-6);
+        assert_eq!(family_advance(metrics, '\u{4e00}'), None);
+        assert!(family_metrics("trebuchet ms", true, false).is_some());
+        assert!(family_metrics("Trebuchet MS", false, false).is_none());
+        assert!(family_metrics("calibri", false, false).is_none());
+
+        let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
+        assert!((line.ascent - 939.0).abs() < 1e-3);
+        assert!((line.descent - 222.0).abs() < 1e-3);
     }
 }
