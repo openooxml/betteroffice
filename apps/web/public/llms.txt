@@ -32,6 +32,9 @@ There is no Vue package. React and framework-free JavaScript are the supported e
 
 VSDX support is available from source and is not yet published. Batch shape-data editing validates every row before applying a change, with per-row receipts and undo. The headless Rust exporter creates editable PowerPoint slides and Word diagrams, with shape-data tables and export reports. Controls the engine would refuse are disabled rather than offered: locks, GUARD and SETATREF redirection are read from the engine's own mutation policy, not re-derived in the browser.
 
+DOCX hosts can call `YrsSession.addUndoBoundary()` to separate actions, and use
+`setUndoCaptureMode('auto' | 'manual')` for typing coalescence or explicit grouping.
+
 ## Rust crates
 
 DOCX, XLSX and PPTX crates are published to crates.io, Apache-2.0. Use a format facade unless you need a single layer of the pipeline.

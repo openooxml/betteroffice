@@ -128,7 +128,7 @@ export const CAPABILITIES = [
   },
   {
     name: "Undo and redo",
-    desc: "Navigate editing history and undo accepted agent proposals as a single step.",
+    desc: "Navigate editing history and undo accepted agent proposals as a single step. DOCX hosts can set explicit boundaries and choose automatic or manual grouping.",
   },
   {
     name: "Embed or automate",

@@ -33,6 +33,8 @@
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
+  DOCX hosts can place explicit undo boundaries and choose automatic typing
+  coalescence or manual grouping across multiple edits.
 
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
