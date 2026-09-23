@@ -37,6 +37,8 @@
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
+  DOCX hosts can query the text position under a pointer for drops and hover
+  tools, including body, header, footer, and note locations.
 
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.

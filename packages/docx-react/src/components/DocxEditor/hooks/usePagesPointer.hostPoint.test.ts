@@ -95,6 +95,7 @@ afterAll(async () => {
 
 function hostAt(zoom: number, scroll: number) {
   const host = document.createElement('div');
+  host.className = 'canvas-pages';
   const left = 40;
   const top = 60 - scroll;
   host.getBoundingClientRect = () => new DOMRect(left, top, 848 * zoom, 2020 * zoom);
@@ -106,11 +107,16 @@ function hostAt(zoom: number, scroll: number) {
     canvas.getBoundingClientRect = () =>
       new DOMRect(
         left + ((848 - size.width) * zoom) / 2,
-        top + (24 + (index === 0 ? 0 : 924)) * zoom,
+        top + 24 + (index === 0 ? 0 : 900 * zoom + 16),
         size.width * zoom,
         size.height * zoom
       );
-    host.append(canvas);
+    const page = document.createElement('div');
+    page.className = 'canvas-page';
+    page.dataset.pageIndex = String(index);
+    page.getBoundingClientRect = canvas.getBoundingClientRect;
+    page.append(canvas);
+    host.append(page);
   }
   return host;
 }
@@ -240,7 +246,9 @@ describe('public point query', () => {
       projector: createCanvasHostProjector(host, queries, 0.75),
     });
     const expected = context.getPositionAtPoint(point.clientX, point.clientY);
-    host.replaceChildren();
+    for (const canvas of host.querySelectorAll('canvas')) canvas.remove();
     expect(context.getPositionAtPoint(point.clientX, point.clientY)).toEqual(expected);
+    host.replaceChildren();
+    expect(context.getPositionAtPoint(point.clientX, point.clientY)).toBeNull();
   });
 });

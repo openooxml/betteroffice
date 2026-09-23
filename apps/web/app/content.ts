@@ -132,7 +132,7 @@ export const CAPABILITIES = [
   },
   {
     name: "Embed or automate",
-    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows.",
+    desc: "Drop React editors into your app, build on the framework-free JavaScript cores, or use Rust and Python APIs for headless processing and agent workflows. DOCX hosts can query pointer positions for drops and hover tools.",
   },
   {
     name: "Open source and self-hostable",

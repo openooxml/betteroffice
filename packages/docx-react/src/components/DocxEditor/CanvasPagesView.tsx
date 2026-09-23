@@ -141,7 +141,11 @@ const CanvasPageSurface = memo(function CanvasPageSurface({
   registerCanvas: (pageKey: string, el: HTMLCanvasElement | null) => void;
 }) {
   return (
-    <div className="canvas-page" style={{ position: 'relative' }}>
+    <div
+      className="canvas-page"
+      data-page-index={page.pageIndex}
+      style={{ position: 'relative', width: page.width * zoom, height: page.height * zoom }}
+    >
       <canvas
         ref={(el) => registerCanvas(pageKey, el)}
         data-page-index={page.pageIndex}
