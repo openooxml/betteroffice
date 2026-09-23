@@ -1864,12 +1864,9 @@ impl EditSession {
     pub fn set_undo_capture_mode(&self, mode: &str) -> Result<(), JsValue> {
         let mode = match mode {
             "auto" => UndoCaptureMode::Auto,
-            "per-edit" => UndoCaptureMode::PerEdit,
             "manual" => UndoCaptureMode::Manual,
             _ => {
-                return Err(js_err(
-                    "undo capture mode must be auto, per-edit, or manual",
-                ));
+                return Err(js_err("undo capture mode must be auto or manual"));
             }
         };
         self.undo.set_capture_mode(mode);
@@ -1880,7 +1877,6 @@ impl EditSession {
     pub fn undo_capture_mode(&self) -> String {
         match self.undo.capture_mode() {
             UndoCaptureMode::Auto => "auto",
-            UndoCaptureMode::PerEdit => "per-edit",
             UndoCaptureMode::Manual => "manual",
         }
         .to_owned()

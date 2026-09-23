@@ -112,15 +112,15 @@ describe('session undo history', () => {
     }
   });
 
-  it('captures each transaction separately in per-edit mode, including raw batches', async () => {
+  it('separates host actions with explicit boundaries, including raw batches', async () => {
     const session = await createYrsSession({ clientId: 53010 });
     try {
       session.createStory('body', 'body');
       expect(session.undoCaptureMode()).toBe('auto');
-      session.setUndoCaptureMode('per-edit');
-      expect(session.undoCaptureMode()).toBe('per-edit');
       session.insertText(endOf(session, 'body'), 'a');
+      session.addUndoBoundary();
       session.insertText(endOf(session, 'body'), 'b');
+      session.addUndoBoundary();
       session.applyRawOps('body', [
         { op: 'insert', index: 6, text: 'c' },
         { op: 'insert', index: 7, text: 'd' },
@@ -177,18 +177,16 @@ describe('session undo history', () => {
       session.insertText(endOf(session, 'body'), 'b');
       session.setUndoCaptureMode('manual');
       session.insertText(endOf(session, 'body'), 'c');
-      session.setUndoCaptureMode('per-edit');
-      session.insertText(endOf(session, 'body'), 'd');
       session.setUndoCaptureMode('auto');
+      session.insertText(endOf(session, 'body'), 'd');
       session.insertText(endOf(session, 'body'), 'e');
-      session.insertText(endOf(session, 'body'), 'f');
-      for (const expected of ['bodyabcd', 'bodyabc', 'bodya', 'body']) {
+      for (const expected of ['bodyabc', 'bodya', 'body']) {
         expect(session.undo()).toBe(true);
         expect(text(session, 'body')).toBe(expected);
       }
       session.setUndoCaptureMode('manual');
       expect(session.canRedo()).toBe(true);
-      for (const expected of ['bodya', 'bodyabc', 'bodyabcd', 'bodyabcdef']) {
+      for (const expected of ['bodya', 'bodyabc', 'bodyabcde']) {
         expect(session.redo()).toBe(true);
         expect(text(session, 'body')).toBe(expected);
       }
@@ -202,6 +200,7 @@ describe('session undo history', () => {
     try {
       session.createStory('body', 'body');
       session.insertText(endOf(session, 'body'), 'a');
+      expect(() => session.setUndoCaptureMode('per-edit' as 'auto')).toThrow();
       expect(() => session.setUndoCaptureMode('invalid' as 'auto')).toThrow();
       expect(session.undoCaptureMode()).toBe('auto');
       session.insertText(endOf(session, 'body'), 'b');

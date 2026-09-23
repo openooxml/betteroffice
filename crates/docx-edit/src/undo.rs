@@ -26,7 +26,6 @@ pub const UNDO_DEPTH: usize = 100;
 pub enum UndoCaptureMode {
     #[default]
     Auto,
-    PerEdit,
     Manual,
 }
 
@@ -69,7 +68,6 @@ impl Clock for CaptureClock {
         // Yrs has no runtime timeout setter; its clock controls capture policy.
         let elapsed = match state.mode {
             UndoCaptureMode::Auto => now.saturating_sub(state.last_source),
-            UndoCaptureMode::PerEdit => UNDO_CAPTURE_TIMEOUT_MS,
             UndoCaptureMode::Manual => 0,
         };
         state.last_source = now;
@@ -436,12 +434,12 @@ mod tests {
     }
 
     #[test]
-    fn per_edit_capture_ignores_the_wall_clock() {
+    fn explicit_boundaries_separate_transactions() {
         let doc = seed();
         let (undo, _now) = stepped_session();
-        undo.set_capture_mode(UndoCaptureMode::PerEdit);
         undo.track(&doc);
         append(&doc, BODY, "a");
+        undo.add_undo_barrier();
         append(&doc, BODY, "b");
         assert!(undo.undo());
         assert_eq!(text(&doc, BODY), "bodya");
@@ -508,20 +506,17 @@ mod tests {
         now.fetch_add(600, Ordering::Relaxed);
         undo.set_capture_mode(UndoCaptureMode::Manual);
         append(&doc, BODY, "c");
-        undo.set_capture_mode(UndoCaptureMode::PerEdit);
+        undo.set_capture_mode(UndoCaptureMode::Auto);
         append(&doc, BODY, "d");
         append(&doc, BODY, "e");
-        undo.set_capture_mode(UndoCaptureMode::Auto);
-        append(&doc, BODY, "f");
-        append(&doc, BODY, "g");
-        for expected in ["bodyabcde", "bodyabcd", "bodyabc", "bodya", "body"] {
+        for expected in ["bodyabc", "bodya", "body"] {
             assert!(undo.undo());
             assert_eq!(text(&doc, BODY), expected);
         }
         assert!(!undo.undo());
         undo.set_capture_mode(UndoCaptureMode::Manual);
         assert!(undo.can_redo());
-        for expected in ["bodya", "bodyabc", "bodyabcd", "bodyabcde", "bodyabcdefg"] {
+        for expected in ["bodya", "bodyabc", "bodyabcde"] {
             assert!(undo.redo());
             assert_eq!(text(&doc, BODY), expected);
         }

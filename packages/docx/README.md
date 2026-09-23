@@ -77,7 +77,6 @@ combined into undo steps. `session.undoCaptureMode()` returns the current mode.
 | Mode | Grouping |
 | --- | --- |
 | `auto` (default) | Edits within 500 ms coalesce; switching stories closes the group. |
-| `per-edit` | Each committed local transaction gets its own undo step. A multi-operation transaction remains one step. |
 | `manual` | Edits coalesce across pauses and stories until an explicit boundary. |
 
 `session.addUndoBoundary()` closes the current group in any mode. Changing modes

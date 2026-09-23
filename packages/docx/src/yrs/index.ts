@@ -654,7 +654,7 @@ export type YrsCellBorders = Partial<
 >;
 
 /** Undo grouping for tracked local transactions. */
-export type YrsUndoCaptureMode = 'auto' | 'per-edit' | 'manual';
+export type YrsUndoCaptureMode = 'auto' | 'manual';
 
 /**
  * One live replica of the yrs editing model. Thin typed wrapper over the
