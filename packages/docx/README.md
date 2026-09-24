@@ -99,3 +99,83 @@ are also available in automatic mode when a host action needs to be isolated fro
 surrounding typing. Undo/redo close capture as usual. Manual mode controls history
 grouping; it does not defer updates, flush pending input, or provide atomic execution.
 The host must close manual groups so later unrelated edits do not join them.
+
+### Version-checked edit batches
+
+Read what you will target together with the session version, then apply a batch
+against that version. Every step resolves against the state that was read; the
+batch commits as one transaction or returns a typed refusal with nothing changed.
+
+```ts
+const read = session.readParagraphs({ story: 'body', view: 'accepted' });
+if (!read.ok) throw new Error(read.failure.message);
+const clause = read.paragraphs.find((paragraph) => paragraph.text.startsWith('Term'))!;
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    {
+      op: 'replaceText',
+      target: { kind: 'search', text: '30 days', view: 'accepted',
+        within: { kind: 'paragraph', story: 'body', paraId: clause.paraId } },
+      text: '45 days',
+      expect: { text: '30 days' },
+    },
+    {
+      op: 'insertParagraphs',
+      target: { story: 'body', paraId: clause.paraId },
+      at: 'end',
+      paragraphs: [{ text: 'Renewal is automatic.' }],
+    },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code, result.failure.message);
+```
+
+`version()` changes with every committed change, local or remote (including
+undo and redo), and when the session reopens its document. Tokens are scoped to
+one session; after a lost response, read again rather than retrying with a new
+version.
+
+Offsets are UTF-16 positions into a paragraph's projected text. Each inline atom
+(hard break, image, content control, note reference, field, other embed) is one
+U+FFFC listed in `atoms`, tabs stay `\t`, and paragraph marks are excluded. The
+`accepted` view includes pending insertions and hides pending deletions;
+`original` does the reverse. `findText` is exact, case-sensitive and
+paragraph-local, and a `search` target must match exactly once in its scope.
+
+| Step | Effect |
+| --- | --- |
+| `insertText` | Inserts at the start or end of a target, formatted like typing there. |
+| `replaceText` | Replaces a target's text inside one paragraph, keeping the paragraph. |
+| `deleteText` | Deletes a target's text inside one paragraph. |
+| `insertParagraphs` | Inserts complete paragraphs before or after an anchor, in the given or the anchor's style. |
+| `deleteParagraphs` | Deletes a contiguous span of complete paragraphs without merging properties into a neighbour. |
+| `setParagraphStyle` | Applies a document paragraph style with its paragraph and run formatting. |
+
+Refusals carry a `code` (`stale-version`, `missing-target`, `ambiguous-target`,
+`content-mismatch`, `overlapping-steps`, `locked-target`,
+`tracked-revision-conflict`, `unsupported`, `invalid-step`, `limit-exceeded`),
+the failing `stepIndex`, and the target. Editor hosts add `read-only` for an
+editor that does not accept edits. Malformed requests throw.
+`validateEdits(request)` runs the same checks and previews each step without
+changing anything or reserving ids.
+
+An applied batch is exactly one undo step in both capture modes; pass
+`history: 'none'` to keep it out of undo history while preserving existing undo
+and redo entries. `source: 'agent'` records provenance only. Add
+`suggest: { author, date }` to a text step to record it as a tracked change.
+
+Current limits: text targets stay within one paragraph; inline atoms cannot be
+replaced or deleted; content-locked controls, existing tracked changes a step
+would touch (including tracked run formatting), and pending paragraph-mark
+revisions refuse. Paragraph and style steps need a session opened from DOCX
+bytes (`openDocx`/`seedFromDocx`) and cannot be suggested. List numbering is a
+v1 limitation: restyling a numbered paragraph, or applying or inserting a style
+that defines numbering, refuses with `unsupported` until a follow-up retains
+numbering definitions in the session. Deleting spans that hold tables,
+controls, section breaks, opaque XML, fields' cached results, or comments and
+bookmarks crossing the span refuses, as does any step after which saving would
+move an opaque XML block, such as one that precedes a table. A batch holds at most 128 steps,
+1,048,576 inserted UTF-16 units and 1,024 new paragraphs. Paragraph ids are
+session anchors: they are not guaranteed to survive save and reopen.

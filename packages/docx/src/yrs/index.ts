@@ -24,7 +24,19 @@ import type {
   CollaborationTextInsertion,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
+import type {
+  DocxEditRefusal,
+  DocxEditRequest,
+  DocxEditResult,
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxReadParagraphsRequest,
+  DocxReadParagraphsResult,
+  DocxTextTarget,
+  DocxValidationResult,
+} from './edits';
 
+export * from './edits';
 export * from './inputPositionMap';
 export {
   ResidentEngineWorkerClient,
@@ -656,6 +668,18 @@ export type YrsCellBorders = Partial<
 /** Undo grouping for tracked local transactions. */
 export type YrsUndoCaptureMode = 'auto' | 'manual';
 
+/** Outcome of a target-resolving helper edit. @internal */
+export type YrsTargetEditResult = { ok: true; version: string } | DocxEditRefusal;
+
+/** Accepted-view texts around a selection; U+FFFC stands for each inline atom. @internal */
+export interface YrsSelectionText {
+  paraId: string;
+  selectedText: string;
+  paragraphText: string;
+  before: string;
+  after: string;
+}
+
 /**
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
@@ -949,6 +973,34 @@ export interface YrsSession extends CollaborationReplica {
   /** A paragraph's story span (start unit, pilcrow index). */
   locateParagraph(story: string, paraId: string): YrsParagraphSpan;
 
+  // -- version-checked host edits --
+
+  /**
+   * The session-scoped version token. It changes on every committed change, local or remote,
+   * and when the document is replaced; compare tokens only within this session.
+   */
+  version(): string;
+  /** Paragraph texts in one view, with the version they were read at. */
+  readParagraphs(request: DocxReadParagraphsRequest): DocxReadParagraphsResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: DocxFindTextRequest): DocxFindTextResult;
+  /** Resolves and checks an edit batch without changing anything or reserving ids. */
+  validateEdits(request: DocxEditRequest): DocxValidationResult;
+  /**
+   * Applies every step or none, resolving all targets against `expectVersion`. Policy
+   * failures are returned; malformed requests throw.
+   */
+  applyEdits(request: DocxEditRequest): DocxEditResult;
+  /** Resolves a text target and formats it in one call. @internal */
+  formatTextTarget(target: DocxTextTarget, delta: YrsInlineFormatDelta): YrsTargetEditResult;
+  /** Resolves a text target and anchors side-map comment `id` over it in one call. @internal */
+  commentTextTarget(
+    target: DocxTextTarget,
+    comment: { id: string; author: string; date: string; body: unknown }
+  ): YrsTargetEditResult;
+  /** Accepted-view texts around a paragraph-keyed selection. @internal */
+  selectionText(range: YrsStoryRange): YrsSelectionText;
+
   /** Drops the observer and frees the wasm-side replica. Idempotent. */
   destroy(): void;
 }
@@ -995,6 +1047,10 @@ function wireRanges(ranges: readonly YrsStoryRange[]): string {
       endOffset: range.end.offset,
     }))
   );
+}
+
+function targetStory(target: DocxTextTarget): string {
+  return target.kind === 'search' ? target.within.story : target.story;
 }
 
 function docxSourceBuffer(bytes: Uint8Array): ArrayBuffer {
@@ -1862,6 +1918,53 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     storySegments: (story) => JSON.parse(session.story_segments(story)) as YrsStorySegment[],
     locateParagraph: (story, paraId) =>
       JSON.parse(session.locate_paragraph(story, paraId)) as YrsParagraphSpan,
+
+    version: () => session.version(),
+    readParagraphs: (request) =>
+      JSON.parse(session.read_paragraphs_json(JSON.stringify(request))) as DocxReadParagraphsResult,
+    findText: (request) =>
+      JSON.parse(session.find_text_json(JSON.stringify(request))) as DocxFindTextResult,
+    validateEdits: (request) =>
+      JSON.parse(session.validate_edits_json(JSON.stringify(request))) as DocxValidationResult,
+    applyEdits: (request) =>
+      mutate(() => {
+        const result = JSON.parse(
+          session.apply_edits_json(JSON.stringify(request))
+        ) as DocxEditResult;
+        if (result.ok && result.applied) markDirty(result.changedStories);
+        return result;
+      }),
+    formatTextTarget: (target, delta) => {
+      ensureUndo(targetStory(target));
+      return mutate(
+        () =>
+          JSON.parse(
+            session.format_text_target_json(JSON.stringify(target), JSON.stringify(delta))
+          ) as YrsTargetEditResult
+      );
+    },
+    commentTextTarget: (target, comment) => {
+      markDirty(targetStory(target));
+      return mutate(
+        () =>
+          JSON.parse(
+            session.comment_text_target_json(
+              JSON.stringify(target),
+              JSON.stringify({ ...comment, body: comment.body ?? null })
+            )
+          ) as YrsTargetEditResult
+      );
+    },
+    selectionText: (range) =>
+      JSON.parse(
+        session.selection_text_json(
+          range.story,
+          range.start.paraId,
+          range.start.offset,
+          range.end.paraId,
+          range.end.offset
+        )
+      ) as YrsSelectionText,
 
     destroy: () => {
       if (destroyed) return;

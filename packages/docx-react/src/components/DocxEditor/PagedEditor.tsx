@@ -374,8 +374,11 @@ export interface PagedEditorRef {
   getYrsStoredFormatting(): YrsStoredFormatting | null;
   /** Resolve a live yrs Loc to the display position used by overlays. */
   yrsLocToDisplayPosition(loc: YrsLoc): number | null;
-  /** Publish a yrs selection/mutation through the direct-input refresh path. */
-  syncYrsInputState(docChanged: boolean): boolean;
+  /**
+   * Publish a yrs selection/mutation through the direct-input refresh path. `dirtyStories`
+   * names every story a mutation changed; the live selection's story by default.
+   */
+  syncYrsInputState(docChanged: boolean, dirtyStories?: readonly string[]): boolean;
   /** Apply a body-toolbar command through yrs. */
   applyYrsFormatting(action: FormattingAction): boolean;
   /** Apply a non-toolbar body command through yrs. */
@@ -725,8 +728,8 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
     const lastPublishedBodySelectionKeyRef = useRef<string | null>(null);
     const lastPublishedPresenceSelectionKeyRef = useRef<string | null>(null);
     const documentChangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const publishYrsDirectInput = useCallback((dirtyStory?: string): void => {
-      yrsCore.publishDirectInput(dirtyStory);
+    const publishYrsDirectInput = useCallback((dirtyStories?: string | readonly string[]): void => {
+      yrsCore.publishDirectInput(dirtyStories);
       // Structural input can mint a paragraph before the existing projection
       // can map its new sticky caret. Invalidate first so emitSelection can
       // rebuild the projection and reach the normal layout-refresh callback.
@@ -873,7 +876,7 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
       (
         docChanged: boolean,
         origin: LayoutUpdateOrigin = 'local',
-        dirtyStory?: string
+        dirtyStory?: string | readonly string[]
       ): boolean => {
         if (!yrsCore.session) return false;
         const displaySelection = yrsInputRef.current?.displaySelection() ?? { anchor: 0, head: 0 };
