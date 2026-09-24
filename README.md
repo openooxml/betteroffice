@@ -75,7 +75,7 @@
 
 ### Diagrams (`.vsdx`, source preview)
 
-VSDX support is available from source and is not yet published.
+VSDX support is available from source and is not yet published. Rows of an imported table bind onto a shape's data in one undo step, matched by column header, and a row the engine refuses leaves the whole bind unwritten.
 
 What to install for which language, with a first example each:
 [npm](https://docs.betteroffice.dev/docs/javascript),

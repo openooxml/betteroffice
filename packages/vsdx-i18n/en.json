@@ -158,5 +158,6 @@
       "connector-crossing": "Connector {name} crosses {other}",
       "empty-shape-data": "Shape {name} has an empty required field ({row})"
     }
-  }
+  },
+  "dataBinding": { "title": "Data Binding", "import": "Import table…", "noTable": "Import a table to bind its rows to shape data.", "noSelection": "Select a shape to bind a row to it.", "unmatched": "No column matches a data row on this shape.", "bind": "Bind to selection", "matched": "{count} of {total} columns match", "nothingToBind": "That row has nothing to bind.", "bound": "Bound {count} rows.", "refused": "Refused: {rows}. Nothing was written." }
 }
