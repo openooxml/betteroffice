@@ -38,6 +38,9 @@
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
 
+- **Host-controlled XLSX editing.** XLSX hosts can intercept saving, flush drafts and accepted clipboard input,
+  and query the cell under a pointer without moving the selection.
+
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
 
