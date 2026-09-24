@@ -1,0 +1,7 @@
+---
+"@betteroffice/docx": minor
+"@betteroffice/docx-react": minor
+"@betteroffice/rust-crates": minor
+---
+
+Add version-checked, all-or-nothing DOCX edit batches. `YrsSession.version()`, `readParagraphs()` and `findText()` return text with the session version it was read at, one U+FFFC per inline atom; `validateEdits()` and `applyEdits()` resolve every step against that version and either commit text insertion, replacement and deletion plus paragraph insertion, deletion and style changes as one transaction and one undo step, or return a typed refusal (`stale-version`, `missing-target`, `ambiguous-target`, `content-mismatch`, `overlapping-steps`, `locked-target`, `tracked-revision-conflict`, `unsupported`, `invalid-step`, `limit-exceeded`) with the document untouched. `history: "none"` keeps a batch out of undo history, and text steps can be recorded as tracked changes. `DocxEditorRef` gains the same four operations, flushing pending input first and refusing with `read-only` while the editor is read-only. Undo and redo now refresh every story they change before the next save. `proposeChange`, `addComment` and `applyFormatting` now resolve their targets in Rust, so text after a hard break, image, content control or note reference is addressed correctly. The Rust `EditingDoc` exposes the same API. Text ranges stay within one paragraph, inline atoms cannot be replaced, paragraph steps need a session opened from DOCX bytes, and list numbering is a v1 limitation that a follow-up lifts.

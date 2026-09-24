@@ -11,7 +11,7 @@ use yrs::{Any, Out, ReadTxn, Text, TextRef};
 use crate::{KIND_KEY, PARA_ID, is_pilcrow, map_string, out_len};
 
 /// Whether the layout gives an embed its own block.
-fn is_block_embed(kind: &str) -> bool {
+pub(crate) fn is_block_embed(kind: &str) -> bool {
     matches!(kind, "table" | "blockSdt" | "pageBreak" | "columnBreak")
 }
 
