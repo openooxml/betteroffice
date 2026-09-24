@@ -142,6 +142,40 @@ fn automatic_numbers_keep_styles_and_story_geometry() {
 }
 
 #[test]
+fn empty_paragraphs_have_no_marker_and_do_not_advance_numbering() {
+    let session = DeckSession::open(DECK, 302).unwrap();
+    let renderer = renderer();
+    for keep_empty_runs in [false, true] {
+        let mut snapshot = session.snapshot().unwrap();
+        let story = &mut snapshot.slides[0]
+            .shapes
+            .iter_mut()
+            .find(|shape| shape.source_id == 11)
+            .unwrap()
+            .text_stories[0];
+        for paragraph in story.paragraphs.iter_mut().skip(1).step_by(2) {
+            if keep_empty_runs {
+                for run in &mut paragraph.runs {
+                    run.text.clear();
+                }
+            } else {
+                paragraph.runs.clear();
+            }
+        }
+        let list = renderer
+            .layout_slide(session.package(), &snapshot, 0)
+            .unwrap()
+            .display_list;
+        assert_eq!(markers(&list, 11), ["1.", "2.", "3.", "4.", "5."]);
+        let lines = lines(&list, 11);
+        assert_eq!(lines.len(), 10);
+        for line in lines.iter().skip(1).step_by(2) {
+            assert!(line.runs.is_empty());
+        }
+    }
+}
+
+#[test]
 fn automatic_numbers_are_stable_with_normal_and_shape_autofit() {
     let session = DeckSession::open(DECK, 301).unwrap();
     let renderer = renderer();
