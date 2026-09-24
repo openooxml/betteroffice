@@ -24,6 +24,11 @@ DOCX, XLSX, PPTX and font packages are published under the `@betteroffice` scope
 
 The DOCX and PPTX React editors render TIFF images in the browser (PPTX additionally renders supported bitmap-only WMF and EMF wrappers). Custom browser image loaders can use the same conversion with `presentationImageBlob(bytes)` from `@betteroffice/pptx`.
 
+DOCX `RenderedDomContext.getPositionAtPoint(clientX, clientY)` resolves a pointer to
+a display position, page, and document region without changing focus or selection.
+`PagedEditorRef.displayPositionToYrsLoc(hit)` maps the hit into its editing location,
+including headers, footers, notes, and tables.
+
 The XLSX and PPTX JavaScript cores expose opt-in operation profiles for edit and render/layout timings. Ordinary methods retain their existing return types; see the [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) for the profiling APIs.
 
 There is no Vue package. React and framework-free JavaScript are the supported entry points.

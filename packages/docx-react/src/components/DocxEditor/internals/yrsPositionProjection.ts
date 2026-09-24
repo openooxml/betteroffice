@@ -1,4 +1,5 @@
 import type { YrsCellLoc, YrsLoc, YrsSession, YrsStorySegment } from '@betteroffice/docx/yrs';
+import type { PointPosition } from '@betteroffice/docx/plugin-api';
 
 export interface YrsProjectedNode {
   kind: string;
@@ -61,6 +62,34 @@ export function createYrsPositionProjection(
 ): YrsPositionProjection | null {
   if (!session.storyIds().includes(rootStory)) return null;
   return new YrsPositionProjection(session, rootStory);
+}
+
+/** Maps body positions or region-aware hits into their story's input coordinates. */
+export function projectYrsDisplayPosition(
+  position: number | PointPosition,
+  getProjection: (rootStory: string) => YrsPositionProjection | null
+): YrsPointerProjectionTarget | null {
+  let rootStory = 'body';
+  if (typeof position !== 'number') {
+    switch (position.region) {
+      case 'header':
+      case 'footer':
+        if (!position.rId) return null;
+        rootStory = `hf:${position.rId}`;
+        break;
+      case 'footnote':
+      case 'endnote':
+        if (position.noteId === undefined) return null;
+        rootStory = `${position.region === 'footnote' ? 'fn' : 'en'}:${position.noteId}`;
+        break;
+    }
+  }
+  const offset = typeof position === 'number' ? position : position.position;
+  const projection = getProjection(rootStory);
+  if (!projection || !Number.isFinite(offset) || offset < 0 || offset > projection.size) {
+    return null;
+  }
+  return projection.targetAt(offset);
 }
 
 export class YrsPositionProjection {

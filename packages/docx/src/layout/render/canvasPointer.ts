@@ -54,6 +54,12 @@ export function resolveDisplayPageClientRect(
     const rect = canvas.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) return rect;
   }
+  const pageHost = host.querySelector<HTMLElement>(`.canvas-page[data-page-index="${pageIndex}"]`);
+  if (pageHost) {
+    const rect = pageHost.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return rect;
+  }
+  if (host.classList.contains('canvas-pages')) return null;
 
   const size = queries.pageSize(pageIndex);
   if (!size || size.width <= 0 || size.height <= 0) return null;
@@ -112,9 +118,10 @@ export function resolveCanvasPoint(
 
   for (let pageIndex = 0; pageIndex < queries.pageCount(); pageIndex++) {
     const canvas = canvasByPage.get(pageIndex);
-    const rect =
-      canvas?.getBoundingClientRect() ??
-      resolveDisplayPageClientRect(host, queries, pageIndex, options);
+    const canvasRect = canvas?.getBoundingClientRect();
+    const rect = canvasRect && canvasRect.width > 0 && canvasRect.height > 0
+      ? canvasRect
+      : resolveDisplayPageClientRect(host, queries, pageIndex, options);
     if (!rect) continue;
     if (rect.width <= 0 || rect.height <= 0) continue;
     if (

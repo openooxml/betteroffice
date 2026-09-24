@@ -60,6 +60,7 @@ function domRect(top: number, left: number, width: number, height: number): DOMR
 function pageHost(): HTMLElement {
   return {
     querySelector: () => null,
+    classList: { contains: () => false },
     getBoundingClientRect: () => domRect(0, 0, 600, 1_000),
     offsetWidth: 600,
     clientWidth: 600,
@@ -95,6 +96,7 @@ function createScene(initialScrollTop: number, initialPageCount: number) {
     Math.max(0, state.pageCount - 1) * PAGE_GAP;
   const host = {
     querySelector: () => null,
+    classList: { contains: () => false },
     getBoundingClientRect: () =>
       domRect(SCROLLER_TOP - state.scrollTop, 0, 600, contentHeight()),
     offsetWidth: 600,

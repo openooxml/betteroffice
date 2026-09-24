@@ -16,6 +16,7 @@ export type {
   PanelConfig,
   RenderedDomContext,
   PositionCoordinates,
+  PointPosition,
   SidebarItem,
   SidebarItemContext,
 } from './types';
