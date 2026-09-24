@@ -655,6 +655,10 @@ export class EditSession {
      */
     set_column_width(at_json: string, width_twips: number): string;
     /**
+     * Reanchors an existing comment without changing its metadata.
+     */
+    set_comment_ranges(comment_id: string, ranges_json: string): void;
+    /**
      * Sets the authored `value` (any JSON) on the content-control embed
      * carrying `embed_id`, searching every story. Errors when no embed has
      * that id.
@@ -1133,6 +1137,7 @@ export interface InitOutput {
     readonly editsession_set_cell_shading: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_cell_text_format: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_set_column_width: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly editsession_set_comment_ranges: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value: (a: number, b: number, c: number, d: number, e: number) => [number, number];
     readonly editsession_set_content_control_value_at: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
     readonly editsession_set_hyperlink: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];

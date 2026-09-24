@@ -603,6 +603,43 @@ impl EditingDoc {
         Ok(comment_id)
     }
 
+    /// Replaces an existing comment's non-empty ranges, preserving all metadata.
+    pub fn set_comment_ranges(&self, comment_id: &str, ranges: &[StoryRange]) -> EditResult<()> {
+        if ranges.is_empty() {
+            return Err(EditError::InvalidComment(
+                "at least one anchored range is required".into(),
+            ));
+        }
+        let mut txn = self.doc.transact_mut_with(self.client_id);
+        let comments = txn.get_map(COMMENTS).expect("comments root is declared");
+        let comment = comments
+            .get(&txn, comment_id)
+            .and_then(|value| value.cast::<MapRef>().ok())
+            .ok_or_else(|| EditError::CommentNotFound(comment_id.to_owned()))?;
+        let mut anchors = Vec::with_capacity(ranges.len());
+        for range in ranges {
+            let len = range.len()?;
+            if len == 0 {
+                return Err(EditError::InvalidComment(
+                    "comment ranges must be non-empty".into(),
+                ));
+            }
+            let story = story_ref(&txn, &range.story)?;
+            check_range(&story, &txn, range.start, len)?;
+            let start = story
+                .sticky_index(&txn, range.start, Assoc::After)
+                .ok_or_else(|| {
+                    EditError::InvalidComment("start anchor could not be made".into())
+                })?;
+            let end = story
+                .sticky_index(&txn, range.end, Assoc::Before)
+                .ok_or_else(|| EditError::InvalidComment("end anchor could not be made".into()))?;
+            anchors.push(anchor_value(&range.story, &start, &end));
+        }
+        comment.insert(&mut txn, "anchors", Any::Array(Arc::from(anchors)));
+        Ok(())
+    }
+
     pub fn comment_anchors(&self, comment_id: &str) -> EditResult<Vec<CommentAnchor>> {
         let txn = self.doc.transact();
         let comments = txn
@@ -939,6 +976,7 @@ fn decode_anchor(value: &Any) -> EditResult<CommentAnchor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use yrs::types::ToJson;
 
     const DATE: &str = "2026-07-13T12:00:00Z";
 
@@ -1006,6 +1044,138 @@ mod tests {
             text: text.to_owned(),
             p_style: "Normal".to_owned(),
             alignment: "left".to_owned(),
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_survives_whole_text_replacement_history() {
+        let doc = EditingDoc::new(801);
+        doc.create_story("body", "Antes achado depois", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 6, 12)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        doc.replace_range(
+            &local("Ada"),
+            StoryRange::new("body", 0, 19),
+            "Novo achado fim",
+        )
+        .unwrap();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 5, 11)])
+            .unwrap();
+        for _ in 0..3 {
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (5, 11));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_preserves_unicode_in_history() {
+        let doc = EditingDoc::new(802);
+        doc.create_story("body", "Antes 🦀 depois", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 6, 8)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let mut undo = doc.undo_manager();
+        doc.replace_range(&local("Ada"), StoryRange::new("body", 0, 15), "Novo 🦀 fim")
+            .unwrap();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 5, 7)])
+            .unwrap();
+        let text = || {
+            doc.story_segments("body")
+                .unwrap()
+                .into_iter()
+                .filter_map(|segment| match segment.content {
+                    SegmentContent::Text(text) => Some(text),
+                    _ => None,
+                })
+                .collect::<String>()
+        };
+        for _ in 0..3 {
+            assert_eq!(text(), "Novo 🦀 fim");
+            assert_eq!(doc.story_len("body").unwrap(), 12);
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (5, 7));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 8));
+            assert_eq!(text(), "Antes 🦀 depois");
+            assert_eq!(doc.story_len("body").unwrap(), 16);
+            assert!(undo.redo());
+        }
+    }
+
+    #[test]
+    fn comment_reanchoring_preserves_metadata_and_undo() {
+        let doc = EditingDoc::new(800);
+        doc.create_story("body", "first second", "Normal", "left")
+            .unwrap();
+        let id = doc
+            .add_comment(
+                &[StoryRange::new("body", 0, 5)],
+                "Ada",
+                DATE,
+                Any::from("Review body"),
+            )
+            .unwrap();
+        let metadata = || {
+            let txn = doc.doc.transact();
+            let comment = txn
+                .get_map(COMMENTS)
+                .unwrap()
+                .get(&txn, &id)
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            comment
+                .iter(&txn)
+                .filter(|(key, _)| *key != "anchors")
+                .map(|(key, value)| (key.to_owned(), value.to_json(&txn)))
+                .collect::<BTreeMap<_, _>>()
+        };
+        {
+            let mut txn = doc.doc.transact_mut_with(doc.client_id);
+            let comment = txn
+                .get_map(COMMENTS)
+                .unwrap()
+                .get(&txn, &id)
+                .unwrap()
+                .cast::<MapRef>()
+                .unwrap();
+            comment.insert(&mut txn, "parentId", "parent");
+            comment.insert(&mut txn, "done", true);
+            comment.insert(&mut txn, "custom", "retained");
+        }
+        let before = metadata();
+        let mut undo = doc.undo_manager();
+        doc.set_comment_ranges(&id, &[StoryRange::new("body", 6, 12)])
+            .unwrap();
+        for _ in 0..3 {
+            assert_eq!(metadata(), before);
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (6, 12));
+            assert!(undo.undo());
+            let anchor = resolved(&doc, &id);
+            assert_eq!((anchor.start, anchor.end), (0, 5));
+            assert_eq!(metadata(), before);
+            assert_eq!(undo.changed_stories(), ["body"]);
+            assert!(undo.redo());
         }
     }
 
