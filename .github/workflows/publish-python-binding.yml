@@ -47,12 +47,12 @@ jobs:
       id-token: write # OIDC Trusted Publishing
     steps:
       - name: Require a complete build
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: built-${{ inputs.binding }}
           path: receipt
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: python-${{ inputs.binding }}.*
           path: dist
