@@ -82,11 +82,11 @@ export const PACKAGES_SECTION = {
 export const PACKAGES = [
   {
     name: "@betteroffice/docx",
-    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine.",
+    desc: "Framework-free .docx core — parsing, CRDT editing and page layout on the Rust engine, with version-checked atomic text and paragraph batches.",
   },
   {
     name: "@betteroffice/docx-react",
-    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, and composable toolbar controls.",
+    desc: "The DOCX editor as a drop-in React component, with host-controlled saving, awaited input flushing, composable toolbar controls, and version-checked edit batches.",
   },
   {
     name: "@betteroffice/xlsx",

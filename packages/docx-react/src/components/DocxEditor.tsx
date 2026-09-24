@@ -12,7 +12,18 @@
 import { useRef, useCallback, useState, useEffect, useMemo, forwardRef } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import type { Document, Theme } from '@betteroffice/docx/types/document';
-import type { YrsLoc, YrsSession, YrsStoryRange } from '@betteroffice/docx/yrs';
+import type {
+  DocxEditRequest,
+  DocxEditResult,
+  DocxFindTextRequest,
+  DocxFindTextResult,
+  DocxReadParagraphsRequest,
+  DocxReadParagraphsResult,
+  DocxValidationResult,
+  YrsLoc,
+  YrsSession,
+  YrsStoryRange,
+} from '@betteroffice/docx/yrs';
 import type { BundledFontProvider } from '@betteroffice/docx/layout';
 import {
   createYrsSidebarProjection,
@@ -337,6 +348,22 @@ export interface DocxEditorRef {
   getEditorRef: () => PagedEditorRef | null;
   /** Commits accepted input and selection; waits for active IME composition. */
   flushPendingInput: () => Promise<void>;
+  /**
+   * Flushes pending input, then reads paragraph texts with the version they were read at. Build
+   * edit targets and `expectVersion` from this result.
+   */
+  readParagraphs: (request: DocxReadParagraphsRequest) => Promise<DocxReadParagraphsResult>;
+  /** Flushes pending input, then searches exactly and case-sensitively within one scope. */
+  findText: (request: DocxFindTextRequest) => Promise<DocxFindTextResult>;
+  /** Flushes pending input, then checks an edit batch without changing anything. */
+  validateEdits: (request: DocxEditRequest) => Promise<DocxValidationResult>;
+  /**
+   * Flushes pending input, then applies every step or none against `expectVersion`. A refusal
+   * is returned as data and never rolls back the flushed typing. Read-only editors refuse with
+   * `read-only`, and suggesting mode requires `suggest` on every step. Throws when the document
+   * is replaced while input is flushing.
+   */
+  applyEdits: (request: DocxEditRequest) => Promise<DocxEditResult>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -770,6 +797,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
   // 'viewing' mode acts as read-only
   const readOnly = readOnlyProp || editingMode === 'viewing';
   const commandBridgeRef = useRef<PagedEditorCommandBridge | null>(null);
+  const writeModeRef = useRef<EditorMode>(editingMode);
+  writeModeRef.current = readOnly ? 'viewing' : editingMode;
 
   // Bridge / agent event subscribers — fan-out from the existing onChange and
   // onSelectionChange paths so multiple listeners (host app, MCP server, etc.)
@@ -1403,6 +1432,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     getCachedStyleResolver,
     commentIdAllocator: commentIdAllocatorRef.current,
     commands: commandController.store,
+    modeRef: writeModeRef,
   });
 
   const initialSectionProperties = useMemo(

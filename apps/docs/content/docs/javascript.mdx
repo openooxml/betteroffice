@@ -105,6 +105,46 @@ a precompiled `WebAssembly.Module` in runtimes that cannot fetch that URL. The
 core also provides hit-testing, viewport calculations, accessibility data, and
 TSV clipboard helpers.
 
+## Edit DOCX in version-checked batches
+
+A DOCX session reads paragraphs with the version they were read at, then applies
+a batch against that version: every step commits in one transaction and one undo
+step, or the batch returns a typed refusal and nothing changes.
+
+```ts
+import { repackDocx } from "@betteroffice/docx/docx";
+import { createYrsSession, yrsToDocument } from "@betteroffice/docx/yrs";
+
+const session = await createYrsSession();
+session.openDocx(bytes, true);
+const read = session.readParagraphs({ view: "accepted" });
+if (!read.ok) throw new Error(read.failure.message);
+const first = read.paragraphs[0];
+
+const result = session.applyEdits({
+  expectVersion: read.version,
+  steps: [
+    { op: "insertText", target: { kind: "paragraph", story: "body", paraId: first.paraId }, at: "end", text: " (revised)" },
+    { op: "insertParagraphs", target: { story: "body", paraId: first.paraId }, at: "end", paragraphs: [{ text: "New clause" }] },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+
+const saved = await repackDocx(yrsToDocument(session, session.materializeDocx()!));
+```
+
+Offsets are UTF-16 positions in the paragraph text, where each inline atom (hard
+break, image, content control, note reference, field) is one U+FFFC. Steps insert,
+replace and delete text within one paragraph, insert or delete complete
+paragraphs, and apply paragraph styles; text steps can be recorded as tracked
+changes. Versions belong to one session and change with every committed edit.
+The React editor exposes the same `readParagraphs`, `findText`, `validateEdits`
+and `applyEdits` on its ref, flushing pending input first. Paragraph and style
+steps need a session opened from DOCX bytes, inline atoms cannot be replaced, and
+list numbering is a v1 limitation: numbered paragraphs and styles that define
+numbering refuse with `unsupported` until a follow-up retains numbering
+definitions.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -119,8 +159,8 @@ interaction separately when investigating input-to-paint latency.
 
 | Package | What it is |
 | --- | --- |
-| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
-| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and a command store with composable toolbar parts. |
+| `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, and flushed version-checked edit batches on its ref. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |
