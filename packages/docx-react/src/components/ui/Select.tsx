@@ -6,6 +6,7 @@
 
 import * as React from 'react';
 import * as SelectPrimitive from '@radix-ui/react-select';
+import { useCommandChromeRef } from '../../commands/hooks';
 import { cn } from '../../lib/utils';
 
 // Radix portals escape `.oox-root`, so dark-mode detection is a document-wide probe.
@@ -90,10 +91,11 @@ function SelectContent({
   ...props
 }: React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>) {
   const isDark = React.useSyncExternalStore(subscribeDarkRoot, getDarkRootSnapshot, () => false);
+  const chromeRef = useCommandChromeRef();
   return (
     <SelectPrimitive.Portal>
       {/* Wrap in .oox-root so Tailwind scoped utilities apply inside the portal */}
-      <div className={cn('oox-root', isDark && 'dark')}>
+      <div ref={chromeRef} className={cn('oox-root', isDark && 'dark')}>
         <SelectPrimitive.Content
           data-docx-escape-layer="true"
           className={cn(

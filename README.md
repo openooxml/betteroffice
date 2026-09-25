@@ -49,6 +49,10 @@
 - **Host-controlled DOCX saving.** Intercept Save before export and await pending
   editor input before reading, changing, or persisting the document.
 
+- **Composable DOCX toolbars.** Arrange built-in controls in your own order next
+  to host actions, inside or outside the editor. Controls keep their state,
+  shortcuts, disabled reasons, and read-only rules through one command store.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

@@ -91,6 +91,8 @@ export type YrsRunMark =
   | { type: 'bold' }
   | { type: 'italic' }
   | { type: 'underline' }
+  | { type: 'superscript' }
+  | { type: 'subscript' }
   | { type: 'fontFamily'; value: string }
   | { type: 'fontSize'; value: number }
   | { type: 'color'; value: string };
@@ -515,12 +517,16 @@ export interface YrsSelectionContext {
   italic: YrsTriState;
   underline: YrsTriState;
   strike: YrsTriState;
+  superscript: YrsTriState;
+  subscript: YrsTriState;
   /** Uniform ASCII font family, or `null` when absent/mixed. */
   fontFamily: string | null;
   /** Uniform font size in half-points (the OOXML `w:sz` unit). */
   fontSize: number | null;
   /** Uniform RGB hex or theme-color name, or `null` when absent/mixed. */
   color: string | null;
+  /** Uniform highlight name (`yellow`, …) or unmapped hex, or `null` when absent/mixed. */
+  highlight: string | null;
   /** Paragraph containing the range start. */
   paraId: string;
   styleId: string | null;
@@ -861,7 +867,8 @@ export interface YrsSession extends CollaborationReplica {
   mergeParagraphs(story: string, paraId: string, suggesting?: YrsAuthor): YrsRevisionReceipt;
   /**
    * Toggles one run mark across a range: removes it when every unit already
-   * carries it, otherwise adds it.
+   * carries it, otherwise adds it. Adding superscript clears subscript and
+   * vice versa.
    */
   toggleMark(range: YrsStoryRange, mark: YrsRunMark): void;
   /** Applies set-valued direct formatting; omitted fields are kept and `null` fields clear. */

@@ -389,6 +389,15 @@ export function currentYrsTableTarget(session: YrsSession): YrsTableTarget | nul
   return focused ? { focused, range: { anchor: focused, head: focused } } : null;
 }
 
+/** Stable story ids of the anchor and head cells of the table selection. */
+export function yrsTableSelectionStories(session: YrsSession): [string, string] | null {
+  const target = currentYrsTableTarget(session);
+  if (!target) return null;
+  const anchor = yrsCellStory(session, target.range.anchor);
+  const head = yrsCellStory(session, target.range.head);
+  return anchor && head ? [anchor, head] : null;
+}
+
 function cellBorderColor(tcPr: Record<string, unknown> | undefined): TableContextInfo['cellBorderColor'] {
   const borders = tcPr?.borders;
   if (!borders || typeof borders !== 'object') return undefined;

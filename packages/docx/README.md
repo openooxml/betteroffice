@@ -99,3 +99,12 @@ are also available in automatic mode when a host action needs to be isolated fro
 surrounding typing. Undo/redo close capture as usual. Manual mode controls history
 grouping; it does not defer updates, flush pending input, or provide atomic execution.
 The host must close manual groups so later unrelated edits do not join them.
+
+### Selection state
+
+`session.selectionContext(range)` aggregates the range for toolbars and
+assistive technology. Toggle marks, including `superscript` and `subscript`,
+are `true`, `false` or `'mixed'`; value marks such as `fontFamily`, `color` and
+`highlight` are `null` when absent or not uniform. `highlight` reports Word's
+highlight name (`'yellow'`) or an unmapped hex value. `toggleMark` accepts
+`{ type: 'superscript' }` and `{ type: 'subscript' }`; adding one clears the other.

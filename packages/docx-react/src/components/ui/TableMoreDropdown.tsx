@@ -6,7 +6,7 @@
  * text direction, no-wrap, row height, table properties.
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useId } from 'react';
 import type { CSSProperties } from 'react';
 import { Button } from './Button';
 import { Tooltip } from './Tooltip';
@@ -19,6 +19,8 @@ import { useTranslation } from '../../i18n';
 export interface TableMoreDropdownProps {
   onAction: (action: TableAction) => void;
   disabled?: boolean;
+  /** Availability of one action; disabled actions explain why. */
+  actionState?: (action: TableAction) => { enabled: boolean; description?: string };
   tableContext?: {
     isInTable: boolean;
     rowCount?: number;
@@ -59,9 +61,11 @@ const sectionLabelStyles: CSSProperties = {
 export function TableMoreDropdown({
   onAction,
   disabled = false,
+  actionState,
   tableContext,
 }: TableMoreDropdownProps) {
   const { t } = useTranslation();
+  const baseId = useId();
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredItem, setHoveredItem] = useState<string | null>(null);
   const close = useCallback(() => setIsOpen(false), []);
@@ -89,12 +93,15 @@ export function TableMoreDropdown({
     action: TableAction,
     opts?: { danger?: boolean; itemDisabled?: boolean }
   ) => {
-    const isItemDisabled = disabled || opts?.itemDisabled;
+    const state = actionState?.(action);
+    const isItemDisabled = disabled || (state ? !state.enabled : opts?.itemDisabled);
+    const reason = isItemDisabled ? state?.description : undefined;
     return (
       <button
         key={id}
         type="button"
         role="menuitem"
+        title={reason}
         style={{
           ...menuItemStyles,
           backgroundColor:
@@ -109,8 +116,15 @@ export function TableMoreDropdown({
         onClick={() => !isItemDisabled && handleAction(action)}
         onMouseEnter={() => setHoveredItem(id)}
         onMouseLeave={() => setHoveredItem(null)}
-        disabled={isItemDisabled}
+        disabled={isItemDisabled && !reason}
+        aria-disabled={isItemDisabled && reason ? true : undefined}
+        aria-describedby={reason ? `${baseId}-${id}` : undefined}
       >
+        {reason && (
+          <span id={`${baseId}-${id}`} hidden>
+            {reason}
+          </span>
+        )}
         <MaterialSymbol
           name={icon}
           size={16}
@@ -219,7 +233,6 @@ export function TableMoreDropdown({
                 <button
                   key={align}
                   type="button"
-                  title={t(labelKeys[align])}
                   style={{
                     display: 'flex',
                     alignItems: 'center',
@@ -239,6 +252,11 @@ export function TableMoreDropdown({
                   onMouseLeave={(e) => {
                     (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
                   }}
+                  disabled={actionState ? !actionState({ type: 'cellVerticalAlign', align }).enabled : false}
+                  title={
+                    actionState?.({ type: 'cellVerticalAlign', align }).description ??
+                    t(labelKeys[align])
+                  }
                   onClick={() => handleAction({ type: 'cellVerticalAlign', align })}
                 >
                   <MaterialSymbol name={icons[align]} size={16} />

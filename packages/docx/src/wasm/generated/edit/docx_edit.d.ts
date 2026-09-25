@@ -605,7 +605,9 @@ export class EditSession {
      * ```json
      * {
      *   "bold": true | false | "mixed", "italic": …, "underline": …, "strike": …,
+     *   "superscript": …, "subscript": …,
      *   "fontFamily": string|null, "fontSize": number|null, "color": string|null,
+     *   "highlight": string|null,
      *   "paraId": string, "styleId": string|null, "alignment": string|null,
      *   "paragraphProperties": {…},
      *   "hasSelection": bool, "isMultiParagraph": bool, "inTable": bool,

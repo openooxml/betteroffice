@@ -4,20 +4,19 @@
  * - TitleBar: two-row layout (row 1: logo + doc name + right actions, row 2: menu bar)
  * - Logo: renders custom logo content left-aligned
  * - DocumentName: editable document name input
- * - MenuBar: File/Format/Insert menus (auto-wired from EditorToolbarContext)
+ * - MenuBar: File/Format/Insert/Help menus built from the editor's commands
  * - TitleBarRight: right-aligned actions slot
  */
 
 import React, { useCallback, Children, isValidElement } from 'react';
 import type { ReactNode } from 'react';
 import { MenuDropdown } from './ui/MenuDropdown';
-import type { MenuEntry } from './ui/MenuDropdown';
+import type { MenuEntry, MenuItem } from './ui/MenuDropdown';
 import { TableGridInline } from './ui/TableGridInline';
 import { MaterialSymbol } from './ui/MaterialSymbol';
-import { useEditorToolbar } from './EditorToolbarContext';
-import type { FormattingAction } from './Toolbar';
+import { useDocxCommand } from '../commands/hooks';
+import type { DocxCommandArgs, DocxCommandId } from '../commands/types';
 import { useTranslation } from '../i18n';
-import { openReportIssue } from './reportIssue';
 
 // ============================================================================
 // BreakSubmenu — vertical list of break choices shown inside the Insert menu's
@@ -28,6 +27,7 @@ interface BreakSubmenuItem {
   icon: string;
   label: string;
   onClick?: () => void;
+  description?: string;
 }
 
 function BreakSubmenu({ items, closeMenu }: { items: BreakSubmenuItem[]; closeMenu: () => void }) {
@@ -40,6 +40,7 @@ function BreakSubmenu({ items, closeMenu }: { items: BreakSubmenuItem[]; closeMe
             key={item.label}
             type="button"
             disabled={disabled}
+            title={disabled ? item.description : undefined}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -169,205 +170,120 @@ export function TitleBarRight({ children }: TitleBarRightProps) {
 // MenuBar
 // ============================================================================
 
+interface BoundMenuItem {
+  entry: MenuItem;
+  hidden: boolean;
+}
+
+function useCommandMenuItem<K extends DocxCommandId>(
+  id: K,
+  icon: string | undefined,
+  args?: DocxCommandArgs[K]
+): BoundMenuItem {
+  const command = useDocxCommand(id, args);
+  const { state } = command;
+  return {
+    entry: {
+      icon,
+      label: command.label,
+      shortcut: command.shortcut ?? undefined,
+      disabled: !state.enabled,
+      description: state.enabled ? undefined : state.disabledReason.message,
+      onClick: () => void command.execute(),
+    },
+    hidden: !state.enabled && state.disabledReason.code === 'host-disabled',
+  };
+}
+
+function visible(...items: BoundMenuItem[]): MenuEntry[] {
+  return items.filter((item) => !item.hidden).map((item) => item.entry);
+}
+
 export function MenuBar() {
   const { t } = useTranslation();
-  const ctx = useEditorToolbar();
-  const {
-    disabled = false,
-    onFormat,
-    onPrint,
-    onOpen,
-    onSave,
-    onPageSetup,
-    onInsertImage,
-    onInsertTable,
-    showTableInsert = true,
-    showHelpMenu = true,
-    onInsertPageBreak,
-    onInsertSectionBreakNextPage,
-    onInsertSectionBreakContinuous,
-    onInsertTOC,
-    onWatermark,
-    onRefocusEditor,
-  } = ctx;
-
-  const handleFormat = useCallback(
-    (action: FormattingAction) => {
-      if (!disabled && onFormat) {
-        onFormat(action);
-      }
-    },
-    [disabled, onFormat]
-  );
+  const open = useCommandMenuItem('open', 'file_upload');
+  const save = useCommandMenuItem('save', 'file_download');
+  const print = useCommandMenuItem('print', 'print');
+  const pageSetup = useCommandMenuItem('pageSetup', 'settings');
+  const ltr = useCommandMenuItem('setLtr', 'format_textdirection_l_to_r');
+  const rtl = useCommandMenuItem('setRtl', 'format_textdirection_r_to_l');
+  const image = useCommandMenuItem('insertImage', 'image');
+  const insertTable = useDocxCommand('insertTable');
+  const pageBreak = useCommandMenuItem('insertPageBreak', 'page_break');
+  const nextPage = useCommandMenuItem('insertSectionBreakNextPage', 'horizontal_rule');
+  const continuous = useCommandMenuItem('insertSectionBreakContinuous', 'border_horizontal');
+  const toc = useCommandMenuItem('insertTOC', 'format_list_numbered');
+  const watermark = useCommandMenuItem('watermark', 'branding_watermark');
+  const reportIssue = useCommandMenuItem('reportIssue', undefined);
 
   const handleTableInsert = useCallback(
     (rows: number, columns: number) => {
-      if (!disabled && onInsertTable) {
-        onInsertTable(rows, columns);
-        requestAnimationFrame(() => onRefocusEditor?.());
-      }
+      void insertTable.execute({ rows, columns });
     },
-    [disabled, onInsertTable, onRefocusEditor]
+    [insertTable]
   );
 
-  const hasPrintOrPageSetup = !!onPrint || !!onPageSetup;
-  const hasFileMenu = hasPrintOrPageSetup || onOpen || onSave;
+  const fileItems = visible(open, save);
+  const printItems = visible(print, pageSetup);
+  const file: MenuEntry[] = [
+    ...fileItems,
+    ...(fileItems.length > 0 && printItems.length > 0 ? [{ type: 'separator' as const }] : []),
+    ...printItems,
+  ];
+  const tableEntry: MenuEntry = insertTable.state.enabled
+    ? {
+        icon: 'grid_on',
+        label: insertTable.label,
+        submenuContent: (closeMenu: () => void) => (
+          <TableGridInline
+            onInsert={(rows: number, cols: number) => {
+              handleTableInsert(rows, cols);
+              closeMenu();
+            }}
+          />
+        ),
+      }
+    : {
+        icon: 'grid_on',
+        label: insertTable.label,
+        disabled: true,
+        description: insertTable.state.disabledReason.message,
+      };
+  const breaks = [pageBreak, nextPage, continuous];
 
   return (
     <div className="flex items-center" role="menubar" aria-label={t('titleBar.menuBarAriaLabel')}>
-      {/* File Menu */}
-      {hasFileMenu && (
-        <MenuDropdown
-          label={t('toolbar.file')}
-          disabled={disabled}
-          items={[
-            ...(onOpen
-              ? [
-                  {
-                    icon: 'file_upload',
-                    label: t('toolbar.open'),
-                    shortcut: t('toolbar.openShortcut'),
-                    onClick: onOpen,
-                  } as MenuEntry,
-                ]
-              : []),
-            ...(onSave
-              ? [
-                  {
-                    icon: 'file_download',
-                    label: t('toolbar.save'),
-                    shortcut: t('toolbar.saveShortcut'),
-                    onClick: onSave,
-                  } as MenuEntry,
-                ]
-              : []),
-            ...((onOpen || onSave) && hasPrintOrPageSetup
-              ? [{ type: 'separator' as const } as MenuEntry]
-              : []),
-            ...(onPrint
-              ? [
-                  {
-                    icon: 'print',
-                    label: t('toolbar.print'),
-                    shortcut: t('toolbar.printShortcut'),
-                    onClick: onPrint,
-                  } as MenuEntry,
-                ]
-              : []),
-            ...(onPageSetup
-              ? [
-                  {
-                    icon: 'settings',
-                    label: t('toolbar.pageSetup'),
-                    onClick: onPageSetup,
-                  } as MenuEntry,
-                ]
-              : []),
-          ]}
-        />
-      )}
+      {file.length > 0 && <MenuDropdown label={t('toolbar.file')} items={file} />}
 
-      {/* Format Menu */}
-      <MenuDropdown
-        label={t('toolbar.format')}
-        disabled={disabled}
-        items={[
-          {
-            icon: 'format_textdirection_l_to_r',
-            label: t('toolbar.leftToRight'),
-            onClick: () => handleFormat('setLtr'),
-          } as MenuEntry,
-          {
-            icon: 'format_textdirection_r_to_l',
-            label: t('toolbar.rightToLeft'),
-            onClick: () => handleFormat('setRtl'),
-          } as MenuEntry,
-        ]}
-      />
+      <MenuDropdown label={t('toolbar.format')} items={visible(ltr, rtl)} />
 
-      {/* Insert Menu */}
       <MenuDropdown
         label={t('toolbar.insert')}
-        disabled={disabled}
         items={[
-          ...(onInsertImage
-            ? [{ icon: 'image', label: t('toolbar.image'), onClick: onInsertImage } as MenuEntry]
-            : []),
-          ...(showTableInsert && onInsertTable
-            ? [
-                {
-                  icon: 'grid_on',
-                  label: t('toolbar.table'),
-                  submenuContent: (closeMenu: () => void) => (
-                    <TableGridInline
-                      onInsert={(rows: number, cols: number) => {
-                        handleTableInsert(rows, cols);
-                        closeMenu();
-                      }}
-                    />
-                  ),
-                } as MenuEntry,
-              ]
-            : []),
-          ...(onInsertImage || (showTableInsert && onInsertTable)
-            ? [{ type: 'separator' as const } as MenuEntry]
-            : []),
+          ...visible(image),
+          tableEntry,
+          { type: 'separator' },
           {
             icon: 'page_break',
             label: t('toolbar.break'),
             submenuContent: (closeMenu: () => void) => (
               <BreakSubmenu
                 closeMenu={closeMenu}
-                items={[
-                  {
-                    icon: 'page_break',
-                    label: t('toolbar.pageBreak'),
-                    onClick: onInsertPageBreak,
-                  },
-                  {
-                    icon: 'horizontal_rule',
-                    label: t('toolbar.sectionBreakNextPage'),
-                    onClick: onInsertSectionBreakNextPage,
-                  },
-                  {
-                    icon: 'border_horizontal',
-                    label: t('toolbar.sectionBreakContinuous'),
-                    onClick: onInsertSectionBreakContinuous,
-                  },
-                ]}
+                items={breaks.map(({ entry }) => ({
+                  icon: entry.icon ?? 'page_break',
+                  label: entry.label,
+                  onClick: entry.disabled ? undefined : entry.onClick,
+                  description: entry.description,
+                }))}
               />
             ),
-          } as MenuEntry,
-          {
-            icon: 'format_list_numbered',
-            label: t('toolbar.tableOfContents'),
-            onClick: onInsertTOC,
-            disabled: !onInsertTOC,
           },
-          ...(onWatermark
-            ? [
-                {
-                  icon: 'branding_watermark',
-                  label: t('toolbar.watermark'),
-                  onClick: onWatermark,
-                } as MenuEntry,
-              ]
-            : []),
+          ...visible(toc, watermark),
         ]}
       />
 
-      {/* Help Menu */}
-      {showHelpMenu && (
-        <MenuDropdown
-          label={t('toolbar.help')}
-          disabled={disabled}
-          items={[
-            {
-              label: t('toolbar.reportIssue'),
-              onClick: () => openReportIssue(),
-            } as MenuEntry,
-          ]}
-        />
+      {!reportIssue.hidden && (
+        <MenuDropdown label={t('toolbar.help')} items={visible(reportIssue)} />
       )}
     </div>
   );

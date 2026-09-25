@@ -124,6 +124,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       const startPos = yrsLocToDisplayPosition(startLoc);
       if (startPos == null || startPos < 0) return false;
       scrollToPositionImpl(startPos, true);
+      yrsSession.setSelection(startLoc);
       if (options?.highlight && requestCanvasParagraphFlash) {
         const endPos = yrsLocToDisplayPosition(endLoc) ?? startPos + 1;
         requestCanvasParagraphFlash({
@@ -134,10 +135,7 @@ export function usePagedScrollApi(opts: UsePagedScrollApiOptions): UsePagedScrol
       }
       const signal = scrollAbortRef.current?.signal;
       if (!signal) return true;
-      runAfterFrames(() => {
-        yrsSession.setSelection(startLoc);
-        yrsInputRef.current?.focus();
-      }, signal);
+      runAfterFrames(() => yrsInputRef.current?.focus(), signal);
       return true;
     },
     [requestCanvasParagraphFlash, scrollToPositionImpl, yrsInputRef, yrsLocToDisplayPosition, yrsSession]

@@ -18,7 +18,6 @@ import {
   type YrsInlineFormatDelta,
   type YrsLoc,
   type YrsResidentCaretSnapshot,
-  type YrsRunMark,
   type YrsSelection,
   type YrsSession,
   type YrsStoryRange,
@@ -32,13 +31,13 @@ import type { ResolveDisplayListQueries } from './hooks/displayListQueryEpochGat
 import { findWordBoundaries } from '@betteroffice/docx/utils';
 import { findVerticalScrollParentOrRoot } from '@betteroffice/docx/utils/findVerticalScrollParent';
 import {
-  performYrsHistoryAction,
   yrsCellLocFromStory,
   yrsCellStory,
   yrsSelectionNearTable,
   yrsTableSelectionRange,
 } from './yrsCommands';
 import { InputOperationQueue } from './inputOperationQueue';
+import { DocxCommandAdmissionError } from '../../commands/createDocxCommandStore';
 import { paragraphVerticalMove, VerticalCaretGoal } from './verticalCaretGoal';
 import {
   shouldScrollCaretIntoView,
@@ -55,6 +54,14 @@ export interface YrsInputRef {
   blur(): void;
   isFocused(): boolean;
   flushPendingInput(): Promise<void>;
+  /**
+   * Runs `operation` in input order, after input accepted before the call and
+   * after an active IME composition commits. Rejects with
+   * {@link DocxCommandAdmissionError} when that input failed, the document was
+   * replaced, or the input unmounted first.
+   */
+  runAfterPendingInput<T>(operation: () => T | Promise<T>): Promise<T>;
+  hasPendingInput(): boolean;
   setSelectionFromDisplay(anchor: number, head?: number, story?: string): void;
   selectWordAtDisplay(position: number, story?: string): void;
   selectParagraphAtDisplay(position: number, story?: string): void;
@@ -70,7 +77,7 @@ export interface YrsInputRef {
 export type YrsStoredFormattingAction =
   | {
       type: 'toggle';
-      mark: 'bold' | 'italic' | 'underline' | 'strike';
+      mark: 'bold' | 'italic' | 'underline' | 'strike' | 'superscript' | 'subscript';
       active: boolean;
     }
   | { type: 'set'; delta: YrsInlineFormatDelta }
@@ -115,6 +122,8 @@ export interface YrsInputProps {
     direction: 'backward' | 'forward'
   ): Promise<ResidentFrameApplyResult | null>;
   onFocusChange?(focused: boolean): void;
+  /** Accepted input started or finished waiting to be applied. */
+  onPendingInputChange?(pending: boolean): void;
   /** Document-mutating input landed (keeps the worker-painted caret mode alive). */
   onCaretInput?(): void;
   /** Text input dispatched — called synchronously from the input event, before
@@ -216,6 +225,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     applyResidentInput,
     applyResidentDelete,
     onFocusChange,
+    onPendingInputChange,
     onCaretInput,
     onCaretInputDispatched,
     onCaretInterrupt,
@@ -231,13 +241,18 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
   inputLifetimeRef.current.session = session;
   inputLifetimeRef.current.enabled = enabled;
   const storedFormattingByParagraphRef = useRef(new Map<string, YrsStoredFormatting>());
+  const onPendingInputChangeRef = useRef(onPendingInputChange);
+  onPendingInputChangeRef.current = onPendingInputChange;
   const inputOperationQueueRef = useRef<InputOperationQueue | null>(null);
   const queuedSessionRef = useRef(session);
   if (!inputOperationQueueRef.current || queuedSessionRef.current !== session) {
     queuedSessionRef.current = session;
-    inputOperationQueueRef.current = new InputOperationQueue((error) => {
-      console.error('[YrsInput] queued input operation failed', error);
-    });
+    inputOperationQueueRef.current = new InputOperationQueue(
+      (error) => {
+        console.error('[YrsInput] queued input operation failed', error);
+      },
+      (pending) => onPendingInputChangeRef.current?.(pending)
+    );
   }
   const pendingResidentTextRef = useRef<{ text: string } | null>(null);
   const pendingResidentFrameEpochRef = useRef<number | null>(null);
@@ -384,6 +399,24 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         storedFormattingByParagraphRef.current.set(key, {
           clear: current.clear,
           delta: { ...current.delta, ...action.delta },
+        });
+        emitSelection(false);
+        return;
+      }
+      if (action.mark === 'superscript' || action.mark === 'subscript') {
+        const other = current.delta.other ?? {};
+        const stored = other[action.mark];
+        const isActive =
+          stored === undefined ? (current.clear ? false : action.active) : stored === true;
+        const counterpart = action.mark === 'superscript' ? 'subscript' : 'superscript';
+        storedFormattingByParagraphRef.current.set(key, {
+          clear: current.clear,
+          delta: {
+            ...current.delta,
+            other: isActive
+              ? { ...other, [action.mark]: null }
+              : { ...other, [action.mark]: true, [counterpart]: null },
+          },
         });
         emitSelection(false);
         return;
@@ -688,80 +721,6 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     suggestingAuthor,
   ]);
 
-  const toggleMark = useCallback(
-    (mark: YrsRunMark): void => {
-      enqueueInputOperation(() => {
-        if (!session || readOnly) return;
-        const current = ensureSelection();
-        const map = current ? inputPositionMap(current.anchor.story) : null;
-        if (!current || !map) return;
-        const range = toRange(current, map);
-        if (range.start.paraId === range.end.paraId && range.start.offset === range.end.offset) {
-          const context = session.selectionContext(range);
-          const active =
-            mark.type === 'bold'
-              ? context.bold === true
-              : mark.type === 'italic'
-                ? context.italic === true
-                : mark.type === 'underline'
-                  ? context.underline === true
-                  : false;
-          if (mark.type === 'bold' || mark.type === 'italic' || mark.type === 'underline') {
-            applyStoredFormatting({ type: 'toggle', mark: mark.type, active });
-          }
-          return;
-        }
-        storedFormattingByParagraphRef.current.delete(
-          `${current.head.story}\u0000${current.head.paraId}`
-        );
-        session.toggleMark(range, mark);
-        finishMutation();
-      });
-    },
-    [
-      applyStoredFormatting,
-      enqueueInputOperation,
-      ensureSelection,
-      finishMutation,
-      inputPositionMap,
-      readOnly,
-      session,
-    ]
-  );
-
-  const undoRedo = useCallback(
-    (redo: boolean): void => {
-      enqueueInputOperation(() => {
-        if (!session || readOnly) return;
-        const result = performYrsHistoryAction(session, redo);
-        if (result.changed) finishMutation(false, false, result.story ?? undefined);
-      });
-    },
-    [enqueueInputOperation, finishMutation, readOnly, session]
-  );
-
-  const setAlignment = useCallback(
-    (alignment: 'left' | 'center' | 'right' | 'both'): void => {
-      enqueueInputOperation(() => {
-        if (!session || readOnly) return;
-        const current = ensureSelection();
-        const map = current ? inputPositionMap(current.anchor.story) : null;
-        if (!current || !map) return;
-        session.setParagraphAttrs(toRange(current, map), { alignment }, suggestingAuthor());
-        finishMutation();
-      });
-    },
-    [
-      enqueueInputOperation,
-      ensureSelection,
-      finishMutation,
-      inputPositionMap,
-      readOnly,
-      session,
-      suggestingAuthor,
-    ]
-  );
-
   const moveSelection = useCallback(
     (
       direction: 'left' | 'right' | 'up' | 'down' | 'home' | 'end',
@@ -986,29 +945,9 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       if (event.nativeEvent.isComposing || composingRef.current) return;
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
-      if (mod && key === 'b') {
-        event.preventDefault();
-        toggleMark({ type: 'bold' });
-      } else if (mod && key === 'i') {
-        event.preventDefault();
-        toggleMark({ type: 'italic' });
-      } else if (mod && key === 'u') {
-        event.preventDefault();
-        toggleMark({ type: 'underline' });
-      } else if (mod && key === 'z') {
-        event.preventDefault();
-        undoRedo(event.shiftKey);
-      } else if (mod && key === 'y') {
-        event.preventDefault();
-        undoRedo(true);
-      } else if (mod && key === 'a') {
+      if (mod && key === 'a') {
         event.preventDefault();
         selectAll();
-      } else if (mod && (key === 'e' || key === 'l' || key === 'r' || key === 'j')) {
-        event.preventDefault();
-        setAlignment(
-          key === 'e' ? 'center' : key === 'r' ? 'right' : key === 'j' ? 'both' : 'left'
-        );
       } else if (event.key === 'Enter') {
         event.preventDefault();
         splitParagraph();
@@ -1036,16 +975,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         moveSelection(event.key === 'Home' ? 'home' : 'end', event.shiftKey, mod);
       }
     },
-    [
-      deleteDirection,
-      moveSelection,
-      moveTableCell,
-      selectAll,
-      setAlignment,
-      splitParagraph,
-      toggleMark,
-      undoRedo,
-    ]
+    [deleteDirection, moveSelection, moveTableCell, selectAll, splitParagraph]
   );
 
   const handleCompositionStart = useCallback(
@@ -1056,6 +986,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       compositionCommitRef.current = '';
       event.currentTarget.value = '';
       onCaretInterrupt?.();
+      onPendingInputChangeRef.current?.(true);
     },
     [onCaretInterrupt]
   );
@@ -1085,6 +1016,7 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
         insertText(text);
         for (const resolve of compositionWaitersRef.current) resolve();
         compositionWaitersRef.current.clear();
+        onPendingInputChangeRef.current?.(inputOperationQueueRef.current?.hasPending() ?? false);
       });
     },
     [insertText, session]
@@ -1130,6 +1062,42 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     assertCurrent();
   }, [session]);
 
+  const runAfterPendingInput = useCallback(
+    <T,>(operation: () => T | Promise<T>): Promise<T> => {
+      const queue = inputOperationQueueRef.current;
+      const lifetime = inputLifetimeRef.current;
+      const admitted = session;
+      const admit = (): Promise<T> => {
+        if (!queue) return Promise.reject(new DocxCommandAdmissionError('editor-unavailable'));
+        pendingResidentTextRef.current = null;
+        return queue.run(() => {
+          if (!lifetime.mounted || !lifetime.enabled || !admitted) {
+            throw new DocxCommandAdmissionError('editor-unavailable');
+          }
+          if (lifetime.session !== admitted) throw new DocxCommandAdmissionError('document-replaced');
+          if (queue.failed) throw new DocxCommandAdmissionError('input-failed');
+          return operation();
+        });
+      };
+      if (!composingRef.current && !compositionPendingRef.current) return admit();
+      return new Promise<T>((resolve, reject) => {
+        compositionWaitersRef.current.add(() => {
+          admit().then(resolve, reject);
+        });
+      });
+    },
+    [session]
+  );
+
+  const hasPendingInput = useCallback(
+    () =>
+      pendingResidentTextRef.current !== null ||
+      composingRef.current ||
+      compositionPendingRef.current ||
+      (inputOperationQueueRef.current?.hasPending() ?? false),
+    []
+  );
+
   useEffect(() => {
     inputLifetimeRef.current.mounted = true;
     return () => {
@@ -1155,6 +1123,8 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       blur: () => textareaRef.current?.blur(),
       isFocused: () => document.activeElement === textareaRef.current,
       flushPendingInput,
+      runAfterPendingInput,
+      hasPendingInput,
       setSelectionFromDisplay(anchor, head = anchor, targetStory = story) {
         const anchorLoc = displayPositionToLoc(anchor, targetStory);
         const headLoc = displayPositionToLoc(head, targetStory);
@@ -1222,9 +1192,11 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
       ensureSelection,
       finishMutation,
       flushPendingInput,
+      hasPendingInput,
       insertText,
       deleteSelected,
       readOnly,
+      runAfterPendingInput,
       selectAll,
       session,
       setSelection,
@@ -1247,8 +1219,15 @@ const YrsInputComponent = forwardRef<YrsInputRef, YrsInputProps>(function YrsInp
     if (!enabled || !session) return;
     ensureSelection();
     emitSelection(false);
-    if (!readOnly) requestAnimationFrame(() => textareaRef.current?.focus({ preventScroll: true }));
-  }, [emitSelection, enabled, ensureSelection, readOnly, session]);
+  }, [emitSelection, enabled, ensureSelection, session]);
+
+  useEffect(() => {
+    if (!enabled || !session || readOnly) return;
+    const frame = requestAnimationFrame(() =>
+      textareaRef.current?.focus({ preventScroll: true })
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [enabled, readOnly, session, story]);
 
   useEffect(() => {
     if (!enabled || !displayListQueries) return;

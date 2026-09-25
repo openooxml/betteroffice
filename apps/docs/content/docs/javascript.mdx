@@ -39,6 +39,52 @@ import { PptxEditor } from "@betteroffice/pptx-react";
 
 `PptxEditor` requires at least one font face in `fonts` before it can lay out text.
 
+## Compose the DOCX toolbar
+
+The DOCX editor's built-in controls share one command store, `ref.commands`.
+Pass `toolbar` to replace the default chrome with public parts in your own order,
+next to your own actions:
+
+```tsx
+import {
+  DocxEditor,
+  EditorToolbar,
+  ToolbarButton,
+  ToolbarCommandButton,
+  ToolbarCommandSelect,
+  ToolbarGroup,
+} from "@betteroffice/docx-react";
+
+<DocxEditor
+  documentBuffer={bytes}
+  toolbar={
+    <EditorToolbar>
+      <EditorToolbar.Toolbar>
+        <ToolbarGroup label="Formatting">
+          <ToolbarCommandSelect id="paragraphStyle" />
+          <ToolbarCommandButton id="bold" />
+        </ToolbarGroup>
+        <ToolbarCommandButton id="undo" />
+        <EditorToolbar.Review />
+        <ToolbarButton title="Share" onClick={share}>Share</ToolbarButton>
+      </EditorToolbar.Toolbar>
+    </EditorToolbar>
+  }
+/>;
+```
+
+Omit `toolbar` for the default chrome, pass `null` for none, or render the same
+parts outside the editor inside `<DocxCommandProvider commands={commands}>`, with
+`commands` captured from the ref (it may be `null` until the editor mounts).
+Controls keep their active and `'mixed'` states, shortcuts, and read-only,
+viewing and suggesting restrictions. A disabled command always states why
+(`disabledReason.code` and a localized `message`), and `execute(id, args)` checks
+availability again after preceding input, resolving to `executed`, `noop`,
+`opened`, `requested` or a typed failure. Dialogs a command opens apply to the
+document and selection they opened with. At narrow widths, groups move into an
+accessible More menu that keeps every built-in choice; wrap other host content
+in `ToolbarOverflow` to give it an entry there.
+
 ## Use the JavaScript core
 
 ```ts
@@ -74,7 +120,7 @@ interaction separately when investigating input-to-paint latency.
 | Package | What it is |
 | --- | --- |
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
-| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes. |
+| `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and a command store with composable toolbar parts. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component. |

@@ -18,6 +18,7 @@ import {
 import { cn } from '../../lib/utils';
 import { useTranslation } from '../../i18n';
 import { getPrimaryFontFamily } from './fontPickerValue';
+import { useDisabledDescription } from './disabledDescription';
 import { excludeFontsByName } from '@betteroffice/docx/utils';
 
 // ============================================================================
@@ -37,6 +38,8 @@ export interface FontPickerProps {
    */
   documentFonts?: readonly FontOption[];
   disabled?: boolean;
+  /** Why the picker is disabled. */
+  description?: string;
   className?: string;
   placeholder?: string;
   width?: number | string;
@@ -47,7 +50,7 @@ export interface FontPickerProps {
 // DEFAULT FONTS
 // ============================================================================
 
-const DEFAULT_FONTS: FontOption[] = [
+export const DEFAULT_FONTS: FontOption[] = [
   // Sans-serif
   { name: 'Arial', fontFamily: 'Arial, Helvetica, sans-serif', category: 'sans-serif' },
   { name: 'Calibri', fontFamily: '"Calibri", Arial, sans-serif', category: 'sans-serif' },
@@ -75,12 +78,15 @@ export function FontPicker({
   fonts = DEFAULT_FONTS,
   documentFonts,
   disabled = false,
+  description,
   className,
   placeholder = 'Arial',
   width = 120,
   showPreview = true,
 }: FontPickerProps) {
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
+  const [open, setOpen] = React.useState(false);
 
   // Document fonts shown above the built-in list, minus any the built-in list
   // already covers (case-insensitive) so a font never appears twice.
@@ -111,11 +117,11 @@ export function FontPicker({
   const handleValueChange = React.useCallback(
     (newValue: string) => {
       const font = lookupFonts.find((f) => f.name === newValue);
-      if (font) {
+      if (font && !disabled) {
         onChange?.(getPrimaryFontFamily(font.fontFamily) || font.name);
       }
     },
-    [onChange, lookupFonts]
+    [disabled, onChange, lookupFonts]
   );
 
   // Group fonts by category
@@ -134,13 +140,23 @@ export function FontPicker({
   }, [fonts]);
 
   return (
-    <Select value={displayValue} onValueChange={handleValueChange} disabled={disabled}>
+    <Select
+      value={displayValue}
+      onValueChange={handleValueChange}
+      disabled={reason.triggerProps.disabled}
+      open={open && !disabled}
+      onOpenChange={(next) => setOpen(next && !disabled)}
+    >
       <SelectTrigger
-        className={cn('h-8 text-sm', className)}
+        className={cn('h-8 text-sm', disabled && 'opacity-50', className)}
         style={{ minWidth: typeof width === 'number' ? `${width}px` : width }}
         aria-label={t('font.selectAriaLabel')}
+        aria-disabled={reason.triggerProps['aria-disabled']}
+        aria-describedby={reason.triggerProps['aria-describedby']}
+        title={reason.title}
       >
         <SelectValue placeholder={placeholder}>{displayValue}</SelectValue>
+        {reason.node}
       </SelectTrigger>
       <SelectContent className="max-h-[300px]">
         {docFonts.length > 0 && (

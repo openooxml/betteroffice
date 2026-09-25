@@ -2,29 +2,34 @@ import { useCallback, useState } from 'react';
 import { toast } from 'sonner';
 import type { HyperlinkData, useHyperlinkDialog } from '../../dialogs/HyperlinkDialog';
 import type { HyperlinkPopupData } from '../../ui/HyperlinkPopup';
-import type { PagedEditorRef } from '../PagedEditor';
+import type { YrsEditorCommand } from '../yrsCommands';
+
+/** Where a hyperlink edit was opened: the link dialog or the link popup. */
+export type HyperlinkSource = 'link' | 'linkPopup';
 
 /**
  * Owns the dialog-driven hyperlink flow (insert / edit / remove) and the
  * Google-Docs-style floating popup that opens when the cursor lands on
  * an existing link. The dialog handle (`hyperlinkDialog`) is owned by
- * the parent and threaded in — Cmd/Ctrl+K in `useKeyboardShortcuts`
- * also opens it.
+ * the parent and threaded in; the `insertLink` command opens it.
+ * `applyCommand` writes against the selection its source opened with.
  */
 export function useHyperlinkActions({
   hyperlinkDialog,
-  pagedEditorRef,
+  openPopup,
+  applyCommand,
   focusActiveEditor,
 }: {
   hyperlinkDialog: ReturnType<typeof useHyperlinkDialog>;
-  pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  openPopup: () => void;
+  applyCommand: (source: HyperlinkSource, command: YrsEditorCommand) => void;
   focusActiveEditor: () => void;
 }) {
   const [hyperlinkPopupData, setHyperlinkPopupData] = useState<HyperlinkPopupData | null>(null);
 
   const handleHyperlinkSubmit = useCallback(
     (data: HyperlinkData) => {
-      pagedEditorRef.current?.applyYrsCommand({
+      applyCommand('link', {
         type: 'setHyperlink',
         href: data.url || '',
         tooltip: data.tooltip,
@@ -34,13 +39,13 @@ export function useHyperlinkActions({
       hyperlinkDialog.close();
       focusActiveEditor();
     },
-    [hyperlinkDialog, pagedEditorRef, focusActiveEditor]
+    [applyCommand, hyperlinkDialog, focusActiveEditor]
   );
 
   const doRemoveHyperlink = useCallback(() => {
-    pagedEditorRef.current?.applyYrsCommand({ type: 'removeHyperlink' });
+    applyCommand('link', { type: 'removeHyperlink' });
     focusActiveEditor();
-  }, [pagedEditorRef, focusActiveEditor]);
+  }, [applyCommand, focusActiveEditor]);
 
   const handleHyperlinkRemove = useCallback(() => {
     doRemoveHyperlink();
@@ -48,8 +53,11 @@ export function useHyperlinkActions({
   }, [hyperlinkDialog, doRemoveHyperlink]);
 
   const handleHyperlinkClick = useCallback(
-    (data: HyperlinkPopupData) => setHyperlinkPopupData(data),
-    []
+    (data: HyperlinkPopupData) => {
+      openPopup();
+      setHyperlinkPopupData(data);
+    },
+    [openPopup]
   );
 
   const handleHyperlinkPopupNavigate = useCallback((href: string) => {
@@ -72,7 +80,7 @@ export function useHyperlinkActions({
 
   const handleHyperlinkPopupEdit = useCallback(
     (displayText: string, href: string) => {
-      pagedEditorRef.current?.applyYrsCommand({
+      applyCommand('linkPopup', {
         type: 'setHyperlink',
         href,
         tooltip: hyperlinkPopupData?.tooltip,
@@ -83,18 +91,18 @@ export function useHyperlinkActions({
       setHyperlinkPopupData(null);
       focusActiveEditor();
     },
-    [focusActiveEditor, hyperlinkPopupData, pagedEditorRef]
+    [applyCommand, focusActiveEditor, hyperlinkPopupData]
   );
 
   const handleHyperlinkPopupRemove = useCallback(() => {
-    pagedEditorRef.current?.applyYrsCommand({
+    applyCommand('linkPopup', {
       type: 'removeHyperlink',
       href: hyperlinkPopupData?.href,
     });
     setHyperlinkPopupData(null);
     focusActiveEditor();
     toast('Link removed');
-  }, [focusActiveEditor, hyperlinkPopupData, pagedEditorRef]);
+  }, [applyCommand, focusActiveEditor, hyperlinkPopupData]);
 
   const handleHyperlinkPopupClose = useCallback(() => {
     setHyperlinkPopupData(null);

@@ -16,6 +16,7 @@ import { Tooltip } from './Tooltip';
 import { cn } from '../../lib/utils';
 import { useFixedDropdown } from '../../hooks/useFixedDropdown';
 import { useTranslation } from '../../i18n';
+import { useDisabledDescription } from './disabledDescription';
 import type { TranslationKey } from '@betteroffice/docx-i18n';
 
 // ============================================================================
@@ -52,6 +53,8 @@ export interface AlignmentButtonsProps {
   onChange?: (alignment: ParagraphAlignment) => void;
   /** Whether the buttons are disabled */
   disabled?: boolean;
+  /** Why the control is disabled */
+  description?: string;
   /** Additional CSS class name */
   className?: string;
   /** Additional inline styles */
@@ -142,8 +145,10 @@ export function AlignmentButtons({
   value = 'left',
   onChange,
   disabled = false,
+  description,
 }: AlignmentButtonsProps) {
   const { t } = useTranslation();
+  const reason = useDisabledDescription(disabled, description);
   const [isOpen, setIsOpen] = useState(false);
   const onClose = useCallback(() => setIsOpen(false), []);
   const { containerRef, dropdownRef, dropdownStyle, handleMouseDown } = useFixedDropdown({
@@ -180,7 +185,7 @@ export function AlignmentButtons({
       )}
       onMouseDown={handleMouseDown}
       onClick={() => !disabled && setIsOpen((prev) => !prev)}
-      disabled={disabled}
+      {...reason.triggerProps}
       aria-label={ariaText}
       aria-expanded={isOpen}
       aria-haspopup="true"
@@ -190,10 +195,12 @@ export function AlignmentButtons({
       <MaterialSymbol name="arrow_drop_down" size={14} className="-ml-1" />
     </Button>
   );
+  const tooltip = reason.title ? `${ariaText}: ${reason.title}` : ariaText;
 
   return (
     <div ref={containerRef} style={{ position: 'relative', display: 'inline-block' }}>
-      {!isOpen ? <Tooltip content={ariaText}>{triggerButton}</Tooltip> : triggerButton}
+      {!isOpen ? <Tooltip content={tooltip}>{triggerButton}</Tooltip> : triggerButton}
+      {reason.node}
 
       {isOpen && !disabled && (
         <div

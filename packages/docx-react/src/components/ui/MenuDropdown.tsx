@@ -5,7 +5,7 @@
  * Supports submenu panels that appear to the right on hover (Google Docs style).
  */
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback, useId } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { MaterialSymbol } from './MaterialSymbol';
 
@@ -15,6 +15,8 @@ export interface MenuItem {
   shortcut?: string;
   onClick?: () => void;
   disabled?: boolean;
+  /** Why the item is disabled. */
+  description?: string;
   /** Custom content to render instead of a simple menu item */
   customContent?: ReactNode;
   /** Submenu content that appears to the right on hover */
@@ -109,6 +111,7 @@ const submenuPanelStyle: CSSProperties = {
 };
 
 export function MenuDropdown({ label, items, disabled, showChevron = false }: MenuDropdownProps) {
+  const menuId = useId();
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredSubmenu, setHoveredSubmenu] = useState<string | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -218,6 +221,8 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
 
             const hasSubmenu = !!item.submenuContent;
             const isSubmenuOpen = hoveredSubmenu === item.label;
+            const reason = item.disabled ? item.description : undefined;
+            const reasonId = reason ? `${menuId}-${i}` : undefined;
 
             return (
               <div
@@ -240,8 +245,16 @@ export function MenuDropdown({ label, items, disabled, showChevron = false }: Me
                   onMouseOut={(e) => {
                     (e.currentTarget as HTMLButtonElement).style.backgroundColor = 'transparent';
                   }}
-                  disabled={item.disabled}
+                  disabled={item.disabled && !reason}
+                  aria-disabled={reason ? true : undefined}
+                  aria-describedby={reasonId}
+                  title={reason}
                 >
+                  {reason && (
+                    <span id={reasonId} hidden>
+                      {reason}
+                    </span>
+                  )}
                   {item.icon && <MaterialSymbol name={item.icon} size={18} />}
                   <span>{item.label}</span>
                   {item.shortcut && <span style={shortcutStyle}>{item.shortcut}</span>}
