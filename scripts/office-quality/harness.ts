@@ -61,27 +61,56 @@ function fontProvider() {
   );
 }
 
-const SCRIPTS: Array<[BundledFontScript, RegExp]> = [
+const RTL_SCRIPTS: Array<[BundledFontScript, RegExp]> = [
   ['arabic', /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/],
   ['hebrew', /[\u0590-\u05FF\uFB1D-\uFB4F]/],
-  ['cjk-jp', /[\u3040-\u30FF]/],
-  ['cjk-kr', /[\u1100-\u11FF\uAC00-\uD7AF]/],
-  ['cjk-sc', /[\u3400-\u4DBF\u4E00-\u9FFF]/],
 ];
+const HAN = /[\u3400-\u4DBF\u4E00-\u9FFF]/;
 
-/** The script faces a slide's text needs beyond the families it names. */
+/** The CJK bucket a `lang` tag asks for, or none. */
+function cjkBucket(lang: string): BundledFontScript | undefined {
+  if (lang.startsWith('ja')) return 'cjk-jp';
+  if (lang.startsWith('ko')) return 'cjk-kr';
+  if (/^zh-(tw|hk|mo|hant)/.test(lang)) return 'cjk-tc';
+  if (lang.startsWith('zh')) return 'cjk-sc';
+  return undefined;
+}
+
+/**
+ * The script faces a deck's text needs beyond the families it names, read
+ * from its decoded text (slides, layouts, masters and SmartArt). CJK faces go
+ * in the order the deck's `lang` tags favour, since the first face that
+ * covers a character draws it.
+ */
 async function fallbackFontsFor(bytes: Uint8Array) {
   const zip = await JSZip.loadAsync(bytes);
   let text = '';
+  const votes = new Map<BundledFontScript, number>();
   for (const entry of Object.values(zip.files)) {
-    if (/^ppt\/(?:slides|slideLayouts|slideMasters)\/[^/]+\.xml$/.test(entry.name)) {
-      text += await entry.async('string');
+    if (!/^ppt\/(?:slides|slideLayouts|slideMasters|diagrams)\/[^/]+\.xml$/.test(entry.name)) continue;
+    const xml = new DOMParser().parseFromString(await entry.async('string'), 'text/xml');
+    text += xml.documentElement?.textContent ?? '';
+    for (const node of xml.querySelectorAll('[lang], [altLang]')) {
+      for (const name of ['lang', 'altLang']) {
+        const bucket = cjkBucket(node.getAttribute(name)?.toLowerCase() ?? '');
+        if (bucket) votes.set(bucket, (votes.get(bucket) ?? 0) + 1);
+      }
     }
   }
+  const scripts = RTL_SCRIPTS.filter(([, pattern]) => pattern.test(text)).map(([script]) => script);
+  const cjk = new Set<BundledFontScript>();
+  if (/[\u3040-\u30FF]/.test(text)) cjk.add('cjk-jp');
+  if (/[\u1100-\u11FF\uAC00-\uD7AF]/.test(text)) cjk.add('cjk-kr');
+  if (HAN.test(text)) {
+    for (const bucket of ['cjk-tc', 'cjk-sc', 'cjk-jp'] as const) {
+      if (votes.get(bucket)) cjk.add(bucket);
+    }
+    if (!cjk.has('cjk-jp') && !cjk.has('cjk-tc')) cjk.add('cjk-sc');
+  }
+  scripts.push(...[...cjk].sort((left, right) => (votes.get(right) ?? 0) - (votes.get(left) ?? 0)));
   const provider = fontProvider();
   const faces = [];
-  for (const [script, pattern] of SCRIPTS) {
-    if (!pattern.test(text)) continue;
+  for (const script of scripts) {
     for (const bold of [false, true]) {
       const face = resolveScriptFallbackFace(script, bold, false);
       const load = provider.resolveScriptFallback(script, bold, false);
