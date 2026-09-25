@@ -2217,11 +2217,10 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     if unit.is_finite() && unit > 0.0 {
         let steps = (span / unit).floor();
         if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
-            let first = round_to_unit(scale.min, unit, true);
             let mut ticks = Vec::new();
             let mut index = 0;
             while ticks.len() < MAX_PLOT_AXIS_TICKS {
-                let value = first + unit * index as f64;
+                let value = scale.min + unit * index as f64;
                 if !value.is_finite() || value > scale.max + unit * 1e-9 {
                     break;
                 }
@@ -5936,6 +5935,50 @@ mod tests {
             tall[1].1 < 11.0 && tall[1].3 > 150.0,
             "a reversed axis grows the bar downward from the top: {tall:?}"
         );
+    }
+
+    #[test]
+    fn a_pinned_minimum_starts_the_major_unit_walk() {
+        let data = source(&[268.0, 273.0]);
+        let mut group = group("line", vec![series("Score", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 245.0, 285.0);
+        axis.major_unit = Some(10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
+        for tick in ["245", "255", "265", "275", "285"] {
+            assert!(
+                labels.contains(&tick.to_owned()),
+                "{tick} is missing: {labels:?}"
+            );
+        }
+        assert!(!labels.contains(&"250".to_owned()), "{labels:?}");
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, color, .. }
+                    if color == CHART_GRID_COLOR && (y1 - y2).abs() < 0.01 =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        let mut marks: Vec<f64> = texts_at(&ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
+            .map(|(_, _, baseline, _)| baseline - 3.0)
+            .collect();
+        marks.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 5, "{grid:?}");
+        assert_eq!(grid, marks, "every gridline stands on its own label");
     }
 
     #[test]
