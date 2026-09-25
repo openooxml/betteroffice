@@ -2248,6 +2248,11 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
         .collect()
 }
 
+/// A gridline whose `c:spPr` draws no line is declared only to be hidden.
+fn draws_no_line(line: Option<PlotLine<'_>>) -> bool {
+    line.is_some_and(|line| line.none)
+}
+
 /// Half-length of a tick mark drawn for `mark`, and whether it crosses.
 fn tick_extents(mark: Option<&str>) -> Option<(f64, f64)> {
     match mark? {
@@ -2305,9 +2310,10 @@ fn emit_axes<S: PlotSink + ?Sized>(
     let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
-    let shown = |line: Option<PlotLine<'_>>| !line.is_some_and(|line| line.none);
-    let major_grid = axis.is_none_or(|axis| axis.major_gridlines && shown(axis.major_gridline));
-    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines && shown(axis.minor_gridline));
+    let major_grid =
+        axis.is_none_or(|axis| axis.major_gridlines && !draws_no_line(axis.major_gridline));
+    let minor_grid =
+        axis.is_some_and(|axis| axis.minor_gridlines && !draws_no_line(axis.minor_gridline));
     let number_format = axis.and_then(|axis| axis.number_format);
     let tick_style = &family.scoped(axis.map(|axis| axis.text).unwrap_or_default());
     let (edge, outward) = match (transposed, family.secondary) {
@@ -3329,8 +3335,11 @@ fn emit_radar<S: PlotSink + ?Sized>(
         (cx + reach * angle.cos(), cy + reach * angle.sin())
     };
 
+    let rings = !family
+        .axis
+        .is_some_and(|axis| draws_no_line(axis.major_gridline));
     for value in axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit)) {
-        if ops.exhausted() || scale.ratio(value) <= 0.0 {
+        if !rings || ops.exhausted() || scale.ratio(value) <= 0.0 {
             continue;
         }
         let ring: Vec<(f64, f64)> = (0..spokes).map(|index| at(index, value)).collect();
@@ -6073,14 +6082,14 @@ mod tests {
 
     #[test]
     fn a_gridline_whose_sp_pr_draws_no_line_is_hidden() {
-        let data = source(&[1.0, 2.0]);
-        let grid = |line: Option<PlotLine<'static>>| {
-            let mut group = group("column", vec![series("North", &data)]);
+        let data = source(&[1.0, 2.0, 3.0]);
+        let grid = |chart_type: &'static str, line: Option<PlotLine<'static>>| {
+            let mut group = group(chart_type, vec![series("North", &data)]);
             group.axis_ids = vec!["1"];
             let mut axis = value_axis("1", 0.0, 4.0);
             axis.major_gridline = line;
             let chart = PlotChart {
-                chart_type: "column",
+                chart_type,
                 plot_groups: vec![group],
                 axes: vec![axis],
                 ..PlotChart::default()
@@ -6097,9 +6106,15 @@ mod tests {
                 width_emu: None,
             })
         };
-        assert_eq!(grid(None), 5);
-        assert_eq!(grid(line(false)), 5);
-        assert_eq!(grid(line(true)), 0);
+        for chart_type in ["column", "radar"] {
+            assert!(grid(chart_type, None) > 0, "{chart_type}");
+            assert_eq!(
+                grid(chart_type, line(false)),
+                grid(chart_type, None),
+                "{chart_type}"
+            );
+            assert_eq!(grid(chart_type, line(true)), 0, "{chart_type}");
+        }
     }
 
     #[test]

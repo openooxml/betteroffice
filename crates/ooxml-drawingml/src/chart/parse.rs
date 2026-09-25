@@ -1187,6 +1187,52 @@ mod tests {
     }
 
     #[test]
+    fn a_gridline_reads_the_line_its_sp_pr_draws() {
+        let gridlines = |kind: &str, line: Node| {
+            Node::el(
+                kind,
+                vec![Node::el("c:spPr", vec![Node::el("a:ln", vec![line])])],
+            )
+        };
+        let space = Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el("c:barChart", vec![Node::val("c:axId", "1")]),
+                        Node::el(
+                            "c:valAx",
+                            vec![
+                                Node::val("c:axId", "1"),
+                                gridlines("c:majorGridlines", Node::el("a:noFill", Vec::new())),
+                                gridlines(
+                                    "c:minorGridlines",
+                                    Node::el("a:solidFill", vec![Node::val("a:srgbClr", "112233")]),
+                                ),
+                            ],
+                        ),
+                    ],
+                )],
+            )],
+        );
+        let space = parse_chart_space(&space).expect("chart space parses");
+        let axis = &space.axis_list.as_ref().expect("axes")[0];
+        assert!(axis.major_gridlines && axis.minor_gridlines);
+        assert!(
+            axis.major_gridline_line
+                .as_ref()
+                .is_some_and(|line| line.none)
+        );
+        assert!(
+            axis.minor_gridline_line
+                .as_ref()
+                .is_some_and(|line| !line.none)
+        );
+    }
+
+    #[test]
     fn a_cache_places_its_points_at_the_index_they_name() {
         let cache = Node::el(
             "c:numCache",
