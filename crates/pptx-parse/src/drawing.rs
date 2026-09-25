@@ -1462,6 +1462,11 @@ pub(crate) fn parse_run_properties(element: Option<&XmlElement>) -> RunPropertie
             .attribute("baseline")
             .and_then(|value| value.parse::<i32>().ok())
             .map(|value| f64::from(value) / 1000.0),
+        kern_pt: element
+            .attribute("kern")
+            .and_then(|value| value.parse::<i32>().ok())
+            .filter(|value| *value >= 0)
+            .map(|value| f64::from(value) / 100.0),
         bold: element.attribute("b").map(parse_bool),
         italic: element.attribute("i").map(parse_bool),
         underline: element.attribute("u").map(str::to_owned),

@@ -908,6 +908,10 @@ pub struct RunProperties {
     /// Baseline shift as a percentage of the font size; negative is subscript.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline_pct: Option<f64>,
+    /// `kern`: the smallest size, in points, the text is kerned at; `0` turns
+    /// kerning off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kern_pt: Option<f64>,
     pub bold: Option<bool>,
     pub italic: Option<bool>,
     pub underline: Option<String>,
