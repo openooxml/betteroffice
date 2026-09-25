@@ -1395,12 +1395,12 @@ attrs {"ariaLabel":"Points","blockId":42,"chart":{"label":"Points, line chart, 1
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":34.667,"x":126.667}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q3","width":34.667,"x":178.667}
 {"fill":"#FF0000","h":14,"kind":"rect","w":14,"x":85,"y":75.75}
-{"baselineY":68.75,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"peak","width":48,"x":106}
+{"baselineY":86.25,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"peak","width":48,"x":102}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":92,"x2":144,"y1":82.75,"y2":156.5}
 {"fill":"#4472C4","h":9,"kind":"rect","w":9,"x":139.5,"y":152}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":144,"x2":196,"y1":156.5,"y2":141.75}
 {"fill":"#00FF00","h":9,"kind":"rect","w":9,"x":191.5,"y":137.25}
-{"baselineY":132.75,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"end","width":48,"x":205}
+{"baselineY":145.25,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"end","width":48,"x":203.5}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":76}
 {"baselineY":84,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":80,"x":224}
 # points-without-indexes

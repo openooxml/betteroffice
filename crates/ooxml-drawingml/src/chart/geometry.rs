@@ -2656,6 +2656,55 @@ fn push_point_label<S: PlotSink + ?Sized>(
     }
 }
 
+/// Width of the box a marker's label is aligned in.
+const MARKER_LABEL_WIDTH: f64 = 48.0;
+
+/// Labels a marker at `point` on the side `c:dLblPos` names: right of it
+/// unless the deck says otherwise, as Office does for lines and scatters.
+#[allow(clippy::too_many_arguments)]
+fn push_marker_label<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: PlotFamily<'_>,
+    series: &SeriesView<'_>,
+    series_index: usize,
+    index: usize,
+    (x, y): (f64, f64),
+    size: f64,
+    percent_total: f64,
+) {
+    let spec = point_label_spec(series, index);
+    let font_px = family
+        .scoped(spec.map(|labels| labels.text).unwrap_or_default())
+        .font
+        .size_px;
+    let reach = size / 2.0 + 3.0;
+    let middle = y + font_px * 0.35;
+    let centred = x - MARKER_LABEL_WIDTH / 2.0;
+    let (left, baseline, align) = match spec.and_then(|labels| labels.position) {
+        Some("t") => (centred, y - reach - font_px * 0.25, PlotTextAlign::Center),
+        Some("b") => (centred, y + reach + font_px * 0.75, PlotTextAlign::Center),
+        Some("ctr") => (centred, middle, PlotTextAlign::Center),
+        Some("l") => (
+            x - reach - MARKER_LABEL_WIDTH,
+            middle,
+            PlotTextAlign::Center,
+        ),
+        _ => (x + reach, middle, PlotTextAlign::Start),
+    };
+    push_point_label(
+        ops,
+        family,
+        series,
+        series_index,
+        index,
+        left,
+        baseline,
+        MARKER_LABEL_WIDTH,
+        percent_total,
+        align,
+    );
+}
+
 /// Where `c:dLblPos` puts a bar label, as a fraction of the bar's own span
 /// measured from its base, plus the pixels it stands off the end.
 fn bar_label_anchor(position: Option<&str>) -> (f64, f64) {
@@ -2963,18 +3012,15 @@ fn emit_line<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            let size = series.marker_size(i);
-            push_point_label(
+            push_marker_label(
                 ops,
                 family,
                 series,
                 ser_idx,
                 i,
-                x + size,
-                y - size,
-                48.0,
+                (x, y),
+                series.marker_size(i),
                 category_total(family, i),
-                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -3199,17 +3245,15 @@ fn emit_scatter<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            push_point_label(
+            push_marker_label(
                 ops,
                 family,
                 series,
                 ser_idx,
                 i,
-                x + 4.0,
-                y - 4.0,
-                48.0,
+                (x, y),
+                series.marker_size(i),
                 category_total(family, i),
-                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -7318,6 +7362,54 @@ mod tests {
         assert!(placed("outEnd") < placed("inEnd"));
         assert!(placed("inEnd") < placed("ctr"));
         assert!(placed("ctr") < placed("inBase"));
+    }
+
+    #[test]
+    fn a_line_label_stands_on_the_side_its_position_names() {
+        let data = source(&[10.0, 20.0]);
+        let placed = |position: Option<&'static str>| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                position,
+                ..PlotDataLabels::default()
+            });
+            let ops = plot_chart(&grouped("line", group("line", vec![labelled])), rect());
+            let marker = ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, y, w, h, .. } if (w - h).abs() < 0.01 => {
+                        Some((x + w / 2.0, y + h / 2.0))
+                    }
+                    _ => None,
+                })
+                .nth(1)
+                .expect("the second point's marker");
+            let (_, x, baseline, width) = texts_at(&ops)
+                .into_iter()
+                .rfind(|(text, ..)| text == "20")
+                .expect("a label");
+            (marker, x, baseline, width)
+        };
+        let ((mx, my), x, baseline, _) = placed(None);
+        assert!(
+            x > mx && (baseline - my).abs() < 8.0,
+            "right of the point by default"
+        );
+        let ((mx, my), x, baseline, width) = placed(Some("t"));
+        assert!(
+            (x + width / 2.0 - mx).abs() < 0.01 && baseline < my,
+            "centred above"
+        );
+        let ((mx, my), x, baseline, width) = placed(Some("b"));
+        assert!(
+            (x + width / 2.0 - mx).abs() < 0.01 && baseline > my,
+            "centred below"
+        );
     }
 
     #[test]
