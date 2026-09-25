@@ -50,13 +50,13 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             .unwrap();
         for (tick, x) in [
             ("0", 156.0),
-            ("10", 252.5),
-            ("20", 349.0),
-            ("30", 445.5),
-            ("40", 542.0),
+            ("10", 266.5918),
+            ("20", 377.1836),
+            ("30", 487.7754),
+            ("40", 598.3672),
         ] {
             let line = label(primitives, tick);
-            close(line.x, if index == 4 { 698.0 - x } else { x });
+            close(line.x, if index == 4 { 754.3672 - x } else { x });
             close(line.baseline, 412.0);
             assert!(line.runs.iter().all(|run| run.color == "#222222"));
         }
@@ -80,8 +80,8 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             assert!(line.x + line.width < 172.0);
         }
         for (color, widths) in [
-            ("#6254E7", [115.8, 183.35, 67.55]),
-            ("#1FA97A", [77.2, 135.1, 202.65]),
+            ("#6254E7", [132.71016, 210.12442, 77.41426]),
+            ("#1FA97A", [88.47344, 154.82852, 232.24278]),
         ] {
             let bars: Vec<_> = primitives
                 .iter()
@@ -105,7 +105,7 @@ fn horizontal_bar_fixture_transposes_axes_without_losing_series_or_labels() {
             assert_eq!(bars[0].1 > bars[2].1, index != 1);
         }
         if index == 3 {
-            close(label(primitives, "80").x, 542.0);
+            close(label(primitives, "80").x, 598.3672);
             close(label(primitives, "80").baseline, 136.0);
             assert!(primitives.iter().any(|primitive| matches!(primitive,
                 Primitive::Shape { x, y, w, h, stroke: Some(stroke), .. }

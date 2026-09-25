@@ -72,8 +72,17 @@ const MAX_LEGEND_ENTRIES: usize = 8;
 const AXIS_GUTTER: f64 = 42.0;
 const CATEGORY_GUTTER: f64 = 76.0;
 const AXIS_HEADER: f64 = 18.0;
-/// Width a `left` or `right` legend takes out of the plot.
-const LEGEND_COL_W: f64 = 104.0;
+/// A side legend's swatch edge, the gap after it, and its row pitch, in ems
+/// of the legend text, as PowerPoint draws them.
+const LEGEND_KEY_EM: f64 = 0.53;
+const LEGEND_KEY_GAP_EM: f64 = 0.32;
+const LEGEND_PITCH_EM: f64 = 1.53;
+/// How far a text row's baseline sits below the middle of its swatch, in ems.
+const LEGEND_BASELINE_EM: f64 = 0.24;
+/// The gap between a side legend and the plot, in ems of the legend text.
+const LEGEND_PLOT_GAP_EM: f64 = 1.0;
+/// The chart area's inner margin, plus the legend's own inset inside it.
+const LEGEND_EDGE: f64 = 13.0;
 /// Height one row of a `top` or `bottom` legend takes out of the plot.
 const LEGEND_ROW_H: f64 = 22.0;
 /// Gap between the entries of a legend row.
@@ -997,10 +1006,19 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     // A legend `c:overlay` puts on the plot takes no band of its own: the plot
     // keeps the whole frame and the legend is drawn over it.
     let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
-    let legend_w = match &legend {
-        Some(band) if !band.horizontal && legend_reserves => LEGEND_COL_W,
-        _ => 8.0,
+    // A side legend keeps an em of its text between itself and the plot.
+    let legend_gap = legend_style.font.size_px * LEGEND_PLOT_GAP_EM;
+    let (reserve_left, reserve_right) = match &legend {
+        Some(band) if !band.horizontal && legend_reserves => {
+            if legend_position == "left" {
+                (band.x + band.w + legend_gap - x, 0.0)
+            } else {
+                (0.0, x + width - band.x + legend_gap)
+            }
+        }
+        _ => (0.0, 0.0),
     };
+    let right_margin = if reserve_right > 0.0 { 0.0 } else { 18.0 };
     let legend_h = match &legend {
         Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
@@ -1010,11 +1028,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         AXIS_GUTTER
     };
-    let plot_x = if legend_position == "left" {
-        x + legend_w + gutter
-    } else {
-        x + gutter
-    };
+    let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
         38.0
     } else {
@@ -1031,6 +1045,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         0.0
     };
+    let region_x = x + reserve_left;
+    let region_w = width - reserve_left - reserve_right;
     let region_y = y + title_h + band_top;
     let region_h = height - title_h - legend_h;
     let plot = match chart.plot_layout {
@@ -1046,7 +1062,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         None => PlotArea {
             x: plot_x,
             y: region_y + axis_header,
-            w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
+            w: (region_w - gutter - right_margin - secondary_w).max(24.0),
             h: (height - title_h - category_band(chart, chart_text) - legend_h - axis_header)
                 .max(24.0),
             gutter,
@@ -1074,9 +1090,9 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                 secondary: false,
             },
             plot,
-            x,
+            region_x,
             region_y,
-            width,
+            region_w,
             region_h,
         );
     } else {
@@ -1116,16 +1132,16 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     secondary,
                 },
                 plot,
-                x,
+                region_x,
                 region_y,
-                width,
+                region_w,
                 region_h,
             );
         }
     }
 
     if let Some(band) = legend {
-        emit_legend(ops, chart, scan, band, legend_style);
+        emit_legend(ops, chart, band, legend_style);
     }
 }
 
@@ -1750,44 +1766,105 @@ fn legend_band<S: PlotSink + ?Sized>(
         h: height,
     } = rect;
     let horizontal = matches!(position, "top" | "bottom");
-    let w = if horizontal {
-        (width - 16.0).max(0.0)
-    } else {
-        LEGEND_COL_W - 12.0
-    };
-    let rows = if horizontal {
-        legend_rows(chart, w, style, ops)
-    } else {
-        Vec::new()
-    };
-    let h = if horizontal {
-        rows.iter()
-            .map(|row| row.height)
-            .sum::<f64>()
-            .max(LEGEND_ROW_H)
-    } else {
-        (height - title_h).max(0.0)
-    };
+    if !horizontal {
+        return Some(side_legend_band(chart, position, rect, title_h, style, ops));
+    }
+    let w = (width - 16.0).max(0.0);
+    let rows = legend_rows(chart, w, style, ops);
+    let h = rows
+        .iter()
+        .map(|row| row.height)
+        .sum::<f64>()
+        .max(LEGEND_ROW_H);
     Some(LegendBand {
-        x: if horizontal {
-            x + 8.0
-        } else if position == "left" {
-            x + 6.0
-        } else {
-            x + width - LEGEND_COL_W + 6.0
-        },
+        x: x + 8.0,
         y: if position == "bottom" {
             y + height - h
-        } else if horizontal {
-            y + title_h
         } else {
-            y + title_h + 8.0
+            y + title_h
         },
         w,
         h,
         horizontal,
         rows,
     })
+}
+
+/// Whether the chart stacks columns or areas upward, series on series.
+fn stacks_upward(chart: &PlotChart<'_>) -> bool {
+    chart.plot_groups.iter().any(|group| {
+        matches!(
+            group.chart_type.unwrap_or(chart.chart_type),
+            "column" | "area"
+        ) && matches!(group.grouping, Some("stacked" | "percentStacked"))
+    })
+}
+
+/// A `left`, `right` or `topRight` legend: one entry per row, as wide as its longest label
+/// up to a third of the chart, held against that edge and centred on the space
+/// below the title.
+fn side_legend_band<S: PlotSink + ?Sized>(
+    chart: &PlotChart<'_>,
+    position: &str,
+    rect: PlotRect,
+    title_h: f64,
+    style: &ResolvedText,
+    ops: &mut Emitter<'_, S>,
+) -> LegendBand {
+    let size = style.font.size_px;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let limit = (rect.w / 3.0).max(lead + size);
+    let mut rows = Vec::new();
+    for (label, color) in legend_entries(chart, &mut ScanBudget::new()) {
+        let lines = wrap_legend_label(&label, limit - lead, style, ops);
+        let width = lead
+            + lines
+                .iter()
+                .map(|line| legend_text_width(line, style, ops))
+                .fold(0.0, f64::max);
+        let height = size * LEGEND_PITCH_EM + size * 1.22 * lines.len().saturating_sub(1) as f64;
+        rows.push(LegendRow {
+            entries: vec![LegendEntry {
+                lines,
+                color,
+                width,
+            }],
+            width,
+            height,
+        });
+    }
+    // PowerPoint lists a vertical stack top down, so its legend reads in the
+    // order the series pile up.
+    if stacks_upward(chart) {
+        rows.reverse();
+    }
+    let w = rows
+        .iter()
+        .map(|row| row.width)
+        .fold(0.0, f64::max)
+        .min(limit);
+    let h = rows.iter().map(|row| row.height).sum::<f64>();
+    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
+        rect.y + title_h
+    } else {
+        rect.y
+    };
+    LegendBand {
+        x: if position == "left" {
+            rect.x + LEGEND_EDGE
+        } else {
+            rect.x + rect.w - LEGEND_EDGE - w
+        },
+        y: if position == "topRight" {
+            top + LEGEND_EDGE
+        } else {
+            ((top + rect.y + rect.h) / 2.0 - h / 2.0).max(top)
+        },
+        w,
+        h,
+        horizontal: false,
+        rows,
+    }
 }
 
 fn legend_rows<S: PlotSink + ?Sized>(
@@ -4003,7 +4080,6 @@ fn pie_wedge_path(
 fn emit_legend<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     chart: &PlotChart<'_>,
-    budget: &mut ScanBudget,
     band: LegendBand,
     style: &ResolvedText,
 ) {
@@ -4014,11 +4090,27 @@ fn emit_legend<S: PlotSink + ?Sized>(
         emit_legend_rows(ops, band, style);
         return;
     }
-    let entries = legend_entries(chart, budget);
-    for (i, (label, color)) in entries.iter().enumerate() {
-        let yy = band.y + i as f64 * 15.0;
-        push_rect(ops, band.x, yy, LEGEND_SWATCH, LEGEND_SWATCH, color);
-        push_text(ops, label, band.x + 12.0, yy + 8.0, band.w - 12.0, style);
+    let size = style.font.size_px;
+    let key = size * LEGEND_KEY_EM;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let mut top = band.y;
+    for row in &band.rows {
+        let Some(entry) = row.entries.first() else {
+            continue;
+        };
+        let middle = top + size * LEGEND_PITCH_EM / 2.0;
+        push_rect(ops, band.x, middle - key / 2.0, key, key, &entry.color);
+        for (index, line) in entry.lines.iter().enumerate() {
+            push_text(
+                ops,
+                line,
+                band.x + lead,
+                middle + size * (LEGEND_BASELINE_EM + 1.22 * index as f64),
+                (band.w - lead).max(1.0),
+                style,
+            );
+        }
+        top += row.height;
     }
 }
 
@@ -5181,12 +5273,21 @@ mod tests {
             .collect()
     }
 
+    /// Whether a rectangle is a legend swatch: a row legend's fixed square, or
+    /// a side legend's key at the default label size.
+    fn is_swatch(w: f64, h: f64) -> bool {
+        (w - h).abs() < 0.01
+            && [LEGEND_SWATCH, CHART_LABEL_SIZE_PX * LEGEND_KEY_EM]
+                .iter()
+                .any(|edge| (w - edge).abs() < 0.01)
+    }
+
     /// Every rectangle but the chart background and the legend swatches.
     fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
         rects(ops)
             .into_iter()
             .skip(1)
-            .filter(|(_, _, w, h)| (*w - 8.0).abs() > 0.01 || (*h - 8.0).abs() > 0.01)
+            .filter(|(_, _, w, h)| !is_swatch(*w, *h))
             .collect()
     }
 
@@ -6767,7 +6868,7 @@ mod tests {
             let upper_tick = text_at(&ops, "8");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert_eq!(upper_tick.1 + 16.0, 186.0);
+            assert_eq!(upper_tick.1 + 16.0, 243.5);
             assert_eq!(text_at(&ops, "4").2, 180.0);
         }
     }
@@ -6941,9 +7042,7 @@ mod tests {
     fn swatches(ops: &[PlotOp]) -> Vec<(f64, f64)> {
         rects(ops)
             .into_iter()
-            .filter(|(_, _, w, h)| {
-                (*w - LEGEND_SWATCH).abs() < 0.01 && (*h - LEGEND_SWATCH).abs() < 0.01
-            })
+            .filter(|(_, _, w, h)| is_swatch(*w, *h))
             .map(|(x, y, _, _)| (x, y))
             .collect()
     }
@@ -7018,6 +7117,103 @@ mod tests {
     }
 
     #[test]
+    fn a_side_legend_spaces_its_rows_by_its_font_and_centres_them() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["Hardware", "Software", "Services", "Other"];
+        let mut chart = legend_chart(Some("right"), &names, &data);
+        chart.title = None;
+        chart.text.legend.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 880.0,
+            h: 560.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let key = 24.0 * LEGEND_KEY_EM;
+        let keys: Vec<(f64, f64)> = rects(&ops)
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, y, _, _)| (x, y))
+            .collect();
+        assert_eq!(keys.len(), 4);
+        for pair in keys.windows(2) {
+            assert!((pair[1].1 - pair[0].1 - 24.0 * LEGEND_PITCH_EM).abs() < 0.01);
+        }
+        let middle = (keys[0].1 + keys[3].1 + key) / 2.0;
+        assert!((middle - frame.h / 2.0).abs() < 0.01, "{middle}");
+        let right = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Text { text, x, width, .. } if names.contains(&text.as_str()) => {
+                    Some(x + width)
+                }
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        assert!((right - (frame.w - LEGEND_EDGE)).abs() < 0.01, "{right}");
+        let plot_right = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x2, width, .. } if *width >= 1.0 => Some(*x2),
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        assert!(
+            (plot_right - (keys[0].0 - 24.0)).abs() < 0.01,
+            "{plot_right}"
+        );
+    }
+
+    #[test]
+    fn a_stacked_column_legend_reads_top_down_like_its_stack() {
+        let data = source(&[10.0, 20.0]);
+        let order = |grouping| {
+            let mut columns = group(
+                "column",
+                vec![series("North", &data), series("South", &data)],
+            );
+            columns.grouping = grouping;
+            let mut chart = grouped("column", columns);
+            chart.legend = Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            });
+            let ops = plot_chart(&chart, rect());
+            let mut names: Vec<(f64, String)> = ops
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Text {
+                        text, baseline_y, ..
+                    } if text == "North" || text == "South" => Some((*baseline_y, text.clone())),
+                    _ => None,
+                })
+                .collect();
+            names.sort_by(|a, b| a.0.total_cmp(&b.0));
+            names.into_iter().map(|(_, name)| name).collect::<Vec<_>>()
+        };
+        assert_eq!(order(None), ["North", "South"]);
+        assert_eq!(order(Some("stacked")), ["South", "North"]);
+    }
+
+    #[test]
+    fn a_top_right_legend_starts_at_the_top() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let mut chart = legend_chart(Some("topRight"), &names, &data);
+        chart.title = None;
+        let top = swatches(&plot_chart(&chart, rect()))[0].1;
+        let middle = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .1;
+        assert!(top < middle, "{top} vs {middle}");
+        assert!(top < rect().y + LEGEND_EDGE + LEGEND_PITCH_EM * CHART_LABEL_SIZE_PX);
+    }
+
+    #[test]
     fn a_row_legend_hands_its_width_back_to_the_plot() {
         let data = source(&[10.0, 20.0]);
         let names = ["North", "South", "East"];
@@ -7030,8 +7226,14 @@ mod tests {
                 })
                 .fold(f64::MIN, f64::max)
         };
+        let key_x = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .0;
+        let column = rect().x + rect().w - 8.0 - key_x;
         assert!(
-            widest(Some("bottom")) > widest(Some("right")) + 90.0,
+            (widest(Some("bottom")) - widest(Some("right")) - column).abs() < 0.01,
             "a bottom legend must return the column's width: {} vs {}",
             widest(Some("bottom")),
             widest(Some("right"))
@@ -7053,8 +7255,13 @@ mod tests {
                 })
                 .fold(f64::MIN, f64::max)
         };
+        let key_x = swatches(&plot_chart(
+            &legend_chart(Some("right"), &names, &data),
+            rect(),
+        ))[0]
+            .0;
         assert!(
-            widest(true) > widest(false) + 90.0,
+            (widest(true) - widest(false) - (rect().x + rect().w - 8.0 - key_x)).abs() < 0.01,
             "an overlaid legend must leave the plot its width: {} vs {}",
             widest(true),
             widest(false)
