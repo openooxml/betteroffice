@@ -8,10 +8,10 @@ mod workbook;
 
 pub use error::Error;
 pub use types::{
-    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, HistoryState,
-    MutationResult, NumberFormatKind, ProposalAcceptance, ProposalEditInput, ProposalRequest,
-    RenderOptions, RenderedPng, SelectionFormatting, SheetInfo, TextSearchMatch, UpdateEvent,
-    UpdateOrigin,
+    CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
+    EditStage, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
+    ProposalEditInput, ProposalRequest, RenderOptions, RenderedPng, SelectionFormatting, SheetInfo,
+    TextSearchMatch, UpdateEvent, UpdateOrigin,
 };
 pub use workbook::{
     DEFAULT_TEXT_SEARCH_LIMIT, MAX_COLLABORATION_BYTES, MAX_COLLABORATION_CLIENT_ID,

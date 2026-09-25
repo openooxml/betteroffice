@@ -315,12 +315,12 @@ impl DeckSession {
 
     pub fn set_slide_notes(&self, context: &EditCtx, slide_id: &str, text: &str) -> EditResult<()> {
         crate::model::validate_xml_text(text)?;
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         let mut txn = self.transact_for(context);
         let slide = slide_ref(&txn, slide_id)?;
         slide.insert(&mut txn, "notes", text);
         drop(txn);
-        self.add_undo_barrier();
+        self.automatic_undo_barrier();
         Ok(())
     }
 

@@ -653,6 +653,9 @@ export type YrsCellBorders = Partial<
   Record<'top' | 'bottom' | 'left' | 'right' | 'insideH' | 'insideV', YrsCellBorder | null>
 >;
 
+/** Undo grouping for tracked local transactions. */
+export type YrsUndoCaptureMode = 'auto' | 'manual';
+
 /**
  * One live replica of the yrs editing model. Thin typed wrapper over the
  * wasm `EditSession` — no editing logic on this side of the boundary.
@@ -782,6 +785,12 @@ export interface YrsSession extends CollaborationReplica {
   cellSelection(): YrsTableRange | null;
   /** Begin local-origin undo capture once import/seeding has completed. */
   beginUndoCapture(): void;
+  /** Separates subsequent local edits from the current undo step; safe before capture starts. */
+  addUndoBoundary(): void;
+  /** Changes grouping policy, closing the current group while retaining history. */
+  setUndoCaptureMode(mode: YrsUndoCaptureMode): void;
+  /** Current grouping policy; defaults to auto. */
+  undoCaptureMode(): YrsUndoCaptureMode;
   /** Stories changed by the latest undo or redo, sorted. */
   historyStories(): string[];
   /** Undo/redo only local-origin direct operations (never remote/system transactions). */
@@ -1398,6 +1407,9 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
     setCellSelection: (range) => session.set_cell_selection(JSON.stringify(range)),
     cellSelection: () => JSON.parse(session.cell_selection()) as YrsTableRange | null,
     beginUndoCapture: ensureUndo,
+    addUndoBoundary: () => session.add_undo_boundary(),
+    setUndoCaptureMode: (mode) => session.set_undo_capture_mode(mode),
+    undoCaptureMode: () => session.undo_capture_mode() as YrsUndoCaptureMode,
     historyStories: () => session.history_stories(),
     undo: () =>
       mutate(() => {

@@ -721,3 +721,50 @@ test('inserted pictures render, synchronize, arrange and reopen with their bytes
     } finally { reopened.dispose(); }
   } finally { source.dispose(); peer.dispose(); }
 });
+
+describe('host undo and comment controls', () => {
+  test('manual capture groups different operations and keeps explicit boundaries', () => {
+    const deck = openPresentation(fixture, { clientId: 9981 });
+    try {
+      const before = deck.snapshot();
+      const story = before.slides[0].shapes.find((shape) => shape.textStories.length)!.textStories[0];
+      expect(deck.undoCaptureMode()).toBe('auto');
+      deck.setUndoCaptureMode('manual');
+      deck.insertText(story.id, 0, 'First ');
+      deck.setUndoCaptureMode('manual');
+      deck.addComment(before.slides[0].id, { author: 'Host', text: 'Grouped', created: '2026-09-23T00:00:00Z' });
+      const grouped = deck.snapshot();
+      deck.addUndoBoundary();
+      deck.insertText(story.id, 0, 'Second ');
+      expect(deck.undo().snapshot).toEqual(grouped);
+      expect(deck.undo().snapshot).toEqual(before);
+      expect(deck.redo().snapshot).toEqual(grouped);
+      expect(() => deck.setUndoCaptureMode('invalid' as 'auto')).toThrow();
+      expect(deck.undoCaptureMode()).toBe('manual');
+      deck.setUndoCaptureMode('auto');
+      expect(deck.canRedo()).toBe(true);
+    } finally { deck.dispose(); }
+  });
+
+  test('moves modern comments without losing their thread or exported position', async () => {
+    const bytes = await readFile(resolve(root, 'crates/pptx-edit/tests/fixtures/modern-comments.pptx'));
+    const deck = openPresentation(bytes, { clientId: 9982 });
+    try {
+      const before = deck.comments();
+      const root = before.find((comment) => !comment.parentId)!;
+      const expected = before.map((comment) => comment.id === root.id
+        ? { ...comment, xEmu: 914400, yEmu: 1828800 } : comment);
+      deck.setCommentPosition(root.id, { xEmu: 914400, yEmu: 1828800 });
+      expect(() => deck.setCommentPosition(root.id, { xEmu: NaN, yEmu: 0 })).toThrow();
+      expect(() => deck.setCommentPosition('missing', { xEmu: 1, yEmu: 2 })).toThrow();
+      for (let cycle = 0; cycle < 3; cycle++) {
+        expect(deck.comments()).toEqual(expected);
+        const reopened = openPresentation(deck.save(), { clientId: 9983 });
+        try { expect(reopened.comments()).toEqual(expected); } finally { reopened.dispose(); }
+        deck.undo();
+        expect(deck.comments()).toEqual(before);
+        deck.redo();
+      }
+    } finally { deck.dispose(); }
+  });
+});

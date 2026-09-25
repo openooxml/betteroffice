@@ -836,3 +836,121 @@ fn deleting_slides_removes_comments_and_last_authors() {
             .any(|(path, _)| path == "ppt/authors.xml" || path.starts_with("ppt/comments/"))
     );
 }
+
+#[test]
+fn moving_a_source_comment_preserves_identity_replies_and_history() {
+    let session = DeckSession::open(MODERN, 9901).unwrap();
+    let root = first_root(&session);
+    let before = session.comments().unwrap();
+    let receipt = session
+        .set_comment_position(&EditCtx::local("host"), &root.id, 914_400, 1_828_800)
+        .unwrap();
+    assert_eq!(receipt.comment_id, root.id);
+    let mut expected = before.clone();
+    let moved = expected
+        .iter_mut()
+        .find(|comment| comment.id == root.id)
+        .unwrap();
+    moved.x_emu = 914_400;
+    moved.y_emu = 1_828_800;
+    for _ in 0..3 {
+        assert_eq!(session.comments().unwrap(), expected);
+        let reopened = DeckSession::open(&session.save().unwrap(), 9902).unwrap();
+        assert_eq!(reopened.comments().unwrap(), expected);
+        assert!(session.undo());
+        assert_eq!(session.comments().unwrap(), before);
+        assert_eq!(parts(&session.save().unwrap()), parts(MODERN));
+        assert!(session.redo());
+    }
+    let peer = DeckSession::open(MODERN, 9903).unwrap();
+    peer.apply_update_v1(&session.encode_state_as_update_v1())
+        .unwrap();
+    assert_eq!(peer.comments().unwrap(), expected);
+    let update = session.encode_state_as_update_v1();
+    assert!(
+        session
+            .set_comment_position(&EditCtx::local("host"), "missing", 1, 2)
+            .is_err()
+    );
+    let reply = before
+        .iter()
+        .find(|comment| comment.parent_id.is_some())
+        .unwrap();
+    assert!(
+        session
+            .set_comment_position(&EditCtx::local("host"), &reply.id, 1, 2)
+            .is_err()
+    );
+    assert!(
+        session
+            .set_comment_position(&EditCtx::local("host"), &root.id, i64::MAX, 2)
+            .is_err()
+    );
+    assert_eq!(session.encode_state_as_update_v1(), update);
+}
+
+#[test]
+fn moving_a_legacy_comment_patches_exported_master_coordinates() {
+    let source = DeckSession::open(DEMO, 9905).unwrap();
+    let slide = source.snapshot().unwrap().slides[0].id.clone();
+    source
+        .add_comment(
+            &EditCtx::local("host"),
+            &slide,
+            "Host",
+            "H",
+            "Legacy position",
+            "2026-09-23T00:00:00Z",
+            0,
+            0,
+        )
+        .unwrap();
+    let bytes = source.save().unwrap();
+    let session = DeckSession::open(&bytes, 9906).unwrap();
+    let before = session.comments().unwrap();
+    let comment = &before[0];
+    session
+        .set_comment_position(&EditCtx::local("host"), &comment.id, 914_400, -914_400)
+        .unwrap();
+    let saved = session.save().unwrap();
+    let reopened = DeckSession::open(&saved, 9907).unwrap();
+    let mut expected = before.clone();
+    expected[0].x_emu = 914_400;
+    expected[0].y_emu = -914_400;
+    assert_eq!(reopened.comments().unwrap(), expected);
+    let original_parts = parts(&bytes);
+    for (path, bytes) in parts(&saved) {
+        if !path.starts_with("ppt/comments/") {
+            assert_eq!(bytes, original_parts[&path], "{path}");
+        }
+    }
+    assert!(session.undo());
+    assert_eq!(parts(&session.save().unwrap()), original_parts);
+    assert!(session.redo());
+    assert_eq!(session.comments().unwrap(), expected);
+}
+
+#[test]
+fn adding_a_missing_comment_position_preserves_marker_order() {
+    let mut original = parts(MODERN);
+    let xml = String::from_utf8(original[FIRST_PART].clone()).unwrap();
+    original.insert(
+        FIRST_PART.to_owned(),
+        xml.replacen("<p188:pos x=\"12345\" y=\"-6789\"/>", "", 1)
+            .into_bytes(),
+    );
+    let source = ooxml_opc::rezip_parts(&original.into_iter().collect::<Vec<_>>()).unwrap();
+    let session = DeckSession::open(&source, 9908).unwrap();
+    let root = first_root(&session);
+    session
+        .set_comment_position(&EditCtx::local("host"), &root.id, 914_400, 914_400)
+        .unwrap();
+    let saved = session.save().unwrap();
+    let xml = String::from_utf8(parts(&saved)[FIRST_PART].clone()).unwrap();
+    let marker = xml.find("</pc:sldMkLst>").unwrap();
+    let position = xml.find("<p188:pos").unwrap();
+    let replies = xml.find("<p188:replyLst>").unwrap();
+    assert!(marker < position && position < replies);
+    let reopened = DeckSession::open(&saved, 9909).unwrap();
+    assert_eq!(reopened.comments().unwrap(), session.comments().unwrap());
+}

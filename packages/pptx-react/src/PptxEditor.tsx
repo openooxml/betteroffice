@@ -12,6 +12,7 @@ import type {
   CanvasImageResolver,
   CollaborationReplica,
   DeckSnapshot,
+  HitTestResult,
   ParagraphAlignment,
   PptxPresence,
   PptxPresencePeer,
@@ -117,7 +118,13 @@ export interface PptxTextSelectionTarget {
   end: number;
 }
 
+export type PptxPointPosition = HitTestResult & { slide: number; slideId: string };
+
 export interface PptxEditorApi {
+  /** Waits for accepted input; rejects during unfinished pointer gestures. */
+  flushPendingInput: () => Promise<void>;
+  /** Client coordinates; returns null outside slide content. */
+  getPositionAtPoint: (clientX: number, clientY: number) => PptxPointPosition | null;
   clearSelection: () => void;
   focus: () => void;
   /** Accepts a 1-based slide number. */
@@ -155,6 +162,8 @@ export interface PptxEditorProps {
   onError?: (error: Error) => void;
   /** Receives the saved bytes; without it, saving downloads the file. */
   onSave?: (bytes: Uint8Array) => void;
+  /** Return true for built-in saving; false or void handles/cancels the request. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Blocks user edits; navigation and selection remain available. */
   readOnly?: boolean;
 }
@@ -329,6 +338,7 @@ function PptxEditorContent({
   onChange,
   onError,
   onSave,
+  onSaveRequest,
   readOnly = false,
 }: Omit<PptxEditorProps, 'i18n'>) {
   const { t } = useTranslation();
@@ -339,6 +349,19 @@ function PptxEditorContent({
   const collaborationPresence = collaboration?.presence;
   const handleRef = useRef<PresentationHandle | null>(null);
   const modelRef = useRef<EditorModel | null>(null);
+  const pendingInputRef = useRef(new Set<Promise<void>>());
+  const pendingSaveRef = useRef<Promise<void> | null>(null);
+  const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
+  const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
+    if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+    while (pendingInputRef.current.size) {
+      await Promise.all([...pendingInputRef.current]);
+      if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
+    }
+    if (pointerGestureRef.current || resizeRef.current) {
+      throw new Error('Finish the pointer gesture before flushing input');
+    }
+  }, []);
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
@@ -638,6 +661,8 @@ function PptxEditorContent({
     caretGoalRef.current = null;
     recentClickRef.current = null;
     setError(null);
+    pendingInputRef.current = new Set();
+    pendingSaveRef.current = null;
     imageCacheRef.current.clear();
     if (!file) return;
     setLoading(true);
@@ -673,7 +698,15 @@ function PptxEditorContent({
             handle: opened,
             refresh,
             refreshProposals,
-            save: () => opened.save(),
+            flushPendingInput: () => flushPendingInput(opened),
+            getPositionAtPoint: (x, y) => handleRef.current === opened ? hostPointRef.current(x, y) : null,
+            save: () => {
+              if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+              if (pendingInputRef.current.size || pointerGestureRef.current || resizeRef.current) {
+                throw new Error('Await flushPendingInput before saving pending input');
+              }
+              return opened.save();
+            },
             selectText,
             focus: () => stageRef.current?.focus(),
           });
@@ -1100,7 +1133,10 @@ function PptxEditorContent({
       recentClickRef.current = null;
       if (next) stageRef.current?.focus();
     } catch (value) {
-      if (handleRef.current === handle && imageInsertAllowedRef.current) reportError(value);
+      if (handleRef.current === handle && imageInsertAllowedRef.current) {
+        reportError(value);
+      }
+      throw value;
     }
   };
 
@@ -1497,7 +1533,7 @@ function PptxEditorContent({
     }
     if (modifier && (event.key === 's' || event.key === 'S')) {
       event.preventDefault();
-      save();
+      if (!event.repeat) void save();
       return;
     }
     if (canvasReview.reviewing) return;
@@ -1813,16 +1849,39 @@ function PptxEditorContent({
     }
   };
 
-  const save = () => {
+  const save = (): Promise<void> => {
+    if (pendingSaveRef.current) return pendingSaveRef.current;
     const handle = handleRef.current;
-    if (!handle) return;
-    try {
+    if (!handle) return Promise.resolve();
+    const pending = Promise.resolve().then(async () => {
+      if (onSaveRequest && await onSaveRequest() !== true) return;
+      if (handleRef.current !== handle) return;
+      await flushPendingInput(handle);
+      if (handleRef.current !== handle) return;
       const bytes = handle.save();
       if (onSave) onSave(bytes);
       else downloadBytes(bytes, fileName ?? 'presentation.pptx', PPTX_MIME);
-    } catch (value) {
-      reportError(value);
-    }
+    }).catch((value: unknown) => {
+      if (handleRef.current === handle) reportError(value);
+    }).finally(() => {
+      if (pendingSaveRef.current === pending) pendingSaveRef.current = null;
+    });
+    pendingSaveRef.current = pending;
+    return pending;
+  };
+
+  hostPointRef.current = (clientX, clientY) => {
+    const handle = handleRef.current;
+    const current = modelRef.current;
+    const canvas = canvasRef.current;
+    if (!handle || !current?.frame || !canvas || canvasReview.reviewing) return null;
+    const point = slidePoint(canvas.getBoundingClientRect(), current.frame, clientX, clientY);
+    if (!point || point.x < 0 || point.y < 0 ||
+        point.x >= current.frame.width || point.y >= current.frame.height) return null;
+    handle.layoutSlide(current.slideIndex);
+    const hit = handle.hitTest(point.x, point.y);
+    const slide = current.snapshot.slides[current.slideIndex];
+    return hit && slide ? { ...hit, slide: current.slideIndex + 1, slideId: slide.id } : null;
   };
 
   const slidePointFromClient = (clientX: number, clientY: number): SlidePoint | null => {
@@ -1987,7 +2046,15 @@ function PptxEditorContent({
     : null;
 
   return (
-    <div className={className} style={styles.root}>
+    <div className={className} style={styles.root}
+      onKeyDownCapture={(event) => {
+        if (!event.defaultPrevented && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!event.repeat) void save();
+        }
+      }}
+    >
       <div style={styles.toolbarShell}>
         {!readOnly && (
         <EditorToolbar
@@ -2077,7 +2144,12 @@ function PptxEditorContent({
           onChange={(event) => {
             const file = event.currentTarget.files?.[0];
             event.currentTarget.value = '';
-            if (file) void insertPicture(file);
+            if (file) {
+              const pending = pendingInputRef.current;
+              const operation = insertPicture(file);
+              pending.add(operation);
+              void operation.catch(() => {}).finally(() => pending.delete(operation));
+            }
           }}
         />
         <button

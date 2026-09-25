@@ -33,13 +33,21 @@
 
 - **Undo and redo.** Navigate editing history and undo accepted agent
   proposals as a single step.
+  DOCX hosts can place explicit undo boundaries and choose automatic typing
+  coalescence or manual grouping across multiple edits.
 
 - **Embed or automate.** Drop React editors into your app, build on the
   framework-free JavaScript cores, or use Rust and Python APIs for headless
   processing and agent workflows.
 
+- **Host-controlled PPTX editing.** PPTX hosts can intercept saving, flush accepted input, query slide content
+  under the pointer, group undo with explicit boundaries, and reposition comments.
+
 - **Open source and self-hostable.** Apache-2.0 licensed, with control over
   your document storage, deployment, and collaboration infrastructure.
+
+- **Host-controlled DOCX saving.** Intercept Save before export and await pending
+  editor input before reading, changing, or persisting the document.
 
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
@@ -132,6 +140,7 @@ For scoring, timing, coverage, and limitations, see the [benchmark methodology](
 - `crates/` — the Rust engines
 - `packages/` — the TypeScript editor packages
 - `bindings/` — the Python bindings
+- `e2e/` — browser tests, corpus scenarios, and the shared test harness
 - `apps/web` — [betteroffice.dev](https://betteroffice.dev) (Next.js on Cloudflare Workers)
 - `apps/demo` — editor playground
 - `apps/docs` — documentation
@@ -145,6 +154,11 @@ bun run dev          # betteroffice.dev site (no wasm needed)
 bun run dev:docs     # documentation site
 bun run rust:check   # fmt + clippy + tests for the engines
 ```
+
+Run `bun run test:e2e:browser` for headless browser tests of all three editors.
+The [E2E guide](e2e/README.md) also covers pinned corpus scenarios,
+cross-SDK checks, and operation profiles. The XLSX and PPTX JavaScript cores expose
+opt-in operation timings; the native XLSX facade also reports edit stage timings.
 
 Use the [Office visual quality harness](scripts/office-quality/README.md) to export Word, PowerPoint, and Excel references, compare local renders, or refresh the fidelity scores with the manual action.
 

@@ -105,7 +105,7 @@ pub use read_state::{RevisionInfo, SelectionContextInfo, TriState};
 pub use search::{TextSearchError, TextSearchMatch};
 pub use seed::seed_from_docx;
 use segments::SegmentIndex;
-pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoSession};
+pub use undo::{DocUndoManager, UNDO_CAPTURE_TIMEOUT_MS, UNDO_DEPTH, UndoCaptureMode, UndoSession};
 
 #[cfg(feature = "wasm")]
 pub mod wasm;

@@ -260,6 +260,36 @@ export interface HistoryResult {
   snapshot: DeckSnapshot;
 }
 
+/** Renderer stage latencies of one profiled slide layout, in ms. */
+export interface LayoutProfile {
+  scopeMs: number;
+  layoutMs: number;
+  serializeMs: number;
+}
+
+export interface ProfiledLayout {
+  layout: SlideDisplayList;
+  profile: LayoutProfile;
+}
+
+/** Boundary stage latencies of one profiled edit, in ms. */
+export interface EditProfile {
+  parseMs: number;
+  applyMs: number;
+  serializeMs: number;
+}
+
+export interface HistoryProfile {
+  undoMs: number;
+  snapshotMs: number;
+  serializeMs: number;
+}
+
+export interface Profiled<T, P = EditProfile> {
+  receipt: T;
+  profile: P;
+}
+
 export interface PptxFontFace {
   family: string;
   bold?: boolean;
