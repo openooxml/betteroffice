@@ -2887,6 +2887,7 @@ fn chart_text_primitive(
             cluster = Some(glyph.cluster);
             started = true;
         }
+        let piece_x = offsets.first().copied().unwrap_or(piece_x);
         shaped_pieces.push((*start, end, piece_face, shaped, offsets, piece_x, cursor));
     }
     let advance = cursor;
@@ -5959,7 +5960,7 @@ mod tests {
                     size_px: 14.0,
                     family: "Arial".to_owned(),
                     italic: false,
-                    letter_spacing_px: 0.0,
+                    letter_spacing_px: 2.0,
                 },
                 color: "#000000",
                 align: PlotTextAlign::Start,
@@ -5970,6 +5971,9 @@ mod tests {
         let Primitive::TextBox { lines, .. } = primitive else {
             panic!("a text box");
         };
+        for run in &lines[0].runs {
+            assert_eq!(run.x, run.glyphs[0].x, "a run starts at its first glyph");
+        }
         let runs: Vec<(&str, &str)> = lines[0]
             .runs
             .iter()
@@ -5985,7 +5989,10 @@ mod tests {
                 ),
             ]
         );
-        assert!((lines[0].runs[1].x - (lines[0].runs[0].x + lines[0].runs[0].width)).abs() < 0.01);
+        assert!(
+            (lines[0].runs[1].x - (lines[0].runs[0].x + lines[0].runs[0].width + 2.0)).abs() < 0.01,
+            "the tracked gap sits between the pieces"
+        );
     }
 
     fn renderer() -> SlideRenderer {
