@@ -2256,6 +2256,8 @@ struct ResolvedParagraph {
     default_tab_px: f32,
     marker: Option<String>,
     bullet_style: Option<ResolvedStyle>,
+    /// `a:pPr/@rtl`: margins, indent, bullet and run order mirror.
+    rtl: bool,
     runs: Vec<ResolvedRun>,
 }
 
@@ -2388,6 +2390,7 @@ fn resolve_content(
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
                 .transpose()?,
             marker,
+            rtl: properties.rtl.unwrap_or(false),
             runs,
         });
         story_offset = story_offset.saturating_add(1);
@@ -2932,6 +2935,7 @@ fn text_layout_key(
             default_tab_px,
             marker,
             bullet_style,
+            rtl,
             runs,
         } = paragraph;
         key.push(match align {
@@ -2954,6 +2958,7 @@ fn text_layout_key(
             key_f32(&mut key, *stop);
         }
         key_f32(&mut key, *default_tab_px);
+        key.push(u8::from(*rtl));
         key_opt_str(&mut key, marker);
         match bullet_style {
             Some(style) => {
@@ -3074,7 +3079,12 @@ fn layout_content(
             y += spacing_px(paragraph.space_before, paragraph, scale);
         }
         previous = Some(paragraph);
-        let paragraph_x = rect.x + paragraph.margin_left_px.max(0.0);
+        let start_margin = if paragraph.rtl {
+            paragraph.margin_right_px
+        } else {
+            paragraph.margin_left_px
+        };
+        let paragraph_x = rect.x + start_margin.max(0.0);
         let paragraph_width =
             (rect.w - paragraph.margin_left_px.max(0.0) - paragraph.margin_right_px.max(0.0))
                 .max(1.0);
@@ -3299,7 +3309,7 @@ fn layout_paragraph(
         } else {
             0.0
         };
-        let line_start = x + indent;
+        let line_start = if paragraph.rtl { x } else { x + indent };
         let line_room = width - indent;
         let line_x = match paragraph.align {
             TextAlign::Center => line_start + ((line_room - natural_width) / 2.0).max(0.0),
@@ -3326,7 +3336,10 @@ fn layout_paragraph(
         caret_stops.dedup_by(|left, right| {
             left.position == right.position && left.x.to_bits() == right.x.to_bits()
         });
-        let runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        let mut runs = positioned_runs(slice, &advances, line_x, line_y + line_box.ascent, scale);
+        if paragraph.rtl {
+            mirror_line(&mut runs, &mut caret_stops, line_x, line_width);
+        }
         output.push(PositionedTextLine {
             x: line_x,
             y: line_y,
@@ -3343,15 +3356,37 @@ fn layout_paragraph(
         });
         line_y += line_box.height();
     }
-    prepend_bullet(fonts, paragraph, x, &mut output, scale)?;
+    prepend_bullet(fonts, paragraph, (x, width), &mut output, scale)?;
     Ok(output)
+}
+
+/// Lays a right-to-left line's runs out from its right edge: each run keeps
+/// its own glyph order, which the backends draw as one string, and moves to
+/// the mirrored place in the line, as do the caret stops.
+fn mirror_line(
+    runs: &mut [PositionedTextRun],
+    caret_stops: &mut [CaretStop],
+    line_x: f32,
+    line_width: f32,
+) {
+    let mirror = 2.0 * line_x + line_width;
+    for run in runs {
+        let shift = mirror - run.width - 2.0 * run.x;
+        run.x += shift;
+        for glyph in &mut run.glyphs {
+            glyph.x += shift;
+        }
+    }
+    for stop in caret_stops {
+        stop.x = mirror - stop.x;
+    }
 }
 
 /// Prepends a marker outside the story's character space.
 fn prepend_bullet(
     fonts: &FontStore,
     paragraph: &ResolvedParagraph,
-    x: f32,
+    (x, width): (f32, f32),
     lines: &mut [PositionedTextLine],
     scale: f32,
 ) -> Result<(), RenderError> {
@@ -3380,6 +3415,7 @@ fn prepend_bullet(
         default_tab_px: resolve_default_tab(None),
         marker: None,
         bullet_style: None,
+        rtl: false,
         runs: vec![ResolvedRun {
             text: value.clone(),
             start: paragraph.runs[0].start,
@@ -3394,6 +3430,15 @@ fn prepend_bullet(
         .iter()
         .map(|cluster| cluster.width)
         .collect::<Vec<_>>();
+    // A right-to-left marker hangs off the right edge the way a left-to-right
+    // one hangs off the left.
+    let bullet_x = if paragraph.rtl {
+        let right =
+            (x + width - paragraph.indent_px).min(x + width + paragraph.margin_left_px.max(0.0));
+        right - advances.iter().sum::<f32>()
+    } else {
+        bullet_x
+    };
     let mut runs = positioned_runs(&clusters, &advances, bullet_x, first.baseline, scale);
     for run in &mut runs {
         run.start = paragraph.runs[0].start;
@@ -4472,6 +4517,9 @@ fn merge_paragraph_properties(target: &mut ParagraphProperties, source: &Paragra
     }
     if source.tab_stops.is_some() {
         target.tab_stops.clone_from(&source.tab_stops);
+    }
+    if source.rtl.is_some() {
+        target.rtl = source.rtl;
     }
     if let Some(source) = &source.default_run {
         let target = target
@@ -6039,6 +6087,7 @@ mod tests {
             default_tab_px: resolve_default_tab(None),
             marker: None,
             bullet_style: None,
+            rtl: false,
             runs: vec![ResolvedRun {
                 text: text.to_owned(),
                 start: 0,
@@ -6315,6 +6364,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: [style.clone(), changed.clone(), style.clone()]
                     .into_iter()
                     .enumerate()
@@ -6394,6 +6444,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: parts
                     .iter()
                     .map(|text| {
@@ -6468,6 +6519,7 @@ mod tests {
                 default_tab_px: resolve_default_tab(None),
                 marker: None,
                 bullet_style: None,
+                rtl: false,
                 runs: vec![ResolvedRun {
                     text: text.to_owned(),
                     start: 0,

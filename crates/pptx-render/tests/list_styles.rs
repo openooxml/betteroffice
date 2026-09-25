@@ -130,6 +130,58 @@ fn a_default_text_style_given_only_as_def_ppr_reaches_text_outside_placeholders(
     assert_eq!(lines(&list, 4)[0].runs.last().unwrap().font_size_px, 36.0);
 }
 
+#[test]
+fn a_right_to_left_paragraph_hangs_its_marker_off_the_right_edge() {
+    let session = DeckSession::open(DECK, 2945).unwrap();
+    let renderer = renderer();
+    let snapshot = session.snapshot().unwrap();
+    let ltr = renderer
+        .layout_slide(session.package(), &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let mut package = session.package().clone();
+    for shape in &mut package.slides[0].shapes {
+        if let ShapeNode::Shape(shape) = shape
+            && let Some(body) = &mut shape.text
+        {
+            for paragraph in &mut body.paragraphs {
+                paragraph.properties.rtl = Some(true);
+            }
+        }
+    }
+    let rtl = renderer
+        .layout_slide(&package, &snapshot, 0)
+        .unwrap()
+        .display_list;
+    let marker = |line: &PositionedTextLine| {
+        let run = line.runs.iter().find(|run| run.text == "•").unwrap();
+        (run.x, run.x + run.width)
+    };
+    let text = |line: &PositionedTextLine| {
+        line.runs
+            .iter()
+            .filter(|run| run.text != "•")
+            .fold((f32::MAX, f32::MIN), |(left, right), run| {
+                (left.min(run.x), right.max(run.x + run.width))
+            })
+    };
+    let (ltr, rtl) = (&lines(&ltr, 3)[0], &lines(&rtl, 3)[0]);
+    assert!(
+        marker(ltr).1 <= text(ltr).0,
+        "left to right, the marker leads on the left"
+    );
+    assert!(
+        marker(rtl).0 >= text(rtl).1,
+        "right to left, it leads on the right"
+    );
+    // The body is 600 px wide with no insets, and its markers hang to the edge.
+    assert!((marker(rtl).1 - (marker(ltr).0 + 600.0)).abs() < 0.01);
+    assert!(
+        text(rtl).0 < text(ltr).0,
+        "the left margin no longer holds the text"
+    );
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style
