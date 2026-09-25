@@ -2827,8 +2827,10 @@ fn named_cluster_width(style: &ResolvedStyle, text: &str, size_px: f32) -> Optio
     Some(total * size_px)
 }
 
-/// Optional ligatures are off once glyphs are tracked apart.
-fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
+/// Optional ligatures are off once glyphs are tracked apart or advanced by the
+/// named family's widths: either way every character needs its own cluster, or
+/// the browser draws the substitute's narrower ligature into a wider slot.
+fn ligature_features(separate: bool) -> &'static [ShapeFeature] {
     const OFF: [ShapeFeature; 2] = [
         ShapeFeature {
             tag: *b"liga",
@@ -2839,7 +2841,7 @@ fn tracking_features(tracking: f32) -> &'static [ShapeFeature] {
             value: 0,
         },
     ];
-    if tracking == 0.0 { &[] } else { &OFF }
+    if separate { &OFF } else { &[] }
 }
 
 /// One shaped line of chart text, in the family, weight, slant and pixel size
@@ -2880,7 +2882,7 @@ fn chart_text_primitive(
             piece_face.id,
             &text.text[*start..end],
             size_px,
-            tracking_features(tracking),
+            ligature_features(tracking != 0.0 || piece_face.widths.is_some()),
         )
         .map_err(|error| RenderError::Font(error.to_string()))?;
         let piece_x = cursor;
@@ -3860,7 +3862,7 @@ fn add_shaped_segment(
         run.style.face.id,
         text,
         size_px,
-        tracking_features(tracking),
+        ligature_features(tracking != 0.0 || run.style.face.widths.is_some()),
     )
     .map_err(|error| RenderError::Font(error.to_string()))?;
     let mut starts = shaped
@@ -10037,6 +10039,28 @@ mod tests {
         let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
         assert!((line.ascent - 939.0).abs() < 1e-3);
         assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_run_on_the_named_family_widths_keeps_one_cluster_per_character() {
+        const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Trebuchet MS", false, false, CARLITO)
+            .unwrap();
+        let face = renderer.resolve_face("Trebuchet MS", false, false).unwrap();
+        let text = "Transmigration";
+        let ligated = shape(&renderer.fonts, face.id, text, 20.0, &[]).unwrap();
+        assert!(ligated.len() < text.len(), "Carlito ligates ti");
+        let shaped = shape(
+            &renderer.fonts,
+            face.id,
+            text,
+            20.0,
+            ligature_features(face.widths.is_some()),
+        )
+        .unwrap();
+        assert_eq!(shaped.len(), text.len());
     }
 
     #[test]
