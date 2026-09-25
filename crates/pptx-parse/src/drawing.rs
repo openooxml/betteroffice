@@ -101,7 +101,7 @@ pub(crate) fn parse_text_styles(root: &XmlElement) -> TextStyleSet {
     }
 }
 
-fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> {
+pub(crate) fn parse_style_levels(element: Option<&XmlElement>) -> Vec<ParagraphProperties> {
     let Some(element) = element else {
         return Vec::new();
     };
@@ -1313,7 +1313,7 @@ fn parse_text_paragraph(
     })
 }
 
-fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
+pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
     let Some(element) = element else {
         return ParagraphProperties::default();
     };

@@ -4082,28 +4082,17 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         let (leading, trailing) = literals(section);
         return Some(leading + &trailing);
     }
-    let digits = section
-        .split('.')
-        .nth(1)
-        .map(|tail| {
-            tail.chars()
-                .take_while(|c| matches!(c, '0' | '#' | '?'))
-                .count()
-                .min(9)
-        })
-        .unwrap_or(0);
+    let pattern = placeholders(section);
+    let (whole_pattern, fraction_pattern) = match pattern.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (pattern.as_str(), None),
+    };
+    let digits = fraction_pattern.map_or(0, |fraction| fraction.len().min(9));
     let percent = section.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
     let factor = 10_f64.powi(digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
-    // `#` and `?` are placeholders a digit fills only where it is significant,
-    // so a zero with neither a `0` nor a decimal writes no figure at all —
-    // which is how an accounting format draws its dash and nothing else.
-    let mut body = if rounded == 0.0 && digits == 0 && !section.contains('0') {
-        String::new()
-    } else {
-        format!("{rounded:.digits$}")
-    };
+    let mut body = placeholder_digits(rounded, whole_pattern, fraction_pattern, digits);
     if section.contains(',') {
         body = group_thousands(&body);
     }
@@ -4245,16 +4234,74 @@ fn literals(code: &str) -> (String, String) {
     (leading, trailing)
 }
 
+/// A section's digit placeholders and decimal point, its literal text skipped.
+fn placeholders(code: &str) -> String {
+    let mut pattern = String::new();
+    let mut chars = code.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => chars.by_ref().take_while(|c| *c != '"').for_each(drop),
+            '\\' | '_' | '*' => {
+                chars.next();
+            }
+            '0' | '#' | '?' => pattern.push(character),
+            '.' if !pattern.contains('.') => pattern.push('.'),
+            _ => {}
+        }
+    }
+    pattern
+}
+
+/// `rounded` written through its placeholders: `0` always writes a digit, while
+/// `#` and `?` write one only where it is significant (a trailing `?` keeps its
+/// place as a space), so `#.##` shows 1.5 as `1.5` and zero as `.`, and an
+/// accounting zero section writes no figure.
+fn placeholder_digits(
+    rounded: f64,
+    whole_pattern: &str,
+    fraction_pattern: Option<&str>,
+    digits: usize,
+) -> String {
+    let fixed = format!("{rounded:.digits$}");
+    let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
+    let least = whole_pattern.matches('0').count();
+    let mut out = if whole == "0" && least == 0 {
+        String::new()
+    } else {
+        format!("{whole:0>least$}")
+    };
+    if let Some(places) = fraction_pattern {
+        let places = places.as_bytes();
+        let mut kept = fraction.as_bytes().to_vec();
+        let mut end = kept.len();
+        while end > 0 && kept[end - 1] == b'0' && places.get(end - 1).is_some_and(|p| *p != b'0') {
+            if places[end - 1] == b'?' {
+                kept[end - 1] = b' ';
+            } else {
+                kept.remove(end - 1);
+            }
+            end -= 1;
+        }
+        out.push('.');
+        out.extend(kept.into_iter().map(char::from));
+    }
+    out
+}
+
 fn group_thousands(body: &str) -> String {
-    let (whole, rest) = body.split_once('.').unwrap_or((body, ""));
-    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3 + rest.len() + 1);
+    let (whole, rest) = match body.split_once('.') {
+        Some((whole, rest)) => (whole, Some(rest)),
+        None => (body, None),
+    };
+    let mut grouped =
+        String::with_capacity(whole.len() + whole.len() / 3 + rest.map_or(0, str::len) + 1);
     for (index, digit) in whole.chars().enumerate() {
         if index > 0 && (whole.len() - index) % 3 == 0 {
             grouped.push(',');
         }
         grouped.push(digit);
     }
-    if !rest.is_empty() {
+    if let Some(rest) = rest {
         grouped.push('.');
         grouped.push_str(rest);
     }
@@ -6515,8 +6562,24 @@ mod tests {
         let ledger = "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"??_);_(@_)";
         assert_eq!(format_with_code(800.0, ledger).as_deref(), Some("$800"));
         assert_eq!(format_with_code(0.0, ledger).as_deref(), Some("$-"));
+        for (value, code, want) in [
+            (0.0, "#.##", "."),
+            (1.5, "#.##", "1.5"),
+            (0.5, "#.##", ".5"),
+            (1.0, "0.0#", "1.0"),
+            (1.25, "0.0#", "1.25"),
+            (0.0, "#,##0.00", "0.00"),
+            (1234.5, "#,##0.##", "1,234.5"),
+            (7.0, "\"No.\" 0", "No. 7"),
+        ] {
+            assert_eq!(
+                format_with_code(value, code).as_deref(),
+                Some(want),
+                "{value} {code}"
+            );
+        }
         assert_eq!(format_with_code(1.25, "?.??").as_deref(), Some("1.25"));
-        assert_eq!(format_with_code(0.5, "0.0?").as_deref(), Some("0.50"));
+        assert_eq!(format_with_code(0.5, "0.0?").as_deref(), Some("0.5 "));
         assert_eq!(format_with_code(-40.0, ledger).as_deref(), Some("$(40)"));
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
         assert_eq!(format_percent(0.5), "50%");
