@@ -990,7 +990,9 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
   let x = run.x;
-  let expectedX = run.glyphs[0].x;
+  // The pen starts at the run's own x, so a leading tab, which paints no glyph,
+  // splits the run where the text after it lands.
+  let expectedX = run.x;
   for (const glyph of run.glyphs) {
     const offset = glyph.cluster - run.start;
     if (
