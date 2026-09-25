@@ -9,6 +9,15 @@ import type { InitInput } from './generated/pptx_wasm.js';
 import { StaleProposalError } from '../proposals';
 import type { Proposal, ProposalAcceptance, ProposalDiffSlide, ProposalEdit, ProposalPreview } from '../proposals';
 import type {
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFindRequest,
+  PptxFindResult,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxValidationResult,
+} from '../edits';
+import type {
   CollaborationReplica,
   CollaborationUpdateOrigin,
 } from '../collaboration/types';
@@ -73,6 +82,22 @@ export interface PresentationHandle extends CollaborationReplica {
   readonly clientId: number;
   snapshot(): DeckSnapshot;
   story(storyId: string): StorySnapshot;
+  /**
+   * The session-scoped version token. It changes with every committed change, local or remote,
+   * undo and redo included; compare tokens only within this session.
+   */
+  version(): string;
+  /** Slides and their stories' text, with the version they were read at. */
+  readContent(request?: PptxReadRequest): PptxReadResult;
+  /** Exact, case-sensitive, paragraph-local search; overlapping matches count separately. */
+  findText(request: PptxFindRequest): PptxFindResult;
+  /** Runs every check of `applyEdits`, staging included, without changing anything. */
+  validateEdits(request: PptxEditRequest): PptxValidationResult;
+  /**
+   * Applies every step or none against `expectVersion`, as one transaction, one update and, for
+   * `history: 'separate'`, one undo step. Policy failures are returned; malformed requests throw.
+   */
+  applyEdits(request: PptxEditRequest): PptxEditResult;
   /** Literal search in slide order. */
   searchText(query: string, options?: PptxTextSearchOptions): PptxTextMatch[];
   registerFont(face: PptxFontFace): number;
@@ -380,6 +405,25 @@ export function openPresentation(
     },
     story(storyId: string): StorySnapshot {
       return jsonWasmCall(() => doc.storyJson(JSON.stringify({ storyId })));
+    },
+    version(): string {
+      return wasmCall(() => doc.documentVersion());
+    },
+    readContent(request = {}) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.readContentJson(json));
+    },
+    findText(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.findTextJson(json));
+    },
+    validateEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.validateEditsJson(json));
+    },
+    applyEdits(request) {
+      const json = requestJson(request);
+      return jsonWasmCall(() => doc.applyEditsJson(json), true);
     },
     searchText(query, options = {}) {
       if (!query) return [];
@@ -713,6 +757,16 @@ export function openPresentation(
     },
   };
   return handle;
+}
+
+/** JSON for a host request; `JSON.stringify` would turn NaN and infinities into `null`. */
+function requestJson(request: unknown): string {
+  return JSON.stringify(request, (_key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new RangeError('host requests must not contain NaN or infinite numbers');
+    }
+    return value;
+  });
 }
 
 function registerFont(renderer: PptxRenderer, face: PptxFontFace): number {

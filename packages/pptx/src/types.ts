@@ -72,19 +72,41 @@ export interface ColorValue {
   themeTint?: string;
   themeShade?: string;
   auto?: boolean;
+  luminanceModulation?: number;
+  luminanceOffset?: number;
+  saturationModulation?: number;
+  alpha?: number;
 }
 
+export interface ShapeGradient {
+  type: string;
+  angle?: number;
+  stops: Array<{ position: number; color: ColorValue }>;
+}
+
+/** An authored fill as the deck stores it. */
 export interface ShapeFill {
   type: string;
   color?: ColorValue;
+  gradient?: ShapeGradient;
 }
 
+export interface ShapeLineEnd {
+  type: string;
+  width: string | null;
+  length: string | null;
+}
+
+/** An authored outline as the deck stores it; `width` is EMU. */
 export interface ShapeOutline {
   width?: number;
   color?: ColorValue;
+  gradient?: ShapeGradient;
   style?: string;
   cap?: string;
   join?: string;
+  headEnd?: ShapeLineEnd;
+  tailEnd?: ShapeLineEnd;
 }
 
 export type BlipEffect =
