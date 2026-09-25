@@ -1066,8 +1066,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         CHART_PAD
     };
-    let region_x = x + reserve_left;
-    let region_w = width - reserve_left - reserve_right;
+    let region_x = x + reserve_left.min(width);
+    let region_w = (width - reserve_left - reserve_right).max(0.0);
     let region_y = y + top + band_top;
     let region_h = height - top - legend_h;
     let plot = match chart.plot_layout {
@@ -1959,19 +1959,27 @@ fn legend_band<S: PlotSink + ?Sized>(
     })
 }
 
-/// Whether the chart stacks columns or areas upward, series on series.
-fn stacks_upward(chart: &PlotChart<'_>) -> bool {
-    chart.plot_groups.iter().any(|group| {
-        matches!(
+/// PowerPoint lists a vertical stack top down, so a stacked column or area
+/// group's entries read in the order its series pile up; other groups keep
+/// theirs.
+fn reverse_stacked_rows(chart: &PlotChart<'_>, rows: &mut [LegendRow]) {
+    let mut start = 0;
+    for group in &chart.plot_groups {
+        let end = (start + group.series.len()).min(rows.len());
+        if matches!(
             group.chart_type.unwrap_or(chart.chart_type),
             "column" | "area"
         ) && matches!(group.grouping, Some("stacked" | "percentStacked"))
-    })
+        {
+            rows[start..end].reverse();
+        }
+        start = end;
+    }
 }
 
-/// A `left`, `right` or `topRight` legend: one entry per row, as wide as its longest label
-/// up to a third of the chart, held against that edge and centred on the space
-/// below the title.
+/// A `left`, `right` or `topRight` legend: one entry per row, as wide as its
+/// longest label up to a third of the chart, held against that edge and centred
+/// on the space below the title.
 fn side_legend_band<S: PlotSink + ?Sized>(
     chart: &PlotChart<'_>,
     position: &str,
@@ -2002,22 +2010,26 @@ fn side_legend_band<S: PlotSink + ?Sized>(
             height,
         });
     }
-    // PowerPoint lists a vertical stack top down, so its legend reads in the
-    // order the series pile up.
-    if stacks_upward(chart) {
-        rows.reverse();
-    }
+    reverse_stacked_rows(chart, &mut rows);
+    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
+        rect.y + title_h
+    } else {
+        rect.y
+    };
+    // Entries that would run past the chart's foot are left out, as PowerPoint
+    // leaves them.
+    let room = (rect.y + rect.h - top).max(0.0);
+    let mut used = 0.0;
+    rows.retain(|row| {
+        used += row.height;
+        used <= room
+    });
     let w = rows
         .iter()
         .map(|row| row.width)
         .fold(0.0, f64::max)
         .min(limit);
     let h = rows.iter().map(|row| row.height).sum::<f64>();
-    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
-        rect.y + title_h
-    } else {
-        rect.y
-    };
     LegendBand {
         x: if position == "left" {
             rect.x + LEGEND_EDGE
@@ -7422,6 +7434,89 @@ mod tests {
         };
         assert_eq!(order(None), ["North", "South"]);
         assert_eq!(order(Some("stacked")), ["South", "North"]);
+    }
+
+    #[test]
+    fn a_side_legend_leaves_out_rows_the_chart_cannot_hold() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["A", "B", "C", "D", "E", "F", "G", "H"];
+        let mut chart = legend_chart(Some("right"), &names, &data);
+        chart.title = None;
+        chart.text.legend.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 180.0,
+        };
+        let key = 24.0 * LEGEND_KEY_EM;
+        let keys: Vec<(f64, f64)> = rects(&plot_chart(&chart, frame))
+            .into_iter()
+            .filter(|(_, _, w, h)| (w - key).abs() < 0.01 && (h - key).abs() < 0.01)
+            .map(|(x, y, _, _)| (x, y))
+            .collect();
+        assert!(!keys.is_empty() && keys.len() < names.len(), "{keys:?}");
+        assert!(
+            keys.iter()
+                .all(|(_, y)| *y >= frame.y && y + key <= frame.y + frame.h)
+        );
+    }
+
+    #[test]
+    fn a_pie_beside_a_legend_wider_than_its_chart_stays_in_the_frame() {
+        let data = source(&[3.0, 1.0]);
+        let mut chart = grouped("pie", group("pie", vec![series("Share", &data)]));
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: Some("right"),
+            visible: Some(true),
+        });
+        let frame = PlotRect {
+            x: 50.0,
+            y: 0.0,
+            w: 12.0,
+            h: 200.0,
+        };
+        for op in plot_chart(&chart, frame) {
+            if let PlotOp::Path { x, w, .. } = op {
+                assert!(x + w / 2.0 >= frame.x, "the pie centre left its frame: {x}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_combo_legend_reverses_only_its_stacked_group() {
+        let data = source(&[10.0, 20.0]);
+        let mut columns = group(
+            "column",
+            vec![series("North", &data), series("South", &data)],
+        );
+        columns.grouping = Some("stacked");
+        let line = group("line", vec![series("East", &data), series("West", &data)]);
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![columns, line],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: Some("right"),
+                visible: Some(true),
+            }),
+            ..PlotChart::default()
+        };
+        let mut names: Vec<(f64, String)> = plot_chart(&chart, rect())
+            .into_iter()
+            .filter_map(|op| match op {
+                PlotOp::Text {
+                    text, baseline_y, ..
+                } if ["North", "South", "East", "West"].contains(&text.as_str()) => {
+                    Some((baseline_y, text))
+                }
+                _ => None,
+            })
+            .collect();
+        names.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let order: Vec<String> = names.into_iter().map(|(_, name)| name).collect();
+        assert_eq!(order, ["South", "North", "East", "West"]);
     }
 
     #[test]
