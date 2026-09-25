@@ -81,13 +81,16 @@ const LEGEND_BASELINE_EM: f64 = 0.24;
 const LEGEND_PLOT_GAP_EM: f64 = 1.0;
 /// The chart area's inner margin, plus the legend's own inset inside it.
 const LEGEND_EDGE: f64 = 13.0;
-/// Height one row of a `top` or `bottom` legend takes out of the plot.
-const LEGEND_ROW_H: f64 = 22.0;
-/// Gap between the entries of a legend row.
-const LEGEND_ROW_GAP: f64 = 14.0;
-/// Swatch edge, and the gap between a swatch and its label.
-const LEGEND_SWATCH: f64 = 8.0;
-const LEGEND_SWATCH_GAP: f64 = 4.0;
+/// A top or bottom legend's row height and the gap between its entries, in
+/// ems of the legend text.
+const LEGEND_ROW_EM: f64 = 1.4;
+const LEGEND_ENTRY_GAP_EM: f64 = 0.65;
+/// The space a title or a top or bottom legend keeps from the plot's labels.
+const BAND_GAP: f64 = 12.0;
+/// A title's line height and the depth of its baseline below the line's top,
+/// in ems.
+const TITLE_LINE_EM: f64 = 1.22;
+const TITLE_ASCENT_EM: f64 = 0.95;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PlotFont {
@@ -965,22 +968,24 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     }
 
     let title_h = if let Some(title) = chart.title.filter(|s| !s.is_empty()) {
+        let style = chart
+            .text
+            .title
+            .over(chart_text)
+            .resolve(CHART_TITLE_SIZE_PX, 600);
+        let size = style.font.size_px;
         push_text_aligned(
             ops,
             title,
-            x + 8.0,
-            y + 18.0,
-            (width - 16.0).max(0.0),
-            &chart
-                .text
-                .title
-                .over(chart_text)
-                .resolve(CHART_TITLE_SIZE_PX, 600),
+            x + CHART_PAD,
+            y + CHART_PAD + TITLE_ASCENT_EM * size,
+            (width - 2.0 * CHART_PAD).max(0.0),
+            &style,
             PlotTextAlign::Center,
         );
-        28.0
+        CHART_PAD + TITLE_LINE_EM * size + BAND_GAP
     } else {
-        10.0
+        CHART_PAD
     };
 
     let legend_position = chart
@@ -1051,8 +1056,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         } else {
             0.0
         };
-    let band_top = if legend_position == "top" {
-        legend_h
+    let band_top = if legend_position == "top" && legend_h > 0.0 {
+        legend_h + BAND_GAP
     } else {
         0.0
     };
@@ -1061,11 +1066,7 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         CHART_PAD + bands.right
     };
-    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
-        title_h
-    } else {
-        CHART_PAD
-    };
+    let top = title_h;
     let region_x = x + reserve_left.min(width);
     let region_w = (width - reserve_left - reserve_right).max(0.0);
     let region_y = y + top + band_top;
@@ -1082,8 +1083,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         },
         None => {
             let plot_y = region_y + axis_header + bands.top;
-            let bottom = if legend_position == "bottom" {
-                legend_h
+            let bottom = if legend_position == "bottom" && legend_h > 0.0 {
+                legend_h + BAND_GAP
             } else {
                 0.0
             };
@@ -1938,17 +1939,13 @@ fn legend_band<S: PlotSink + ?Sized>(
     if !horizontal {
         return Some(side_legend_band(chart, position, rect, title_h, style, ops));
     }
-    let w = (width - 16.0).max(0.0);
+    let w = (width - 2.0 * CHART_PAD).max(0.0);
     let rows = legend_rows(chart, w, style, ops);
-    let h = rows
-        .iter()
-        .map(|row| row.height)
-        .sum::<f64>()
-        .max(LEGEND_ROW_H);
+    let h = rows.iter().map(|row| row.height).sum::<f64>();
     Some(LegendBand {
-        x: x + 8.0,
+        x: x + CHART_PAD,
         y: if position == "bottom" {
-            y + height - h
+            y + height - CHART_PAD - h
         } else {
             y + title_h
         },
@@ -2054,12 +2051,13 @@ fn legend_rows<S: PlotSink + ?Sized>(
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
 ) -> Vec<LegendRow> {
-    let lead = LEGEND_SWATCH + LEGEND_SWATCH_GAP;
+    let size = style.font.size_px;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let gap = size * LEGEND_ENTRY_GAP_EM;
     if width <= lead {
         return Vec::new();
     }
     let mut rows = vec![LegendRow::default()];
-    let line_height = legend_line_height(style);
     for (label, color) in legend_entries(chart, &mut ScanBudget::new()) {
         let lines = wrap_legend_label(&label, width - lead, style, ops);
         let entry_width = lead
@@ -2068,15 +2066,17 @@ fn legend_rows<S: PlotSink + ?Sized>(
                 .map(|line| text_width(line, style, ops))
                 .fold(0.0, f64::max);
         let row = rows.last().unwrap();
-        if !row.entries.is_empty() && row.width + LEGEND_ROW_GAP + entry_width > width {
+        if !row.entries.is_empty() && row.width + gap + entry_width > width {
             rows.push(LegendRow::default());
         }
         let row = rows.last_mut().unwrap();
         if !row.entries.is_empty() {
-            row.width += LEGEND_ROW_GAP;
+            row.width += gap;
         }
         row.width += entry_width;
-        row.height = row.height.max(line_height * lines.len() as f64);
+        row.height = row
+            .height
+            .max(size * (LEGEND_ROW_EM + TITLE_LINE_EM * (lines.len() - 1) as f64));
         row.entries.push(LegendEntry {
             lines,
             color,
@@ -2084,10 +2084,6 @@ fn legend_rows<S: PlotSink + ?Sized>(
         });
     }
     rows
-}
-
-fn legend_line_height(style: &ResolvedText) -> f64 {
-    LEGEND_ROW_H.max(style.font.size_px * 1.25 + 8.0)
 }
 
 /// A label's advance in `style`, measured by the sink where it can.
@@ -4393,29 +4389,29 @@ fn emit_legend_rows<S: PlotSink + ?Sized>(
     band: LegendBand,
     style: &ResolvedText,
 ) {
-    let lead = LEGEND_SWATCH + LEGEND_SWATCH_GAP;
-    let line_height = legend_line_height(style);
+    let size = style.font.size_px;
+    let key = size * LEGEND_KEY_EM;
+    let lead = size * (LEGEND_KEY_EM + LEGEND_KEY_GAP_EM);
+    let gap = size * LEGEND_ENTRY_GAP_EM;
+    let line = size * TITLE_LINE_EM;
     let mut y = band.y;
     for row in &band.rows {
         let mut x = band.x + ((band.w - row.width) / 2.0).max(0.0);
-        let swatch_y = y + (row.height - LEGEND_SWATCH) / 2.0;
+        let middle = y + row.height / 2.0;
         for entry in &row.entries {
-            push_rect(ops, x, swatch_y, LEGEND_SWATCH, LEGEND_SWATCH, &entry.color);
-            let top = y + (row.height - line_height * entry.lines.len() as f64) / 2.0;
-            for (index, line) in entry.lines.iter().enumerate() {
-                let baseline = top
-                    + index as f64 * line_height
-                    + (line_height + style.font.size_px * 0.72) / 2.0;
+            push_rect(ops, x, middle - key / 2.0, key, key, &entry.color);
+            let first = middle - line * (entry.lines.len() - 1) as f64 / 2.0;
+            for (index, text) in entry.lines.iter().enumerate() {
                 push_text(
                     ops,
-                    line,
+                    text,
                     x + lead,
-                    baseline,
-                    (entry.width - lead + LEGEND_ROW_GAP).max(1.0),
+                    first + size * LEGEND_BASELINE_EM + line * index as f64,
+                    (entry.width - lead).max(1.0),
                     style,
                 );
             }
-            x += entry.width + LEGEND_ROW_GAP;
+            x += entry.width + gap;
         }
         y += row.height;
     }
@@ -5457,13 +5453,12 @@ mod tests {
             .collect()
     }
 
-    /// Whether a rectangle is a legend swatch: a row legend's fixed square, or
-    /// a side legend's key at the default label size.
+    /// The edge of a legend swatch at the default label size.
+    const SWATCH: f64 = CHART_LABEL_SIZE_PX * LEGEND_KEY_EM;
+
+    /// Whether a rectangle is a legend swatch at the default label size.
     fn is_swatch(w: f64, h: f64) -> bool {
-        (w - h).abs() < 0.01
-            && [LEGEND_SWATCH, CHART_LABEL_SIZE_PX * LEGEND_KEY_EM]
-                .iter()
-                .any(|edge| (w - edge).abs() < 0.01)
+        (w - SWATCH).abs() < 0.01 && (h - SWATCH).abs() < 0.01
     }
 
     /// Every rectangle but the chart background and the legend swatches.
@@ -6876,6 +6871,32 @@ mod tests {
     }
 
     #[test]
+    fn a_title_takes_a_band_sized_by_its_font() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = grouped("column", group("column", vec![series("North", &data)]));
+        chart.title = Some("Regional Sales");
+        chart.text.title.size_pt = Some(20.0);
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: None,
+            visible: Some(false),
+        });
+        let ops = plot_chart(&chart, rect());
+        let size = 20.0 * 4.0 / 3.0;
+        let title = text_at(&ops, "Regional Sales");
+        assert!((title.2 - (CHART_PAD + TITLE_ASCENT_EM * size)).abs() < 1e-9);
+        let top_tick = tick_labels(&ops)
+            .into_iter()
+            .map(|tick| tick.2)
+            .fold(f64::MAX, f64::min);
+        let band = CHART_PAD + TITLE_LINE_EM * size + BAND_GAP;
+        assert!(
+            top_tick - 0.75 * CHART_LABEL_SIZE_PX >= band - 1.0,
+            "the top tick {top_tick} rises into the title band {band}"
+        );
+    }
+
+    #[test]
     fn axis_labels_keep_a_font_sized_gap_from_their_axis() {
         let data = source(&[10.0, 20.0]);
         let mut chart = grouped("column", group("column", vec![series("North", &data)]));
@@ -7659,8 +7680,8 @@ mod tests {
             "long entries wrap onto another row: {swatches:?}"
         );
         for (x, y) in swatches {
-            assert!(x >= rect().x && x + LEGEND_SWATCH <= rect().x + rect().w);
-            assert!(y >= rect().y && y + LEGEND_SWATCH <= rect().y + rect().h);
+            assert!(x >= rect().x && x + SWATCH <= rect().x + rect().w);
+            assert!(y >= rect().y && y + SWATCH <= rect().y + rect().h);
         }
     }
 
@@ -7708,7 +7729,9 @@ mod tests {
             let bottom = bounds(Some("bottom"));
             assert!(top.1 < original.1, "{kind}: {top:?} vs {original:?}");
             assert!((top.1 - bottom.1).abs() < 1e-9);
-            assert!((top.0 - bottom.0 - LEGEND_ROW_H).abs() < 1e-9);
+            assert!(
+                (top.0 - bottom.0 - (LEGEND_ROW_EM * CHART_LABEL_SIZE_PX + BAND_GAP)).abs() < 1e-9
+            );
         }
     }
 

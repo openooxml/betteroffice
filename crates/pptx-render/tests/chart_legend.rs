@@ -34,7 +34,7 @@ fn swatches(parts: &[Primitive]) -> Vec<(f32, f32, &str)> {
                 h,
                 fill: Some(Paint::Solid { color }),
                 ..
-            } if *w == 8.0 && *h == 8.0 => Some((*x, *y, color.as_str())),
+            } if (*w - *h).abs() < 0.001 && *w > 2.0 && *w < 20.0 => Some((*x, *y, color.as_str())),
             _ => None,
         })
         .collect()
@@ -66,19 +66,19 @@ fn text<'a>(parts: &'a [Primitive], value: &str) -> &'a PositionedTextLine {
 
 #[test]
 fn top_and_bottom_legends_reserve_their_own_rows() {
-    for (slide, y, plot_y) in [(0, 417.0, 128.6), (1, 131.0, 150.6)] {
+    for (slide, y, plot_y) in [(0, 412.85, 137.96), (1, 137.71, 163.96)] {
         let parts = chart(slide);
         let swatches = swatches(&parts);
         assert_eq!(swatches.len(), 2);
-        assert_eq!(swatches[0].1, y);
-        assert_eq!(swatches[1].1, y);
+        assert!((swatches[0].1 - y).abs() < 0.001, "{swatches:?}");
+        assert_eq!(swatches[1].1, swatches[0].1);
         assert!(swatches[0].0 < swatches[1].0);
         assert_eq!(swatches[0].2, "#6254E7");
         assert_eq!(swatches[1].2, "#1FA97A");
         let (x, top, h) = axis(&parts);
         assert!((x - 143.62305).abs() < 0.001, "{x}");
         assert!((top - plot_y).abs() < 0.001, "{top}");
-        assert!((h - 234.9).abs() < 0.001, "{h}");
+        assert!((h - 221.54).abs() < 0.001, "{h}");
         let title = text(&parts, "Revenue");
         assert!((title.x + title.width / 2.0 - 384.0).abs() < 0.001);
     }
@@ -167,7 +167,9 @@ fn a_single_long_legend_label_wraps_without_losing_text() {
     let mut labels = Vec::<Vec<&PositionedTextLine>>::new();
     for part in &parts {
         match part {
-            Primitive::Shape { w, h, .. } if *w == 8.0 && *h == 8.0 => labels.push(Vec::new()),
+            Primitive::Shape { w, h, .. } if (*w - *h).abs() < 0.001 && *w > 2.0 && *w < 20.0 => {
+                labels.push(Vec::new())
+            }
             Primitive::TextBox { lines, .. } if !labels.is_empty() => {
                 labels.last_mut().unwrap().extend(lines)
             }
