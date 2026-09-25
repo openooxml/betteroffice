@@ -551,6 +551,13 @@ impl SlideRenderer {
         })
     }
 
+    /// Whether a face was registered under `family` itself, rather than one
+    /// resolution would fall back to.
+    fn has_face_for(&self, family: &str) -> bool {
+        let requested = normalize_family(family);
+        self.faces.keys().any(|(name, _, _)| *name == requested)
+    }
+
     fn resolve_face(
         &self,
         family: &str,
@@ -2526,6 +2533,9 @@ fn resolve_content(
             .then(|| resolve_marker(properties.bullet.as_ref(), paragraph.level, &mut numbering))
             .flatten()
             .map(|marker| symbol_bullet(&marker, properties.bullet_font.as_ref(), theme));
+        let marker_drawn = marker.as_deref().is_none_or(|marker| {
+            bullet_font_draws(renderer, theme, properties.bullet_font.as_ref(), marker)
+        });
         paragraphs.push(ResolvedParagraph {
             align: parse_align(alignment),
             justify: is_full_justification(alignment),
@@ -2546,7 +2556,14 @@ fn resolve_content(
             bullet_style: marker
                 .is_some()
                 .then(|| resolve_bullet_style(renderer, theme, &properties, &runs[0].style))
-                .transpose()?,
+                .transpose()?
+                .map(|mut style| {
+                    // The marker keeps its slot but paints nothing.
+                    if !marker_drawn {
+                        style.color = TRANSPARENT.to_owned();
+                    }
+                    style
+                }),
             marker,
             rtl: properties.rtl.unwrap_or(false),
             runs,
@@ -5436,6 +5453,38 @@ fn rect_covering_text(rect: PxRect, text: Option<&TextHit>) -> PxRect {
         w: (right - left).max(rect.w),
         h: (bottom - top).max(rect.h),
     }
+}
+
+const TRANSPARENT: &str = "#00000000";
+
+/// Whether the `buFont` a deck names can draw `marker`. PowerPoint paints no
+/// marker when that font lacks the character, where a browser would borrow
+/// another font's glyph; it is judged only when the host registered a face for
+/// that family, and never for a symbol font, whose slots are translated first.
+fn bullet_font_draws(
+    renderer: &SlideRenderer,
+    theme: &Theme,
+    font: Option<&BulletFont>,
+    marker: &str,
+) -> bool {
+    let Some(BulletFont::Typeface(typeface)) = font else {
+        return true;
+    };
+    let family = if typeface.starts_with('+') {
+        resolve_theme_font_ref(Some(theme), typeface)
+    } else {
+        typeface.clone()
+    };
+    if ooxml_text::SymbolFont::named(&family).is_some() || !renderer.has_face_for(&family) {
+        return true;
+    }
+    let Ok(face) = renderer.resolve_face(&family, false, false) else {
+        return true;
+    };
+    marker
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .all(|character| renderer.fonts.covers(face.id, character).unwrap_or(true))
 }
 
 /// A `buFont` symbol face reaches its glyphs by font position, so `buChar`
@@ -10037,6 +10086,52 @@ mod tests {
         let line = family_line_box(substituted.line.expect("trebuchet ms lines"), 1000.0);
         assert!((line.ascent - 939.0).abs() < 1e-3);
         assert!((line.descent - 222.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_bullet_font_without_the_marker_character_paints_no_marker() {
+        let mut renderer = SlideRenderer::new();
+        renderer
+            .register_font("Georgia", false, false, FONT)
+            .unwrap();
+        let theme = Theme::default();
+        let georgia = BulletFont::Typeface("Georgia".to_owned());
+        assert!(bullet_font_draws(
+            &renderer,
+            &theme,
+            Some(&georgia),
+            "\u{2022}"
+        ));
+        assert!(
+            !renderer
+                .fonts
+                .covers(
+                    renderer.resolve_face("Georgia", false, false).unwrap().id,
+                    '\u{2713}'
+                )
+                .unwrap()
+        );
+        assert!(!bullet_font_draws(
+            &renderer,
+            &theme,
+            Some(&georgia),
+            "\u{2713}"
+        ));
+        let wingdings = BulletFont::Typeface("Wingdings".to_owned());
+        assert!(bullet_font_draws(
+            &renderer,
+            &theme,
+            Some(&wingdings),
+            "\u{2713}"
+        ));
+        let unregistered = BulletFont::Typeface("Futura".to_owned());
+        assert!(bullet_font_draws(
+            &renderer,
+            &theme,
+            Some(&unregistered),
+            "\u{2713}"
+        ));
+        assert!(bullet_font_draws(&renderer, &theme, None, "\u{2713}"));
     }
 
     #[test]
