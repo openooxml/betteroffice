@@ -4,7 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "build": "bun build src/app.ts --outdir dist --target browser --minify && cp src/index.html dist/index.html",
+    "build": "bun build src/dashboard.ts src/compare.ts --outdir dist --target browser --minify && bun styles.ts && cp src/index.html src/compare.html src/icon.svg dist/",
     "predev": "bun run build",
     "dev": "wrangler dev",
     "predeploy": "bun run build",
@@ -14,7 +14,10 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260708.1",
+    "@tailwindcss/postcss": "^4.3.2",
     "@types/bun": "^1.3.14",
+    "postcss": "^8.5.23",
+    "tailwindcss": "^4.3.2",
     "typescript": "^6.0.3",
     "wrangler": "^4.106.0"
   }

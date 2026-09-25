@@ -4,334 +4,95 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex" />
-    <title>Visual fidelity</title>
-    <style>
-      :root {
-        --bg: #0b0b0c;
-        --panel: #141416;
-        --line: #26262a;
-        --text: #e9e9ea;
-        --muted: #8c8c93;
-        --accent: #6aa6ff;
-        color-scheme: dark;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        margin: 0;
-        height: 100vh;
-        display: flex;
-        background: var(--bg);
-        color: var(--text);
-        font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
-      }
-      button {
-        font: inherit;
-        color: inherit;
-        background: none;
-        border: 0;
-        cursor: pointer;
-      }
-      .num {
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-variant-numeric: tabular-nums;
-      }
-
-      aside {
-        width: 300px;
-        flex: none;
-        display: flex;
-        flex-direction: column;
-        border-right: 1px solid var(--line);
-        background: var(--panel);
-      }
-      aside header {
-        padding: 18px 18px 12px;
-        border-bottom: 1px solid var(--line);
-      }
-      h1 {
-        margin: 0;
-        font-size: 13px;
-        font-weight: 600;
-        letter-spacing: 0.01em;
-      }
-      #revision {
-        margin: 4px 0 12px;
-        color: var(--muted);
-        font-size: 12px;
-      }
-      #filter {
-        width: 100%;
-        padding: 6px 8px;
-        color: inherit;
-        background: var(--bg);
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        font: inherit;
-      }
-      #filter:focus {
-        outline: 1px solid var(--accent);
-      }
-      #documents {
-        margin: 0;
-        padding: 6px 0 24px;
-        list-style: none;
-        overflow-y: auto;
-      }
-      #documents button {
-        width: 100%;
-        display: flex;
-        gap: 8px;
-        align-items: baseline;
-        padding: 7px 18px;
-        text-align: left;
-      }
-      #documents button:hover {
-        background: #1c1c20;
-      }
-      #documents button[aria-current='true'] {
-        background: #1c1c20;
-        box-shadow: inset 2px 0 var(--accent);
-      }
-      .id {
-        flex: 1;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .format {
-        color: var(--muted);
-        font-size: 10px;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
-      }
-
-      main {
-        flex: 1;
-        min-width: 0;
-        display: flex;
-        flex-direction: column;
-      }
-      main > header {
-        display: flex;
-        gap: 18px;
-        align-items: center;
-        padding: 14px 20px;
-        border-bottom: 1px solid var(--line);
-      }
-      #title {
-        font-weight: 600;
-      }
-      #scores {
-        display: flex;
-        gap: 18px;
-        margin-left: auto;
-        color: var(--muted);
-      }
-      #scores b {
-        color: var(--text);
-        font-weight: 500;
-      }
-      .toggle {
-        display: flex;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        overflow: hidden;
-      }
-      .toggle button {
-        padding: 4px 10px;
-        color: var(--muted);
-      }
-      .toggle button[aria-pressed='true'] {
-        color: var(--text);
-        background: #26262a;
-      }
-
-      #pages {
-        display: flex;
-        gap: 4px;
-        padding: 10px 20px;
-        overflow-x: auto;
-        border-bottom: 1px solid var(--line);
-      }
-      #pages button {
-        flex: none;
-        min-width: 30px;
-        padding: 3px 6px;
-        color: var(--muted);
-        border: 1px solid transparent;
-        border-radius: 3px;
-      }
-      #pages button:hover {
-        border-color: var(--line);
-      }
-      #pages button[aria-current='true'] {
-        color: var(--bg);
-        background: var(--accent);
-      }
-      #pages button[data-missing='true'] {
-        color: #d98b6a;
-      }
-
-      #stage {
-        flex: 1;
-        min-height: 0;
-        display: grid;
-        place-items: center;
-        padding: 20px;
-        overflow: auto;
-      }
-      .sheet {
-        position: relative;
-        isolation: isolate;
-        background: #fff;
-        box-shadow: 0 0 0 1px var(--line);
-      }
-      .sheet img {
-        position: absolute;
-        inset: 0;
-        width: 100%;
-        height: 100%;
-        display: block;
-      }
-      #ours {
-        position: absolute;
-        inset: 0;
-        clip-path: inset(0 0 0 var(--split));
-      }
-      #handle {
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: var(--split);
-        width: 11px;
-        margin-left: -5px;
-        cursor: ew-resize;
-        z-index: 2;
-      }
-      #handle::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        bottom: 0;
-        left: 5px;
-        width: 1px;
-        background: var(--accent);
-      }
-      #stage[data-mode='difference'][data-pair='true'] .sheet {
-        background: #000;
-        filter: brightness(2.4);
-      }
-      #stage[data-mode='difference'] #ours {
-        clip-path: none;
-      }
-      #stage[data-mode='difference'][data-pair='true'] #render {
-        mix-blend-mode: difference;
-      }
-      #stage:not([data-pair='true']) #handle,
-      #stage[data-mode='difference'] #handle {
-        display: none;
-      }
-      #stage[data-blink='true'] #ours {
-        visibility: hidden;
-      }
-      [data-absent='true'] {
-        display: none;
-      }
-
-      #note,
-      #hint {
-        padding: 8px 20px;
-        color: var(--muted);
-        border-top: 1px solid var(--line);
-      }
-      #note {
-        color: #d98b6a;
-        border: 0;
-        border-bottom: 1px solid var(--line);
-      }
-      kbd {
-        padding: 1px 4px;
-        color: var(--text);
-        border: 1px solid var(--line);
-        border-radius: 3px;
-        font: inherit;
-        font-size: 11px;
-      }
-
-      #loader {
-        margin: auto;
-        max-width: 440px;
-        padding: 24px;
-        text-align: center;
-      }
-      #loader p {
-        color: var(--muted);
-      }
-      #loader label {
-        display: inline-block;
-        margin-top: 8px;
-        padding: 7px 14px;
-        border: 1px solid var(--line);
-        border-radius: 4px;
-        cursor: pointer;
-      }
-      #loader label:hover {
-        border-color: var(--accent);
-      }
-      #loader input {
-        display: none;
-      }
-      [hidden] {
-        display: none !important;
-      }
-    </style>
+    <meta
+      name="description"
+      content="BetterOffice's visual fidelity and formula accuracy measured against Microsoft Office, its speed against LibreOffice, and the editing latency of its SDKs."
+    />
+    <title>BetterOffice Benchmarks</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="./styles.css" />
+    <script>
+      try {
+        var theme = localStorage.getItem('betteroffice-benchmarks-theme');
+        if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+      } catch (error) {}
+    </script>
   </head>
-  <body>
-    <aside hidden>
-      <header>
-        <h1>Visual fidelity</h1>
-        <p id="revision"></p>
-        <input id="filter" type="search" placeholder="Filter documents" autocomplete="off" />
-      </header>
-      <ol id="documents"></ol>
-    </aside>
-
-    <main hidden>
-      <header>
-        <span id="title"></span>
-        <div class="toggle" id="modes">
-          <button data-mode="swipe" aria-pressed="true">Swipe</button>
-          <button data-mode="difference" aria-pressed="false">Difference</button>
-        </div>
-        <div class="toggle" id="zooms">
-          <button data-zoom="fit" aria-pressed="true">Fit</button>
-          <button data-zoom="full" aria-pressed="false">100%</button>
-        </div>
-        <div id="scores"></div>
-      </header>
-      <p id="note" hidden></p>
-      <nav id="pages"></nav>
-      <div id="stage" data-mode="swipe">
-        <div class="sheet" id="sheet">
-          <img id="reference" alt="Microsoft Office reference page" />
-          <div id="ours"><img id="render" alt="BetterOffice rendered page" /></div>
-          <div id="handle"></div>
+  <body class="min-h-screen overflow-x-hidden bg-bg font-sans text-[15px]/[1.55] text-fg antialiased">
+    <header class="sticky top-0 z-20 h-(--header) border-b border-line bg-bg/86 backdrop-blur-md">
+      <div class="mx-auto flex h-full max-w-[1240px] items-center gap-3.5 px-4 md:gap-8 md:px-5">
+        <a class="flex items-center gap-2.5 text-[14.5px] font-semibold tracking-[-0.01em] whitespace-nowrap" href="/"><svg class="h-[15px] w-auto text-fg" aria-hidden="true" viewBox="0 0 276 206" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M130.19 13.5L130.273 14.5H128.323L126.99 13.5H130.19Z" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+<path d="M197.227 188.5L198.727 203.5H196.643L194.393 188.5H197.227Z" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+<mask id="path-3-inside-1_40_73" fill="white">
+<path d="M151.169 206L153.169 193L140.169 195L141.169 206H151.169Z"/>
+</mask>
+<path d="M153.169 193L172.936 196.041L177.083 169.086L150.128 173.233L153.169 193ZM151.169 206V226H168.327L170.936 209.041L151.169 206ZM141.169 206L121.251 207.811L122.905 226H141.169V206ZM140.169 195L137.128 175.233L118.549 178.091L120.251 196.811L140.169 195ZM153.169 193L133.401 189.959L131.401 202.959L151.169 206L170.936 209.041L172.936 196.041L153.169 193ZM151.169 206V186H141.169V206V226H151.169V206ZM141.169 206L161.087 204.189L160.087 193.189L140.169 195L120.251 196.811L121.251 207.811L141.169 206ZM140.169 195L143.21 214.767L156.21 212.767L153.169 193L150.128 173.233L137.128 175.233L140.169 195Z" fill="currentColor" mask="url(#path-3-inside-1_40_73)"/>
+<path d="M151.169 194.5L139.491 117M123.669 12L134.82 86" stroke="currentColor" stroke-width="20"/>
+<path d="M132.49 100L32.4896 100" stroke="currentColor" stroke-width="20"/>
+<path d="M116.49 10H11.6688L40.4897 196H143.169" stroke="currentColor" stroke-width="20"/>
+<path d="M114.669 10H233.669L263.669 196H148.669" stroke="currentColor" stroke-width="20"/>
+<mask id="path-9-inside-2_40_73" fill="white">
+<path d="M163.49 3.05176e-05H166.99L166.49 20L163.49 3.05176e-05Z"/>
+</mask>
+<path d="M166.99 3.05176e-05L171.988 0.124991L172.116 -4.99997H166.99V3.05176e-05ZM163.49 3.05176e-05V-4.99997H157.684L158.545 0.741733L163.49 3.05176e-05ZM166.49 20L161.545 20.7417L171.488 20.125L166.49 20ZM166.99 3.05176e-05V-4.99997H163.49V3.05176e-05V5.00003H166.99V3.05176e-05ZM163.49 3.05176e-05L158.545 0.741733L161.545 20.7417L166.49 20L171.434 19.2583L168.434 -0.741672L163.49 3.05176e-05ZM166.49 20L171.488 20.125L171.988 0.124991L166.99 3.05176e-05L161.991 -0.12493L161.491 19.8751L166.49 20Z" fill="currentColor" mask="url(#path-9-inside-2_40_73)"/>
+<path d="M120.99 11.9502V13.5H117.99V5.09277L120.99 11.9502Z" stroke="currentColor" stroke-width="5" stroke-linecap="round"/>
+<mask id="path-12-inside-3_40_73" fill="white">
+<path d="M126.169 95L124.169 82L143.669 77.5L145.669 89.5L132.669 100.5L148.669 109.5L150.169 121.5L130.669 124.5L126.169 95Z"/>
+</mask>
+<path d="M124.169 82L119.672 62.5122L101.578 66.6877L104.401 85.0411L124.169 82ZM126.169 95L145.94 91.984L145.938 91.9714L145.936 91.9589L126.169 95ZM130.669 124.5L110.898 127.516L113.917 147.312L133.71 144.267L130.669 124.5ZM150.169 121.5L153.21 141.267L172.426 138.311L170.014 119.019L150.169 121.5ZM148.669 109.5L168.514 107.019L167.264 97.0126L158.474 92.0685L148.669 109.5ZM132.669 100.5L119.75 85.2323L97.7802 103.822L122.864 117.932L132.669 100.5ZM145.669 89.5L158.588 104.768L167.266 97.4249L165.397 86.212L145.669 89.5ZM143.669 77.5L163.397 74.212L159.9 53.2288L139.172 58.0122L143.669 77.5ZM124.169 82L104.401 85.0411L106.401 98.0411L126.169 95L145.936 91.9589L143.936 78.9589L124.169 82ZM126.169 95L106.398 98.016L110.898 127.516L130.669 124.5L150.44 121.484L145.94 91.984L126.169 95ZM130.669 124.5L133.71 144.267L153.21 141.267L150.169 121.5L147.128 101.733L127.628 104.733L130.669 124.5ZM150.169 121.5L170.014 119.019L168.514 107.019L148.669 109.5L128.823 111.981L130.323 123.981L150.169 121.5ZM148.669 109.5L158.474 92.0685L142.474 83.0685L132.669 100.5L122.864 117.932L138.864 126.932L148.669 109.5ZM132.669 100.5L145.588 115.768L158.588 104.768L145.669 89.5L132.75 74.2323L119.75 85.2323L132.669 100.5ZM145.669 89.5L165.397 86.212L163.397 74.212L143.669 77.5L123.941 80.788L125.941 92.788L145.669 89.5ZM143.669 77.5L139.172 58.0122L119.672 62.5122L124.169 82L128.666 101.488L148.166 96.9878L143.669 77.5Z" fill="currentColor" mask="url(#path-12-inside-3_40_73)"/>
+</svg><span class="hidden md:inline">BetterOffice</span><span class="font-medium text-dim">Benchmarks</span></a>
+        <nav class="hidden gap-[22px] lg:flex" aria-label="Sections">
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#scoreboard">Scoreboard</a>
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#docx">DOCX</a>
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#pptx">PPTX</a>
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#xlsx">XLSX</a>
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#latency">Latency</a>
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="#method">Method</a>
+        </nav>
+        <div class="ml-auto flex items-center gap-4">
+          <a class="text-[13.5px] whitespace-nowrap text-ink hover:text-fg" href="/compare">Compare pages</a>
+          <button class="grid size-8 cursor-pointer place-items-center rounded-lg border border-line text-ink hover:border-line-2 hover:text-fg" id="theme" type="button" aria-label="Switch to light mode">
+            <svg class="size-[15px] light:hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2.5v2M12 19.5v2M4.6 4.6 6 6M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4" />
+            </svg>
+            <svg class="hidden size-[15px] light:block" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M20.5 13.3A8.5 8.5 0 1 1 10.7 3.5a6.6 6.6 0 0 0 9.8 9.8Z" />
+            </svg>
+          </button>
         </div>
       </div>
-      <footer id="hint">
-        Drag the divider to swipe · hold <kbd>B</kbd> to blink between the two ·
-        <kbd>←</kbd> <kbd>→</kbd> to change page
-      </footer>
+    </header>
+
+    <main class="mx-auto max-w-[1240px] px-4 md:px-5">
+      <section class="pt-12 md:pt-20" id="hero">
+        <h1 class="max-w-[820px] text-[clamp(34px,4.4vw,50px)] leading-[1.05] font-semibold tracking-[-0.035em] text-balance">BetterOffice Benchmarks</h1>
+        <p class="mt-4 max-w-[780px] text-[15.5px] text-ink md:text-[16.5px]" id="lede">Real documents, scored page by page against Microsoft Office and compared with LibreOffice.</p>
+        <dl class="mt-8 flex flex-wrap gap-x-6 gap-y-3 md:gap-x-9" id="facts"></dl>
+        <div class="mt-9 grid grid-cols-1 gap-px overflow-hidden rounded-panel border border-line bg-line md:grid-cols-2 lg:grid-cols-4" id="kpis">
+          <p class="col-span-full bg-solid px-6 py-11 text-[13.5px] text-dim">Loading the latest run…</p>
+        </div>
+      </section>
+
+      <section class="pt-18 md:pt-24" id="scoreboard" hidden>
+        <header class="mb-6">
+          <h2 class="text-[24px] leading-[1.15] font-semibold tracking-[-0.03em] md:text-[28px]">Scoreboard</h2>
+          <p class="mt-2 max-w-[760px] text-[14px] text-ink">The latest release against LibreOffice. Scores and shares fill from 0 to 1, times and page errors to the larger value. The dot marks the better result.</p>
+        </header>
+      </section>
+
+      <div id="formats"></div>
+      <section id="latency"></section>
+      <section id="method"></section>
     </main>
 
-    <div id="loader">
-      <h1>Visual fidelity</h1>
-      <p id="loader-message">Loading the latest measured run…</p>
-      <label>Open a report.json<input id="file" type="file" accept="application/json,.json" /></label>
-    </div>
+    <footer class="mx-auto mt-24 flex max-w-[1240px] flex-wrap justify-between gap-3 border-t border-line px-5 pt-[26px] pb-14 text-[13px] text-dim">
+      <span>BetterOffice · Apache-2.0</span>
+      <span><a class="text-ink" href="https://betteroffice.dev">betteroffice.dev</a> · <a class="text-ink" href="https://github.com/openooxml/betteroffice">GitHub</a></span>
+    </footer>
 
-    <script type="module" src="./app.js"></script>
+    <div class="pointer-events-none fixed top-0 left-0 z-50 max-w-[340px] min-w-[190px] rounded-[11px] border border-line-2 bg-tip px-3 py-2.5 text-[12px] shadow-(--shadow) backdrop-blur-[14px]" id="tip" hidden></div>
+    <script type="module" src="./dashboard.js"></script>
   </body>
 </html>
