@@ -680,9 +680,9 @@ mod tests {
         assert!(
             parts(&chart).iter().any(
                 |primitive| matches!(primitive, Primitive::Shape { geometry, w, .. }
-                if geometry == "custom" && (*w - 11.0).abs() < 0.001)
+                if geometry == "custom" && (*w - 11.0 * 4.0 / 3.0).abs() < 0.001)
             ),
-            "a circle symbol draws its own outline at the marker size"
+            "a circle symbol draws its own outline at the marker size, in points"
         );
         for value in ["3", "1", "2"] {
             assert!(texts(&chart).contains(&value.to_owned()), "{value}");

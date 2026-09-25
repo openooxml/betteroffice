@@ -381,6 +381,9 @@ pub struct ChartAxis {
     pub crosses: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crosses_at: Option<f64>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_between: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub major_unit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -401,6 +404,12 @@ pub struct ChartAxis {
     pub major_gridlines: bool,
     #[serde(default)]
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub major_gridline_line: Option<ChartLine>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_line: Option<ChartLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
     /// `c:spPr/a:ln` of this axis: the rule drawn along the plot's edge.
