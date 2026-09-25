@@ -429,18 +429,15 @@ fn parse_series_name<E: ChartXml>(series: &E) -> Option<String> {
     text_from_rich_text(child(series, "tx"))
 }
 
-/// A series the deck gives no `c:spPr` is drawn in the theme's accents, cycled
-/// in order — the deck's own palette, not Office's current default one.
-fn parse_series_color<E: ChartXml>(series: &E, index: usize) -> String {
-    explicit_fill(series).unwrap_or_else(|| accent_color(series, index))
-}
-
 fn explicit_fill<E: ChartXml>(element: &E) -> Option<String> {
     child(element, "spPr")
         .and_then(|properties| first_deep(properties, "solidFill", 0))
         .and_then(E::solid_fill_hex)
 }
 
+/// A series or point the deck gives no `c:spPr` is drawn in the theme's
+/// accents, cycled in order — the deck's own palette, not Office's current
+/// default one.
 fn accent_color<E: ChartXml>(element: &E, index: usize) -> String {
     element
         .theme_color_hex(&format!("accent{}", index % 6 + 1))
@@ -466,33 +463,28 @@ fn paints_points<E: ChartXml>(chart: &E) -> bool {
 }
 
 /// Adds an accent point for every category a varied series' `c:dPt`s leave out.
-fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut [ChartSeries]) {
-    if !paints_points(chart) {
+fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries) {
+    let count = series.categories.len().max(series.values.len());
+    let points = series.points.get_or_insert_with(Vec::new);
+    if points.iter().any(|point| point.index.is_none()) {
         return;
     }
-    for series in series {
-        let count = series.categories.len().max(series.values.len());
-        let points = series.points.get_or_insert_with(Vec::new);
-        if points.iter().any(|point| point.index.is_none()) {
-            continue;
-        }
-        let painted: HashSet<usize> = points
-            .iter()
-            .filter_map(|point| point.index)
-            .map(|index| index as usize)
-            .collect();
-        points.extend(
-            (0..count)
-                .filter(|index| !painted.contains(index))
-                .map(|index| ChartPoint {
-                    index: Some(index as f64),
-                    explosion: None,
-                    color: accent_color(chart, index),
-                }),
-        );
-        if points.is_empty() {
-            series.points = None;
-        }
+    let painted: HashSet<usize> = points
+        .iter()
+        .filter_map(|point| point.index)
+        .map(|index| index as usize)
+        .collect();
+    points.extend(
+        (0..count)
+            .filter(|index| !painted.contains(index))
+            .map(|index| ChartPoint {
+                index: Some(index as f64),
+                explosion: None,
+                color: accent_color(chart, index),
+            }),
+    );
+    if points.is_empty() {
+        series.points = None;
     }
 }
 
@@ -519,6 +511,10 @@ fn parse_series<E: ChartXml>(
                 .and_then(|marker| child(marker, "spPr"))
                 .and_then(|properties| first_deep(properties, "solidFill", 0))
                 .and_then(E::solid_fill_hex);
+            // Varied colours only replace automatic ones: a series that paints
+            // itself lends that fill to every point without its own.
+            let series_fill = explicit_fill(series);
+            let varied = varies && series_fill.is_none();
             let points = take_points(children(series, "dPt"), budget, |point| {
                 let point_index = match child(point, "idx") {
                     Some(idx) => Some(parse_index(val_attr(Some(idx)))?),
@@ -527,10 +523,14 @@ fn parse_series<E: ChartXml>(
                 Some(ChartPoint {
                     index: point_index,
                     explosion: parse_number(val_attr(child(point, "explosion"))),
-                    color: explicit_fill(point).unwrap_or_else(|| match point_index {
-                        Some(point_index) if varies => accent_color(point, point_index as usize),
-                        _ => accent_color(point, index),
-                    }),
+                    color: explicit_fill(point)
+                        .or_else(|| series_fill.clone())
+                        .unwrap_or_else(|| match point_index {
+                            Some(point_index) if varied => {
+                                accent_color(point, point_index as usize)
+                            }
+                            _ => accent_color(point, index),
+                        }),
                 })
             });
             let uses_x_as_category = category.is_none() && x_value.is_some();
@@ -543,11 +543,13 @@ fn parse_series<E: ChartXml>(
             if !uses_x_as_category {
                 x_values = parse_num_cache(x_value, budget);
             }
-            ChartSeries {
+            let mut parsed = ChartSeries {
                 name: parse_series_name(series),
                 categories,
                 values,
-                color: parse_series_color(series, index),
+                color: series_fill
+                    .clone()
+                    .unwrap_or_else(|| accent_color(series, index)),
                 index: parse_index(val_attr(child(series, "idx"))),
                 order: parse_index(val_attr(child(series, "order"))),
                 category_formula: child_formula(category.or(x_value)),
@@ -578,7 +580,11 @@ fn parse_series<E: ChartXml>(
                     .filter(|values| !values.is_empty()),
                 data_labels: parse_data_labels(child(series, "dLbls"), budget),
                 line: parse_line(child(series, "spPr")),
+            };
+            if varied {
+                vary_point_colors(chart, &mut parsed);
             }
+            parsed
         })
         .collect::<Vec<_>>();
     budget.spend_series(series.len());
@@ -855,8 +861,7 @@ fn parse_plot_group<E: ChartXml>(chart: &E, budget: &mut Budget) -> ChartPlotGro
         })
         .take(MAX_AXIS_IDS)
         .collect::<Vec<_>>();
-    let mut series = parse_series(chart, grouping.as_deref(), &axis_ids, budget);
-    vary_point_colors(chart, &mut series);
+    let series = parse_series(chart, grouping.as_deref(), &axis_ids, budget);
     ChartPlotGroup {
         chart_type: plot_type_for(chart),
         grouping: grouping.clone(),
@@ -1328,6 +1333,22 @@ mod tests {
                 DEFAULT_SERIES_COLORS[2]
             ]
         );
+        let green = || {
+            Node::el(
+                "c:spPr",
+                vec![Node::el(
+                    "c:solidFill",
+                    vec![Node::val("a:srgbClr", "00FF00")],
+                )],
+            )
+        };
+        assert!(point_colors(&columns(1, None, vec![green()]), 0).is_empty());
+        let inherited = columns(
+            1,
+            None,
+            vec![green(), Node::el("c:dPt", vec![Node::val("c:idx", "2")])],
+        );
+        assert_eq!(point_colors(&inherited, 0), ["#00FF00"]);
         let bare = columns(
             1,
             None,
