@@ -48,6 +48,7 @@ use wasm_bindgen::prelude::*;
 use yrs::{Any, Assoc, IndexedSequence, Map, ReadTxn, StickyIndex, Subscription, Transact};
 
 use crate::batch::outcome_json;
+use crate::compare::{CompareApplied, CompareLimits, CompareOutcome};
 use crate::presence::{
     apply_update_with_typing_inference, encode_sticky, resolve_sticky_selection,
 };
@@ -918,6 +919,8 @@ pub struct EditSession {
     selection: RefCell<Option<LocalSelection>>,
     cell_selection: RefCell<Option<LocalCellSelection>>,
     last_apply_profile_json: RefCell<String>,
+    /// The comparison applied here, awaiting its saved bytes.
+    compared: RefCell<Option<(Box<CompareApplied>, CompareLimits)>>,
 }
 
 struct UpdateEventObserver {
@@ -1159,6 +1162,7 @@ impl EditSession {
             selection: RefCell::new(None),
             cell_selection: RefCell::new(None),
             last_apply_profile_json: RefCell::new("{}".to_owned()),
+            compared: RefCell::new(None),
         };
         session.engine.doc().rotate_version(js_entropy());
         Ok(session)
@@ -3195,6 +3199,62 @@ impl EditSession {
         outcome_json(&self.engine.doc().export_markdown(&options)).map_err(js_err)
     }
 
+    /// Compares two DOCX packages into this session, which must hold no document: the original
+    /// is opened here and the revised body text differences are applied as tracked changes,
+    /// outside undo history.
+    ///
+    /// `options` is `{"author","date","granularity"?,"unsupported"?,"limits"?}`. Returns a final
+    /// `{"ok":false,"diagnostics"}` or `{"ok":true,"noop":true,"changes":[],"diagnostics"}`, or
+    /// `{"ok":true,"noop":false,"save"}` naming what a save of the applied changes may write:
+    /// then pass the saved bytes to [`EditSession::finish_compared_docx_json`], or the save
+    /// failure to [`EditSession::fail_compared_docx_json`]. Malformed options and internal
+    /// failures throw.
+    pub fn compare_docx_json(
+        &self,
+        original: &[u8],
+        revised: &[u8],
+        options: &str,
+    ) -> Result<String, JsValue> {
+        let options = match crate::compare::parse_options(options).map_err(js_err)? {
+            Ok(options) => options,
+            Err(diagnostic) => return crate::compare::refused_json(diagnostic).map_err(js_err),
+        };
+        let outcome = crate::compare::compare_into(
+            self.engine.doc(),
+            &self.undo,
+            original,
+            revised,
+            &options,
+        )
+        .map_err(js_err)?;
+        let json = outcome.to_json(&options.limits).map_err(js_err)?;
+        if let CompareOutcome::Applied(applied) = outcome {
+            self.docx_source.replace(Some(original.to_vec()));
+            self.compared.replace(Some((applied, options.limits)));
+        }
+        Ok(json)
+    }
+
+    /// The final comparison result for `bytes`, the saved applied changes, verified against both
+    /// inputs: `{"ok":true,"changes","diagnostics"}` or `{"ok":false,"diagnostics"}`. Throws
+    /// when no comparison awaits its saved bytes.
+    pub fn finish_compared_docx_json(&self, bytes: &[u8]) -> Result<String, JsValue> {
+        let (applied, limits) = self
+            .compared
+            .take()
+            .ok_or_else(|| js_err("no comparison awaits its saved bytes"))?;
+        applied.finish(bytes, &limits).map_err(js_err)
+    }
+
+    /// The final comparison result when saving the applied changes failed with `message`.
+    pub fn fail_compared_docx_json(&self, message: &str) -> Result<String, JsValue> {
+        let (applied, limits) = self
+            .compared
+            .take()
+            .ok_or_else(|| js_err("no comparison awaits its saved bytes"))?;
+        applied.fail(message, &limits).map_err(js_err)
+    }
+
     /// The headings of `story` in document order, classified as the structured export
     /// classifies them: `[{"paraId","heading":{"outlineLevel","source"}}]`.
     pub fn headings_json(&self, story: &str) -> Result<String, JsValue> {
@@ -4070,5 +4130,75 @@ mod tests {
         assert_eq!(snapshot["frameEpoch"], 1);
         assert_eq!(caret["pageIndex"], 0);
         assert!((caret["x"].as_f64().unwrap() - 40.0).abs() < 0.001);
+    }
+
+    fn compare_fixture(body: &str) -> Vec<u8> {
+        ooxml_opc::rezip_parts(&[
+            ("[Content_Types].xml".to_owned(), br#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#.to_vec()),
+            ("_rels/.rels".to_owned(), br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#.to_vec()),
+            ("word/document.xml".to_owned(), format!(r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr/></w:body></w:document>"#).into_bytes()),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn compare_bridge_applies_changes_and_verifies_saved_bytes() {
+        let original = compare_fixture("<w:p><w:r><w:t>old text</w:t></w:r></w:p>");
+        let revised = compare_fixture("<w:p><w:r><w:t>new text</w:t></w:r></w:p>");
+        let options = r#"{"author":"A","date":"2024-01-02T03:04:05Z"}"#;
+        let session = EditSession::new(1.0).unwrap();
+        let outcome: Value = serde_json::from_str(
+            &session
+                .compare_docx_json(&original, &revised, options)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(outcome["ok"], true);
+        assert_eq!(outcome["noop"], false);
+        assert!(outcome.get("changes").is_none());
+        assert_eq!(
+            outcome["save"]["paragraphs"],
+            json!([{ "path": [0, 0], "block": 0 }])
+        );
+        assert_eq!(outcome["save"]["now"], "2024-01-02T03:04:05.000Z");
+        assert!(session.materialize_docx().unwrap().is_some());
+        let unchanged: Value =
+            serde_json::from_str(&session.finish_compared_docx_json(&original).unwrap()).unwrap();
+        assert_eq!(unchanged["ok"], false);
+        assert_eq!(unchanged["diagnostics"][0]["code"], "roundtrip-mismatch");
+
+        let failing = EditSession::new(4.0).unwrap();
+        failing
+            .compare_docx_json(&original, &revised, options)
+            .unwrap();
+        let failed: Value =
+            serde_json::from_str(&failing.fail_compared_docx_json("disk full").unwrap()).unwrap();
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["diagnostics"][0]["code"], "serialization-failed");
+
+        let fresh = EditSession::new(2.0).unwrap();
+        let noop: Value = serde_json::from_str(
+            &fresh
+                .compare_docx_json(&original, &original, options)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            noop,
+            json!({ "ok": true, "noop": true, "changes": [], "diagnostics": [] })
+        );
+        let refused: Value = serde_json::from_str(
+            &EditSession::new(3.0)
+                .unwrap()
+                .compare_docx_json(
+                    &original,
+                    &revised,
+                    r#"{"author":"","date":"2024-01-02T03:04:05Z"}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(refused["ok"], false);
+        assert_eq!(refused["diagnostics"][0]["code"], "invalid-options");
     }
 }

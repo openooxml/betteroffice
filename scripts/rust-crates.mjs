@@ -8,6 +8,7 @@ export const STANDALONE_WORKSPACES = ['bindings', 'fuzz', 'apps/native-viewer'];
 export const RUST_CRATES = [
   { name: 'betteroffice-opc', dependency: 'ooxml-opc' },
   { name: 'betteroffice-ooxml-text', dependency: 'ooxml-text' },
+  { name: 'betteroffice-ooxml-diff', dependency: 'ooxml-diff' },
   { name: 'betteroffice-drawingml', dependency: 'ooxml-drawingml' },
   { name: 'betteroffice-xlsx-model', dependency: 'xlsx-model' },
   { name: 'betteroffice-xlsx-parse', dependency: 'xlsx-parse' },

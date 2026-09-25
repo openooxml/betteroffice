@@ -16,6 +16,7 @@
 
 import type { EditSession } from './wasm/index';
 import type { Document } from '../types/document';
+import { registerSessionInternals } from './sessionInternals';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import { decodeS9Envelope, decodeS9EnvelopeValue } from '../docx/rustParseFacade';
 import type {
@@ -2010,6 +2011,17 @@ function wrapSession(session: EditSession, clientId: number): YrsSession {
       session.free();
     },
   };
+
+  registerSessionInternals(facade, {
+    compareDocx: (original, revised, options) => {
+      markDirty('all');
+      const json = mutate(() => session.compare_docx_json(original, revised, options));
+      docxSource = original.slice();
+      return json;
+    },
+    finishComparedDocx: (bytes) => session.finish_compared_docx_json(bytes),
+    failComparedDocx: (message) => session.fail_compared_docx_json(message),
+  });
 
   return facade;
 }

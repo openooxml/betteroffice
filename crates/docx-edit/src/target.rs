@@ -8,6 +8,7 @@
 //! insertions and hides pending deletions; the original view does the reverse.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ops::Range;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -274,6 +275,21 @@ pub(crate) struct ParagraphView {
 impl ParagraphView {
     pub fn len(&self) -> u32 {
         self.spans.last().map_or(0, |span| span.view + span.len)
+    }
+
+    /// Raw intervals of the visible units in `range`, in order.
+    pub(crate) fn raw_ranges(&self, range: Range<u32>) -> impl Iterator<Item = Range<u32>> + '_ {
+        let first = self
+            .spans
+            .partition_point(|span| span.view + span.len <= range.start);
+        self.spans[first..]
+            .iter()
+            .take_while(move |span| span.view < range.end)
+            .map(move |span| {
+                let start = range.start.max(span.view) - span.view;
+                let end = range.end.min(span.view + span.len) - span.view;
+                span.raw + start..span.raw + end
+            })
     }
 
     /// Raw index of the visible unit at `offset`, or the paragraph mark at the end.

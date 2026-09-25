@@ -262,3 +262,77 @@ anchor in `anchors`. Only http, https, mailto and internal-anchor targets are li
 judged after entity and percent decoding, and `&` in a target is written `&amp;`; document text, titles and alt text never keep a
 line break or unescaped HTML. It does not
 preserve Word pagination or layout. Page fragments are not included yet.
+
+### Compare documents into tracked changes
+
+Compare an original and a revised DOCX and get back the original with the
+body text differences as tracked insertions and deletions, attributed to the
+author and date you pass:
+
+```ts
+import { compareDocx } from '@betteroffice/docx';
+
+const result = await compareDocx(original, revised, {
+  author: 'Contract review',
+  date: '2024-05-06T09:30:00+02:00',
+  granularity: 'word',
+  unsupported: 'fail',
+});
+if (result.ok) {
+  for (const change of result.changes) console.log(change.id, change.kind, change.revised.text);
+} else {
+  console.warn(result.diagnostics.map((diagnostic) => diagnostic.code));
+}
+```
+
+Only text inside body paragraphs whose structure is unchanged is compared. Both
+packages are inspected in full before anything is authored, and any blocking
+difference refuses the comparison with `{ ok: false, diagnostics }`; no partial
+redline is ever returned. `unsupported: 'report'` keeps inspecting and returns
+every diagnostic, bounded by `limits.maxDiagnostics`. Blocking codes are
+`invalid-options`, `invalid-docx`, `existing-revisions` (anywhere, headers and
+property revisions included), `paragraph-insertion`, `paragraph-deletion`,
+`paragraph-move`, `ambiguous-alignment`, `table-change`, `structure-change`,
+`field-change`, `object-change`, `content-control-change`, `formatting-change`,
+`unsupported-content` and `unsupported-formatting` (a changed paragraph holding
+content, or run properties, that edits cannot carry, such as fields,
+hyperlinks, bookmarks, objects, page breaks, patterned shading or `w:lang`),
+`out-of-scope-change` (headers, footers, notes, comments), `opaque-part-change`,
+`provenance-unavailable`, `limit-exceeded`, `diagnostics-truncated`,
+`batch-refused`, `serialization-failed` and `roundtrip-mismatch`.
+`metadata-difference` (informational: modified dates, revision-session ids and
+document statistics, kept from the original) and `ambiguous-identity` (a
+warning: repeated paragraph ids, so changes are addressed by position) accompany
+a result. Parts are found by their content types, and wrappers such as custom
+XML elements, body-level markers and every part must match exactly; a part that
+cannot be read refuses the comparison.
+
+Paragraphs are aligned conservatively: text unique to one paragraph on each side
+anchors the alignment, crossing anchors are moves, one paragraph against one
+between anchors is a replacement, and several need shared words and exactly one
+best correspondence. Clearing a paragraph's text is a deletion; the paragraph
+mark stays. Differences are reported by Unicode word, keeping punctuation and
+whitespace tokens, or with `granularity: 'char'` by grapheme cluster. Each
+change is one tracked replacement: deleted text keeps its formatting and
+inserted text takes the revised formatting. Changes are ordered by original
+position, `id` is `change-0`, `change-1` and so on, and their spans address the
+inputs by part, SHA-256 and element-child path with paragraph-local UTF-16
+offsets. `date` must be RFC 3339 with an explicit offset and is recorded in UTC;
+the clock is never read. `author` must not be blank.
+
+Only the changed paragraphs' content is rewritten; their start tags and
+properties, every other paragraph and every other part keep the original's
+bytes, and identical inputs return the original bytes. Rewritten runs carry the
+session's formatting vocabulary, so run properties a style supplies are written
+as direct formatting, and complex-script fonts, sizes, bold and italic are
+written only as the source states them. The result is reopened and checked
+against both inputs before it is returned, with each run's effective formatting
+read from the XML, style toggles such as bold combined across every level of a
+style's `basedOn` chain; a difference refuses with `roundtrip-mismatch`.
+Defaults, which are also the ceilings: 32 MiB per input, 128 MiB inflated,
+10,000 paragraphs per input and 1,048,576 UTF-16 units of text in both inputs,
+counted across every story while the parts are read, 250,000 alignment cells,
+4,000,000 diff cells, 128 changes, 256 diagnostics, 64 MiB of staged state,
+8 MiB of result data and a 64 MiB output, the no-op included.
+Review in BetterOffice is tested; Word validation is reported separately.
+Native Rust and Python comparison is not available yet.

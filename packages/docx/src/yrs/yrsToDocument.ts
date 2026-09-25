@@ -301,14 +301,12 @@ function formattingAttrs(attributes: Attrs): Attrs {
 function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const formatting: TextFormatting = {};
 
-  if (attributes.bold) {
-    formatting.bold = true;
-    formatting.boldCs = true;
-  }
-  if (attributes.italic) {
-    formatting.italic = true;
-    formatting.italicCs = true;
-  }
+  if (attributes.bold) formatting.bold = true;
+  if (attributes.italic) formatting.italic = true;
+  // Complex-script bold and italic follow the session where it states them (a comparison does),
+  // and bold and italic otherwise.
+  if (attributes.boldCs ?? attributes.bold) formatting.boldCs = true;
+  if (attributes.italicCs ?? attributes.italic) formatting.italicCs = true;
 
   const underline = asObject(attributes.underline);
   if (underline && underline.inheritedHyperlink !== true) {
@@ -345,7 +343,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
   const fontSize = asObject(attributes.fontSize);
   if (fontSize) {
     const size = asFiniteNumber(fontSize.size);
-    const sizeCs = asFiniteNumber(fontSize.sizeCs) ?? size;
+    const sizeCs = asFiniteNumber(fontSize.sizeCs);
     if (size !== undefined) formatting.fontSize = size;
     if (sizeCs !== undefined) formatting.fontSizeCs = sizeCs;
   }
@@ -357,7 +355,7 @@ function attrsToTextFormatting(attributes: Attrs): TextFormatting {
       ascii: (ascii ?? null) as string | undefined,
       hAnsi: (asString(fontFamily.hAnsi) ?? null) as string | undefined,
       eastAsia: asString(fontFamily.eastAsia),
-      cs: asString(fontFamily.cs) || ascii,
+      cs: asString(fontFamily.cs),
       asciiTheme: (fontFamily.asciiTheme ?? null) as NonNullable<
         TextFormatting['fontFamily']
       >['asciiTheme'],
@@ -493,16 +491,34 @@ function revisionId(value: unknown): number {
   return 0;
 }
 
-function trackedInfo(raw: unknown, _pmShape = false): TrackedChangeInfo | null {
+function trackedInfo(raw: unknown, _pmShape = false, id?: number): TrackedChangeInfo | null {
   const value = asObject(raw);
   if (!value) return null;
   const author = asString(value.author) || 'Unknown';
   const date = asString(value.date);
   return {
-    id: revisionId(value.revisionId ?? value.id),
+    id: id ?? revisionId(value.revisionId ?? value.id),
     author,
     ...(date ? { date } : {}),
   };
+}
+
+/** Serialized ids for a session revision's deletion and insertion. */
+export interface RevisionNumbers {
+  insertion?: number;
+  deletion?: number;
+}
+
+type RevisionIds = ReadonlyMap<string, RevisionNumbers>;
+
+function mappedRevisionId(
+  raw: unknown,
+  kind: keyof RevisionNumbers,
+  revisionIds: RevisionIds | undefined
+): number | undefined {
+  const value = asObject(raw);
+  const id = value?.revisionId ?? value?.id;
+  return typeof id === 'string' ? revisionIds?.get(id)?.[kind] : undefined;
 }
 
 function createHyperlink(attributes: Attrs): Hyperlink | null {
@@ -914,7 +930,7 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
     case 'break':
       return { type: 'run', content: [{ type: 'break', breakType: 'textWrapping' }] };
     case 'tab':
-      return { type: 'run', content: [{ type: 'tab' }] };
+      return tabRun(item.attributes);
     case 'image':
       return imageRunFromPayload(item.payload);
     case 'horizontalRule':
@@ -948,23 +964,27 @@ function ordinaryContentForItem(item: InlineItem): ParagraphContent | null {
   }
 }
 
+function tabRun(attributes: Attrs): Run {
+  const formatting = attrsToTextFormatting(formattingAttrs(attributes));
+  return {
+    type: 'run',
+    content: [{ type: 'tab' }],
+    ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
+  };
+}
+
 function trackedContentForItem(item: InlineItem, info: TrackedChangeInfo): ParagraphContent {
   let run: Run;
   if (item.kind === 'embed' && item.embedKind === 'image') run = imageRunFromPayload(item.payload);
+  else if (item.kind === 'embed' && item.embedKind === 'tab') run = tabRun(item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'horizontalRule')
     run = horizontalRuleRun(item.payload, item.attributes);
   else if (item.kind === 'embed' && item.embedKind === 'shape')
     run = shapeRunFromPayload(item.payload);
   else if (item.kind === 'embed' && item.embedKind === 'chart')
     run = chartRunFromPayload(item.payload) ?? { type: 'run', content: [] };
-  else if (item.kind === 'text') {
-    const formatting = attrsToTextFormatting(formattingAttrs(item.attributes));
-    run = {
-      type: 'run',
-      content: [{ type: 'text', text: item.text }],
-      ...(Object.keys(formatting).length > 0 ? { formatting } : {}),
-    };
-  } else run = { type: 'run', content: [] };
+  else if (item.kind === 'text') run = createTextRun(item.text, item.attributes);
+  else run = { type: 'run', content: [] };
 
   const raw = asObject(item.attributes.ins) ?? asObject(item.attributes.del);
   const isMovePair = raw?.isMovePair === true;
@@ -1077,7 +1097,24 @@ function restoreProjectedFieldResults(items: InlineItem[]): InlineItem[] {
   return remaining;
 }
 
-function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
+type TrackedWrapper = Extract<
+  ParagraphContent,
+  { type: 'insertion' | 'deletion' | 'moveFrom' | 'moveTo' }
+>;
+
+function isTrackedWrapper(content: ParagraphContent | undefined): content is TrackedWrapper {
+  return (
+    content?.type === 'insertion' ||
+    content?.type === 'deletion' ||
+    content?.type === 'moveFrom' ||
+    content?.type === 'moveTo'
+  );
+}
+
+function buildParagraphContent(
+  items: InlineItem[],
+  revisionIds?: RevisionIds
+): ParagraphContent[] {
   items = restoreProjectedFieldResults(items);
   const content: ParagraphContent[] = [];
   let currentRun: Run | null = null;
@@ -1104,11 +1141,29 @@ function buildParagraphContent(items: InlineItem[]): ParagraphContent[] {
       continue;
     }
 
-    const revision = trackedInfo(item.attributes.ins ?? item.attributes.del);
+    const raw = item.attributes.ins ?? item.attributes.del;
+    const revision = trackedInfo(
+      raw,
+      false,
+      mappedRevisionId(raw, item.attributes.ins ? 'insertion' : 'deletion', revisionIds)
+    );
     if (revision) {
       flushRun();
       flushHyperlink();
-      content.push(trackedContentForItem(item, revision));
+      const tracked = trackedContentForItem(item, revision);
+      const previous = content[content.length - 1];
+      if (
+        isTrackedWrapper(previous) &&
+        isTrackedWrapper(tracked) &&
+        previous.type === tracked.type &&
+        previous.info.id === tracked.info.id &&
+        previous.info.author === tracked.info.author &&
+        previous.info.date === tracked.info.date
+      ) {
+        previous.content.push(...tracked.content);
+      } else {
+        content.push(tracked);
+      }
       continue;
     }
 
@@ -1440,10 +1495,11 @@ function paragraphFromStory(
   properties: Attrs,
   items: InlineItem[],
   commentBoundaries: CommentBoundary[],
-  baseParagraph: Paragraph | undefined
+  baseParagraph: Paragraph | undefined,
+  revisionIds?: RevisionIds
 ): Paragraph {
   const attrs = paragraphAttrs(properties);
-  let content = buildParagraphContent(items);
+  let content = buildParagraphContent(items, revisionIds);
   content = restoreOriginalRuns(
     content,
     items,
@@ -1970,7 +2026,8 @@ class SaveContext {
 
   constructor(
     private readonly session: YrsSession,
-    base: Document
+    base: Document,
+    private readonly revisionIds?: RevisionIds
   ) {
     this.storyIds = new Set(session.storyIds());
     this.baseParagraphs = collectBaseParagraphs(base);
@@ -2125,7 +2182,8 @@ class SaveContext {
             segment.properties,
             items,
             boundaries,
-            baseParagraph
+            baseParagraph,
+            this.revisionIds
           );
           projectedBlocks.set(paragraph, { inputs: snapshot });
         }
@@ -2223,7 +2281,7 @@ class SaveContext {
     // A story ending in a flow-break embed is well-formed, not a lost
     // paragraph, so only content the projection can carry opens one.
     if (items.length > 0) {
-      const trailing = buildParagraphContent(items);
+      const trailing = buildParagraphContent(items, this.revisionIds);
       if (trailing.length > 0) blocks.push({ type: 'paragraph', content: trailing });
     }
     const projected = restoreRawBlocks(blocks, baseBlocks ?? []);
@@ -2251,7 +2309,28 @@ export function yrsToDocument(
   base: Document,
   options: YrsToDocumentOptions = {}
 ): Document {
-  const context = new SaveContext(session, base);
+  return projectDocument(session, base, options);
+}
+
+/**
+ * {@link yrsToDocument} of the body alone, writing each session revision with the serialized
+ * ids `revisionIds` gives its deletion and insertion.
+ */
+export function yrsBodyToDocumentWithRevisionIds(
+  session: YrsSession,
+  base: Document,
+  revisionIds: ReadonlyMap<string, RevisionNumbers>
+): Document {
+  return projectDocument(session, base, { storyIds: new Set(['body']) }, revisionIds);
+}
+
+function projectDocument(
+  session: YrsSession,
+  base: Document,
+  options: YrsToDocumentOptions,
+  revisionIds?: RevisionIds
+): Document {
+  const context = new SaveContext(session, base, revisionIds);
   const shouldProject = (storyId: string): boolean =>
     options.storyIds === undefined || options.storyIds.has(storyId);
   const bodyContent = context.storyIds.has('body') && shouldProject('body')

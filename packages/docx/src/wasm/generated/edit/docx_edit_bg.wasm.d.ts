@@ -29,6 +29,7 @@ export const editsession_clear_update_event_observation: (a: number) => void;
 export const editsession_clear_update_observer: (a: number) => void;
 export const editsession_client_id: (a: number) => number;
 export const editsession_comment_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
 export const editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
@@ -47,7 +48,9 @@ export const editsession_encode_sticky_position: (a: number, b: number, c: numbe
 export const editsession_encoded_selection: (a: number) => [number, number, number, number];
 export const editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_fail_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
+export const editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
 export const editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
 export const editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
 export const editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];

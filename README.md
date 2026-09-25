@@ -59,6 +59,12 @@
   Markdown with source anchors, explicit story and revision options, and
   omission diagnostics. Page fragments are not yet included.
 
+- **DOCX comparison into tracked changes.** Compare body paragraph text in two
+  DOCX files with unchanged paragraph structure and emit attributed tracked
+  insertions and deletions. Unsupported or ambiguous comparisons return
+  diagnostics. The headless JavaScript API supports BetterOffice review; Word
+  validation is reported separately.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

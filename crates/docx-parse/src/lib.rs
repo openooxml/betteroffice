@@ -164,9 +164,9 @@ pub use section::{
 pub use serializer::{
     CanonicalXmlAttribute, CanonicalXmlEvent, S10SerializeRequest, S10SerializeResponse,
     S11SerializeRequest, S11SerializeResponse, S12SerializeRequest, S12SerializeResponse,
-    S13SaveOptions, S13SaveRequest, S13SelectiveSave, SerializerDeterminism, canonical_xml_events,
-    serialize_s10_wire, serialize_s11_wire, serialize_s12_wire, write_docx_s13,
-    write_docx_s13_parts,
+    S13SaveOptions, S13SaveRequest, S13SelectiveSave, S13SourceParagraph, S13SourceParagraphs,
+    SerializerDeterminism, canonical_xml_events, element_span, serialize_s10_wire,
+    serialize_s11_wire, serialize_s12_wire, write_docx_s13, write_docx_s13_parts,
 };
 pub use settings::{
     CompatibilityFlags, DocumentSettings, RevisionView, ThemeFontLanguage, parse_settings,

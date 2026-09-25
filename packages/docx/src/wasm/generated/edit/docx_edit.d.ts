@@ -215,6 +215,19 @@ export class EditSession {
      */
     comment_text_target_json(target_json: string, comment_json: string): string;
     /**
+     * Compares two DOCX packages into this session, which must hold no document: the original
+     * is opened here and the revised body text differences are applied as tracked changes,
+     * outside undo history.
+     *
+     * `options` is `{"author","date","granularity"?,"unsupported"?,"limits"?}`. Returns a final
+     * `{"ok":false,"diagnostics"}` or `{"ok":true,"noop":true,"changes":[],"diagnostics"}`, or
+     * `{"ok":true,"noop":false,"save"}` naming what a save of the applied changes may write:
+     * then pass the saved bytes to [`EditSession::finish_compared_docx_json`], or the save
+     * failure to [`EditSession::fail_compared_docx_json`]. Malformed options and internal
+     * failures throw.
+     */
+    compare_docx_json(original: Uint8Array, revised: Uint8Array, options: string): string;
+    /**
      * Adds a story holding one paragraph with `initial_text` (which must not
      * contain paragraph breaks), `p_style` and `alignment`. Receipt:
      * `{"paraId"}` — the paragraph ending at the story's pilcrow. Errors when
@@ -337,11 +350,21 @@ export class EditSession {
      */
     export_structured_json(options: string): string;
     /**
+     * The final comparison result when saving the applied changes failed with `message`.
+     */
+    fail_compared_docx_json(message: string): string;
+    /**
      * Exact, case-sensitive, paragraph-local search:
      * `{"text","within","view","limit"?}` ->
      * `{"ok":true,"version","matches":[{"text","range"}],"truncated"}`.
      */
     find_text_json(request: string): string;
+    /**
+     * The final comparison result for `bytes`, the saved applied changes, verified against both
+     * inputs: `{"ok":true,"changes","diagnostics"}` or `{"ok":false,"diagnostics"}`. Throws
+     * when no comparison awaits its saved bytes.
+     */
+    finish_compared_docx_json(bytes: Uint8Array): string;
     /**
      * Applies a set-valued, tri-state inline formatting delta over
      * `[start, end)` in one transaction. An omitted key keeps the current
@@ -1170,6 +1193,7 @@ export interface InitOutput {
     readonly editsession_clear_update_observer: (a: number) => void;
     readonly editsession_client_id: (a: number) => number;
     readonly editsession_comment_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly editsession_compare_docx_json: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly editsession_create_story: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => [number, number, number, number];
     readonly editsession_delete_column: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_delete_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
@@ -1188,7 +1212,9 @@ export interface InitOutput {
     readonly editsession_encoded_selection: (a: number) => [number, number, number, number];
     readonly editsession_export_markdown_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_export_structured_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_fail_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_find_text_json: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly editsession_finish_compared_docx_json: (a: number, b: number, c: number) => [number, number, number, number];
     readonly editsession_format_range: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number];
     readonly editsession_format_text_target_json: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly editsession_headings_json: (a: number, b: number, c: number) => [number, number, number, number];

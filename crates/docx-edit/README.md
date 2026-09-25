@@ -32,6 +32,15 @@ ranges, table and control ids, or `sourcePart` locations in retained XML), and
 everything omitted or not represented is diagnosed. `read_types` holds the
 anchor, story-selection and content-control types shared by the read APIs.
 
+`compare` backs the JavaScript package's `compareDocx`: it inspects two DOCX
+packages in full, aligns their body paragraphs, diffs the text of paired
+paragraphs with the bounded LCS from
+[betteroffice-ooxml-diff](https://crates.io/crates/betteroffice-ooxml-diff),
+and applies each supported difference to the original's session as a rich
+tracked replacement in one batch; anything else is diagnosed and refuses the
+comparison. The saved result is verified against both inputs. It has no native
+entry point yet.
+
 Used by [betteroffice-docx](https://crates.io/crates/betteroffice-docx).
 
 Measure DOCX parsing, seeding, and body lowering with:

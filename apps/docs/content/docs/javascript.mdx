@@ -131,6 +131,42 @@ classified the same way. Exports stop at whole blocks when they reach `maxBlocks
 `maxBytes` and report `truncated`. Markdown does not preserve Word pagination or
 layout, and page fragments are not included yet.
 
+## Compare DOCX files into tracked changes
+
+`compareDocx` compares the body paragraph text of an original and a revised DOCX
+and returns the original with the differences as tracked insertions and
+deletions, attributed to the author and date you pass. Everything else in the
+package keeps the original's bytes.
+
+```ts
+import { compareDocx } from "@betteroffice/docx";
+
+const result = await compareDocx(original, revised, {
+  author: "Contract review",
+  date: "2024-05-06T09:30:00+02:00",
+});
+if (result.ok) {
+  await save(result.docx);
+  for (const change of result.changes) console.log(change.kind, change.original.text, change.revised.text);
+} else {
+  for (const diagnostic of result.diagnostics) console.warn(diagnostic.code, diagnostic.message);
+}
+```
+
+Only text inside body paragraphs whose structure is unchanged is compared.
+Whole-paragraph additions, removals and moves, table and content-control
+changes, formatting or style changes, field, hyperlink and object changes,
+edits in paragraphs holding such content, existing tracked changes, and
+differences outside the body return `{ ok: false, diagnostics }` and never a
+partial redline; `unsupported: "report"` collects every diagnostic instead of
+stopping at the first. `granularity` reports differences by Unicode word
+(the default) or grapheme cluster, and `limits` can tighten the documented v1
+bounds. The result is reopened and checked against both inputs before it is
+returned: accepting every change gives the revised text and formatting,
+rejecting every change gives the original. Review in BetterOffice is tested;
+Word validation is reported separately. Native Rust and Python comparison is
+not available yet.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
