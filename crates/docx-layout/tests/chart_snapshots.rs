@@ -1395,12 +1395,12 @@ attrs {"ariaLabel":"Points","blockId":42,"chart":{"label":"Points, line chart, 1
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q2","width":10,"x":139}
 {"baselineY":200,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"Q3","width":10,"x":173.667}
 {"fill":"#FF0000","geometryPath":"5 commands {\"type\":\"move\",\"x\":109.333,\"y\":73.417} .. {\"type\":\"close\"} #4d2a3f78615ac026","h":18.667,"kind":"shape","w":18.667,"x":100,"y":73.417}
-{"baselineY":64.083,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"peak","width":48,"x":128}
+{"baselineY":86.25,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"peak","width":48,"x":121.667}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":109.333,"x2":144,"y1":82.75,"y2":156.5}
 {"fill":"#4472C4","geometryPath":"5 commands {\"type\":\"move\",\"x\":144,\"y\":150.5} .. {\"type\":\"close\"} #41c947062a4bb889","h":12,"kind":"shape","w":12,"x":138,"y":150.5}
 {"color":"#4472C4","kind":"line","strokeWidth":2,"x1":144,"x2":178.667,"y1":156.5,"y2":141.75}
 {"fill":"#00FF00","geometryPath":"5 commands {\"type\":\"move\",\"x\":178.667,\"y\":135.75} .. {\"type\":\"close\"} #1adb38feecd4c76a","h":12,"kind":"shape","w":12,"x":172.667,"y":135.75}
-{"baselineY":129.75,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"end","width":48,"x":190.667}
+{"baselineY":145.25,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"end","width":48,"x":187.667}
 {"fill":"#4472C4","h":8,"kind":"rect","w":8,"x":212,"y":76}
 {"baselineY":84,"color":"#222222","font":"400 10px Calibri, sans-serif","kind":"text","text":"North","width":80,"x":224}
 # points-without-indexes
