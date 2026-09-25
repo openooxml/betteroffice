@@ -69,8 +69,6 @@ pub const MAX_PLOT_COORD: f64 = 1e9;
 
 const MAX_LABEL_CHARS: usize = 120;
 const MAX_LEGEND_ENTRIES: usize = 8;
-const AXIS_GUTTER: f64 = 42.0;
-const CATEGORY_GUTTER: f64 = 76.0;
 const AXIS_HEADER: f64 = 18.0;
 /// A side legend's swatch edge, the gap after it, and its row pitch, in ems
 /// of the legend text, as PowerPoint draws them.
@@ -1018,16 +1016,29 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         }
         _ => (0.0, 0.0),
     };
-    let right_margin = if reserve_right > 0.0 { 0.0 } else { 18.0 };
     let legend_h = match &legend {
         Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
     };
-    let gutter = if has_transposed_family(chart) {
-        CATEGORY_GUTTER
+    let views: Vec<Vec<SeriesView<'_>>> = if chart.plot_groups.is_empty() {
+        vec![series_views(&chart.series, scan)]
     } else {
-        AXIS_GUTTER
+        chart
+            .plot_groups
+            .iter()
+            .take(MAX_PLOT_GROUPS)
+            .map(|group| series_views(&group.series, scan))
+            .collect()
     };
+    let families = plot_families(chart, &views, label_style);
+    let bands = axis_bands(
+        ops,
+        families
+            .iter()
+            .copied()
+            .find(|family| has_axes(family.chart_type) && !family.secondary),
+    );
+    let gutter = bands.left;
     let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
         38.0
@@ -1045,10 +1056,20 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     } else {
         0.0
     };
+    let right_margin = if reserve_right > 0.0 {
+        bands.overhang
+    } else {
+        CHART_PAD + bands.right
+    };
+    let top = if chart.title.is_some_and(|title| !title.is_empty()) {
+        title_h
+    } else {
+        CHART_PAD
+    };
     let region_x = x + reserve_left;
     let region_w = width - reserve_left - reserve_right;
-    let region_y = y + title_h + band_top;
-    let region_h = height - title_h - legend_h;
+    let region_y = y + top + band_top;
+    let region_h = height - top - legend_h;
     let plot = match chart.plot_layout {
         // The deck placed the inner plot itself; honouring it is what keeps
         // manually sized charts where PowerPoint draws them (#797).
@@ -1059,28 +1080,53 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             h: (manual.h * height).max(24.0),
             gutter,
         },
-        None => PlotArea {
-            x: plot_x,
-            y: region_y + axis_header,
-            w: (region_w - gutter - right_margin - secondary_w).max(24.0),
-            h: (height - title_h - category_band(chart, chart_text) - legend_h - axis_header)
-                .max(24.0),
-            gutter,
-        },
+        None => {
+            let plot_y = region_y + axis_header + bands.top;
+            let bottom = if legend_position == "bottom" {
+                legend_h
+            } else {
+                0.0
+            };
+            PlotArea {
+                x: plot_x,
+                y: plot_y,
+                w: (region_w - gutter - right_margin - secondary_w).max(24.0),
+                h: (y + height - bottom - bands.bottom - plot_y).max(24.0),
+                gutter,
+            }
+        }
     };
 
+    for family in families {
+        if ops.exhausted() {
+            break;
+        }
+        emit_family(ops, family, plot, region_x, region_y, region_w, region_h);
+    }
+
+    if let Some(band) = legend {
+        emit_legend(ops, chart, band, legend_style);
+    }
+}
+
+/// Every family the chart plots, in draw order, each over its own views.
+fn plot_families<'a>(
+    chart: &'a PlotChart<'a>,
+    views: &'a [Vec<SeriesView<'a>>],
+    label: &'a ResolvedText,
+) -> Vec<PlotFamily<'a>> {
+    let chart_text = chart.text.chart;
     if chart.plot_groups.is_empty() {
-        let series = series_views(&chart.series, scan);
-        emit_family(
-            ops,
-            PlotFamily {
+        return views
+            .first()
+            .map(|series| PlotFamily {
                 chart_type: chart.chart_type,
-                series: &series,
+                series,
                 value_axis: chart.value_axis,
                 axis_titles: chart.axis_titles,
                 group: None,
                 chart_text,
-                label: label_style,
+                label,
                 axis: None,
                 x_axis: None,
                 category_axis: chart
@@ -1088,60 +1134,194 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
                     .iter()
                     .find(|axis| axis.kind != PlotAxisKind::Value),
                 secondary: false,
-            },
-            plot,
-            region_x,
-            region_y,
-            region_w,
-            region_h,
-        );
-    } else {
-        let primary = primary_value_axis(chart);
-        for group in chart.plot_groups.iter().take(MAX_PLOT_GROUPS) {
-            if ops.exhausted() {
-                break;
-            }
-            let series = series_views(&group.series, scan);
+            })
+            .into_iter()
+            .collect();
+    }
+    let primary = primary_value_axis(chart);
+    chart
+        .plot_groups
+        .iter()
+        .zip(views)
+        .map(|(group, series)| {
             let (x_axis, axis) = group_value_axes(chart, group);
             let category_axis = group_category_axis(chart, group);
             let legacy_axes = chart.axes.is_empty() && group.axis_ids.is_empty();
-            let secondary = match (axis, primary) {
-                (Some(axis), Some(primary)) => axis.id != primary.id,
-                _ => false,
-            };
-            emit_family(
-                ops,
-                PlotFamily {
-                    chart_type: group.chart_type.unwrap_or(chart.chart_type),
-                    series: &series,
-                    value_axis: legacy_axes.then_some(chart.value_axis).flatten(),
-                    axis_titles: if legacy_axes {
-                        chart.axis_titles
-                    } else {
-                        PlotAxisTitles {
-                            category: category_axis.and_then(|axis| axis.title),
-                            value: axis.and_then(|axis| axis.title),
-                        }
-                    },
-                    group: Some(group),
-                    chart_text,
-                    label: label_style,
-                    axis,
-                    x_axis,
-                    category_axis,
-                    secondary,
+            PlotFamily {
+                chart_type: group.chart_type.unwrap_or(chart.chart_type),
+                series,
+                value_axis: legacy_axes.then_some(chart.value_axis).flatten(),
+                axis_titles: if legacy_axes {
+                    chart.axis_titles
+                } else {
+                    PlotAxisTitles {
+                        category: category_axis.and_then(|axis| axis.title),
+                        value: axis.and_then(|axis| axis.title),
+                    }
                 },
-                plot,
-                region_x,
-                region_y,
-                region_w,
-                region_h,
-            );
-        }
-    }
+                group: Some(group),
+                chart_text,
+                label,
+                axis,
+                x_axis,
+                category_axis,
+                secondary: match (axis, primary) {
+                    (Some(axis), Some(primary)) => axis.id != primary.id,
+                    _ => false,
+                },
+            }
+        })
+        .collect()
+}
 
-    if let Some(band) = legend {
-        emit_legend(ops, chart, band, legend_style);
+fn has_axes(chart_type: &str) -> bool {
+    !matches!(chart_type, "pie" | "doughnut" | "ofPie" | "radar")
+}
+
+/// The chart area's inner margin, as PowerPoint leaves it.
+const CHART_PAD: f64 = 9.5;
+/// How far the plot keeps from an edge nothing hangs over.
+const PLOT_INSET: f64 = 4.6;
+/// The length of a tick, which the gap between an axis and its labels spans.
+const TICK_LEN: f64 = 7.0;
+/// The rest of that gap, in ems of the label text.
+const LABEL_GAP_EM: f64 = 0.6;
+/// The band an axis title takes beside its labels, in ems of its text.
+const AXIS_TITLE_EM: f64 = 1.4;
+/// Line pitch of a label that wraps onto more lines, in ems.
+const LABEL_LINE_EM: f64 = 1.2;
+
+/// Space between an axis line and the near edge of its labels.
+fn label_gap(style: &ResolvedText) -> f64 {
+    TICK_LEN + LABEL_GAP_EM * style.font.size_px
+}
+
+/// The first baseline of labels hung below `edge`.
+fn baseline_below(edge: f64, style: &ResolvedText) -> f64 {
+    edge + label_gap(style) + 0.75 * style.font.size_px
+}
+
+/// The baseline that centres one line of `style` on `middle`.
+fn baseline_centred(middle: f64, style: &ResolvedText) -> f64 {
+    middle + 0.25 * style.font.size_px
+}
+
+/// How far the plot sits in from each edge of the space it is given, so its
+/// axis labels fit beside it.
+struct AxisBands {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+    /// How far the last value label hangs past the plot's far end.
+    overhang: f64,
+}
+
+/// The bands the primary family's axis labels need, measured from the labels.
+fn axis_bands<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    family: Option<PlotFamily<'_>>,
+) -> AxisBands {
+    let empty = AxisBands {
+        left: CHART_PAD + PLOT_INSET,
+        top: PLOT_INSET,
+        right: PLOT_INSET,
+        bottom: CHART_PAD + PLOT_INSET,
+        overhang: 0.0,
+    };
+    let Some(family) = family else {
+        return empty;
+    };
+    let value_style = family.scoped(family.axis.map(|axis| axis.text).unwrap_or_default());
+    let values: Vec<f64> = if family.axis.is_some_and(|axis| axis.hidden) {
+        Vec::new()
+    } else {
+        let scale = value_scale(family);
+        let format = family.axis.and_then(|axis| axis.number_format);
+        axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit))
+            .into_iter()
+            .map(|value| text_width(&scale.format(value, format), &value_style, ops))
+            .collect()
+    };
+    let category_style = family.category_text();
+    let count = category_count(family.series).min(MAX_PLOT_DATA_SCAN);
+    let categories: Vec<String> = if family.category_axis.is_some_and(|axis| axis.hidden) {
+        Vec::new()
+    } else {
+        (0..count)
+            .map(|index| category_label(family.series, index))
+            .collect()
+    };
+    let widest = |ops: &mut Emitter<'_, S>| {
+        categories
+            .iter()
+            .flat_map(|label| label.split('\n'))
+            .map(|line| text_width(line.trim(), &category_style, ops))
+            .fold(0.0, f64::max)
+    };
+    let lines = categories
+        .iter()
+        .map(|label| label.split('\n').count())
+        .max()
+        .unwrap_or(0);
+    let hung = |style: &ResolvedText, lines: usize| {
+        CHART_PAD
+            + label_gap(style)
+            + style.font.size_px * (1.0 + LABEL_LINE_EM * lines.saturating_sub(1) as f64)
+    };
+    let widest_value = values.iter().copied().fold(0.0, f64::max);
+    let titled = |title: Option<&str>| {
+        if title.is_some_and(|title| !title.is_empty()) {
+            AXIS_TITLE_EM * value_style.font.size_px
+        } else {
+            0.0
+        }
+    };
+    let (value_title, category_title) = (
+        titled(family.axis_titles.value),
+        titled(family.axis_titles.category),
+    );
+    if family.transposed() {
+        let overhang = values.last().map_or(0.0, |width| width / 2.0);
+        AxisBands {
+            left: category_title
+                + if categories.is_empty() {
+                    empty.left
+                } else {
+                    CHART_PAD + widest(ops) + label_gap(&category_style)
+                },
+            top: PLOT_INSET,
+            right: PLOT_INSET + overhang,
+            bottom: value_title
+                + if values.is_empty() {
+                    empty.bottom
+                } else {
+                    hung(&value_style, 1)
+                },
+            overhang,
+        }
+    } else {
+        AxisBands {
+            left: value_title
+                + if values.is_empty() {
+                    empty.left
+                } else {
+                    CHART_PAD + widest_value + label_gap(&value_style)
+                },
+            top: if values.is_empty() {
+                PLOT_INSET
+            } else {
+                PLOT_INSET.max(0.5 * value_style.font.size_px - 0.7)
+            },
+            right: PLOT_INSET,
+            bottom: category_title
+                + if categories.is_empty() {
+                    empty.bottom
+                } else {
+                    hung(&category_style, lines)
+                },
+            overhang: 0.0,
+        }
     }
 }
 
@@ -1361,17 +1541,6 @@ fn group_category_axis<'a>(
         (Some(axis), None) => Some(axis),
         _ => None,
     }
-}
-
-fn has_transposed_family(chart: &PlotChart<'_>) -> bool {
-    if chart.plot_groups.is_empty() {
-        return chart.chart_type == "bar";
-    }
-    chart
-        .plot_groups
-        .iter()
-        .take(MAX_PLOT_GROUPS)
-        .any(|group| group.chart_type.unwrap_or(chart.chart_type) == "bar")
 }
 
 fn has_transposed_category_title(chart: &PlotChart<'_>) -> bool {
@@ -1820,7 +1989,7 @@ fn side_legend_band<S: PlotSink + ?Sized>(
         let width = lead
             + lines
                 .iter()
-                .map(|line| legend_text_width(line, style, ops))
+                .map(|line| text_width(line, style, ops))
                 .fold(0.0, f64::max);
         let height = size * LEGEND_PITCH_EM + size * 1.22 * lines.len().saturating_sub(1) as f64;
         rows.push(LegendRow {
@@ -1884,7 +2053,7 @@ fn legend_rows<S: PlotSink + ?Sized>(
         let entry_width = lead
             + lines
                 .iter()
-                .map(|line| legend_text_width(line, style, ops))
+                .map(|line| text_width(line, style, ops))
                 .fold(0.0, f64::max);
         let row = rows.last().unwrap();
         if !row.entries.is_empty() && row.width + LEGEND_ROW_GAP + entry_width > width {
@@ -1909,7 +2078,8 @@ fn legend_line_height(style: &ResolvedText) -> f64 {
     LEGEND_ROW_H.max(style.font.size_px * 1.25 + 8.0)
 }
 
-fn legend_text_width<S: PlotSink + ?Sized>(
+/// A label's advance in `style`, measured by the sink where it can.
+fn text_width<S: PlotSink + ?Sized>(
     label: &str,
     style: &ResolvedText,
     ops: &mut Emitter<'_, S>,
@@ -1935,11 +2105,11 @@ fn wrap_legend_label<S: PlotSink + ?Sized>(
 ) -> Vec<String> {
     let mut remaining: String = label.chars().take(MAX_LABEL_CHARS).collect();
     let mut lines = Vec::new();
-    while !remaining.is_empty() && legend_text_width(&remaining, style, ops) > width {
+    while !remaining.is_empty() && text_width(&remaining, style, ops) > width {
         let mut end = 0;
         for (index, ch) in remaining.char_indices() {
             let next = index + ch.len_utf8();
-            if end > 0 && legend_text_width(&remaining[..next], style, ops) > width {
+            if end > 0 && text_width(&remaining[..next], style, ops) > width {
                 break;
             }
             end = next;
@@ -2210,13 +2380,6 @@ fn round_to_unit(value: f64, unit: f64, up: bool) -> f64 {
 
 #[cfg(test)]
 fn value_range(family: PlotFamily<'_>) -> (f64, f64) {
-    let _plot = PlotArea {
-        x: 0.0,
-        y: 0.0,
-        w: 200.0,
-        h: 156.0,
-        gutter: AXIS_GUTTER,
-    };
     let scale = value_scale(family);
     (scale.min, scale.max)
 }
@@ -2340,9 +2503,9 @@ fn draws_no_line(line: Option<PlotLine<'_>>) -> bool {
 /// Half-length of a tick mark drawn for `mark`, and whether it crosses.
 fn tick_extents(mark: Option<&str>) -> Option<(f64, f64)> {
     match mark? {
-        "in" => Some((0.0, 4.0)),
-        "out" => Some((4.0, 0.0)),
-        "cross" => Some((3.0, 3.0)),
+        "in" => Some((0.0, TICK_LEN)),
+        "out" => Some((TICK_LEN, 0.0)),
+        "cross" => Some((TICK_LEN / 2.0, TICK_LEN / 2.0)),
         _ => None,
     }
 }
@@ -2418,6 +2581,7 @@ fn emit_axes<S: PlotSink + ?Sized>(
             );
         }
     }
+    let mut widest: f64 = 0.0;
     for value in axis_ticks(scale, axis.and_then(|axis| axis.major_unit))
         .into_iter()
         .rev()
@@ -2433,20 +2597,37 @@ fn emit_axes<S: PlotSink + ?Sized>(
             continue;
         }
         let text = scale.format(value, number_format);
+        let width = text_width(&text, tick_style, ops);
+        widest = widest.max(width);
         if transposed {
             let baseline = if family.secondary {
-                plot.y - 6.0
+                plot.y - label_gap(tick_style) - 0.25 * tick_style.font.size_px
             } else {
-                plot.y + plot.h + 14.0
+                baseline_below(plot.y + plot.h, tick_style)
             };
-            push_text(ops, &text, at - 16.0, baseline, 32.0, tick_style);
+            push_text_aligned(
+                ops,
+                &text,
+                at - width,
+                baseline,
+                width * 2.0,
+                tick_style,
+                PlotTextAlign::Center,
+            );
         } else {
             let label_x = if family.secondary {
-                plot.x + plot.w + 4.0
+                plot.x + plot.w + label_gap(tick_style)
             } else {
-                plot.x - plot.gutter + 4.0
+                plot.x - label_gap(tick_style) - width
             };
-            push_text(ops, &text, label_x, at + 3.0, 34.0, tick_style);
+            push_text(
+                ops,
+                &text,
+                label_x,
+                baseline_centred(at, tick_style),
+                width,
+                tick_style,
+            );
         }
         if let Some((outer, inner)) = tick_extents(axis.and_then(|axis| axis.major_tick_mark)) {
             let (near, far) = (edge + outward * outer, edge - outward * inner);
@@ -2494,10 +2675,20 @@ fn emit_axes<S: PlotSink + ?Sized>(
             width,
         );
     }
+    let category_style = family.category_text();
+    let below = below_plot(
+        plot,
+        if transposed {
+            tick_style
+        } else {
+            &category_style
+        },
+        tick_style,
+    );
     let (value_title, category_title) = if transposed {
-        (below_plot(plot), left_of_plot(plot))
+        (below, left_of_plot(plot))
     } else {
-        (left_of_plot(plot), below_plot(plot))
+        (left_of_plot(plot), below)
     };
     if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
         if transposed || !ops.sink.turns_text() {
@@ -2516,7 +2707,11 @@ fn emit_axes<S: PlotSink + ?Sized>(
             push_text_turned(
                 ops,
                 title,
-                plot.x - plot.gutter / 2.0 - plot.h / 2.0,
+                plot.x
+                    - label_gap(tick_style)
+                    - widest
+                    - AXIS_TITLE_EM / 2.0 * tick_style.font.size_px
+                    - plot.h / 2.0,
                 plot.y + plot.h / 2.0 + tick_style.font.size_px * 0.34,
                 plot.h,
                 tick_style,
@@ -2549,8 +2744,13 @@ fn left_of_plot(plot: PlotArea) -> (f64, f64, f64) {
     )
 }
 
-fn below_plot(plot: PlotArea) -> (f64, f64, f64) {
-    (plot.x, plot.y + plot.h + 26.0, plot.w)
+/// An axis title's box under the labels hung below the plot.
+fn below_plot(plot: PlotArea, labels: &ResolvedText, title: &ResolvedText) -> (f64, f64, f64) {
+    (
+        plot.x,
+        plot.y + plot.h + label_gap(labels) + labels.font.size_px + title.font.size_px,
+        plot.w,
+    )
 }
 
 fn push_value_gridline<S: PlotSink + ?Sized>(
@@ -2944,16 +3144,19 @@ fn emit_bar<S: PlotSink + ?Sized>(
         let label = category_label(family.series, cat_idx);
         // A category name carries its own line breaks, and PowerPoint stacks
         // the lines under the band rather than running them together.
-        let step = category_style.font.size_px * 1.2;
+        let step = category_style.font.size_px * LABEL_LINE_EM;
         let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
         for (line, text) in label.split('\n').enumerate() {
             if horizontal {
+                let text = text.trim();
+                let width = text_width(text, category_style, ops);
                 push_text(
                     ops,
-                    text.trim(),
-                    plot.x - plot.gutter + 4.0,
-                    plot.y + slot + bands.slot * 0.55 - lift + step * line as f64,
-                    plot.gutter - 8.0,
+                    text,
+                    plot.x - label_gap(category_style) - width,
+                    baseline_centred(plot.y + slot + bands.slot / 2.0, category_style) - lift
+                        + step * line as f64,
+                    width,
                     category_style,
                 );
             } else {
@@ -2961,7 +3164,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     ops,
                     text.trim(),
                     plot.x + slot + 2.0,
-                    plot.y + plot.h + 14.0 + step * line as f64,
+                    baseline_below(plot.y + plot.h, category_style) + step * line as f64,
                     bands.slot - 4.0,
                     category_style,
                     PlotTextAlign::Center,
@@ -3055,7 +3258,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     // A category name carries its own line breaks, and PowerPoint stacks the
     // lines under the tick, each centred on the band the category occupies.
     let slot = (plot.w / count.max(1) as f64).max(32.0);
-    let step = style.font.size_px * 1.2;
+    let step = style.font.size_px * LABEL_LINE_EM;
     for index in 0..count {
         if ops.exhausted() {
             return;
@@ -3067,7 +3270,7 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
                 ops,
                 text.trim(),
                 x,
-                plot.y + plot.h + 14.0 + step * line as f64,
+                baseline_below(plot.y + plot.h, style) + step * line as f64,
                 slot,
                 style,
                 PlotTextAlign::Center,
@@ -3292,13 +3495,16 @@ fn emit_scatter_x_labels<S: PlotSink + ?Sized>(
         if ops.exhausted() {
             return;
         }
-        push_text(
+        let text = scale.format(value, format);
+        let width = text_width(&text, family.label(), ops);
+        push_text_aligned(
             ops,
-            &scale.format(value, format),
-            scale.x(plot, value) - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
+            &text,
+            scale.x(plot, value) - width,
+            baseline_below(plot.y + plot.h, family.label()),
+            width * 2.0,
             family.label(),
+            PlotTextAlign::Center,
         );
     }
 }
@@ -3608,7 +3814,7 @@ fn emit_stock<S: PlotSink + ?Sized>(
             ops,
             &category_label(family.series, cat_idx),
             plot.x + slot + 2.0,
-            plot.y + plot.h + 14.0,
+            baseline_below(plot.y + plot.h, family.label()),
             bands.slot - 4.0,
             family.label(),
         );
@@ -3762,7 +3968,7 @@ fn emit_surface<S: PlotSink + ?Sized>(
             ops,
             &category_label(family.series, column),
             plot.x + cell_w * category_position(family, column, columns) as f64 + 2.0,
-            plot.y + plot.h + 14.0,
+            baseline_below(plot.y + plot.h, family.label()),
             cell_w - 4.0,
             family.label(),
         );
@@ -4280,40 +4486,6 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
         out.push('%');
     }
     Some(out)
-}
-
-/// The room under the plot for its category names: the one line every chart
-/// keeps, grown by a line for each break the longest name carries.
-fn category_band(chart: &PlotChart<'_>, chart_text: PlotTextStyle<'_>) -> f64 {
-    const ONE_LINE: f64 = 34.0;
-    let lines = chart
-        .series
-        .iter()
-        .chain(
-            chart
-                .plot_groups
-                .iter()
-                .flat_map(|group| group.series.iter()),
-        )
-        .find(|series| !series.categories.is_empty())
-        .into_iter()
-        .flat_map(|series| series.categories.iter())
-        .take(MAX_PLOT_DATA_SCAN)
-        .map(|name| name.split('\n').count())
-        .max()
-        .unwrap_or(1);
-    if lines <= 1 || has_transposed_family(chart) {
-        return ONE_LINE;
-    }
-    let style = chart
-        .axes
-        .iter()
-        .find(|axis| axis.kind != PlotAxisKind::Value)
-        .map(|axis| axis.text)
-        .unwrap_or_default()
-        .over(chart_text)
-        .resolve(CHART_LABEL_SIZE_PX, 400);
-    ONE_LINE + style.font.size_px * 1.2 * (lines - 1) as f64
 }
 
 /// A format code's `;`-separated sections. A semicolon inside quotes, or one
@@ -6160,7 +6332,7 @@ mod tests {
         let tall = bars(&ops);
         assert_eq!(tall.len(), 2);
         assert!(
-            tall[1].1 < 11.0 && tall[1].3 > 150.0,
+            tall[1].1 < 15.0 && tall[1].3 > 150.0,
             "a reversed axis grows the bar downward from the top: {tall:?}"
         );
     }
@@ -6202,11 +6374,17 @@ mod tests {
         let mut marks: Vec<f64> = texts_at(&ops)
             .into_iter()
             .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
-            .map(|(_, _, baseline, _)| baseline - 3.0)
+            .map(|(_, _, baseline, _)| baseline - 0.25 * CHART_LABEL_SIZE_PX)
             .collect();
         marks.sort_by(f64::total_cmp);
         assert_eq!(grid.len(), 5, "{grid:?}");
-        assert_eq!(grid, marks, "every gridline stands on its own label");
+        assert_eq!(marks.len(), grid.len(), "{marks:?}");
+        assert!(
+            grid.iter()
+                .zip(&marks)
+                .all(|(line, mark)| (line - mark).abs() < 1e-9),
+            "every gridline stands on its own label: {grid:?} {marks:?}"
+        );
     }
 
     #[test]
@@ -6686,6 +6864,53 @@ mod tests {
     }
 
     #[test]
+    fn axis_labels_keep_a_font_sized_gap_from_their_axis() {
+        let data = source(&[10.0, 20.0]);
+        let mut chart = grouped("column", group("column", vec![series("North", &data)]));
+        chart.legend = Some(PlotLegend {
+            overlay: false,
+            position: None,
+            visible: Some(false),
+        });
+        chart.text.chart.size_pt = Some(18.0);
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 600.0,
+            h: 400.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        let size = 24.0;
+        let gap = TICK_LEN + LABEL_GAP_EM * size;
+        let axis_x = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 && x1 == x2 => Some(*x1),
+                _ => None,
+            })
+            .fold(f64::MAX, f64::min);
+        let ticks = tick_labels(&ops);
+        let widest = ticks.iter().map(|tick| tick.3).fold(0.0, f64::max);
+        for tick in &ticks {
+            assert!((tick.1 + tick.3 - (axis_x - gap)).abs() < 1e-9, "{tick:?}");
+        }
+        assert!(
+            (axis_x - (CHART_PAD + widest + gap)).abs() < 1e-9,
+            "{axis_x}"
+        );
+        let axis_y = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, width, .. } if *width >= 1.0 && y1 == y2 => Some(*y1),
+                _ => None,
+            })
+            .fold(f64::MIN, f64::max);
+        let q1 = text_at(&ops, "Q1");
+        assert!((q1.2 - (axis_y + gap + 0.75 * size)).abs() < 1e-9, "{q1:?}");
+        assert!((frame.h - axis_y - (CHART_PAD + gap + size)).abs() < 1e-9);
+    }
+
+    #[test]
     fn a_horizontal_bar_chart_draws_its_value_axis_under_the_plot() {
         let north = source(&[10.0, 20.0]);
         let plotted = |chart_type| {
@@ -6727,7 +6952,7 @@ mod tests {
              {ticks:?} {q1:?} {q2:?}"
         );
         assert!(
-            q1.3 > 36.0,
+            q1.1 >= rect().x && q1.3 >= fallback_label_width("Q1", &chart_label_font()),
             "the gutter is wide enough for a whole category name: {q1:?}"
         );
         assert!(
@@ -6742,8 +6967,10 @@ mod tests {
         let column = plotted("column");
         let ticks = tick_labels(&column);
         assert!(
-            ticks.iter().all(|tick| (tick.1 - ticks[0].1).abs() < 0.01),
-            "a column chart keeps its value ticks in one left-hand column: {ticks:?}"
+            ticks
+                .iter()
+                .all(|tick| (tick.1 + tick.3 - ticks[0].1 - ticks[0].3).abs() < 0.01),
+            "a column chart right-aligns its value ticks in one left-hand column: {ticks:?}"
         );
         let (q1, q2) = (text_at(&column, "Q1"), text_at(&column, "Q2"));
         assert!(
@@ -6846,7 +7073,7 @@ mod tests {
             let category = text_at(&ops, "Quarter");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(category.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert_eq!(text_at(&ops, "Millions").2, 192.0);
+            assert_eq!(text_at(&ops, "Millions").2, 186.5);
         }
     }
 
@@ -6868,8 +7095,8 @@ mod tests {
             let upper_tick = text_at(&ops, "8");
             let title_bottom = title.map_or(0.0, |title| text_at(&ops, title).2 + 3.0);
             assert!(upper_tick.2 - CHART_LABEL_SIZE_PX >= title_bottom);
-            assert_eq!(upper_tick.1 + 16.0, 243.5);
-            assert_eq!(text_at(&ops, "4").2, 180.0);
+            assert_eq!(upper_tick.1 + upper_tick.3 / 2.0, 241.0);
+            assert_eq!(text_at(&ops, "4").2, 188.0);
         }
     }
 
@@ -7231,7 +7458,10 @@ mod tests {
             rect(),
         ))[0]
             .0;
-        let column = rect().x + rect().w - 8.0 - key_x;
+        let column = rect().x + rect().w
+            - CHART_PAD
+            - PLOT_INSET
+            - (key_x - CHART_LABEL_SIZE_PX * LEGEND_PLOT_GAP_EM);
         assert!(
             (widest(Some("bottom")) - widest(Some("right")) - column).abs() < 0.01,
             "a bottom legend must return the column's width: {} vs {}",
@@ -7261,7 +7491,14 @@ mod tests {
         ))[0]
             .0;
         assert!(
-            (widest(true) - widest(false) - (rect().x + rect().w - 8.0 - key_x)).abs() < 0.01,
+            (widest(true)
+                - widest(false)
+                - (rect().x + rect().w
+                    - CHART_PAD
+                    - PLOT_INSET
+                    - (key_x - CHART_LABEL_SIZE_PX * LEGEND_PLOT_GAP_EM)))
+                .abs()
+                < 0.01,
             "an overlaid legend must leave the plot its width: {} vs {}",
             widest(true),
             widest(false)

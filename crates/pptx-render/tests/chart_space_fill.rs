@@ -134,7 +134,7 @@ fn a_chart_space_fill_and_axis_lines_reach_the_display_list() {
     assert_eq!(pattern_rules.len(), 1, "{pattern_rules:?}");
     assert_rule(
         &pattern_rules[0],
-        (138.0, 398.0, 476.3672, 0.0, "#D9D9D9", 1.0),
+        (143.62305, 385.5, 470.74414, 0.0, "#D9D9D9", 1.0),
     );
     assert!(!pattern.iter().any(|primitive| matches!(
         primitive,
@@ -145,20 +145,26 @@ fn a_chart_space_fill_and_axis_lines_reach_the_display_list() {
     assert_eq!(ground(bare), None);
     let bare_rules = rules(bare);
     assert_eq!(bare_rules.len(), 2, "{bare_rules:?}");
-    assert_rule(&bare_rules[0], (138.0, 124.0, 0.0, 274.0, "#666666", 1.0));
+    assert_rule(
+        &bare_rules[0],
+        (143.62305, 128.6, 0.0, 256.9, "#666666", 1.0),
+    );
     assert_rule(
         &bare_rules[1],
-        (138.0, 398.0, 476.3672, 0.0, "#666666", 1.0),
+        (143.62305, 385.5, 470.74414, 0.0, "#666666", 1.0),
     );
 
     let solid = &slides[2];
     assert_eq!(ground(solid).as_deref(), Some("#F5F7FA"));
     let solid_rules = rules(solid);
     assert_eq!(solid_rules.len(), 2, "{solid_rules:?}");
-    assert_rule(&solid_rules[0], (138.0, 124.0, 0.0, 274.0, "#6254E7", 1.0));
+    assert_rule(
+        &solid_rules[0],
+        (143.62305, 128.6, 0.0, 256.9, "#6254E7", 1.0),
+    );
     assert_rule(
         &solid_rules[1],
-        (138.0, 398.0, 476.3672, 0.0, "#BFBFBF", 2.0),
+        (143.62305, 385.5, 470.74414, 0.0, "#BFBFBF", 2.0),
     );
 
     let expected_texts = texts(pattern);
