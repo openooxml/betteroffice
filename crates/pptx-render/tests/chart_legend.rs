@@ -23,6 +23,18 @@ fn chart(slide: usize) -> Vec<Primitive> {
         .unwrap()
 }
 
+/// Whether a square is a legend key: 0.53 em of some text the chart draws.
+fn is_key(parts: &[Primitive], w: f32, h: f32) -> bool {
+    w == h
+        && parts.iter().any(|primitive| match primitive {
+            Primitive::TextBox { lines, .. } => lines
+                .iter()
+                .flat_map(|line| &line.runs)
+                .any(|run| (run.font_size_px * 0.53 - w).abs() < 0.001),
+            _ => false,
+        })
+}
+
 fn swatches(parts: &[Primitive]) -> Vec<(f32, f32, &str)> {
     parts
         .iter()
@@ -34,7 +46,7 @@ fn swatches(parts: &[Primitive]) -> Vec<(f32, f32, &str)> {
                 h,
                 fill: Some(Paint::Solid { color }),
                 ..
-            } if (*w - *h).abs() < 0.001 && *w > 2.0 && *w < 20.0 => Some((*x, *y, color.as_str())),
+            } if is_key(parts, *w, *h) => Some((*x, *y, color.as_str())),
             _ => None,
         })
         .collect()
@@ -167,9 +179,7 @@ fn a_single_long_legend_label_wraps_without_losing_text() {
     let mut labels = Vec::<Vec<&PositionedTextLine>>::new();
     for part in &parts {
         match part {
-            Primitive::Shape { w, h, .. } if (*w - *h).abs() < 0.001 && *w > 2.0 && *w < 20.0 => {
-                labels.push(Vec::new())
-            }
+            Primitive::Shape { w, h, .. } if is_key(&parts, *w, *h) => labels.push(Vec::new()),
             Primitive::TextBox { lines, .. } if !labels.is_empty() => {
                 labels.last_mut().unwrap().extend(lines)
             }

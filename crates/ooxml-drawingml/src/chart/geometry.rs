@@ -1078,7 +1078,14 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
     let region_x = x + reserve_left.min(width);
     let region_w = (width - reserve_left - reserve_right).max(0.0);
     let region_y = y + top + band_top;
-    let region_h = height - top - legend_h;
+    // The region stops short of a bottom legend by the same span a top legend
+    // pushes it down, so the pie keeps its size either way.
+    let region_bottom = if legend_position == "bottom" && legend_h > 0.0 {
+        y + height - legend_h - BAND_GAP
+    } else {
+        y + height
+    };
+    let region_h = (region_bottom - region_y).max(0.0);
     let plot = match chart.plot_layout {
         // The deck placed the inner plot itself; honouring it is what keeps
         // manually sized charts where PowerPoint draws them (#797).
@@ -6906,6 +6913,38 @@ mod tests {
             bars[0].0 > bars[1].0,
             "the first category draws on the right"
         );
+    }
+
+    #[test]
+    fn a_pie_region_stays_inside_the_frame_and_clear_of_its_legend() {
+        let data = source(&[3.0, 1.0]);
+        for position in ["top", "bottom"] {
+            let mut chart = grouped("pie", group("pie", vec![series("North", &data)]));
+            chart.title = Some("Share");
+            chart.legend = Some(PlotLegend {
+                overlay: false,
+                position: Some(position),
+                visible: Some(true),
+            });
+            let frame = PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 260.0,
+                h: 180.0,
+            };
+            let ops = plot_chart(&chart, frame);
+            let key = swatches(&ops)[0].1;
+            for op in &ops {
+                if let PlotOp::Path { y, h, .. } = op {
+                    assert!(*y >= frame.y && y + h <= frame.y + frame.h, "{position}");
+                    if position == "bottom" {
+                        assert!(y + h <= key, "the pie runs into its legend");
+                    } else {
+                        assert!(*y >= key + SWATCH, "the pie runs into its legend");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
