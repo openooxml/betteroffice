@@ -1,5 +1,6 @@
 import { GlobalRegistrator } from '@happy-dom/global-registrator';
 import { afterAll, afterEach, describe, expect, test } from 'bun:test';
+import { useState } from 'react';
 
 const ownsDom = !GlobalRegistrator.isRegistered;
 if (ownsDom) GlobalRegistrator.register();
@@ -11,7 +12,7 @@ import type { ReactSidebarItem } from '../plugin-api/types';
 import { managedSidebarItems, mergeSidebarItems } from './PluginSidebarItems';
 import type { DocxPluginSidebarItem } from './types';
 
-const { cleanup, render } = await import('@testing-library/react');
+const { cleanup, fireEvent, render } = await import('@testing-library/react');
 const quiet = console.error;
 afterEach(() => {
   cleanup();
@@ -47,7 +48,7 @@ function harness(items: () => DocxPluginSidebarItem<unknown>[]) {
 const anchor = (version: string, paraId = '00000001') => ({ version, story: 'body', paraId });
 
 describe('managed sidebar items', () => {
-  test('namespace ids, place cards pre-zoom and leave out unplaceable anchors', () => {
+  test('namespace ids, place cards pre-zoom and hide unplaceable anchors', () => {
     const { host, activation } = harness(() => [
       { id: 'current', anchor: anchor('v2'), priority: 1, render: () => <p>current</p> },
       { id: 'stale', anchor: anchor('v1'), render: () => <p>stale</p> },
@@ -56,8 +57,56 @@ describe('managed sidebar items', () => {
       where.version === 'v2' ? { position: 7, y: 40 } : null
     );
     expect(
-      items.map(({ id, anchorPos, fixedY, priority }) => ({ id, anchorPos, fixedY, priority }))
-    ).toEqual([{ id: 'plugin:acme/current', anchorPos: 7, fixedY: 40, priority: 1 }]);
+      items.map(({ id, fixedY, priority, hidden }) => ({ id, fixedY, priority, hidden }))
+    ).toEqual([
+      { id: 'plugin:acme/current', fixedY: 40, priority: 1, hidden: undefined },
+      { id: 'plugin:acme/stale', fixedY: undefined, priority: undefined, hidden: true },
+    ]);
+    expect(items[0].anchorPos).toBe(7);
+  });
+
+  test('one card component keeps its state until its id or activation changes', () => {
+    function Card({ item }: { item: DocxPluginSidebarItem<unknown> }) {
+      const [clicks, setClicks] = useState(0);
+      return (
+        <button
+          type="button"
+          data-testid="card"
+          data-id={item.id}
+          data-clicks={clicks}
+          onClick={() => setClicks((count) => count + 1)}
+        />
+      );
+    }
+    let id = 'note';
+    const { host, activation } = harness(() => [{ id, anchor: anchor('v'), render: Card }]);
+    const sidebar = (current: DocxPluginActivation, placed = true) => (
+      <UnifiedSidebar
+        items={managedSidebarItems(host, [current], () => (placed ? { position: 0, y: 10 } : null))}
+        anchorPositions={new Map()}
+        renderedDomContext={null}
+        pageWidth={800}
+        zoom={1}
+        editorContainerRef={{ current: null }}
+      />
+    );
+    const view = render(sidebar(activation));
+    const card = () => view.getByTestId('card');
+    fireEvent.click(card());
+    expect(card().dataset).toMatchObject({ id: 'note', clicks: '1' });
+
+    view.rerender(sidebar({ ...activation, context: { ...activation.context } }, false));
+    expect(card().parentElement!.style.visibility).toBe('hidden');
+    view.rerender(sidebar({ ...activation, context: { ...activation.context } }));
+    expect(card().parentElement!.style.visibility).toBe('');
+    expect(card().dataset.clicks).toBe('1');
+
+    id = 'other';
+    view.rerender(sidebar(activation));
+    expect(card().dataset).toMatchObject({ id: 'other', clicks: '0' });
+    fireEvent.click(card());
+    view.rerender(sidebar({ ...activation, key: 'acme#2' }));
+    expect(card().dataset.clicks).toBe('0');
   });
 
   test('duplicate local ids fail the plugin; a throwing card reports a render failure', () => {

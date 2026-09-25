@@ -5,6 +5,7 @@ import {
   defineDocxPlugin,
   type DocxEditorRef,
   type DocxPluginContext,
+  type DocxPluginSidebarItem,
 } from '@betteroffice/docx-react';
 import documentUrl from '../../../apps/demo/public/betteroffice-demo.docx?url';
 import '../../../packages/docx-react/src/styles/editor.css';
@@ -91,6 +92,38 @@ function ProbePanel({ context }: { context: ProbeContext }) {
   );
 }
 
+function ProbeCard({
+  item,
+  isExpanded,
+  onToggleExpand,
+  measureRef,
+}: {
+  item: DocxPluginSidebarItem<ProbeState>;
+  isExpanded: boolean;
+  onToggleExpand(): void;
+  measureRef(element: HTMLDivElement | null): void;
+}) {
+  const [clicks, setClicks] = useState(0);
+  return (
+    <div ref={measureRef}>
+      <button
+        type="button"
+        data-testid="probe-card"
+        data-version={item.anchor.version}
+        data-expanded={String(isExpanded)}
+        data-clicks={clicks}
+        onClick={() => {
+          setClicks((count) => count + 1);
+          onToggleExpand();
+        }}
+        style={{ display: 'block', width: '100%', height: 60 }}
+      >
+        First paragraph
+      </button>
+    </div>
+  );
+}
+
 const alignment = defineDocxPlugin<ProbeState>({
   id: 'probe.alignment',
   createState: () => ({ version: null, paragraphs: [] }),
@@ -129,20 +162,7 @@ const alignment = defineDocxPlugin<ProbeState>({
           {
             id: 'first',
             anchor: { version, story: 'body', paraId: first.paraId },
-            render: ({ isExpanded, onToggleExpand, measureRef }) => (
-              <div ref={measureRef}>
-                <button
-                  type="button"
-                  data-testid="probe-card"
-                  data-version={version}
-                  data-expanded={String(isExpanded)}
-                  onClick={onToggleExpand}
-                  style={{ display: 'block', width: '100%', height: 60 }}
-                >
-                  First paragraph
-                </button>
-              </div>
-            ),
+            render: ProbeCard,
           },
         ]
       : [];

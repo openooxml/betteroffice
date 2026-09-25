@@ -5,6 +5,7 @@ import {
   type DocxCommandResult,
   type DocxPluginContext,
   type DocxPluginGeometry,
+  type DocxPluginSidebarItem,
 } from "@betteroffice/docx-react";
 
 const REVIEW_PLUGIN_ID = "demo.review";
@@ -125,7 +126,16 @@ function ReviewPanel({ context }: { context: ReviewContext }) {
   );
 }
 
-function ReviewCard({ context }: { context: ReviewContext }) {
+function ReviewCard({
+  context,
+  item,
+}: {
+  context: ReviewContext;
+  item: DocxPluginSidebarItem<ReviewState>;
+}) {
+  const paragraph = context.state.paragraphs.find(
+    (candidate) => candidate.paraId === item.anchor.paraId,
+  );
   return (
     <div
       style={{
@@ -136,7 +146,7 @@ function ReviewCard({ context }: { context: ReviewContext }) {
         fontSize: 12,
       }}
     >
-      Review starts here ({context.state.paragraphs.length} paragraphs read)
+      Review starts at &ldquo;{paragraph?.text.slice(0, 40)}&rdquo;
     </div>
   );
 }

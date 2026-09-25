@@ -128,7 +128,7 @@ export function useDocxPluginHost(options: UseDocxPluginHostOptions): DocxPlugin
 
   useLayoutEffect(() => {
     host.setGrants(options.pluginGrants);
-  }, [host, options.pluginGrants]);
+  });
 
   useLayoutEffect(() => {
     host.setPlugins(options.plugins);
