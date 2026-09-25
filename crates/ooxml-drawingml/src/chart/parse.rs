@@ -680,6 +680,9 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
             .filter(|value| matches!(*value, "min" | "max" | "autoZero"))
             .map(str::to_owned),
         crosses_at: parse_number(val_attr(child(axis, "crossesAt"))),
+        cross_between: val_attr(child(axis, "crossBetween"))
+            .filter(|value| matches!(*value, "between" | "midCat"))
+            .map(str::to_owned),
         major_unit: parse_number(val_attr(child(axis, "majorUnit"))),
         minor_unit: parse_number(val_attr(child(axis, "minorUnit"))),
         logarithmic_base: parse_number(val_attr(scaling.and_then(|value| child(value, "logBase")))),

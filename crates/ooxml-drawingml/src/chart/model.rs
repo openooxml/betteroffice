@@ -381,6 +381,9 @@ pub struct ChartAxis {
     pub crosses: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub crosses_at: Option<f64>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_between: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub major_unit: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]

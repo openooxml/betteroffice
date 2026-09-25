@@ -365,6 +365,8 @@ pub struct PlotAxis<'a> {
     pub minor_tick_mark: Option<&'a str>,
     pub major_gridlines: bool,
     pub minor_gridlines: bool,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    pub cross_between: Option<&'a str>,
     pub number_format: Option<&'a str>,
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
@@ -663,6 +665,7 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
@@ -2883,9 +2886,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
 }
 
 /// Where the `index`th of `count` categories sits along a line or area axis.
+/// A point sits mid-band, or on the category's tick when the value axis
+/// crosses there (`midCat`).
 fn line_x(family: PlotFamily<'_>, plot: PlotArea, index: usize, count: usize) -> f64 {
-    let denom = count.saturating_sub(1).max(1) as f64;
-    plot.x + plot.w * category_position(family, index, count) as f64 / denom
+    let position = category_position(family, index, count) as f64;
+    if family.axis.and_then(|axis| axis.cross_between) == Some("midCat") {
+        let denom = count.saturating_sub(1).max(1) as f64;
+        plot.x + plot.w * position / denom
+    } else {
+        plot.x + plot.w * (position + 0.5) / count.max(1) as f64
+    }
 }
 
 fn emit_category_labels<S: PlotSink + ?Sized>(
@@ -5835,6 +5845,37 @@ mod tests {
                 rect(),
             )
         );
+    }
+
+    #[test]
+    fn a_line_point_sits_mid_band_unless_the_axis_crosses_at_the_category() {
+        let markers = |cross_between| {
+            let data = source(&[1.0, 2.0, 3.0]);
+            let mut group = group("line", vec![series("Trend", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.cross_between = cross_between;
+            let chart = PlotChart {
+                chart_type: "line",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            rects(&plot_chart(&chart, rect()))
+                .into_iter()
+                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .map(|(x, ..)| x)
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
     }
 
     #[test]
