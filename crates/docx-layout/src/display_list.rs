@@ -8340,6 +8340,8 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
         line: None,
+        major_gridline: None,
+        minor_gridline: None,
     }
 }
 

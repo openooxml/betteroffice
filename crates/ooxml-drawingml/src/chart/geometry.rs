@@ -365,6 +365,10 @@ pub struct PlotAxis<'a> {
     pub minor_tick_mark: Option<&'a str>,
     pub major_gridlines: bool,
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    pub major_gridline: Option<PlotLine<'a>>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    pub minor_gridline: Option<PlotLine<'a>>,
     pub number_format: Option<&'a str>,
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
@@ -663,16 +667,22 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from_model),
+        minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from_model),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from_model(axis.text.as_ref()),
-        line: axis.line.as_ref().map(|line| PlotLine {
-            none: line.none,
-            color: line.color.as_deref(),
-            width_emu: line.width_emu,
-        }),
+        line: axis.line.as_ref().map(plot_line_from_model),
+    }
+}
+
+fn plot_line_from_model(line: &super::model::ChartLine) -> PlotLine<'_> {
+    PlotLine {
+        none: line.none,
+        color: line.color.as_deref(),
+        width_emu: line.width_emu,
     }
 }
 
@@ -2295,8 +2305,9 @@ fn emit_axes<S: PlotSink + ?Sized>(
     let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
-    let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
-    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines);
+    let shown = |line: Option<PlotLine<'_>>| !line.is_some_and(|line| line.none);
+    let major_grid = axis.is_none_or(|axis| axis.major_gridlines && shown(axis.major_gridline));
+    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines && shown(axis.minor_gridline));
     let number_format = axis.and_then(|axis| axis.number_format);
     let tick_style = &family.scoped(axis.map(|axis| axis.text).unwrap_or_default());
     let (edge, outward) = match (transposed, family.secondary) {
@@ -6058,6 +6069,37 @@ mod tests {
         };
         assert_eq!(grid(true), 5);
         assert_eq!(grid(false), 0);
+    }
+
+    #[test]
+    fn a_gridline_whose_sp_pr_draws_no_line_is_hidden() {
+        let data = source(&[1.0, 2.0]);
+        let grid = |line: Option<PlotLine<'static>>| {
+            let mut group = group("column", vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_gridline = line;
+            let chart = PlotChart {
+                chart_type: "column",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .iter()
+                .filter(|op| matches!(op, PlotOp::Line { color, .. } if color == CHART_GRID_COLOR))
+                .count()
+        };
+        let line = |none| {
+            Some(PlotLine {
+                none,
+                color: None,
+                width_emu: None,
+            })
+        };
+        assert_eq!(grid(None), 5);
+        assert_eq!(grid(line(false)), 5);
+        assert_eq!(grid(line(true)), 0);
     }
 
     #[test]

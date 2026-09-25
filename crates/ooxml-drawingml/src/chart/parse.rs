@@ -693,6 +693,12 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
         hidden: val_attr(child(axis, "delete")) == Some("1"),
         major_gridlines: child(axis, "majorGridlines").is_some(),
         minor_gridlines: child(axis, "minorGridlines").is_some(),
+        major_gridline_line: parse_line(
+            child(axis, "majorGridlines").and_then(|gridlines| child(gridlines, "spPr")),
+        ),
+        minor_gridline_line: parse_line(
+            child(axis, "minorGridlines").and_then(|gridlines| child(gridlines, "spPr")),
+        ),
         text: parse_text_properties(child(axis, "txPr")),
         line: parse_line(child(axis, "spPr")),
     }

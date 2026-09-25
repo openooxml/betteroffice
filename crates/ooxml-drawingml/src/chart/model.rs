@@ -401,6 +401,12 @@ pub struct ChartAxis {
     pub major_gridlines: bool,
     #[serde(default)]
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub major_gridline_line: Option<ChartLine>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minor_gridline_line: Option<ChartLine>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<ChartTextProperties>,
     /// `c:spPr/a:ln` of this axis: the rule drawn along the plot's edge.
