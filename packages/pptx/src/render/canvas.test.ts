@@ -1809,3 +1809,47 @@ test('stroke joins follow each shape and reset for legacy display lists', async 
   await paintSlide(ctx, { contractVersion: 1, width: 60, height: 20, primitives }, 1, 1);
   expect(joins).toEqual(['round', 'bevel', 'miter']);
 });
+
+test('a tiled picture repeats only the part its crop keeps', async () => {
+  const globals = globalThis as unknown as Record<string, unknown>;
+  const saved = { OffscreenCanvas: globals.OffscreenCanvas, DOMMatrix: globals.DOMMatrix };
+  const cuts: unknown[][] = [];
+  class Surface {
+    constructor(public width: number, public height: number) {}
+    getContext() {
+      return { drawImage: (...args: unknown[]) => cuts.push(args) };
+    }
+  }
+  class Matrix {
+    translateSelf() { return this; }
+    scaleSelf() { return this; }
+  }
+  try {
+    globals.OffscreenCanvas = Surface;
+    globals.DOMMatrix = Matrix;
+    const source = { width: 40, height: 20 };
+    const patterns: unknown[] = [];
+    const ctx = new Proxy({} as CanvasRenderingContext2D, {
+      get: (_, key) => key === 'createPattern'
+        ? (image: unknown) => { patterns.push(image); return { setTransform: () => {} }; }
+        : () => {},
+      set: () => true,
+    });
+    await paintSlide(ctx, {
+      contractVersion: 1,
+      width: 100,
+      height: 100,
+      primitives: [
+        { kind: 'image', objectId: 1, name: 'Tiled', x: 0, y: 0, w: 100, h: 100, assetId: 'image',
+          crop: { left: 0.25, bottom: 0.5 }, tile: { scaleX: 1, scaleY: 1 } },
+      ],
+    }, 1, 1, { resolveImage: async () => source as unknown as CanvasImageSource });
+    expect(cuts).toEqual([[source, 10, 0, 30, 10, 0, 0, 30, 10]]);
+    expect(patterns).toHaveLength(1);
+    expect(patterns[0]).toBeInstanceOf(Surface);
+    expect([(patterns[0] as Surface).width, (patterns[0] as Surface).height]).toEqual([30, 10]);
+  } finally {
+    globals.OffscreenCanvas = saved.OffscreenCanvas;
+    globals.DOMMatrix = saved.DOMMatrix;
+  }
+});
