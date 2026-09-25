@@ -133,11 +133,16 @@ pub fn serialize_s12_wire(
 
 fn parse_back(family: &str, xml: &str, seed: &str) -> Result<serde_json::Value, ParseError> {
     let value = match family {
-        "document" => serde_json::to_value(parse_document_back(xml, seed)?),
-        "headerFooter" => serde_json::to_value(parse_header_footer_back(xml, seed)?),
-        "footnotes" => serde_json::to_value(parse_notes_back(xml, seed, true)?),
-        "endnotes" => serde_json::to_value(parse_notes_back(xml, seed, false)?),
-        "comments" => serde_json::to_value(parse_comments_back(xml, seed)?),
+        "document" => serde_json::to_string(&parse_document_back(xml, seed)?)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        "headerFooter" => serde_json::to_string(&parse_header_footer_back(xml, seed)?)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        "footnotes" => serde_json::to_string(&parse_notes_back(xml, seed, true)?)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        "endnotes" => serde_json::to_string(&parse_notes_back(xml, seed, false)?)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
+        "comments" => serde_json::to_string(&parse_comments_back(xml, seed)?)
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s)),
         "commentsExtended" | "commentsIds" | "commentsExtensible" => {
             Ok(parse_comment_companion_back(family, xml)?)
         }

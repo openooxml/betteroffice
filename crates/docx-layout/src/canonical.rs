@@ -136,7 +136,9 @@ fn push_indent(out: &mut String, depth: usize) {
 
 /// Returns the canonical layout string with a trailing newline.
 pub fn serialize_layout(layout: &Layout) -> String {
-    let value = serde_json::to_value(layout).expect("Layout serializes to JSON");
+    let value = serde_json::to_string(&layout)
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s))
+        .expect("Layout serializes to JSON");
     let mut out = String::new();
     write_value(&mut out, &value, 0);
     out.push('\n');

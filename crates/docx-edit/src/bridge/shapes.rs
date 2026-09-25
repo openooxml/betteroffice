@@ -544,7 +544,10 @@ fn shape_run_formatting(source: Option<&Value>) -> RunFormatting {
         }
     }
     insert_clone(&mut output, "language", source.get("language"));
-    serde_json::from_value(Value::Object(output)).unwrap_or_default()
+    serde_json::to_string(&Value::Object(output))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
 }
 
 fn resolve_shape_color(value: Option<&Value>) -> Option<String> {
@@ -1006,7 +1009,12 @@ fn shared_plus_geometry(shape_type: &str, shape: &Value) -> Option<Vec<Value>> {
     };
     let path = docx_parse::drawingml::preset_geometry_to_path("plus", &HashMap::new(), aspect)?;
     path.into_iter()
-        .map(serde_json::to_value)
+        .map(|p| {
+            serde_json::to_string(&p)
+                .ok()
+                .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .ok_or(())
+        })
         .collect::<Result<Vec<_>, _>>()
         .ok()
         .filter(|path| !path.is_empty())

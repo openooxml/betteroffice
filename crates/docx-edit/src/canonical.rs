@@ -343,7 +343,10 @@ fn canonical_any_map(
 }
 
 fn canonical_any(value: &Any) -> Option<Value> {
-    let value = serde_json::to_value(value).expect("yrs Any serializes to JSON");
+    let value: Value = serde_json::to_string(value)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .expect("yrs Any serializes to JSON");
     normalize_value(&value)
 }
 

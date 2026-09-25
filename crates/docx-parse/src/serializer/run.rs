@@ -562,8 +562,9 @@ pub fn serialize_shape_content(
                 .start_element("wps:txbx")
                 .start_element("w:txbxContent");
             for value in &text_body.content {
-                let block: BlockContent =
-                    serde_json::from_value(value.clone()).map_err(|error| {
+                let block: BlockContent = serde_json::to_string(&(value.clone()))
+                    .and_then(|s| serde_json::from_str(&s))
+                    .map_err(|error| {
                         ParseError::Canonical(format!(
                             "shape text body contains an invalid block: {error}"
                         ))

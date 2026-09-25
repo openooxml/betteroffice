@@ -645,7 +645,10 @@ fn parse_para_attr_delta(attrs_json: &str) -> Result<ParaAttrDelta, JsValue> {
 }
 
 fn attrs_value(attrs: &std::collections::BTreeMap<String, Any>) -> Result<Value, JsValue> {
-    serde_json::to_value(attrs).map_err(js_err)
+    serde_json::to_string(attrs)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or_else(|| JsValue::from_str("serialize attrs"))
 }
 
 fn tri_state_value(state: TriState) -> Value {
