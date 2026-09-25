@@ -10075,6 +10075,56 @@ mod tests {
     }
 
     #[test]
+    fn a_run_below_its_kern_threshold_is_not_kerned() {
+        let renderer = renderer();
+        let width = |kerned: bool| {
+            let mut paragraph = paragraph(&renderer, "l", "AVAVAV");
+            paragraph.runs[0].style.kerned = kerned;
+            layout_paragraph(
+                &renderer.fonts,
+                &paragraph,
+                0.0,
+                0.0,
+                1_000.0,
+                1.0,
+                false,
+                true,
+            )
+            .unwrap()[0]
+                .width
+        };
+        assert!(
+            width(false) > width(true) + 1.0,
+            "{} vs {}",
+            width(false),
+            width(true)
+        );
+    }
+
+    #[test]
+    fn the_kern_threshold_resolves_against_the_run_size() {
+        let renderer = renderer();
+        let theme = Theme::default();
+        let kerned = |size: f64, kern: Option<f64>| {
+            let fallback = RunProperties {
+                font_size_pt: Some(size),
+                kern_pt: kern,
+                ..RunProperties::default()
+            };
+            resolve_style(&renderer, &theme, &TextStyle::default(), Some(&fallback))
+                .unwrap()
+                .kerned
+        };
+        assert!(kerned(11.0, None), "no threshold kerns every size");
+        assert!(!kerned(11.0, Some(12.0)));
+        assert!(kerned(12.0, Some(12.0)));
+        assert!(
+            !kerned(40.0, Some(0.0)),
+            "a zero threshold turns kerning off"
+        );
+    }
+
+    #[test]
     fn a_run_on_the_named_family_widths_keeps_one_cluster_per_character() {
         const CARLITO: &[u8] = include_bytes!("../../../packages/fonts/assets/Carlito-Regular.ttf");
         let mut renderer = SlideRenderer::new();

@@ -1554,6 +1554,25 @@ mod tests {
     use ooxml_drawingml::GeometryPathCommand;
 
     #[test]
+    fn a_kern_threshold_reads_in_points_and_rejects_negatives() {
+        let limits = ParseLimits::default();
+        let kern = |attribute: &str| {
+            let xml = format!(r#"<a:rPr {attribute}/>"#);
+            let root = parse_xml(
+                xml.as_bytes(),
+                "ppt/slides/slide1.xml",
+                &mut ParseBudget::new(&limits),
+            )
+            .unwrap();
+            parse_run_properties(Some(&root)).kern_pt
+        };
+        assert_eq!(kern(r#"kern="1200""#), Some(12.0));
+        assert_eq!(kern(r#"kern="0""#), Some(0.0));
+        assert_eq!(kern(r#"kern="-100""#), None);
+        assert_eq!(kern(r#"sz="1100""#), None);
+    }
+
+    #[test]
     fn a_custom_geometry_becomes_a_path_normalised_to_the_shape() {
         let limits = ParseLimits::default();
         let mut budget = ParseBudget::new(&limits);
