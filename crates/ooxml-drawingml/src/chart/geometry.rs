@@ -11,6 +11,8 @@ pub const CHART_AXIS_COLOR: &str = "#666666";
 pub const CHART_GRID_COLOR: &str = "#D9D9D9";
 pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
+/// The size Office gives a marker whose `c:marker` names none, in points.
+const DEFAULT_MARKER_PT: f64 = 7.0;
 const EMU_PER_PIXEL: f64 = 9525.0;
 /// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
 const MAX_LINE_PX: f64 = 16.0;
@@ -1471,13 +1473,16 @@ impl<'a> SeriesView<'a> {
             .unwrap_or_else(|| series_color(Some(self.series), series_index))
     }
 
+    /// `c:marker/c:size` in pixels. The schema counts points, 2 to 72.
     fn marker_size(&self, index: usize) -> f64 {
         self.point(index)
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.size)
-            .unwrap_or(4.0)
-            .clamp(1.0, 24.0)
+            .unwrap_or(DEFAULT_MARKER_PT)
+            .clamp(2.0, 72.0)
+            * 4.0
+            / 3.0
     }
 
     /// The symbol to draw at `index`, or `None` for a point that draws none.
@@ -4315,6 +4320,8 @@ mod tests {
         ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
     };
 
+    const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
+
     #[test]
     fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
         let font = |spacing: f64| PlotFont {
@@ -4645,8 +4652,8 @@ mod tests {
             ..PlotPoint::default()
         }];
         let view = SeriesView::new(&series, &mut ScanBudget::new());
-        assert_eq!(view.marker_size(0), 4.0);
-        assert_eq!(view.marker_size(1), 9.0);
+        assert_eq!(view.marker_size(0), DEFAULT_MARKER_PX);
+        assert_eq!(view.marker_size(1), 12.0);
     }
 
     #[test]
@@ -5133,7 +5140,7 @@ mod tests {
             let ops = plot_chart(&chart, rect());
             let columns = bars(&ops)
                 .into_iter()
-                .filter(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+                .filter(|(_, _, w, h)| *w > DEFAULT_MARKER_PX && *h > DEFAULT_MARKER_PX)
                 .count();
             assert_ne!(columns, 2, "{chart_type} still draws columns");
         }
@@ -5170,7 +5177,9 @@ mod tests {
         let ops = plot_chart(&chart, rect());
         let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         assert_eq!(markers.len(), 2);
         assert!(markers[0].0 < markers[1].0);
@@ -5194,7 +5203,8 @@ mod tests {
         assert_eq!(
             rects(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -5232,7 +5242,8 @@ mod tests {
         assert_eq!(
             rects(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -5642,7 +5653,8 @@ mod tests {
         assert!(
             !rects(&ops)
                 .iter()
-                .any(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .any(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
         );
     }
 
@@ -5788,7 +5800,9 @@ mod tests {
             .expect("a column");
         let marker = bars(&ops)
             .into_iter()
-            .find(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .find(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .expect("a line marker");
         assert!(
             marker.1 > bar.1,
@@ -5853,7 +5867,9 @@ mod tests {
         let ops = plot_chart(&chart, rect());
         let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         let plot_h = 200.0 - 10.0 - 34.0;
         let travelled = markers[0].1 - markers[1].1;
