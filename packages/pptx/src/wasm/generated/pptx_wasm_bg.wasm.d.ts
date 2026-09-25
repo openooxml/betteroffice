@@ -27,7 +27,6 @@ export const pptxdocument_bringShapeToFrontJson: (a: number, b: number, c: numbe
 export const pptxdocument_canRedo: (a: number) => number;
 export const pptxdocument_canUndo: (a: number) => number;
 export const pptxdocument_clearUpdateObservation: (a: number) => void;
-export const pptxdocument_clientId: (a: number) => number;
 export const pptxdocument_commentsJson: (a: number) => [number, number, number, number];
 export const pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -78,6 +77,7 @@ export const pptxdocument_undoCaptureMode: (a: number) => [number, number];
 export const pptxdocument_undoJson: (a: number) => [number, number, number, number];
 export const pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
 export const pptxdocument_version: () => [number, number];
+export const pptxdocument_clientId: (a: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

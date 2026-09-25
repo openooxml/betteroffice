@@ -28,7 +28,6 @@ export const vsdxdocument_applyUpdateJson: (a: number, b: number, c: number) => 
 export const vsdxdocument_canRedo: (a: number) => number;
 export const vsdxdocument_canUndo: (a: number) => number;
 export const vsdxdocument_clearUpdateObservation: (a: number) => void;
-export const vsdxdocument_clientId: (a: number) => number;
 export const vsdxdocument_deleteShapeJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_deleteShapesJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_drainUpdateEvent: (a: number) => [number, number];
@@ -60,6 +59,7 @@ export const vsdxdocument_startUpdateObservation: (a: number) => [number, number
 export const vsdxdocument_subtreeGlueJson: (a: number, b: number, c: number) => [number, number, number, number];
 export const vsdxdocument_undoJson: (a: number) => [number, number, number, number];
 export const vsdxdocument_version: () => [number, number];
+export const vsdxdocument_clientId: (a: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;

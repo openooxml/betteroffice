@@ -138,7 +138,6 @@ export interface InitOutput {
     readonly pptxdocument_canRedo: (a: number) => number;
     readonly pptxdocument_canUndo: (a: number) => number;
     readonly pptxdocument_clearUpdateObservation: (a: number) => void;
-    readonly pptxdocument_clientId: (a: number) => number;
     readonly pptxdocument_commentsJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_deleteSlideJson: (a: number, b: number, c: number) => [number, number, number, number];
     readonly pptxdocument_deleteTextJson: (a: number, b: number, c: number) => [number, number, number, number];
@@ -189,6 +188,7 @@ export interface InitOutput {
     readonly pptxdocument_undoJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_undoProfiledJson: (a: number) => [number, number, number, number];
     readonly pptxdocument_version: () => [number, number];
+    readonly pptxdocument_clientId: (a: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;

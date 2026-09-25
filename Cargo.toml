@@ -44,21 +44,4 @@ betteroffice-vsdx = { path = "crates/betteroffice-vsdx", version = "0.2.0" }
 [profile.release]
 opt-level = "s"
 lto = true
-
-[profile.release.package.betteroffice-docx-layout]
-opt-level = 3
-
-[profile.release.package.betteroffice-docx-parse]
-opt-level = 3
-
-# The per-keystroke hot path lives in docx-edit (engine session, frame
-# encoding), ooxml-text (shaping/measurement), and yrs (text CRDT ops); the
-# size-optimized workspace default measurably slows all three.
-[profile.release.package.betteroffice-docx-edit]
-opt-level = 3
-
-[profile.release.package.betteroffice-ooxml-text]
-opt-level = 3
-
-[profile.release.package.yrs]
-opt-level = 3
+codegen-units = 1
