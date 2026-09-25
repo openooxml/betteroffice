@@ -19,6 +19,8 @@ import { yrsHyperlinkAtSelection, yrsSelectedText } from '../yrsCommands';
  */
 export function useKeyboardShortcuts({
   pagedEditorRef,
+  containerRef,
+  onSaveDocument,
   disableFindReplaceShortcuts,
   showFileOpen,
   onOpenDocument,
@@ -27,6 +29,8 @@ export function useKeyboardShortcuts({
   tableSelection,
 }: {
   pagedEditorRef: React.RefObject<PagedEditorRef | null>;
+  containerRef?: React.RefObject<HTMLElement | null>;
+  onSaveDocument?: () => void | Promise<void>;
   disableFindReplaceShortcuts: boolean;
   showFileOpen: boolean;
   onOpenDocument?: () => void;
@@ -36,6 +40,7 @@ export function useKeyboardShortcuts({
 }) {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.defaultPrevented) return;
       const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
       const cmdOrCtrl = isMac ? e.metaKey : e.ctrlKey;
 
@@ -51,7 +56,13 @@ export function useKeyboardShortcuts({
       }
 
       if (cmdOrCtrl && !e.shiftKey && !e.altKey) {
-        if (e.key.toLowerCase() === 'f') {
+        if (e.key.toLowerCase() === 's') {
+          const ownsFocus = pagedEditorRef.current?.isFocused() ||
+            (e.target instanceof Node && containerRef?.current?.contains(e.target));
+          if (!onSaveDocument || !ownsFocus) return;
+          e.preventDefault();
+          if (!e.repeat) void onSaveDocument();
+        } else if (e.key.toLowerCase() === 'f') {
           if (disableFindReplaceShortcuts) return;
           e.preventDefault();
           const selection = window.getSelection();
@@ -93,6 +104,8 @@ export function useKeyboardShortcuts({
     };
   }, [
     pagedEditorRef,
+    containerRef,
+    onSaveDocument,
     disableFindReplaceShortcuts,
     showFileOpen,
     onOpenDocument,

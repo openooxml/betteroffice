@@ -46,6 +46,31 @@ Props: `file`, `fonts`, `collaboration`, `i18n`, `className`, `fileName`,
 host-driven edits, `refreshProposals`, and `save`), `onChange` (deck snapshots), `onError`, and
 `onSave` (receives the saved bytes; without it, saving downloads the file).
 
+## Host editing controls
+
+`onSaveRequest` runs for toolbar and Ctrl/Cmd+S saves before serialization.
+Return `true` to continue built-in saving; `false` or `void` handles or cancels
+it. Promises are awaited and concurrent requests are coalesced. `onSave` still
+receives the resulting bytes when built-in saving continues. A request waiting
+on a replaced or closed document is discarded.
+
+The API received by `onReady` exposes `flushPendingInput(): Promise<void>`.
+Await it before inspecting or mutating the core from a host workflow, then call
+`api.save()` for explicit serialization without re-entering `onSaveRequest`.
+`save()` remains synchronous and rejects while asynchronous input is pending.
+Flush rejects stale document handles, failed input, and unfinished pointer
+gestures. Finish or cancel the gesture before retrying.
+
+PPTX keyboard and notes edits are synchronous; flushing also waits for accepted
+image imports. A failed import rejects a flush waiting for it and is reported
+through `onError`; it does not block later saves of the existing presentation.
+
+`api.getPositionAtPoint(clientX, clientY)` returns a shape or text hit with
+`slide` (1-based), `slideId`, and `shapeId`; text hits include `storyId` and the
+UTF-16 `position`. It uses the current slide and canvas bounds without changing
+focus or selection. Outside content, unavailable geometry, stale handles, and
+proposal previews return `null`. Use `api.refresh()` after core mutations.
+
 ## What works today
 
 - Slide rendering with Rust layout and text shaping, painted onto canvas

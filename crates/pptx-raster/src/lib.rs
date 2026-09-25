@@ -18,13 +18,13 @@ use std::sync::Arc;
 use ooxml_drawingml::GeometryPathCommand;
 use ooxml_text::{FontId, FontStore};
 use pptx_render::{
-    GradientType, ImageCrop, Paint as SlidePaint, Primitive, Shadow as SlideShadow,
+    GradientType, ImageCrop, ImageTile, Paint as SlidePaint, Primitive, Shadow as SlideShadow,
     Stroke as SlideStroke, SurfaceDisplayList, Transform as SlideTransform,
 };
 use tiny_skia::{
-    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntSize, LinearGradient, Mask, Paint,
-    Path, PathBuilder, Pixmap, PixmapPaint, Point, RadialGradient, Rect, SpreadMode, Stroke,
-    StrokeDash, Transform,
+    Color, ColorU8, FillRule, FilterQuality, GradientStop, IntRect, IntSize, LinearGradient, Mask,
+    Paint, Path, PathBuilder, Pattern, Pixmap, PixmapPaint, Point, RadialGradient, Rect,
+    SpreadMode, Stroke, StrokeDash, Transform,
 };
 
 /// Media bytes keyed by the `asset_id` an image primitive carries — an OPC part
@@ -381,6 +381,7 @@ impl Painter<'_, '_> {
                 asset_id,
                 effects,
                 crop,
+                tile,
                 path,
                 stroke,
                 shadow,
@@ -393,6 +394,7 @@ impl Painter<'_, '_> {
                 asset_id.as_deref(),
                 effects,
                 *crop,
+                *tile,
                 path.as_deref(),
                 stroke.as_ref(),
                 shadow.as_ref(),
@@ -586,6 +588,7 @@ impl Painter<'_, '_> {
         asset_id: Option<&str>,
         effects: &[pptx_render::ImageEffect],
         crop: ImageCrop,
+        tile: Option<ImageTile>,
         commands: Option<&[GeometryPathCommand]>,
         stroke: Option<&SlideStroke>,
         shadow: Option<&SlideShadow>,
@@ -615,15 +618,37 @@ impl Painter<'_, '_> {
             }
             match asset_id.and_then(|asset_id| self.decode(asset_id, effects)) {
                 Some(source) => {
-                    let fit = Transform::from_row(
-                        frame.width() / (source.width() as f32 * kept_x),
-                        0.0,
-                        0.0,
-                        frame.height() / (source.height() as f32 * kept_y),
-                        frame.x() - crop.left * frame.width() / kept_x,
-                        frame.y() - crop.top * frame.height() / kept_y,
-                    );
-                    decoded = Some((source, fit));
+                    let tiled = tile.and_then(|tile| {
+                        tiled_fill(
+                            &source,
+                            crop,
+                            tile,
+                            frame.width(),
+                            frame.height(),
+                            self.scale,
+                        )
+                    });
+                    if let Some(surface) = tiled {
+                        let fit = Transform::from_row(
+                            frame.width() / surface.width() as f32,
+                            0.0,
+                            0.0,
+                            frame.height() / surface.height() as f32,
+                            frame.x(),
+                            frame.y(),
+                        );
+                        decoded = Some((Arc::new(surface), fit));
+                    } else {
+                        let fit = Transform::from_row(
+                            frame.width() / (source.width() as f32 * kept_x),
+                            0.0,
+                            0.0,
+                            frame.height() / (source.height() as f32 * kept_y),
+                            frame.x() - crop.left * frame.width() / kept_x,
+                            frame.y() - crop.top * frame.height() / kept_y,
+                        );
+                        decoded = Some((source, fit));
+                    }
                 }
                 None => self.skipped_images += 1,
             }
@@ -931,6 +956,66 @@ impl Painter<'_, '_> {
             &mut self.image_budget,
         )
     }
+}
+
+/// Pixels a tiled fill may materialise; a larger frame is filled at a coarser
+/// resolution rather than refused.
+const MAX_TILED_PIXELS: f32 = 8_388_608.0;
+
+/// `a:tile` over a `w`-by-`h` frame, cropped by `a:srcRect` first, as one
+/// surface the stretched-picture path can draw, clip and shadow unchanged.
+fn tiled_fill(
+    source: &Pixmap,
+    crop: ImageCrop,
+    tile: ImageTile,
+    w: f32,
+    h: f32,
+    scale: f32,
+) -> Option<Pixmap> {
+    let usable = |value: f32| value.is_finite() && value > 0.0;
+    if !(usable(tile.scale_x) && usable(tile.scale_y) && usable(w) && usable(h) && usable(scale)) {
+        return None;
+    }
+    let fraction = |value: f32| {
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    let (source_w, source_h) = (source.width() as f32, source.height() as f32);
+    let left = (fraction(crop.left) * source_w).round();
+    let top = (fraction(crop.top) * source_h).round();
+    let right = source_w - (fraction(crop.right) * source_w).round();
+    let bottom = source_h - (fraction(crop.bottom) * source_h).round();
+    let cropped = if crop.is_whole() {
+        None
+    } else {
+        let rect = IntRect::from_ltrb(left as i32, top as i32, right as i32, bottom as i32)?;
+        Some(source.clone_rect(rect)?)
+    };
+    let tile_source = cropped.as_ref().unwrap_or(source);
+    let resolution = scale.min((MAX_TILED_PIXELS / (w * h)).sqrt());
+    let width = (w * resolution).ceil().max(1.0);
+    let height = (h * resolution).ceil().max(1.0);
+    let mut surface = Pixmap::new(width as u32, height as u32)?;
+    let shader = Pattern::new(
+        tile_source.as_ref(),
+        SpreadMode::Repeat,
+        FilterQuality::Bicubic,
+        1.0,
+        Transform::from_scale(tile.scale_x * resolution, tile.scale_y * resolution),
+    );
+    surface.fill_rect(
+        Rect::from_xywh(0.0, 0.0, width, height)?,
+        &Paint {
+            shader,
+            ..Paint::default()
+        },
+        Transform::identity(),
+        None,
+    );
+    Some(surface)
 }
 
 /// Where a shadow's copy of the source lands: scaled about the surface origin,
@@ -2089,6 +2174,60 @@ mod tests {
             *pixel = ColorU8::from_rgba(255, 0, 0, 255).premultiply();
         }
         source.encode_png().unwrap()
+    }
+
+    #[test]
+    fn a_tiled_picture_repeats_its_cropped_source() {
+        let mut source = Pixmap::new(2, 1).unwrap();
+        source.pixels_mut()[0] = ColorU8::from_rgba(255, 0, 0, 255).premultiply();
+        source.pixels_mut()[1] = ColorU8::from_rgba(0, 0, 255, 255).premultiply();
+        let bytes = source.encode_png().unwrap();
+        let fonts = FontStore::new();
+        let images = AssetMap::from([("tile", bytes.as_slice())]);
+        let render = |crop: ImageCrop| {
+            let mut list = empty_list(8.0, 2.0);
+            list.primitives.push(Primitive::Image {
+                tile: Some(ImageTile {
+                    scale_x: 1.0,
+                    scale_y: 1.0,
+                }),
+                geometry_fallback: false,
+                object_id: 1,
+                shape_id: None,
+                name: "tiled".into(),
+                x: 0.0,
+                y: 0.0,
+                w: 8.0,
+                h: 2.0,
+                asset_id: Some("tile".into()),
+                effects: Vec::new(),
+                crop,
+                path: None,
+                stroke: None,
+                shadow: None,
+                transform: SlideTransform::default(),
+            });
+            let picture = render_slide(
+                &list,
+                &resources(&fonts, &images),
+                &RenderOptions::default(),
+            )
+            .expect("the tiled picture renders");
+            let image = Pixmap::decode_png(&picture.bytes).unwrap();
+            (0..8)
+                .map(|x| {
+                    let pixel = image.pixel(x, 1).unwrap().demultiply();
+                    (pixel.red() > 128, pixel.blue() > 128)
+                })
+                .collect::<Vec<_>>()
+        };
+        let red_blue = [(true, false), (false, true)];
+        assert_eq!(render(ImageCrop::default()), red_blue.repeat(4));
+        let blue_only = render(ImageCrop {
+            left: 0.5,
+            ..ImageCrop::default()
+        });
+        assert_eq!(blue_only, [(false, true)].repeat(8));
     }
 
     fn shadowed_image(asset: &str, shadow: SlideShadow) -> Primitive {

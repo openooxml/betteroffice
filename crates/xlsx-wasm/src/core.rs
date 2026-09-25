@@ -2,7 +2,7 @@
 use betteroffice_xlsx::RenderOptions;
 use betteroffice_xlsx::{
     CalculationOptions, CapturedFormat, CellAddress, CellInput as WorkbookCellInput, CellRange,
-    CellRef, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
+    CellRef, EditProfile, MutationResult, NumberFormatMutation, Op, PrintMetrics, Proposal,
     ProposalEditInput as WorkbookProposalEditInput, ProposalRequest, SheetId, StylePatch,
     UpdateEvent, UpdateSubscription, Viewport, Workbook,
 };
@@ -141,6 +141,20 @@ struct EditResult {
     sheet_info: SheetInfo,
     changed: Vec<String>,
     limited_cells: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ProfiledEditResult {
+    #[serde(flatten)]
+    result: EditResult,
+    profile: EditProfile,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayListProfile {
+    build_ms: f64,
+    encode_ms: f64,
 }
 
 #[derive(Serialize)]
@@ -298,6 +312,31 @@ impl Session {
         serde_json::to_string(&display_list).map_err(|error| error.to_string())
     }
 
+    /// `display_list_json` split into build and encode time by `now`, returned
+    /// as `{"displayList": ..., "profile": {"buildMs", "encodeMs"}}`.
+    pub fn display_list_profiled_json(
+        &self,
+        viewport_json: &str,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let viewport: Viewport = serde_json::from_str(viewport_json)
+            .map_err(|error| format!("bad viewport: {error}"))?;
+        let started = now();
+        let display_list = self
+            .workbook
+            .display_list(&viewport)
+            .map_err(|error| error.to_string())?;
+        let built = now();
+        let json = serde_json::to_string(&display_list).map_err(|error| error.to_string())?;
+        let encoded = now();
+        let profile = serde_json::to_string(&DisplayListProfile {
+            build_ms: built - started,
+            encode_ms: encoded - built,
+        })
+        .map_err(|error| error.to_string())?;
+        Ok(format!("{{\"displayList\":{json},\"profile\":{profile}}}"))
+    }
+
     pub fn chart_at_point_json(&self, args: &str) -> Result<String, String> {
         let args: ChartHitArgs =
             serde_json::from_str(args).map_err(|error| format!("bad chart hit args: {error}"))?;
@@ -401,6 +440,28 @@ impl Session {
         self.edit_result(result)
     }
 
+    /// `edit_cell_json` with the facade's stage profile attached under `profile`.
+    pub fn edit_cell_profiled_json(
+        &mut self,
+        args: &str,
+        now_serial: Option<f64>,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let args: EditArgs =
+            serde_json::from_str(args).map_err(|error| format!("bad edit args: {error}"))?;
+        let (result, profile) = self
+            .workbook
+            .edit_cell_profiled(
+                SheetId(args.sheet),
+                CellRef::new(args.row, args.col),
+                &args.input,
+                calculation_options(now_serial),
+                now,
+            )
+            .map_err(|error| error.to_string())?;
+        self.profiled_edit_result(result, profile)
+    }
+
     pub fn edit_cells_json(
         &mut self,
         args: &str,
@@ -435,6 +496,22 @@ impl Session {
             .apply_ops(args.ops, calculation_options(now_serial))
             .map_err(|error| error.to_string())?;
         self.edit_result(result)
+    }
+
+    /// `apply_ops_json` with the facade's stage profile attached under `profile`.
+    pub fn apply_ops_profiled_json(
+        &mut self,
+        transaction_json: &str,
+        now_serial: Option<f64>,
+        now: &mut impl FnMut() -> f64,
+    ) -> Result<String, String> {
+        let args: OpsArgs =
+            serde_json::from_str(transaction_json).map_err(|error| format!("bad ops: {error}"))?;
+        let (result, profile) = self
+            .workbook
+            .apply_ops_profiled(args.ops, calculation_options(now_serial), now)
+            .map_err(|error| error.to_string())?;
+        self.profiled_edit_result(result, profile)
     }
 
     pub fn undo_json(&mut self, now_serial: Option<f64>) -> Result<String, String> {
@@ -715,13 +792,28 @@ impl Session {
     }
 
     fn edit_result(&self, result: MutationResult) -> Result<String, String> {
-        serde_json::to_string(&EditResult {
+        serde_json::to_string(&self.edit_payload(result)?).map_err(|error| error.to_string())
+    }
+
+    fn profiled_edit_result(
+        &self,
+        result: MutationResult,
+        profile: EditProfile,
+    ) -> Result<String, String> {
+        serde_json::to_string(&ProfiledEditResult {
+            result: self.edit_payload(result)?,
+            profile,
+        })
+        .map_err(|error| error.to_string())
+    }
+
+    fn edit_payload(&self, result: MutationResult) -> Result<EditResult, String> {
+        Ok(EditResult {
             applied: result.applied,
             sheet_info: self.sheet_info()?,
             changed: self.changed_list(&result.changed),
             limited_cells: self.changed_list(&result.limited_cells),
         })
-        .map_err(|error| error.to_string())
     }
 
     fn changed_list(&self, changed: &[CellAddress]) -> Vec<String> {
@@ -1141,6 +1233,52 @@ mod tests {
             session.calculation_status_json().unwrap(),
             r#"{"limitedCells":["A3"]}"#
         );
+    }
+
+    #[test]
+    fn profiled_calls_carry_their_stage_profile() {
+        let mut session = Session::open(&formula_xlsx(), None).unwrap();
+        let mut ticks = 0.0;
+        let mut clock = || {
+            ticks += 1.0;
+            ticks
+        };
+        let edited: serde_json::Value = serde_json::from_str(
+            &session
+                .edit_cell_profiled_json(
+                    r#"{"sheet":0,"row":0,"col":0,"input":"7"}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(edited["applied"], true);
+        assert_eq!(edited["profile"]["applyMs"], 1.0);
+        assert_eq!(edited["profile"]["recalcMs"], 1.0);
+
+        let shifted: serde_json::Value = serde_json::from_str(
+            &session
+                .apply_ops_profiled_json(
+                    r#"{"ops":[{"type":"insertRows","sheet":0,"at":0,"count":1}]}"#,
+                    None,
+                    &mut clock,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(shifted["applied"], true);
+        assert_eq!(shifted["profile"]["validateMs"], 1.0);
+
+        let listed: serde_json::Value = serde_json::from_str(
+            &session
+                .display_list_profiled_json(r#"{"x":0,"y":0,"width":400,"height":300}"#, &mut clock)
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(listed["displayList"]["commands"].is_array());
+        assert_eq!(listed["profile"]["buildMs"], 1.0);
+        assert_eq!(listed["profile"]["encodeMs"], 1.0);
     }
 
     #[test]

@@ -121,6 +121,8 @@ export interface DocxEditorProps {
   document?: Document | null;
   /** Callback when document is saved */
   onSave?: (buffer: ArrayBuffer) => void;
+  /** Owns File > Save and Cmd/Ctrl+S; return true to continue the built-in save. */
+  onSaveRequest?: () => boolean | void | Promise<boolean | void>;
   /** Whether Save also downloads a copy. Defaults to true. */
   downloadOnSave?: boolean;
   /** Configure the Yrs collaboration replica used by the editor. */
@@ -318,6 +320,8 @@ export interface DocxEditorRef {
   getDocument: () => Document | null;
   /** Get the editor ref */
   getEditorRef: () => PagedEditorRef | null;
+  /** Commits accepted input and selection; waits for active IME composition. */
+  flushPendingInput: () => Promise<void>;
   /** Save the document to a buffer. */
   save: () => Promise<ArrayBuffer | null>;
   /** Set zoom level */
@@ -557,6 +561,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     documentBuffer,
     document: initialDocument,
     onSave,
+    onSaveRequest,
     downloadOnSave = true,
     collaboration,
     onOpen,
@@ -889,6 +894,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     comments,
     documentName,
     onSave,
+    onSaveRequest,
     downloadOnSave,
     onOpen,
     onError,
@@ -1055,6 +1061,8 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   useKeyboardShortcuts({
     pagedEditorRef,
+    containerRef,
+    onSaveDocument: handleDownloadDocument,
     disableFindReplaceShortcuts,
     showFileOpen,
     onOpenDocument: handleOpenDocument,

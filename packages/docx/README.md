@@ -68,3 +68,34 @@ Package builds, demo startup, and CI run this step automatically.
 
 [JavaScript guide](https://docs.betteroffice.dev/docs/javascript) ·
 [Changelog](https://github.com/openooxml/betteroffice/blob/main/packages/docx/CHANGELOG.md) · Apache-2.0.
+
+### Undo capture modes and boundaries
+
+`session.setUndoCaptureMode(mode)` selects how tracked local transactions are
+combined into undo steps. `session.undoCaptureMode()` returns the current mode.
+
+| Mode | Grouping |
+| --- | --- |
+| `auto` (default) | Edits within 500 ms coalesce; switching stories closes the group. |
+| `manual` | Edits coalesce across pauses and stories until an explicit boundary. |
+
+`session.addUndoBoundary()` closes the current group in any mode. Changing modes
+also closes the group; setting the same mode again does not. Both operations
+preserve undo/redo history and are safe before capture starts. Repeated boundaries
+create no empty undo steps. Remote transactions remain outside local undo history.
+
+```ts
+session.setUndoCaptureMode('manual');
+session.insertText(firstLocation, 'Prefixo ');
+session.insertText(secondLocation, 'Suffix');
+session.addUndoBoundary();
+session.deleteRange(markerRange);
+session.addUndoBoundary();
+session.setUndoCaptureMode('auto');
+```
+
+The two insertions undo together; marker deletion is a separate step. Boundaries
+are also available in automatic mode when a host action needs to be isolated from
+surrounding typing. Undo/redo close capture as usual. Manual mode controls history
+grouping; it does not defer updates, flush pending input, or provide atomic execution.
+The host must close manual groups so later unrelated edits do not join them.

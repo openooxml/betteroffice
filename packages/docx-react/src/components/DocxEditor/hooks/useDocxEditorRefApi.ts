@@ -177,6 +177,14 @@ export function useDocxEditorRefApi({
     () => ({
       getDocument: () => pagedEditorRef.current?.getDocument() ?? documentFromYrs() ?? document,
       getEditorRef: () => pagedEditorRef.current,
+      flushPendingInput: async () => {
+        const editor = pagedEditorRef.current;
+        if (!editor) throw new Error('The editor input is unavailable');
+        await editor.flushPendingInput();
+        if (editor !== pagedEditorRef.current) {
+          throw new Error('The document changed while flushing input');
+        }
+      },
       save: handleSave,
       setZoom,
       getZoom: () => zoom,

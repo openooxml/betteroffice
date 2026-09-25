@@ -37,6 +37,7 @@ export {
 export type {
   OpenPresentationOptions,
   PresentationHandle,
+  UndoCaptureMode,
   WasmInitInput,
 } from './wasm/loader';
 export type {
@@ -47,12 +48,15 @@ export type {
   CommentReceipt,
   CommentSnapshot,
   DeckSnapshot,
+  EditProfile,
   GeometryPathCommand,
+  HistoryProfile,
   HistoryResult,
   HitTestResult,
   ImageEffect,
   ImageCrop,
   ImagePrimitive,
+  LayoutProfile,
   Paint,
   ParagraphAlignment,
   ParagraphSnapshot,
@@ -62,6 +66,8 @@ export type {
   PositionedTextLine,
   PositionedTextRun,
   PresetShapeDraft,
+  Profiled,
+  ProfiledLayout,
   PptxFontFace,
   PptxTextMatch,
   PptxTextSearchOptions,
