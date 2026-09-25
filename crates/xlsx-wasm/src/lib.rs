@@ -26,6 +26,12 @@ fn now_serial() -> Option<f64> {
     Some(js_sys::Date::now() / MS_PER_DAY + UNIX_EPOCH_SERIAL)
 }
 
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now() -> f64;
+}
+
 /// a workbook handle exposed to js; wraps the pure `Session`.
 #[wasm_bindgen]
 pub struct XlsxDocument {
@@ -188,6 +194,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = displayListProfiledJson)]
+    pub fn display_list_profiled_json(&self, viewport_json: &str) -> Result<String, JsValue> {
+        self.session
+            .display_list_profiled_json(viewport_json, &mut performance_now)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// the chart under a viewport-local point, or `null`.
     #[wasm_bindgen(js_name = chartAtPointJson)]
     pub fn chart_at_point_json(&self, args: &str) -> Result<String, JsValue> {
@@ -253,6 +266,13 @@ impl XlsxDocument {
             .map_err(|e| JsValue::from_str(&e))
     }
 
+    #[wasm_bindgen(js_name = editCellProfiledJson)]
+    pub fn edit_cell_profiled_json(&mut self, args: &str) -> Result<String, JsValue> {
+        self.session
+            .edit_cell_profiled_json(args, now_serial(), &mut performance_now)
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
     /// enter a batch of cell edits as one undo step; returns `SheetInfo` json.
     #[wasm_bindgen(js_name = editCellsJson)]
     pub fn edit_cells_json(&mut self, args: &str) -> Result<String, JsValue> {
@@ -266,6 +286,13 @@ impl XlsxDocument {
     pub fn apply_ops_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {
         self.session
             .apply_ops_json(transaction_json, now_serial())
+            .map_err(|e| JsValue::from_str(&e))
+    }
+
+    #[wasm_bindgen(js_name = applyOpsProfiledJson)]
+    pub fn apply_ops_profiled_json(&mut self, transaction_json: &str) -> Result<String, JsValue> {
+        self.session
+            .apply_ops_profiled_json(transaction_json, now_serial(), &mut performance_now)
             .map_err(|e| JsValue::from_str(&e))
     }
 

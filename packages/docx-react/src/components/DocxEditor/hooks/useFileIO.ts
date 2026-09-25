@@ -14,6 +14,7 @@ import {
   type ImageResolver,
 } from '@betteroffice/docx/layout/render';
 import type { PagedEditorRef } from '../PagedEditor';
+import type { DocxEditorProps } from '../../DocxEditor';
 
 const INSERT_IMAGE_MAX_WIDTH_PX = 612;
 
@@ -107,6 +108,7 @@ export function useFileIO({
   comments,
   documentName,
   onSave,
+  onSaveRequest,
   downloadOnSave = true,
   onOpen,
   onError,
@@ -121,6 +123,7 @@ export function useFileIO({
   comments: Comment[];
   documentName: string | undefined;
   onSave: ((buffer: ArrayBuffer) => void) | undefined;
+  onSaveRequest?: DocxEditorProps['onSaveRequest'];
   downloadOnSave?: boolean;
   onOpen: ((file: File) => void | Promise<void>) | undefined;
   onError: ((error: Error) => void) | undefined;
@@ -131,11 +134,22 @@ export function useFileIO({
 }) {
   const imageInputRef = useRef<HTMLInputElement>(null);
   const docxInputRef = useRef<HTMLInputElement>(null);
+  const saveRequestRef = useRef<Promise<void> | null>(null);
 
   const handleSave = useCallback(
     async (): Promise<ArrayBuffer | null> => {
       try {
-        const document = pagedEditorRef.current?.getDocument();
+        const editor = pagedEditorRef.current;
+        if (!editor) return null;
+        const session = editor.getYrsSession();
+        await editor.flushPendingInput();
+        const assertCurrent = () => {
+          if (editor !== pagedEditorRef.current || session !== editor.getYrsSession()) {
+            throw new Error('The document changed while saving');
+          }
+        };
+        assertCurrent();
+        const document = editor.getDocument();
         if (!document) return null;
 
         // Sync React comments state (including new replies) back to the document model
@@ -150,6 +164,7 @@ export function useFileIO({
         const buffer = document.originalBuffer
           ? await repackDocx(document)
           : await createDocx(document);
+        assertCurrent();
         document.originalBuffer = buffer;
 
         onSave?.(buffer);
@@ -171,20 +186,34 @@ export function useFileIO({
     printDisplayListPages(displayList, resolveImage, onPrint);
   }, [displayList, resolveImage, onPrint]);
 
-  const handleDownloadDocument = useCallback(async () => {
-    const buffer = await handleSave();
-    if (!buffer || !downloadOnSave) return;
-    const blob = new Blob([buffer], {
-      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  const handleDownloadDocument = useCallback((): Promise<void> => {
+    if (saveRequestRef.current) return saveRequestRef.current;
+    const pending = Promise.resolve().then(async () => {
+      const editor = pagedEditorRef.current;
+      const session = editor?.getYrsSession();
+      if (onSaveRequest && (await onSaveRequest()) !== true) return;
+      if (editor !== pagedEditorRef.current || session !== editor?.getYrsSession()) {
+        throw new Error('The document changed during the save request');
+      }
+      const buffer = await handleSave();
+      if (!buffer || !downloadOnSave) return;
+      const blob = new Blob([buffer], {
+        type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = window.document.createElement('a');
+      a.href = url;
+      a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 0);
+    }).catch((error) => {
+      onError?.(toFileIOError(error, 'Failed to save document'));
+    }).finally(() => {
+      if (saveRequestRef.current === pending) saveRequestRef.current = null;
     });
-    const url = URL.createObjectURL(blob);
-    const a = window.document.createElement('a');
-    a.href = url;
-    a.download = `${(documentName?.trim() || 'document').replace(/\.docx$/i, '')}.docx`;
-    a.click();
-    // Defer revoke so Safari has time to start the download.
-    setTimeout(() => URL.revokeObjectURL(url), 0);
-  }, [handleSave, documentName, downloadOnSave]);
+    saveRequestRef.current = pending;
+    return pending;
+  }, [handleSave, documentName, downloadOnSave, onSaveRequest, onError, pagedEditorRef]);
 
   const handleOpenDocument = useCallback(() => {
     docxInputRef.current?.click();
