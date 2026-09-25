@@ -1313,7 +1313,7 @@ fn parse_text_paragraph(
     })
 }
 
-fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
+pub(crate) fn parse_paragraph_properties(element: Option<&XmlElement>) -> ParagraphProperties {
     let Some(element) = element else {
         return ParagraphProperties::default();
     };

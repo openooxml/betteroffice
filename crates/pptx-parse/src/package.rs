@@ -8,7 +8,8 @@ use crate::comments::{
     slide_comment_parts,
 };
 use crate::drawing::{
-    common_slide_data, parse_diagram_drawing, parse_style_levels, parse_text_styles,
+    common_slide_data, parse_diagram_drawing, parse_paragraph_properties, parse_style_levels,
+    parse_text_styles,
 };
 use crate::model::*;
 use crate::relationships::{Relationship, parse_relationships, relationship_types};
@@ -450,6 +451,10 @@ fn parse_presentation(
         slides,
         master_part_paths,
         default_text_style: parse_style_levels(root.child("defaultTextStyle")),
+        default_text_paragraph: root
+            .child("defaultTextStyle")
+            .and_then(|style| style.child("defPPr"))
+            .map(|properties| Box::new(parse_paragraph_properties(Some(properties)))),
     })
 }
 

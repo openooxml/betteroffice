@@ -97,6 +97,39 @@ fn text_outside_placeholders_takes_the_presentation_default_style() {
     assert_eq!(lines(&list, 4)[0].runs.last().unwrap().font_size_px, 36.0);
 }
 
+#[test]
+fn a_default_text_style_given_only_as_def_ppr_reaches_text_outside_placeholders() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/presentation.xml" {
+            *bytes = String::from_utf8(bytes.clone())
+                .unwrap()
+                .replace(
+                    "</p:presentation>",
+                    r#"<p:defaultTextStyle><a:defPPr><a:defRPr sz="2700"/></a:defPPr></p:defaultTextStyle></p:presentation>"#,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2944).unwrap();
+    let mut package = session.package().clone();
+    assert!(package.presentation.default_text_style.is_empty());
+    for shape in &mut package.slides[0].shapes {
+        if let ShapeNode::Shape(shape) = shape
+            && let Some(body) = &mut shape.text
+        {
+            body.default_list_style = None;
+            body.list_style.clear();
+        }
+    }
+    let list = renderer()
+        .layout_slide(&package, &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    assert_eq!(lines(&list, 2)[0].runs[0].font_size_px, 88.0);
+    assert_eq!(lines(&list, 4)[0].runs.last().unwrap().font_size_px, 36.0);
+}
+
 fn clear_bullets(body: &mut TextBody) {
     for properties in body
         .default_list_style
