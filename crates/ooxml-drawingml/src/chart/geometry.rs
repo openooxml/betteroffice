@@ -1031,13 +1031,21 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             .collect()
     };
     let families = plot_families(chart, &views, label_style);
-    let bands = axis_bands(
-        ops,
-        families
-            .iter()
-            .copied()
-            .find(|family| has_axes(family.chart_type) && !family.secondary),
-    );
+    // Every family on the primary axes hangs its labels off the one plot, so
+    // each side takes the widest band any of them needs.
+    let bands = families
+        .iter()
+        .copied()
+        .filter(|family| has_axes(family.chart_type) && !family.secondary)
+        .map(|family| axis_bands(ops, Some(family), width))
+        .reduce(|a, b| AxisBands {
+            left: a.left.max(b.left),
+            top: a.top.max(b.top),
+            right: a.right.max(b.right),
+            bottom: a.bottom.max(b.bottom),
+            overhang: a.overhang.max(b.overhang),
+        })
+        .unwrap_or_else(|| axis_bands(ops, None, width));
     let gutter = bands.left;
     let plot_x = x + reserve_left + gutter;
     let secondary_w = if secondary_value_axis(chart, false).is_some() {
@@ -1221,6 +1229,7 @@ struct AxisBands {
 fn axis_bands<S: PlotSink + ?Sized>(
     ops: &mut Emitter<'_, S>,
     family: Option<PlotFamily<'_>>,
+    width: f64,
 ) -> AxisBands {
     let empty = AxisBands {
         left: CHART_PAD + PLOT_INSET,
@@ -1301,6 +1310,30 @@ fn axis_bands<S: PlotSink + ?Sized>(
             overhang,
         }
     } else {
+        // A scatter's x labels sit centred on their ticks, so the last one
+        // hangs half its width past the plot.
+        let x_overhang = if matches!(family.chart_type, "scatter" | "bubble")
+            && !family.x_axis.is_some_and(|axis| axis.hidden)
+        {
+            let scale = scatter_x_scale(
+                family,
+                PlotArea {
+                    x: 0.0,
+                    y: 0.0,
+                    w: width,
+                    h: 0.0,
+                    gutter: 0.0,
+                },
+            );
+            let format = family.x_axis.and_then(|axis| axis.number_format);
+            axis_ticks(scale, family.x_axis.and_then(|axis| axis.major_unit))
+                .last()
+                .map_or(0.0, |value| {
+                    text_width(&scale.format(*value, format), family.label(), ops) / 2.0
+                })
+        } else {
+            0.0
+        };
         AxisBands {
             left: value_title
                 + if values.is_empty() {
@@ -1313,14 +1346,14 @@ fn axis_bands<S: PlotSink + ?Sized>(
             } else {
                 PLOT_INSET.max(0.5 * value_style.font.size_px - 0.7)
             },
-            right: PLOT_INSET,
+            right: PLOT_INSET + x_overhang,
             bottom: category_title
                 + if categories.is_empty() {
                     empty.bottom
                 } else {
                     hung(&category_style, lines)
                 },
-            overhang: 0.0,
+            overhang: x_overhang,
         }
     }
 }
@@ -6878,6 +6911,70 @@ mod tests {
             bars[0].0 > bars[1].0,
             "the first category draws on the right"
         );
+    }
+
+    #[test]
+    fn a_combo_chart_makes_room_for_its_widest_labels() {
+        let data = Source {
+            categories: vec![
+                "A rather long category name".to_owned(),
+                "Another long one".to_owned(),
+            ],
+            values: vec![10.0, 20.0],
+        };
+        let chart = PlotChart {
+            chart_type: "column",
+            plot_groups: vec![
+                group("column", vec![series("North", &data)]),
+                group("bar", vec![series("South", &data)]),
+            ],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = PlotRect {
+            x: 0.0,
+            y: 0.0,
+            w: 400.0,
+            h: 300.0,
+        };
+        let ops = plot_chart(&chart, frame);
+        for name in ["A rather long category name", "Another long one"] {
+            assert!(
+                texts_at(&ops)
+                    .iter()
+                    .filter(|(text, ..)| text == name)
+                    .all(|(_, x, ..)| *x >= frame.x),
+                "{name} starts outside the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scatter_keeps_its_last_x_label_inside_the_frame() {
+        let data = source(&[1.0, 2.0]);
+        let xs = [0.0, 123_456.0];
+        let mut points = series("North", &data);
+        points.x_values = &xs;
+        let chart = PlotChart {
+            chart_type: "scatter",
+            plot_groups: vec![group("scatter", vec![points])],
+            legend: Some(PlotLegend {
+                overlay: false,
+                position: None,
+                visible: Some(false),
+            }),
+            ..PlotChart::default()
+        };
+        let frame = rect();
+        // Each x label's box is twice its text, centred on the tick.
+        for (text, x, _, width) in tick_labels(&plot_chart(&chart, frame)) {
+            let ink_right = x + width * 0.75;
+            assert!(ink_right <= frame.x + frame.w, "{text} ends at {ink_right}");
+        }
     }
 
     #[test]
