@@ -11,6 +11,8 @@ pub const CHART_AXIS_COLOR: &str = "#666666";
 pub const CHART_GRID_COLOR: &str = "#D9D9D9";
 pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
+/// The size Office gives a marker whose `c:marker` names none, in points.
+const DEFAULT_MARKER_PT: f64 = 7.0;
 const EMU_PER_PIXEL: f64 = 9525.0;
 /// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
 const MAX_LINE_PX: f64 = 16.0;
@@ -214,6 +216,9 @@ pub enum PlotOp {
         font: PlotFont,
         color: String,
         align: PlotTextAlign,
+        /// Clockwise turn about the text box's own centre. `0.0` for all but a
+        /// value-axis title, which PowerPoint stands on its side.
+        rotation_deg: f64,
     },
     Line {
         x1: f64,
@@ -245,11 +250,21 @@ pub trait PlotSink {
     }
 
     fn push_op(&mut self, op: PlotOp) -> bool;
+
+    /// Whether the host draws a text op at its `rotation_deg`. One that keeps
+    /// every label flat gets a turned title laid out flat instead.
+    fn turns_text(&self) -> bool {
+        false
+    }
 }
 
 impl PlotSink for Vec<PlotOp> {
     fn push_op(&mut self, op: PlotOp) -> bool {
         self.push(op);
+        true
+    }
+
+    fn turns_text(&self) -> bool {
         true
     }
 }
@@ -307,6 +322,8 @@ pub struct PlotAxisTitles<'a> {
 pub struct PlotLegend<'a> {
     pub position: Option<&'a str>,
     pub visible: Option<bool>,
+    /// `c:overlay`: the legend sits on the plot instead of taking a band of it.
+    pub overlay: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -350,6 +367,12 @@ pub struct PlotAxis<'a> {
     pub minor_tick_mark: Option<&'a str>,
     pub major_gridlines: bool,
     pub minor_gridlines: bool,
+    /// `c:majorGridlines/c:spPr/a:ln`.
+    pub major_gridline: Option<PlotLine<'a>>,
+    /// `c:minorGridlines/c:spPr/a:ln`.
+    pub minor_gridline: Option<PlotLine<'a>>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    pub cross_between: Option<&'a str>,
     pub number_format: Option<&'a str>,
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
@@ -519,10 +542,12 @@ impl<'a> From<&'a ChartSpace> for PlotChart<'a> {
                 PlotLegend {
                     position: None,
                     visible: Some(false),
+                    overlay: false,
                 },
                 |legend| PlotLegend {
                     position: legend.position.as_deref(),
                     visible: Some(legend.visible),
+                    overlay: legend.overlay,
                 },
             )),
             value_axis: space
@@ -646,16 +671,23 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from_model),
+        minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from_model),
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from_model(axis.text.as_ref()),
-        line: axis.line.as_ref().map(|line| PlotLine {
-            none: line.none,
-            color: line.color.as_deref(),
-            width_emu: line.width_emu,
-        }),
+        line: axis.line.as_ref().map(plot_line_from_model),
+    }
+}
+
+fn plot_line_from_model(line: &super::model::ChartLine) -> PlotLine<'_> {
+    PlotLine {
+        none: line.none,
+        color: line.color.as_deref(),
+        width_emu: line.width_emu,
     }
 }
 
@@ -962,12 +994,15 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
         legend_style,
         ops,
     );
+    // A legend `c:overlay` puts on the plot takes no band of its own: the plot
+    // keeps the whole frame and the legend is drawn over it.
+    let legend_reserves = chart.legend.as_ref().is_none_or(|legend| !legend.overlay);
     let legend_w = match &legend {
-        Some(band) if !band.horizontal => LEGEND_COL_W,
+        Some(band) if !band.horizontal && legend_reserves => LEGEND_COL_W,
         _ => 8.0,
     };
     let legend_h = match &legend {
-        Some(band) if band.horizontal => band.h,
+        Some(band) if band.horizontal && legend_reserves => band.h,
         _ => 0.0,
     };
     let gutter = if has_transposed_family(chart) {
@@ -1012,7 +1047,8 @@ pub fn plot_chart_into<S: PlotSink + ?Sized>(chart: &PlotChart<'_>, rect: PlotRe
             x: plot_x,
             y: region_y + axis_header,
             w: (width - gutter - legend_w - 10.0 - secondary_w).max(24.0),
-            h: (height - title_h - 34.0 - legend_h - axis_header).max(24.0),
+            h: (height - title_h - category_band(chart, chart_text) - legend_h - axis_header)
+                .max(24.0),
             gutter,
         },
     };
@@ -1450,13 +1486,16 @@ impl<'a> SeriesView<'a> {
             .unwrap_or_else(|| series_color(Some(self.series), series_index))
     }
 
+    /// `c:marker/c:size` in pixels. The schema counts points, 2 to 72.
     fn marker_size(&self, index: usize) -> f64 {
         self.point(index)
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.size)
-            .unwrap_or(4.0)
-            .clamp(1.0, 24.0)
+            .unwrap_or(DEFAULT_MARKER_PT)
+            .clamp(2.0, 72.0)
+            * 4.0
+            / 3.0
     }
 
     /// The symbol to draw at `index`, or `None` for a point that draws none.
@@ -1466,7 +1505,7 @@ impl<'a> SeriesView<'a> {
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.symbol)
-            .unwrap_or(PlotMarkerSymbol::Square)
+            .unwrap_or(PlotMarkerSymbol::Auto)
             .resolved(series_index);
         (symbol != PlotMarkerSymbol::None).then_some(symbol)
     }
@@ -1612,6 +1651,20 @@ fn push_text_aligned<S: PlotSink + ?Sized>(
     style: &ResolvedText,
     align: PlotTextAlign,
 ) {
+    push_text_turned(ops, text, x, baseline_y, width, style, align, 0.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_text_turned<S: PlotSink + ?Sized>(
+    ops: &mut Emitter<'_, S>,
+    text: &str,
+    x: f64,
+    baseline_y: f64,
+    width: f64,
+    style: &ResolvedText,
+    align: PlotTextAlign,
+    rotation_deg: f64,
+) {
     if text.is_empty() || width <= 0.0 || ops.exhausted() {
         return;
     }
@@ -1623,6 +1676,7 @@ fn push_text_aligned<S: PlotSink + ?Sized>(
         font: style.font.clone(),
         color: style.color.clone(),
         align,
+        rotation_deg,
     });
 }
 
@@ -1804,7 +1858,7 @@ fn wrap_legend_label<S: PlotSink + ?Sized>(
 ) -> Vec<String> {
     let mut remaining: String = label.chars().take(MAX_LABEL_CHARS).collect();
     let mut lines = Vec::new();
-    while legend_text_width(&remaining, style, ops) > width {
+    while !remaining.is_empty() && legend_text_width(&remaining, style, ops) > width {
         let mut end = 0;
         for (index, ch) in remaining.char_indices() {
             let next = index + ch.len_utf8();
@@ -2178,11 +2232,10 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     if unit.is_finite() && unit > 0.0 {
         let steps = (span / unit).floor();
         if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
-            let first = round_to_unit(scale.min, unit, true);
             let mut ticks = Vec::new();
             let mut index = 0;
             while ticks.len() < MAX_PLOT_AXIS_TICKS {
-                let value = first + unit * index as f64;
+                let value = scale.min + unit * index as f64;
                 if !value.is_finite() || value > scale.max + unit * 1e-9 {
                     break;
                 }
@@ -2200,6 +2253,11 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
             step => scale.min + span * step as f64 / 4.0,
         })
         .collect()
+}
+
+/// A gridline whose `c:spPr` draws no line is declared only to be hidden.
+fn draws_no_line(line: Option<PlotLine<'_>>) -> bool {
+    line.is_some_and(|line| line.none)
 }
 
 /// Half-length of a tick mark drawn for `mark`, and whether it crosses.
@@ -2259,8 +2317,10 @@ fn emit_axes<S: PlotSink + ?Sized>(
     let scale = value_scale(family);
     let axis = family.axis;
     let hidden = axis.is_some_and(|axis| axis.hidden);
-    let major_grid = axis.is_none_or(|axis| axis.major_gridlines);
-    let minor_grid = axis.is_some_and(|axis| axis.minor_gridlines);
+    let major_grid =
+        axis.is_none_or(|axis| axis.major_gridlines && !draws_no_line(axis.major_gridline));
+    let minor_grid =
+        axis.is_some_and(|axis| axis.minor_gridlines && !draws_no_line(axis.minor_gridline));
     let number_format = axis.and_then(|axis| axis.number_format);
     let tick_style = &family.scoped(axis.map(|axis| axis.text).unwrap_or_default());
     let (edge, outward) = match (transposed, family.secondary) {
@@ -2363,14 +2423,30 @@ fn emit_axes<S: PlotSink + ?Sized>(
         (left_of_plot(plot), below_plot(plot))
     };
     if let Some(title) = family.axis_titles.value.filter(|title| !title.is_empty()) {
-        push_text(
-            ops,
-            title,
-            value_title.0,
-            value_title.1,
-            value_title.2,
-            tick_style,
-        );
+        if transposed || !ops.sink.turns_text() {
+            push_text(
+                ops,
+                title,
+                value_title.0,
+                value_title.1,
+                value_title.2,
+                tick_style,
+            );
+        } else {
+            // PowerPoint stands a value-axis title on its side, centred on the
+            // axis it names; the baseline sits half an ascent below the centre
+            // the box turns about.
+            push_text_turned(
+                ops,
+                title,
+                plot.x - plot.gutter / 2.0 - plot.h / 2.0,
+                plot.y + plot.h / 2.0 + tick_style.font.size_px * 0.34,
+                plot.h,
+                tick_style,
+                PlotTextAlign::Center,
+                -90.0,
+            );
+        }
     }
     if let Some(title) = family
         .axis_titles
@@ -2576,6 +2652,7 @@ fn push_point_label<S: PlotSink + ?Sized>(
     baseline_y: f64,
     width: f64,
     percent_total: f64,
+    align: PlotTextAlign,
 ) {
     let Some(text) = point_label(family, series, index, percent_total) else {
         return;
@@ -2591,7 +2668,15 @@ fn push_point_label<S: PlotSink + ?Sized>(
     let step = style.font.size_px * 1.2;
     let top = baseline_y - step * (lines.len() as f64 - 1.0) / 2.0;
     for (line, text) in lines.iter().enumerate() {
-        push_text(ops, text.trim(), x, top + step * line as f64, width, &style);
+        push_text_aligned(
+            ops,
+            text.trim(),
+            x,
+            top + step * line as f64,
+            width,
+            &style,
+            align,
+        );
     }
 }
 
@@ -2731,24 +2816,31 @@ fn emit_bar<S: PlotSink + ?Sized>(
         }
         let slot = bands.slot * category_position(family, cat_idx, cat_count) as f64;
         let label = category_label(family.series, cat_idx);
-        if horizontal {
-            push_text(
-                ops,
-                &label,
-                plot.x - plot.gutter + 4.0,
-                plot.y + slot + bands.slot * 0.55,
-                plot.gutter - 8.0,
-                category_style,
-            );
-        } else {
-            push_text(
-                ops,
-                &label,
-                plot.x + slot + 2.0,
-                plot.y + plot.h + 14.0,
-                bands.slot - 4.0,
-                category_style,
-            );
+        // A category name carries its own line breaks, and PowerPoint stacks
+        // the lines under the band rather than running them together.
+        let step = category_style.font.size_px * 1.2;
+        let lift = step * (label.split('\n').count() - 1) as f64 / 2.0;
+        for (line, text) in label.split('\n').enumerate() {
+            if horizontal {
+                push_text(
+                    ops,
+                    text.trim(),
+                    plot.x - plot.gutter + 4.0,
+                    plot.y + slot + bands.slot * 0.55 - lift + step * line as f64,
+                    plot.gutter - 8.0,
+                    category_style,
+                );
+            } else {
+                push_text_aligned(
+                    ops,
+                    text.trim(),
+                    plot.x + slot + 2.0,
+                    plot.y + plot.h + 14.0 + step * line as f64,
+                    bands.slot - 4.0,
+                    category_style,
+                    PlotTextAlign::Center,
+                );
+            }
         }
         stacked_spans(family, cat_idx, spans);
         let total = category_total(family, cat_idx);
@@ -2778,6 +2870,7 @@ fn emit_bar<S: PlotSink + ?Sized>(
                     y + bands.bar,
                     48.0,
                     total,
+                    PlotTextAlign::Start,
                 );
             } else {
                 let (y0, y1) = (scale.y(plot, start), scale.y(plot, end));
@@ -2793,16 +2886,20 @@ fn emit_bar<S: PlotSink + ?Sized>(
                 let (fraction, offset) = bar_label_anchor(
                     point_label_spec(series, cat_idx).and_then(|labels| labels.position),
                 );
+                // PowerPoint centres a column's label on the bar it labels, and
+                // a bar too narrow for the label spills evenly to both sides.
+                let label_w = bands.bar.max(32.0);
                 push_point_label(
                     ops,
                     family,
                     series,
                     ser_idx,
                     cat_idx,
-                    x,
+                    x + (bands.bar - label_w) / 2.0,
                     y0 + (y1 - y0) * fraction - offset,
-                    bands.bar.max(32.0),
+                    label_w,
                     total,
+                    PlotTextAlign::Center,
                 );
             }
         }
@@ -2810,9 +2907,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
 }
 
 /// Where the `index`th of `count` categories sits along a line or area axis.
+/// A point sits mid-band, or on the category's tick when the value axis
+/// crosses there (`midCat`).
 fn line_x(family: PlotFamily<'_>, plot: PlotArea, index: usize, count: usize) -> f64 {
-    let denom = count.saturating_sub(1).max(1) as f64;
-    plot.x + plot.w * category_position(family, index, count) as f64 / denom
+    let position = category_position(family, index, count) as f64;
+    if family.axis.and_then(|axis| axis.cross_between) == Some("midCat") {
+        let denom = count.saturating_sub(1).max(1) as f64;
+        plot.x + plot.w * position / denom
+    } else {
+        plot.x + plot.w * (position + 0.5) / count.max(1) as f64
+    }
 }
 
 fn emit_category_labels<S: PlotSink + ?Sized>(
@@ -2822,18 +2926,27 @@ fn emit_category_labels<S: PlotSink + ?Sized>(
     count: usize,
 ) {
     let style = &family.category_text();
+    // A category name carries its own line breaks, and PowerPoint stacks the
+    // lines under the tick, each centred on the band the category occupies.
+    let slot = (plot.w / count.max(1) as f64).max(32.0);
+    let step = style.font.size_px * 1.2;
     for index in 0..count {
         if ops.exhausted() {
             return;
         }
-        push_text(
-            ops,
-            &category_label(family.series, index),
-            line_x(family, plot, index, count) - 16.0,
-            plot.y + plot.h + 14.0,
-            32.0,
-            style,
-        );
+        let label = category_label(family.series, index);
+        let x = line_x(family, plot, index, count) - slot / 2.0;
+        for (line, text) in label.split('\n').enumerate() {
+            push_text_aligned(
+                ops,
+                text.trim(),
+                x,
+                plot.y + plot.h + 14.0 + step * line as f64,
+                slot,
+                style,
+                PlotTextAlign::Center,
+            );
+        }
     }
 }
 
@@ -2881,7 +2994,8 @@ fn emit_line<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            let size = series.marker_size(i);
+            let visible = markers && series.marker_symbol(i, ser_idx).is_some();
+            let size = if visible { series.marker_size(i) } else { 4.0 };
             push_point_label(
                 ops,
                 family,
@@ -2892,6 +3006,7 @@ fn emit_line<S: PlotSink + ?Sized>(
                 y - size,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -2969,6 +3084,7 @@ fn emit_area<S: PlotSink + ?Sized>(
                 *y - 3.0,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3125,6 +3241,7 @@ fn emit_scatter<S: PlotSink + ?Sized>(
                 y - 4.0,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
             prev = Some((x, y));
         }
@@ -3199,6 +3316,7 @@ fn emit_bubble<S: PlotSink + ?Sized>(
                 y,
                 48.0,
                 category_total(family, i),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3232,8 +3350,11 @@ fn emit_radar<S: PlotSink + ?Sized>(
         (cx + reach * angle.cos(), cy + reach * angle.sin())
     };
 
+    let rings = !family
+        .axis
+        .is_some_and(|axis| draws_no_line(axis.major_gridline));
     for value in axis_ticks(scale, family.axis.and_then(|axis| axis.major_unit)) {
-        if ops.exhausted() || scale.ratio(value) <= 0.0 {
+        if !rings || ops.exhausted() || scale.ratio(value) <= 0.0 {
             continue;
         }
         let ring: Vec<(f64, f64)> = (0..spokes).map(|index| at(index, value)).collect();
@@ -3311,6 +3432,7 @@ fn emit_radar<S: PlotSink + ?Sized>(
                 *y - 4.0,
                 48.0,
                 category_total(family, index),
+                PlotTextAlign::Start,
             );
         }
     }
@@ -3778,6 +3900,7 @@ fn emit_pie<S: PlotSink + ?Sized>(
             oy + reach * middle.sin(),
             48.0,
             total,
+            PlotTextAlign::Start,
         );
         angle += sweep;
     }
@@ -3972,74 +4095,248 @@ pub fn format_with_code(value: f64, code: &str) -> Option<String> {
     if !value.is_finite() || code.is_empty() {
         return None;
     }
-    let section = code.split(';').next().unwrap_or(code);
+    let sections = format_sections(code);
+    // Excel reads the sections as positive, negative and zero. A negative with
+    // a section of its own writes itself, parentheses and all; without one it
+    // takes a minus sign.
+    let (section, signed) = match (value, sections.as_slice()) {
+        (value, [_, negative, ..]) if value < 0.0 => (*negative, false),
+        (0.0, [_, _, zero, ..]) => (*zero, false),
+        _ => (sections[0], true),
+    };
     if section.eq_ignore_ascii_case("general") {
         return Some(format_number(value));
     }
-    if section.contains(['y', 'd', 'h', 's', 'E', 'e', '?', '*', '[']) || section.contains("m/") {
+    let section = &strip_modifiers(section)?;
+    if section.contains(['y', 'd', 'h', 's', 'E', 'e']) || section.contains("m/") {
         return None;
     }
-    let digits = section
-        .split('.')
-        .nth(1)
-        .map(|tail| {
-            tail.chars()
-                .take_while(|c| matches!(c, '0' | '#'))
-                .count()
-                .min(9)
-        })
-        .unwrap_or(0);
+    // A section with no digit placeholder writes only its literal text, which
+    // is how `0;-0;"-"` draws a zero as a dash and `0;-0;` as nothing.
+    if !section.contains(['0', '#', '?']) {
+        let (leading, trailing) = literals(section);
+        return Some(leading + &trailing);
+    }
+    let pattern = placeholders(section);
+    let (whole_pattern, fraction_pattern) = match pattern.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (pattern.as_str(), None),
+    };
+    let digits = fraction_pattern.map_or(0, |fraction| fraction.len().min(9));
     let percent = section.contains('%');
     let scaled = if percent { value * 100.0 } else { value };
     let factor = 10_f64.powi(digits as i32);
     let rounded = (scaled.abs() * factor).round() / factor;
-    let mut body = format!("{rounded:.digits$}");
+    let mut body = placeholder_digits(rounded, whole_pattern, fraction_pattern, digits);
     if section.contains(',') {
         body = group_thousands(&body);
     }
+    let (leading, trailing) = literals(section);
     let mut out = String::new();
-    if scaled < 0.0 && !body.trim_start_matches(['0', '.', ',']).is_empty() {
+    if signed && scaled < 0.0 && !body.trim_start_matches(['0', '.', ',']).is_empty() {
         out.push('-');
     }
-    out.push_str(&literal(section, true));
+    out.push_str(&leading);
     out.push_str(&body);
-    out.push_str(&literal(section, false));
+    out.push_str(&trailing);
     if percent {
         out.push('%');
     }
     Some(out)
 }
 
-/// The literal characters a format code puts before or after its digits.
-fn literal(code: &str, leading: bool) -> String {
-    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
-    let bytes: Vec<char> = code.chars().collect();
-    let range: Box<dyn Iterator<Item = &char>> = if leading {
-        Box::new(bytes.iter())
-    } else {
-        Box::new(bytes.iter().rev())
-    };
-    let mut literal: Vec<char> = range
-        .take_while(|c| !placeholder(**c))
-        .filter(|c| **c != '"' && **c != '\\' && **c != '_')
-        .copied()
-        .collect();
-    if !leading {
-        literal.reverse();
+/// The room under the plot for its category names: the one line every chart
+/// keeps, grown by a line for each break the longest name carries.
+fn category_band(chart: &PlotChart<'_>, chart_text: PlotTextStyle<'_>) -> f64 {
+    const ONE_LINE: f64 = 34.0;
+    let lines = chart
+        .series
+        .iter()
+        .chain(
+            chart
+                .plot_groups
+                .iter()
+                .flat_map(|group| group.series.iter()),
+        )
+        .find(|series| !series.categories.is_empty())
+        .into_iter()
+        .flat_map(|series| series.categories.iter())
+        .take(MAX_PLOT_DATA_SCAN)
+        .map(|name| name.split('\n').count())
+        .max()
+        .unwrap_or(1);
+    if lines <= 1 || has_transposed_family(chart) {
+        return ONE_LINE;
     }
-    literal.into_iter().collect()
+    let style = chart
+        .axes
+        .iter()
+        .find(|axis| axis.kind != PlotAxisKind::Value)
+        .map(|axis| axis.text)
+        .unwrap_or_default()
+        .over(chart_text)
+        .resolve(CHART_LABEL_SIZE_PX, 400);
+    ONE_LINE + style.font.size_px * 1.2 * (lines - 1) as f64
+}
+
+/// A format code's `;`-separated sections. A semicolon inside quotes, or one
+/// escaped, spaced or repeated as a literal, belongs to the section it is in.
+fn format_sections(code: &str) -> Vec<&str> {
+    let mut sections = Vec::new();
+    let mut start = 0;
+    let mut quoted = false;
+    let mut literal = false;
+    for (index, character) in code.char_indices() {
+        if literal {
+            literal = false;
+            continue;
+        }
+        match character {
+            '"' => quoted = !quoted,
+            '\\' | '_' | '*' if !quoted => literal = true,
+            ';' if !quoted => {
+                sections.push(&code[start..index]);
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    sections.push(&code[start..]);
+    sections
+}
+
+/// A section without the `[…]` groups that only colour it or name its locale.
+/// A condition such as `[>100]` picks the section by value, which this does not
+/// model, so it gives up instead.
+fn strip_modifiers(section: &str) -> Option<String> {
+    const COLORS: [&str; 8] = [
+        "black", "blue", "cyan", "green", "magenta", "red", "white", "yellow",
+    ];
+    let mut out = String::with_capacity(section.len());
+    let mut rest = section;
+    while let Some(open) = rest.find('[') {
+        let close = rest[open..].find(']')? + open;
+        let inside = &rest[open + 1..close];
+        out.push_str(&rest[..open]);
+        rest = &rest[close + 1..];
+        // `[$€-407]` is a currency symbol and the locale it belongs to: the
+        // symbol is drawn, the locale is not.
+        if let Some(currency) = inside.strip_prefix('$') {
+            let symbol = currency
+                .split_once('-')
+                .map_or(currency, |(symbol, _)| symbol);
+            for character in symbol.chars() {
+                out.push('\\');
+                out.push(character);
+            }
+            continue;
+        }
+        let known = COLORS.iter().any(|name| inside.eq_ignore_ascii_case(name))
+            || inside.to_ascii_lowercase().starts_with("color");
+        if !known {
+            return None;
+        }
+    }
+    out.push_str(rest);
+    Some(out)
+}
+
+/// The literal characters a format code puts before and after its digits.
+/// `"…"` is quoted text, `\x` an escaped character, and `_x` or `*x` a blank
+/// the width of `x`, which reads as nothing at all.
+fn literals(code: &str) -> (String, String) {
+    let placeholder = |c: char| matches!(c, '0' | '#' | '.' | ',' | '%' | '?');
+    let mut leading = String::new();
+    let mut trailing = String::new();
+    let mut past_digits = false;
+    let mut chars = code.chars();
+    while let Some(character) = chars.next() {
+        let target = if past_digits {
+            &mut trailing
+        } else {
+            &mut leading
+        };
+        match character {
+            '"' => target.extend(chars.by_ref().take_while(|c| *c != '"')),
+            '\\' => target.extend(chars.next()),
+            '_' | '*' => {
+                chars.next();
+            }
+            character if placeholder(character) => past_digits = true,
+            character => target.push(character),
+        }
+    }
+    (leading, trailing)
+}
+
+/// A section's digit placeholders and decimal point, its literal text skipped.
+fn placeholders(code: &str) -> String {
+    let mut pattern = String::new();
+    let mut chars = code.chars();
+    while let Some(character) = chars.next() {
+        match character {
+            '"' => chars.by_ref().take_while(|c| *c != '"').for_each(drop),
+            '\\' | '_' | '*' => {
+                chars.next();
+            }
+            '0' | '#' | '?' => pattern.push(character),
+            '.' if !pattern.contains('.') => pattern.push('.'),
+            _ => {}
+        }
+    }
+    pattern
+}
+
+/// `rounded` written through its placeholders: `0` always writes a digit, while
+/// `#` and `?` write one only where it is significant (a trailing `?` keeps its
+/// place as a space), so `#.##` shows 1.5 as `1.5` and zero as `.`, and an
+/// accounting zero section writes no figure.
+fn placeholder_digits(
+    rounded: f64,
+    whole_pattern: &str,
+    fraction_pattern: Option<&str>,
+    digits: usize,
+) -> String {
+    let fixed = format!("{rounded:.digits$}");
+    let (whole, fraction) = fixed.split_once('.').unwrap_or((fixed.as_str(), ""));
+    let least = whole_pattern.matches('0').count();
+    let mut out = if whole == "0" && least == 0 {
+        String::new()
+    } else {
+        format!("{whole:0>least$}")
+    };
+    if let Some(places) = fraction_pattern {
+        let places = places.as_bytes();
+        let mut kept = fraction.as_bytes().to_vec();
+        let mut end = kept.len();
+        while end > 0 && kept[end - 1] == b'0' && places.get(end - 1).is_some_and(|p| *p != b'0') {
+            if places[end - 1] == b'?' {
+                kept[end - 1] = b' ';
+            } else {
+                kept.remove(end - 1);
+            }
+            end -= 1;
+        }
+        out.push('.');
+        out.extend(kept.into_iter().map(char::from));
+    }
+    out
 }
 
 fn group_thousands(body: &str) -> String {
-    let (whole, rest) = body.split_once('.').unwrap_or((body, ""));
-    let mut grouped = String::with_capacity(whole.len() + whole.len() / 3 + rest.len() + 1);
+    let (whole, rest) = match body.split_once('.') {
+        Some((whole, rest)) => (whole, Some(rest)),
+        None => (body, None),
+    };
+    let mut grouped =
+        String::with_capacity(whole.len() + whole.len() / 3 + rest.map_or(0, str::len) + 1);
     for (index, digit) in whole.chars().enumerate() {
         if index > 0 && (whole.len() - index) % 3 == 0 {
             grouped.push(',');
         }
         grouped.push(digit);
     }
-    if !rest.is_empty() {
+    if let Some(rest) = rest {
         grouped.push('.');
         grouped.push_str(rest);
     }
@@ -4052,6 +4349,8 @@ mod tests {
     use crate::chart::{
         ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
     };
+
+    const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
 
     #[test]
     fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
@@ -4284,6 +4583,47 @@ mod tests {
     }
 
     #[test]
+    fn a_value_axis_title_turns_only_for_a_host_that_can_draw_it_turned() {
+        struct Flat(Vec<PlotOp>);
+        impl PlotSink for Flat {
+            fn push_op(&mut self, op: PlotOp) -> bool {
+                self.0.push(op);
+                true
+            }
+        }
+        let north = source(&[10.0, 20.0]);
+        let chart = PlotChart {
+            chart_type: "column",
+            axis_titles: PlotAxisTitles {
+                category: None,
+                value: Some("Millions"),
+            },
+            series: vec![series("North", &north)],
+            ..PlotChart::default()
+        };
+        let title = |ops: &[PlotOp]| {
+            ops.iter()
+                .find_map(|op| match op {
+                    PlotOp::Text {
+                        text,
+                        rotation_deg,
+                        width,
+                        ..
+                    } if text == "Millions" => Some((*rotation_deg, *width)),
+                    _ => None,
+                })
+                .expect("the value-axis title is drawn")
+        };
+        let turned = title(&plot_chart(&chart, rect()));
+        assert_eq!(turned.0, -90.0);
+        let mut flat = Flat(Vec::new());
+        plot_chart_into(&chart, rect(), &mut flat);
+        let (rotation, width) = title(&flat.0);
+        assert_eq!(rotation, 0.0);
+        assert_ne!(width, turned.1, "a flat title keeps its own box");
+    }
+
+    #[test]
     fn an_of_pie_group_draws_wedges_and_a_per_slice_legend() {
         let share = source(&[3.0, 1.0]);
         let chart = PlotChart {
@@ -4342,8 +4682,41 @@ mod tests {
             ..PlotPoint::default()
         }];
         let view = SeriesView::new(&series, &mut ScanBudget::new());
-        assert_eq!(view.marker_size(0), 4.0);
-        assert_eq!(view.marker_size(1), 9.0);
+        assert_eq!(view.marker_size(0), DEFAULT_MARKER_PX);
+        assert_eq!(view.marker_size(1), 12.0);
+        for (points, pixels) in [(0.5, 2.0 * 4.0 / 3.0), (400.0, 96.0)] {
+            series.marker = Some(PlotMarker {
+                size: Some(points),
+                symbol: None,
+            });
+            let view = SeriesView::new(&series, &mut ScanBudget::new());
+            assert_eq!(view.marker_size(1), pixels, "{points} pt clamps to 2..72");
+        }
+    }
+
+    #[test]
+    fn a_line_without_markers_keeps_its_labels_beside_the_point() {
+        let data = source(&[1.0, 3.7]);
+        let label_x = |markers: Option<bool>, size: f64| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(size),
+                symbol: None,
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                ..PlotDataLabels::default()
+            });
+            let mut line = group("line", vec![labelled]);
+            line.markers = markers;
+            texts_at(&plot_chart(&grouped("line", line), rect()))
+                .into_iter()
+                .find(|(text, ..)| text == "3.7")
+                .map(|(_, x, ..)| x)
+                .expect("a label")
+        };
+        assert_eq!(label_x(Some(false), 72.0), label_x(Some(false), 2.0));
+        assert!(label_x(None, 72.0) > label_x(None, 2.0));
     }
 
     #[test]
@@ -4622,7 +4995,7 @@ mod tests {
         assert!(ops.len() <= MAX_PLOT_OPS);
         assert!(
             ops.iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } | PlotOp::Path { fill, .. } if fill == "#010203"))
         );
     }
 
@@ -4751,6 +5124,18 @@ mod tests {
             .collect()
     }
 
+    /// Every rectangle and outlined path, as `(x, y, w, h)`: a marker is one or the other.
+    fn marks(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, .. } | PlotOp::Path { x, y, w, h, .. } => {
+                    Some((*x, *y, *w, *h))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every rectangle but the chart background and the legend swatches.
     fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
         rects(ops)
@@ -4830,7 +5215,7 @@ mod tests {
             let ops = plot_chart(&chart, rect());
             let columns = bars(&ops)
                 .into_iter()
-                .filter(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+                .filter(|(_, _, w, h)| *w > DEFAULT_MARKER_PX && *h > DEFAULT_MARKER_PX)
                 .count();
             assert_ne!(columns, 2, "{chart_type} still draws columns");
         }
@@ -4865,9 +5250,11 @@ mod tests {
         xy.x_values = &x;
         let chart = grouped("scatter", group("scatter", vec![xy]));
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         assert_eq!(markers.len(), 2);
         assert!(markers[0].0 < markers[1].0);
@@ -4889,9 +5276,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -4927,9 +5315,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -5337,9 +5726,10 @@ mod tests {
         off.markers = Some(false);
         let ops = plot_chart(&grouped("line", off), rect());
         assert!(
-            !rects(&ops)
+            !marks(&ops)
                 .iter()
-                .any(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .any(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
         );
     }
 
@@ -5483,9 +5873,11 @@ mod tests {
             .into_iter()
             .find(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
             .expect("a column");
-        let marker = bars(&ops)
+        let marker = marks(&ops)
             .into_iter()
-            .find(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .find(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .expect("a line marker");
         assert!(
             marker.1 > bar.1,
@@ -5535,6 +5927,44 @@ mod tests {
     }
 
     #[test]
+    fn a_line_point_sits_mid_band_unless_the_axis_crosses_at_the_category() {
+        let markers = |cross_between| {
+            let data = source(&[1.0, 2.0, 3.0]);
+            let mut trend = series("Trend", &data);
+            trend.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            let mut group = group("line", vec![trend]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.cross_between = cross_between;
+            let chart = PlotChart {
+                chart_type: "line",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .into_iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_log_axis_places_values_by_their_logarithm() {
         let data = source(&[1.0, 100.0]);
         let mut group = group("line", vec![series("Growth", &data)]);
@@ -5548,9 +5978,11 @@ mod tests {
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         let plot_h = 200.0 - 10.0 - 34.0;
         let travelled = markers[0].1 - markers[1].1;
@@ -5585,6 +6017,50 @@ mod tests {
             tall[1].1 < 11.0 && tall[1].3 > 150.0,
             "a reversed axis grows the bar downward from the top: {tall:?}"
         );
+    }
+
+    #[test]
+    fn a_pinned_minimum_starts_the_major_unit_walk() {
+        let data = source(&[268.0, 273.0]);
+        let mut group = group("line", vec![series("Score", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 245.0, 285.0);
+        axis.major_unit = Some(10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
+        for tick in ["245", "255", "265", "275", "285"] {
+            assert!(
+                labels.contains(&tick.to_owned()),
+                "{tick} is missing: {labels:?}"
+            );
+        }
+        assert!(!labels.contains(&"250".to_owned()), "{labels:?}");
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, color, .. }
+                    if color == CHART_GRID_COLOR && (y1 - y2).abs() < 0.01 =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        let mut marks: Vec<f64> = texts_at(&ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
+            .map(|(_, _, baseline, _)| baseline - 3.0)
+            .collect();
+        marks.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 5, "{grid:?}");
+        assert_eq!(grid, marks, "every gridline stands on its own label");
     }
 
     #[test]
@@ -5755,6 +6231,43 @@ mod tests {
         };
         assert_eq!(grid(true), 5);
         assert_eq!(grid(false), 0);
+    }
+
+    #[test]
+    fn a_gridline_whose_sp_pr_draws_no_line_is_hidden() {
+        let data = source(&[1.0, 2.0, 3.0]);
+        let grid = |chart_type: &'static str, line: Option<PlotLine<'static>>| {
+            let mut group = group(chart_type, vec![series("North", &data)]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.major_gridline = line;
+            let chart = PlotChart {
+                chart_type,
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .iter()
+                .filter(|op| matches!(op, PlotOp::Line { color, .. } if color == CHART_GRID_COLOR))
+                .count()
+        };
+        let line = |none| {
+            Some(PlotLine {
+                none,
+                color: None,
+                width_emu: None,
+            })
+        };
+        for chart_type in ["column", "radar"] {
+            assert!(grid(chart_type, None) > 0, "{chart_type}");
+            assert_eq!(
+                grid(chart_type, line(false)),
+                grid(chart_type, None),
+                "{chart_type}"
+            );
+            assert_eq!(grid(chart_type, line(true)), 0, "{chart_type}");
+        }
     }
 
     #[test]
@@ -6224,11 +6737,60 @@ mod tests {
         );
         assert_eq!(
             format_with_code(-12.0, "0.0;(0.0)").as_deref(),
-            Some("-12.0")
+            Some("(12.0)")
+        );
+        assert_eq!(format_with_code(-12.0, "0.0").as_deref(), Some("-12.0"));
+        let accounting = "\"$\"#,##0_);[Red]\\(\"$\"#,##0\\)";
+        assert_eq!(
+            format_with_code(18766.0, accounting).as_deref(),
+            Some("$18,766")
+        );
+        assert_eq!(
+            format_with_code(-18766.0, accounting).as_deref(),
+            Some("($18,766)")
         );
         assert_eq!(format_with_code(7.0, "General").as_deref(), Some("7"));
+        assert_eq!(format_with_code(0.0, "0;-0;\"-\"").as_deref(), Some("-"));
+        assert_eq!(format_with_code(0.0, "0;-0;").as_deref(), Some(""));
+        assert_eq!(format_with_code(4.0, "0;-0;").as_deref(), Some("4"));
+        assert_eq!(
+            format_with_code(1234.5, "[$$-409]#,##0.00").as_deref(),
+            Some("$1,234.50")
+        );
+        assert_eq!(
+            format_with_code(1234.5, "[$\u{20ac}-407]#,##0.00").as_deref(),
+            Some("\u{20ac}1,234.50")
+        );
+        assert_eq!(format_with_code(3.0, "[$-409]0").as_deref(), Some("3"));
+        assert_eq!(format_with_code(2.5, "0.0\";\"").as_deref(), Some("2.5;"));
+        assert_eq!(
+            format_with_code(-2.5, "0.0\\;;(0.0)").as_deref(),
+            Some("(2.5)")
+        );
         assert_eq!(format_with_code(7.0, "0 \"kg\"").as_deref(), Some("7 kg"));
         assert_eq!(format_with_code(7.0, "yyyy-mm-dd"), None);
+        let ledger = "_(\"$\"* #,##0_);_(\"$\"* \\(#,##0\\);_(\"$\"* \"-\"??_);_(@_)";
+        assert_eq!(format_with_code(800.0, ledger).as_deref(), Some("$800"));
+        assert_eq!(format_with_code(0.0, ledger).as_deref(), Some("$-"));
+        for (value, code, want) in [
+            (0.0, "#.##", "."),
+            (1.5, "#.##", "1.5"),
+            (0.5, "#.##", ".5"),
+            (1.0, "0.0#", "1.0"),
+            (1.25, "0.0#", "1.25"),
+            (0.0, "#,##0.00", "0.00"),
+            (1234.5, "#,##0.##", "1,234.5"),
+            (7.0, "\"No.\" 0", "No. 7"),
+        ] {
+            assert_eq!(
+                format_with_code(value, code).as_deref(),
+                Some(want),
+                "{value} {code}"
+            );
+        }
+        assert_eq!(format_with_code(1.25, "?.??").as_deref(), Some("1.25"));
+        assert_eq!(format_with_code(0.5, "0.0?").as_deref(), Some("0.5 "));
+        assert_eq!(format_with_code(-40.0, ledger).as_deref(), Some("$(40)"));
         assert_eq!(format_with_code(f64::NAN, "0.0"), None);
         assert_eq!(format_percent(0.5), "50%");
     }
@@ -6351,6 +6913,7 @@ mod tests {
             title: Some("Revenue"),
             series: names.iter().map(|name| series(name, data)).collect(),
             legend: Some(PlotLegend {
+                overlay: false,
                 position,
                 visible: Some(true),
             }),
@@ -6431,6 +6994,67 @@ mod tests {
     }
 
     #[test]
+    fn an_overlaid_legend_takes_no_band_from_the_plot() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North", "South", "East"];
+        let widest = |overlay| {
+            let mut chart = legend_chart(Some("right"), &names, &data);
+            chart.legend.as_mut().expect("legend").overlay = overlay;
+            plot_chart(&chart, rect())
+                .iter()
+                .filter_map(|op| match op {
+                    PlotOp::Line { x1, x2, width, .. } if *width >= 1.0 => Some(x2 - x1),
+                    _ => None,
+                })
+                .fold(f64::MIN, f64::max)
+        };
+        assert!(
+            widest(true) > widest(false) + 90.0,
+            "an overlaid legend must leave the plot its width: {} vs {}",
+            widest(true),
+            widest(false)
+        );
+    }
+
+    #[test]
+    fn a_band_with_no_room_still_finishes_its_wrap() {
+        let mut ops = Vec::new();
+        let mut emitter = Emitter {
+            sink: &mut ops,
+            remaining: MAX_PLOT_OPS,
+        };
+        let style = PlotTextStyle::default().resolve(CHART_LABEL_SIZE_PX, 400);
+        // A negative band leaves the remainder empty and still wider than the
+        // band, the state the wrap used to spin in.
+        let lines = wrap_legend_label("North", -1.0, &style, &mut emitter);
+        assert_eq!(lines.concat(), "North");
+    }
+
+    #[test]
+    fn a_category_name_with_breaks_keeps_every_line_inside_the_frame() {
+        let data = source(&[10.0, 20.0]);
+        let names = ["North"];
+        let categories = ["One\nTwo\nThree".to_owned(), "Four".to_owned()];
+        let mut chart = legend_chart(Some("bottom"), &names, &data);
+        chart.series[0].categories = &categories;
+        let ops = plot_chart(&chart, rect());
+        let bottom = rect().y + rect().h;
+        let three = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text {
+                    text, baseline_y, ..
+                } if text == "Three" => Some(*baseline_y),
+                _ => None,
+            })
+            .expect("the third line is drawn");
+        assert!(
+            three < bottom,
+            "the third line sits below the frame: {three} vs {bottom}"
+        );
+    }
+
+    #[test]
     fn a_wrapped_legend_keeps_every_entry_inside_the_frame() {
         let data = source(&[10.0, 20.0]);
         let names = [
@@ -6505,7 +7129,7 @@ mod tests {
     }
 
     #[test]
-    fn only_the_title_asks_to_be_centred() {
+    fn the_title_and_the_category_names_are_the_centred_text() {
         let data = source(&[10.0, 20.0]);
         let names = ["North"];
         let ops = plot_chart(&legend_chart(Some("bottom"), &names, &data), rect());
@@ -6520,7 +7144,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(centred, ["Revenue"]);
+        assert_eq!(centred, ["Revenue", "Q1", "Q2"]);
         let title = ops
             .iter()
             .find_map(|op| match op {
@@ -6529,6 +7153,34 @@ mod tests {
             })
             .expect("the title is emitted");
         assert_eq!(title.0 + title.1 / 2.0, rect().x + rect().w / 2.0);
+    }
+
+    #[test]
+    fn a_narrow_column_centres_its_label_on_the_bar() {
+        let mut space = labelled_space(
+            "column",
+            None,
+            Some(ChartDataLabels {
+                show_value: Some(true),
+                position: Some("ctr".to_owned()),
+                ..ChartDataLabels::default()
+            }),
+        );
+        let series = &mut space.plot_groups[0].series[0];
+        series.values = (1..=40).map(f64::from).collect();
+        series.categories = (1..=40).map(|index| format!("C{index}")).collect();
+        let chart = PlotChart::from(&space);
+        let ops = plot_chart(&chart, rect());
+        let bar = bars(&ops)[0];
+        assert!(bar.2 < 32.0, "the bar is narrower than a label: {}", bar.2);
+        let (x, width) = ops
+            .iter()
+            .find_map(|op| match op {
+                PlotOp::Text { text, x, width, .. } if text == "1" => Some((*x, *width)),
+                _ => None,
+            })
+            .expect("the first label is drawn");
+        assert!(((x + width / 2.0) - (bar.0 + bar.2 / 2.0)).abs() < 1e-6);
     }
 
     #[test]

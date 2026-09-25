@@ -27,6 +27,7 @@ pub(crate) struct ChartText<'a> {
     pub font: PlotFont,
     pub color: &'a str,
     pub align: PlotTextAlign,
+    pub rotation_deg: f64,
 }
 
 /// The chart primitive for `space`, with at most `budget` parts. Chart text
@@ -99,6 +100,10 @@ struct ChartSink<'a> {
 }
 
 impl PlotSink for ChartSink<'_> {
+    fn turns_text(&self) -> bool {
+        true
+    }
+
     fn accepts_more(&mut self) -> bool {
         self.remaining > 0 && self.error.is_none()
     }
@@ -116,6 +121,7 @@ impl PlotSink for ChartSink<'_> {
             font: font.clone(),
             color: "#000000",
             align: PlotTextAlign::Start,
+            rotation_deg: 0.0,
         }) {
             Ok(Primitive::TextBox {
                 text_shadow: None,
@@ -221,6 +227,7 @@ impl PlotSink for ChartSink<'_> {
                 font,
                 color,
                 align,
+                rotation_deg,
             } => {
                 let request = ChartText {
                     object_id: self.object_id,
@@ -231,6 +238,7 @@ impl PlotSink for ChartSink<'_> {
                     font,
                     color: &color,
                     align,
+                    rotation_deg,
                 };
                 match (self.text)(request) {
                     Ok(primitive) => primitive,
@@ -370,6 +378,7 @@ mod tests {
             legend: Some(ChartLegend {
                 position: Some("right".to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             }),
             series: groups
@@ -593,6 +602,7 @@ mod tests {
             space.legend = Some(ChartLegend {
                 position: Some(position.to_owned()),
                 visible: true,
+                overlay: false,
                 text: None,
             });
             assert!(
@@ -610,6 +620,7 @@ mod tests {
         hidden.legend = Some(ChartLegend {
             position: None,
             visible: false,
+            overlay: false,
             text: None,
         });
         assert!(!texts(&plot(&hidden)).contains(&"North".to_owned()));
@@ -669,9 +680,9 @@ mod tests {
         assert!(
             parts(&chart).iter().any(
                 |primitive| matches!(primitive, Primitive::Shape { geometry, w, .. }
-                if geometry == "custom" && (*w - 11.0).abs() < 0.001)
+                if geometry == "custom" && (*w - 11.0 * 4.0 / 3.0).abs() < 0.001)
             ),
-            "a circle symbol draws its own outline at the marker size"
+            "a circle symbol draws its own outline at the marker size, in points"
         );
         for value in ["3", "1", "2"] {
             assert!(texts(&chart).contains(&value.to_owned()), "{value}");

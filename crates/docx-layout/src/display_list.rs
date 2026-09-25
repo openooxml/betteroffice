@@ -2334,6 +2334,8 @@ struct ChartLegendIn {
     #[serde(default)]
     visible: Option<bool>,
     #[serde(default)]
+    overlay: bool,
+    #[serde(default)]
     text: Option<ChartTextIn>,
 }
 
@@ -2370,6 +2372,8 @@ struct ChartAxisIn {
     major_gridlines: bool,
     #[serde(default)]
     minor_gridlines: bool,
+    #[serde(default)]
+    cross_between: Option<String>,
     #[serde(default)]
     number_format: Option<String>,
     #[serde(default)]
@@ -8191,6 +8195,7 @@ fn plot_chart_from(chart: &ChartIn) -> PlotChart<'_> {
         legend: chart.legend.as_ref().map(|legend| PlotLegend {
             position: legend.position.as_deref(),
             visible: legend.visible,
+            overlay: legend.overlay,
         }),
         value_axis: chart
             .axes
@@ -8331,12 +8336,15 @@ fn plot_axis_from(axis: &ChartAxisIn) -> PlotAxis<'_> {
         minor_tick_mark: axis.minor_tick_mark.as_deref(),
         major_gridlines: axis.major_gridlines,
         minor_gridlines: axis.minor_gridlines,
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
         hidden: axis.hidden,
         text: plot_text_from(axis.text.as_ref()),
         line: None,
+        major_gridline: None,
+        minor_gridline: None,
     }
 }
 
@@ -8457,6 +8465,7 @@ impl PlotSink for PrimitiveSink<'_> {
                 font,
                 color,
                 align: _,
+                rotation_deg: _,
             } => prims.push(Primitive::Text(TextRunPrimitive {
                 text,
                 x: px(x),

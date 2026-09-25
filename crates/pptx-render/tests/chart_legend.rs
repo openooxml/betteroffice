@@ -127,9 +127,10 @@ fn the_composed_chart_title_preserves_its_alignment() {
         } = primitive
         {
             let is_title = paragraphs[0].runs[0].text == "Revenue";
+            let centred = is_title || paragraphs[0].runs[0].text == "Q1";
             assert_eq!(
                 paragraphs[0].align,
-                Some(if is_title {
+                Some(if centred {
                     TextAlign::Center
                 } else {
                     TextAlign::Left
