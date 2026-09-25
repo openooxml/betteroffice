@@ -86,11 +86,17 @@ struct FontFace {
     widths: Option<&'static FamilyMetrics>,
     /// The same family's `hhea` metrics, which decide where the line box sits.
     line: Option<&'static FamilyMetrics>,
+    /// The face whose own metrics size the line when `line` names none: the
+    /// face itself, or for a coverage fallback the face of the run it stands in.
+    line_id: FontId,
 }
 
 pub struct SlideRenderer {
     fonts: FontStore,
     faces: HashMap<(String, bool, bool), FontFace>,
+    /// Faces drawn only for characters a run's own face has no glyph for,
+    /// with the weight and slant each was registered for.
+    coverage_faces: Vec<(bool, bool, FontFace)>,
     fallback: Option<FontFace>,
     /// Normalized fallback family.
     fallback_family: Option<String>,
@@ -110,6 +116,7 @@ impl SlideRenderer {
         Self {
             fonts: FontStore::new(),
             faces: HashMap::new(),
+            coverage_faces: Vec::new(),
             fallback: None,
             fallback_family: None,
             font_count: 0,
@@ -150,6 +157,7 @@ impl SlideRenderer {
             requested_family: requested.clone(),
             widths: metrics.filter(|metrics| !runs_at_own_widths(&self.fonts, id, metrics)),
             line: metrics.filter(|metrics| !sits_on_own_baseline(&self.fonts, id, metrics)),
+            line_id: id,
         };
         self.faces.insert((requested, bold, italic), face.clone());
         self.fallback.get_or_insert(face);
@@ -160,6 +168,133 @@ impl SlideRenderer {
             cache.clear();
         }
         Ok(id.to_u32())
+    }
+
+    /// Registers a face drawn only where a run's own face has no glyph, the way
+    /// PowerPoint reaches for a script's font when the named one cannot draw a
+    /// character. The first registered face that covers a character draws it.
+    pub fn register_fallback_font(
+        &mut self,
+        family: &str,
+        bold: bool,
+        italic: bool,
+        bytes: &[u8],
+    ) -> Result<u32, RenderError> {
+        if bytes.len() > MAX_FONT_BYTES {
+            return Err(RenderError::ResourceLimit(format!(
+                "font exceeds {MAX_FONT_BYTES} bytes"
+            )));
+        }
+        if self.font_count >= MAX_FONTS {
+            return Err(RenderError::ResourceLimit(format!(
+                "more than {MAX_FONTS} font faces"
+            )));
+        }
+        let family = family.trim();
+        if family.is_empty() {
+            return Err(RenderError::Font("font family is empty".to_owned()));
+        }
+        let id = self
+            .fonts
+            .register(bytes.to_vec())
+            .map_err(|error| RenderError::Font(error.to_string()))?;
+        self.coverage_faces.push((
+            bold,
+            italic,
+            FontFace {
+                id,
+                family: family.to_owned(),
+                requested_family: normalize_family(family),
+                widths: None,
+                line: None,
+                line_id: id,
+            },
+        ));
+        self.font_count += 1;
+        if let Ok(cache) = self.text_layouts.get_mut() {
+            cache.clear();
+        }
+        Ok(id.to_u32())
+    }
+
+    /// The fallback face that draws `character` for a run in `face`: one of the
+    /// same weight and slant where there is one, sized on the run's own line.
+    fn coverage_face(
+        &self,
+        face: &FontFace,
+        character: char,
+        bold: bool,
+        italic: bool,
+    ) -> Option<FontFace> {
+        let covering = || {
+            self.coverage_faces.iter().filter(|(_, _, candidate)| {
+                self.fonts.covers(candidate.id, character).unwrap_or(false)
+            })
+        };
+        covering()
+            .find(|(face_bold, face_italic, _)| (*face_bold, *face_italic) == (bold, italic))
+            .or_else(|| covering().find(|(face_bold, _, _)| *face_bold == bold))
+            .or_else(|| covering().next())
+            .map(|(_, _, candidate)| FontFace {
+                line: face.line,
+                line_id: face.line_id,
+                ..candidate.clone()
+            })
+    }
+
+    /// Splits `run` where its face has no glyph and a fallback does, so each
+    /// part is shaped, measured and drawn in a face that can draw it. Spaces
+    /// and punctuation stay with the fallback text around them.
+    fn split_by_coverage(&self, run: ResolvedRun, out: &mut Vec<ResolvedRun>) {
+        if self.coverage_faces.is_empty()
+            || run.text.chars().all(|character| {
+                self.fonts
+                    .covers(run.style.face.id, character)
+                    .unwrap_or(true)
+            })
+        {
+            out.push(run);
+            return;
+        }
+        let mut pieces: Vec<(usize, Option<FontFace>)> = Vec::new();
+        for (index, character) in run.text.char_indices() {
+            let current = pieces.last().and_then(|(_, face)| face.as_ref());
+            let own = self
+                .fonts
+                .covers(run.style.face.id, character)
+                .unwrap_or(true);
+            let neutral = character.is_whitespace() || character.is_ascii_punctuation();
+            let face = match current {
+                Some(face) if neutral && self.fonts.covers(face.id, character).unwrap_or(false) => {
+                    Some(face.clone())
+                }
+                _ if own => None,
+                _ => {
+                    self.coverage_face(&run.style.face, character, run.style.bold, run.style.italic)
+                }
+            };
+            let same = pieces.last().is_some_and(|(_, last)| {
+                last.as_ref().map(|face| face.id) == face.as_ref().map(|face| face.id)
+            });
+            if !same {
+                pieces.push((index, face));
+            }
+        }
+        for (position, (start, face)) in pieces.iter().enumerate() {
+            let end = pieces
+                .get(position + 1)
+                .map_or(run.text.len(), |(next, _)| *next);
+            let mut style = run.style.clone();
+            if let Some(face) = face {
+                style.family = face.family.clone();
+                style.face = face.clone();
+            }
+            out.push(ResolvedRun {
+                text: run.text[*start..end].to_owned(),
+                start: run.start + utf16_len(&run.text[..*start]),
+                style,
+            });
+        }
     }
 
     /// The store holding every registered face, so a raster backend can resolve
@@ -2340,7 +2475,11 @@ fn resolve_content(
                 resolve_style(renderer, theme, &run.style, properties.default_run.as_ref())?;
             let start = story_offset;
             story_offset = story_offset.saturating_add(utf16_len(&run.text));
-            push_cased_runs(&mut runs, &run.text, start, language, style);
+            let mut cased = Vec::new();
+            push_cased_runs(&mut cased, &run.text, start, language, style);
+            for run in cased {
+                renderer.split_by_coverage(run, &mut runs);
+            }
         }
         if runs.is_empty() {
             let end_style = cascade
@@ -3025,6 +3164,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
                 requested_family,
                 widths,
                 line,
+                line_id,
             },
         family,
         font_size_pt,
@@ -3038,6 +3178,7 @@ fn key_style(key: &mut Vec<u8>, style: &ResolvedStyle) {
         caps,
     } = style;
     key_u32(key, id.to_u32());
+    key_u32(key, line_id.to_u32());
     key_str(key, face_family);
     key_str(key, requested_family);
     key.push(u8::from(widths.is_some()));
@@ -3912,7 +4053,7 @@ fn style_line_box(
         return Ok(family_line_box(named, size_px));
     }
     let metrics = fonts
-        .metrics(style.face.id)
+        .metrics(style.face.line_id)
         .map_err(|error| RenderError::Font(error.to_string()))?;
     Ok(single_line_box(metrics, size_px, &CompatFlags::default()))
 }
@@ -5699,6 +5840,67 @@ mod tests {
             format_autonum(u32::MAX, "romanUcPeriod"),
             format!("{}DCCLXVII.", "M".repeat(52))
         );
+    }
+
+    #[test]
+    fn a_character_its_face_cannot_draw_moves_to_a_fallback_that_can() {
+        let arabic: &[u8] =
+            include_bytes!("../../../packages/fonts/assets/NotoSansArabic-Regular.ttf");
+        let mut renderer = renderer();
+        let run = paragraph(
+            &renderer,
+            "l",
+            "Hello \u{645}\u{631}\u{62d}\u{628}\u{627} world",
+        )
+        .runs
+        .remove(0);
+        let mut unchanged = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut unchanged,
+        );
+        assert_eq!(unchanged.len(), 1, "no fallback registered, nothing moves");
+
+        renderer
+            .register_fallback_font("Noto Sans Arabic", false, false, arabic)
+            .unwrap();
+        let mut pieces = Vec::new();
+        renderer.split_by_coverage(
+            ResolvedRun {
+                text: run.text.clone(),
+                start: 3,
+                style: run.style.clone(),
+            },
+            &mut pieces,
+        );
+        let parts: Vec<(&str, u32, &str)> = pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.text.as_str(),
+                    piece.start,
+                    piece.style.family.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            parts,
+            [
+                ("Hello ", 3, "Arial"),
+                (
+                    "\u{645}\u{631}\u{62d}\u{628}\u{627} ",
+                    9,
+                    "Noto Sans Arabic"
+                ),
+                ("world", 15, "Arial"),
+            ]
+        );
+        assert_eq!(pieces[1].style.face.line_id, run.style.face.id);
+        assert_ne!(pieces[1].style.face.id, run.style.face.id);
     }
 
     fn renderer() -> SlideRenderer {

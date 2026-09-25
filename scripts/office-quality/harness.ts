@@ -3,6 +3,7 @@ declare const __QUALITY_FONT_BASE_CJK__: string | null;
 
 import JSZip from 'jszip';
 import { createFontProvider } from '../../packages/fonts/src/cdn';
+import { resolveScriptFallbackFace, type BundledFontScript } from '../../packages/fonts/src/manifest';
 import { normalFontIndex } from './xlsx-styles';
 
 const api = window as any;
@@ -23,16 +24,7 @@ async function fontsFor(bytes: Uint8Array) {
     }
   }
   if (families.size > 32) throw new Error('Too many font families for this capture');
-  const provider = createFontProvider(
-    typeof __QUALITY_FONT_BASE__ === 'string'
-      ? {
-          baseUrl: __QUALITY_FONT_BASE__,
-          ...(typeof __QUALITY_FONT_BASE_CJK__ === 'string'
-            ? { cjkBaseUrl: __QUALITY_FONT_BASE_CJK__ }
-            : {}),
-        }
-      : {}
-  );
+  const provider = fontProvider();
   const faces = [];
   for (const family of families) {
     for (const [bold, italic] of [
@@ -51,6 +43,53 @@ async function fontsFor(bytes: Uint8Array) {
       });
       document.fonts.add(await face.load());
       faces.push({ family, bold, italic, bytes: new Uint8Array(buffer) });
+    }
+  }
+  return faces;
+}
+
+function fontProvider() {
+  return createFontProvider(
+    typeof __QUALITY_FONT_BASE__ === 'string'
+      ? {
+          baseUrl: __QUALITY_FONT_BASE__,
+          ...(typeof __QUALITY_FONT_BASE_CJK__ === 'string'
+            ? { cjkBaseUrl: __QUALITY_FONT_BASE_CJK__ }
+            : {}),
+        }
+      : {}
+  );
+}
+
+const SCRIPTS: Array<[BundledFontScript, RegExp]> = [
+  ['arabic', /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/],
+  ['hebrew', /[\u0590-\u05FF\uFB1D-\uFB4F]/],
+  ['cjk-jp', /[\u3040-\u30FF]/],
+  ['cjk-kr', /[\u1100-\u11FF\uAC00-\uD7AF]/],
+  ['cjk-sc', /[\u3400-\u4DBF\u4E00-\u9FFF]/],
+];
+
+/** The script faces a slide's text needs beyond the families it names. */
+async function fallbackFontsFor(bytes: Uint8Array) {
+  const zip = await JSZip.loadAsync(bytes);
+  let text = '';
+  for (const entry of Object.values(zip.files)) {
+    if (/^ppt\/(?:slides|slideLayouts|slideMasters)\/[^/]+\.xml$/.test(entry.name)) {
+      text += await entry.async('string');
+    }
+  }
+  const provider = fontProvider();
+  const faces = [];
+  for (const [script, pattern] of SCRIPTS) {
+    if (!pattern.test(text)) continue;
+    for (const bold of [false, true]) {
+      const face = resolveScriptFallbackFace(script, bold, false);
+      const load = provider.resolveScriptFallback(script, bold, false);
+      if (!face || !load) continue;
+      const buffer = await load();
+      const fontFace = new FontFace(face.family, buffer.slice(0), { weight: bold ? '700' : '400' });
+      document.fonts.add(await fontFace.load());
+      faces.push({ family: face.family, bold, italic: false, bytes: new Uint8Array(buffer) });
     }
   }
   return faces;
@@ -134,7 +173,8 @@ api.oracleInit = async (input: number[], useFonts: boolean, profile: any) => {
       'virtual:office-quality-renderer'
     );
     await initWasm();
-    const handle = openPresentation(bytes, { fonts });
+    const fallbackFonts = useFonts ? await fallbackFontsFor(bytes) : [];
+    const handle = openPresentation(bytes, { fonts, fallbackFonts });
     pages = handle.snapshot().slides.length;
     capture = async (index) => {
       const frame = handle.layoutSlide(index);
