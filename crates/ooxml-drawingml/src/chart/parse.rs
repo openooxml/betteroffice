@@ -91,10 +91,22 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
     }
     let plot_layout = parse_plot_layout(plot_area);
     let budget = &mut Budget::new();
-    let plot_groups = chart_elements
-        .into_iter()
-        .map(|chart| parse_plot_group(chart, budget))
+    let mut plot_groups = chart_elements
+        .iter()
+        .map(|chart| parse_plot_group(*chart, budget))
         .collect::<Vec<_>>();
+    // Colours come last, from what the data left of the budget, so varying
+    // them can never cost a later group its values.
+    for (chart, group) in chart_elements.iter().zip(&mut plot_groups) {
+        if !paints_points(*chart) {
+            continue;
+        }
+        for (element, series) in children(*chart, "ser").zip(&mut group.series) {
+            if explicit_fill(element).is_none() {
+                vary_point_colors(*chart, series, budget);
+            }
+        }
+    }
     let first_type = plot_groups[0].chart_type.as_deref();
     let chart_type = match first_type {
         Some("bar" | "column" | "line" | "pie" | "doughnut") => first_type.unwrap().to_owned(),
@@ -462,10 +474,16 @@ fn paints_points<E: ChartXml>(chart: &E) -> bool {
         }
 }
 
-/// Adds an accent point for every category a varied series' `c:dPt`s leave out,
-/// each charged to the chart's point budget.
+/// Adds an accent point for every plotted value a varied series' `c:dPt`s leave
+/// out, each charged to the chart's point budget.
 fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries, budget: &mut Budget) {
-    let count = budget.point_cap(series.categories.len().max(series.values.len()));
+    let plotted: Vec<usize> = series
+        .values
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.is_finite())
+        .map(|(index, _)| index)
+        .collect();
     let points = series.points.get_or_insert_with(Vec::new);
     if points.iter().any(|point| point.index.is_none()) {
         return;
@@ -476,9 +494,12 @@ fn vary_point_colors<E: ChartXml>(chart: &E, series: &mut ChartSeries, budget: &
         .map(|index| index as usize)
         .collect();
     let before = points.len();
+    let room = budget.point_cap(plotted.len());
     points.extend(
-        (0..count)
+        plotted
+            .into_iter()
             .filter(|index| !painted.contains(index))
+            .take(room)
             .map(|index| ChartPoint {
                 index: Some(index as f64),
                 explosion: None,
@@ -546,7 +567,7 @@ fn parse_series<E: ChartXml>(
             if !uses_x_as_category {
                 x_values = parse_num_cache(x_value, budget);
             }
-            let mut parsed = ChartSeries {
+            ChartSeries {
                 name: parse_series_name(series),
                 categories,
                 values,
@@ -583,11 +604,7 @@ fn parse_series<E: ChartXml>(
                     .filter(|values| !values.is_empty()),
                 data_labels: parse_data_labels(child(series, "dLbls"), budget),
                 line: parse_line(child(series, "spPr")),
-            };
-            if varied {
-                vary_point_colors(chart, &mut parsed, budget);
             }
-            parsed
         })
         .collect::<Vec<_>>();
     budget.spend_series(series.len());
@@ -1415,6 +1432,49 @@ mod tests {
         assert_eq!(fills, ["#00FF00"; 3]);
         let varied = varied_pie(1, &[0, 1, 2], None);
         assert_eq!(point_colors(&varied, 0), &DEFAULT_SERIES_COLORS[..3]);
+    }
+
+    #[test]
+    fn varied_colours_never_cost_a_later_group_its_values() {
+        let cache = |count: usize| {
+            Node::el(
+                "c:val",
+                vec![Node::el(
+                    "c:numCache",
+                    (0..count)
+                        .map(|index| {
+                            Node::el("c:pt", vec![Node::text("c:v", "1")])
+                                .attr("idx", &index.to_string())
+                        })
+                        .collect(),
+                )],
+            )
+        };
+        let space = parse_chart_space(&Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el(
+                            "c:pieChart",
+                            vec![Node::el("c:ser", vec![cache(MAX_POINTS)])],
+                        ),
+                        Node::el("c:barChart", vec![Node::el("c:ser", vec![cache(60_000)])]),
+                    ],
+                )],
+            )],
+        ))
+        .expect("chart space parses");
+        let later = &space.plot_groups[1].series[0].values;
+        assert_eq!(later.len(), 60_000);
+        assert!(later.iter().all(|value| value.is_finite()));
+        let coloured = space.plot_groups[0].series[0]
+            .points
+            .as_ref()
+            .map_or(0, Vec::len);
+        assert_eq!(coloured, MAX_CHART_POINTS - MAX_POINTS - 60_000);
     }
 
     #[test]
