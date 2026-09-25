@@ -314,6 +314,49 @@ list numbering is a v1 limitation: numbered paragraphs and styles that define
 numbering refuse with `unsupported` until a follow-up retains numbering
 definitions.
 
+## Edit XLSX in version-checked batches
+
+A workbook reads cells with the version they were read at, then applies a batch
+against that version: every step commits as one recalculated change and one undo
+step, or the batch returns a typed refusal and nothing changes.
+
+```ts
+const read = workbook.readCells({
+  ranges: [{ sheetId: "sheet:0", range: { kind: "a1", a1: "B3:D3" } }],
+});
+if (!read.ok) throw new Error(read.failure.message);
+
+const result = workbook.applyEdits({
+  expectVersion: read.version,
+  calculation: { nowSerial: Date.now() / 86_400_000 + 25_569 },
+  steps: [
+    {
+      op: "setCellInputs",
+      target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+      inputs: [["120"]],
+      expect: { cells: [[{ displayText: read.ranges[0].cells[0][0].displayText }]] },
+    },
+    { op: "setFormulas", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "E3" } }, formulas: [["D3*1.2"]] },
+    { op: "patchStyle", target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3:E3" } }, patch: { bold: true } },
+  ],
+});
+if (!result.ok) console.warn(result.failure.code);
+```
+
+Steps set cell inputs (parsed like typing, against each cell's current number
+format), set formulas (stored as formulas whatever the format), set number
+formats and patch styles. Targets name a sheet id from the current catalog and an
+A1 range or zero-based corners; value matrices and guards match the target
+exactly. Guards compare a cell's value, formula or display text before the
+batch, and steps may combine content with formatting on the same cells but not
+write one property twice. `findText` searches display text exactly and
+case-sensitively. Volatile functions see only `calculation.nowSerial`. Versions
+and sheet ids belong to one session. Batches do not insert or delete rows,
+columns or sheets, merge cells or move charts, and refuse writes to merged-cell
+followers, array-formula cells and protected sheets. The React editor's
+`onReady` API exposes the same operations, committing pending drafts, nudges and
+pastes first.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -331,8 +374,8 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
-| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts. |
+| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, and flushed version-checked edit batches on its `onReady` API. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |

@@ -66,6 +66,7 @@ host/agent-driven edits and the editor's `commands`), `collaboration`, `i18n`,
 - Composable toolbar: built-in controls, the formula bar and host actions in your
   own order, bound to one command store
 - Agent proposals: in-cell tracked-change ghosts plus an accept/reject panel
+- Version-checked edit batches through `onReady`, after pending input commits
 - TSV clipboard copy/paste
 - Accessible grid mirroring the painted canvas for screen readers
 - Localized UI via the `i18n` prop
@@ -177,6 +178,45 @@ import type { XlsxEditorApi } from "@betteroffice/xlsx-react";
   }}
 />;
 ```
+
+## Edit batches
+
+The `onReady` API's `version`, `readCells`, `findText`, `validateEdits` and
+`applyEdits` run in the same queue as commands: cell and formula entries, chart
+nudges, pastes and cuts accepted before them land first, and an IME composition
+ends with its text written. Like commands, they fail with `input-failed` while a
+refused entry waits for correction, `gesture-active` during a chart drag, and
+`document-replaced` when the workbook is replaced meanwhile; they reject with an
+error carrying that `code`. `applyEdits` keeps the
+caller's `expectVersion`, so input that lands first refuses the batch with
+`stale-version`; read the version through the API to include it. While
+`readOnly`, writes refuse with `read-only`. An applied batch repaints once and
+calls `onChange` once.
+
+```tsx
+<XlsxEditor
+  file={file}
+  onReady={(api: XlsxEditorApi) => {
+    void (async () => {
+      const version = await api.version();
+      const result = await api.applyEdits({
+        expectVersion: version,
+        steps: [
+          {
+            op: "setCellInputs",
+            target: { sheetId: "sheet:0", range: { kind: "a1", a1: "B3" } },
+            inputs: [["120"]],
+          },
+        ],
+      });
+      if (!result.ok) console.warn(result.failure.code);
+    })();
+  }}
+/>;
+```
+
+See [`@betteroffice/xlsx`](https://www.npmjs.com/package/@betteroffice/xlsx) for
+the step vocabulary and its limits.
 
 ## Collaboration
 

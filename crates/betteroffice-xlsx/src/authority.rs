@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -10,7 +11,7 @@ use xlsx_model::{
     MAX_COLS, MAX_ROWS, Sheet, SheetChart, SheetFormat, SheetId, Stylesheet, Table,
     Workbook as WorkbookModel,
 };
-use xlsx_ops::Op;
+use xlsx_ops::{CellState, Op};
 use yrs::block::{
     BLOCK_GC_REF_NUMBER, BLOCK_ITEM_ANY_REF_NUMBER, BLOCK_ITEM_DELETED_REF_NUMBER,
     BLOCK_ITEM_TYPE_REF_NUMBER, BLOCK_SKIP_REF_NUMBER, ClientID,
@@ -53,6 +54,8 @@ const STYLES: &str = "styles";
 const BOOTSTRAP_ORIGIN: &str = "xlsx:bootstrap";
 const HYDRATE_ORIGIN: &str = "xlsx:hydrate";
 const REMOTE_ORIGIN: &str = "xlsx:remote";
+/// Local adoptions no undo manager captures.
+const UNTRACKED_ORIGIN: &str = "xlsx:untracked";
 const MAX_SAFE_CLIENT_ID: u64 = (1_u64 << 53) - 1;
 const MAX_SAFE_CLOCK: u32 = i32::MAX as u32;
 const MAX_UPDATE_BLOCKS: usize = 1_000_000;
@@ -364,6 +367,25 @@ pub(crate) struct StagedLocalUpdate {
     pub(crate) state_vector_entries: usize,
     pub(crate) structure: WorkbookStructure,
     pub(crate) update: Vec<u8>,
+    carried: CarriedState,
+}
+
+/// What staging changed beside the document, handed to the live authority on adoption.
+struct CarriedState {
+    base: Arc<WorkbookBase>,
+    next_sheet_id: u64,
+    sheet_order: Option<SheetOrderEntry>,
+}
+
+/// Which history an adopted local update enters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LocalHistory {
+    /// One collaborative undo item.
+    Undo,
+    /// The sheet-order entry a standalone undo replays against.
+    SheetOrder,
+    /// Neither; existing undo and redo entries stay.
+    None,
 }
 
 pub(crate) struct AuthorityCheckpoint {
@@ -497,13 +519,18 @@ impl WorkbookAuthority {
             .map_err(AuthorityError::InvalidState)
     }
 
+    /// Applies `ops`, whose style indices index `styles`, the caller's style table.
     pub(crate) fn apply_ops(
         &mut self,
         ops: &[Op],
         origin: SyncOrigin,
+        styles: &Stylesheet,
     ) -> Result<Option<Vec<u8>>, AuthorityError> {
         let state_vector = self.doc.transact().state_vector();
         let mut model = self.materialize()?;
+        let ops =
+            remap_styles(ops, styles, &mut model.styles).map_err(AuthorityError::InvalidState)?;
+        let ops = ops.as_ref();
         let authored_styles = ops
             .iter()
             .filter_map(|op| match op {
@@ -762,10 +789,21 @@ impl WorkbookAuthority {
         &self,
         ops: &[Op],
         origin: SyncOrigin,
+        styles: &Stylesheet,
     ) -> Result<StagedLocalUpdate, AuthorityError> {
-        let baseline = self.encode_state_as_update_v1();
+        self.stage_local_ops_from_v1(ops, origin, styles, &self.encode_state_as_update_v1())
+    }
+
+    /// [`Self::stage_local_ops_v1`] from this replica's already-encoded state.
+    pub(crate) fn stage_local_ops_from_v1(
+        &self,
+        ops: &[Op],
+        origin: SyncOrigin,
+        styles: &Stylesheet,
+        baseline: &[u8],
+    ) -> Result<StagedLocalUpdate, AuthorityError> {
         let staged_doc = Doc::with_client_id(self.client_id());
-        hydrate_local_doc(&staged_doc, &baseline).map_err(AuthorityError::InvalidState)?;
+        hydrate_local_doc(&staged_doc, baseline).map_err(AuthorityError::InvalidState)?;
         let mut staged = Self {
             doc: staged_doc,
             base: self.base.clone(),
@@ -777,7 +815,7 @@ impl WorkbookAuthority {
         // `apply_ops` already encoded the same diff: the staged doc is the
         // hydrated baseline, so its pre-op state vector is this replica's own.
         let update = staged
-            .apply_ops(ops, origin)?
+            .apply_ops(ops, origin, styles)?
             .unwrap_or_else(|| Update::EMPTY_V1.to_vec());
         let state = staged.encode_state_as_update_v1();
         let state_vector_entries = staged.doc.transact().state_vector().len();
@@ -790,7 +828,84 @@ impl WorkbookAuthority {
             state_vector_entries,
             structure,
             update,
+            carried: CarriedState {
+                sheet_order: staged.history.undo.pop(),
+                base: staged.base,
+                next_sheet_id: staged.next_sheet_id,
+            },
         })
+    }
+
+    /// Adopts a staged local update, returning its bytes unless it was empty. They are decoded
+    /// before anything changes, so a failure leaves this replica as it was.
+    pub(crate) fn adopt_local_update(
+        &mut self,
+        staged: StagedLocalUpdate,
+        history: LocalHistory,
+    ) -> Result<Option<Vec<u8>>, AuthorityError> {
+        let StagedLocalUpdate {
+            update: bytes,
+            carried,
+            ..
+        } = staged;
+        let update = decode_local_update_v1(&bytes).map_err(AuthorityError::InvalidUpdate)?;
+        let undo = match history {
+            LocalHistory::Undo => Some(
+                build_undo_manager(&self.doc, self.undo_stack.clone(), self.redo_stack.clone())
+                    .map_err(AuthorityError::InvalidState)?,
+            ),
+            LocalHistory::SheetOrder | LocalHistory::None => None,
+        };
+        match undo {
+            Some(mut undo) => {
+                undo.reset();
+                self.doc
+                    .transact_mut_with(self.client_id())
+                    .apply_update(update)
+                    .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+                self.undo_stack = undo.undo_stack().to_vec();
+                self.redo_stack = undo.redo_stack().to_vec();
+            }
+            None => self
+                .doc
+                .transact_mut_with(UNTRACKED_ORIGIN)
+                .apply_update(update)
+                .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?,
+        }
+        let CarriedState {
+            base,
+            next_sheet_id,
+            sheet_order,
+        } = carried;
+        self.base = base;
+        self.next_sheet_id = next_sheet_id;
+        if history == LocalHistory::SheetOrder
+            && let Some(entry) = sheet_order
+        {
+            self.apply_history(HistoryAction::Push(entry));
+        }
+        Ok((bytes.as_slice() != Update::EMPTY_V1).then_some(bytes))
+    }
+
+    /// Whether `update` integrates completely into a fresh replica of `baseline`, this
+    /// replica's encoded state.
+    pub(crate) fn rehearse_local_update(
+        &self,
+        baseline: &[u8],
+        update: &[u8],
+    ) -> Result<bool, AuthorityError> {
+        let doc = Doc::with_client_id(self.client_id());
+        hydrate_local_doc(&doc, baseline).map_err(AuthorityError::InvalidState)?;
+        let update = decode_local_update_v1(update).map_err(AuthorityError::InvalidUpdate)?;
+        doc.transact_mut_with(UNTRACKED_ORIGIN)
+            .apply_update(update)
+            .map_err(|error| AuthorityError::InvalidUpdate(error.to_string()))?;
+        Ok(!has_pending(&doc))
+    }
+
+    /// Whether this replica holds update structs it has not integrated yet.
+    pub(crate) fn has_pending_updates(&self) -> bool {
+        has_pending(&self.doc)
     }
 
     pub(crate) fn apply_local_update_v1(
@@ -1565,6 +1680,11 @@ fn hydrate_local_doc(doc: &Doc, update: &[u8]) -> Result<(), String> {
     doc.transact_mut_with(HYDRATE_ORIGIN)
         .apply_update(update)
         .map_err(|error| error.to_string())
+}
+
+fn has_pending(doc: &Doc) -> bool {
+    let txn = doc.transact();
+    txn.store().pending_update().is_some() || txn.store().pending_ds().is_some()
 }
 
 fn build_undo_manager(
@@ -2661,6 +2781,101 @@ fn materialize_cell_formats<T: ReadTxn>(
         indices.insert(key, index);
     }
     Ok((styles, indices))
+}
+
+/// Rewrites the style indices `ops` carry from `source`'s table to the indices of the same
+/// formats in `target`, adding formats `target` lacks. Two tables built from one base agree on
+/// its indices but intern later formats in their own order.
+fn remap_styles<'a>(
+    ops: &'a [Op],
+    source: &Stylesheet,
+    target: &mut Stylesheet,
+) -> Result<Cow<'a, [Op]>, String> {
+    let mut mapped: HashMap<u32, Option<u32>> = HashMap::new();
+    let mut resolve = |style: Option<u32>| -> Result<Option<u32>, String> {
+        let Some(index) = style else {
+            return Ok(None);
+        };
+        if let Some(&known) = mapped.get(&index) {
+            return Ok(known);
+        }
+        if source.xf(index).is_none() {
+            return Err(format!("cell style index {index} is out of range"));
+        }
+        let format = source.cell_format(Some(index));
+        let resolved = if target.xf(index).is_some() && target.cell_format(Some(index)) == format {
+            Some(index)
+        } else {
+            match (0..target.cell_xfs.len() as u32)
+                .find(|&candidate| target.cell_format(Some(candidate)) == format)
+            {
+                Some(found) => Some(found),
+                None => target
+                    .intern_cell_format(&format)
+                    .map_err(|_| "number format table is full".to_string())?,
+            }
+        };
+        mapped.insert(index, resolved);
+        Ok(resolved)
+    };
+    let mut remapped: Option<Vec<Op>> = None;
+    for (position, op) in ops.iter().enumerate() {
+        let rewritten = match op {
+            Op::SetCell { sheet, at, cell } => {
+                let style = resolve(cell.style)?;
+                (style != cell.style).then(|| Op::SetCell {
+                    sheet: *sheet,
+                    at: *at,
+                    cell: CellState {
+                        style,
+                        ..cell.clone()
+                    },
+                })
+            }
+            Op::RestoreSheet {
+                sheet,
+                name,
+                formulas,
+            } => {
+                let mut changed = false;
+                let mut restored = Vec::with_capacity(formulas.len());
+                for (formula_sheet, at, state) in formulas {
+                    let style = resolve(state.style)?;
+                    changed |= style != state.style;
+                    restored.push((
+                        *formula_sheet,
+                        *at,
+                        CellState {
+                            style,
+                            ..state.clone()
+                        },
+                    ));
+                }
+                changed.then(|| Op::RestoreSheet {
+                    sheet: *sheet,
+                    name: name.clone(),
+                    formulas: restored,
+                })
+            }
+            _ => None,
+        };
+        if let Some(rewritten) = rewritten {
+            remapped
+                .get_or_insert_with(|| ops[..position].to_vec())
+                .push(rewritten);
+        } else if let Some(remapped) = &mut remapped {
+            remapped.push(op.clone());
+        }
+    }
+    Ok(match remapped {
+        Some(remapped) => Cow::Owned(remapped),
+        None => Cow::Borrowed(ops),
+    })
+}
+
+/// Whether `format` fits the size a shared cell format may take.
+pub(crate) fn cell_format_fits(format: &CellFormat) -> bool {
+    cell_format_entry(format).is_ok_and(|(_, payload)| payload.len() <= MAX_CELL_FORMAT_BYTES)
 }
 
 fn style_key(stylesheet: &Stylesheet, style: u32) -> Result<String, String> {
@@ -3783,6 +3998,7 @@ mod tests {
                     },
                 }],
                 SyncOrigin::User,
+                &Stylesheet::default(),
             )
             .unwrap();
         authority
@@ -3830,6 +4046,7 @@ mod tests {
                     },
                 }],
                 SyncOrigin::User,
+                &Stylesheet::default(),
             )
             .unwrap();
         let restored_snapshot = restored.encode_state_as_update_v1();
@@ -4076,7 +4293,11 @@ mod tests {
         let mut authority = WorkbookAuthority::from_model(&model).unwrap();
 
         authority
-            .apply_ops(&[Op::RemoveSheet { index: 0 }], SyncOrigin::User)
+            .apply_ops(
+                &[Op::RemoveSheet { index: 0 }],
+                SyncOrigin::User,
+                &Stylesheet::default(),
+            )
             .unwrap();
 
         let shared = authority.materialize().unwrap();
@@ -4101,6 +4322,7 @@ mod tests {
                     charts,
                 }],
                 SyncOrigin::User,
+                &Stylesheet::default(),
             )
             .expect("SetCharts is a full sync, not a rejected partial one");
 
@@ -4277,7 +4499,11 @@ mod tests {
         let model = rich_model();
         let mut authority = WorkbookAuthority::from_model_with_client_id(&model, 31).unwrap();
         authority
-            .apply_ops(&[Op::RemoveSheet { index: 1 }], SyncOrigin::User)
+            .apply_ops(
+                &[Op::RemoveSheet { index: 1 }],
+                SyncOrigin::User,
+                &Stylesheet::default(),
+            )
             .unwrap();
         let (_, removed) = authority.strict_materialize().unwrap();
         assert_eq!(removed.sheet_keys, ["sheet:0"]);
@@ -4291,6 +4517,7 @@ mod tests {
                     name: "Second".into(),
                 }],
                 SyncOrigin::Undo,
+                &Stylesheet::default(),
             )
             .unwrap();
         let (restored, structure) = authority.strict_materialize().unwrap();
@@ -4453,7 +4680,7 @@ mod tests {
                 to,
             }];
             let staged = authority
-                .stage_local_ops_v1(&ops, SyncOrigin::User)
+                .stage_local_ops_v1(&ops, SyncOrigin::User, &Stylesheet::default())
                 .unwrap();
             authority
                 .apply_local_update_v1(&staged.update, SyncOrigin::User)
@@ -4525,7 +4752,7 @@ mod tests {
             to: slid_anchor(2),
         }];
         let local = authority
-            .stage_local_ops_v1(&ops, SyncOrigin::User)
+            .stage_local_ops_v1(&ops, SyncOrigin::User, &Stylesheet::default())
             .unwrap();
         authority
             .apply_local_update_v1(&local.update, SyncOrigin::User)

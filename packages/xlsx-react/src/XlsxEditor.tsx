@@ -48,6 +48,14 @@ import type {
   SelectionLimits,
   SheetInfo,
   WorkbookHandle,
+  XlsxEditRefusal,
+  XlsxEditRequest,
+  XlsxEditResult,
+  XlsxFindRequest,
+  XlsxFindResult,
+  XlsxReadRequest,
+  XlsxReadResult,
+  XlsxValidationResult,
 } from '@betteroffice/xlsx';
 import type {
   AwarenessPeer,
@@ -56,7 +64,10 @@ import type {
 } from '@betteroffice/xlsx/collaboration';
 import type { Translations } from '@betteroffice/xlsx-i18n';
 import { LocaleProvider, useTranslation } from './i18n';
-import { createXlsxCommandController } from './commands/createXlsxCommandStore';
+import {
+  createXlsxCommandController,
+  XlsxCommandAdmissionError,
+} from './commands/createXlsxCommandStore';
 import { commandForEvent } from './commands/descriptors';
 import { useXlsxCommand } from './commands/hooks';
 import {
@@ -86,6 +97,13 @@ import { ProposalsPanel } from './proposals/ProposalsPanel';
  * The imperative surface handed to {@link XlsxEditorProps.onReady}: the open
  * workbook handle plus a `refreshProposals` to re-read the pending list after an
  * external caller (e.g. a demo agent) stages proposals on the same handle.
+ *
+ * The version, read and edit-batch methods run in order with the input accepted
+ * before them, as commands do: cell and formula entries, chart moves, pastes and
+ * cuts land first, and an IME composition ends with its text written. They reject
+ * with the command failure `code`: `input-failed` while a refused entry waits for
+ * correction or earlier input failed, `gesture-active` during a chart drag, and
+ * `document-replaced` when the workbook is replaced meanwhile.
  */
 export interface XlsxEditorApi {
   /**
@@ -116,6 +134,25 @@ export interface XlsxEditorApi {
    * have landed when this returns.
    */
   selectCells: (sheet: number, selection: Selection) => boolean;
+  version: () => Promise<string>;
+  readCells: (request: XlsxReadRequest) => Promise<XlsxReadResult>;
+  findText: (request: XlsxFindRequest) => Promise<XlsxFindResult>;
+  /** Refuses with `read-only` while the editor is read-only. */
+  validateEdits: (request: XlsxEditRequest) => Promise<XlsxValidationResult>;
+  /**
+   * Applies the batch against the caller's `expectVersion` after committing pending input,
+   * so input that lands first refuses it with `stale-version`. Refuses with `read-only`
+   * while the editor is read-only; an applied batch calls `onChange` once.
+   */
+  applyEdits: (request: XlsxEditRequest) => Promise<XlsxEditResult>;
+}
+
+function readOnlyRefusal(handle: WorkbookHandle): XlsxEditRefusal {
+  return {
+    ok: false,
+    version: handle.version(),
+    failure: { code: 'read-only', message: 'The editor is read-only' },
+  };
 }
 
 /** Why a synchronous {@link XlsxEditorApi.save} did not return bytes. */
@@ -670,6 +707,20 @@ function XlsxEditorContent({
     return () => observer.disconnect();
   }, [toolbarElement]);
 
+  // runs a host read or batch in the input queue, after the input accepted before it.
+  const afterInput = useCallback(
+    <T,>(opened: WorkbookHandle, operation: () => T): Promise<T> => {
+      if (handleRef.current !== opened) {
+        return Promise.reject(new XlsxCommandAdmissionError('document-replaced'));
+      }
+      return coordinator.runAfterPendingInput(() => {
+        if (handleRef.current !== opened) throw new XlsxCommandAdmissionError('document-replaced');
+        return operation();
+      });
+    },
+    [coordinator]
+  );
+
   // re-read the pending proposal list and queue a repaint — ghosts paint into
   // the engine frame, so every lifecycle change (propose/accept/reject) must
   // republish it. safe to call against an old core (the loader returns an
@@ -765,6 +816,7 @@ function XlsxEditorContent({
           setCollaborationReplica(handle);
           setError(null);
           refreshProposals();
+          const opened = handle;
           const cleanup = onReadyRef.current?.({
             clearSelection,
             commands: commandController.store,
@@ -775,9 +827,34 @@ function XlsxEditorContent({
               if (hasRejectedRef.current()) throw new XlsxSaveRefusedError('input-failed');
               if (coordinator.pending) throw new XlsxSaveRefusedError('input-pending');
               if (!settlePendingEditsRef.current()) throw new XlsxSaveRefusedError('input-failed');
-              return handle!.save();
+              return opened.save();
             },
             selectCells,
+            version: () => afterInput(opened, () => opened.version()),
+            readCells: (request) => afterInput(opened, () => opened.readCells(request)),
+            findText: (request) => afterInput(opened, () => opened.findText(request)),
+            validateEdits: async (request) => {
+              if (readOnlyRef.current && handleRef.current === opened) {
+                return readOnlyRefusal(opened);
+              }
+              return afterInput(opened, () =>
+                readOnlyRef.current ? readOnlyRefusal(opened) : opened.validateEdits(request)
+              );
+            },
+            applyEdits: async (request) => {
+              if (readOnlyRef.current && handleRef.current === opened) {
+                return readOnlyRefusal(opened);
+              }
+              return afterInput(opened, () => {
+                if (readOnlyRef.current) return readOnlyRefusal(opened);
+                const result = opened.applyEdits(request);
+                if (result.ok && result.applied) {
+                  onChangeRef.current?.();
+                  commandController.refresh();
+                }
+                return result;
+              });
+            },
           });
           if (typeof cleanup === 'function') cleanupReady = cleanup;
         } catch (e) {
@@ -813,6 +890,7 @@ function XlsxEditorContent({
     collaborationClientId,
     collaborationInitialUpdate,
     clearSelection,
+    afterInput,
     commandController,
     refreshProposals,
     selectCells,
@@ -1347,31 +1425,29 @@ function XlsxEditorContent({
     return { handle, sheet: activeSheetRef.current, range: normalizeRange(selection) };
   }, [selectionRef, activeSheetRef]);
 
-  const clearTarget = useCallback(
+  // an input write clearing `target`, while its workbook is still open and writable.
+  const writeClear = useCallback(
     ({ handle, sheet, range }: CellTarget) => {
-      if (readOnly) return;
+      if (handleRef.current !== handle || readOnlyRef.current) return;
       const edits: CellInputEdit[] = [];
       for (let row = range.top; row <= range.bottom; row++) {
         for (let col = range.left; col <= range.right; col++) edits.push({ row, col, input: '' });
       }
-      void coordinator.input(() => {
-        if (handleRef.current !== handle || readOnlyRef.current) return;
-        try {
-          applyResult(handle.editCells(sheet, edits));
-          return true;
-        } catch (e) {
-          setError(e instanceof Error ? e.message : String(e));
-          return false;
-        }
-      });
+      try {
+        applyResult(handle.editCells(sheet, edits));
+        return true;
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        return false;
+      }
     },
-    [applyResult, readOnly, coordinator]
+    [applyResult]
   );
 
   const clearCells = useCallback(() => {
     const target = captureTarget();
-    if (target) clearTarget(target);
-  }, [captureTarget, clearTarget]);
+    if (target && !readOnly) void coordinator.input(() => writeClear(target));
+  }, [captureTarget, writeClear, readOnly, coordinator]);
 
   const copyTarget = useCallback(async ({ handle, sheet, range }: CellTarget) => {
     try {
@@ -1394,10 +1470,16 @@ function XlsxEditorContent({
     if (target) await copyTarget(target);
   }, [captureTarget, copyTarget]);
 
-  const cutSelection = useCallback(async () => {
+  // the cut copies at once and takes its place in input order: it clears what was selected
+  // when it was accepted, once the clipboard write settles, and only while that workbook is
+  // still open and writable.
+  const cutSelection = useCallback(() => {
     const target = captureTarget();
-    if (target && (await copyTarget(target))) clearTarget(target);
-  }, [captureTarget, copyTarget, clearTarget]);
+    if (!target) return;
+    const copied = copyTarget(target);
+    if (readOnly) return;
+    void coordinator.input(async () => ((await copied) ? writeClear(target) : undefined));
+  }, [captureTarget, copyTarget, writeClear, readOnly, coordinator]);
 
   // the clipboard is read while the key press still grants access; the write
   // takes its place in input order.
@@ -1565,7 +1647,7 @@ function XlsxEditorContent({
           return;
         }
         if (lower === 'x') {
-          void cutSelection();
+          cutSelection();
           e.preventDefault();
           return;
         }
