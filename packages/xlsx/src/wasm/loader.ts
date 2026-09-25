@@ -6,7 +6,12 @@
  * precompiled module. Callers never see the JSON-string boundary.
  */
 
-import initWasmModule, { XlsxDocument } from './generated/xlsx_wasm.js';
+import initWasmModule, {
+  XlsxDocument,
+  exportXlsxMarkdownJson,
+  exportXlsxStructuredJson,
+  renderXlsxMarkdownJson,
+} from './generated/xlsx_wasm.js';
 import type { InitInput } from './generated/xlsx_wasm.js';
 import type { CollaborationReplica, CollaborationUpdateOrigin } from '../collaboration/types';
 import type { ChartRegion, DisplayList } from '../display-list/types';
@@ -20,6 +25,13 @@ import type {
   XlsxReadResult,
   XlsxValidationResult,
 } from '../edits';
+import type {
+  XlsxExportOptions,
+  XlsxExportResult,
+  XlsxMarkdownContent,
+  XlsxMarkdownOptions,
+  XlsxStructuredContent,
+} from '../exports';
 
 /**
  * A scrolled window into a sheet. `x`/`y` are content-pixel offsets into the
@@ -445,8 +457,8 @@ export interface WorkbookHandle extends CollaborationReplica {
   isProposalsAvailable(): boolean;
   /**
    * The session-scoped version of the committed workbook. Committed edits, peer updates, undo,
-   * redo and value-changing recalculation move it; selection, the active sheet and proposals
-   * do not.
+   * redo and a recalculation that changes values or what an export reports about results move
+   * it; selection, the active sheet and proposals do not.
    */
   version(): string;
   /** Cells with the version they were read at; empty `ranges` reads the sheet catalog. */
@@ -460,6 +472,17 @@ export interface WorkbookHandle extends CollaborationReplica {
    * Update listeners run once, after the call returns. Malformed requests throw.
    */
   applyEdits(request: XlsxEditRequest): XlsxEditResult;
+  /**
+   * Exports the committed workbook with the version it was read at: sparse cells with values,
+   * formulas and display text, plus sheet metadata and diagnostics. Nothing is recalculated,
+   * flushed or published. Options it cannot honor refuse; malformed ones throw.
+   */
+  exportStructured(options?: XlsxExportOptions): XlsxExportResult<XlsxStructuredContent>;
+  /** {@link WorkbookHandle.exportStructured} rendered as Markdown from the same read. */
+  exportMarkdown(
+    options?: XlsxExportOptions,
+    markdownOptions?: XlsxMarkdownOptions
+  ): XlsxExportResult<XlsxMarkdownContent>;
   dispose(): void;
 }
 
@@ -879,6 +902,17 @@ export function openWorkbook(
     applyEdits(request: XlsxEditRequest): XlsxEditResult {
       return parseJson(() => doc.applyEditsJson(JSON.stringify(request)), true);
     },
+    exportStructured(options: XlsxExportOptions = {}): XlsxExportResult<XlsxStructuredContent> {
+      return parseJson(() => doc.exportStructuredJson(JSON.stringify(options)));
+    },
+    exportMarkdown(
+      options: XlsxExportOptions = {},
+      markdownOptions: XlsxMarkdownOptions = {}
+    ): XlsxExportResult<XlsxMarkdownContent> {
+      return parseJson(() =>
+        doc.exportMarkdownJson(JSON.stringify(options), JSON.stringify(markdownOptions))
+      );
+    },
     dispose(): void {
       if (disposed) return;
       disposed = true;
@@ -933,6 +967,48 @@ function resolveCollaborativeClientId(options: OpenWorkbookOptions): number | un
     value = (words[0] & 0x1fffff) * 0x1_0000_0000 + words[1];
   } while (value === 0);
   return value;
+}
+
+function exported<T>(operation: () => string): T {
+  try {
+    return JSON.parse(operation()) as T;
+  } catch (error) {
+    throw toError(error);
+  }
+}
+
+/**
+ * Exports `.xlsx` bytes as read, initializing the core if needed. Formula results are the
+ * stored ones: nothing is recalculated and no clock is read, so the same bytes and options
+ * always give the same content. Unreadable bytes and unusable options reject.
+ */
+export async function exportXlsxStructured(
+  bytes: Uint8Array,
+  options: XlsxExportOptions = {}
+): Promise<XlsxStructuredContent> {
+  await initWasm();
+  return exported(() => exportXlsxStructuredJson(bytes, JSON.stringify(options)));
+}
+
+/** {@link exportXlsxStructured} rendered as Markdown. */
+export async function exportXlsxMarkdown(
+  bytes: Uint8Array,
+  options: XlsxExportOptions = {},
+  markdownOptions: XlsxMarkdownOptions = {}
+): Promise<XlsxMarkdownContent> {
+  await initWasm();
+  return exported(() =>
+    exportXlsxMarkdownJson(bytes, JSON.stringify(options), JSON.stringify(markdownOptions))
+  );
+}
+
+/** Renders structured content as Markdown; content that does not validate rejects. */
+export async function renderXlsxMarkdown(
+  content: XlsxStructuredContent,
+  options: XlsxMarkdownOptions = {}
+): Promise<XlsxMarkdownContent> {
+  await initWasm();
+  return exported(() => renderXlsxMarkdownJson(JSON.stringify(content), JSON.stringify(options)));
 }
 
 /**

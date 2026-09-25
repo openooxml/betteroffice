@@ -142,6 +142,45 @@ followers, array-formula cells and protected sheets. The React editor's
 `onReady` API exposes the same operations, committing pending drafts, nudges and
 pastes first.
 
+## Export XLSX content with anchors
+
+XLSX exports bounded sparse worksheet content and Markdown with positional
+anchors, formulas, stored values, formatted text, explicit hidden-content
+options, and omission diagnostics. Export does not recalculate formulas.
+
+```ts
+import { exportXlsxMarkdown } from "@betteroffice/xlsx";
+
+const result = workbook.exportStructured({
+  scope: [{ sheet: 0, range: "A1:H40" }],
+  includeHiddenRows: false,
+  maxCells: 20_000,
+});
+if (result.ok) {
+  const { version, content } = result;
+  const totals = content.sheets[0].cells.filter((cell) => cell.formula !== null);
+}
+
+const { markdown, anchors } = await exportXlsxMarkdown(bytes, {}, { maxRows: 100 });
+```
+
+A live export returns `{ ok, version, content }` read from the committed
+workbook without flushing, recalculating or publishing anything; a refused scope
+or option returns `{ ok: false, version, failure }` with `target` naming the
+sheet or `null`. `exportXlsxStructured`, `exportXlsxMarkdown` and
+`renderXlsxMarkdown` need no session: bytes are read as stored, with no clock.
+Cells carry a typed value, the formula without `=`, the engine's display text,
+the number format and merge membership; formula results are stored values
+marked `unverified`, `missing` (the file stored none and nothing has calculated
+since), `uncertain`, `cycle` or `limited`. Sheets also list merges,
+tables, hyperlinks, hidden row and column spans, and drawing objects as
+placeholders; defined names are listed read-only. Anchors are sheet index, sheet
+name and A1 in that version or snapshot, not identities that survive structural
+edits. `maxCells` and `maxBytes` stop at a complete record with `truncated`.
+Markdown renders one labelled grid per sheet (200 rows, 50 columns and 10,000
+positions by default), escaped HTML tables for merges, and
+`<!-- xlsx-export:N -->` markers whose anchors are returned beside it.
+
 ## Operation profiles
 
 XLSX provides `editCellProfiled`, `applyOpsProfiled`, and `displayListProfiled`.
@@ -159,7 +198,7 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/docx` | Framework-free DOCX core: OOXML parse and serialize, CRDT editing, version-checked atomic text and paragraph batches, text shaping, pagination, canvas rendering. Saving preserves untouched package parts. |
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, and flushed version-checked edit batches on its ref. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
-| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
+| `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, anchored JSON and Markdown export, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
 | `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with flushed version-checked edit batches on its `onReady` API. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |

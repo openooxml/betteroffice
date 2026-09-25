@@ -131,6 +131,59 @@ if (!result.ok) console.warn(result.failure.code); // e.g. "stale-version"
   rows, columns or sheets, merge cells or move charts, and refuse writes to
   merged-cell followers, array-formula cells and protected sheets.
 
+## Structured export
+
+XLSX exports bounded sparse worksheet content and Markdown with positional
+anchors, formulas, stored values, formatted text, explicit hidden-content
+options, and omission diagnostics. Export does not recalculate formulas:
+
+```ts
+const result = workbook.exportStructured({ scope: [{ sheet: 0, range: "A1:D20" }] });
+if (result.ok) {
+  for (const cell of result.content.sheets[0].cells) {
+    console.log(cell.anchor, cell.value, cell.formula, cell.displayText);
+  }
+}
+
+const markdown = workbook.exportMarkdown({}, { maxRows: 100 });
+const fromBytes = await exportXlsxStructured(bytes); // no session, no clock
+```
+
+- Each sheet lists its stored cells in row-major order (formula cells and
+  styled empty cells included, empty positions skipped) with value, formula,
+  display text, number format and merge membership, plus merges, tables,
+  hyperlinks, hidden row and column spans, and charts, pictures and shapes as
+  placeholders with alt text. Defined names are listed read-only.
+- Anchors are `{ sheet: { index, name }, a1 }` positions in the exported version
+  (`anchorScope: "session"`) or bytes snapshot (`"snapshot"`); neither follows
+  later row, column or sheet edits. Retained drawings carry a `sourcePart`
+  provenance with the part's SHA-256.
+- Formula results are the stored values (`calculation.policy: "asStored"`,
+  `freshness: "unverified"`); cells mark results the file did not store as
+  `missing` (`uncertain` once anything has calculated, or where it cannot be
+  traced) and the last calculation's `cycle` and `limited` cells. Live exports
+  reflect whatever calculation already ran, and the same version and options
+  always export the same content; `exportXlsxStructured` reads bytes without
+  recalculating.
+- Hidden sheets, rows, columns and names are excluded unless requested
+  (`includeHiddenSheets`, `includeHiddenRows`, `includeHiddenColumns`,
+  `includeHiddenNames`), with a `hidden-content-excluded` diagnostic. A sheet
+  whose visibility is unknown, such as one from a model handed in without its
+  package, counts as hidden.
+  Comments, rich-text runs, conditional formatting, pivot tables and unreadable
+  charts are diagnosed, not exported.
+- `maxCells` (default 100,000) and `maxBytes` (default 8 MiB) stop at a complete
+  record with `truncated: true` and a `truncated` diagnostic; an absent cell is
+  empty only before that point. Scope refusals (`invalid-scope`,
+  `invalid-options`, `limit-exceeded`) return `{ ok: false, version, failure }`.
+- Markdown renders one grid per sheet labelled with its A1 columns and row
+  numbers (200 rows, 50 columns and 10,000 positions by default), using an
+  escaped HTML table where merges need spans, and `<!-- xlsx-export:N -->`
+  markers whose anchors come back in `anchors`. Document text is escaped and
+  kept on one line, and hyperlinks become Markdown links only for `http`,
+  `https` and `mailto` destinations. `renderXlsxMarkdown` renders content you
+  already hold, refusing content that does not validate.
+
 ## Collaboration
 
 Open a collaborative replica, then connect it to any reliable binary transport:

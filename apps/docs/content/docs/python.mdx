@@ -91,6 +91,23 @@ if not result["ok"]:
     print(result["failure"]["code"])   # e.g. "stale-version"
 ```
 
+## Structured export
+
+`export_structured` and `export_markdown` return a workbook's sparse cells,
+sheet metadata and diagnostics, or bounded Markdown with anchor markers, with the
+version they were read at. Formula results are the stored values; nothing is
+recalculated. Hidden sheets, rows, columns and names are opt-in:
+
+```python
+from betteroffice_xlsx import export_xlsx_markdown
+
+result = wb.export_structured(scope=[{"sheet": 0, "range": "A1:H40"}], max_cells=20_000)
+if result["ok"]:
+    cells = result["content"]["sheets"][0]["cells"]
+
+print(export_xlsx_markdown(data, markdown_options={"maxRows": 100})["markdown"])
+```
+
 See the [package README](https://pypi.org/project/betteroffice-xlsx/) for the full
 API, error types, and an openpyxl comparison.
 

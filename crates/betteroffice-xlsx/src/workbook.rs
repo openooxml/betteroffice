@@ -39,6 +39,7 @@ use crate::sheet_json::{
     MAX_CHART_ANCHORS_PER_DRAWING, MAX_CHART_FIELD_BYTES, MAX_CHART_REFS_PER_CHART,
     MAX_CHARTS_PER_SHEET, MAX_HYPERLINK_FIELD_BYTES, MAX_HYPERLINKS_PER_SHEET,
 };
+use crate::structured::ExportSource;
 use crate::{
     CalculationOptions, CalculationResult, CellAddress, CellEdit, CellInput, EditProfile,
     EditStage, Error, HistoryState, MutationResult, NumberFormatKind, ProposalAcceptance,
@@ -107,6 +108,9 @@ struct PreservedSheetState {
     /// edits made since the package was read. `None` once an identity-less
     /// replay replaced the model wholesale, which reserializes edited sheets.
     axes: Vec<Option<xlsx_parse::SheetAxes>>,
+    /// Whether each sheet was added in this session, so its properties are the
+    /// defaults of a new sheet rather than unknown ones.
+    created: Vec<bool>,
 }
 
 impl PreservedSheetState {
@@ -116,6 +120,7 @@ impl PreservedSheetState {
         self.shared_string_cells
             .resize_with(sheets, Default::default);
         self.axes.resize(sheets, None);
+        self.created.resize(sheets, false);
     }
 
     fn insert(&mut self, index: usize) {
@@ -124,6 +129,7 @@ impl PreservedSheetState {
         self.shared_string_cells
             .insert(index, xlsx_parse::SharedStringCells::new());
         self.axes.insert(index, None);
+        self.created.insert(index.min(self.created.len()), true);
     }
 
     fn remove(&mut self, index: usize) {
@@ -133,6 +139,9 @@ impl PreservedSheetState {
         }
         if index < self.axes.len() {
             self.axes.remove(index);
+        }
+        if index < self.created.len() {
+            self.created.remove(index);
         }
     }
 
@@ -266,6 +275,17 @@ fn sheet_content(
     }
 }
 
+/// The cycle and limited cells of a calculation, order aside.
+fn calculation_status(result: &CalculationResult) -> [BTreeSet<(u32, u32, u32)>; 2] {
+    let cells = |cells: &[CellAddress]| {
+        cells
+            .iter()
+            .map(|address| (address.sheet.0, address.cell.row, address.cell.col))
+            .collect()
+    };
+    [cells(&result.cycle_cells), cells(&result.limited_cells)]
+}
+
 /// On the used range's edge — the only place removing a cell can shrink it.
 fn on_used_edge(bounds: Option<CellRange>, at: CellRef) -> bool {
     bounds.is_some_and(|bounds| {
@@ -310,6 +330,8 @@ pub struct Workbook {
     /// Resolved `ChartSpace` per (chart part, owner sheet), valid for the
     /// stored epoch and part-bytes hash.
     chart_cache: Mutex<HashMap<(String, String), CachedChartSpace>>,
+    /// SHA-256 of retained source parts that exports have cited.
+    source_part_hashes: Mutex<BTreeMap<String, String>>,
 }
 
 struct CachedChartSpace {
@@ -463,11 +485,13 @@ impl Workbook {
                     .map(|index| package.source_shared_string_cells(index))
                     .collect(),
                 axes: vec![Some(xlsx_parse::SheetAxes::default()); model.sheets.len()],
+                created: vec![false; model.sheets.len()],
             },
             None => PreservedSheetState {
                 origins: vec![None; model.sheets.len()],
                 shared_string_cells: vec![Default::default(); model.sheets.len()],
                 axes: vec![None; model.sheets.len()],
+                created: vec![false; model.sheets.len()],
             },
         };
         let version_nonce = batch::mint_nonce();
@@ -495,6 +519,7 @@ impl Workbook {
             version_nonce,
             committed_changes: 0,
             chart_cache: Mutex::new(HashMap::new()),
+            source_part_hashes: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -860,6 +885,31 @@ impl Workbook {
 
     pub fn model(&self) -> &WorkbookModel {
         &self.model
+    }
+
+    fn has_uncached_source_formulas(&self) -> bool {
+        self.source_package.as_ref().is_some_and(|package| {
+            (0..package.source_sheet_count()).any(|index| {
+                package
+                    .source_cell_facts(index)
+                    .is_some_and(|facts| !facts.uncached_formulas.is_empty())
+            })
+        })
+    }
+
+    /// The committed state a structured export reads.
+    pub(crate) fn export_source(&self) -> ExportSource<'_> {
+        ExportSource {
+            model: &self.model,
+            package: self.source_package.as_ref(),
+            origins: &self.preserved.origins,
+            shared_string_cells: &self.preserved.shared_string_cells,
+            axes: &self.preserved.axes,
+            calculation: &self.last_calculation,
+            created: &self.preserved.created,
+            edited: self.edited_since_open,
+            part_hashes: &self.source_part_hashes,
+        }
     }
 
     pub fn into_model(self) -> WorkbookModel {
@@ -1396,12 +1446,16 @@ impl Workbook {
     }
 
     /// A recalculation that moves any value moves [`Workbook::version`] too, since values
-    /// and display text can be guarded; one that moves none leaves it.
-    /// A value-changing recalculation also notifies observers with an empty
+    /// and display text can be guarded, as does one that changes what a structured export
+    /// reports about results: the cells left in a cycle or at a limit, or, on the first
+    /// calculation, formulas the file stored no result for. One that moves none of these
+    /// leaves it. Such a recalculation also notifies observers with an empty
     /// [`UpdateOrigin::Recalculation`] event.
     pub fn recalculate_all(&mut self, options: CalculationOptions) -> CalculationResult {
+        let first = !self.edited_since_open && self.has_uncached_source_formulas();
+        let before = calculation_status(&self.last_calculation);
         let result = self.rebuild_and_recalculate(options);
-        if !result.changed.is_empty() {
+        if !result.changed.is_empty() || first || calculation_status(&result) != before {
             self.committed_changes += 1;
             self.emit_update(UpdateEvent {
                 update: Vec::new(),

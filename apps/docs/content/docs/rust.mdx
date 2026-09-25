@@ -57,6 +57,23 @@ match workbook.apply_edits(&request)? {
 }
 ```
 
+`Workbook::export_structured` and `export_markdown` read the committed workbook
+with its version as sparse cells, sheet metadata and diagnostics, or as bounded
+Markdown with anchor markers; `export_xlsx_structured`, `export_xlsx_markdown`
+and `render_xlsx_markdown` work from bytes or content. None recalculates:
+formula results are the stored values.
+
+```rust
+use betteroffice_xlsx::{XlsxExportOptions, XlsxMarkdownOptions, export_xlsx_markdown};
+
+if let Ok(export) = workbook.export_structured(&XlsxExportOptions::default())? {
+    for cell in &export.content.sheets[0].cells {
+        println!("{:?} {:?} {}", cell.anchor, cell.formula, cell.display_text);
+    }
+}
+let markdown = export_xlsx_markdown(&bytes, &XlsxExportOptions::default(), &XlsxMarkdownOptions::default())?;
+```
+
 `Workbook::edit_cell_profiled` and `apply_ops_profiled` return the usual edit
 outcome with an `EditProfile`. Supply a monotonic clock reporting milliseconds
 to collect validate, apply, recalculation, and result-building durations. Normal
@@ -136,7 +153,7 @@ XML. The ZIP container is rebuilt, so the complete file may differ byte for byte
 | Crate | What it is |
 | --- | --- |
 | `betteroffice-docx` | Typed native API for opening, editing, laying out, and saving DOCX documents. |
-| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks, including version-checked atomic cell batches. |
+| `betteroffice-xlsx` | Typed native API for opening, editing, collaborating, calculating, rendering, and saving XLSX workbooks, including version-checked atomic cell batches and anchored JSON and Markdown export. |
 | `betteroffice-pptx` | Typed native API for opening, editing, collaborating on, and rendering PPTX presentations. |
 
 ## The layers

@@ -55,6 +55,12 @@ describe("homepage markdown", () => {
     }
   });
 
+  test("names the XLSX core's structured export", () => {
+    const xlsx = PACKAGES.find((pkg) => pkg.name === "@betteroffice/xlsx");
+    expect(xlsx.desc).toContain("anchored JSON and Markdown export");
+    expect(markdown).toContain(xlsx.desc);
+  });
+
   test("carries an install line and a guide for every ecosystem", () => {
     for (const eco of ECOSYSTEMS) {
       expect(markdown).toContain(eco.install);
