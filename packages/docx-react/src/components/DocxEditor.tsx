@@ -1703,7 +1703,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
     return map;
   }, [trackedChanges]);
 
-  const sidebarOpen = allSidebarItems.length > 0;
+  const sidebarOpen = allSidebarItems.some((item) => !item.hidden);
   // Reserve 2× the left-edge allowance so the centered page clears whatever
   // outline UI is showing, without forcing a shift on wide viewports.
   const outlineLeftAllowance =

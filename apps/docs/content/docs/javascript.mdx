@@ -183,7 +183,9 @@ pages-container units divided by zoom, and `geometry.toOverlayRect(rect)`
 converts such a rectangle into pixels of the unscaled overlay layer. Overlays
 ignore the pointer unless an element sets `pointer-events: auto`. Sidebar cards
 anchor to `{ version, story, paraId }` and appear only while that version is
-current and the body paragraph is unique. `navigation.scrollToParagraph`
+current and the body paragraph is unique; a card's `render` receives its `item`,
+so one component can draw every card and keep its state while that `id` stays.
+`navigation.scrollToParagraph`
 flushes input, waits briefly for a matching layout, keeps focus unless asked, and
 reports `layout-unavailable` or `unsupported` instead of success when it cannot
 scroll. In a narrow editor, side docks show tabs that open panels as drawers.

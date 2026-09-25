@@ -40,10 +40,14 @@ test('managed overlays land on the rendered pages at every zoom', async ({ page 
   }
 });
 
-test('after an edit, overlays and sidebar cards return for the new version', async ({ page }) => {
+test('after an edit, overlays and sidebar cards follow the new version; cards keep their state', async ({
+  page,
+}) => {
   await open(page);
   const card = page.getByTestId('probe-card');
   await expect(card).toBeVisible();
+  await card.click();
+  await expect(card).toHaveAttribute('data-clicks', '1');
   const before = await card.getAttribute('data-version');
   await page.getByTestId('probe-append').click();
   await expect(card).not.toHaveAttribute('data-version', before!);
@@ -58,6 +62,7 @@ test('after an edit, overlays and sidebar cards return for the new version', asy
     return (await editor.readParagraphs({ view: 'accepted' })).version;
   });
   await expect(card).toHaveAttribute('data-version', version);
+  await expect(card).toHaveAttribute('data-clicks', '1');
   await expect
     .poll(async () => Math.max(...(await offsets(page))), { timeout: 30_000 })
     .toBeLessThan(1.5);
@@ -145,7 +150,7 @@ test('plugin toolbar commands work by pointer, shortcut and the keyboard overflo
   await expect.poll(marks).toBe(3);
 });
 
-test('sidebar cards make room for comments and start collapsed after replacement', async ({
+test('sidebar cards make room for comments and start afresh after replacement', async ({
   page,
 }) => {
   await open(page);
@@ -181,6 +186,7 @@ test('sidebar cards make room for comments and start collapsed after replacement
 
   await card.click();
   await expect(card).toHaveAttribute('data-expanded', 'true');
+  await expect(card).toHaveAttribute('data-clicks', '1');
   const before = await card.getAttribute('data-version');
   await page.evaluate(() =>
     (window as unknown as { __probe: { reload(): Promise<void> } }).__probe.reload()
@@ -188,4 +194,5 @@ test('sidebar cards make room for comments and start collapsed after replacement
   await expect(card).toBeVisible({ timeout: 60_000 });
   await expect(card).not.toHaveAttribute('data-version', before!);
   await expect(card).toHaveAttribute('data-expanded', 'false');
+  await expect(card).toHaveAttribute('data-clicks', '0');
 });

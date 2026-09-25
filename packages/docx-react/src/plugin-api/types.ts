@@ -37,6 +37,8 @@ export interface SidebarItemRenderProps {
 export interface ReactSidebarItem extends SidebarItem {
   render: (props: SidebarItemRenderProps) => ReactNode;
   estimatedHeight?: number;
+  /** Stays mounted, keeping its state, but is neither shown nor placed. */
+  hidden?: boolean;
 }
 
 export interface SidebarItemContext {

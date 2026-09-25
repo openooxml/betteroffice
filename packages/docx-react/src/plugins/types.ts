@@ -213,8 +213,14 @@ export interface DocxPluginSidebarItem<S> {
   anchor: { version: string; story: string; paraId: string };
   priority?: number;
   estimatedHeight?: number;
+  /**
+   * Draws the card; one component can draw them all from `item`. A card keeps its React state
+   * while the plugin returns its `id`, and resets for a new id or document.
+   */
   render: ComponentType<{
     context: DocxPluginContext<S>;
+    /** This item as `getSidebarItems` returned it. */
+    item: DocxPluginSidebarItem<S>;
     isExpanded: boolean;
     onToggleExpand(): void;
     measureRef(element: HTMLDivElement | null): void;

@@ -363,7 +363,10 @@ const review = defineDocxPlugin<State>({
   layout and is never an edit target.
 - **Sidebar cards** anchor to `{ version, story, paraId }` and show only while
   the document is at that version and the body paragraph resolves uniquely.
-  Their ids are namespaced, so they never collide with comments.
+  `render` receives the `item` it draws, so one component can draw every card;
+  a card keeps its React state while the plugin returns its `id`, and starts
+  afresh for a new id or document. Their ids are namespaced, so they never
+  collide with comments.
 - **Navigation.** `navigation.scrollToParagraph(target, { expectVersion })`
   flushes input, waits briefly for a layout of that version, and keeps focus
   and selection unless `focus: true`. It succeeds only when it scrolled, and

@@ -56,7 +56,7 @@ export function UnifiedSidebar({
   const resolved = useMemo(
     () =>
       resolveItemPositions(
-        items,
+        items.filter((item) => !item.hidden),
         anchorPositions,
         renderedDomContext,
         zoom,
@@ -78,12 +78,13 @@ export function UnifiedSidebar({
     return map;
   }, [resolved]);
 
-  // Track newly positioned cards in an effect (not during render)
+  // Track newly positioned cards in an effect (not during render); a hidden card fades back in.
   useEffect(() => {
     for (const r of resolved) {
       knownCardsRef.current.add(r.item.id);
     }
-  }, [resolved]);
+    for (const item of items) if (item.hidden) knownCardsRef.current.delete(item.id);
+  }, [items, resolved]);
 
   // Forget removed items, so a card that returns is placed afresh instead of at a stale Y.
   useEffect(() => {
@@ -219,20 +220,20 @@ export function UnifiedSidebar({
           const isExpanded = expandedItem === item.id;
           const isKnown = knownCardsRef.current.has(item.id);
           const isNewCard = !isKnown && yPos !== undefined;
-          const noPosition = hasPositions && !positionMap.has(item.id);
+          const noPosition = item.hidden || (hasPositions && yPos === undefined);
 
-          const style: React.CSSProperties = hasPositions
-            ? yPos !== undefined
+          const style: React.CSSProperties = noPosition
+            ? {
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                opacity: 0,
+                visibility: 'hidden',
+              }
+            : hasPositions
               ? { position: 'absolute', top: yPos, left: 0, right: 0, opacity: 1 }
-              : {
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  opacity: 0,
-                  visibility: 'hidden',
-                }
-            : { marginBottom: 6 };
+              : { marginBottom: 6 };
 
           const transition = noPosition
             ? 'none'
