@@ -271,6 +271,50 @@ fn a_right_to_left_paragraph_keeps_its_latin_words_in_their_own_order() {
         "Latin letters keep left-to-right order"
     );
     assert!(first.glyphs.windows(2).all(|pair| pair[1].x < pair[0].x));
+    let caret = |position: u32| {
+        line.caret_stops
+            .iter()
+            .find(|stop| stop.position == position)
+            .expect("a caret stop")
+            .x
+    };
+    assert!(
+        (caret(latin.start) - latin.x).abs() < 0.01,
+        "the caret before a Latin span sits at its left edge"
+    );
+    assert!((caret(latin.start + 1) - latin.glyphs[1].x).abs() < 0.01);
+}
+
+#[test]
+fn a_punctuation_run_between_latin_words_reads_left_to_right() {
+    let mut parts = ooxml_opc::unzip_parts(DECK).unwrap();
+    for (path, bytes) in &mut parts {
+        if path == "ppt/slides/slide1.xml" {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            *bytes = xml
+                .replacen(
+                    r#"<a:pPr lvl="0" /><a:r><a:rPr /><a:t>First level</a:t>"#,
+                    "<a:pPr lvl=\"0\" rtl=\"1\" /><a:r><a:rPr /><a:t>\u{645}\u{631}\u{62d}\u{628}\u{627} Hello</a:t></a:r><a:r><a:rPr b=\"1\" /><a:t>, </a:t></a:r><a:r><a:rPr /><a:t>world \u{628}\u{643}\u{645}</a:t>",
+                    1,
+                )
+                .into_bytes();
+        }
+    }
+    let session = DeckSession::open(&ooxml_opc::rezip_parts(&parts).unwrap(), 2948).unwrap();
+    let list = renderer()
+        .layout_slide(session.package(), &session.snapshot().unwrap(), 0)
+        .unwrap()
+        .display_list;
+    let line = &lines(&list, 3)[0];
+    let find = |needle: &str| {
+        line.runs
+            .iter()
+            .find(|run| run.text.starts_with(needle))
+            .expect("a run")
+    };
+    let (hello, comma, world) = (find("Hello"), find(","), find("world"));
+    assert!(hello.x < comma.x && comma.x < world.x);
+    assert!((hello.x + hello.width - comma.x).abs() < 0.01);
 }
 
 fn clear_bullets(body: &mut TextBody) {

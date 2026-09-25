@@ -3373,9 +3373,11 @@ fn layout_paragraph(
 
 /// Lays a right-to-left line out from its right edge, in bidi visual order:
 /// the runs reverse, except that a stretch of consecutive left-to-right runs
-/// keeps its own order. A right-to-left run mirrors glyph by glyph so it paints
-/// in reading order; a left-to-right run keeps its glyphs and moves as a block.
-/// Caret stops follow the glyphs they sit between.
+/// keeps its own order. A run of spaces or punctuation reads the way its
+/// strong neighbours agree on, else right to left. A right-to-left run mirrors
+/// glyph by glyph so it paints in reading order; a left-to-right run keeps its
+/// glyphs and moves as a block. Each caret stop sits at the leading edge of
+/// the character after it, or at the trailing edge of the line's last run.
 fn mirror_line(
     runs: &mut [PositionedTextRun],
     caret_stops: &mut [CaretStop],
@@ -3383,9 +3385,16 @@ fn mirror_line(
     line_width: f32,
 ) {
     let mirror = 2.0 * line_x + line_width;
-    let ltr: Vec<bool> = runs
-        .iter()
-        .map(|run| direction(&run.text) == Some(false))
+    let strong: Vec<Option<bool>> = runs.iter().map(|run| direction(&run.text)).collect();
+    let ltr: Vec<bool> = (0..runs.len())
+        .map(|position| match strong[position] {
+            Some(rtl) => !rtl,
+            None => {
+                let before = strong[..position].iter().rev().find_map(|value| *value);
+                let after = strong[position + 1..].iter().find_map(|value| *value);
+                before == Some(false) && after == Some(false)
+            }
+        })
         .collect();
     let old: Vec<f32> = runs.iter().map(|run| run.x).collect();
     let mut placed: Vec<f32> = runs.iter().map(|run| mirror - run.width - run.x).collect();
@@ -3405,16 +3414,16 @@ fn mirror_line(
         }
         index = end;
     }
+    let last = runs.len().checked_sub(1);
     for stop in caret_stops.iter_mut() {
         let home = (0..runs.len()).find(|&position| {
             let run = &runs[position];
-            ltr[position]
-                && (stop.position > run.start && stop.position < run.end
-                    || stop.position == run.start && position > 0 && ltr[position - 1])
+            (run.start..run.end).contains(&stop.position)
+                || Some(position) == last && stop.position == run.end
         });
         stop.x = match home {
-            Some(position) => placed[position] + (stop.x - old[position]),
-            None => mirror - stop.x,
+            Some(position) if ltr[position] => placed[position] + (stop.x - old[position]),
+            _ => mirror - stop.x,
         };
     }
     for (position, run) in runs.iter_mut().enumerate() {

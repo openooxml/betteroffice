@@ -964,17 +964,28 @@ function positionedTextChunks(run: PositionedTextRun): Array<{ text: string; x: 
   // A right-to-left run's glyphs step leftward: the canvas orders each tab-free
   // piece itself, drawn from that piece's leftmost glyph.
   if (run.glyphs[1].x < run.glyphs[0].x) {
-    const pieces: Array<{ text: string; x: number }> = [];
-    let start = 0;
-    for (const piece of run.text.split('\t')) {
-      const end = start + piece.length;
-      const xs = run.glyphs
-        .filter((glyph) => glyph.cluster - run.start >= start && glyph.cluster - run.start < end)
-        .map((glyph) => glyph.x);
-      if (piece.length > 0 && xs.length > 0) pieces.push({ text: piece, x: Math.min(...xs) });
-      start = end + 1;
+    const texts = run.text.split('\t');
+    const ends: number[] = [];
+    let end = -1;
+    for (const text of texts) {
+      end += text.length + 1;
+      ends.push(end);
     }
-    return pieces;
+    const lefts = texts.map(() => Infinity);
+    for (const glyph of run.glyphs) {
+      const offset = glyph.cluster - run.start;
+      let low = 0;
+      let high = ends.length - 1;
+      while (low < high) {
+        const middle = (low + high) >> 1;
+        if (ends[middle] < offset) low = middle + 1;
+        else high = middle;
+      }
+      if (offset >= 0 && offset < ends[low]) lefts[low] = Math.min(lefts[low], glyph.x);
+    }
+    return texts.flatMap((text, index) =>
+      text.length > 0 && lefts[index] < Infinity ? [{ text, x: lefts[index] }] : [],
+    );
   }
   const chunks: Array<{ text: string; x: number }> = [];
   let textStart = 0;
