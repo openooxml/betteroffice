@@ -50,7 +50,11 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null
+      "executionFailed": null,
+      "permissionDenied": "Aplikacja hosta nie zezwoliła tej wtyczce na użycie tego polecenia.",
+      "unsupportedPolicy": "Wtyczki nie mogą jeszcze uruchamiać tego polecenia. Użyj zamiast tego pakietu edycji.",
+      "pluginUnavailable": "Wtyczka nie jest już aktywna.",
+      "aborted": "Działanie wtyczki zostało anulowane przed wykonaniem polecenia."
     }
   },
   "editor": {
@@ -77,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "Wtyczki",
+    "panelTabs": "Panele wtyczek",
+    "collapsePanel": "Zwiń {title}",
+    "expandPanel": "Rozwiń {title}"
   }
 }

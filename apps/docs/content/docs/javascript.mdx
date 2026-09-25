@@ -246,6 +246,11 @@ far, checks availability again, and resolves to `executed`, `noop`, `opened`,
 states why in `disabledReason`. The synchronous `api.save()` throws
 `XlsxSaveRefusedError` (`input-pending` or `input-failed`) instead of returning
 bytes without accepted input; `execute("save", null)` waits for it and saves.
+The editor API's `version`, `readCells`, `findText`, `validateEdits` and
+`applyEdits` wait for that input too, and reject with the exported
+`XlsxCommandAdmissionError` when they cannot run: its `code` is `input-failed`
+while a refused entry waits for correction, `gesture-active` during a chart drag
+and `document-replaced` when the workbook is replaced meanwhile.
 `selectCells` and `clearSelection` queue an open entry behind input that is
 still waiting, so it may not have landed when they return.
 The store gates the editor's own UI, not direct
@@ -253,6 +258,112 @@ The store gates the editor's own UI, not direct
 working in the default legacy mode; `mode="commands"` rejects those props. Narrow
 rails move groups into an accessible More menu; wrap other host content in
 `ToolbarOverflow` to give it an entry there.
+
+## Host XLSX editor plugins
+
+`XlsxEditor` installs host-owned tools through the same `plugins`,
+`pluginGrants` and `onPluginError` props as the DOCX editor. A plugin
+created with `defineXlsxPlugin` contributes a docked panel, an overlay on the
+grid and commands, and works through restricted clients:
+
+```tsx
+import { XlsxEditor, defineXlsxPlugin } from "@betteroffice/xlsx-react";
+
+const review = defineXlsxPlugin<{ sheets: number }>({
+  id: "acme.review",
+  createState: () => ({ sheets: 0 }),
+  async onEvent(context, event) {
+    if (event.type !== "load" && event.type !== "document-change") return;
+    const read = await context.read.readCells({ ranges: [] });
+    if (read.ok) context.setState({ sheets: read.sheets.length }, read.version);
+  },
+  panel: {
+    title: "Review",
+    placement: "right",
+    render: ({ context }) => <p>{context.state.sheets} sheets</p>,
+  },
+  commands: [
+    {
+      id: "mark",
+      label: "Mark reviewed",
+      mutatesDocument: true,
+      async execute(context) {
+        const selection = context.snapshot.selection;
+        const version = await context.read.version();
+        if (!selection?.cells || !version.ok || !context.edits) return { ok: true, status: "noop" };
+        const { anchor, focus } = selection.cells;
+        const start = { row: Math.min(anchor.row, focus.row), col: Math.min(anchor.col, focus.col) };
+        const end = { row: Math.max(anchor.row, focus.row), col: Math.max(anchor.col, focus.col) };
+        const result = await context.edits.applyEdits({
+          expectVersion: version.version,
+          steps: [
+            {
+              op: "patchStyle",
+              target: { sheetId: selection.sheetId, range: { kind: "rowCol", start, end } },
+              patch: { fillColor: "#d9ead3" },
+            },
+          ],
+        });
+        return result.ok ? { ok: true, status: "executed" } : { ok: true, status: "noop" };
+      },
+    },
+  ],
+  toolbar: ["mark"],
+});
+
+<XlsxEditor
+  file={bytes}
+  plugins={[review]}
+  pluginGrants={{ "acme.review": { document: "write", editBatches: true } }}
+  onPluginError={(error) => console.error(error.pluginId, error.phase, error.error)}
+/>;
+```
+
+**Lifecycle and grants** follow the DOCX editor: fresh state,
+`initialize` and one `load` event per workbook, then coalesced
+`document-change`, `selection-change`, `mode-change` (with `readOnly`),
+`layout-change` and `grants-change` events. `document-change` comes from the
+workbook's committed versions after recalculation, so typing, commands,
+batches, undo, redo and remote updates each produce one, and refusals or no-ops
+none. Replacing the workbook, removing the plugin, changing its `revision`,
+unmounting or a failure ends the activation and runs its cleanups once. Without
+a grant a plugin reads (`read.version`, `readCells`, `findText`,
+`validateEdits`) and navigates; built-in commands need an allowlisted id,
+mutating ones refuse with `unsupported-policy`, and `applyEdits` needs
+`document: "write"` and `editBatches`. Grants and `readOnly` are checked again
+right before each change. Each client call waits for pending input in order
+with it; plugin handlers run outside that queue.
+
+**Selection and navigation.** `snapshot.selection` names the active sheet
+(session `sheetId` and zero-based `sheetIndex`), the selected cells with their
+`anchor`/`focus` direction and a selected chart's id.
+`navigation.selectCells({ sheetId, selection }, { expectVersion })` activates
+the sheet, selects the cells and reveals the focus cell;
+`navigation.scrollToCell({ sheetId, row, col }, { expectVersion, align })`
+reveals a cell (`nearest`, `start` or `center`) and keeps the selection, which
+is cleared when the cell is on another sheet. Both keep keyboard focus unless
+`selectCells` gets `focus: true`, and refuse with `stale-version` or
+`missing-target` rather than retarget a changed workbook. Sheet ids and versions
+are session-scoped.
+
+**Coordinates.** `context.geometry` exists only while the canvas shows a
+painted frame of the current version. `layout` names its `sheetId`, `zoom` and
+painted `viewport` in unzoomed sheet pixels, and changes with every scroll,
+zoom and sheet switch. `geometry.getCellRect({ sheetId, row, col })` and
+`getRangeRect({ sheetId, range })` return pixels of the overlay layer, zoomed
+and clipped to the visible grid, frozen panes included; a cell scrolled out of
+view returns null, and merged areas are addressed as ranges.
+`getPositionAtPoint` is null until the editor exposes pointer queries. The
+overlay layer sits on the grid below the editor's selection and cell editor and
+ignores the pointer unless an element sets `pointer-events: auto`. Panels dock
+left, right or bottom of the grid, above the sheet tabs, and become drawers in a
+narrow editor. Place `<XlsxPluginToolbar />` in replacement chrome to keep
+contributed toolbar commands. Plugin shortcuts must use Mod or Alt, or a
+function key; built-in shortcuts win and a clashing plugin shortcut is reported. Keys pressed in plugin chrome are the user's:
+built-in shortcuts act on the editor there, a plugin's text fields keep their
+own editing keys, and no key or click in a contribution reaches the grid.
+Plugins share the page's JavaScript realm, so grants govern the supported API
+rather than sandboxing code, and they are not spreadsheet protection.
 
 ## Use the JavaScript core
 
@@ -355,7 +466,8 @@ and sheet ids belong to one session. Batches do not insert or delete rows,
 columns or sheets, merge cells or move charts, and refuse writes to merged-cell
 followers, array-formula cells and protected sheets. The React editor's
 `onReady` API exposes the same operations, committing pending drafts, nudges and
-pastes first.
+pastes first, and rejecting with `XlsxCommandAdmissionError` when that input
+cannot be written or the workbook is replaced meanwhile.
 
 ## Operation profiles
 
@@ -375,7 +487,7 @@ interaction separately when investigating input-to-paint latency.
 | `@betteroffice/docx-react` | The DOCX editor and viewer as a React component: toolbar, paginated canvas, comments, tracked changes, a command store with composable toolbar parts, flushed version-checked edit batches on its ref, and host-owned plugins with panels, overlays, sidebar items, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/docx-i18n` | UI locale strings and types for the DOCX React editor. |
 | `@betteroffice/xlsx` | Framework-free XLSX core: SpreadsheetML parse and serialize, formula recalculation, version-checked atomic cell batches, grid display lists, hit-testing, PNG export, and reviewable agent proposals. |
-| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, and flushed version-checked edit batches on its `onReady` API. |
+| `@betteroffice/xlsx-react` | The spreadsheet editor and viewer as a React component, with a command store and composable toolbar parts, flushed version-checked edit batches on its `onReady` API, and host-owned plugins with panels, overlays, lifecycle events, and explicitly granted commands and edit batches. |
 | `@betteroffice/xlsx-i18n` | UI locale strings and types for the XLSX React editor. |
 | `@betteroffice/pptx` | Framework-free PPTX core: parsing, editing, masters and layouts, rendering, comments, collaboration, and saving. Untouched slides retain their source bytes. |
 | `@betteroffice/pptx-react` | The slides editor and viewer as a React component. |

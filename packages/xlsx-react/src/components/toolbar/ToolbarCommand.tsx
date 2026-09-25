@@ -6,7 +6,7 @@ import {
   xlsxCommandController,
   type XlsxPendingCommand,
 } from '../../commands/createXlsxCommandStore';
-import { commandLabelKey, commandShortcut } from '../../commands/descriptors';
+import { commandLabelKey, commandShortcut, isPluginCommandId } from '../../commands/descriptors';
 import {
   isHexColor,
   MAX_FONT_POINTS,
@@ -21,6 +21,7 @@ import type {
   XlsxCommandResult,
   XlsxCommandState,
   XlsxCommandStore,
+  XlsxPluginCommandId,
   XlsxSelectCommandId,
 } from '../../commands/types';
 import { useTranslation } from '../../i18n';
@@ -106,15 +107,19 @@ const COLOR_DEFAULTS: Record<ColorCommandId, string> = {
 };
 
 /** Arguments a control binds; required when the command takes arguments. */
-export type ToolbarCommandArgs<K extends XlsxCommandId> = null extends XlsxCommandArgs[K]
-  ? { args?: XlsxCommandArgs[K] }
-  : { args: XlsxCommandArgs[K] };
+export type ToolbarCommandArgs<K extends XlsxCommandId | XlsxPluginCommandId> =
+  K extends XlsxCommandId
+    ? null extends XlsxCommandArgs[K]
+      ? { args?: XlsxCommandArgs[K] }
+      : { args: XlsxCommandArgs[K] }
+    : { args?: null };
 
-export type ToolbarCommandButtonProps<K extends XlsxCommandId> = {
+/** A built-in or contributed command; a contributed one renders nothing while inactive. */
+export type ToolbarCommandButtonProps<K extends XlsxCommandId | XlsxPluginCommandId> = {
   id: K;
   /** Button content; defaults to the command's icon, or its label when it has none. */
   children?: ReactNode;
-  /** Accessible name; defaults to the localized label for the bound arguments. */
+  /** Accessible name; defaults to the localized or contributed command label. */
   label?: string;
   className?: string;
 } & ToolbarCommandArgs<K>;
@@ -124,10 +129,10 @@ export interface ToolbarCommandSelectProps<K extends XlsxSelectCommandId> {
   className?: string;
 }
 
-export interface ToolbarCommandProps<K extends XlsxCommandId> {
+export interface ToolbarCommandProps<K extends XlsxCommandId | XlsxPluginCommandId> {
   id: K;
   /** Binds arguments; omit to render the command's full built-in control. */
-  args?: XlsxCommandArgs[K];
+  args?: K extends XlsxCommandId ? XlsxCommandArgs[K] : null;
   className?: string;
 }
 
@@ -367,7 +372,58 @@ function useCommandOverflow<K extends XlsxCommandId>(
 }
 
 /** A button bound to one command, showing its pressed and disabled state. */
-export function ToolbarCommandButton<K extends XlsxCommandId>(props: ToolbarCommandButtonProps<K>) {
+export function ToolbarCommandButton<K extends XlsxCommandId | XlsxPluginCommandId>(
+  props: ToolbarCommandButtonProps<K>
+) {
+  if (isPluginCommandId(props.id)) {
+    return (
+      <PluginCommandButton
+        id={props.id}
+        label={props.label}
+        className={props.className}
+      >
+        {props.children}
+      </PluginCommandButton>
+    );
+  }
+  const Button = BuiltInCommandButton as ComponentType<ToolbarCommandButtonProps<XlsxCommandId>>;
+  return <Button {...(props as ToolbarCommandButtonProps<XlsxCommandId>)} />;
+}
+
+function PluginCommandButton({
+  id,
+  label,
+  className,
+  children,
+}: {
+  id: XlsxPluginCommandId;
+  label?: string;
+  className?: string;
+  children?: ReactNode;
+}) {
+  const command = useXlsxCommand(id);
+  if (command.descriptor === null) return null;
+  const state = command.state;
+  const name = label ?? command.label;
+  const toggle = state.active !== undefined;
+  return (
+    <ToolbarButtonBase
+      active={toggle ? state.active : undefined}
+      toggle={toggle}
+      disabled={!state.enabled}
+      description={state.enabled ? undefined : state.disabledReason.message}
+      title={name}
+      shortcut={command.shortcut}
+      className={className}
+      style={children ? undefined : { padding: '0 8px' }}
+      onClick={() => void command.execute()}
+    >
+      {children ?? name}
+    </ToolbarButtonBase>
+  );
+}
+
+function BuiltInCommandButton<K extends XlsxCommandId>(props: ToolbarCommandButtonProps<K>) {
   const { id, children, label, className } = props;
   const args = (props as { args?: XlsxCommandArgs[K] }).args;
   const store = useXlsxCommands();
@@ -726,8 +782,14 @@ function CommandColorPicker({ id, className }: { id: ColorCommandId; className?:
 }
 
 /** The built-in control of any command, as the default toolbar presents it. */
-export function ToolbarCommand<K extends XlsxCommandId>(props: ToolbarCommandProps<K>) {
+export function ToolbarCommand<K extends XlsxCommandId | XlsxPluginCommandId>(
+  props: ToolbarCommandProps<K>
+) {
   const { id, args, className } = props;
+  if (isPluginCommandId(id)) {
+    const contributed: XlsxPluginCommandId = id;
+    return <ToolbarCommandButton id={contributed} className={className} />;
+  }
   if (args === undefined) {
     if (COLOR_COMMANDS.has(id)) {
       return <CommandColorPicker id={id as ColorCommandId} className={className} />;

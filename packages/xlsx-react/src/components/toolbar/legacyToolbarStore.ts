@@ -1,6 +1,11 @@
 import type { TFunction } from '@betteroffice/xlsx-i18n';
-import { XLSX_COMMAND_DESCRIPTORS, XLSX_COMMAND_IDS } from '../../commands/descriptors';
 import {
+  isPluginCommandId,
+  XLSX_COMMAND_DESCRIPTORS,
+  XLSX_COMMAND_IDS,
+} from '../../commands/descriptors';
+import {
+  commandReason,
   DEFAULT_FONT_FAMILIES,
   DEFAULT_FONT_SIZES,
   evaluateXlsxCommand,
@@ -161,14 +166,22 @@ export function createLegacyToolbarStore(
   const env = legacyEnvironment(props, t);
   const snapshots = new Map<string, XlsxCommandState>();
   const evaluate = <K extends XlsxCommandId>(id: K, args?: XlsxCommandArgs[K]) => {
+    if (isPluginCommandId(id)) {
+      return {
+        enabled: false,
+        disabledReason: commandReason('unsupported-command', env),
+      } as XlsxCommandState<K>;
+    }
     if (id === 'searchMenus' && !env.hostDisabled?.has(id)) {
       return { enabled: true } as XlsxCommandState<K>;
     }
     return evaluateXlsxCommand(id, args, env);
   };
   return Object.freeze({
-    getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K> {
-      return XLSX_COMMAND_DESCRIPTORS[id] as XlsxCommandDescriptor<K>;
+    getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K> | null {
+      return isPluginCommandId(id)
+        ? null
+        : (XLSX_COMMAND_DESCRIPTORS[id] as XlsxCommandDescriptor<K>);
     },
     getState<K extends XlsxCommandId>(id: K, args?: XlsxCommandArgs[K]): XlsxCommandState<K> {
       const key = args === undefined ? id : `${id}\u0000${JSON.stringify(args)}`;
@@ -199,7 +212,7 @@ export function createLegacyToolbarStore(
       }
       return { ok: true, status: 'requested' };
     },
-  });
+  }) as XlsxCommandStore;
 }
 
 type CommandCall = { [K in XlsxCommandId]: { id: K; args: XlsxCommandArgs[K] } }[XlsxCommandId];

@@ -50,7 +50,11 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null
+      "executionFailed": null,
+      "permissionDenied": "Die Host-Anwendung hat diesem Plugin diesen Befehl nicht erlaubt.",
+      "unsupportedPolicy": "Plugins können diesen Befehl noch nicht ausführen. Verwenden Sie stattdessen einen Bearbeitungsstapel.",
+      "pluginUnavailable": "Das Plugin ist nicht mehr aktiv.",
+      "aborted": "Die Plugin-Aktion wurde abgebrochen, bevor der Befehl ausgeführt wurde."
     }
   },
   "editor": {
@@ -77,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "Plugins",
+    "panelTabs": "Plugin-Bereiche",
+    "collapsePanel": "{title} einklappen",
+    "expandPanel": "{title} ausklappen"
   }
 }

@@ -140,7 +140,10 @@ export type XlsxCommandDisabledCode =
   | 'proposal-not-found'
   | 'host-disabled'
   | 'unsupported-command'
-  | 'invalid-arguments';
+  | 'invalid-arguments'
+  | 'permission-denied'
+  | 'unsupported-policy'
+  | 'plugin-unavailable';
 
 /** Why an executed command did not complete. */
 export type XlsxCommandFailureCode =
@@ -151,7 +154,8 @@ export type XlsxCommandFailureCode =
   | 'gesture-active'
   | 'proposal-stale'
   | 'render-failed'
-  | 'execution-failed';
+  | 'execution-failed'
+  | 'aborted';
 
 /** One choice of a selector command. */
 export interface XlsxCommandOption<K extends XlsxCommandId = XlsxCommandId> {
@@ -195,12 +199,31 @@ export type XlsxCommandResult =
   | { ok: true; status: XlsxCommandStatus }
   | { ok: false; failure: CommandReason<XlsxCommandFailureCode> };
 
+/** A command a plugin contributes, registered as `plugin:<pluginId>/<localId>`. */
+export type XlsxPluginCommandId = `plugin:${string}/${string}`;
+
+/** Static description of a contributed command. */
+export interface XlsxPluginCommandDescriptor {
+  id: XlsxPluginCommandId;
+  label: string;
+  mutatesDocument: boolean;
+  shortcuts: readonly { chord: string; args: null }[];
+}
+
+/** State of a contributed command; the plugin chooses its own disabled codes. */
+export type XlsxPluginCommandState = CommandState;
+
 /** The command authority of one editor, shared by built-in and host chrome. */
 export interface XlsxCommandStore {
   getDescriptor<K extends XlsxCommandId>(id: K): XlsxCommandDescriptor<K>;
+  /** Null while no active plugin contributes `id`. */
+  getDescriptor(id: XlsxPluginCommandId): XlsxPluginCommandDescriptor | null;
   /** Snapshots are stable until the state changes; pass `args` to evaluate one option. */
   getState<K extends XlsxCommandId>(id: K, args?: XlsxCommandArgs[K]): XlsxCommandState<K>;
+  getState(id: XlsxPluginCommandId, args?: null): XlsxPluginCommandState;
   subscribe(listener: () => void): () => void;
   /** Runs after input accepted before the call; availability is checked again first. */
   execute<K extends XlsxCommandId>(id: K, args: XlsxCommandArgs[K]): Promise<XlsxCommandResult>;
+  /** Runs a contributed command with its plugin's own clients, outside the input queue. */
+  execute(id: XlsxPluginCommandId, args: null): Promise<XlsxCommandResult>;
 }

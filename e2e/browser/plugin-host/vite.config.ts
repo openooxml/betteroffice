@@ -7,7 +7,7 @@ const fromReact = createRequire(resolve(root, 'packages/docx-react/package.json'
 const tailwind = fromReact('tailwindcss');
 const autoprefixer = fromReact('autoprefixer');
 
-/** Serves the plugin-host harness against the package sources. */
+/** Serves the plugin-host harnesses against the package sources. */
 export default defineConfig({
   root: import.meta.dirname,
   resolve: {
@@ -22,6 +22,16 @@ export default defineConfig({
       },
       { find: /^@betteroffice\/docx$/, replacement: resolve(root, 'packages/docx/src/core.ts') },
       { find: /^@betteroffice\/docx\/(.*)$/, replacement: resolve(root, 'packages/docx/src/$1') },
+      {
+        find: /^@betteroffice\/xlsx-react$/,
+        replacement: resolve(root, 'packages/xlsx-react/src/index.ts'),
+      },
+      {
+        find: /^@betteroffice\/xlsx-i18n$/,
+        replacement: resolve(root, 'packages/xlsx-i18n/src/index.ts'),
+      },
+      { find: /^@betteroffice\/xlsx$/, replacement: resolve(root, 'packages/xlsx/src/index.ts') },
+      { find: /^@betteroffice\/xlsx\/(.*)$/, replacement: resolve(root, 'packages/xlsx/src/$1') },
     ],
   },
   css: {

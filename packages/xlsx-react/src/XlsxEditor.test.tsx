@@ -26,7 +26,6 @@ import type {
   WorkbookHandle,
   XlsxEditResult,
 } from '@betteroffice/xlsx';
-import { XlsxCommandAdmissionError } from './commands/createXlsxCommandStore';
 import { isMacPlatform } from './commands/descriptors';
 import { useXlsxCommands } from './commands/hooks';
 import type {
@@ -37,6 +36,7 @@ import type {
 } from './commands/types';
 import { EditorToolbar } from './components/EditorToolbar';
 import { ToolbarCommandButton } from './components/toolbar/ToolbarCommand';
+import { XlsxCommandAdmissionError } from './index';
 import {
   XlsxEditor,
   XlsxSaveRefusedError,
@@ -2235,53 +2235,47 @@ describe('XlsxEditor commands', () => {
   });
 
   it('places host chrome by the toolbar and showToolbar props', async () => {
-    const originalHeight = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'offsetHeight');
-    Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-      configurable: true,
-      get(this: HTMLElement) {
-        return this.dataset.testid === 'xlsx-toolbar' ? (this.firstElementChild ? 60 : 0) : 0;
-      },
-    });
-    try {
-      const host = (
-        <EditorToolbar mode="commands">
-          <EditorToolbar.Toolbar>
-            <ToolbarCommandButton id="undo" />
-          </EditorToolbar.Toolbar>
-          <EditorToolbar.FormulaBar />
-        </EditorToolbar>
-      );
-      const editor = await mountCommands({ toolbar: host, readOnly: true });
-      expect(editor.view.getByTestId('xlsx-toolbar')).toBeDefined();
-      expect(editor.view.getByTestId('xlsx-formula-input')).toBeDefined();
-      expect(editor.view.queryByTestId('xlsx-save')).toBeNull();
-      await editor.execute('proposalsPanel', { open: true });
-      expect(editor.view.getByTestId('xlsx-proposals-panel').style.top).toBe('64px');
+    const host = (
+      <EditorToolbar mode="commands">
+        <EditorToolbar.Toolbar>
+          <ToolbarCommandButton id="undo" />
+        </EditorToolbar.Toolbar>
+        <EditorToolbar.FormulaBar />
+      </EditorToolbar>
+    );
+    const editor = await mountCommands({ toolbar: host, readOnly: true });
+    expect(editor.view.getByTestId('xlsx-toolbar')).toBeDefined();
+    expect(editor.view.getByTestId('xlsx-formula-input')).toBeDefined();
+    expect(editor.view.queryByTestId('xlsx-save')).toBeNull();
+    await editor.execute('proposalsPanel', { open: true });
+    const workspace = editor.view.getByTestId('xlsx-workspace');
+    const panel = editor.view.getByTestId('xlsx-proposals-panel');
+    expect(workspace.contains(panel)).toBe(true);
+    expect(panel.style.top).toBe('4px');
+    expect(
+      editor.view.getByTestId('xlsx-toolbar').compareDocumentPosition(workspace) &
+        Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
 
-      await act(async () => editor.rerender({ toolbar: null, readOnly: false }));
-      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
-      await waitFor(() =>
-        expect(editor.view.getByTestId('xlsx-proposals-panel').style.top).toBe('4px')
-      );
+    await act(async () => editor.rerender({ toolbar: null, readOnly: false }));
+    expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+    expect(workspace.contains(editor.view.getByTestId('xlsx-proposals-panel'))).toBe(true);
 
-      const bar = (
-        <EditorToolbar mode="commands">
-          <EditorToolbar.Toolbar>
-            <ToolbarCommandButton id="bold" />
-          </EditorToolbar.Toolbar>
-        </EditorToolbar>
-      );
-      await act(async () => editor.rerender({ toolbar: bar, readOnly: false }));
-      expect(editor.view.queryByTestId('xlsx-formula-input')).toBeNull();
-      await act(async () => editor.rerender({ toolbar: bar, showToolbar: false, readOnly: false }));
-      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
-      await act(async () => editor.rerender({ toolbar: undefined, readOnly: true }));
-      expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
-      await act(async () => editor.rerender({ toolbar: undefined, readOnly: false }));
-      expect(editor.view.getByTestId('xlsx-save')).toBeDefined();
-    } finally {
-      if (originalHeight) Object.defineProperty(HTMLElement.prototype, 'offsetHeight', originalHeight);
-    }
+    const bar = (
+      <EditorToolbar mode="commands">
+        <EditorToolbar.Toolbar>
+          <ToolbarCommandButton id="bold" />
+        </EditorToolbar.Toolbar>
+      </EditorToolbar>
+    );
+    await act(async () => editor.rerender({ toolbar: bar, readOnly: false }));
+    expect(editor.view.queryByTestId('xlsx-formula-input')).toBeNull();
+    await act(async () => editor.rerender({ toolbar: bar, showToolbar: false, readOnly: false }));
+    expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+    await act(async () => editor.rerender({ toolbar: undefined, readOnly: true }));
+    expect(editor.view.queryByTestId('xlsx-toolbar')).toBeNull();
+    await act(async () => editor.rerender({ toolbar: undefined, readOnly: false }));
+    expect(editor.view.getByTestId('xlsx-save')).toBeDefined();
   });
 });
 
@@ -2411,7 +2405,11 @@ describe('XlsxEditor edit batches', () => {
       await act(async () => clipboard.resolve('late'));
       const replaced = await settled(() => outcome);
       expect(replaced).toBeInstanceOf(XlsxCommandAdmissionError);
-      expect((replaced as XlsxCommandAdmissionError).code).toBe('document-replaced');
+      expect(replaced).toMatchObject({
+        name: 'XlsxCommandAdmissionError',
+        code: 'document-replaced',
+        message: 'The workbook was replaced',
+      });
     } finally {
       clipboard.restore();
     }

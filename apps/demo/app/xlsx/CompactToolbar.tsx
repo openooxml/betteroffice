@@ -6,6 +6,7 @@ import {
   ToolbarCommandButton,
   ToolbarCommandSelect,
   ToolbarGroup,
+  XlsxPluginToolbar,
 } from "@betteroffice/xlsx-react";
 
 /** A task-focused toolbar composed only from public parts, in the host's order. */
@@ -18,6 +19,7 @@ export function CompactToolbar({ onShare }: { onShare(): void }) {
           <ToolbarCommandButton id="bold" />
         </ToolbarGroup>
         <ToolbarCommandButton id="undo" />
+        <XlsxPluginToolbar />
         <ToolbarButton title="Copy link" onClick={onShare}>
           Copy link
         </ToolbarButton>

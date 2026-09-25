@@ -50,7 +50,11 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null
+      "executionFailed": null,
+      "permissionDenied": "Ana uygulama bu eklentinin bu komutu kullanmasına izin vermedi.",
+      "unsupportedPolicy": "Eklentiler bu komutu henüz çalıştıramaz. Bunun yerine bir düzenleme toplu işlemi kullanın.",
+      "pluginUnavailable": "Eklenti artık etkin değil.",
+      "aborted": "Eklenti eylemi komut çalışmadan önce iptal edildi."
     }
   },
   "editor": {
@@ -77,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "Eklentiler",
+    "panelTabs": "Eklenti panelleri",
+    "collapsePanel": "{title} daralt",
+    "expandPanel": "{title} genişlet"
   }
 }

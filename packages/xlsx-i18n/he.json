@@ -50,7 +50,11 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null
+      "executionFailed": null,
+      "permissionDenied": "היישום המארח לא התיר לתוסף זה להשתמש בפקודה זו.",
+      "unsupportedPolicy": "תוספים עדיין לא יכולים להריץ פקודה זו. השתמש במקום זאת באצוות עריכה.",
+      "pluginUnavailable": "התוסף אינו פעיל עוד.",
+      "aborted": "פעולת התוסף בוטלה לפני שהפקודה רצה."
     }
   },
   "editor": {
@@ -77,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "תוספים",
+    "panelTabs": "חלוניות תוספים",
+    "collapsePanel": "כווץ את {title}",
+    "expandPanel": "הרחב את {title}"
   }
 }

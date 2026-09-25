@@ -4,6 +4,7 @@ import type {
   XlsxCommandDescriptor,
   XlsxCommandId,
   XlsxCommandShortcut,
+  XlsxPluginCommandId,
 } from './types';
 
 type DescriptorTable = { readonly [K in XlsxCommandId]: XlsxCommandDescriptor<K> };
@@ -62,6 +63,13 @@ export function isXlsxCommandId(value: unknown): value is XlsxCommandId {
   );
 }
 
+const PLUGIN_COMMAND_ID =
+  /^plugin:[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
+
+export function isPluginCommandId(value: unknown): value is XlsxPluginCommandId {
+  return typeof value === 'string' && PLUGIN_COMMAND_ID.test(value);
+}
+
 /** The label of a command bound to `args`, such as "Format as currency". */
 export function commandLabelKey<K extends XlsxCommandId>(
   id: K,
@@ -118,6 +126,22 @@ function parseChord(chord: string): ParsedChord {
   };
 }
 
+const MODIFIERS: ReadonlySet<string> = new Set(['Mod', 'Shift', 'Alt']);
+
+/** `chord` in canonical form (`Mod+Alt+Shift+key`), or null when it is not a chord. */
+export function normalizeChord(chord: string): string | null {
+  if (typeof chord !== 'string' || chord.length === 0) return null;
+  const parts = chord.split('+');
+  const modifiers =
+    parts.length > 1 && parts[parts.length - 1] === '' ? parts.slice(0, -2) : parts.slice(0, -1);
+  if (!modifiers.every((modifier) => MODIFIERS.has(modifier))) return null;
+  const parsed = parseChord(chord);
+  if (parsed.key.length === 0) return null;
+  return [parsed.mod && 'Mod', parsed.alt && 'Alt', parsed.shift && 'Shift', parsed.key]
+    .filter(Boolean)
+    .join('+');
+}
+
 export function isMacPlatform(): boolean {
   return typeof navigator !== 'undefined' && /Mac|iPod|iPhone|iPad/.test(navigator.platform);
 }
@@ -169,6 +193,48 @@ export const XLSX_COMMAND_BINDINGS: readonly { id: XlsxCommandId; shortcut: Xlsx
       }))
     )
   );
+
+/** Canonical chords of the built-in commands, which always win over contributed ones. */
+export const BUILT_IN_CHORDS: ReadonlySet<string> = new Set(
+  XLSX_COMMAND_BINDINGS.map(({ shortcut }) => normalizeChord(shortcut.chord)!)
+);
+
+const FUNCTION_KEY = /^f(?:[1-9]|1[0-2])$/;
+
+/** Whether a canonical chord may be a plugin shortcut: it uses Mod or Alt, or is F1 to F12. */
+export function isPluginChord(canonical: string): boolean {
+  const parsed = parseChord(canonical);
+  return parsed.mod || parsed.alt || FUNCTION_KEY.test(parsed.key);
+}
+
+const GRID_KEYS: ReadonlySet<string> = new Set([
+  'arrowup',
+  'arrowdown',
+  'arrowleft',
+  'arrowright',
+  'tab',
+  'enter',
+  'escape',
+  'home',
+  'end',
+  'pageup',
+  'pagedown',
+  'f2',
+  'delete',
+  'backspace',
+]);
+const GRID_MOD_KEYS: ReadonlySet<string> = new Set(['a', 'c', 'v', 'x']);
+
+/**
+ * Whether the grid consumes a canonical chord before shortcuts are dispatched: navigation and
+ * editing keys with any modifiers, typing, select all and the clipboard.
+ */
+export function gridOwnsChord(canonical: string): boolean {
+  const parsed = parseChord(canonical);
+  if (GRID_KEYS.has(parsed.key)) return true;
+  if (parsed.mod) return GRID_MOD_KEYS.has(parsed.key);
+  return !parsed.alt && parsed.key.length === 1;
+}
 
 /** The command a keydown event invokes, if any. */
 export function commandForEvent(

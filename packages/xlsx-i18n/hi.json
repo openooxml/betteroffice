@@ -50,7 +50,11 @@
       "gestureActive": null,
       "proposalStale": null,
       "renderFailed": null,
-      "executionFailed": null
+      "executionFailed": null,
+      "permissionDenied": "होस्ट एप्लिकेशन ने इस प्लगइन को यह कमांड उपयोग करने की अनुमति नहीं दी है।",
+      "unsupportedPolicy": "प्लगइन अभी यह कमांड नहीं चला सकते। इसके बजाय संपादन बैच का उपयोग करें।",
+      "pluginUnavailable": "प्लगइन अब सक्रिय नहीं है।",
+      "aborted": "कमांड चलने से पहले प्लगइन की कार्रवाई रद्द कर दी गई।"
     }
   },
   "editor": {
@@ -77,5 +81,11 @@
     "cellLabelSelected": null,
     "emptyCellLabel": null,
     "emptyCellLabelSelected": null
+  },
+  "plugins": {
+    "toolbarGroup": "प्लगइन",
+    "panelTabs": "प्लगइन पैनल",
+    "collapsePanel": "{title} संक्षिप्त करें",
+    "expandPanel": "{title} विस्तृत करें"
   }
 }
