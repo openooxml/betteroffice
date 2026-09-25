@@ -8,8 +8,9 @@ use crate::inline::{
 };
 use crate::paragraph::{
     CommentRange, Paragraph, ParagraphContent, ParagraphPropertyChange, RangeEnd, RangeStart,
-    TrackedChangeInfo, TrackedInline,
+    RawAttribute, TrackedChangeInfo, TrackedInline,
 };
+use crate::paragraph_identity::W14_NAMESPACE;
 use crate::section::SectionProperties;
 use crate::xml::ParseError;
 
@@ -43,20 +44,67 @@ pub fn serialize_paragraph(
     result
 }
 
+/// The prefix a paragraph's Word 2010 attributes take: `w14`, unless the
+/// paragraph rebinds it, then a prefix it binds to that namespace or a fresh
+/// one. Also whether `w14` is rebound.
+fn word_2010_prefix(attributes: &[RawAttribute]) -> (String, bool) {
+    let rebound = attributes
+        .iter()
+        .any(|attribute| attribute.name == "xmlns:w14" && attribute.value.trim() != W14_NAMESPACE);
+    if !rebound {
+        return ("w14".to_owned(), false);
+    }
+    let declared = attributes.iter().find_map(|attribute| {
+        attribute
+            .name
+            .strip_prefix("xmlns:")
+            .filter(|_| attribute.value.trim() == W14_NAMESPACE)
+    });
+    let prefix = declared.map(str::to_owned).unwrap_or_else(|| {
+        (0..)
+            .map(|index| format!("w14p{index}"))
+            .find(|candidate| {
+                !attributes.iter().any(|attribute| {
+                    attribute.name.split_once(':').is_some_and(|(used, local)| {
+                        used == candidate || (used == "xmlns" && local == candidate)
+                    })
+                })
+            })
+            .unwrap_or_default()
+    });
+    (prefix, true)
+}
+
 fn serialize_paragraph_inner(
     paragraph: &Paragraph,
     context: &mut SerializerContext,
 ) -> Result<String, ParseError> {
     let mut writer = XmlWriter::with_capacity(512);
     writer.start_element("w:p");
-    if let Some(value) = nonempty(paragraph.para_id.as_deref()) {
-        writer.attribute("w14:paraId", value);
+    let para_id = nonempty(paragraph.para_id.as_deref());
+    let text_id = nonempty(paragraph.text_id.as_deref());
+    let (prefix, rebound) = word_2010_prefix(&paragraph.extra_attributes);
+    if rebound
+        && (para_id.is_some() || text_id.is_some())
+        && !paragraph
+            .extra_attributes
+            .iter()
+            .any(|attribute| attribute.name == format!("xmlns:{prefix}"))
+    {
+        writer.dynamic_attribute(&format!("xmlns:{prefix}"), W14_NAMESPACE);
     }
-    if let Some(value) = nonempty(paragraph.text_id.as_deref()) {
-        writer.attribute("w14:textId", value);
+    if let Some(value) = para_id {
+        writer.dynamic_attribute(&format!("{prefix}:paraId"), value);
+    }
+    if let Some(value) = text_id {
+        writer.dynamic_attribute(&format!("{prefix}:textId"), value);
     }
     for attribute in &paragraph.extra_attributes {
-        if is_safe_attribute_name(&attribute.name) {
+        let replaced = para_id.is_some()
+            && (attribute.name == "w:paraId"
+                || (!rebound && attribute.name == "w14:paraId")
+                || paragraph.para_id_attribute.as_deref() == Some(attribute.name.as_str()));
+        if !replaced && is_safe_attribute_name(&attribute.name) {
             writer.dynamic_attribute(&attribute.name, &attribute.value);
         }
     }
@@ -938,6 +986,9 @@ mod tests {
         let paragraph = Paragraph {
             node_type: "paragraph".to_owned(),
             para_id: Some("AA&BB\"CC".to_owned()),
+            repeated_para_id: None,
+            para_id_attribute: None,
+            source_ordinal: None,
             text_id: None,
             extra_attributes: Vec::new(),
             formatting: Some(ParagraphFormatting {

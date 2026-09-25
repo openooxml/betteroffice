@@ -18,6 +18,10 @@ pub struct Note {
     pub custom_root_bindings: Vec<crate::paragraph::RawAttribute>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verbatim_xml: Option<String>,
+    /// The occurrence of the first `w:p` inside `verbatim_xml` in its part,
+    /// when the parse records source ordinals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ordinal: Option<u32>,
 }
 
 impl Note {
@@ -60,6 +64,10 @@ pub fn parse_notes(
             }
             bound.to_raw_inline_xml()
         });
+        let source_ordinal = verbatim_xml
+            .as_ref()
+            .filter(|_| parser.budget.records_source_ordinals())
+            .and_then(|_| element.first_paragraph_ordinal());
         notes.push(Note {
             story_type: note_name.to_owned(),
             id: element
@@ -69,6 +77,7 @@ pub fn parse_notes(
             content,
             custom_root_bindings,
             verbatim_xml,
+            source_ordinal,
         });
     }
     Ok(notes)

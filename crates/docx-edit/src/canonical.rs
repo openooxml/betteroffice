@@ -20,8 +20,9 @@
 //! Text projects one [`CanonicalItem::CharItem`] per Unicode scalar (Rust
 //! `char`) — never per UTF-16 code unit and never coalesced into runs; a tab is
 //! an ordinary `"\t"` item. [`CanonicalItem::ParaMark`] excludes the pilcrow's
-//! `_kind` discriminator and its volatile `paraId`, so two documents that
-//! differ only in freshly minted paragraph ids project identical bytes. Every
+//! `_kind` discriminator, its volatile `paraId` and its paragraph identity
+//! bindings, so two documents that differ only in paragraph identities
+//! project identical bytes. Every
 //! other atom — hard breaks, native `noteRef` anchors — is an
 //! [`CanonicalItem::Embed`] whose `_kind` becomes `kind` and whose remaining
 //! entries become `payload`.
@@ -46,6 +47,7 @@ use serde_json::{Map as JsonMap, Value};
 use yrs::types::{ToJson, text::YChange};
 use yrs::{Any, Map, MapRef, Out, ReadTxn, Text, Transact};
 
+use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID};
 use crate::op::OpError;
 use crate::{EditingDoc, KIND_KEY, PARA_ID, is_pilcrow, map_string, story_ref};
 
@@ -108,7 +110,17 @@ pub fn project_story(doc: &EditingDoc, story_id: &str) -> Result<Vec<CanonicalIt
             }
             Out::YMap(map) if is_pilcrow(&map, &txn) => {
                 items.push(CanonicalItem::ParaMark {
-                    ppr: canonical_shared_map(&map, &txn, &[KIND_KEY, PARA_ID]),
+                    ppr: canonical_shared_map(
+                        &map,
+                        &txn,
+                        &[
+                            KIND_KEY,
+                            PARA_ID,
+                            OOXML_PARA_ID,
+                            SOURCE_PARA_ID,
+                            PARA_ORIGIN,
+                        ],
+                    ),
                 });
                 unit += 1;
             }
@@ -201,18 +213,49 @@ fn exclude_cell_story_ids(rows: &mut Value) {
 /// sorted `[start, end)` UTF-16 story-unit intervals. Ordinals come from
 /// comparing covered story units lexicographically, never from comment keys.
 fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u32)>> {
+    let mut groups: Vec<(Vec<u32>, Vec<(u32, u32)>)> = story_comment_anchors(txn, story_id)
+        .into_values()
+        .filter_map(|anchors| {
+            let intervals: Vec<(u32, u32)> = anchors
+                .into_iter()
+                .filter(|(start, end)| start < end)
+                .collect();
+            if intervals.is_empty() {
+                return None;
+            }
+            let intervals = merge_intervals(intervals);
+            let covered = intervals
+                .iter()
+                .flat_map(|&(start, end)| start..end)
+                .collect();
+            Some((covered, intervals))
+        })
+        .collect();
+    // Lexicographic covered-unit order; ties (identical coverage) are interchangeable
+    // in the projection, so any stable outcome is deterministic.
+    groups.sort_by(|left, right| left.0.cmp(&right.0));
+    groups.into_iter().map(|(_, intervals)| intervals).collect()
+}
+
+/// Each comment anchored in `story_id`, by comment key, with the sorted
+/// `(start, end)` UTF-16 story-unit offsets its anchors there resolve to,
+/// carets included.
+pub(crate) fn story_comment_anchors<T: ReadTxn>(
+    txn: &T,
+    story_id: &str,
+) -> BTreeMap<String, Vec<(u32, u32)>> {
+    let mut comments_by_key = BTreeMap::new();
     let Some(comments) = txn.get_map(crate::COMMENTS) else {
-        return Vec::new();
+        return comments_by_key;
     };
-    let mut groups: Vec<(Vec<u32>, Vec<(u32, u32)>)> = Vec::new();
-    for (_, value) in comments.iter(txn) {
+    for (key, value) in comments.iter(txn) {
         let Out::YMap(comment) = value else {
             continue;
         };
         let Some(Out::Any(Any::Array(anchors))) = comment.get(txn, "anchors") else {
             continue;
         };
-        let mut intervals: Vec<(u32, u32)> = Vec::new();
+        let mut offsets: Vec<(u32, u32)> = Vec::new();
         for encoded in anchors.iter() {
             let Ok(anchor) = crate::decode_anchor(encoded) else {
                 continue;
@@ -220,29 +263,18 @@ fn story_comment_groups<T: ReadTxn>(txn: &T, story_id: &str) -> Vec<Vec<(u32, u3
             if anchor.story != story_id {
                 continue;
             }
-            let (Some(start), Some(end)) =
+            if let (Some(start), Some(end)) =
                 (anchor.start.get_offset(txn), anchor.end.get_offset(txn))
-            else {
-                continue;
-            };
-            if start.index < end.index {
-                intervals.push((start.index, end.index));
+            {
+                offsets.push((start.index, end.index));
             }
         }
-        if intervals.is_empty() {
-            continue;
+        if !offsets.is_empty() {
+            offsets.sort_unstable();
+            comments_by_key.insert(key.to_owned(), offsets);
         }
-        let intervals = merge_intervals(intervals);
-        let covered: Vec<u32> = intervals
-            .iter()
-            .flat_map(|&(start, end)| start..end)
-            .collect();
-        groups.push((covered, intervals));
     }
-    // Lexicographic covered-unit order; ties (identical coverage) are interchangeable
-    // in the projection, so any stable outcome is deterministic.
-    groups.sort_by(|left, right| left.0.cmp(&right.0));
-    groups.into_iter().map(|(_, intervals)| intervals).collect()
+    comments_by_key
 }
 
 /// Merges sorted-or-unsorted intervals, coalescing overlapping AND adjacent spans.

@@ -16,6 +16,7 @@ use crate::inline::{
 };
 use crate::media::MediaMap;
 use crate::numbering::{ListRendering, NumberingMap, compute_list_rendering};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::RelationshipMap;
 use crate::section::{SectionProperties, parse_section_properties};
 use crate::shape::{
@@ -147,6 +148,18 @@ pub struct Paragraph {
     pub node_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub para_id: Option<String>,
+    /// Set when `para_id` repeats a paragraph ID that occurs earlier in the
+    /// package; it is still this paragraph's authored identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repeated_para_id: Option<bool>,
+    /// The extra attribute that holds an invalid Word 2010 `paraId` under a
+    /// prefix other than `w14`; a save that sets `para_id` replaces it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub para_id_attribute: Option<String>,
+    /// This paragraph's `w:p` occurrence in its part, when the parse records
+    /// source ordinals.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_ordinal: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text_id: Option<String>,
     /// Attributes the model does not type, kept in authored form so a save
@@ -208,13 +221,15 @@ impl HexIdAllocator {
     }
 }
 
-/// Everything on `w:p` the model does not consume itself.
-fn extra_paragraph_attributes(element: &XmlElement) -> Vec<RawAttribute> {
-    const CONSUMED: [&str; 4] = ["w14:paraId", "w:paraId", "w14:textId", "w:textId"];
+/// Everything on `w:p` the model does not consume itself. A paragraph ID the
+/// model does not take as identity stays here verbatim, so a save keeps it.
+fn extra_paragraph_attributes(element: &XmlElement, para_id: Option<&str>) -> Vec<RawAttribute> {
     element
         .attributes
         .iter()
-        .filter(|(name, _)| !CONSUMED.contains(&name.as_str()))
+        .filter(|(name, _)| {
+            !matches!(name.as_str(), "w14:textId" | "w:textId") && Some(name.as_str()) != para_id
+        })
         .map(|(name, value)| RawAttribute {
             name: name.clone(),
             value: value.clone(),
@@ -239,21 +254,30 @@ pub fn parse_paragraph(
 ) -> Result<Paragraph, ParseError> {
     budget.check_nesting_depth(depth, part)?;
     budget.charge_paragraph(part)?;
+    let para_id = element
+        .para_id_attribute
+        .as_deref()
+        .into_iter()
+        .chain(["paraId", "w:paraId"])
+        .find_map(|name| Some((name, element.attributes.get(name)?.as_str())))
+        .filter(|(_, value)| parse_paragraph_id(value).is_some());
     let mut paragraph = Paragraph {
         node_type: "paragraph".to_owned(),
-        para_id: normalize_hex_id(
-            element
-                .attribute(Some("w14"), "paraId")
-                .or_else(|| element.attribute(Some("w"), "paraId")),
-            ids,
-        ),
+        extra_attributes: extra_paragraph_attributes(element, para_id.map(|(name, _)| name)),
+        para_id: para_id.map(|(_, value)| value.to_owned()),
+        repeated_para_id: None,
+        para_id_attribute: element.para_id_attribute.clone().filter(|name| {
+            name != "w14:paraId" && para_id.map(|(consumed, _)| consumed) != Some(name.as_str())
+        }),
+        source_ordinal: element
+            .paragraph_ordinal
+            .filter(|_| budget.records_source_ordinals()),
         text_id: normalize_hex_id(
             element
                 .attribute(Some("w14"), "textId")
                 .or_else(|| element.attribute(Some("w"), "textId")),
             ids,
         ),
-        extra_attributes: extra_paragraph_attributes(element),
         formatting: None,
         property_changes: None,
         p_pr_ins: None,
@@ -333,6 +357,8 @@ pub fn parse_document_paragraph_properties(
             name: "w:r".to_owned(),
             attributes: Default::default(),
             children: vec![XmlNode::Element(run_properties.clone())],
+            paragraph_ordinal: None,
+            para_id_attribute: None,
         };
         value.run_properties = parse_run(&shell, theme, styles, None).run.formatting;
     }
@@ -620,8 +646,8 @@ fn parse_paragraph_contents(
             // Paragraph properties are handled by the orchestrator.
             "pPr" | "proofErr" | "permStart" | "permEnd" => {}
             _ => {
-                if let Some(node) = crate::inline::raw_foreign_inline(child) {
-                    output.push(ParagraphContent::Inline(node));
+                if let Some(raw) = crate::inline::raw_foreign_node(child, budget) {
+                    output.push(ParagraphContent::Inline(InlineNode::RawXml(Box::new(raw))));
                 }
             }
         }
@@ -912,6 +938,8 @@ fn normalize_deletion_element(element: &XmlElement) -> XmlElement {
     XmlElement {
         name,
         attributes: element.attributes.clone(),
+        paragraph_ordinal: element.paragraph_ordinal,
+        para_id_attribute: element.para_id_attribute.clone(),
         children: element
             .children
             .iter()

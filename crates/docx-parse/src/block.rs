@@ -120,10 +120,8 @@ impl StoryParser<'_, '_> {
                 "p" | "tbl" | "sdt" | "oMath" | "oMathPara"
             );
             if !recognized {
-                if let Some(crate::inline::InlineNode::RawXml(raw)) =
-                    crate::inline::raw_foreign_inline(child)
-                {
-                    content.push(BlockContent::RawXml(Arc::new(*raw)));
+                if let Some(raw) = crate::inline::raw_foreign_node(child, self.budget) {
+                    content.push(BlockContent::RawXml(Arc::new(raw)));
                 }
                 continue;
             }
@@ -630,6 +628,9 @@ fn math_paragraph(element: &XmlElement) -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
         extra_attributes: Vec::new(),
         formatting: None,
@@ -661,6 +662,9 @@ fn empty_paragraph() -> Paragraph {
     Paragraph {
         node_type: "paragraph".to_owned(),
         para_id: None,
+        repeated_para_id: None,
+        para_id_attribute: None,
+        source_ordinal: None,
         text_id: None,
         extra_attributes: Vec::new(),
         formatting: None,

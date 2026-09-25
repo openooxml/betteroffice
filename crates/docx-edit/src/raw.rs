@@ -6,12 +6,18 @@ use std::sync::Arc;
 use yrs::types::text::YChange;
 use yrs::types::{Attrs, Delta};
 use yrs::{
-    Any, Assoc, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
+    Any, Assoc, ClientID, In, IndexedSequence, Map, MapPrelim, MapRef, Out, ReadTxn, Text, TextRef,
     TransactionMut,
 };
 
+use docx_parse::paragraph_identity::parse_paragraph_id;
+
+use crate::identity::{OOXML_PARA_ID, PARA_ORIGIN, SOURCE_PARA_ID, SYNTHETIC};
 use crate::op::{OpError, OpResult};
-use crate::{COMMENTS, EditCtx, EditingDoc, KIND_KEY, anchor_value, out_len, story_ref};
+use crate::{
+    COMMENTS, EditCtx, EditingDoc, KIND_KEY, PARA_ID, PILCROW_KIND, anchor_value, is_pilcrow,
+    map_string, out_len, story_ref,
+};
 
 /// One low-level story mutation. Indices are UTF-16 story units (every embed = 1).
 #[derive(Clone, Debug, PartialEq)]
@@ -28,14 +34,17 @@ pub enum RawOp {
     Format { index: u32, len: u32, attrs: Attrs },
     /// Insert a map-backed embed at `index` with discriminator `kind` (`pilcrow`,
     /// `break`, `opaque`, …) and `payload` map entries. `attrs` are the embed's
-    /// text-level formatting (usually just tracked-change stamps, if any).
+    /// text-level formatting (usually just tracked-change stamps, if any). A
+    /// pilcrow's `ooxmlParaId` binds its Word paragraph ID and is dropped when
+    /// it is not one; its source identity and origin are seeding's to record.
     InsertEmbed {
         index: u32,
         kind: String,
         payload: Vec<(String, Any)>,
         attrs: Attrs,
     },
-    /// Sets one key on the map-backed embed at the index.
+    /// Sets one key on the map-backed embed at the index. A pilcrow's Word
+    /// paragraph ID, source identity and origin are schema-managed.
     SetEmbedAttr { index: u32, key: String, value: Any },
     /// Upserts a side-map comment with sticky UTF-16 ranges.
     SetComment {
@@ -47,6 +56,10 @@ pub enum RawOp {
     },
     /// Remove the side-map comment keyed by `id`. Errors when it does not exist.
     RemoveComment { id: String },
+}
+
+fn valid_paragraph_id(value: &Any) -> bool {
+    matches!(value, Any::String(id) if parse_paragraph_id(id).is_some())
 }
 
 /// Finds the map-backed embed sitting exactly at story `index`.
@@ -71,10 +84,28 @@ fn embed_at<T: ReadTxn>(story: &yrs::TextRef, txn: &T, index: u32) -> OpResult<M
 }
 
 impl EditingDoc {
-    /// Applies raw story operations in one transaction.
+    /// Applies raw story operations in one transaction. A pilcrow they insert
+    /// or re-key is a new paragraph, never the one whose identity it carries:
+    /// in the same transaction it takes a fresh key for a key any paragraph,
+    /// present or deleted, held before, and a fresh Word paragraph ID for an
+    /// ID another paragraph owns or a deleted one reserves.
     pub fn apply_raw_ops(&self, story_id: &str, ops: Vec<RawOp>, ctx: &EditCtx) -> OpResult<()> {
+        let rekeys = ops.iter().any(|op| match op {
+            RawOp::InsertEmbed { kind, .. } => kind == PILCROW_KIND,
+            RawOp::SetEmbedAttr { key, .. } => key == PARA_ID,
+            _ => false,
+        });
         let mut txn = self.transact_for(ctx);
-        apply_raw_ops_to_story(&mut txn, story_id, ops, false)
+        let since = txn.before_state().get(&ClientID::new(self.client_id()));
+        if rekeys {
+            self.with_seen(&txn, |_| ());
+        }
+        let mut rekeyed = Vec::new();
+        apply_raw_ops_to_story(&mut txn, story_id, ops, false, &mut rekeyed)?;
+        if rekeys {
+            self.repair_copies(&mut txn, since, &rekeyed);
+        }
+        Ok(())
     }
 
     pub(crate) fn apply_raw_story_batches(
@@ -82,10 +113,13 @@ impl EditingDoc {
         batches: Vec<(String, Vec<RawOp>)>,
         ctx: &EditCtx,
     ) -> OpResult<()> {
-        let mut txn = self.transact_for(ctx);
-        for (story_id, ops) in batches {
-            apply_raw_ops_to_story(&mut txn, &story_id, ops, true)?;
+        {
+            let mut txn = self.transact_for(ctx);
+            for (story_id, ops) in batches {
+                apply_raw_ops_to_story(&mut txn, &story_id, ops, true, &mut Vec::new())?;
+            }
         }
+        self.forget_seen();
         Ok(())
     }
 }
@@ -300,15 +334,28 @@ impl InsertRun {
     }
 }
 
+/// Applies `ops` to one story, collecting into `rekeyed` the pilcrows whose
+/// `paraId` they set.
 fn apply_raw_ops_to_story(
     txn: &mut TransactionMut<'_>,
     story_id: &str,
     ops: Vec<RawOp>,
     deterministic: bool,
+    rekeyed: &mut Vec<MapRef>,
 ) -> OpResult<()> {
     let story = story_ref(txn, story_id).map_err(OpError::from)?;
     let mut run = InsertRun::new(deterministic);
-    for op in ops {
+    for mut op in ops {
+        if let RawOp::InsertEmbed { kind, payload, .. } = &mut op
+            && kind == PILCROW_KIND
+        {
+            payload.retain(|(key, value)| match key.as_str() {
+                OOXML_PARA_ID => valid_paragraph_id(value),
+                SOURCE_PARA_ID => deterministic && valid_paragraph_id(value),
+                PARA_ORIGIN => deterministic && *value == Any::from(SYNTHETIC),
+                _ => true,
+            });
+        }
         match op {
             RawOp::Insert { index, text, attrs }
                 if run.is_contiguous(index)
@@ -338,7 +385,7 @@ fn apply_raw_ops_to_story(
             }
             op => {
                 run.flush(&story, txn)?;
-                apply_raw_op_absolute(txn, &story, story_id, op)?;
+                apply_raw_op_absolute(txn, &story, story_id, op, rekeyed)?;
             }
         }
     }
@@ -377,6 +424,7 @@ fn apply_raw_op_absolute(
     story: &TextRef,
     story_id: &str,
     op: RawOp,
+    rekeyed: &mut Vec<MapRef>,
 ) -> OpResult<()> {
     match op {
         RawOp::Insert { index, text, attrs } => {
@@ -408,6 +456,16 @@ fn apply_raw_op_absolute(
         }
         RawOp::SetEmbedAttr { index, key, value } => {
             let embed = embed_at(story, txn, index)?;
+            if is_pilcrow(&embed, txn) {
+                if matches!(key.as_str(), OOXML_PARA_ID | SOURCE_PARA_ID | PARA_ORIGIN) {
+                    return Err(OpError::ReservedKey(key));
+                }
+                if key == PARA_ID
+                    && map_string(&embed, txn, PARA_ID).map(Any::from) != Some(value.clone())
+                {
+                    rekeyed.push(embed.clone());
+                }
+            }
             embed.insert(txn, key, value);
         }
         RawOp::SetComment {

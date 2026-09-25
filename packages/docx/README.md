@@ -99,3 +99,42 @@ are also available in automatic mode when a host action needs to be isolated fro
 surrounding typing. Undo/redo close capture as usual. Manual mode controls history
 grouping; it does not defer updates, flush pending input, or provide atomic execution.
 The host must close manual groups so later unrelated edits do not join them.
+
+### Paragraph identities
+
+A session addresses paragraphs by session keys (`YrsLoc.paraId`); Word stores its
+own paragraph ID (`w14:paraId`) in the file. A session key is never saved; a session
+anchor resolves on every replica of one collaborative session, and each seeding open
+(`openDocx`, `seedFromDocx`, `documentToYrs`) starts a new one unless given a fixed
+`generation`, as a deterministic shared seed needs. Source IDs are kept as authored, and every
+paragraph authored in the session gets a fresh, valid ID that avoids every ID the
+package already uses.
+
+`saveYrsDocx(session)` saves a session opened from DOCX bytes and returns each saved
+paragraph's persisted anchor, qualified by its package part:
+
+```ts
+import { createYrsSession, saveYrsDocx } from '@betteroffice/docx/yrs';
+
+const { secondParaId } = session.splitParagraph({ story: 'body', paraId, offset: 12 });
+const saved = await saveYrsDocx(session);
+const anchor = saved.paragraphs.find((p) => p.session.paraId === secondParaId)!.persisted;
+
+const reopened = await createYrsSession();
+reopened.openDocx(saved.bytes, true);
+reopened.resolveParagraphAnchor(anchor); // { status: 'found', anchor: { kind: 'session', … } }
+```
+
+`saved.conflicts` lists saved paragraphs whose ID the live session reassigned while the
+save ran, such as by a duplicate repair after a remote update; their anchors find them in
+the saved bytes only. Source paragraphs without an ID save without one and have no
+persisted anchor.
+`session.persistParagraphIds()` assigns them IDs across every story part, comments,
+note separators and retained XML included, and repairs duplicates: source IDs and
+saved IDs keep theirs over copies. It refuses, changing nothing, rather than guess at
+an ambiguous comment reference. The change is replicated, stays out of undo history,
+and later saves keep it; a save whose stories are otherwise unchanged patches the IDs
+into the source bytes. `session.paragraphIdentities()` lists each paragraph's session,
+persisted and exact-source anchors. A persisted anchor is scoped to the document the
+host chose, repeated source IDs resolve as `ambiguous`, and table, cell and
+content-control identities are not persisted.

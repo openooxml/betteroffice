@@ -48,6 +48,7 @@ fn save_request(original: &[u8]) -> S13SaveRequest {
             modified_by: None,
         },
         selective: None,
+        paragraph_ids: None,
     }
 }
 

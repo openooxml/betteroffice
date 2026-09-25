@@ -43,6 +43,7 @@ pub mod media;
 pub mod notes;
 pub mod numbering;
 pub mod paragraph;
+pub mod paragraph_identity;
 pub mod relationships;
 pub mod s2;
 pub mod s3;

@@ -37,7 +37,7 @@ import { ensureHexPrefix, resolveColorToHex } from '../utils/colorResolver';
 import { mergeTextFormatting } from '../utils/textFormattingMerge';
 import { tableCellParagraphFormatting, tableColumnCount } from './tableParagraphFormatting';
 import type { Style } from '../types/styles';
-import type { YrsRawOp, YrsSession } from './index';
+import type { YrsOpeningOptions, YrsRawOp, YrsSession } from './index';
 import { noteYrsStoriesDirty } from './yrsToDocument';
 import {
   blockSdtAttrsToPayload,
@@ -1525,7 +1525,7 @@ function takeBlockId(cursor: BlockCursor, storyId: string, block: BlockContent):
   if (isRawXml(block)) return null;
   if (block.type === 'paragraph') {
     const index = cursor.paragraph++;
-    return block.paraId || `${storyId}:p${index}`;
+    return (!block.repeatedParaId && block.paraId) || `${storyId}:p${index}`;
   }
   if (block.type === 'table') return `${storyId}:t${cursor.table++}`;
   return blockSdtStoryId(storyId, cursor.sdt++);
@@ -1591,8 +1591,8 @@ function visitStory(
     commentCoverage: new Map(),
   };
   context.plans.push(plan);
-  const blocks =
-    sourceBlocks.length > 0 ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
+  const source = sourceBlocks.length > 0;
+  const blocks = source ? [...sourceBlocks] : [{ type: 'paragraph', content: [] } as Paragraph];
   const cursor: BlockCursor = { paragraph: 0, table: 0, sdt: 0 };
   const resultTableIds = new Map<number, string>();
   let lastKind: 'paragraph' | 'table' | 'blockSdt' | null = null;
@@ -1618,7 +1618,14 @@ function visitStory(
         resultTableIds
       );
       plan.units.push(...paragraph.units);
-      plan.units.push(embedUnit('pilcrow', { ...paragraph.ppr, paraId: blockId }));
+      plan.units.push(
+        embedUnit('pilcrow', {
+          ...paragraph.ppr,
+          ...(source && block.paraId ? { sourceParaId: block.paraId } : {}),
+          ...(source ? {} : { paraOrigin: 'synthetic' }),
+          paraId: blockId,
+        })
+      );
       if (options.includePageBreaks && paragraphHasNonLeadingPageBreak(block)) {
         plan.units.push(embedUnit('pageBreak', {}));
       }
@@ -1688,6 +1695,7 @@ function visitStory(
       embedUnit('pilcrow', {
         hangingIndent: false,
         paraId: `${storyId}:p${cursor.paragraph}`,
+        paraOrigin: 'synthetic',
       })
     );
   }
@@ -1749,11 +1757,15 @@ function seedPlan(session: YrsSession, plan: StoryPlan): void {
  *
  * Stories are `body`, `hf:{rId}`, `fn:{id}`, `en:{id}`, and recursively generated table
  * cell / block-SDT stories. The target session must not already contain any of
- * those story ids.
+ * those story ids. Seeding starts a new opening; see {@link YrsSession.beginOpening}.
  *
  * @public
  */
-export function documentToYrs(session: YrsSession, document: Document): void {
+export function documentToYrs(
+  session: YrsSession,
+  document: Document,
+  options: YrsOpeningOptions = {}
+): void {
   noteYrsStoriesDirty(session, 'all');
   const context: LoweringContext = {
     styleResolver: document.package.styles ? createStyleResolver(document.package.styles) : null,
@@ -1798,4 +1810,5 @@ export function documentToYrs(session: YrsSession, document: Document): void {
 
   for (const plan of context.plans) session.createStory(plan.storyId, '', 'Normal', 'left');
   for (const plan of context.plans) seedPlan(session, plan);
+  session.beginOpening(options.generation);
 }

@@ -1022,48 +1022,80 @@ fn apply_paragraph_style_clears_a_widow_control_off_the_new_style_does_not_autho
     );
 }
 
+fn identities(doc: &EditingDoc) -> Vec<(ParagraphId, Option<String>)> {
+    doc.paragraph_identities()
+        .paragraphs
+        .into_iter()
+        .map(|paragraph| match paragraph.paragraph {
+            ParagraphRef::Session { para_id, .. } => (para_id, paragraph.ooxml_para_id),
+            ParagraphRef::Source(source) => panic!("unexpected source paragraph {source:?}"),
+        })
+        .collect()
+}
+
 #[test]
-fn dedupe_para_ids_first_occurrence_keeps_its_id() {
-    // Concurrent splits of the same paragraph give both new pilcrows the ORIGINAL paraId.
-    let base = EditingDoc::new(1);
-    let original = base
-        .create_story("body", "abcdef", "Normal", "left")
-        .unwrap();
-    let update = base.encode_state_as_update_v1();
-    let a = EditingDoc::new(2);
-    let b = EditingDoc::new(3);
-    a.apply_update_v1(&update).unwrap();
-    b.apply_update_v1(&update).unwrap();
-    a.split_paragraph(&ctx(), Position::new("body", 2), None)
-        .unwrap();
-    b.split_paragraph(&ctx(), Position::new("body", 4), None)
-        .unwrap();
-    let from_a = a.encode_state_as_update_v1();
-    let from_b = b.encode_state_as_update_v1();
-    a.apply_update_v1(&from_b).unwrap();
-    b.apply_update_v1(&from_a).unwrap();
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(
-        ids.iter().filter(|id| **id == original).count(),
-        2,
-        "concurrent splits duplicate the original id"
-    );
-    let renames = a.dedupe_para_ids(DATE).unwrap();
-    assert_eq!(renames.len(), 1);
-    assert_eq!(renames[0].0, original);
-    let ids: Vec<ParagraphId> = a
-        .paragraphs("body")
-        .unwrap()
-        .into_iter()
-        .map(|p| p.para_id)
-        .collect();
-    assert_eq!(ids.iter().filter(|id| **id == original).count(), 1);
-    assert_eq!(ids[0], original, "FIRST occurrence keeps the id");
+fn concurrent_splits_converge_on_unique_identities() {
+    // Each split copies the paragraph's identity onto its new first-half mark.
+    for (a_at, b_at) in [(2, 4), (3, 3)] {
+        let base = EditingDoc::new(1);
+        let original = base
+            .create_story("body", "abcdef", "Normal", "left")
+            .unwrap();
+        base.persist_paragraph_ids().unwrap();
+        let update = base.encode_state_as_update_v1();
+        let a = EditingDoc::new(2);
+        let b = EditingDoc::new(3);
+        a.apply_update_v1(&update).unwrap();
+        b.apply_update_v1(&update).unwrap();
+        let original_id = identities(&a)[0].1.clone().unwrap();
+        a.split_paragraph(&ctx(), Position::new("body", a_at), None)
+            .unwrap();
+        b.split_paragraph(&ctx(), Position::new("body", b_at), None)
+            .unwrap();
+        let from_a = a.encode_state_as_update_v1();
+        let from_b = b.encode_state_as_update_v1();
+        let late = EditingDoc::new(4);
+        late.apply_update_v1(&update).unwrap();
+        late.apply_update_v1(&from_b).unwrap();
+        a.apply_update_v1(&from_b).unwrap();
+        b.apply_update_v1(&from_a).unwrap();
+        assert_eq!(
+            identities(&a),
+            identities(&b),
+            "repairs agree before exchange"
+        );
+        late.apply_update_v1(&from_a).unwrap();
+        assert_eq!(
+            identities(&late),
+            identities(&a),
+            "delivery order is irrelevant"
+        );
+        let from_a = a.encode_state_as_update_v1();
+        let from_b = b.encode_state_as_update_v1();
+        let from_late = late.encode_state_as_update_v1();
+        a.apply_update_v1(&from_b).unwrap();
+        b.apply_update_v1(&from_late).unwrap();
+        b.apply_update_v1(&from_a).unwrap();
+        late.apply_update_v1(&from_a).unwrap();
+        late.apply_update_v1(&from_b).unwrap();
+        a.apply_update_v1(&from_late).unwrap();
+
+        let converged = identities(&a);
+        assert_eq!(converged, identities(&b));
+        assert_eq!(converged, identities(&late));
+        assert_eq!(a.encode_state_vector_v1(), b.encode_state_vector_v1());
+        assert_eq!(a.encode_state_vector_v1(), late.encode_state_vector_v1());
+        assert_eq!(converged.len(), 3);
+        assert_eq!(converged[0], (original.clone(), Some(original_id)));
+        let keys: std::collections::HashSet<_> = converged.iter().map(|(key, _)| key).collect();
+        let ids: std::collections::HashSet<_> = converged
+            .iter()
+            .map(|(_, id)| id.clone().unwrap())
+            .collect();
+        assert_eq!((keys.len(), ids.len()), (3, 3));
+        assert!(a.dedupe_para_ids(DATE).unwrap().is_empty());
+        assert!(b.persist_paragraph_ids().unwrap().assignments.is_empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

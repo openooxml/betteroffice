@@ -1,6 +1,9 @@
 //! Deterministic recursive serializer state.
 
+use std::collections::BTreeSet;
+
 use crate::paragraph::HexIdAllocator;
+use crate::paragraph_identity::{allocate_paragraph_id, format_paragraph_id};
 use crate::xml::ParseError;
 
 use super::s10::SerializerDeterminism;
@@ -12,6 +15,7 @@ pub struct SerializerContext {
     ids: HexIdAllocator,
     now: String,
     rendered_page_breaks: Vec<bool>,
+    paragraph_ids: BTreeSet<u32>,
 }
 
 impl SerializerContext {
@@ -21,7 +25,21 @@ impl SerializerContext {
             ids: HexIdAllocator::from_sha256(&determinism.seed)?,
             now: determinism.now.clone(),
             rendered_page_breaks: Vec::new(),
+            paragraph_ids: BTreeSet::new(),
         })
+    }
+
+    /// Paragraph IDs the output already uses, which [`Self::allocate_paragraph_id`] avoids.
+    pub fn reserve_paragraph_ids(&mut self, ids: impl IntoIterator<Item = u32>) {
+        self.paragraph_ids.extend(ids);
+    }
+
+    /// A paragraph ID for `owner` through the shared deterministic allocator.
+    pub fn allocate_paragraph_id(&mut self, owner: &str) -> String {
+        let id = allocate_paragraph_id(owner, &self.paragraph_ids)
+            .expect("parse budgets keep packages far below 2^31 paragraphs");
+        self.paragraph_ids.insert(id);
+        format_paragraph_id(id)
     }
 
     pub fn allocate_hex_id(&mut self) -> String {

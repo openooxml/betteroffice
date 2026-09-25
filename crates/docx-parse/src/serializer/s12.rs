@@ -335,6 +335,9 @@ mod tests {
             content: vec![crate::block::BlockContent::Paragraph(Arc::new(Paragraph {
                 node_type: "paragraph".to_owned(),
                 para_id: None,
+                repeated_para_id: None,
+                para_id_attribute: None,
+                source_ordinal: None,
                 text_id: None,
                 extra_attributes: Vec::new(),
                 formatting: None,

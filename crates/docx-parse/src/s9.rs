@@ -19,6 +19,7 @@ use crate::media::{MediaFile, build_media_map_with_warnings};
 use crate::notes::Note;
 use crate::numbering::{NumberingDefinitions, parse_numbering};
 use crate::paragraph::{HexIdAllocator, Paragraph};
+use crate::paragraph_identity::parse_paragraph_id;
 use crate::relationships::{Relationship, RelationshipMap, parse_relationships};
 use crate::s8::{find_part, parse_comment_part, parse_note_part, partition_notes};
 use crate::settings::{DocumentSettings, is_valid_utf8_xml_text, parse_settings};
@@ -35,6 +36,8 @@ pub struct S9ParseOptions {
     pub detect_variables: bool,
     pub determinism_seed: Option<String>,
     pub include_canonical: bool,
+    /// Records each paragraph's `w:p` occurrence in its part as `sourceOrdinal`.
+    pub source_ordinals: bool,
 }
 
 impl Default for S9ParseOptions {
@@ -45,6 +48,7 @@ impl Default for S9ParseOptions {
             detect_variables: true,
             determinism_seed: None,
             include_canonical: false,
+            source_ordinals: false,
         }
     }
 }
@@ -208,6 +212,9 @@ fn parse_s9_package(
     limits: &ParseLimits,
 ) -> Result<S9WireEnvelope, ParseError> {
     let mut budget = ParseBudget::new(limits);
+    if options.source_ordinals {
+        budget.record_source_ordinals();
+    }
     let document_path = crate::relationships::office_document_path(parts, &mut budget)?;
     let document_relationships_path = crate::relationships::relationship_part_path(&document_path);
 
@@ -421,7 +428,6 @@ fn parse_s9_package(
         endnotes.as_mut(),
         footnote_separators.as_mut(),
         endnote_separators.as_mut(),
-        &mut ids,
     );
 
     let template_variables = options
@@ -488,7 +494,8 @@ fn parse_s9_package(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Flags every paragraph whose ID repeats one earlier in the package,
+/// comparing values numerically; each keeps its authored ID.
 fn dedupe_package_paragraph_ids(
     body: &mut DocumentBody,
     headers: Option<&mut IndexMap<String, HeaderFooter>>,
@@ -497,15 +504,14 @@ fn dedupe_package_paragraph_ids(
     endnotes: Option<&mut Vec<Note>>,
     footnote_separators: Option<&mut Vec<Note>>,
     endnote_separators: Option<&mut Vec<Note>>,
-    ids: &mut HexIdAllocator,
 ) {
     let mut seen = HashSet::new();
-    dedupe_blocks(&mut body.content, &mut seen, ids);
+    dedupe_blocks(&mut body.content, &mut seen);
     for story in headers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen, ids);
+        dedupe_blocks(&mut story.content, &mut seen);
     }
     for story in footers.into_iter().flat_map(IndexMap::values_mut) {
-        dedupe_blocks(&mut story.content, &mut seen, ids);
+        dedupe_blocks(&mut story.content, &mut seen);
     }
     for note in footnotes
         .into_iter()
@@ -522,52 +528,32 @@ fn dedupe_package_paragraph_ids(
                 .flat_map(|notes| notes.iter_mut()),
         )
     {
-        dedupe_blocks(&mut note.content, &mut seen, ids);
+        dedupe_blocks(&mut note.content, &mut seen);
     }
 }
 
-fn dedupe_blocks(
-    blocks: &mut [BlockContent],
-    seen: &mut HashSet<String>,
-    ids: &mut HexIdAllocator,
-) {
+fn dedupe_blocks(blocks: &mut [BlockContent], seen: &mut HashSet<u32>) {
     for block in blocks {
         match block {
-            BlockContent::Paragraph(paragraph) => {
-                dedupe_paragraph(Arc::make_mut(paragraph), seen, ids)
-            }
+            BlockContent::Paragraph(paragraph) => dedupe_paragraph(Arc::make_mut(paragraph), seen),
             BlockContent::Table(table) => {
                 for row in &mut Arc::make_mut(table).rows {
                     for cell in &mut row.cells {
-                        dedupe_blocks(&mut cell.content, seen, ids);
+                        dedupe_blocks(&mut cell.content, seen);
                     }
                 }
             }
-            BlockContent::BlockSdt(sdt) => {
-                dedupe_blocks(&mut Arc::make_mut(sdt).content, seen, ids)
-            }
+            BlockContent::BlockSdt(sdt) => dedupe_blocks(&mut Arc::make_mut(sdt).content, seen),
             BlockContent::RawXml(_) => {}
         }
     }
 }
 
-fn dedupe_paragraph(
-    paragraph: &mut Paragraph,
-    seen: &mut HashSet<String>,
-    ids: &mut HexIdAllocator,
-) {
-    let Some(current) = paragraph.para_id.as_ref() else {
-        return;
-    };
-    if seen.contains(current) {
-        let mut replacement = ids.allocate();
-        while seen.contains(&replacement) {
-            replacement = ids.allocate();
-        }
-        paragraph.para_id = Some(replacement);
-    }
-    if let Some(id) = &paragraph.para_id {
-        seen.insert(id.clone());
+fn dedupe_paragraph(paragraph: &mut Paragraph, seen: &mut HashSet<u32>) {
+    if let Some(id) = paragraph.para_id.as_deref().and_then(parse_paragraph_id)
+        && !seen.insert(id)
+    {
+        paragraph.repeated_para_id = Some(true);
     }
 }
 
@@ -734,7 +720,7 @@ mod tests {
         let parts = vec![
             (
                 "word/document.xml".to_owned(),
-                br#"<w:document xmlns:w="w" xmlns:w14="w14"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
+                br#"<w:document xmlns:w="w" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body><w:p w14:paraId="00000001"><w:r><w:t>{name}</w:t></w:r></w:p><w:p w14:paraId="00000001"/></w:body></w:document>"#.to_vec(),
             ),
             (
                 "word/header1.xml".to_owned(),
@@ -750,6 +736,7 @@ mod tests {
                 detect_variables: true,
                 determinism_seed: None,
                 include_canonical: true,
+                source_ordinals: false,
             },
         )
         .unwrap();
@@ -766,7 +753,11 @@ mod tests {
             panic!("paragraph")
         };
         assert_eq!(first.para_id.as_deref(), Some("00000001"));
-        assert_ne!(first.para_id, second.para_id);
+        assert_eq!(second.para_id.as_deref(), Some("00000001"));
+        assert_eq!(
+            (first.repeated_para_id, second.repeated_para_id),
+            (None, Some(true))
+        );
         assert_eq!(parsed.canonical_sha256.as_deref().unwrap().len(), 64);
     }
 }

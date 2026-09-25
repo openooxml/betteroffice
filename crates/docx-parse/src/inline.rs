@@ -858,6 +858,10 @@ pub struct RawInlineXml {
     #[serde(rename = "type")]
     pub node_type: RawInlineXmlType,
     pub xml: String,
+    /// The occurrence of the first `w:p` inside `xml` in its part, when the
+    /// parse records source ordinals.
+    #[serde(rename = "sourceOrdinal", skip_serializing_if = "Option::is_none")]
+    pub source_ordinal: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -873,6 +877,21 @@ const MODELLED_PREFIXES: [&str; 26] = [
     "w16cid", "w16du", "w16sdtdh", "w16sdtfl", "w16se", "wne", "wpc", "wpg", "wpi", "wps", "xml",
 ];
 
+/// [`raw_foreign_inline`] carrying the source ordinal of its first paragraph
+/// when the parse records them.
+pub(crate) fn raw_foreign_node(
+    element: &crate::xml::XmlElement,
+    budget: &crate::xml::ParseBudget<'_>,
+) -> Option<RawInlineXml> {
+    let InlineNode::RawXml(mut raw) = raw_foreign_inline(element)? else {
+        return None;
+    };
+    if budget.records_source_ordinals() {
+        raw.source_ordinal = element.first_paragraph_ordinal();
+    }
+    Some(*raw)
+}
+
 pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<InlineNode> {
     let prefix = match element.name.split_once(':') {
         Some((prefix, _)) => prefix,
@@ -884,6 +903,7 @@ pub(crate) fn raw_foreign_inline(element: &crate::xml::XmlElement) -> Option<Inl
     Some(InlineNode::RawXml(Box::new(RawInlineXml {
         node_type: RawInlineXmlType::RawXml,
         xml: element.to_raw_inline_xml(),
+        source_ordinal: None,
     })))
 }
 
