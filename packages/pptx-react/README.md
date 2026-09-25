@@ -146,6 +146,28 @@ UTF-16 `position`. It uses the current slide and canvas bounds without changing
 focus or selection. Outside content, unavailable geometry, stale handles, and
 proposal previews return `null`. Use `api.refresh()` after core mutations.
 
+`api.readContent()`, `api.findText()`, `api.validateEdits()` and
+`api.applyEdits()` run the core's version-checked edit batches after flushing
+pending input, and `api.version()` returns the flushed session version:
+
+```ts
+const read = await api.readContent();
+if (read.ok) {
+  const result = await api.applyEdits({
+    expectVersion: read.version,
+    steps: [{ op: 'setSlideNotes', target: { slideId: read.slides[0].id }, text: 'Opening' }],
+  });
+  if (!result.ok) console.warn(result.failure.code);
+}
+```
+
+An applied batch refreshes the slides, history and proposals once and calls
+`onChange`; refusals and no-op batches refresh nothing. A refusal never rolls
+back input the flush committed, so an edit that lands between the read and the
+batch refuses with `stale-version`. Read-only editors refuse `validateEdits` and
+`applyEdits` with `read-only`, and the promises reject when the presentation is
+replaced while input flushes.
+
 ## What works today
 
 - Slide rendering with Rust layout and text shaping, painted onto canvas

@@ -14,6 +14,7 @@ use yrs::{
     Update, WriteTxn,
 };
 
+mod batch;
 mod comments;
 mod deck;
 mod effects;
@@ -24,13 +25,26 @@ mod proposals;
 mod save;
 mod search;
 mod source_run_properties;
+mod staging;
 mod story;
+mod target;
 mod undo;
 
+pub use batch::{
+    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory, EditOutcome,
+    EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep, EditTarget,
+    EditValidation, FillGuard, MAX_REQUEST_BYTES, OutlineGuard, RectGuard, SlideTarget, TargetEdge,
+    TextGuard, ValidationOutcome, outcome_json, oversized_request,
+};
 pub use model::*;
 pub use proposal_diff::*;
 pub use proposals::*;
 pub use search::TextSearchMatch;
+pub use target::{
+    FindMatch, FindOutcome, FindRequest, FindResponse, FindScope, ParagraphText, ReadOutcome,
+    ReadRequest, ReadResponse, ShapeTarget, StoryTarget, StoryText, TextField, TextRange,
+    TextTarget,
+};
 pub use undo::{DeckUndoManager, UndoCaptureMode};
 
 #[cfg(feature = "wasm")]
@@ -71,6 +85,8 @@ pub struct DeckSession {
     /// Bumped on every committed transaction via `_epoch_observer`, so a value
     /// uniquely identifies the doc's state for memoized computations.
     epoch: Arc<AtomicU64>,
+    /// Scopes version tokens to this session object.
+    version_nonce: AtomicU64,
     _epoch_observer: UpdateSubscription,
     state_update: RefCell<Option<(u64, Arc<Vec<u8>>)>>,
 }
@@ -78,9 +94,13 @@ pub struct DeckSession {
 fn watch_epoch(doc: &Doc) -> EditResult<(Arc<AtomicU64>, UpdateSubscription)> {
     let epoch = Arc::new(AtomicU64::new(0));
     let counter = Arc::clone(&epoch);
+    // After-transaction callbacks run before any update observer, so a version read from inside
+    // an update callback already reflects the transaction being published.
     let observer = doc
-        .observe_update_v1(move |_, _| {
-            counter.fetch_add(1, Ordering::Relaxed);
+        .observe_after_transaction(move |txn| {
+            if !txn.delete_set().is_empty() || txn.after_state() != txn.before_state() {
+                counter.fetch_add(1, Ordering::Relaxed);
+            }
         })
         .map_err(|error| EditError::Observer(error.to_string()))?;
     Ok((epoch, observer))
@@ -129,19 +149,13 @@ impl DeckSession {
         let doc = doc_with_client_id(client_id);
         hydrate_doc(&doc, &baseline)?;
         deck::validate_doc(&doc)?;
-        let undo = DeckUndoManager::new(&doc, client_id)?;
-        let (epoch, _epoch_observer) = watch_epoch(&doc)?;
-        Ok(Self {
+        Self::assemble(
             doc,
             client_id,
-            id_counter: AtomicU64::new(0),
-            package: Arc::new(package),
-            undo: RefCell::new(undo),
-            proposals: Default::default(),
-            epoch,
-            _epoch_observer,
-            state_update: RefCell::new(None),
-        })
+            0,
+            Arc::new(package),
+            batch::mint_nonce(client_id, 0),
+        )
     }
 
     pub fn open_from_update(update: &[u8], client_id: u64) -> EditResult<Self> {
@@ -155,16 +169,33 @@ impl DeckSession {
         hydrate_doc(&doc, update)?;
         deck::migrate_doc(&doc)?;
         let (package, _snapshot) = deck::validate_doc(&doc)?;
+        Self::assemble(
+            doc,
+            client_id,
+            0,
+            Arc::new(package),
+            batch::mint_nonce(client_id, 0),
+        )
+    }
+
+    pub(crate) fn assemble(
+        doc: Doc,
+        client_id: u64,
+        id_counter: u64,
+        package: Arc<PptxPackage>,
+        version_nonce: u64,
+    ) -> EditResult<Self> {
         let undo = DeckUndoManager::new(&doc, client_id)?;
         let (epoch, _epoch_observer) = watch_epoch(&doc)?;
         Ok(Self {
             doc,
             client_id,
-            id_counter: AtomicU64::new(0),
-            package: Arc::new(package),
+            id_counter: AtomicU64::new(id_counter),
+            package,
             undo: RefCell::new(undo),
             proposals: Default::default(),
             epoch,
+            version_nonce: AtomicU64::new(version_nonce),
             _epoch_observer,
             state_update: RefCell::new(None),
         })
@@ -254,6 +285,24 @@ impl DeckSession {
 
     pub(crate) fn epoch(&self) -> u64 {
         self.epoch.load(Ordering::Relaxed)
+    }
+
+    /// The optimistic-concurrency token of the committed deck state.
+    ///
+    /// It changes with every committed change, local or remote, undo and redo included. It is
+    /// scoped to this session: a token from another session, even of the same file, never
+    /// matches.
+    pub fn version(&self) -> DocumentVersion {
+        batch::version_token(self.version_nonce.load(Ordering::Relaxed), self.epoch())
+    }
+
+    /// Invalidates every version handed out so far; `entropy` is mixed into the new nonce.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn rotate_version(&self, entropy: u64) {
+        self.version_nonce.store(
+            batch::mint_nonce(self.client_id, entropy),
+            Ordering::Relaxed,
+        );
     }
 
     pub fn encode_diff_v1(&self, remote_state_vector: &[u8]) -> EditResult<Vec<u8>> {

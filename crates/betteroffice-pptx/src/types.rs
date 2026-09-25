@@ -7,6 +7,14 @@ pub use pptx_edit::{
     UpdateSubscription,
 };
 pub use pptx_edit::{
+    DocumentVersion, EditApplication, EditFailure, EditFailureCode, EditHistory, EditOutcome,
+    EditPreview, EditReceipt, EditRefusal, EditRequest, EditSource, EditStep, EditTarget,
+    EditValidation, FillGuard, FindMatch, FindOutcome, FindRequest, FindResponse, FindScope,
+    MAX_REQUEST_BYTES, OutlineGuard, ParagraphText, ReadOutcome, ReadRequest, ReadResponse,
+    RectGuard, ShapeTarget, SlideTarget, StoryTarget, StoryText, TargetEdge, TextField, TextGuard,
+    TextRange, TextTarget, ValidationOutcome, outcome_json, oversized_request,
+};
+pub use pptx_edit::{
     Proposal, ProposalAcceptance, ProposalChange, ProposalEdit, ProposalError, ProposalPreview,
     ProposalRequest, ProposalResult,
 };

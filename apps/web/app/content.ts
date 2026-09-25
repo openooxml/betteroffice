@@ -98,11 +98,11 @@ export const PACKAGES = [
   },
   {
     name: "@betteroffice/pptx",
-    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
+    desc: "Framework-free slides core — parsing, editing and rendering on the Rust engine, with version-checked atomic edit batches, opt-in operation timings, manual undo boundaries, comment repositioning, and caret anchors.",
   },
   {
     name: "@betteroffice/pptx-react",
-    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, and composable toolbar controls.",
+    desc: "The slides editor as a drop-in React component, with host-controlled saving, awaited input flushing, pointer position queries, composable toolbar controls, and version-checked edit batches.",
   },
 ];
 

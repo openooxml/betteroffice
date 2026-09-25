@@ -15,9 +15,17 @@ import type {
   HitTestResult,
   ParagraphAlignment,
   PptxCaretAnchor,
+  PptxEditRefusal,
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFindRequest,
+  PptxFindResult,
   PptxPresence,
   PptxPresencePeer,
   PptxFontFace,
+  PptxReadRequest,
+  PptxReadResult,
+  PptxValidationResult,
   PresentationHandle,
   Proposal,
   ProposalDiffSlide,
@@ -149,6 +157,20 @@ export interface PptxEditorApi {
   save: () => Uint8Array;
   /** Also navigates to the slide. */
   selectText: (target: PptxTextSelectionTarget) => boolean;
+  /** Flushes pending input, then returns the session version. */
+  version: () => Promise<string>;
+  /** Flushes pending input, then reads slides and story text with the version they were read at. */
+  readContent: (request?: PptxReadRequest) => Promise<PptxReadResult>;
+  /** Flushes pending input, then searches exactly and case-sensitively. */
+  findText: (request: PptxFindRequest) => Promise<PptxFindResult>;
+  /** Flushes pending input, then checks a batch without changing anything. */
+  validateEdits: (request: PptxEditRequest) => Promise<PptxValidationResult>;
+  /**
+   * Flushes pending input, then applies every step or none against `expectVersion` and refreshes
+   * the editor once. A refusal is data and never rolls back the flushed input. Read-only editors
+   * refuse with `read-only`. Rejects when the presentation is replaced while input flushes.
+   */
+  applyEdits: (request: PptxEditRequest) => Promise<PptxEditResult>;
 }
 
 export interface PptxEditorCollaborationOptions {
@@ -393,20 +415,33 @@ function PptxEditorContent({
   const pendingSaveRef = useRef<Promise<PptxSaveOutcome> | null>(null);
   const pickerOriginRef = useRef<PictureOrigin | null>(null);
   const hostPointRef = useRef<(x: number, y: number) => PptxPointPosition | null>(() => null);
-  const flushPendingInput = useCallback(async (opened: PresentationHandle) => {
-    if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
-    try {
-      await coordinator.run(() => {
-        if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
-        if (pointerGestureRef.current || resizeRef.current) {
-          throw new Error('Finish the pointer gesture before flushing input');
-        }
-      });
-    } catch (value) {
-      if (value instanceof PptxInputStale) throw new Error('Presentation changed while flushing input');
-      throw value instanceof PptxInputFailure ? value.cause : value;
-    }
-  }, [coordinator]);
+  const afterInput = useCallback(
+    async <T,>(opened: PresentationHandle, operation: () => T): Promise<T> => {
+      if (handleRef.current !== opened) throw new Error('Presentation is no longer open');
+      try {
+        return await coordinator.run(() => {
+          if (handleRef.current !== opened) throw new Error('Presentation changed while flushing input');
+          if (pointerGestureRef.current || resizeRef.current) {
+            throw new Error('Finish the pointer gesture before flushing input');
+          }
+          return operation();
+        });
+      } catch (value) {
+        if (value instanceof PptxInputStale) throw new Error('Presentation changed while flushing input');
+        throw value instanceof PptxInputFailure ? value.cause : value;
+      }
+    },
+    [coordinator]
+  );
+  const flushPendingInput = useCallback(
+    (opened: PresentationHandle): Promise<void> => afterInput(opened, () => {}),
+    [afterInput]
+  );
+  const readOnlyRef = useRef(readOnly);
+  const readOnlyRefusal = useCallback((opened: PresentationHandle): PptxEditRefusal | null =>
+    readOnlyRef.current
+      ? { ok: false, version: opened.version(), failure: { code: 'read-only', message: 'The editor is read-only' } }
+      : null, []);
   const initialSlideRef = useRef(initialSlide);
   const onReadyRef = useRef(onReady);
   const onChangeRef = useRef(onChange);
@@ -490,12 +525,11 @@ function PptxEditorContent({
   }, [readOnly]);
 
   onReadyRef.current = onReady;
+  readOnlyRef.current = readOnly;
   initialSlideRef.current = initialSlide;
   onChangeRef.current = onChange;
   onErrorRef.current = onError;
   modelRef.current = model;
-  const readOnlyRef = useRef(readOnly);
-  readOnlyRef.current = readOnly;
   const reviewingRef = useRef(canvasReview.reviewing);
   reviewingRef.current = canvasReview.reviewing;
 
@@ -758,6 +792,22 @@ function PptxEditorContent({
             },
             selectText,
             focus: () => stageRef.current?.focus(),
+            version: () => afterInput(opened, () => opened.version()),
+            readContent: (request) => afterInput(opened, () => opened.readContent(request)),
+            findText: (request) => afterInput(opened, () => opened.findText(request)),
+            validateEdits: (request) =>
+              afterInput(opened, () => readOnlyRefusal(opened) ?? opened.validateEdits(request)),
+            applyEdits: async (request) => {
+              const early = readOnlyRefusal(opened);
+              if (early) return early;
+              return afterInput(opened, () => {
+                const refused = readOnlyRefusal(opened);
+                if (refused) return refused;
+                const result = opened.applyEdits(request);
+                if (result.ok && result.applied) refreshAt(undefined, true, true);
+                return result;
+              });
+            },
           });
         } catch (value) {
           setLoading(false);
@@ -778,6 +828,7 @@ function PptxEditorContent({
       removeBrowserFonts(browserFaces);
     };
   }, [
+    afterInput,
     collaborationClientId,
     collaborationInitialUpdate,
     clearSelection,
@@ -788,6 +839,7 @@ function PptxEditorContent({
     goToSlide,
     stableFonts,
     refresh,
+    readOnlyRefusal,
     refreshAt,
     reportError,
     selectText,

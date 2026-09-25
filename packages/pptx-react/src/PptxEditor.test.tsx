@@ -10,7 +10,14 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { initWasm } from '@betteroffice/pptx';
 import * as pptx from '@betteroffice/pptx';
-import type { PptxFontFace, PptxPresenceCursor, SlideDisplayList } from '@betteroffice/pptx';
+import type {
+  DeckSnapshot,
+  PptxEditRequest,
+  PptxEditResult,
+  PptxFontFace,
+  PptxPresenceCursor,
+  SlideDisplayList,
+} from '@betteroffice/pptx';
 import type { PptxEditorApi } from './PptxEditor';
 import { paintSelection, PptxEditor, SelectionOverlay } from './PptxEditor';
 import { EditorToolbar, PptxCommandProvider, ToolbarCommandButton } from './index';
@@ -1485,4 +1492,183 @@ describe('PptxEditor commands', () => {
     await waitFor(() => expect(api.handle.snapshot()).toEqual(before));
     outside.unmount();
   }, 60_000);
+});
+
+describe('PptxEditor edit batches', () => {
+  const fonts = () => [{ family: 'Liberation Sans', bytes: fontBytes }];
+
+  /** Image decoding that finishes only when the test says so, keeping the insertion pending. */
+  function pauseImages(): { started: () => boolean; finish: () => void; restore: () => void } {
+    const originalImage = globalThis.Image;
+    let pending: (() => void) | undefined;
+    class PausedImage {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      naturalWidth = 400;
+      naturalHeight = 200;
+      set src(value: string) {
+        if (value.startsWith('data:')) pending = () => this.onload?.();
+        else queueMicrotask(() => this.onload?.());
+      }
+    }
+    globalThis.Image = PausedImage as unknown as typeof Image;
+    return {
+      started: () => pending !== undefined,
+      finish: () => pending?.(),
+      restore: () => {
+        globalThis.Image = originalImage;
+      },
+    };
+  }
+
+  const insertImage = (view: ReturnType<typeof render>, name: string) =>
+    fireEvent.change(view.getByTestId('pptx-insert-image-input'), {
+      target: { files: [new File([Uint8Array.from([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' })] },
+    });
+
+  const notesRequest = (version: string, slideId: string, text: string): PptxEditRequest => ({
+    expectVersion: version,
+    steps: [{ op: 'setSlideNotes', target: { slideId }, text }],
+  });
+
+  it('flushes pending input first and refuses a stale batch without undoing that input', async () => {
+    const images = pauseImages();
+    try {
+      let api: PptxEditorApi | undefined;
+      const view = render(
+        <PptxEditor file={fixture} fonts={fonts()} clientId={9130} onReady={(ready) => { api = ready; }} />
+      );
+      await act(async () => {
+        await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+      });
+      const read = await api!.readContent();
+      if (!read.ok) throw new Error(read.failure.message);
+      insertImage(view, 'flushed.png');
+      await waitFor(() => expect(images.started()).toBe(true));
+      let settled = false;
+      const applying = api!
+        .applyEdits(notesRequest(read.version, read.slides[0].id, 'Too late'))
+        .finally(() => { settled = true; });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      let result: PptxEditResult | undefined;
+      await act(async () => {
+        images.finish();
+        result = await applying;
+      });
+      expect(result).toMatchObject({ ok: false, failure: { code: 'stale-version' } });
+      expect(result!.version).toBe(api!.handle.version());
+      const slide = api!.handle.snapshot().slides[0];
+      expect(slide.shapes.some((shape) => shape.name === 'flushed.png')).toBe(true);
+      expect(slide.notes ?? '').not.toBe('Too late');
+    } finally {
+      cleanup();
+      images.restore();
+    }
+  }, 30_000);
+
+  it('applies a batch as one undo step and publishes it once', async () => {
+    let api: PptxEditorApi | undefined;
+    const changes: DeckSnapshot[] = [];
+    const view = render(
+      <PptxEditor file={fixture} fonts={fonts()} clientId={9131} onReady={(ready) => { api = ready; }}
+        onChange={(snapshot) => changes.push(snapshot)} />
+    );
+    await act(async () => {
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    });
+    const read = await api!.readContent();
+    if (!read.ok) throw new Error(read.failure.message);
+    const slideId = read.slides[0].id;
+    let result: PptxEditResult | undefined;
+    await act(async () => {
+      result = await api!.applyEdits(notesRequest(read.version, slideId, 'Batch notes'));
+    });
+    expect(result).toMatchObject({ ok: true, applied: true, changedSlides: [slideId] });
+    expect(changes).toHaveLength(1);
+    expect(changes[0].slides[0].notes).toBe('Batch notes');
+    const notes = view.getByRole('textbox', { name: 'Speaker notes' }) as HTMLTextAreaElement;
+    expect(notes.value).toBe('Batch notes');
+    expect(api!.handle.canUndo()).toBe(true);
+    expect(await api!.version()).toBe(api!.handle.version());
+    await act(async () => {
+      result = await api!.applyEdits(notesRequest(api!.handle.version(), slideId, 'Batch notes'));
+    });
+    expect(result).toMatchObject({ ok: true, applied: false });
+    expect(changes).toHaveLength(1);
+  }, 30_000);
+
+  it('refuses writes while read-only but still reads', async () => {
+    let api: PptxEditorApi | undefined;
+    render(<PptxEditor file={fixture} fonts={fonts()} clientId={9132} onReady={(ready) => { api = ready; }} readOnly />);
+    await act(async () => {
+      await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+    });
+    const read = await api!.readContent();
+    if (!read.ok) throw new Error(read.failure.message);
+    const found = await api!.findText({ text: 'e', limit: 1 });
+    expect(found).toMatchObject({ ok: true, version: read.version });
+    const request = notesRequest(read.version, read.slides[0].id, 'Blocked');
+    const refusal = { ok: false, version: read.version, failure: { code: 'read-only' } };
+    expect(await api!.validateEdits(request)).toMatchObject(refusal);
+    expect(await api!.applyEdits(request)).toMatchObject(refusal);
+    expect(api!.handle.snapshot().slides[0].notes ?? '').not.toBe('Blocked');
+  }, 30_000);
+
+  it('refuses a batch when the editor turns read-only while input flushes', async () => {
+    const images = pauseImages();
+    try {
+      let api: PptxEditorApi | undefined;
+      const props = { file: fixture, fonts: fonts(), clientId: 9134, onReady: (ready: PptxEditorApi) => { api = ready; } };
+      const view = render(<PptxEditor {...props} />);
+      await act(async () => {
+        await waitFor(() => expect(api).toBeDefined(), { timeout: 15_000 });
+      });
+      const read = await api!.readContent();
+      if (!read.ok) throw new Error(read.failure.message);
+      insertImage(view, 'pending.png');
+      await waitFor(() => expect(images.started()).toBe(true));
+      const applying = api!.applyEdits(notesRequest(read.version, read.slides[0].id, 'Blocked'));
+      await act(async () => { view.rerender(<PptxEditor {...props} readOnly />); });
+      await act(async () => { images.finish(); });
+      expect(await applying).toMatchObject({
+        ok: false,
+        version: api!.handle.version(),
+        failure: { code: 'read-only' },
+      });
+      expect(api!.handle.snapshot().slides[0].notes ?? '').not.toBe('Blocked');
+      expect(api!.handle.canUndo()).toBe(false);
+    } finally {
+      cleanup();
+      images.restore();
+    }
+  }, 30_000);
+
+  it('rejects when the presentation is replaced while input flushes', async () => {
+    const images = pauseImages();
+    try {
+      const opened: PptxEditorApi[] = [];
+      const props = { fonts: fonts(), clientId: 9133, onReady: (ready: PptxEditorApi) => { opened.push(ready); } };
+      const view = render(<PptxEditor {...props} file={fixture} />);
+      await act(async () => {
+        await waitFor(() => expect(opened).toHaveLength(1), { timeout: 15_000 });
+      });
+      const read = await opened[0].readContent();
+      if (!read.ok) throw new Error(read.failure.message);
+      insertImage(view, 'pending.png');
+      await waitFor(() => expect(images.started()).toBe(true));
+      const applying = opened[0].applyEdits(notesRequest(read.version, read.slides[0].id, 'Orphaned'));
+      void applying.catch(() => {});
+      view.rerender(<PptxEditor {...props} file={new Uint8Array(fixture)} />);
+      await act(async () => {
+        await waitFor(() => expect(opened).toHaveLength(2), { timeout: 15_000 });
+      });
+      await act(async () => { images.finish(); });
+      await expect(applying).rejects.toThrow('while flushing');
+      expect(opened[1].handle.snapshot().slides[0].notes ?? '').not.toBe('Orphaned');
+    } finally {
+      cleanup();
+      images.restore();
+    }
+  }, 30_000);
 });

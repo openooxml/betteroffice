@@ -1,5 +1,4 @@
 use std::collections::{BTreeSet, HashSet};
-use std::sync::atomic::Ordering;
 
 use pptx_parse::PptxPackage;
 use serde::{Deserialize, Serialize};
@@ -12,9 +11,9 @@ use crate::deck::{
 };
 use crate::proposals::{apply_edit, shape_text};
 use crate::{
-    DeckSession, DeckSnapshot, DeckUndoManager, EditError, EditResult, Proposal, ProposalChange,
-    ProposalEdit, ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot,
-    TextRunSnapshot, TextStyle, doc_with_client_id, hydrate_doc,
+    DeckSession, DeckSnapshot, EditError, EditResult, Proposal, ProposalChange, ProposalEdit,
+    ProposalResult, SHAPES, SLIDES, ShapeSnapshot, SlideScope, StorySnapshot, TextRunSnapshot,
+    TextStyle,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,26 +143,11 @@ impl DeckSession {
     /// Hydrates a scratch doc from the live state and applies `edits` — the
     /// `preview_edits` tail, with target validation left to the caller.
     fn preview_doc_with_edits(&self, edits: &[ProposalEdit]) -> ProposalResult<DeckSession> {
-        let doc = doc_with_client_id(self.client_id);
-        let update = self.state_update_v1();
-        hydrate_doc(&doc, &update)?;
-        let undo = DeckUndoManager::new(&doc, self.client_id)?;
-        let (epoch, _epoch_observer) = crate::watch_epoch(&doc)?;
-        let preview = DeckSession {
-            doc,
-            client_id: self.client_id,
-            id_counter: self.id_counter.load(Ordering::Relaxed).into(),
-            package: self.package.clone(),
-            undo: std::cell::RefCell::new(undo),
-            proposals: Default::default(),
-            epoch,
-            _epoch_observer,
-            state_update: std::cell::RefCell::new(None),
-        };
+        let preview = self.stage()?;
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        preview.validated_snapshot()?;
         Ok(preview)
     }
 

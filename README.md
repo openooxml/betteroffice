@@ -69,6 +69,12 @@
   next to host actions, inside or outside the editor, through one command store
   with disabled reasons, platform-aware shortcuts, and ordered execution.
 
+- **Version-checked PPTX edit batches.** PPTX JavaScript, React, Rust and
+  Python hosts read slides and story text with a session version, then apply
+  atomic text, speaker-notes and shape batches that commit as one undo step or
+  return a typed refusal with nothing changed. Text steps stay within one
+  paragraph and leave fields and line breaks whole.
+
 [Try it out](https://demo.betteroffice.dev), or
 [explore the docs](https://docs.betteroffice.dev) for setup, APIs, and format support.
 

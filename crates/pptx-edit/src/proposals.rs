@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::Ordering;
 
 use serde::{Deserialize, Serialize};
-use yrs::Transact;
+use yrs::{ReadTxn, Transact};
 
+use crate::staging::Adoption;
 use crate::{
-    DeckSession, DeckSnapshot, DeckUndoManager, EditCtx, EditError, ShapeRect, ShapeSnapshot,
-    ShapeStroke, TextStyle, TextStylePatch, decode_update_v1, doc_with_client_id, hydrate_doc,
+    DeckSession, DeckSnapshot, EditCtx, EditError, ShapeRect, ShapeSnapshot, ShapeStroke,
+    TextStyle, TextStylePatch,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -233,18 +233,8 @@ impl DeckSession {
         let (preview, snapshot) = self.preview_edits(&before, &proposal.edits)?;
         let applied = before != snapshot;
         if applied {
-            let update = preview.encode_diff_v1(&self.encode_state_vector_v1())?;
-            let update = decode_update_v1(&update).map_err(EditError::InvalidUpdate)?;
-            self.automatic_undo_barrier();
-            self.doc
-                .transact_mut_with(self.client_id)
-                .apply_update(update)
-                .map_err(|error| EditError::InvalidUpdate(error.to_string()))?;
-            self.id_counter.store(
-                preview.id_counter.load(Ordering::Relaxed),
-                Ordering::Relaxed,
-            );
-            self.automatic_undo_barrier();
+            let (_, update) = preview.staged_update(&self.doc.transact().state_vector())?;
+            self.adopt(&preview, update, Adoption::Proposal)?;
         }
         self.reject_proposal(id);
         Ok(ProposalAcceptance {
@@ -284,26 +274,11 @@ impl DeckSession {
             let (slide_id, shape_id) = target(before, edit)?;
             check_target(before, &slide_id, shape_id.as_deref())?;
         }
-        let doc = doc_with_client_id(self.client_id);
-        let update = self.state_update_v1();
-        hydrate_doc(&doc, &update)?;
-        let undo = DeckUndoManager::new(&doc, self.client_id)?;
-        let (epoch, _epoch_observer) = crate::watch_epoch(&doc)?;
-        let preview = DeckSession {
-            doc,
-            client_id: self.client_id,
-            id_counter: self.id_counter.load(Ordering::Relaxed).into(),
-            package: self.package.clone(),
-            undo: std::cell::RefCell::new(undo),
-            proposals: Default::default(),
-            epoch,
-            _epoch_observer,
-            state_update: std::cell::RefCell::new(None),
-        };
+        let preview = self.stage()?;
         for edit in edits {
             apply_edit(&preview, edit)?;
         }
-        let snapshot = crate::deck::validated_snapshot(&preview.doc, &self.package)?;
+        let snapshot = preview.validated_snapshot()?;
         Ok((preview, snapshot))
     }
 }
@@ -386,7 +361,7 @@ pub(crate) fn apply_edit(session: &DeckSession, edit: &ProposalEdit) -> Result<(
     Ok(())
 }
 
-fn inherited_style(story: &crate::StorySnapshot, at: u32) -> TextStyle {
+pub(crate) fn inherited_style(story: &crate::StorySnapshot, at: u32) -> TextStyle {
     let mut offset = 0;
     let mut previous = TextStyle::default();
     for paragraph in &story.paragraphs {
