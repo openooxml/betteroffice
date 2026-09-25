@@ -5851,7 +5851,12 @@ mod tests {
     fn a_line_point_sits_mid_band_unless_the_axis_crosses_at_the_category() {
         let markers = |cross_between| {
             let data = source(&[1.0, 2.0, 3.0]);
-            let mut group = group("line", vec![series("Trend", &data)]);
+            let mut trend = series("Trend", &data);
+            trend.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            let mut group = group("line", vec![trend]);
             group.axis_ids = vec!["1"];
             let mut axis = value_axis("1", 0.0, 4.0);
             axis.cross_between = cross_between;
@@ -5861,10 +5866,12 @@ mod tests {
                 axes: vec![axis],
                 ..PlotChart::default()
             };
-            rects(&plot_chart(&chart, rect()))
+            plot_chart(&chart, rect())
                 .into_iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
-                .map(|(x, ..)| x)
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
                 .collect::<Vec<f64>>()
         };
         let on_ticks = markers(Some("midCat"));
