@@ -93,6 +93,7 @@ export type InvokeOutcome<T> =
 export interface PluginRuntime<Plugin, Context, Event, Phase extends string> {
   /** Reconciles registrations by id and revision; call after the host commits. */
   setPlugins(plugins: readonly Plugin[]): void;
+  /** Rereads every grant, including one changed in place, and notifies the plugins it changed. */
   setGrants(grants: Readonly<Record<string, PluginGrant<string>>> | null | undefined): void;
   grant(pluginId: string): PluginGrant<string>;
   /** Activates every registration for a ready document. */
@@ -462,13 +463,16 @@ export function createPluginRuntime<
       );
       if (initialized === 'ended') return;
     }
-    activation.pending = [];
-    const loaded = await hook(activation, 'event', 'document-change', (context, invocation) =>
-      activation.registration.plugin.onEvent?.(
-        context,
-        options.loadEvent(invocation.snapshot, reason)
-      )
-    );
+    let loaded: 'ok' | 'aborted' | 'ended';
+    do {
+      activation.pending = [];
+      loaded = await hook(activation, 'event', 'document-change', (context, invocation) =>
+        activation.registration.plugin.onEvent?.(
+          context,
+          options.loadEvent(invocation.snapshot, reason)
+        )
+      );
+    } while (loaded === 'aborted' && activation.status !== 'disposed');
     if (loaded === 'ended' || activation.status === 'disposed') return;
     activation.status = 'ready';
     changed();
@@ -549,18 +553,24 @@ export function createPluginRuntime<
         [...registrations.keys()].map((pluginId) => [pluginId, grantOf(pluginId)] as const)
       );
       grants = next ?? {};
+      normalized.clear();
+      let revised = false;
       for (const registration of registrations.values()) {
+        const grant = grantOf(registration.id);
+        const previous = before.get(registration.id)!;
+        if (sameGrant(previous, grant)) {
+          normalized.get(registration.id)!.grant = previous;
+          continue;
+        }
+        revised = true;
         const activation = registration.activation;
         if (!activation) continue;
-        const grant = grantOf(registration.id);
-        const previous = before.get(registration.id);
-        if (previous && sameGrant(previous, grant)) continue;
         enqueue(
           activation,
           options.grantsEvent(options.snapshot(registration.id, activation.generation), grant)
         );
       }
-      changed();
+      if (revised) changed();
     },
 
     grant: grantOf,

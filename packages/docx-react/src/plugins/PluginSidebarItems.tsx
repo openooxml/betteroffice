@@ -33,7 +33,7 @@ function checkedItems(value: unknown): readonly DocxPluginSidebarItem<unknown>[]
 
 /**
  * The sidebar cards of every ready plugin, with namespaced ids and placements resolved now.
- * Items whose anchor is stale, ambiguous, missing or not rendered are left out.
+ * Cards whose anchor is stale, ambiguous, missing or not rendered stay mounted but hidden.
  */
 export function managedSidebarItems(
   host: DocxPluginHost,
@@ -52,17 +52,16 @@ export function managedSidebarItems(
     );
     for (const item of produced ?? []) {
       const placement = place(item.anchor);
-      if (!placement) continue;
       const Render = item.render;
       items.push({
         id: `plugin:${activation.pluginId}/${item.id}`,
-        anchorPos: placement.position,
-        fixedY: placement.y,
+        anchorPos: placement?.position ?? 0,
+        ...(placement ? { fixedY: placement.y } : { hidden: true }),
         ...(item.priority === undefined ? {} : { priority: item.priority }),
         ...(item.estimatedHeight === undefined ? {} : { estimatedHeight: item.estimatedHeight }),
         render: (props) => (
           <PluginRenderScope key={activation.key} host={host} activation={activation}>
-            <Render context={activation.context} {...props} />
+            <Render context={activation.context} item={item} {...props} />
           </PluginRenderScope>
         ),
       });

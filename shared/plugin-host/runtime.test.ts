@@ -296,6 +296,36 @@ describe('plugin runtime lifecycle', () => {
     expect(state.version).toBe('v4');
   });
 
+  test('a change during the load hook repeats the load before the plugin is ready', async () => {
+    const { runtime, change } = setup();
+    const gates: Array<ReturnType<typeof deferred>> = [];
+    const seen: string[] = [];
+    runtime.setPlugins([
+      {
+        id: 'slow',
+        createState: () => null,
+        async onEvent(_context, event) {
+          seen.push(`${event.type}:${event.version}`);
+          if (event.type !== 'load') return;
+          const gate = deferred();
+          gates.push(gate);
+          await gate.promise;
+        },
+      },
+    ]);
+    runtime.open('g1');
+    await tick();
+    change('v2');
+    gates[0].resolve();
+    await tick(10);
+    expect(seen).toEqual(['load:v1', 'load:v2']);
+    expect(runtime.activations()).toEqual([]);
+    gates[1].resolve();
+    await tick(10);
+    expect(seen).toEqual(['load:v1', 'load:v2']);
+    expect(runtime.activations().map((entry) => entry.pluginId)).toEqual(['slow']);
+  });
+
   test('state updates need the current version', async () => {
     const { runtime, change } = setup();
     const { plugin, contexts } = recorder('versioned');
@@ -407,6 +437,26 @@ describe('plugin runtime lifecycle', () => {
     expect(b.log.some((entry) => entry.startsWith('grants-change'))).toBe(true);
     expect(runtime.grant('b')).toEqual({ commands: ['bold'] });
     expect(runtime.grant('constructor')).toEqual({ commands: [] });
+  });
+
+  test('a grant changed in place takes effect when grants are set again', async () => {
+    const { runtime } = setup();
+    const a = recorder('a');
+    runtime.setPlugins([a.plugin]);
+    const grant: { document: 'write'; editBatches?: true } = {
+      document: 'write',
+      editBatches: true,
+    };
+    const grants = { a: grant };
+    runtime.setGrants(grants);
+    runtime.open('g1');
+    await tick();
+    expect(grantsEditBatch(runtime.grant('a'), 'separate')).toBe(true);
+    delete grant.editBatches;
+    runtime.setGrants(grants);
+    await tick();
+    expect(grantsEditBatch(runtime.grant('a'), 'separate')).toBe(false);
+    expect(a.log.some((entry) => entry.startsWith('grants-change'))).toBe(true);
   });
 
   test('rendered activations keep their identity until something changes', async () => {
