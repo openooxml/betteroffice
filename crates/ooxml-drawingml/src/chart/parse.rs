@@ -151,7 +151,6 @@ pub fn parse_chart_space<E: ChartXml>(chart_space: &E) -> Option<ChartSpace> {
 /// `c:plotArea/c:layout/c:manualLayout`, read only when it places the inner
 /// plot from the frame edges — the mode PowerPoint writes and the one this
 /// layout can honour without re-deriving the axis gutters.
-/// A `c:plotArea/c:layout/c:manualLayout` in edge mode naming the inner plot.
 fn parse_plot_layout<E: ChartXml>(plot_area: &E) -> Option<ChartManualLayout> {
     let manual = child(child(plot_area, "layout")?, "manualLayout")?;
     if val_attr(child(manual, "layoutTarget")) != Some("inner") {
@@ -645,7 +644,9 @@ fn parse_legend<E: ChartXml>(chart_space: &E) -> Option<ChartLegend> {
     Some(ChartLegend {
         position: position.map(str::to_owned),
         visible: true,
-        overlay: val_attr(child(legend, "overlay")) == Some("1"),
+        // `CT_Boolean` defaults to true, so a bare `<c:overlay/>` overlays too.
+        overlay: child(legend, "overlay")
+            .is_some_and(|overlay| !matches!(val_attr(Some(overlay)), Some("0" | "false"))),
         text: parse_text_properties(child(legend, "txPr")),
     })
 }
@@ -1007,6 +1008,30 @@ mod tests {
         let prefixed = parse_chart_space(&fixture("c:")).expect("prefixed parses");
         assert_eq!(bare, prefixed);
         assert_eq!(prefixed.series[0].name.as_deref(), Some("North"));
+    }
+
+    #[test]
+    fn a_legend_overlay_reads_every_spelling_of_the_boolean() {
+        let overlay = |element: Option<Node>| {
+            let legend = Node::el("c:legend", element.into_iter().collect());
+            let space = Node::el(
+                "c:chartSpace",
+                vec![Node::el(
+                    "c:chart",
+                    vec![
+                        legend,
+                        Node::el("c:plotArea", vec![Node::el("c:pieChart", Vec::new())]),
+                    ],
+                )],
+            );
+            parse_chart_space(&space).unwrap().legend.unwrap().overlay
+        };
+        assert!(overlay(Some(Node::val("c:overlay", "1"))));
+        assert!(overlay(Some(Node::val("c:overlay", "true"))));
+        assert!(overlay(Some(Node::el("c:overlay", Vec::new()))));
+        assert!(!overlay(Some(Node::val("c:overlay", "0"))));
+        assert!(!overlay(Some(Node::val("c:overlay", "false"))));
+        assert!(!overlay(None));
     }
 
     #[test]
