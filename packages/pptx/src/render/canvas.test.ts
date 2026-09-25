@@ -504,6 +504,50 @@ describe('PPTX canvas replay', () => {
     expect(calls.find((call) => call.text === 'AB')).toEqual({ text: 'AB', x: 136 });
   });
 
+  test('paints a lone letter after a leading tab at its tab stop', async () => {
+    const calls: Array<{ text: string; x: number }> = [];
+    const ctx = new Proxy(
+      { fillText: (text: string, x: number) => calls.push({ text, x }) } as Record<string, unknown>,
+      {
+        get: (target, property) => (property in target ? target[property as string] : () => undefined),
+        set: (target, property, value) => {
+          target[property as string] = value;
+          return true;
+        },
+      }
+    ) as unknown as CanvasRenderingContext2D;
+    await paintSlide(
+      ctx,
+      {
+        contractVersion: 1,
+        width: 320,
+        height: 180,
+        primitives: [
+          {
+            kind: 'textBox', objectId: 1, shapeId: 'shape:1', storyId: 'story:1',
+            x: 40, y: 50, w: 240, h: 80, anchor: 'top', paragraphs: [],
+            lines: [
+              {
+                x: 40, y: 50, width: 140, height: 24, baseline: 68, start: 0, end: 2,
+                caretStops: [],
+                runs: [
+                  {
+                    text: '\tA', start: 0, end: 2, x: 40, width: 106, fontId: 1,
+                    fontFamily: 'Liberation Sans', fontSizePx: 20, bold: false, italic: false,
+                    underline: false, color: '#000000',
+                    glyphs: [{ glyphId: 2, cluster: 1, x: 136, advance: 10, xOffset: 0, yOffset: 68 }],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      1
+    );
+    expect(calls.find((call) => call.text === 'A')).toEqual({ text: 'A', x: 136 });
+  });
+
   test('paints each tab-separated piece of a right-to-left run at its own glyphs', async () => {
     const calls: Array<{ text: string; x: number }> = [];
     const ctx = new Proxy(
