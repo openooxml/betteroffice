@@ -2968,7 +2968,8 @@ fn emit_line<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            let size = series.marker_size(i);
+            let visible = markers && series.marker_symbol(i, ser_idx).is_some();
+            let size = if visible { series.marker_size(i) } else { 4.0 };
             push_point_label(
                 ops,
                 family,
@@ -4654,6 +4655,39 @@ mod tests {
         let view = SeriesView::new(&series, &mut ScanBudget::new());
         assert_eq!(view.marker_size(0), DEFAULT_MARKER_PX);
         assert_eq!(view.marker_size(1), 12.0);
+        for (points, pixels) in [(0.5, 2.0 * 4.0 / 3.0), (400.0, 96.0)] {
+            series.marker = Some(PlotMarker {
+                size: Some(points),
+                symbol: None,
+            });
+            let view = SeriesView::new(&series, &mut ScanBudget::new());
+            assert_eq!(view.marker_size(1), pixels, "{points} pt clamps to 2..72");
+        }
+    }
+
+    #[test]
+    fn a_line_without_markers_keeps_its_labels_beside_the_point() {
+        let data = source(&[1.0, 3.7]);
+        let label_x = |markers: Option<bool>, size: f64| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(size),
+                symbol: None,
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                ..PlotDataLabels::default()
+            });
+            let mut line = group("line", vec![labelled]);
+            line.markers = markers;
+            texts_at(&plot_chart(&grouped("line", line), rect()))
+                .into_iter()
+                .find(|(text, ..)| text == "3.7")
+                .map(|(_, x, ..)| x)
+                .expect("a label")
+        };
+        assert_eq!(label_x(Some(false), 72.0), label_x(Some(false), 2.0));
+        assert!(label_x(None, 72.0) > label_x(None, 2.0));
     }
 
     #[test]
