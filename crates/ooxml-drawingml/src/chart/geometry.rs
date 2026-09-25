@@ -11,6 +11,8 @@ pub const CHART_AXIS_COLOR: &str = "#666666";
 pub const CHART_GRID_COLOR: &str = "#D9D9D9";
 pub const CHART_TEXT_COLOR: &str = "#222222";
 pub const CHART_BACKGROUND_COLOR: &str = "#FFFFFF";
+/// The size Office gives a marker whose `c:marker` names none, in points.
+const DEFAULT_MARKER_PT: f64 = 7.0;
 const EMU_PER_PIXEL: f64 = 9525.0;
 /// Keeps a nonsense `a:ln/@w` from drawing a rule across the whole chart.
 const MAX_LINE_PX: f64 = 16.0;
@@ -369,6 +371,8 @@ pub struct PlotAxis<'a> {
     pub major_gridline: Option<PlotLine<'a>>,
     /// `c:minorGridlines/c:spPr/a:ln`.
     pub minor_gridline: Option<PlotLine<'a>>,
+    /// `c:crossBetween`: `midCat` puts the points on the category ticks.
+    pub cross_between: Option<&'a str>,
     pub number_format: Option<&'a str>,
     pub position: Option<&'a str>,
     pub title: Option<&'a str>,
@@ -669,6 +673,7 @@ fn plot_axis_from_model(axis: &super::model::ChartAxis) -> PlotAxis<'_> {
         minor_gridlines: axis.minor_gridlines,
         major_gridline: axis.major_gridline_line.as_ref().map(plot_line_from_model),
         minor_gridline: axis.minor_gridline_line.as_ref().map(plot_line_from_model),
+        cross_between: axis.cross_between.as_deref(),
         number_format: axis.number_format.as_deref(),
         position: axis.position.as_deref(),
         title: axis.title.as_deref(),
@@ -1481,13 +1486,16 @@ impl<'a> SeriesView<'a> {
             .unwrap_or_else(|| series_color(Some(self.series), series_index))
     }
 
+    /// `c:marker/c:size` in pixels. The schema counts points, 2 to 72.
     fn marker_size(&self, index: usize) -> f64 {
         self.point(index)
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.size)
-            .unwrap_or(4.0)
-            .clamp(1.0, 24.0)
+            .unwrap_or(DEFAULT_MARKER_PT)
+            .clamp(2.0, 72.0)
+            * 4.0
+            / 3.0
     }
 
     /// The symbol to draw at `index`, or `None` for a point that draws none.
@@ -1497,7 +1505,7 @@ impl<'a> SeriesView<'a> {
             .and_then(|point| point.marker.as_ref())
             .or(self.series.marker.as_ref())
             .and_then(|marker| marker.symbol)
-            .unwrap_or(PlotMarkerSymbol::Square)
+            .unwrap_or(PlotMarkerSymbol::Auto)
             .resolved(series_index);
         (symbol != PlotMarkerSymbol::None).then_some(symbol)
     }
@@ -2224,11 +2232,10 @@ fn axis_ticks(scale: ValueScale, unit: Option<f64>) -> Vec<f64> {
     if unit.is_finite() && unit > 0.0 {
         let steps = (span / unit).floor();
         if steps >= 1.0 && steps < MAX_PLOT_AXIS_TICKS as f64 {
-            let first = round_to_unit(scale.min, unit, true);
             let mut ticks = Vec::new();
             let mut index = 0;
             while ticks.len() < MAX_PLOT_AXIS_TICKS {
-                let value = first + unit * index as f64;
+                let value = scale.min + unit * index as f64;
                 if !value.is_finite() || value > scale.max + unit * 1e-9 {
                     break;
                 }
@@ -2900,9 +2907,16 @@ fn emit_bar<S: PlotSink + ?Sized>(
 }
 
 /// Where the `index`th of `count` categories sits along a line or area axis.
+/// A point sits mid-band, or on the category's tick when the value axis
+/// crosses there (`midCat`).
 fn line_x(family: PlotFamily<'_>, plot: PlotArea, index: usize, count: usize) -> f64 {
-    let denom = count.saturating_sub(1).max(1) as f64;
-    plot.x + plot.w * category_position(family, index, count) as f64 / denom
+    let position = category_position(family, index, count) as f64;
+    if family.axis.and_then(|axis| axis.cross_between) == Some("midCat") {
+        let denom = count.saturating_sub(1).max(1) as f64;
+        plot.x + plot.w * position / denom
+    } else {
+        plot.x + plot.w * (position + 0.5) / count.max(1) as f64
+    }
 }
 
 fn emit_category_labels<S: PlotSink + ?Sized>(
@@ -2980,7 +2994,8 @@ fn emit_line<S: PlotSink + ?Sized>(
                     &series.point_color(i, ser_idx),
                 );
             }
-            let size = series.marker_size(i);
+            let visible = markers && series.marker_symbol(i, ser_idx).is_some();
+            let size = if visible { series.marker_size(i) } else { 4.0 };
             push_point_label(
                 ops,
                 family,
@@ -4335,6 +4350,8 @@ mod tests {
         ChartDataLabels, ChartPlotGroup, ChartPointLabel, ChartSeries, ChartTextProperties,
     };
 
+    const DEFAULT_MARKER_PX: f64 = DEFAULT_MARKER_PT * 4.0 / 3.0;
+
     #[test]
     fn an_unmeasured_legend_label_is_never_negative_and_counts_gaps_between() {
         let font = |spacing: f64| PlotFont {
@@ -4665,8 +4682,41 @@ mod tests {
             ..PlotPoint::default()
         }];
         let view = SeriesView::new(&series, &mut ScanBudget::new());
-        assert_eq!(view.marker_size(0), 4.0);
-        assert_eq!(view.marker_size(1), 9.0);
+        assert_eq!(view.marker_size(0), DEFAULT_MARKER_PX);
+        assert_eq!(view.marker_size(1), 12.0);
+        for (points, pixels) in [(0.5, 2.0 * 4.0 / 3.0), (400.0, 96.0)] {
+            series.marker = Some(PlotMarker {
+                size: Some(points),
+                symbol: None,
+            });
+            let view = SeriesView::new(&series, &mut ScanBudget::new());
+            assert_eq!(view.marker_size(1), pixels, "{points} pt clamps to 2..72");
+        }
+    }
+
+    #[test]
+    fn a_line_without_markers_keeps_its_labels_beside_the_point() {
+        let data = source(&[1.0, 3.7]);
+        let label_x = |markers: Option<bool>, size: f64| {
+            let mut labelled = series("North", &data);
+            labelled.marker = Some(PlotMarker {
+                size: Some(size),
+                symbol: None,
+            });
+            labelled.labels = Some(PlotDataLabels {
+                show_value: true,
+                ..PlotDataLabels::default()
+            });
+            let mut line = group("line", vec![labelled]);
+            line.markers = markers;
+            texts_at(&plot_chart(&grouped("line", line), rect()))
+                .into_iter()
+                .find(|(text, ..)| text == "3.7")
+                .map(|(_, x, ..)| x)
+                .expect("a label")
+        };
+        assert_eq!(label_x(Some(false), 72.0), label_x(Some(false), 2.0));
+        assert!(label_x(None, 72.0) > label_x(None, 2.0));
     }
 
     #[test]
@@ -4945,7 +4995,7 @@ mod tests {
         assert!(ops.len() <= MAX_PLOT_OPS);
         assert!(
             ops.iter()
-                .any(|op| matches!(op, PlotOp::Rect { fill, .. } if fill == "#010203"))
+                .any(|op| matches!(op, PlotOp::Rect { fill, .. } | PlotOp::Path { fill, .. } if fill == "#010203"))
         );
     }
 
@@ -5074,6 +5124,18 @@ mod tests {
             .collect()
     }
 
+    /// Every rectangle and outlined path, as `(x, y, w, h)`: a marker is one or the other.
+    fn marks(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                PlotOp::Rect { x, y, w, h, .. } | PlotOp::Path { x, y, w, h, .. } => {
+                    Some((*x, *y, *w, *h))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Every rectangle but the chart background and the legend swatches.
     fn bars(ops: &[PlotOp]) -> Vec<(f64, f64, f64, f64)> {
         rects(ops)
@@ -5153,7 +5215,7 @@ mod tests {
             let ops = plot_chart(&chart, rect());
             let columns = bars(&ops)
                 .into_iter()
-                .filter(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
+                .filter(|(_, _, w, h)| *w > DEFAULT_MARKER_PX && *h > DEFAULT_MARKER_PX)
                 .count();
             assert_ne!(columns, 2, "{chart_type} still draws columns");
         }
@@ -5188,9 +5250,11 @@ mod tests {
         xy.x_values = &x;
         let chart = grouped("scatter", group("scatter", vec![xy]));
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         assert_eq!(markers.len(), 2);
         assert!(markers[0].0 < markers[1].0);
@@ -5212,9 +5276,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -5250,9 +5315,10 @@ mod tests {
             rect(),
         );
         assert_eq!(
-            rects(&scatter)
+            marks(&scatter)
                 .iter()
-                .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .filter(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
                 .count(),
             1
         );
@@ -5660,9 +5726,10 @@ mod tests {
         off.markers = Some(false);
         let ops = plot_chart(&grouped("line", off), rect());
         assert!(
-            !rects(&ops)
+            !marks(&ops)
                 .iter()
-                .any(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+                .any(|(_, _, w, h)| (*w - DEFAULT_MARKER_PX).abs() < 0.01
+                    && (*h - DEFAULT_MARKER_PX).abs() < 0.01)
         );
     }
 
@@ -5806,9 +5873,11 @@ mod tests {
             .into_iter()
             .find(|(_, _, w, h)| *w > 8.0 && *h > 8.0)
             .expect("a column");
-        let marker = bars(&ops)
+        let marker = marks(&ops)
             .into_iter()
-            .find(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .find(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .expect("a line marker");
         assert!(
             marker.1 > bar.1,
@@ -5858,6 +5927,44 @@ mod tests {
     }
 
     #[test]
+    fn a_line_point_sits_mid_band_unless_the_axis_crosses_at_the_category() {
+        let markers = |cross_between| {
+            let data = source(&[1.0, 2.0, 3.0]);
+            let mut trend = series("Trend", &data);
+            trend.marker = Some(PlotMarker {
+                size: Some(8.0),
+                symbol: Some(PlotMarkerSymbol::Diamond),
+            });
+            let mut group = group("line", vec![trend]);
+            group.axis_ids = vec!["1"];
+            let mut axis = value_axis("1", 0.0, 4.0);
+            axis.cross_between = cross_between;
+            let chart = PlotChart {
+                chart_type: "line",
+                plot_groups: vec![group],
+                axes: vec![axis],
+                ..PlotChart::default()
+            };
+            plot_chart(&chart, rect())
+                .into_iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
+    }
+
+    #[test]
     fn a_log_axis_places_values_by_their_logarithm() {
         let data = source(&[1.0, 100.0]);
         let mut group = group("line", vec![series("Growth", &data)]);
@@ -5871,9 +5978,11 @@ mod tests {
             ..PlotChart::default()
         };
         let ops = plot_chart(&chart, rect());
-        let markers: Vec<(f64, f64, f64, f64)> = rects(&ops)
+        let markers: Vec<(f64, f64, f64, f64)> = marks(&ops)
             .into_iter()
-            .filter(|(_, _, w, h)| (*w - 4.0).abs() < 0.01 && (*h - 4.0).abs() < 0.01)
+            .filter(|(_, _, w, h)| {
+                (*w - DEFAULT_MARKER_PX).abs() < 0.01 && (*h - DEFAULT_MARKER_PX).abs() < 0.01
+            })
             .collect();
         let plot_h = 200.0 - 10.0 - 34.0;
         let travelled = markers[0].1 - markers[1].1;
@@ -5908,6 +6017,50 @@ mod tests {
             tall[1].1 < 11.0 && tall[1].3 > 150.0,
             "a reversed axis grows the bar downward from the top: {tall:?}"
         );
+    }
+
+    #[test]
+    fn a_pinned_minimum_starts_the_major_unit_walk() {
+        let data = source(&[268.0, 273.0]);
+        let mut group = group("line", vec![series("Score", &data)]);
+        group.axis_ids = vec!["1"];
+        let mut axis = value_axis("1", 245.0, 285.0);
+        axis.major_unit = Some(10.0);
+        let chart = PlotChart {
+            chart_type: "line",
+            plot_groups: vec![group],
+            axes: vec![axis],
+            ..PlotChart::default()
+        };
+        let ops = plot_chart(&chart, rect());
+        let labels = texts(&ops);
+        for tick in ["245", "255", "265", "275", "285"] {
+            assert!(
+                labels.contains(&tick.to_owned()),
+                "{tick} is missing: {labels:?}"
+            );
+        }
+        assert!(!labels.contains(&"250".to_owned()), "{labels:?}");
+        let mut grid: Vec<f64> = ops
+            .iter()
+            .filter_map(|op| match op {
+                PlotOp::Line { y1, y2, color, .. }
+                    if color == CHART_GRID_COLOR && (y1 - y2).abs() < 0.01 =>
+                {
+                    Some(*y1)
+                }
+                _ => None,
+            })
+            .collect();
+        grid.sort_by(f64::total_cmp);
+        let mut marks: Vec<f64> = texts_at(&ops)
+            .into_iter()
+            .filter(|(text, ..)| text.parse::<f64>().is_ok_and(|value| value >= 245.0))
+            .map(|(_, _, baseline, _)| baseline - 3.0)
+            .collect();
+        marks.sort_by(f64::total_cmp);
+        assert_eq!(grid.len(), 5, "{grid:?}");
+        assert_eq!(grid, marks, "every gridline stands on its own label");
     }
 
     #[test]

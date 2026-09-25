@@ -680,6 +680,9 @@ fn parse_axis<E: ChartXml>(axis: &E) -> ChartAxis {
             .filter(|value| matches!(*value, "min" | "max" | "autoZero"))
             .map(str::to_owned),
         crosses_at: parse_number(val_attr(child(axis, "crossesAt"))),
+        cross_between: val_attr(child(axis, "crossBetween"))
+            .filter(|value| matches!(*value, "between" | "midCat"))
+            .map(str::to_owned),
         major_unit: parse_number(val_attr(child(axis, "majorUnit"))),
         minor_unit: parse_number(val_attr(child(axis, "minorUnit"))),
         logarithmic_base: parse_number(val_attr(scaling.and_then(|value| child(value, "logBase")))),
@@ -1184,6 +1187,80 @@ mod tests {
         let points = space.plot_groups[0].series[0].points.as_ref().unwrap();
         assert_eq!(points[0].index, None);
         assert_eq!(red_wedges(&space), 2);
+    }
+
+    /// A three-point line chart whose value axis writes `crossBetween` as given.
+    fn line_chart_crossing(cross_between: Option<&str>) -> Node {
+        let points = ["1", "2", "3"]
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                Node::el("c:pt", vec![Node::text("c:v", value)]).attr("idx", &index.to_string())
+            })
+            .collect();
+        let series = Node::el(
+            "c:ser",
+            vec![
+                Node::val("c:idx", "0"),
+                Node::el("c:marker", vec![Node::val("c:symbol", "diamond")]),
+                Node::el(
+                    "c:val",
+                    vec![Node::el("c:numRef", vec![Node::el("c:numCache", points)])],
+                ),
+            ],
+        );
+        let mut value_axis = vec![Node::val("c:axId", "2"), Node::val("c:crossAx", "1")];
+        value_axis.extend(cross_between.map(|value| Node::val("c:crossBetween", value)));
+        Node::el(
+            "c:chartSpace",
+            vec![Node::el(
+                "c:chart",
+                vec![Node::el(
+                    "c:plotArea",
+                    vec![
+                        Node::el(
+                            "c:lineChart",
+                            vec![series, Node::val("c:axId", "1"), Node::val("c:axId", "2")],
+                        ),
+                        Node::el(
+                            "c:catAx",
+                            vec![Node::val("c:axId", "1"), Node::val("c:crossAx", "2")],
+                        ),
+                        Node::el("c:valAx", value_axis),
+                    ],
+                )],
+            )],
+        )
+    }
+
+    #[test]
+    fn a_line_reads_where_its_points_cross_from_the_chart_xml() {
+        let markers = |cross_between| {
+            let space = parse_chart_space(&line_chart_crossing(cross_between)).expect("chart");
+            let rect = PlotRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 200.0,
+            };
+            plot_chart(&PlotChart::from(&space), rect)
+                .into_iter()
+                .filter_map(|op| match op {
+                    PlotOp::Path { x, w, h, .. } if (w - h).abs() < 0.01 => Some(x + w / 2.0),
+                    _ => None,
+                })
+                .collect::<Vec<f64>>()
+        };
+        let on_ticks = markers(Some("midCat"));
+        let mid_band = markers(None);
+        assert_eq!(on_ticks.len(), 3);
+        assert_eq!(mid_band, markers(Some("between")));
+        let (tick_step, band) = (on_ticks[1] - on_ticks[0], mid_band[1] - mid_band[0]);
+        assert!(
+            (band / tick_step - 2.0 / 3.0).abs() < 1e-6,
+            "{on_ticks:?} {mid_band:?}"
+        );
+        assert!((mid_band[0] - on_ticks[0] - band / 2.0).abs() < 1e-6);
     }
 
     #[test]
