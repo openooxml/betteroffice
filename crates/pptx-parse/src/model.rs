@@ -117,6 +117,12 @@ pub struct Presentation {
     pub first_slide_num: i32,
     pub slides: Vec<SlideReference>,
     pub master_part_paths: Vec<String>,
+    /// `p:defaultTextStyle`, one entry per list level.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub default_text_style: Vec<ParagraphProperties>,
+    /// `p:defaultTextStyle/a:defPPr`, under every level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_text_paragraph: Option<Box<ParagraphProperties>>,
 }
 
 fn default_first_slide_num() -> i32 {
